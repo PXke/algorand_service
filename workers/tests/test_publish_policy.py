@@ -1,14 +1,12 @@
-from datetime import UTC, datetime
 
 from app.modules.newspaper.publish_policy import (
     PublishKind,
-    PublishTopic,
     PublishTier,
-    classify_publish_topic,
+    PublishTopic,
     classify_publish_tier,
+    classify_publish_topic,
     classify_scrape_publish,
     evaluate_enqueue,
-    evaluate_publish,
     is_significant_diff,
     priority_for_topic,
     trim_text_to_chars,

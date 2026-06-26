@@ -1,8 +1,7 @@
-from datetime import UTC, datetime
 
 from app.modules.newspaper.publish_daily_guard import (
-    reserve_publish_slot,
     release_publish_slot,
+    reserve_publish_slot,
 )
 from app.modules.newspaper.publish_policy import PublishTier
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.modules.search.classifier.score import score_page
-from app.modules.search.core.indexer import upsert_article_document, upsert_page_document
+from app.modules.search.core.indexer import upsert_article_document
 
 
 def test_classifier_accepts_algorand_page() -> None:

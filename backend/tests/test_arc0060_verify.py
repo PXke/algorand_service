@@ -4,8 +4,6 @@ import base64
 
 import pytest
 
-from app.modules.search.classifier.score import score_page
-
 algosdk = pytest.importorskip("algosdk")
 
 from app.modules.auth.utils.arc0060_verify import verify_arc0060_auth  # noqa: E402

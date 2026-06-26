@@ -4,7 +4,7 @@ import json
 from unittest.mock import patch
 
 from app.modules.chain_tail.chain_reader import RoundTransaction
-from app.modules.chain_tail.discovery import extract_urls_from_tx, enqueue_discovered_urls
+from app.modules.chain_tail.discovery import enqueue_discovered_urls, extract_urls_from_tx
 
 
 def test_extract_urls_from_note() -> None:

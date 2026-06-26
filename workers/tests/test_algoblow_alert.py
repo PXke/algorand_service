@@ -4,8 +4,8 @@ from app.modules.newspaper.publish_policy import (
     PublishKind,
     PublishTier,
     PublishTopic,
-    classify_publish_topic,
     classify_publish_tier,
+    classify_publish_topic,
 )
 from app.modules.newspaper.scam_enrichment import (
     extract_algorand_addresses,

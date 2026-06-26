@@ -1,7 +1,7 @@
 from app.modules.newspaper.editorial_briefs import (
+    EditorialBriefMatch,
     brief_matches_text,
     format_briefs_for_writer,
-    EditorialBriefMatch,
 )
 
 

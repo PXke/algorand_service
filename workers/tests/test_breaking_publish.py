@@ -3,7 +3,6 @@ from app.modules.newspaper.publish_policy import (
     PublishTier,
     PublishTopic,
     build_publish_intent,
-    classify_publish_tier,
 )
 from app.modules.newspaper.publish_schedule import is_standard_publish_due
 

@@ -5,7 +5,7 @@ from app.modules.newspaper import grader_model as gm
 
 
 def _subs(v: float = 0.5) -> dict:
-    return {k: v for k in gm.FEATURE_ORDER}
+    return dict.fromkeys(gm.FEATURE_ORDER, v)
 
 
 def test_scalar_model_path(monkeypatch) -> None:

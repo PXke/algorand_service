@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from app.modules.registry.models import ServiceEntry
 from types import SimpleNamespace
 
+from app.modules.registry.models import ServiceEntry
 from app.modules.registry.repository import (
     InMemoryServiceRegistryRepository,
     _row_to_entry,

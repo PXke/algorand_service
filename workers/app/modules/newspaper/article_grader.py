@@ -14,8 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 _STOP = frozenset(
-    "the a an of to in on for and or is are was were be been with from at by as "
-    "this that these those it its algorand algo".split()
+    ["the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are", "was", "were", "be", "been", "with", "from", "at", "by", "as", "this", "that", "these", "those", "it", "its", "algorand", "algo"]
 )
 
 
