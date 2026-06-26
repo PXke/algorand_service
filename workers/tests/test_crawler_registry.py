@@ -11,25 +11,24 @@ from app.modules.scraper.crawler_types import CrawlerType
 
 def test_infer_types():
     assert infer_crawler_type("https://example.com") == CrawlerType.WEB
-    assert infer_crawler_type("reddit://r/algorand") == CrawlerType.REDDIT
-    assert infer_crawler_type("discord://channels/1/2") == CrawlerType.DISCORD
+    assert infer_crawler_type("youtube://UC_x5XG1OV2P6uZZ5FSM9Ttw") == CrawlerType.YOUTUBE
 
 
-def test_reddit_disabled_by_default(monkeypatch):
-    monkeypatch.delenv("CRAWLER_REDDIT_ENABLED", raising=False)
+def test_web_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("CRAWLER_WEB_ENABLED", raising=False)
     from app.modules.scraper.crawler_store import CrawlerConfigRow
 
     fake = {
-        "reddit": CrawlerConfigRow(
-            crawler_type="reddit",
-            display_name="Reddit",
+        "web": CrawlerConfigRow(
+            crawler_type="web",
+            display_name="Web",
             description="",
             enabled=False,
         ),
     }
     monkeypatch.setattr("app.modules.scraper.crawler_registry.load_crawler_config", lambda: fake)
-    assert not is_crawler_enabled(CrawlerType.REDDIT)
-    assert crawl_disabled_reason("reddit://r/algorand") == "crawler_reddit_disabled"
+    assert not is_crawler_enabled(CrawlerType.WEB)
+    assert crawl_disabled_reason("https://example.com") == "crawler_web_disabled"
 
 
 def test_web_spa_sub_flag(monkeypatch):

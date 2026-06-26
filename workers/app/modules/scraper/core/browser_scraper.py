@@ -8,16 +8,11 @@ from app.modules.scraper.core.browser_scrape import (
     fetch_page,
     resolve_browser_target_url,
 )
-from app.modules.scraper.core.discord_urls import is_discord_scrape_url, resolve_discord_web_url
-from app.modules.scraper.core.telegram_urls import (
-    is_telegram_scrape_url,
-    resolve_telegram_preview_url,
-)
 
 
 class BrowserScraper(BaseScraper):
     """
-    Playwright-based scraper for hard targets (SPAs, Discord web, heavy JS sites).
+    Playwright-based scraper for hard targets (SPAs, heavy JS sites).
     Registry: browser://https://… or https://… on an allowlisted domain.
     """
 
@@ -71,16 +66,8 @@ class BrowserScraper(BaseScraper):
         )
 
     def _resolve_url(self, scrape_url: str) -> str | None:
-        if is_discord_scrape_url(scrape_url):
-            return resolve_discord_web_url(scrape_url)
-        if is_telegram_scrape_url(scrape_url):
-            return resolve_telegram_preview_url(scrape_url)
         return resolve_browser_target_url(scrape_url)
 
 
 def _default_title(scrape_url: str) -> str:
-    if is_discord_scrape_url(scrape_url):
-        return "Discord (browser)"
-    if is_telegram_scrape_url(scrape_url):
-        return "Telegram (browser)"
     return "Web page"

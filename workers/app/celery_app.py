@@ -43,7 +43,6 @@ celery_app.conf.task_routes = {
     "app.tasks.security.*": {"queue": "security"},
     "app.tasks.chain_tail.*": {"queue": "chain"},
     "app.tasks.newspaper.*": {"queue": "pipeline"},
-    "app.tasks.ingest.*": {"queue": "pipeline"},
     "app.tasks.crawler.*": {"queue": "scrape"},
     "app.tasks.search.*": {"queue": "pipeline"},
     "app.tasks.metrics.*": {"queue": "pipeline"},
@@ -51,8 +50,6 @@ celery_app.conf.task_routes = {
 }
 celery_app.conf.imports = (
     "app.modules.newspaper.tasks.mail_poll_tasks",
-    "app.modules.newspaper.tasks.telegram_poll_tasks",
-    "app.modules.newspaper.tasks.ingest_tasks",
     "app.modules.crawler.tasks.url_queue_tasks",
     "app.tasks.scrape",
     "app.tasks.crawler",
@@ -72,21 +69,6 @@ def _build_beat_schedule() -> dict:
             "schedule": float(os.getenv("CHAIN_TAIL_POLL_SECONDS", "60")),
         }
 
-    if is_crawler_enabled(CrawlerType.DISCORD):
-        schedule["discord-poll-sources"] = {
-            "task": "app.tasks.scrape.poll_discord_sources",
-            "schedule": float(os.getenv("DISCORD_POLL_SECONDS", "900")),
-        }
-    if is_crawler_enabled(CrawlerType.REDDIT):
-        schedule["reddit-poll-sources"] = {
-            "task": "app.tasks.scrape.poll_reddit_sources",
-            "schedule": float(os.getenv("REDDIT_POLL_SECONDS", "1800")),
-        }
-    if is_crawler_enabled(CrawlerType.TELEGRAM):
-        schedule["telegram-poll-sources"] = {
-            "task": "app.tasks.scrape.poll_telegram_sources",
-            "schedule": float(os.getenv("TELEGRAM_POLL_SECONDS", "900")),
-        }
     if is_crawler_enabled(CrawlerType.YOUTUBE):
         schedule["youtube-poll-sources"] = {
             "task": "app.tasks.scrape.poll_youtube_sources",
@@ -96,10 +78,6 @@ def _build_beat_schedule() -> dict:
     # by admin actions (approving an article fires drain_standard_publish_queue;
     # approving a domain fires drain_url_queue + fetch_source). So these can be
     # spaced way out — workers stay idle until you accept something.
-    schedule["drain-external-ingest-queue"] = {
-        "task": "app.tasks.ingest.drain_external_ingest_queue",
-        "schedule": float(os.getenv("INGEST_QUEUE_DRAIN_SECONDS", "1800")),
-    }
     schedule["drain-url-queue"] = {
         "task": "app.tasks.crawler.drain_url_queue",
         # Default ~1 page / 10s: gentle on any single domain, yet clears a new

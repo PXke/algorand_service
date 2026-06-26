@@ -46,13 +46,6 @@ SCRAPER_ACTIONS: dict[str, ScraperAction] = {
             "Crawl URLs waiting in the discovery queue.",
         ),
         ScraperAction(
-            "drain_ingest",
-            "app.tasks.ingest.drain_external_ingest_queue",
-            "pipeline",
-            "Drain ingest queue",
-            "Process externally pushed signals.",
-        ),
-        ScraperAction(
             "publish_standard",
             "app.tasks.newspaper.drain_standard_publish_queue",
             "pipeline",

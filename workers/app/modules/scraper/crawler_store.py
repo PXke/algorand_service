@@ -23,24 +23,6 @@ def _defaults() -> dict[str, CrawlerConfigRow]:
             description="HTTPS and optional Playwright.",
             enabled=True,
         ),
-        "reddit": CrawlerConfigRow(
-            crawler_type="reddit",
-            display_name="Reddit",
-            description="reddit:// API lane.",
-            enabled=False,
-        ),
-        "telegram": CrawlerConfigRow(
-            crawler_type="telegram",
-            display_name="Telegram",
-            description="telegram:// / t.me/s lane.",
-            enabled=False,
-        ),
-        "discord": CrawlerConfigRow(
-            crawler_type="discord",
-            display_name="Discord",
-            description="discord:// bot or web.",
-            enabled=False,
-        ),
         "mail": CrawlerConfigRow(
             crawler_type="mail",
             display_name="Email (IMAP)",

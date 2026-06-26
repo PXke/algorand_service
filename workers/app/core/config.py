@@ -50,9 +50,6 @@ CRAWLER_HTTP_ENABLED = env_bool("CRAWLER_HTTP_ENABLED", True)
 CRAWLER_BROWSER_ENABLED = env_bool("CRAWLER_BROWSER_ENABLED", False)
 CRAWLER_WEB_SPA_ENABLED = env_bool("CRAWLER_WEB_SPA_ENABLED", False)
 CRAWLER_MAIL_ENABLED = env_bool("CRAWLER_MAIL_ENABLED", True)
-CRAWLER_REDDIT_ENABLED = env_bool("CRAWLER_REDDIT_ENABLED", False)
-CRAWLER_TELEGRAM_ENABLED = env_bool("CRAWLER_TELEGRAM_ENABLED", False)
-CRAWLER_DISCORD_ENABLED = env_bool("CRAWLER_DISCORD_ENABLED", False)
 CRAWLER_CHAIN_ENABLED = env_bool("CRAWLER_CHAIN_ENABLED", True)
 CRAWLER_METRICS_ENABLED = env_bool("CRAWLER_METRICS_ENABLED", True)
 # Respect robots.txt for frontier crawling (politeness). The robots.txt per host
@@ -86,12 +83,10 @@ PUBLISH_DEFER_AFTER_HOURS = env_int("PUBLISH_DEFER_AFTER_HOURS", 24)
 PUBLISH_ANNOUNCE_EXPIRE_HOURS = env_int("PUBLISH_ANNOUNCE_EXPIRE_HOURS", 72)
 PUBLISH_QUEUE_MAINTENANCE_SECONDS = env_int("PUBLISH_QUEUE_MAINTENANCE_SECONDS", 3600)
 
-OFFICIAL_DISCORD_CHANNEL_IDS = env_str("OFFICIAL_DISCORD_CHANNEL_IDS", "")
 OFFICIAL_MAIL_FROM_DOMAINS = env_str(
     "OFFICIAL_MAIL_FROM_DOMAINS",
     "algorand.foundation,algorand.com",
 )
-OFFICIAL_TELEGRAM_CHAT_IDS = env_str("OFFICIAL_TELEGRAM_CHAT_IDS", "")
 
 MAIL_IMAP_HOST = env_str("MAIL_IMAP_HOST", "")
 MAIL_IMAP_PORT = env_int("MAIL_IMAP_PORT", 993)
@@ -102,18 +97,9 @@ MAIL_POLL_SECONDS = env_int("MAIL_POLL_SECONDS", 300)
 MAIL_NEWS_SERVICE_ID = env_str("MAIL_NEWS_SERVICE_ID", "algorand-foundation-mail")
 MAIL_NEWS_DISPLAY_NAME = env_str("MAIL_NEWS_DISPLAY_NAME", "Algorand Foundation Mail")
 
-TELEGRAM_BOT_TOKEN = env_str("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_POLL_SECONDS = env_int("TELEGRAM_POLL_SECONDS", 300)
-TELEGRAM_SCRAPE_MODE = env_str("TELEGRAM_SCRAPE_MODE", "web")
-TELEGRAM_WEB_PLAYWRIGHT = env_bool("TELEGRAM_WEB_PLAYWRIGHT", False)
-
-DISCORD_SCRAPE_MODE = env_str("DISCORD_SCRAPE_MODE", "web")
-
 SCRAPE_ENGINE_DEFAULT = env_str("SCRAPE_ENGINE_DEFAULT", "auto")
-BROWSER_SCRAPE_DOMAINS = env_str(
-    "BROWSER_SCRAPE_DOMAINS",
-    "discord.com,discordapp.com,t.me,telegram.org,web.telegram.org",
-)
+# Allowlist of domains the Playwright engine may render (SPAs / heavy-JS sites).
+BROWSER_SCRAPE_DOMAINS = env_str("BROWSER_SCRAPE_DOMAINS", "")
 BROWSER_HEADLESS = env_bool("BROWSER_HEADLESS", True)
 BROWSER_TIMEOUT_MS = env_int("BROWSER_TIMEOUT_MS", 35_000)
 BROWSER_WAIT_MS = env_int("BROWSER_WAIT_MS", 2500)
@@ -121,7 +107,7 @@ BROWSER_CHANNEL = env_str("BROWSER_CHANNEL", "")
 BROWSER_STORAGE_STATE_PATH = env_str("BROWSER_STORAGE_STATE_PATH", "")
 
 SCRAPE_COOLDOWN_SECONDS = env_int("SCRAPE_COOLDOWN_SECONDS", 3600)
-# Exponential backoff on consecutive scrape failures (e.g. Reddit 429 storms):
+# Exponential backoff on consecutive scrape failures (e.g. 429 storms):
 # first failure waits the base, each subsequent one multiplies up to the cap.
 # Reset to zero on the next successful scrape.
 SCRAPE_BACKOFF_BASE_SECONDS = env_int("SCRAPE_BACKOFF_BASE_SECONDS", 600)
@@ -130,24 +116,8 @@ SCRAPE_BACKOFF_MULTIPLIER = env_float("SCRAPE_BACKOFF_MULTIPLIER", 2.0)
 # A host that no longer resolves (dead domain) or resolves to a non-public IP
 # won't recover on the normal retry cadence — park it for a long while instead.
 DEAD_HOST_COOLDOWN_SECONDS = env_int("DEAD_HOST_COOLDOWN_SECONDS", 604800)
-REDDIT_CLIENT_ID = env_str("REDDIT_CLIENT_ID", "")
-REDDIT_CLIENT_SECRET = env_str("REDDIT_CLIENT_SECRET", "")
-REDDIT_OAUTH_ENABLED = env_bool("REDDIT_OAUTH_ENABLED", False)
 WEEKLY_DIGEST_MAX_BODY_CHARS = env_int("WEEKLY_DIGEST_MAX_BODY_CHARS", 1500)
 CHAIN_TAIL_MAX_ROUNDS_PER_RUN = env_int("CHAIN_TAIL_MAX_ROUNDS_PER_RUN", 8)
-
-DISCORD_BOT_TOKEN = env_str("DISCORD_BOT_TOKEN", "")
-DISCORD_MESSAGE_LIMIT = env_int("DISCORD_MESSAGE_LIMIT", 50)
-DISCORD_POLL_SECONDS = env_int("DISCORD_POLL_SECONDS", 300)
-
-REDDIT_USER_AGENT = env_str(
-    "REDDIT_USER_AGENT",
-    "algorand-platform-newspaper/1.0 (contact: dev@localhost)",
-)
-REDDIT_POST_LIMIT = env_int("REDDIT_POST_LIMIT", 25)
-REDDIT_POLL_SECONDS = env_int("REDDIT_POLL_SECONDS", 1200)
-# Gap between consecutive subreddit requests in one poll run (anti rate-limit).
-REDDIT_REQUEST_SPACING_SECONDS = env_int("REDDIT_REQUEST_SPACING_SECONDS", 8)
 
 PRICE_ANALYSIS_ENABLED = env_bool("PRICE_ANALYSIS_ENABLED", True)
 PRICE_ANALYSIS_ASSET_ID = env_str("PRICE_ANALYSIS_ASSET_ID", "algorand")

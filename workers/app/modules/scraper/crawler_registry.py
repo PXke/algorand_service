@@ -4,10 +4,7 @@ import os
 
 from app.core import config
 from app.core.config import env_bool
-from app.modules.scraper.core.discord_urls import is_discord_scrape_url
-from app.modules.scraper.core.reddit_urls import is_reddit_scrape_url
 from app.modules.scraper.core.scrape_engine import uses_browser_engine
-from app.modules.scraper.core.telegram_urls import is_telegram_scrape_url
 from app.modules.scraper.core.youtube_urls import is_youtube_scrape_url
 from app.modules.scraper.crawler_store import load_crawler_config
 from app.modules.scraper.crawler_types import CrawlerType
@@ -53,12 +50,6 @@ def is_web_spa_enabled() -> bool:
 
 
 def infer_crawler_type(scrape_url: str) -> CrawlerType:
-    if is_discord_scrape_url(scrape_url):
-        return CrawlerType.DISCORD
-    if is_reddit_scrape_url(scrape_url):
-        return CrawlerType.REDDIT
-    if is_telegram_scrape_url(scrape_url):
-        return CrawlerType.TELEGRAM
     if is_youtube_scrape_url(scrape_url):
         return CrawlerType.YOUTUBE
     return CrawlerType.WEB
@@ -70,8 +61,6 @@ def crawl_disabled_reason(scrape_url: str) -> str | None:
         return f"crawler_{ctype}_disabled"
 
     needs_spa = uses_browser_engine(scrape_url)
-    if ctype == CrawlerType.DISCORD and config.DISCORD_SCRAPE_MODE == "web":
-        needs_spa = True
     if needs_spa and not is_web_spa_enabled():
         return "crawler_web_spa_disabled"
 
