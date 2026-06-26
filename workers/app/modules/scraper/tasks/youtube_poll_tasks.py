@@ -15,18 +15,6 @@ from app.modules.scraper.crawler_registry import is_crawler_enabled
 from app.modules.scraper.crawler_types import CrawlerType
 
 
-def _enqueue_relevant(page_text: str, url: str) -> bool:
-    """Mirror ingest's Stage-1 relevance gate so we never pay for a transcript
-    on a video that gate would reject. When the gate is disabled, treat every
-    video as eligible (the once-per-video attempt marker still bounds spend)."""
-    from app.core import config
-    from app.modules.ai.publish_classifier import is_relevant_for_enqueue
-
-    if not config.ENQUEUE_RELEVANCE_GATE_ENABLED:
-        return True
-    return is_relevant_for_enqueue(page_text, url)
-
-
 @celery_app.task(name="app.tasks.scrape.poll_youtube_sources")
 def poll_youtube_sources() -> dict[str, object]:
     """Per-video ingest of YouTube channel uploads (public Atom feed).
@@ -69,13 +57,11 @@ def poll_youtube_sources() -> dict[str, object]:
             if get_latest_snapshot(source_id_for_service(service_id)) is not None:
                 results.append({"video_id": video.video_id, "status": "unchanged"})
                 continue
-            # Best-effort transcript (metered third-party API). Two guards keep
-            # us from burning credits: (1) don't pay for off-topic videos the
-            # enqueue gate would reject anyway; (2) pay at most once per video,
-            # even when a skip path leaves no snapshot to dedup on next poll.
+            # Best-effort transcript (metered third-party API). A new video on a
+            # monitored channel is on-topic by definition; pay at most once per
+            # video, even when a skip path leaves no snapshot to dedup next poll.
             transcript = ""
-            relevant = _enqueue_relevant(page_text, video.watch_url)
-            if relevant and not transcript_attempted(video.video_id):
+            if not transcript_attempted(video.video_id):
                 transcript = fetch_video_transcript(video.video_id)
                 mark_transcript_attempted(video.video_id)
             outcome = ingest_publish_signal(

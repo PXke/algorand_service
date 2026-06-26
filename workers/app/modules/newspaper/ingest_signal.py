@@ -74,7 +74,6 @@ def ingest_publish_signal(
     Updates snapshot, service profile, and publish queue.
     """
     from app.modules.ai.content_signals import compute_content_signals
-    from app.modules.ai.publish_classifier import is_relevant_for_enqueue
     from app.modules.crawler.domain_tracker import url_recently_rejected
     from app.modules.newspaper.article_store import record_service_event
     from app.modules.newspaper.tasks.queue_drain_tasks import drain_breaking_publish_queue
@@ -106,15 +105,12 @@ def ingest_publish_signal(
 
     # Classifier verdicts for this page, computed once here and carried on the
     # queue payload so the drain and compose step never recompute (or disagree).
+    # Relevance feeds novelty/priority ranking — it is NOT an enqueue gate.
+    # Whether a domain is worth monitoring is decided upstream (Classifier A at
+    # discovery); by the time content reaches here the source is already
+    # approved, so the only enqueue veto is an explicit admin reject.
     signals = compute_content_signals(page_text, source_url)
 
-    # Stage-1 enqueue gates (first failure wins): don't queue a page the
-    # relevance scorer is confident is off-topic, nor one an admin recently
-    # rejected (even if its content hash has since shifted).
-    if config.ENQUEUE_RELEVANCE_GATE_ENABLED and not is_relevant_for_enqueue(
-        page_text, source_url, relevance=signals.relevance
-    ):
-        return _skip("not_relevant")
     if url_recently_rejected(source_url):
         return _skip("recently_rejected")
 

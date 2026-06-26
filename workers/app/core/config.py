@@ -279,13 +279,6 @@ COMPOSE_DAILY_TTL = env_int("COMPOSE_DAILY_TTL", 86400)
 # articles in 24h" case) even when both are under the daily count. 0 disables.
 COMPOSE_DOMAIN_COOLDOWN_HOURS = env_int("COMPOSE_DOMAIN_COOLDOWN_HOURS", 168)
 
-# Stage-1 relevance gate: drop a candidate before it ever enters the publish
-# queue when the relevance scorer is confident the page is off-topic. Keeps
-# clearly-irrelevant pages from being composed and proposed for review at all.
-# The floor is intentionally low so borderline pages still flow through for
-# classifier training — only confidently-irrelevant content is dropped.
-ENQUEUE_RELEVANCE_GATE_ENABLED = env_bool("ENQUEUE_RELEVANCE_GATE_ENABLED", True)
-ENQUEUE_RELEVANCE_MIN_SCORE = env_float("ENQUEUE_RELEVANCE_MIN_SCORE", 0.25)
 # After an admin rejects a review, suppress re-enqueueing that exact URL for
 # this long (seconds). Stops a rejected page re-entering the candidate queue the
 # moment its content hash shifts again. Default 7 days.

@@ -133,21 +133,6 @@ def relevance_score(text: str, url: str = "") -> float:
         return 1.0
 
 
-def is_relevant_for_enqueue(text: str, url: str = "", *, relevance: float | None = None) -> bool:
-    """Stage-1 gate: True unless we're confident the page is off-topic.
-
-    Drops only clearly-irrelevant pages (low relevance score AND insufficient
-    Algorand keyword density) so borderline content still reaches review for
-    labelling. Pass ``relevance`` to reuse an already-computed score."""
-    from app.core.config import ENQUEUE_RELEVANCE_MIN_SCORE
-
-    score = relevance if relevance is not None else relevance_score(text, url)
-    if score >= ENQUEUE_RELEVANCE_MIN_SCORE:
-        return True
-    # Relevance scorer is unsure — keep the keyword floor as a second opinion.
-    return is_content_quality_sufficient(text)
-
-
 def score_content_for_storage(text: str, url: str = "") -> float:
     """Crude storage-relevance score (~0–10): on-topic keyword families present
     plus the page classifier's 0–1 score scaled ×5. Used for the domain
