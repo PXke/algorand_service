@@ -598,17 +598,18 @@ def publish_from_chain_event(
 
 def _source_kind_from_url(scrape_url: str) -> str | None:
     lower = scrape_url.lower()
-    if lower.startswith("discord://"):
-        return "discord"
-    if lower.startswith("reddit://"):
-        return "reddit"
-    if lower.startswith("telegram://"):
-        return "telegram"
     if lower.startswith("youtube://") or lower.startswith("youtube:"):
         return "youtube"
     if lower.startswith("mail://"):
         return "mail"
-    if lower.startswith("http://") or lower.startswith("https://"):
+    # browser:// is an SPA web source (Playwright). It MUST classify as web so the
+    # per-domain daily cap + diversity cooldown apply — otherwise SPA sources
+    # silently bypass both and can republish without spacing.
+    if (
+        lower.startswith("http://")
+        or lower.startswith("https://")
+        or lower.startswith("browser://")
+    ):
         return "web"
     return "chain_only"
 

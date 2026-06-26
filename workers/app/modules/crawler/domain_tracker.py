@@ -194,7 +194,13 @@ def domain_from_url(url: str) -> str:
     separate source per subdomain (xgov./specs./dev.algorand.co), which would
     otherwise each compose its own near-duplicate article.
     """
-    parsed = urlparse(url.strip())
+    raw = url.strip()
+    # SPA sources are registered as browser://https://… — strip the engine prefix
+    # so the eTLD+1 resolves to the real host (else urlparse reads it as "https").
+    low = raw.lower()
+    if low.startswith("browser://http://") or low.startswith("browser://https://"):
+        raw = raw[len("browser://") :]
+    parsed = urlparse(raw)
     host = (parsed.hostname or "").lower().strip(".")
     if not host:
         return ""
