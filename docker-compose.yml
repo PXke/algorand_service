@@ -34,7 +34,7 @@ x-platform-app: &platform_app
 
 services:
   cassandra:
-    image: cassandra:4.1
+    image: cassandra:5.0
     restart: unless-stopped
     logging: *default_logging
     deploy:
