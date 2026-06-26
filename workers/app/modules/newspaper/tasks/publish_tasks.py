@@ -43,6 +43,28 @@ def _compose_domain_for_row(row: QueuedPublishRow) -> str:
     return domain_from_url(row.scrape_url)
 
 
+def _gate_enforces_review(
+    *, clf_decision: object, title: str, body: str, page_text: str, source_url: str
+) -> bool:
+    """Quality veto on the auto-publish path. True when a draft Classifier A
+    would send STRAIGHT to the feed (``clf_decision is True``) should instead be
+    diverted to human review because the deterministic gatekeeper fails.
+
+    Honors ``GATEKEEPER_ENFORCE`` — default off, so this returns False (shadow
+    mode, no behaviour change) until the quality head is trusted. Failure-tolerant:
+    a None gate (disabled / error) never diverts."""
+    from app.core import config
+
+    if clf_decision is not True or not config.GATEKEEPER_ENFORCE:
+        return False
+    from app.modules.gatekeeper.live import gate_draft
+
+    gate = gate_draft(
+        source_text=page_text, article_text=f"{title}\n{body}", service_id=source_url
+    )
+    return gate is not None and not gate.passed
+
+
 @single_flight(lambda *_a, **_kw: "compose:article", ttl=1860)
 @single_flight(lambda row, **_kw: f"compose:{row.queue_id}", ttl=1800)
 def publish_from_queued_row(
@@ -203,6 +225,17 @@ def publish_from_queued_row(
     clf_category = signals.category
     clf_decision, clf_confidence = signals.publish_decision, signals.confidence
 
+    # Quality veto on the auto-publish path: a draft Classifier A would send
+    # straight to the feed is diverted into the human-review path below when the
+    # deterministic gatekeeper fails under GATEKEEPER_ENFORCE (default off).
+    gate_enforced_review = _gate_enforces_review(
+        clf_decision=clf_decision,
+        title=composed.title,
+        body=composed.body,
+        page_text=page_text_for_clf,
+        source_url=row.scrape_url,
+    )
+
     # Resolve a hero/brand image when the upstream payload carried none, so both
     # the feed tile and the social/OG card show real artwork (best-effort). A
     # true share image (og/twitter) is also embedded in the body; a brand logo
@@ -222,7 +255,7 @@ def publish_from_queued_row(
         except Exception:
             pass
 
-    if clf_decision is not True:
+    if clf_decision is not True or gate_enforced_review:
         from app.modules.crawler.classifier_review_store import (
             enqueue_classifier_review,
             has_pending_review_for_url,
@@ -312,6 +345,7 @@ def publish_from_queued_row(
                 "article_id": held_article_id,
                 "source": held_kind or "web",
                 "confidence": f"{clf_confidence:.3f}",
+                "diverted_by": "gatekeeper" if gate_enforced_review else "classifier",
                 **grade_meta,
             },
         )

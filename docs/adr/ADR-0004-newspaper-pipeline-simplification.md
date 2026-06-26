@@ -66,9 +66,19 @@ Two independent questions, both must pass:
   per-source interleave, and `_domain_in_cooldown` spacing.)
 
 Today the publish gate is a **1-slot human review** (`classifier_review_pending`,
-`MAX_PENDING_REVIEWS=1`). The migration path: Classifier B + novelty auto-publish
-above a confidence threshold; the human review stays as a fallback until the
-classifier is trusted, then is removed.
+`MAX_PENDING_REVIEWS=1`), but the auto-publish path already exists: `predict_publish`
+(Classifier A) sends confident candidates **straight to the feed** and routes only
+uncertain ones to the human fallback. As Classifier A gains training data, fewer
+items need a human — the review slot shrinks on its own.
+
+**Quality veto (wired, default off).** `_gate_enforces_review` lets the
+deterministic gatekeeper (and, once trained, the Classifier B quality head) divert
+an otherwise auto-publishable draft into the human-review path when it fails —
+behind `GATEKEEPER_ENFORCE` (default **off** = shadow). So a candidate Classifier A
+deems publish-worthy by *topic* can still be held when its composed draft is
+low-*quality*. The diversion is labelled `diverted_by=gatekeeper` in the review
+metadata. Enable it only once the quality head is trained — enforcing on the
+heuristic floor would hold (or, if inverted, publish) on a weak signal.
 
 ## What gets removed
 
@@ -99,5 +109,7 @@ classifier is trusted, then is removed.
 1. Delete dead lanes (Discord/Reddit/Telegram) + external push. Pure removal.
 2. Collapse `ingest_signal` to per-lane rules; drop `is_relevant_for_enqueue` and
    the intent/topic/event-phase plumbing. Keep novelty + cooling.
-3. Wire Classifier B + novelty as the publish gate behind a confidence threshold;
-   retire the human review slot once trusted.
+3. **Done (code):** `_gate_enforces_review` wires the gatekeeper as a quality veto
+   on auto-publish, behind `GATEKEEPER_ENFORCE` (default off). **Remaining (data):**
+   train the Classifier B quality head live, then flip the flag on; retire the human
+   review slot once trusted. This last mile is a training milestone, not code.
