@@ -626,12 +626,12 @@ def _tool_medium_articles(source: str, limit: int = 15) -> dict[str, Any]:
     s = (source or "").strip()
     if not s:
         return {"error": "source required"}
-    if s.startswith("@"):
-        feed_url = f"https://medium.com/feed/{s}"
-    elif "." not in s.split("/")[0]:  # bare handle, no dot/scheme
-        feed_url = f"https://medium.com/feed/@{s}"
+    has_scheme = s.startswith(("http://", "https://"))
+    if s.startswith("@") or (not has_scheme and "." not in s.split("/")[0]):
+        # an @handle or a bare handle (no dot, no scheme)
+        feed_url = f"https://medium.com/feed/{s if s.startswith('@') else '@' + s}"
     else:  # a URL or a bare domain/path — normalize to one URL code path
-        if not s.startswith(("http://", "https://")):
+        if not has_scheme:
             s = "https://" + s
         parts = urlsplit(s)
         path = parts.path.strip("/")
