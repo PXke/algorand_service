@@ -1,0 +1,12 @@
+name: cassandra
+config:
+  hosts:
+    - "127.0.0.1"
+  port: 9042
+  keyspace: algorand_platform
+  # username: ""
+  # password: ""
+  consistency: QUORUM
+  auto_migrate: true
+  write_transactions_by_sender: true
+  write_transactions_by_receiver: true

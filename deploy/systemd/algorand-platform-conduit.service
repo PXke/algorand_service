@@ -1,0 +1,17 @@
+[Unit]
+Description=Algorand Platform Conduit (algod to Cassandra)
+After=network.target cassandra.service algorand-node.service
+Wants=cassandra.service
+
+[Service]
+Type=simple
+User=algorand
+Group=algorand
+WorkingDirectory=/opt/algorand-platform/current/conduit
+EnvironmentFile=-/opt/algorand-platform/current/conduit/.env
+ExecStart=/opt/algorand-platform/current/conduit/bin/conduit -f /opt/algorand-platform/current/conduit_data/conduit.yml
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

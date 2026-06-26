@@ -1,0 +1,30 @@
+# Conduit for docker compose --profile chain
+# Requires algod in follower mode (not public REST). Point ALGOD_NETADDR at your node.
+
+log-level: info
+retry:
+  count: 5
+  delay: 1s
+  max-delay: 30s
+
+importer:
+  name: algod
+  config:
+    mode: follower
+    netaddr: "__ALGOD_NETADDR__"
+    token: "__ALGOD_TOKEN__"
+    catchup: true
+
+processors:
+
+exporter:
+  name: cassandra
+  config:
+    hosts:
+      - cassandra
+    port: 9042
+    keyspace: algorand_platform
+    consistency: QUORUM
+    auto_migrate: false
+    write_transactions_by_sender: true
+    write_transactions_by_receiver: true

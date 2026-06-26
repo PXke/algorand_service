@@ -1,0 +1,20 @@
+# Docker buildx local cache
+.cache/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Flutter
+.dart_tool/
+build/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,24 @@
+name: wallet_auth_flutter
+description: >-
+  Wallet-agnostic Algorand authentication for Flutter (ARC-0025, ARC-0060, SIWA/CAIP-122).
+  Framework-agnostic core — use with Riverpod, Bloc, Provider, or ValueListenableBuilder.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.2.0
+  flutter: ">=3.16.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  crypto: ^3.0.0
+  algorand_dart: ^1.0.3
+  ensemble_walletconnect: ^1.0.5
+  flutter_secure_storage: ^10.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

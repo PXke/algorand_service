@@ -1,0 +1,383 @@
+# CQL migration registry (stdlib TOML — no PyYAML required).
+# Docs: docs/architecture/cql-migrations.md
+
+keyspace = "algorand_platform"
+
+[streams.ledger]
+description = "Shared migration ledger (always first)."
+
+[streams.chain]
+description = "On-chain tables written by Conduit cassandra exporter."
+legacy_monolith = "conduit/schema/cassandra.cql"
+
+[streams.app]
+description = "Application tables (Robyn API, workers)."
+legacy_monolith = "backend/schema/cassandra_app.cql"
+
+[[migrations]]
+stream = "ledger"
+version = "000"
+file = "schema/migrations/ledger/000_schema_migrations.cql"
+tier = "prod"
+status = "active"
+description = "schema_migrations ledger table"
+
+[[migrations]]
+stream = "chain"
+version = "001"
+file = "conduit/schema/migrations/chain/001_keyspace.cql"
+tier = "prod"
+status = "active"
+description = "Keyspace algorand_platform (edit replication per DC before first prod apply)"
+
+[[migrations]]
+stream = "chain"
+version = "002"
+file = "conduit/schema/migrations/chain/002_conduit_meta_and_blocks.cql"
+tier = "prod"
+status = "active"
+description = "conduit_meta, blocks"
+
+[[migrations]]
+stream = "chain"
+version = "003"
+file = "conduit/schema/migrations/chain/003_transactions_core.cql"
+tier = "prod"
+status = "active"
+description = "transactions_by_round, transactions_by_id (base columns)"
+
+[[migrations]]
+stream = "chain"
+version = "004"
+file = "conduit/schema/migrations/chain/004_transactions_by_sender.cql"
+tier = "prod"
+status = "active"
+description = "transactions_by_sender"
+
+[[migrations]]
+stream = "chain"
+version = "005"
+file = "conduit/schema/migrations/chain/005_payment_receiver_columns.cql"
+tier = "prod"
+status = "active"
+description = "receiver + amount_microalgos on txn tables (upgrade path)"
+
+[[migrations]]
+stream = "chain"
+version = "006"
+file = "conduit/schema/migrations/chain/006_transactions_by_receiver.cql"
+tier = "prod"
+status = "active"
+description = "transactions_by_receiver index table"
+
+[[migrations]]
+stream = "app"
+version = "001"
+file = "backend/schema/migrations/app/001_suggestions.cql"
+tier = "prod"
+status = "active"
+description = "suggestions_by_status + submission_txid index"
+
+[[migrations]]
+stream = "app"
+version = "002"
+file = "backend/schema/migrations/app/002_upvotes.cql"
+tier = "prod"
+status = "active"
+description = "upvotes_by_suggestion"
+
+[[migrations]]
+stream = "app"
+version = "003"
+file = "backend/schema/migrations/app/003_service_registry.cql"
+tier = "prod"
+status = "active"
+description = "service_registry for chain-tail matching"
+
+[[migrations]]
+stream = "app"
+version = "004"
+file = "backend/schema/migrations/app/004_service_registry_scrape_url.cql"
+tier = "prod"
+status = "active"
+description = "scrape_url on service_registry"
+
+[[migrations]]
+stream = "app"
+version = "005"
+file = "backend/schema/migrations/app/005_newspaper_sources_snapshots.cql"
+tier = "prod"
+status = "active"
+description = "page_sources and page_snapshots"
+
+[[migrations]]
+stream = "app"
+version = "006"
+file = "backend/schema/migrations/app/006_newspaper_articles.cql"
+tier = "prod"
+status = "active"
+description = "articles_feed and articles_by_id"
+
+[[migrations]]
+stream = "app"
+version = "007"
+file = "backend/schema/migrations/app/007_service_events.cql"
+tier = "prod"
+status = "active"
+description = "service_events log for newspaper triggers"
+
+[[migrations]]
+stream = "app"
+version = "008"
+file = "backend/schema/migrations/app/008_price_metrics.cql"
+tier = "prod"
+status = "active"
+description = "price_metric_samples and price_metrics_brief for Mistral context"
+
+[[migrations]]
+stream = "app"
+version = "009"
+file = "backend/schema/migrations/app/009_article_tags.cql"
+tier = "prod"
+status = "active"
+description = "tags list on newspaper articles"
+
+[[migrations]]
+stream = "app"
+version = "010"
+file = "backend/schema/migrations/app/010_publish_queue.cql"
+tier = "prod"
+status = "active"
+description = "prioritized publish queue for crawl and event-driven articles"
+
+[[migrations]]
+stream = "app"
+version = "011"
+file = "backend/schema/migrations/app/011_service_profiles.cql"
+tier = "prod"
+status = "active"
+description = "service_profiles impressiveness scores for publish priority"
+
+[[migrations]]
+stream = "app"
+version = "012"
+file = "backend/schema/migrations/app/012_feed_placements.cql"
+tier = "prod"
+status = "active"
+description = "sponsored feed placements separate from editorial articles"
+
+[[migrations]]
+stream = "app"
+version = "013"
+file = "backend/schema/migrations/app/013_crawler_config.cql"
+tier = "prod"
+status = "active"
+description = "crawler_config per-type enable flags (web, reddit, telegram, discord, mail, chain, metrics)"
+
+[[migrations]]
+stream = "app"
+version = "014"
+file = "backend/schema/migrations/app/014_service_intelligence.cql"
+tier = "prod"
+status = "active"
+description = "service_intelligence cache for writer enrichment bundle"
+
+[[migrations]]
+stream = "app"
+version = "015"
+file = "backend/schema/migrations/app/015_editorial_workflow.cql"
+tier = "prod"
+status = "active"
+description = "article match keys, versions, editorial briefs for edit-in-place workflow"
+
+[[migrations]]
+stream = "app"
+version = "016"
+file = "backend/schema/migrations/app/016_url_queue.cql"
+tier = "prod"
+status = "active"
+description = "url_queue for discovery crawler URLs"
+
+[[migrations]]
+stream = "app"
+version = "017"
+file = "backend/schema/migrations/app/017_domain_tracking.cql"
+tier = "prod"
+status = "active"
+description = "domain_tracking for web crawl relevance"
+
+[[migrations]]
+stream = "app"
+version = "018"
+file = "backend/schema/migrations/app/018_classifier_feedback.cql"
+tier = "prod"
+status = "active"
+description = "classifier feedback, review queue for publish classifier"
+
+[[migrations]]
+stream = "app"
+version = "019"
+file = "backend/schema/migrations/app/019_official_channels.cql"
+tier = "prod"
+status = "active"
+description = "admin-managed official channel allowlist (discord, telegram, mail domains)"
+
+[[migrations]]
+stream = "app"
+version = "020"
+file = "backend/schema/migrations/app/020_url_queue_status_column.cql"
+tier = "prod"
+status = "active"
+description = "add status to url_queue_by_url (dedupe lookups read it)"
+
+[[migrations]]
+stream = "app"
+version = "021"
+file = "backend/schema/migrations/app/021_classifier_feedback_dimensions.cql"
+tier = "prod"
+status = "active"
+description = "predicted_category and quality on classifier_feedback"
+
+[[migrations]]
+stream = "app"
+version = "022"
+file = "backend/schema/migrations/app/022_pending_feed_queue.cql"
+tier = "prod"
+status = "active"
+description = "approved-but-over-daily-cap articles awaiting a publish slot"
+
+[[migrations]]
+stream = "app"
+version = "023"
+file = "backend/schema/migrations/app/023_investigation_findings.cql"
+tier = "prod"
+status = "active"
+description = "investigative agent tool-call evidence trail"
+
+[[migrations]]
+stream = "app"
+version = "024"
+file = "backend/schema/migrations/app/024_registry_origin.cql"
+tier = "prod"
+status = "active"
+description = "service_registry origin (seed vs domain-approved)"
+
+[[migrations]]
+stream = "app"
+version = "025"
+file = "backend/schema/migrations/app/025_domain_sai.cql"
+tier = "prod"
+status = "active"
+description = "domain_tracking frontier_status column plus SAI indexes"
+
+[[migrations]]
+stream = "app"
+version = "026"
+file = "backend/schema/migrations/app/026_article_view_counts.cql"
+tier = "prod"
+status = "active"
+description = "per-article read tally (counter) for popularity + trending"
+
+[[migrations]]
+stream = "app"
+version = "027"
+file = "backend/schema/migrations/app/027_article_image.cql"
+tier = "prod"
+status = "active"
+description = "article image_url (og:image) for feed previews"
+
+[[migrations]]
+stream = "app"
+version = "028"
+file = "backend/schema/migrations/app/028_tool_insights.cql"
+tier = "prod"
+status = "active"
+description = "writer introspection: tool_suggestions log (suggest_tool)"
+
+[[migrations]]
+stream = "app"
+version = "029"
+file = "backend/schema/migrations/app/029_compose_sessions.cql"
+tier = "prod"
+status = "active"
+description = "full agentic compose transcripts for debug/analysis (7-day TTL)"
+
+[[migrations]]
+stream = "app"
+version = "030"
+file = "backend/schema/migrations/app/030_crawled_pages.cql"
+tier = "prod"
+status = "active"
+description = "persistent crawled website pages with domain and keywords for Cassandra -> Typesense indexing"
+
+[[migrations]]
+stream = "app"
+version = "031"
+file = "backend/schema/migrations/app/031_gatekeeper_telemetry.cql"
+tier = "prod"
+status = "active"
+description = "MTTH gatekeeper telemetry: gatekeeper_decisions (Stream A) + gatekeeper_audit (Stream B)"
+
+[[migrations]]
+stream = "app"
+version = "032"
+file = "backend/schema/migrations/app/032_gatekeeper_anchors.cql"
+tier = "prod"
+status = "active"
+description = "gatekeeper validation anchors (ground truth) + annotator validation report"
+
+[[migrations]]
+stream = "app"
+version = "033"
+file = "backend/schema/migrations/app/033_url_queue_gc_grace.cql"
+tier = "prod"
+status = "active"
+description = "lower gc_grace_seconds on url_queue tables to clear pending-partition tombstone buildup (RF=1 safe)"
+
+[[migrations]]
+stream = "app"
+version = "034"
+file = "backend/schema/migrations/app/034_articles_feed_source_url.cql"
+tier = "prod"
+status = "active"
+description = "add source_url to articles_feed so front-page tiles can derive the per-domain favicon"
+
+[[migrations]]
+stream = "app"
+version = "035"
+file = "backend/schema/migrations/app/035_pageview_counters.cql"
+tier = "prod"
+status = "active"
+description = "first-party pageview analytics counter tables (daily human/bot, top paths, top referrers)"
+
+[[migrations]]
+stream = "app"
+version = "036"
+file = "backend/schema/migrations/app/036_tool_usage_stats.cql"
+tier = "prod"
+status = "active"
+description = "durable writer tool-usage counters (calls/errors per tool per day) beyond the 7-day compose_sessions TTL"
+
+[[migrations]]
+stream = "app"
+version = "037"
+file = "backend/schema/migrations/app/037_pageview_path_kind.cql"
+tier = "prod"
+status = "active"
+description = "pageview_path_kind_daily: top-pages counters split by kind (human|bot), supersedes pageview_path_daily"
+
+[[migrations]]
+stream = "app"
+version = "038"
+file = "backend/schema/migrations/app/038_pageview_direct_breakdown.cql"
+tier = "prod"
+status = "active"
+description = "diagnose the (direct) bucket: UA-class counters + short-lived raw sample of human direct requests (7d TTL)"
+
+[[migrations]]
+stream = "app"
+version = "039"
+file = "backend/schema/migrations/app/039_analytics_expansion.cql"
+tier = "prod"
+status = "active"
+description = "analytics expansion: search-query + zero-result counters, per-bot-name counters, referrer->landing pairs, 404 tracking"

@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: algorand-platform-workers
+Version: 0.1.0
+Requires-Python: >=3.11
+Requires-Dist: celery>=5.4.0
+Requires-Dist: redis>=5.0.0
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: beautifulsoup4>=4.12.0
+Requires-Dist: playwright>=1.45.0
+Requires-Dist: cassandra-driver>=3.29.0
+Requires-Dist: typesense>=0.21.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: ruff>=0.8.0; extra == "dev"
+Requires-Dist: vulture>=2.14; extra == "dev"

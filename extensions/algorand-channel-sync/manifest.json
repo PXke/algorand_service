@@ -1,0 +1,51 @@
+{
+  "manifest_version": 2,
+  "name": "Algorand Platform — Channel Sync",
+  "version": "0.1.0",
+  "description": "When you browse official Discord, Telegram, or Reddit channels, sync visible text to the platform (your account, your view).",
+  "permissions": [
+    "storage",
+    "alarms",
+    "tabs",
+    "http://localhost:8080/*",
+    "http://127.0.0.1:8080/*"
+  ],
+  "optional_permissions": ["https://*/*", "http://*/*"],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://discord.com/channels/*",
+        "https://ptb.discord.com/channels/*",
+        "https://canary.discord.com/channels/*"
+      ],
+      "js": ["content/extract-common.js", "content/discord.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://web.telegram.org/*", "https://webk.telegram.org/*"],
+      "js": ["content/extract-common.js", "content/telegram.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.reddit.com/r/*",
+        "https://old.reddit.com/r/*"
+      ],
+      "js": ["content/extract-common.js", "content/reddit.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "algorand-channel-sync@platform.local",
+      "strict_min_version": "102.0"
+    }
+  }
+}

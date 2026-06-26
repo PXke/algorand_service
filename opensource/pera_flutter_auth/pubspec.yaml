@@ -1,0 +1,11 @@
+name: pera_flutter_auth
+description: Flutter adapter for Algorand wallet authentication flows compatible with Pera wallet sessions.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ">=3.2.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Keep provider abstraction so connector implementation can be swapped.

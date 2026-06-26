@@ -1,0 +1,89 @@
+# Production sources for the newspaper pipeline (algorand.pxke.me).
+# Load on the host:
+#   set -a; source ~/algorand-platform/shared/workers.env; set +a
+#   SEED_FILE=deploy/seeds/prod_services.toml \
+#     ~/algorand-platform/venv/bin/python deploy/scripts/seed_service_registry.py  # (from the release root)
+# Lanes: web sources are snapshot-diffed by mistral-diff-publish; reddit://
+# sources are polled by the reddit crawler (requires CRAWLER_REDDIT_ENABLED=1).
+
+[[services]]
+service_id = "algorand-foundation-blog"
+display_name = "Algorand Foundation — Blog"
+match_kind = "domain"
+match_value = "algorand.co"
+scrape_url = "https://algorand.co/blog"
+enabled = true
+
+[[services]]
+service_id = "algorand-forum"
+display_name = "Algorand Forum — Latest"
+match_kind = "domain"
+match_value = "forum.algorand.co"
+scrape_url = "https://forum.algorand.co/latest"
+enabled = true
+
+[[services]]
+service_id = "reddit-algorand"
+display_name = "Reddit — r/algorand"
+match_kind = "subreddit"
+match_value = "algorand"
+scrape_url = "reddit://r/algorand/new"
+enabled = true
+
+[[services]]
+service_id = "reddit-algorand-official"
+display_name = "Reddit — r/AlgorandOfficial"
+match_kind = "subreddit"
+match_value = "AlgorandOfficial"
+scrape_url = "reddit://r/AlgorandOfficial/new"
+enabled = true
+
+# Algorand ecosystem sources (positives, added 2026-06-17).
+[[services]]
+service_id = "nodely-io"
+display_name = "Nodely"
+match_kind = "domain"
+match_value = "nodely.io"
+scrape_url = "https://nodely.io/"
+enabled = true
+
+[[services]]
+service_id = "valar-solutions"
+display_name = "Valar Solutions"
+match_kind = "domain"
+match_value = "valar.solutions"
+scrape_url = "https://valar.solutions/"
+enabled = true
+
+[[services]]
+service_id = "pact-fi"
+display_name = "Pact (DeFi)"
+match_kind = "domain"
+match_value = "pact.fi"
+scrape_url = "https://www.pact.fi/"
+enabled = true
+
+[[services]]
+service_id = "algotools"
+display_name = "AlgoTools"
+match_kind = "domain"
+match_value = "algotools.netlify.app"
+scrape_url = "https://algotools.netlify.app/"
+enabled = true
+
+[[services]]
+service_id = "zk-colorsort"
+display_name = "zk ColorSort"
+match_kind = "domain"
+match_value = "zk-colorsort.netlify.app"
+scrape_url = "https://zk-colorsort.netlify.app/"
+enabled = true
+
+# Borderline: general crypto news (not Algorand-specific) — label per-article.
+[[services]]
+service_id = "coinpedia-org"
+display_name = "Coinpedia (general crypto)"
+match_kind = "domain"
+match_value = "coinpedia.org"
+scrape_url = "https://coinpedia.org/"
+enabled = true

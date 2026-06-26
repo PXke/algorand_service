@@ -1,0 +1,43 @@
+# Repo-wide dev tooling (backend/workers keep their own package config).
+
+[tool.vulture]
+paths = [
+  "backend/app",
+  "workers/app",
+  "workers/tests",
+  "deploy/scripts/cql_migrate.py",
+  "deploy/scripts/seed_service_registry.py",
+]
+exclude = ["*/tests/*", "*/.venv/*"]
+min_confidence = 80
+ignore_decorators = [
+  "@app.get",
+  "@app.post",
+  "@app.put",
+  "@app.patch",
+  "@app.delete",
+  "@celery_app.task",
+  "@pytest.fixture",
+  # Celery signal handlers are invoked by the framework, never called directly.
+  "@worker_process_init.connect",
+  "@task_prerun.connect",
+  "@task_postrun.connect",
+  "@task_failure.connect",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+# RUF001/RUF002: en-dash/minus-sign are intentional typography in LLM prompts
+# and docstrings, not typos for hyphen-minus.
+ignore = ["RUF001", "RUF002"]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/tests/test_arc0060_verify.py" = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

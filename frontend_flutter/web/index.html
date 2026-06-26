@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#171238">
+  <meta name="description" content="Algorand ecosystem news, search and tools.">
+
+  <!-- Baseline social-card defaults. The backend's server-rendered document
+       routes replace title/description and these og:/twitter: tags per page;
+       they are the fallback for any route served straight from this static
+       shell (e.g. deep links the SSR layer doesn't cover). -->
+  <link rel="canonical" href="https://algorand.pxke.me/">
+  <link rel="alternate" type="application/rss+xml" title="PXke Algorand" href="https://algorand.pxke.me/feed.xml">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="PXke Algorand">
+  <meta property="og:title" content="PXke Algorand">
+  <meta property="og:description" content="Algorand ecosystem news, search and tools.">
+  <meta property="og:url" content="https://algorand.pxke.me/">
+  <meta property="og:image" content="https://algorand.pxke.me/icons/Icon-512.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="PXke Algorand">
+  <meta name="twitter:description" content="Algorand ecosystem news, search and tools.">
+  <meta name="twitter:image" content="https://algorand.pxke.me/icons/Icon-512.png">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="PXke Algorand Projects">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="favicon.svg"/>
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>PXke Algorand Projects</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!--
+    One-time service-worker migration.
+
+    Earlier deploys shipped Flutter's caching service worker, which stored a
+    stale tree-shaken MaterialIcons font in Cache Storage. Flutter loads that
+    font via a runtime fetch, so the old SW kept serving the stale subset even
+    through a hard refresh — newer admin icons rendered as blank boxes.
+
+    This build no longer registers a caching SW (pwa-strategy=none). The
+    snippet below evicts any leftover SW + caches from affected browsers so
+    they re-fetch assets fresh. It is a no-op for clean profiles and reloads
+    at most once per tab.
+  -->
+  <script>
+    (function () {
+      if (!('serviceWorker' in navigator)) return;
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        if (!regs.length) return;
+        Promise.all(regs.map(function (r) { return r.unregister(); }))
+          .then(function () {
+            if (window.caches && caches.keys) {
+              return caches.keys().then(function (keys) {
+                return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+              });
+            }
+          })
+          .then(function () {
+            if (navigator.serviceWorker.controller &&
+                !sessionStorage.getItem('sw-purged')) {
+              sessionStorage.setItem('sw-purged', '1');
+              location.reload();
+            }
+          });
+      });
+    })();
+  </script>
+</head>
+<body>
+  <!--
+    You can customize the "flutter_bootstrap.js" script.
+    This is useful to provide a custom configuration to the Flutter loader
+    or to give the user feedback during the initialization process.
+
+    For more details:
+    * https://docs.flutter.dev/platform-integration/web/initialization
+  -->
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

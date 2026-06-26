@@ -1,0 +1,20 @@
+# TESTING ONLY — optional Conduit for local chain ingest (compose profile `chain`).
+# Build: docker build -f docker/Dockerfile.conduit -t algorand-platform-conduit-test .
+
+FROM golang:1.22-bookworm AS build
+
+WORKDIR /src
+COPY conduit/go.mod ./
+COPY conduit/ ./
+RUN go mod tidy && make conduit
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/bin/conduit /usr/local/bin/conduit
+
+WORKDIR /data
+ENTRYPOINT ["conduit"]

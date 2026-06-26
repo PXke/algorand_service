@@ -1,0 +1,182 @@
+# Training-only NEGATIVE seeds for the classifier/grader bootstrap sprint.
+# These are deliberately off-topic / adjacent sources we expect to REJECT, to
+# balance the (mostly positive) live Algorand sources. Reject them in the Review
+# tab with "Training mode" ON so they train both models WITHOUT publishing.
+#
+# AFTER the sprint: disable these (set enabled = false and re-seed) or delete the
+# rows so they stop being scraped — we don't want amazon.fr composing forever.
+#
+# Load on the host (from the release root, workers.env sourced for CASSANDRA_*):
+#   set -a; source ~/algorand-platform/shared/workers.env; set +a
+#   SEED_FILE=deploy/seeds/training_seeds.toml \
+#     ~/algorand-platform/venv/bin/python deploy/scripts/seed_service_registry.py
+#
+# Field notes:
+#   service_id   stable unique id (domain with dots -> dashes)
+#   display_name human label shown in admin
+#   match_kind   "domain" for web sources
+#   match_value  the registrable domain
+#   scrape_url   the page to scrape (https://…)
+#   enabled      true to crawl it; flip to false to retire after the sprint
+
+[[services]]
+service_id = "amazon-fr"
+display_name = "Amazon FR (training: reject)"
+match_kind = "domain"
+match_value = "amazon.fr"
+scrape_url = "https://www.amazon.fr/"
+enabled = true
+
+[[services]]
+service_id = "aljazeera-com"
+display_name = "Al Jazeera (training: usually reject)"
+match_kind = "domain"
+match_value = "aljazeera.com"
+scrape_url = "https://www.aljazeera.com/"
+enabled = true
+
+[[services]]
+service_id = "bitcoin-com"
+display_name = "Bitcoin.com (training: reject — crypto, not Algorand)"
+match_kind = "domain"
+match_value = "bitcoin.com"
+scrape_url = "https://www.bitcoin.com/"
+enabled = true
+
+[[services]]
+service_id = "imdb-com"
+display_name = "IMDb (training: reject)"
+match_kind = "domain"
+match_value = "imdb.com"
+scrape_url = "https://www.imdb.com/"
+enabled = true
+
+[[services]]
+service_id = "bugsnag-com"
+display_name = "Bugsnag (training: reject)"
+match_kind = "domain"
+match_value = "bugsnag.com"
+scrape_url = "https://www.bugsnag.com/"
+enabled = true
+
+# Batch 2 negatives (added 2026-06-17). app.pacifica.fi = crypto-but-not-Algorand
+# (hard negative); the rest are clearly off-topic.
+[[services]]
+service_id = "nvidia-com"
+display_name = "NVIDIA (training: reject)"
+match_kind = "domain"
+match_value = "nvidia.com"
+scrape_url = "https://www.nvidia.com/"
+enabled = true
+
+[[services]]
+service_id = "cursor-com"
+display_name = "Cursor (training: reject)"
+match_kind = "domain"
+match_value = "cursor.com"
+scrape_url = "https://cursor.com/"
+enabled = true
+
+[[services]]
+service_id = "filmaffinity-com"
+display_name = "FilmAffinity (training: reject)"
+match_kind = "domain"
+match_value = "filmaffinity.com"
+scrape_url = "https://www.filmaffinity.com/"
+enabled = true
+
+[[services]]
+service_id = "marmiton-org"
+display_name = "Marmiton (training: reject)"
+match_kind = "domain"
+match_value = "marmiton.org"
+scrape_url = "https://www.marmiton.org/"
+enabled = true
+
+[[services]]
+service_id = "proton-me"
+display_name = "Proton (training: reject)"
+match_kind = "domain"
+match_value = "proton.me"
+scrape_url = "https://proton.me/"
+enabled = true
+
+[[services]]
+service_id = "claude-ai"
+display_name = "Claude (training: reject)"
+match_kind = "domain"
+match_value = "claude.ai"
+scrape_url = "https://claude.ai/"
+enabled = true
+
+[[services]]
+service_id = "antontop-com"
+display_name = "Antontop (training: reject)"
+match_kind = "domain"
+match_value = "antontop.com"
+scrape_url = "https://antontop.com/"
+enabled = true
+
+[[services]]
+service_id = "booking-com"
+display_name = "Booking.com (training: reject)"
+match_kind = "domain"
+match_value = "booking.com"
+scrape_url = "https://www.booking.com/"
+enabled = true
+
+[[services]]
+service_id = "mecharashi"
+display_name = "Mecharashi game (training: reject)"
+match_kind = "domain"
+match_value = "tentree-games.com"
+scrape_url = "https://mecharashi.tentree-games.com/"
+enabled = true
+
+[[services]]
+service_id = "app-pacifica-fi"
+display_name = "Pacifica DeFi (training: reject — non-Algorand chain)"
+match_kind = "domain"
+match_value = "pacifica.fi"
+scrape_url = "https://app.pacifica.fi/"
+enabled = true
+
+[[services]]
+service_id = "mysql-com"
+display_name = "MySQL (training: reject)"
+match_kind = "domain"
+match_value = "mysql.com"
+scrape_url = "https://www.mysql.com/"
+enabled = true
+
+[[services]]
+service_id = "realtor-com"
+display_name = "Realtor.com (training: reject)"
+match_kind = "domain"
+match_value = "realtor.com"
+scrape_url = "https://www.realtor.com/"
+enabled = true
+
+[[services]]
+service_id = "stremio-com"
+display_name = "Stremio (training: reject)"
+match_kind = "domain"
+match_value = "stremio.com"
+scrape_url = "https://www.stremio.com/"
+enabled = true
+
+[[services]]
+service_id = "ccleaner-com"
+display_name = "CCleaner (training: reject)"
+match_kind = "domain"
+match_value = "ccleaner.com"
+scrape_url = "https://www.ccleaner.com/"
+enabled = true
+
+[[services]]
+service_id = "translate-google"
+display_name = "Google Translate (training: reject)"
+match_kind = "domain"
+match_value = "google.com"
+scrape_url = "https://translate.google.com/"
+enabled = true

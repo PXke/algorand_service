@@ -1,0 +1,10 @@
+# Localnet / docker smoke — replace match_value with a funded sandbox account you control.
+# Load: SEED_FILE=deploy/seeds/localnet_services.toml python3 deploy/scripts/seed_service_registry.py
+
+[[services]]
+service_id = "algorand-foundation"
+display_name = "Algorand Foundation"
+match_kind = "address"
+match_value = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ"
+scrape_url = "https://algorand.org"
+enabled = true

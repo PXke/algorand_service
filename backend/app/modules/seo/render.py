@@ -1,0 +1,344 @@
+"""Builds the per-route `<head>` markup, JSON-LD and crawlable `<noscript>`
+body that get injected into the Flutter shell (see shell.render_document)."""
+
+from __future__ import annotations
+
+import html
+import json
+from datetime import UTC, datetime
+
+from app.core.config import settings
+from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
+from app.modules.seo.markdown import md_to_html, md_to_text, truncate
+from app.modules.seo.sections import SECTIONS, Section, matches_section
+
+
+def site_url() -> str:
+    return settings.public_site_url.rstrip("/")
+
+
+def absolute(path: str) -> str:
+    if path.startswith(("http://", "https://")):
+        return path
+    return f"{site_url()}/{path.lstrip('/')}"
+
+
+def _iso(epoch: int) -> str:
+    return datetime.fromtimestamp(epoch, tz=UTC).isoformat()
+
+
+def _attr(value: str) -> str:
+    return html.escape(value or "", quote=True)
+
+
+def _json_ld(data: dict | list) -> str:
+    # `</` would otherwise let a script tag close early inside the body.
+    payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False).replace("</", "<\\/")
+    return f'<script type="application/ld+json">{payload}</script>'
+
+
+def _same_as() -> list[str]:
+    return [u.strip() for u in settings.seo_same_as.split(",") if u.strip()]
+
+
+def _publisher() -> dict:
+    org = {
+        "@type": "Organization",
+        "name": settings.site_name,
+        "logo": {"@type": "ImageObject", "url": absolute("/icons/Icon-512.png")},
+    }
+    same = _same_as()
+    if same:
+        org["sameAs"] = same
+    return org
+
+
+def _meta_block(
+    *,
+    title: str,
+    description: str,
+    canonical: str,
+    image: str,
+    og_type: str = "website",
+    robots: str | None = None,
+    published_iso: str | None = None,
+    modified_iso: str | None = None,
+    tags: list[str] | None = None,
+    image_alt: str = "",
+    image_dims: tuple[int, int] | None = None,
+    json_ld: list[dict] | None = None,
+) -> str:
+    full_title = title if title.endswith(settings.site_name) else f"{title} — {settings.site_name}"
+    parts = [
+        f"<title>{html.escape(full_title)}</title>",
+        f'<meta name="description" content="{_attr(description)}">',
+        f'<link rel="canonical" href="{_attr(canonical)}">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        f'<link rel="alternate" type="application/rss+xml" '
+        f'title="{_attr(settings.site_name)}" href="{_attr(absolute("/feed.xml"))}">',
+    ]
+    if robots:
+        parts.append(f'<meta name="robots" content="{_attr(robots)}">')
+    # Open Graph
+    parts += [
+        f'<meta property="og:type" content="{_attr(og_type)}">',
+        f'<meta property="og:site_name" content="{_attr(settings.site_name)}">',
+        f'<meta property="og:title" content="{_attr(title)}">',
+        f'<meta property="og:description" content="{_attr(description)}">',
+        f'<meta property="og:url" content="{_attr(canonical)}">',
+        f'<meta property="og:image" content="{_attr(image)}">',
+        '<meta property="og:locale" content="en_US">',
+    ]
+    if image_alt:
+        parts.append(f'<meta property="og:image:alt" content="{_attr(image_alt)}">')
+    if image_dims:
+        parts.append(f'<meta property="og:image:width" content="{image_dims[0]}">')
+        parts.append(f'<meta property="og:image:height" content="{image_dims[1]}">')
+    if published_iso:
+        parts.append(f'<meta property="article:published_time" content="{_attr(published_iso)}">')
+    if modified_iso:
+        parts.append(f'<meta property="article:modified_time" content="{_attr(modified_iso)}">')
+    for tag in tags or []:
+        parts.append(f'<meta property="article:tag" content="{_attr(tag)}">')
+    # Twitter
+    parts += [
+        '<meta name="twitter:card" content="summary_large_image">',
+        f'<meta name="twitter:title" content="{_attr(title)}">',
+        f'<meta name="twitter:description" content="{_attr(description)}">',
+        f'<meta name="twitter:image" content="{_attr(image)}">',
+    ]
+    if image_alt:
+        parts.append(f'<meta name="twitter:image:alt" content="{_attr(image_alt)}">')
+    for block in json_ld or []:
+        parts.append(_json_ld(block))
+    return "\n".join(parts)
+
+
+_DEFAULT_IMAGE_DIMS = (512, 512)  # icons/Icon-512.png
+
+
+def _image_for(image_url: str | None) -> tuple[str, bool]:
+    """(absolute_url, is_default). Dimensions are only known for the default."""
+    if image_url:
+        return absolute(image_url), False
+    return absolute(settings.seo_default_image), True
+
+
+def article_path(article_id: str) -> str:
+    return f"/news/articles/{article_id}"
+
+
+def _breadcrumb(trail: list[tuple[str, str]]) -> dict:
+    """BreadcrumbList JSON-LD from (name, absolute_url) pairs."""
+    return {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+            {"@type": "ListItem", "position": i + 1, "name": name, "item": url}
+            for i, (name, url) in enumerate(trail)
+        ],
+    }
+
+
+def _website_jsonld() -> dict:
+    """WebSite + SearchAction (enables the Google sitelinks search box)."""
+    return {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": settings.site_name,
+        "url": site_url() + "/",
+        "publisher": _publisher(),
+        "potentialAction": {
+            "@type": "SearchAction",
+            "target": {
+                "@type": "EntryPoint",
+                "urlTemplate": site_url() + "/search?q={search_term_string}",
+            },
+            "query-input": "required name=search_term_string",
+        },
+    }
+
+
+# --- Page builders: each returns (head_html, body_html) -----------------------
+
+def _section_for(tags: list[str]) -> Section | None:
+    return next((s for s in SECTIONS if matches_section(s, tags)), None)
+
+
+def render_article(article: ArticleDetail) -> tuple[str, str]:
+    canonical = absolute(article_path(article.article_id))
+    image, is_default = _image_for(article.image_url)
+    body_text = md_to_text(article.body)
+    description = truncate(article.summary or body_text, 160)
+    published_iso = _iso(article.published_at_epoch)
+
+    trail = [("Home", site_url() + "/")]
+    section = _section_for(article.tags or [])
+    if section:
+        trail.append((section.label, absolute(f"/section/{section.slug}")))
+    trail.append((truncate(article.title, 80), canonical))
+
+    news_article = {
+        "@context": "https://schema.org",
+        "@type": "NewsArticle",
+        "headline": truncate(article.title, 110),
+        "description": description,
+        "datePublished": published_iso,
+        "dateModified": published_iso,
+        "url": canonical,
+        "mainEntityOfPage": {"@type": "WebPage", "@id": canonical},
+        "image": [image],
+        "articleBody": body_text,
+        "publisher": _publisher(),
+        "author": _publisher(),
+        "keywords": ", ".join(article.tags or []),
+        "isAccessibleForFree": True,
+    }
+    head = _meta_block(
+        title=article.title,
+        description=description,
+        canonical=canonical,
+        image=image,
+        og_type="article",
+        published_iso=published_iso,
+        modified_iso=published_iso,
+        tags=article.tags,
+        image_alt=article.title,
+        image_dims=_DEFAULT_IMAGE_DIMS if is_default else None,
+        json_ld=[news_article, _breadcrumb(trail)],
+    )
+
+    img_html = (
+        f'<img src="{_attr(image)}" alt="{_attr(article.title)}">' if article.image_url else ""
+    )
+    source = (
+        f'<p>Source: <a href="{_attr(article.source_url)}" rel="noopener nofollow">'
+        f"{_attr(article.source_url)}</a></p>"
+        if article.source_url
+        else ""
+    )
+    body = (
+        "<noscript>"
+        f'<article><h1>{html.escape(article.title)}</h1>'
+        f'<p><time datetime="{_attr(published_iso)}">{published_iso[:10]}</time></p>'
+        f"{img_html}{md_to_html(article.body)}{source}</article>"
+        "</noscript>"
+    )
+    return head, body
+
+
+def _feed_list_jsonld(items: list[ArticleFeedItem], canonical: str, name: str) -> dict:
+    return {
+        "@context": "https://schema.org",
+        "@type": "CollectionPage",
+        "name": name,
+        "url": canonical,
+        "publisher": _publisher(),
+        "mainEntity": {
+            "@type": "ItemList",
+            "itemListElement": [
+                {
+                    "@type": "ListItem",
+                    "position": i + 1,
+                    "url": absolute(article_path(item.article_id)),
+                    "name": item.title,
+                }
+                for i, item in enumerate(items)
+            ],
+        },
+    }
+
+
+def _feed_noscript(items: list[ArticleFeedItem], heading: str) -> str:
+    links = "".join(
+        f'<li><a href="{_attr(article_path(item.article_id))}">'
+        f"{html.escape(item.title)}</a> — {html.escape(truncate(item.summary, 140))}</li>"
+        for item in items
+    )
+    return f"<noscript><h1>{html.escape(heading)}</h1><ul>{links}</ul></noscript>"
+
+
+def render_home(items: list[ArticleFeedItem]) -> tuple[str, str]:
+    canonical = site_url() + "/"
+    description = settings.site_tagline
+    head = _meta_block(
+        title=settings.site_name,
+        description=description,
+        canonical=canonical,
+        image=absolute(settings.seo_default_image),
+        image_alt=settings.site_name,
+        image_dims=_DEFAULT_IMAGE_DIMS,
+        json_ld=[
+            _website_jsonld(),
+            {"@context": "https://schema.org", **_publisher(), "url": site_url() + "/"},
+            _feed_list_jsonld(items, canonical, f"{settings.site_name} — Latest"),
+        ],
+    )
+    body = _feed_noscript(items, f"{settings.site_name} — Latest Algorand news")
+    return head, body
+
+
+def render_section(section: Section, items: list[ArticleFeedItem]) -> tuple[str, str]:
+    canonical = absolute(f"/section/{section.slug}")
+    title = f"{section.label} — Algorand news"
+    trail = [("Home", site_url() + "/"), (section.label, canonical)]
+    head = _meta_block(
+        title=title,
+        description=section.description,
+        canonical=canonical,
+        image=absolute(settings.seo_default_image),
+        image_alt=settings.site_name,
+        image_dims=_DEFAULT_IMAGE_DIMS,
+        json_ld=[_feed_list_jsonld(items, canonical, title), _breadcrumb(trail)],
+    )
+    body = _feed_noscript(items, section.label)
+    return head, body
+
+
+def render_about() -> tuple[str, str]:
+    canonical = absolute("/about")
+    description = f"About {settings.site_name}: {settings.site_tagline}"
+    head = _meta_block(
+        title="About",
+        description=description,
+        canonical=canonical,
+        image=absolute(settings.seo_default_image),
+        image_alt=settings.site_name,
+        image_dims=_DEFAULT_IMAGE_DIMS,
+        json_ld=[
+            {
+                "@context": "https://schema.org",
+                "@type": "AboutPage",
+                "url": canonical,
+                "name": f"About {settings.site_name}",
+                "publisher": _publisher(),
+            }
+        ],
+    )
+    disclosure = (
+        f"{settings.site_name} publishes AI-assisted journalism: articles are drafted "
+        "by AI language models from on-chain events, market data and community sources "
+        "under automated editorial review, with source links on every story. The "
+        "organisation, not an individual byline, is the author of record."
+    )
+    body = (
+        f"<noscript><h1>About {html.escape(settings.site_name)}</h1>"
+        f"<p>{html.escape(settings.site_tagline)}</p>"
+        f"<h2>Written with AI</h2><p>{html.escape(disclosure)}</p></noscript>"
+    )
+    return head, body
+
+
+def render_noindex(title: str) -> tuple[str, str]:
+    """Minimal shell for utility routes (admin/search/suggestions) — keep them
+    out of the index but still serve the app."""
+    head = _meta_block(
+        title=title,
+        description=settings.site_tagline,
+        canonical=site_url() + "/",
+        image=absolute(settings.seo_default_image),
+        image_alt=settings.site_name,
+        image_dims=_DEFAULT_IMAGE_DIMS,
+        robots="noindex, follow",
+    )
+    return head, ""

@@ -1,0 +1,28 @@
+# Reddit communities for the newspaper crawler (public JSON API).
+# Requires REDDIT_USER_AGENT (see workers/.env.example).
+#
+# scrape_url forms:
+#   reddit://r/<subreddit>
+#   reddit://r/<subreddit>/new|hot|top|rising
+#   reddit:r/algorand
+#
+# Load:
+#   SEED_FILE=deploy/seeds/reddit_services.toml python3 deploy/scripts/seed_service_registry.py
+#
+# Replace subreddit names with your two communities.
+
+[[services]]
+service_id = "reddit-community-1"
+display_name = "Reddit — Community 1"
+match_kind = "address"
+match_value = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ"
+scrape_url = "reddit://r/REPLACE_SUBREDDIT_1"
+enabled = true
+
+[[services]]
+service_id = "reddit-community-2"
+display_name = "Reddit — Community 2"
+match_kind = "address"
+match_value = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ"
+scrape_url = "reddit://r/REPLACE_SUBREDDIT_2/hot"
+enabled = true

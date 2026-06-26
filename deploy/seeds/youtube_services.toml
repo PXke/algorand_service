@@ -1,0 +1,20 @@
+# YouTube channels for the newspaper crawler (public Atom feed, metadata only).
+# Requires CRAWLER_YOUTUBE_ENABLED=1 (see workers.env). No API key, no transcript
+# (the caption endpoint needs a po_token — see Stage 2).
+#
+# scrape_url forms:
+#   youtube://<channelId>            e.g. youtube://UCYqAUajjZd0PuHyHslY_8Ww
+#   youtube://channel/<channelId>
+#
+# Load on the host (from the release root, workers.env sourced for CASSANDRA_*):
+#   set -a; source ~/algorand-platform/shared/workers.env; set +a
+#   SEED_FILE=deploy/seeds/youtube_services.toml \
+#     ~/algorand-platform/venv/bin/python deploy/scripts/seed_service_registry.py
+
+[[services]]
+service_id = "youtube-algorand-foundation"
+display_name = "Algorand Foundation — YouTube"
+match_kind = "channel"
+match_value = "UCYqAUajjZd0PuHyHslY_8Ww"
+scrape_url = "youtube://UCYqAUajjZd0PuHyHslY_8Ww"
+enabled = true

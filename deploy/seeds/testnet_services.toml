@@ -1,0 +1,11 @@
+# Seed entries for TestNet newspaper pipeline.
+# Load: python deploy/scripts/seed_service_registry.py
+
+[[services]]
+service_id = "algorand-foundation"
+display_name = "Algorand Foundation"
+match_kind = "address"
+# Example watched address — replace with a real TestNet treasury or app address you control.
+match_value = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ"
+scrape_url = "https://algorand.org"
+enabled = true

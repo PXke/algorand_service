@@ -1,0 +1,22 @@
+{
+  "api_base": "http://localhost:8080",
+  "ingest_key": "set-me-or-use-INGEST_API_KEY-env",
+  "cdp_url": "http://127.0.0.1:9222",
+  "poll_seconds": 120,
+  "targets": [
+    {
+      "service_id": "algorand-foundation-discord",
+      "display_name": "Algorand Foundation (Discord)",
+      "url": "https://discord.com/channels/GUILD_ID/CHANNEL_ID",
+      "page_title": "Discord announcements",
+      "source_url": "local://discord/foundation-announce"
+    },
+    {
+      "service_id": "algorand-official-telegram",
+      "display_name": "Algorand (Telegram)",
+      "url": "https://web.telegram.org/k/#@algorand",
+      "page_title": "Telegram channel",
+      "source_url": "local://telegram/algorand"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "algorand-platform-backend"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "celery>=5.3",
+  "robyn>=0.65.0",
+  "pydantic>=2.8.0",
+  "pydantic-settings>=2.4.0",
+  "redis>=5.0.0",
+  "bugsnag>=4.6.0",
+  "cassandra-driver>=3.29.0",
+  "typesense>=0.21.0",
+  "py-algorand-sdk>=2.5.0",
+  "pynacl>=1.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.8.0",
+  "vulture>=2.14",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+# RUF001/RUF002: en-dash/minus-sign are intentional typography in LLM prompts
+# and docstrings, not typos for hyphen-minus.
+ignore = ["RUF001", "RUF002"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_arc0060_verify.py" = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

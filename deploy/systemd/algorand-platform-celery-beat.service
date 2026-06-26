@@ -1,0 +1,19 @@
+[Unit]
+Description=Algorand Platform Celery Beat (chain tail schedule)
+After=network-online.target algorand-platform-celery.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+WorkingDirectory=@TARGET_PATH@/releases/current/workers
+EnvironmentFile=-@TARGET_PATH@/releases/current/workers/.env
+ExecStart=@TARGET_PATH@/venv/bin/celery -A app.celery_app beat --loglevel=INFO
+Restart=on-failure
+RestartSec=5
+# Beat has no in-flight work to drain — exit promptly on restart.
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

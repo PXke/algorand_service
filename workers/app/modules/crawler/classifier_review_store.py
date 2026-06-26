@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import UTC, datetime
+from typing import Any
+
+
+def enqueue_classifier_review(
+    *,
+    url: str,
+    page_text: str,
+    page_title: str,
+    category: str,
+    storage_score: float,
+    metadata: dict[str, str] | None = None,
+) -> str:
+    from app.core.cassandra import get_cassandra_session
+
+    review_id = uuid.uuid4()
+    now = datetime.now(tz=UTC)
+    status = "pending"
+    meta = json.dumps(metadata or {}, separators=(",", ":"))
+    session = get_cassandra_session()
+    session.execute(
+        """
+        INSERT INTO classifier_review_queue (
+          review_id, url, page_text, page_title, category,
+          storage_score, status, created_at, metadata
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            review_id,
+            url,
+            page_text[:50_000],
+            page_title[:512],
+            category,
+            storage_score,
+            status,
+            now,
+            {"raw": meta},
+        ),
+    )
+    session.execute(
+        """
+        INSERT INTO classifier_review_pending (
+          status, created_at, review_id, url, category
+        ) VALUES (%s, %s, %s, %s, %s)
+        """,
+        (status, now, review_id, url, category),
+    )
+    return str(review_id)
+
+
+def count_pending_reviews(*, scan_limit: int = 500) -> int:
+    """Number of items currently awaiting admin classification."""
+    from app.core.cassandra import get_cassandra_session
+
+    rows = get_cassandra_session().execute(
+        "SELECT review_id FROM classifier_review_pending WHERE status = %s LIMIT %s",
+        ("pending", scan_limit),
+    )
+    return sum(1 for _ in rows)
+
+
+def review_queue_full() -> bool:
+    from app.core.config import MAX_PENDING_REVIEWS
+
+    return count_pending_reviews() >= MAX_PENDING_REVIEWS
+
+
+def has_pending_review_for_url(url: str, *, scan_limit: int = 500) -> bool:
+    """True when a pending review already covers this URL (dedupe guard so a
+    fast-changing source doesn't pile up one held article per crawl cycle)."""
+    from app.core.cassandra import get_cassandra_session
+
+    session = get_cassandra_session()
+    rows = session.execute(
+        """
+        SELECT url FROM classifier_review_pending
+        WHERE status = %s
+        LIMIT %s
+        """,
+        ("pending", scan_limit),
+    )
+    normalized = url.strip().rstrip("/")
+    return any((row.url or "").strip().rstrip("/") == normalized for row in rows)
+
+
+def list_pending_reviews(*, limit: int = 50) -> list[dict[str, Any]]:
+    from app.core.cassandra import get_cassandra_session
+
+    session = get_cassandra_session()
+    rows = session.execute(
+        """
+        SELECT review_id, url, category, created_at
+        FROM classifier_review_pending
+        WHERE status = %s
+        LIMIT %s
+        """,
+        ("pending", limit),
+    )
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        detail = session.execute(
+            """
+            SELECT review_id, url, page_title, page_text, category, storage_score, metadata
+            FROM classifier_review_queue
+            WHERE review_id = %s
+            """,
+            (row.review_id,),
+        ).one()
+        if detail is None:
+            continue
+        article_id = ""
+        meta = detail.metadata or {}
+        if isinstance(meta, dict):
+            raw = meta.get("raw")
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                    article_id = str(parsed.get("article_id", ""))
+                except (json.JSONDecodeError, TypeError):
+                    article_id = str(meta.get("article_id", ""))
+            else:
+                article_id = str(meta.get("article_id", ""))
+        items.append(
+            {
+                "review_id": str(detail.review_id),
+                "url": detail.url,
+                "page_title": detail.page_title or "",
+                "page_text_preview": (detail.page_text or "")[:500],
+                "category": detail.category or "",
+                "storage_score": float(detail.storage_score or 0),
+                "article_id": article_id,
+            }
+        )
+    return items
+
+
+def complete_classifier_review(
+    review_id: str,
+    *,
+    resolution: str = "completed",
+) -> bool:
+    """Remove from pending index and mark review row resolved."""
+    from uuid import UUID
+
+    from app.core.cassandra import get_cassandra_session
+
+    try:
+        rid = UUID(review_id)
+    except ValueError:
+        return False
+
+    session = get_cassandra_session()
+    row = session.execute(
+        """
+        SELECT review_id, url, page_text, page_title, category, storage_score,
+               status, created_at, metadata
+        FROM classifier_review_queue
+        WHERE review_id = %s
+        """,
+        (rid,),
+    ).one()
+    if row is None:
+        return False
+
+    created = row.created_at
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+
+    session.execute(
+        """
+        INSERT INTO classifier_review_queue (
+          review_id, url, page_text, page_title, category,
+          storage_score, status, created_at, metadata
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            rid,
+            row.url,
+            row.page_text,
+            row.page_title,
+            row.category,
+            row.storage_score,
+            resolution,
+            created or datetime.now(tz=UTC),
+            dict(row.metadata or {}),
+        ),
+    )
+    if created is not None:
+        session.execute(
+            """
+            DELETE FROM classifier_review_pending
+            WHERE status = %s AND created_at = %s AND review_id = %s
+            """,
+            ("pending", created, rid),
+        )
+    return True

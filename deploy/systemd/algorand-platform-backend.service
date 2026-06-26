@@ -1,0 +1,23 @@
+[Unit]
+Description=Algorand Platform Backend API (Robyn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+WorkingDirectory=@TARGET_PATH@/releases/current/backend
+EnvironmentFile=-@TARGET_PATH@/releases/current/backend/.env
+ExecStart=@TARGET_PATH@/venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=5
+# Robyn doesn't drain on SIGTERM — don't wait the systemd default (90s) before
+# SIGKILL. KillMode=mixed signals the whole process group (Robyn workers too).
+KillMode=mixed
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

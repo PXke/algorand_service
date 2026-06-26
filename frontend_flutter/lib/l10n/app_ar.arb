@@ -1,0 +1,441 @@
+{
+  "@@locale": "ar",
+  "appTitle": "PXke Algorand Projects",
+  "appTagline": "أخبار ومصادر ومجتمع",
+  "navHome": "الرئيسية",
+  "navNews": "الأخبار",
+  "navSources": "Sources",
+  "navSuggestions": "اقتراحات",
+  "navSearch": "بحث",
+  "navAdmin": "الإدارة",
+  "navProducts": "المنتجات",
+  "navWallet": "Wallet",
+  "navAppearance": "APPEARANCE",
+  "pageTitleHome": "PXke Algorand Projects",
+  "pageTitleArticle": "Article",
+  "pageTitleNews": "الأخبار",
+  "pageTitleSources": "News sources",
+  "pageTitleSuggestions": "اقتراحات",
+  "pageTitleSearch": "بحث",
+  "pageTitleAdmin": "الإدارة",
+  "backToFeed": "العودة إلى الخلاصة",
+  "homeWelcome": "PXke Algorand ecosystem platform",
+  "homeTagline": "Curated news from on-chain triggers and crawled sources, community suggestions, and search.",
+  "homeNewsDescription": "Curated feed of articles published when monitored sources or chain events change.",
+  "homeSourcesDescription": "Registered Discord, Reddit, and web crawlers that power the news pipeline.",
+  "homeSuggestionsDescription": "Submit and upvote community ideas with wallet-backed authentication.",
+  "homeSearchDescription": "Full-text search across published articles.",
+  "homeOpenProduct": "فتح",
+  "themeLight": "Light",
+  "themeDark": "Dark",
+  "themeSystem": "System",
+  "themeSwitchToLight": "Switch to light theme",
+  "themeSwitchToDark": "Switch to dark theme",
+  "localeSystem": "لغة النظام",
+  "localeEnglish": "English",
+  "localeSpanish": "Español",
+  "localeFrench": "Français",
+  "localeArabic": "العربية",
+  "navLanguage": "اللغة",
+  "walletConnected": "متصل",
+  "walletDisconnect": "قطع الاتصال",
+  "walletSignInTitle": "Sign in with wallet",
+  "walletSignInBody": "Connect a WalletConnect-compatible Algorand wallet to submit suggestions and upvotes.",
+  "walletConnect": "ربط المحفظة",
+  "walletConnectFailed": "Connection failed. Try again or cancel the pairing dialog first.",
+  "walletDialogTitle": "Connect your wallet",
+  "walletDialogBody": "Scan the QR code with a WalletConnect-compatible Algorand wallet (Pera, Defly, etc.) or copy/open the link on mobile.",
+  "walletAwaitingApproval": "تم اتصال المحفظة. ارجع إلى تطبيق محفظتك للموافقة على طلب تسجيل الدخول ثم عُد إلى هنا.",
+  "walletAwaitingApprovalTitle": "أوشكت على الانتهاء",
+  "walletCopyUri": "Copy URI",
+  "walletUriCopied": "WalletConnect URI copied",
+  "walletOpenWallet": "Open wallet",
+  "walletOpenFailed": "Could not open wallet app — copy the URI and paste it in Pera or Defly",
+  "walletCancel": "Cancel",
+  "walletDone": "Done",
+  "newsFeedTitle": "أحدث المقالات",
+  "newsSubtitleDefault": "On-chain triggers and crawled sources publish here when content changes.",
+  "newsPriceUnavailable": "ALGO price unavailable — run price metrics collection",
+  "newsArticleCount": "{count} articles in the curated feed",
+  "@newsArticleCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "newsEmptyFilteredTitle": "No articles yet",
+  "newsEmptyTitle": "Feed is empty",
+  "newsSponsoredLabel": "Sponsored",
+  "newsSponsoredBy": "Sponsored · {sponsor}",
+  "newsEmptyFilteredMessage": "This source has not published any articles. Check that workers are polling and content has changed.",
+  "newsEmptyMessage": "Start Conduit, Celery workers, and seed service_registry to populate the feed.",
+  "newsFilterShowing": "Showing articles from {serviceId}",
+  "@newsFilterShowing": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
+  "clearFilter": "Clear",
+  "articleUntitled": "Untitled",
+  "articleSectionTitle": "Article",
+  "articlePublicationDetails": "Publication details",
+  "articleMetaService": "Service",
+  "articleMetaPublisher": "Publisher",
+  "articleMetaDataSource": "Data source",
+  "articleMetaCoinGecko": "CoinGecko market data",
+  "articleMetaPublished": "Published",
+  "articleMetaRound": "Round",
+  "articleMetaTriggerTx": "Trigger tx",
+  "articleMetaSourceUrl": "Source URL",
+  "articleOpenInBrowser": "Open in browser",
+  "articleViewOnExplorer": "عرض على مستكشف Algorand",
+  "articleMoreFrom": "More from {serviceId}",
+  "@articleMoreFrom": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
+  "articleViewSource": "View source",
+  "adminTitle": "Source administration",
+  "adminSubtitle": "Registered crawlers and feeds (visible to admin wallets only).",
+  "adminViewFeedArticles": "View feed for this source",
+  "adminAccessDenied": "اربط محفظة مسؤول. عيّن ADMIN_WALLET_ADDRESSES عند البناء.",
+  "sourcesTitle": "News sources",
+  "sourcesSubtitle": "Registered services crawled by workers. Discord and Reddit are polled on a schedule; on-chain matches trigger publishes when monitored content changes.",
+  "sourcesEmptyTitle": "No sources configured",
+  "sourcesEmptyMessage": "Seed service_registry with Discord and Reddit TOML files, then run migrations. Sources appear here once registered in Cassandra.",
+  "sourcesMetaServiceId": "Service ID",
+  "sourcesMetaScrapeUrl": "Scrape URL",
+  "sourcesMetaMatchRule": "Match rule",
+  "sourcesViewArticles": "View articles",
+  "sourcesDisabled": "Disabled",
+  "filterAll": "All ({count})",
+  "@filterAll": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "filterDiscord": "Discord ({count})",
+  "@filterDiscord": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "filterReddit": "Reddit ({count})",
+  "@filterReddit": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "filterWeb": "Web ({count})",
+  "@filterWeb": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "matchRuleValue": "{kind} = {value}",
+  "@matchRuleValue": {
+    "placeholders": {
+      "kind": {
+        "type": "String"
+      },
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "sourceKindDiscord": "Discord",
+  "sourceKindReddit": "Reddit",
+  "sourceKindWeb": "Web",
+  "sourceKindOnChain": "On-chain",
+  "sourceKindUnknown": "Source",
+  "searchTitle": "بحث",
+  "searchSubtitle": "Full-text search via Typesense when configured; otherwise scans the recent feed.",
+  "searchQueryLabel": "استعلام البحث",
+  "searchQueryHint": "كلمات مفتاحية، عناوين، ملخصات…",
+  "searchAction": "بحث",
+  "searchEngine": "Engine: {name}",
+  "@searchEngine": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "searchEmptyTitle": "لا نتائج",
+  "searchEmptyMessage": "Try different keywords or check that articles are indexed.",
+  "searchErrorBackend": "البحث غير متاح مؤقتًا. تأكد من تشغيل واجهة API وقاعدة البيانات.",
+  "suggestionsTitle": "Suggestions",
+  "suggestionsSubtitle": "Submit after sending at least 0.01 ALGO to the platform treasury. Upvotes use an off-chain wallet signature.",
+  "suggestionsNewTitle": "New suggestion",
+  "suggestionsFieldTitle": "Title",
+  "suggestionsFieldBody": "Body",
+  "suggestionsFieldTxid": "Submission transaction ID",
+  "suggestionsSubmit": "Submit suggestion",
+  "suggestionsUpvoteTitle": "Upvote",
+  "suggestionsSignatureLabel": "Signature (base64)",
+  "suggestionsSignatureHint": "After signing the prepared message in your wallet",
+  "suggestionsSubmitUpvote": "Submit upvote",
+  "suggestionsPrepareUpvote": "Prepare upvote",
+  "suggestionsUpvoteDialogTitle": "Sign upvote message",
+  "suggestionsCopyMessage": "Copy message",
+  "suggestionsMessageCopied": "Signing message copied to clipboard",
+  "suggestionsTreasuryHelp": "Send at least {minAlgo} ALGO to the platform treasury before submitting:\n{address}",
+  "@suggestionsTreasuryHelp": {
+    "placeholders": {
+      "minAlgo": {
+        "type": "String"
+      },
+      "address": {
+        "type": "String"
+      }
+    }
+  },
+  "suggestionsUpvoteCount": "{count, plural, =0{No upvotes yet} =1{1 upvote} other{{count} upvotes}}",
+  "@suggestionsUpvoteCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "close": "Close",
+  "suggestionsTxShort": "Tx {txid}",
+  "@suggestionsTxShort": {
+    "placeholders": {
+      "txid": {
+        "type": "String"
+      }
+    }
+  },
+  "snackConnectWallet": "Connect your wallet first",
+  "snackSuggestionSubmitted": "Suggestion submitted",
+  "snackUpvoteRecorded": "Upvote recorded",
+  "snackChooseSuggestionUpvote": "Choose a suggestion to upvote first",
+  "metaPublishedEpoch": "Published: {epoch}",
+  "@metaPublishedEpoch": {
+    "placeholders": {
+      "epoch": {
+        "type": "String"
+      }
+    }
+  },
+  "metaPublishedRelative": "Published: {when}",
+  "@metaPublishedRelative": {
+    "placeholders": {
+      "when": {
+        "type": "String"
+      }
+    }
+  },
+  "timeJustNow": "just now",
+  "timeMinutesAgo": "{count}m ago",
+  "@timeMinutesAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "timeHoursAgo": "{count}h ago",
+  "@timeHoursAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "timeDaysAgo": "{count}d ago",
+  "@timeDaysAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "metaRound": "Round: {round}",
+  "@metaRound": {
+    "placeholders": {
+      "round": {
+        "type": "String"
+      }
+    }
+  },
+  "metaService": "الخدمة: {serviceId}",
+  "@metaService": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
+  "seedsTitle": "البذور",
+  "seedsSubtitle": "نقاط انطلاق يُعدّها المشرف يدويًا للزاحف. النطاقات المعتمدة من الاكتشاف تظهر في تبويب النطاقات.",
+  "sourcesAdd": "إضافة مصدر",
+  "sourcesEdit": "تعديل",
+  "sourcesEditTitle": "تعديل المصدر",
+  "sourcesAddTitle": "إضافة مصدر",
+  "sourcesDeleteTitle": "حذف المصدر؟",
+  "sourcesDeleteBody": "سيتوقف الزحف إلى «{serviceId}». المقالات المنشورة سابقًا تبقى كما هي.",
+  "@sourcesDeleteBody": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
+  "sourcesDelete": "حذف",
+  "sourcesSave": "حفظ",
+  "sourcesAddAction": "إضافة",
+  "sourcesRequiredFields": "معرّف الخدمة والاسم والرابط مطلوبة.",
+  "sourcesChangesNextPoll": "تُطبَّق التغييرات في الدورة التالية للزاحف.",
+  "sourcesFieldServiceId": "معرّف الخدمة",
+  "sourcesFieldServiceIdHint": "kebab-case، مثل algorand-foundation-blog",
+  "sourcesFieldDisplayName": "الاسم المعروض",
+  "sourcesFieldScrapeUrl": "رابط الزحف",
+  "sourcesFieldScrapeUrlHint": "https://… أو reddit://r/… أو discord://channel/…",
+  "sourcesFieldMatchKind": "نوع المطابقة",
+  "sourcesFieldMatchKindHint": "address / app_id / asset_id",
+  "sourcesFieldMatchValue": "قيمة المطابقة",
+  "sourcesFieldMatchValueHint": "مثل عنوان المحفظة أو معرّف التطبيق",
+  "sourcesMatchRuleHelp": "قاعدة المطابقة تربط هذا المصدر بنشاط السلسلة: عندما يرى زاحف السلسلة معاملة على MainNet يتطابق فيها عنوان المرسل/المستلم (نوع «address») أو معرّف التطبيق («app_id») أو معرّف الأصل («asset_id») مع القيمة، يُنسب الحدث إلى هذا المصدر وقد يُنشئ مقالًا. لمصادر الويب أو Reddit فهي للمعلومات فقط — استخدم اسم النطاق أو subreddit مثلًا.",
+  "sourcesEnabled": "مفعّل",
+  "actionCancel": "إلغاء",
+  "actionRefresh": "تحديث",
+  "adminTabSeeds": "البذور",
+  "adminTabArticles": "المقالات",
+  "adminTabWriterBriefs": "ملخصات الكاتب",
+  "adminTabClassifier": "المصنّف",
+  "adminTabDomains": "النطاقات",
+  "adminTabToolInsights": "أدوات البحث",
+  "adminTabSessions": "الجلسات",
+  "adminTabSystem": "النظام",
+  "domainsIntro": "حدود الزحف: النطاقات التي التقى بها زاحف الروابط. المسارات المسدودة لا تُستكشف أبدًا — تُحدَّد تلقائيًا بالأهمية وحكمك اليدوي هنا.",
+  "domainsFilterAll": "الكل",
+  "domainsFilterAllCount": "الكل ({count})",
+  "@domainsFilterAllCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "domainsFilterPending": "بانتظار المراجعة",
+  "domainsFilterPendingCount": "بانتظار المراجعة ({count})",
+  "@domainsFilterPendingCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "domainsFilterDeadEnds": "مسارات مسدودة",
+  "domainsFilterDeadEndsCount": "مسارات مسدودة ({count})",
+  "@domainsFilterDeadEndsCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "domainsEmptyTitle": "لا توجد نطاقات بعد",
+  "domainsEmptyMessage": "يسجّل الزاحف كل نطاق يجده أثناء متابعة الروابط.",
+  "domainsOpenInNewTab": "فتح {domain} في تبويب جديد",
+  "@domainsOpenInNewTab": {
+    "placeholders": {
+      "domain": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsKeywords": "كلمات مفتاحية: {keywords}",
+  "@domainsKeywords": {
+    "placeholders": {
+      "keywords": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsLinkedAs": "مرتبط كـ «{text}»",
+  "@domainsLinkedAs": {
+    "placeholders": {
+      "text": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsPredictedInterest": "الاهتمام المتوقع {score}",
+  "@domainsPredictedInterest": {
+    "placeholders": {
+      "score": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsFoundOn": "وُجد على {url}",
+  "@domainsFoundOn": {
+    "placeholders": {
+      "url": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsScore": "الدرجة {score}",
+  "@domainsScore": {
+    "placeholders": {
+      "score": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsCrawled": "زُحف في {date}",
+  "@domainsCrawled": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsPagesCrawled": "{count} صفحة",
+  "@domainsPagesCrawled": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "domainsDeadEnd": "مسار مسدود",
+  "domainsApproveExplore": "اعتماد واستكشاف",
+  "domainsMarkDeadEnd": "تعليم كمسار مسدود",
+  "domainsRevive": "إعادة تفعيل",
+  "domainsApprovedSnack": "تم اعتماد {domain} — يمكن للزاحف استكشافه",
+  "@domainsApprovedSnack": {
+    "placeholders": {
+      "domain": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsDeadEndSnack": "تم تعليم {domain} كمسار مسدود",
+  "@domainsDeadEndSnack": {
+    "placeholders": {
+      "domain": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsWalletNotConnected": "المحفظة غير متصلة"
+}

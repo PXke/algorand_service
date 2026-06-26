@@ -1,0 +1,25 @@
+[Unit]
+Description=Algorand Platform Celery Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+WorkingDirectory=@TARGET_PATH@/releases/current/workers
+EnvironmentFile=-@TARGET_PATH@/releases/current/workers/.env
+ExecStart=@TARGET_PATH@/venv/bin/celery -A app.celery_app worker --loglevel=INFO -Q default,scrape,pipeline,chain,security --concurrency=4
+Restart=on-failure
+RestartSec=5
+# Default SIGTERM is a *warm* shutdown — Celery waits for in-flight tasks, and
+# article-gen tasks run for minutes, so restarts would hang ~90s. SIGQUIT is a
+# cold shutdown (drop in-flight work); safe because tasks hold per-work-unit
+# Redis locks and get re-triggered. TimeoutStopSec is the SIGKILL backstop.
+KillSignal=SIGQUIT
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
