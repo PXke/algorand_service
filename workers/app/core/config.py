@@ -38,6 +38,11 @@ REDIS_URL = env_str("REDIS_URL", "redis://localhost:6379/0")
 ALGOD_URL = env_str("ALGOD_URL", "https://testnet-api.algonode.cloud").rstrip("/")
 # Sent as the X-Algo-API-Token header when set (prod node requires it; algonode does not).
 ALGOD_TOKEN = env_str("ALGOD_TOKEN", "")
+# Public AlgoNode testnet INDEXER (history-capable, unlike algod) — backs the
+# writer's testnet_lookup tool for verifying a project's Testnet txns/app deploys.
+TESTNET_INDEXER_URL = env_str(
+    "TESTNET_INDEXER_URL", "https://testnet-idx.algonode.cloud"
+).rstrip("/")
 NEWS_FEED_BUCKET = env_str("NEWS_FEED_BUCKET", "main")
 NEWS_MAX_ARTICLES_PER_DAY = min(max(1, env_int("NEWS_MAX_ARTICLES_PER_DAY", 7)), 7)
 NEWS_MAX_BREAKING_PER_DAY = env_int("NEWS_MAX_BREAKING_PER_DAY", 2)
@@ -326,7 +331,6 @@ YOUTUBE_TRANSCRIPT_TIMEOUT = env_int("YOUTUBE_TRANSCRIPT_TIMEOUT", 30)
 # credit burn; transient failures may retry after this TTL. 30 days.
 YOUTUBE_TRANSCRIPT_ATTEMPT_TTL = env_int("YOUTUBE_TRANSCRIPT_ATTEMPT_TTL", 2592000)
 DISCOVERY_MODE_ENABLED = env_bool("DISCOVERY_MODE_ENABLED", True)
-EXTERNAL_LINK_DISCOVERY_ENABLED = env_bool("EXTERNAL_LINK_DISCOVERY_ENABLED", True)
 SPA_FALLBACK_ENABLED = env_bool("SPA_FALLBACK_ENABLED", True)
 CONTENT_CATEGORIZATION_ENABLED = env_bool("CONTENT_CATEGORIZATION_ENABLED", True)
 PUBLISH_CLASSIFIER_ENABLED = env_bool("PUBLISH_CLASSIFIER_ENABLED", True)

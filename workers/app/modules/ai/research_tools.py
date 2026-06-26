@@ -547,6 +547,199 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10) -> dict[str, Any]:
     return out
 
 
+def _normalize_repo_slug(repo: str) -> str:
+    """'owner/name', a github.com URL, or '...git' -> 'owner/name' ('' if invalid)."""
+    slug = (repo or "").strip().rstrip("/")
+    if "github.com/" in slug:
+        slug = slug.split("github.com/", 1)[1]
+    slug = "/".join(slug.split("/")[:2])
+    if slug.endswith(".git"):
+        slug = slug[:-4]
+    if slug.count("/") != 1 or not all(slug.split("/")):
+        return ""
+    return slug
+
+
+def _tool_github_repo_contents(repo: str, path: str = "", ref: str = "") -> dict[str, Any]:
+    """Inspect a GitHub repo's files via the contents API. Empty path → root
+    directory listing; a directory path → its entries; a file path → the file's
+    decoded text. Use to READ smart-contract source and judge what a project
+    actually shipped (github_activity only gives metadata). GITHUB_TOKEN optional."""
+    import base64
+    import os
+
+    slug = _normalize_repo_slug(repo)
+    if not slug:
+        return {"error": f"expected owner/name, got '{repo}'"}
+    p = (path or "").strip().lstrip("/")
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    params = {"ref": ref.strip()} if ref and ref.strip() else None
+    try:
+        resp = _guarded_get(
+            f"https://api.github.com/repos/{slug}/contents/{p}", headers=headers, params=params
+        )
+        if resp.status_code == 404:
+            return {"repo": slug, "path": p, "error": "path not found"}
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return {"repo": slug, "path": p, "error": str(exc)[:200]}
+    if isinstance(data, list):  # directory listing
+        entries = [
+            {"name": e.get("name"), "type": e.get("type"), "size": e.get("size")}
+            for e in data if isinstance(e, dict)
+        ]
+        return {"repo": slug, "path": p or "/", "kind": "dir", "entries": entries[:100]}
+    if isinstance(data, dict) and data.get("type") == "file":
+        text = ""
+        if data.get("encoding") == "base64" and data.get("content"):
+            try:
+                text = base64.b64decode(data["content"]).decode("utf-8", "replace")
+            except Exception:
+                text = ""
+        # Files >1MB come back with empty content + a download_url; fetch that.
+        if not text and data.get("download_url"):
+            try:
+                text = _guarded_get(data["download_url"], headers=headers, timeout=15.0).text
+            except Exception:
+                text = ""
+        cap = 12000
+        return {
+            "repo": slug, "path": data.get("path"), "kind": "file",
+            "size": data.get("size"), "text": text[:cap], "truncated": len(text) > cap,
+        }
+    return {"repo": slug, "path": p, "error": "unexpected contents response"}
+
+
+def _tool_medium_articles(source: str, limit: int = 15) -> dict[str, Any]:
+    """List a Medium author's or publication's recent articles via its public RSS
+    feed (no auth). Accepts an @handle, a medium.com URL, or a Medium-backed custom
+    domain (e.g. algonaut.space). Returns title, link, published date and tags — use
+    to quantify a blog's output and spot cross-posting patterns."""
+    from urllib.parse import urlsplit
+
+    from lxml import etree as LET
+
+    s = (source or "").strip()
+    if not s:
+        return {"error": "source required"}
+    if s.startswith("@"):
+        feed_url = f"https://medium.com/feed/{s}"
+    elif "." not in s.split("/")[0]:  # bare handle, no dot/scheme
+        feed_url = f"https://medium.com/feed/@{s}"
+    else:  # a URL or a bare domain/path — normalize to one URL code path
+        if not s.startswith(("http://", "https://")):
+            s = "https://" + s
+        parts = urlsplit(s)
+        path = parts.path.strip("/")
+        if "medium.com" in parts.netloc:
+            if path.startswith("feed"):  # already a feed URL — use as-is
+                feed_url = f"https://medium.com/{path}"
+            elif path:  # /@handle or /publication
+                feed_url = f"https://medium.com/feed/{path.split('/')[0]}"
+            else:
+                feed_url = "https://medium.com/feed"
+        elif path.startswith("feed"):  # custom domain feed URL
+            feed_url = f"{parts.scheme}://{parts.netloc}/{path}"
+        else:  # custom domain backed by Medium
+            feed_url = f"{parts.scheme}://{parts.netloc}/feed"
+    n = max(1, min(int(limit), 30))
+    try:
+        resp = _guarded_get(
+            feed_url,
+            headers={"Accept": "application/rss+xml, application/xml, text/xml"},
+            timeout=12.0,
+        )
+        resp.raise_for_status()
+        # recover=True tolerates the slightly-malformed XML some Medium custom-domain
+        # feeds emit (stray entities/tags) instead of hard-failing the whole feed.
+        root = LET.fromstring(resp.content, parser=LET.XMLParser(recover=True))
+    except Exception as exc:
+        return {"feed": feed_url, "error": str(exc)[:200], "articles": []}
+    if root is None:
+        return {"feed": feed_url, "error": "feed not parseable as RSS", "articles": []}
+    articles = []
+    for it in root.findall(".//item")[:n]:
+        cats = [c.text.strip() for c in it.findall("category") if c.text]
+        articles.append({
+            "title": (it.findtext("title") or "").strip(),
+            "link": (it.findtext("link") or "").strip(),
+            "published": (it.findtext("pubDate") or "").strip(),
+            "categories": cats[:8],
+        })
+    return {"feed": feed_url, "count": len(articles), "articles": articles}
+
+
+def _tool_reddit_history(user: str, kind: str = "submitted", limit: int = 15) -> dict[str, Any]:
+    """Recent Reddit history for a user via Reddit's public JSON (no auth, rate-
+    limited). kind: 'submitted' (posts, default) or 'comments'. Returns subreddit,
+    title/body snippet, score, comments, date and permalink — use to verify a
+    publication timeline or gauge community engagement."""
+    from datetime import UTC, datetime
+
+    u = (user or "").strip().lstrip("@")
+    if u.lower().startswith("u/"):
+        u = u[2:]
+    if not u:
+        return {"error": "user required"}
+    k = "comments" if (kind or "").strip().lower().startswith("comment") else "submitted"
+    n = max(1, min(int(limit), 25))
+    try:
+        resp = _guarded_get(
+            f"https://www.reddit.com/user/{u}/{k}.json",
+            headers={"Accept": "application/json"},
+            params={"limit": n, "raw_json": 1},
+            timeout=12.0,
+        )
+        if resp.status_code == 404:
+            return {"user": u, "error": "user not found", "items": []}
+        if resp.status_code == 429:
+            return {"user": u, "error": "reddit rate-limited (429); try again later", "items": []}
+        if resp.status_code == 403:
+            return {
+                "user": u,
+                "error": "reddit blocked this request (403) — it rate-limits server IPs; "
+                         "treat as unavailable for this story",
+                "items": [],
+            }
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return {"user": u, "error": str(exc)[:200], "items": []}
+
+    def _iso(ts: Any) -> str:
+        try:
+            return datetime.fromtimestamp(float(ts), tz=UTC).strftime("%Y-%m-%d")
+        except Exception:
+            return ""
+
+    items = []
+    for c in ((data.get("data", {}) or {}).get("children", []) or [])[:n]:
+        d = (c.get("data") or {}) if isinstance(c, dict) else {}
+        perma = f"https://www.reddit.com{d.get('permalink', '')}" if d.get("permalink") else ""
+        if k == "submitted":
+            items.append({
+                "subreddit": d.get("subreddit"),
+                "title": (d.get("title") or "")[:200],
+                "score": d.get("score"),
+                "num_comments": d.get("num_comments"),
+                "date": _iso(d.get("created_utc")),
+                "permalink": perma,
+            })
+        else:
+            items.append({
+                "subreddit": d.get("subreddit"),
+                "body": (d.get("body") or "")[:300],
+                "score": d.get("score"),
+                "date": _iso(d.get("created_utc")),
+                "permalink": perma,
+            })
+    return {"user": u, "kind": k, "count": len(items), "items": items}
+
+
 _GITHUB_SCHEMA = {
     "type": "function",
     "function": {
@@ -653,29 +846,99 @@ _NODE_STATS_SCHEMA = {
     },
 }
 
+_GITHUB_CONTENTS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "github_repository_contents",
+        "description": (
+            "Inspect a GitHub repo's files. Empty path → root listing; a directory "
+            "path → its entries; a file path → the file's decoded text. Use to READ "
+            "smart-contract source and assess what a project actually shipped "
+            "(github_activity only gives metadata/commits). Pass 'owner/name' or a "
+            "github.com URL."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "owner/name or github.com URL"},
+                "path": {"type": "string", "description": "file or dir path; empty = repo root"},
+                "ref": {"type": "string", "description": "branch/tag/commit, optional"},
+            },
+            "required": ["repo"],
+        },
+    },
+}
+
+_MEDIUM_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "medium_api_article_list",
+        "description": (
+            "List a Medium author's or publication's recent articles via its public "
+            "RSS feed (no auth): title, link, published date and tags. Use to quantify "
+            "a blog's output or spot cross-posting. Pass an @handle, a medium.com URL, "
+            "or a Medium-backed custom domain (e.g. algonaut.space)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "@handle, medium URL, or custom domain"},
+                "limit": {"type": "integer", "description": "1-30, default 15"},
+            },
+            "required": ["source"],
+        },
+    },
+}
+
+_REDDIT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "reddit_api_post_history",
+        "description": (
+            "Recent Reddit history for a user via Reddit's public JSON (free, rate-"
+            "limited): subreddit, title/body, score, comments, date and permalink. Use "
+            "to verify a publication timeline or gauge engagement. kind: 'submitted' "
+            "(posts) or 'comments'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "user": {"type": "string", "description": "reddit username (with or without u/)"},
+                "kind": {"type": "string", "description": "'submitted' (default) or 'comments'"},
+                "limit": {"type": "integer", "description": "1-25, default 15"},
+            },
+            "required": ["user"],
+        },
+    },
+}
+
 
 def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Enabled external research tools as (schemas, handlers).
 
     search_web needs SEARXNG_URL and search_bluesky needs an app-password, so they
-    register only when usable. github_activity, fetch_url, get_defi_tvl,
-    discourse_forum and get_node_stats hit free public APIs and are always
-    available (GITHUB_TOKEN optional).
+    register only when usable. github_activity, github_repository_contents,
+    fetch_url, get_defi_tvl, discourse_forum, get_node_stats, medium_api_article_list
+    and reddit_api_post_history hit free public APIs and are always available
+    (GITHUB_TOKEN optional).
     """
     import os
 
     from app.core.config import BLUESKY_SEARCH_ENABLED, SEARXNG_URL
 
     schemas: list[dict[str, Any]] = [
-        _GITHUB_SCHEMA, _FETCH_SCHEMA, _DEFILLAMA_SCHEMA, _DISCOURSE_SCHEMA,
-        _NODE_STATS_SCHEMA,
+        _GITHUB_SCHEMA, _GITHUB_CONTENTS_SCHEMA, _FETCH_SCHEMA, _DEFILLAMA_SCHEMA,
+        _DISCOURSE_SCHEMA, _NODE_STATS_SCHEMA, _MEDIUM_SCHEMA, _REDDIT_SCHEMA,
     ]
     handlers: dict[str, Any] = {
         "github_activity": _tool_github_activity,
+        "github_repository_contents": _tool_github_repo_contents,
         "fetch_url": _tool_fetch_url,
         "get_defi_tvl": _tool_get_defi_tvl,
         "discourse_forum": _tool_discourse_forum,
         "get_node_stats": _tool_get_node_stats,
+        "medium_api_article_list": _tool_medium_articles,
+        "reddit_api_post_history": _tool_reddit_history,
     }
     if SEARXNG_URL:
         schemas.append(_WEB_SCHEMA)

@@ -545,7 +545,6 @@ def run_publish_pipeline(
         compose_domain = domain_from_url(scrape_url)
         if compose_domain and domain_compose_cap_reached(compose_domain):
             return {"status": "skipped", "reason": "domain_daily_compose_cap", "txid": txid}
-    _enqueue_social_external_links(result.text, source_kind)
     if source_kind == "web":
         try:
             from app.modules.scraper.core.link_extractor import enqueue_page_links
@@ -571,22 +570,6 @@ def run_publish_pipeline(
         inner_links=getattr(result, "links", None),
     )
     return outcome
-
-
-def _enqueue_social_external_links(page_text: str, source_kind: str | None) -> None:
-    priority = 30
-    source = "web"
-    if source_kind == "reddit":
-        source = "reddit"
-    elif source_kind == "discord":
-        source = "discord"
-    elif source_kind == "telegram":
-        source = "telegram"
-    else:
-        return
-    from app.modules.scraper.core.link_extractor import enqueue_external_links
-
-    enqueue_external_links(page_text, source=source, priority=priority)
 
 
 @celery_app.task(name="app.tasks.newspaper.publish_from_chain_event")

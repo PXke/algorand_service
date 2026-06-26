@@ -1,28 +1,5 @@
 from __future__ import annotations
 
-import re
-from urllib.parse import urlparse
-
-_MARKDOWN_LINK = re.compile(r"\[([^\]]*)\]\((https?://[^)]+)\)", re.IGNORECASE)
-_PLAIN_URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
-_DOMAIN_MENTION = re.compile(
-    r"(?:^|[\s(])([a-z0-9][-a-z0-9]*\.(?:com|org|io|app|fi|co|net|dev|xyz))(?:/[\w./-]*)?",
-    re.IGNORECASE,
-)
-
-_INTERNAL_HOSTS = frozenset(
-    {
-        "reddit.com",
-        "www.reddit.com",
-        "old.reddit.com",
-        "discord.com",
-        "discordapp.com",
-        "t.me",
-        "telegram.org",
-        "web.telegram.org",
-    }
-)
-
 
 def _preview_has_algorand_signal(preview: dict[str, str]) -> bool:
     """True when a domain's landing-page preview actually mentions the Algorand
@@ -37,65 +14,6 @@ def _preview_has_algorand_signal(preview: dict[str, str]) -> bool:
         )
     ).lower()
     return "algorand" in blob or "algo " in blob or " algo" in blob or "asa " in blob
-
-
-def _hostname(url: str) -> str:
-    parsed = urlparse(url.strip())
-    host = (parsed.hostname or "").lower()
-    if host.startswith("www."):
-        host = host[4:]
-    return host
-
-
-def _is_external(url: str) -> bool:
-    host = _hostname(url)
-    if not host:
-        return False
-    return host not in _INTERNAL_HOSTS and not any(
-        host == d or host.endswith(f".{d}") for d in _INTERNAL_HOSTS
-    )
-
-
-def extract_external_links(text: str) -> list[str]:
-    """Extract external HTTP(S) URLs from markdown, plaintext, and domain mentions."""
-    if not text or not text.strip():
-        return []
-
-    found: list[str] = []
-    for _label, url in _MARKDOWN_LINK.findall(text):
-        found.append(url.rstrip(".,;"))
-    for url in _PLAIN_URL.findall(text):
-        found.append(url.rstrip(".,;"))
-    for match in _DOMAIN_MENTION.finditer(text):
-        domain = match.group(1).lower()
-        found.append(f"https://{domain}")
-
-    seen: set[str] = set()
-    unique: list[str] = []
-    for raw in found:
-        u = raw if "://" in raw else f"https://{raw}"
-        key = u.lower().rstrip("/")
-        if key in seen:
-            continue
-        if not _is_external(u):
-            continue
-        seen.add(key)
-        unique.append(u)
-    return unique
-
-
-def enqueue_external_links(text: str, *, source: str, priority: int = 30) -> int:
-    from app.core.config import EXTERNAL_LINK_DISCOVERY_ENABLED
-    from app.modules.crawler.url_queue import enqueue_url
-
-    if not EXTERNAL_LINK_DISCOVERY_ENABLED:
-        return 0
-    count = 0
-    for url in extract_external_links(text):
-        _, created = enqueue_url(url, source=source, priority=priority)
-        if created:
-            count += 1
-    return count
 
 
 _SKIP_EXTENSIONS = (

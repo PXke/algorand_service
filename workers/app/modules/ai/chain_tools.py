@@ -200,6 +200,108 @@ def _tool_get_consensus_stats() -> dict[str, Any]:
     }
 
 
+def _testnet_idx_get(path: str, params: dict | None = None) -> Any:
+    """GET a path off the public testnet INDEXER (history-capable, unlike algod).
+    Returns parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}."""
+    import httpx
+
+    from app.core.config import TESTNET_INDEXER_URL
+
+    if not TESTNET_INDEXER_URL:
+        return {"error": "testnet indexer not configured (TESTNET_INDEXER_URL unset)"}
+    try:
+        with httpx.Client(timeout=_TIMEOUT) as http:
+            r = http.get(f"{TESTNET_INDEXER_URL}{path}", params=params)
+        if r.status_code == 404:
+            return {"_status": 404}
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
+def _tool_testnet_lookup(
+    txid: str = "", address: str = "", app_id: Any = "",
+) -> dict[str, Any]:
+    """Verify Testnet on-chain activity via the public testnet indexer. Pass EXACTLY
+    one of: a transaction id (confirm a tx happened and what it did), an account
+    address (recent activity + what it created), or an application id (confirm a
+    contract is deployed and when). Testnet only — for mainnet use lookup_* tools."""
+    txid = (txid or "").strip()
+    address = (address or "").strip()
+    app_id = str(app_id).strip()
+
+    if txid:
+        data = _testnet_idx_get(f"/v2/transactions/{txid}")
+        if not isinstance(data, dict) or data.get("error"):
+            return data if isinstance(data, dict) else {"error": "unexpected indexer response"}
+        if data.get("_status") == 404:
+            return {"txid": txid, "found": False, "error": "transaction not found on testnet"}
+        tx = data.get("transaction", {}) or {}
+        return {
+            "txid": txid,
+            "found": True,
+            "type": tx.get("tx-type"),
+            "sender": tx.get("sender"),
+            "confirmed_round": tx.get("confirmed-round"),
+            "round_time": tx.get("round-time"),
+            "created_application_index": tx.get("created-application-index"),
+            "created_asset_index": tx.get("created-asset-index"),
+            "fee": tx.get("fee"),
+            "note_b64": tx.get("note"),
+        }
+
+    if app_id:
+        if not app_id.isdigit():
+            return {"error": "app_id must be a numeric application id"}
+        data = _testnet_idx_get(f"/v2/applications/{app_id}")
+        if not isinstance(data, dict) or data.get("error"):
+            return data if isinstance(data, dict) else {"error": "unexpected indexer response"}
+        if data.get("_status") == 404:
+            return {"app_id": int(app_id), "found": False, "error": "application not found on testnet"}
+        app = data.get("application", {}) or {}
+        return {
+            "app_id": int(app_id),
+            "found": True,
+            "creator": (app.get("params", {}) or {}).get("creator"),
+            "created_at_round": app.get("created-at-round"),
+            "deleted": app.get("deleted", False),
+            "deleted_at_round": app.get("deleted-at-round"),
+        }
+
+    if address:
+        acct = _testnet_idx_get(f"/v2/accounts/{address}")
+        if not isinstance(acct, dict) or acct.get("error"):
+            return acct if isinstance(acct, dict) else {"error": "unexpected indexer response"}
+        if acct.get("_status") == 404:
+            return {"address": address, "found": False, "error": "account not found on testnet"}
+        a = acct.get("account", {}) or {}
+        txns = _testnet_idx_get(
+            f"/v2/accounts/{address}/transactions", params={"limit": 10}
+        )
+        recent = []
+        if isinstance(txns, dict) and not txns.get("error"):
+            for t in (txns.get("transactions", []) or [])[:10]:
+                if isinstance(t, dict):
+                    recent.append({
+                        "txid": t.get("id"),
+                        "type": t.get("tx-type"),
+                        "round": t.get("confirmed-round"),
+                        "round_time": t.get("round-time"),
+                    })
+        return {
+            "address": address,
+            "found": True,
+            "balance_algo": round((a.get("amount", 0) or 0) / 1e6, 6),
+            "created_apps": a.get("total-created-apps"),
+            "created_assets": a.get("total-created-assets"),
+            "apps_opted_in": a.get("total-apps-opted-in"),
+            "recent_transactions": recent,
+        }
+
+    return {"error": "pass one of txid, address, or app_id"}
+
+
 CHAIN_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -267,6 +369,28 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "testnet_lookup",
+            "description": (
+                "Verify a project's TESTNET on-chain activity via the public testnet "
+                "indexer. Pass exactly ONE of: txid (confirm a transaction happened and "
+                "what it created), address (recent activity + apps/assets it created), or "
+                "app_id (confirm a smart contract is deployed and its creation round). Use "
+                "to fact-check 'deployed on Testnet' claims. Testnet only — for mainnet "
+                "use lookup_account/lookup_asset/lookup_application."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "txid": {"type": "string", "description": "transaction id to confirm"},
+                    "address": {"type": "string", "description": "58-char account address"},
+                    "app_id": {"type": "integer", "description": "numeric application id"},
+                },
+            },
+        },
+    },
 ]
 
 CHAIN_HANDLERS: dict[str, Any] = {
@@ -274,6 +398,7 @@ CHAIN_HANDLERS: dict[str, Any] = {
     "lookup_asset": _tool_lookup_asset,
     "lookup_application": _tool_lookup_application,
     "get_consensus_stats": _tool_get_consensus_stats,
+    "testnet_lookup": _tool_testnet_lookup,
 }
 
 

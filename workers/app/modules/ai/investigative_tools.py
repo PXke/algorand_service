@@ -67,6 +67,53 @@ def fetch_archive_snapshot(url: str, target_date: str = "") -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+def fetch_archive_text(url: str, target_date: str = "", max_chars: int = 6000) -> dict[str, Any]:
+    """Read the actual TEXT of a Wayback Machine snapshot — not just prove it
+    existed, but extract the archived page's title and body so you can quote
+    titles/dates/content from a deleted or rewritten page. target_date: YYYYMMDD
+    (closest snapshot on/near it). Use after fetch_archive_snapshot when you need
+    what the page SAID, not just that it was captured."""
+    from app.core.net_guard import guarded_get
+    from app.modules.scraper.core.web_fetch import html_to_plain_text
+
+    snap = fetch_archive_snapshot(url, target_date)
+    if snap.get("error") or not snap.get("found"):
+        return snap if snap.get("error") else {"found": False, "url": url}
+    archive_url = snap.get("archive_url") or ""
+    # Insert the `id_` flag after the 14-digit timestamp to fetch the RAW capture
+    # (no Wayback toolbar/banner injected into the HTML).
+    import re
+
+    raw_url = re.sub(
+        r"(/web/\d{14})/", r"\1id_/", archive_url, count=1
+    ) or archive_url
+    try:
+        r = guarded_get(raw_url, headers={"User-Agent": _UA}, timeout=15.0)
+        r.raise_for_status()
+    except Exception as exc:
+        return {"archive_url": archive_url, "error": str(exc)[:200]}
+    title = ""
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(r.text, "html.parser")
+        if soup.title and soup.title.string:
+            title = soup.title.string.strip()[:200]
+        text = html_to_plain_text(str(soup))
+    except Exception:
+        text = html_to_plain_text(r.text)
+    cap = max(500, min(int(max_chars), 12000))
+    return {
+        "found": True,
+        "archive_url": archive_url,
+        "snapshot_timestamp": snap.get("snapshot_timestamp"),
+        "title": title,
+        "text": text[:cap],
+        "chars": len(text),
+        "truncated": len(text) > cap,
+    }
+
+
 def extract_document_metadata(file_url: str) -> dict[str, Any]:
     """EXIF (images) / document properties (PDF) from a leaked file URL:
     author, creation time, GPS, producing software."""
@@ -267,6 +314,12 @@ INVESTIGATIVE_SCHEMAS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {
             "url": {"type": "string"}, "target_date": {"type": "string", "description": "YYYYMMDD, optional"}},
             "required": ["url"]}}},
+    {"type": "function", "function": {"name": "fetch_archive_text",
+        "description": "Read the TEXT of a Wayback snapshot (title + body) to quote titles/dates/content from a deleted or rewritten page — not just prove it existed.",
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string"}, "target_date": {"type": "string", "description": "YYYYMMDD, optional"},
+            "max_chars": {"type": "integer", "description": "cap on returned text, default 6000"}},
+            "required": ["url"]}}},
     {"type": "function", "function": {"name": "extract_document_metadata",
         "description": "EXIF/PDF metadata (author, timestamps, GPS, software) from a leaked file URL.",
         "parameters": {"type": "object", "properties": {"file_url": {"type": "string"}}, "required": ["file_url"]}}},
@@ -291,6 +344,7 @@ INVESTIGATIVE_SCHEMAS: list[dict[str, Any]] = [
 
 INVESTIGATIVE_HANDLERS: dict[str, Any] = {
     "fetch_archive_snapshot": fetch_archive_snapshot,
+    "fetch_archive_text": fetch_archive_text,
     "extract_document_metadata": extract_document_metadata,
     "resolve_domain_infrastructure": resolve_domain_infrastructure,
     "screen_sanctions_and_pep": screen_sanctions_and_pep,
