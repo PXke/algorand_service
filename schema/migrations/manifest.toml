@@ -381,3 +381,27 @@ file = "backend/schema/migrations/app/039_analytics_expansion.cql"
 tier = "prod"
 status = "active"
 description = "analytics expansion: search-query + zero-result counters, per-bot-name counters, referrer->landing pairs, 404 tracking"
+
+[[migrations]]
+stream = "app"
+version = "040"
+file = "backend/schema/migrations/app/040_analytics_segmentation.cql"
+tier = "prod"
+status = "active"
+description = "analytics segmentation: site-wide device/browser counters, hour-of-day distribution, full external referrer URLs"
+
+[[migrations]]
+stream = "app"
+version = "041"
+file = "backend/schema/migrations/app/041_analytics_engagement.cql"
+tier = "prod"
+status = "active"
+description = "analytics engagement: session_daily counters (new vs returning) for server-side sessions and returning-visitor rate"
+
+[[migrations]]
+stream = "app"
+version = "042"
+file = "backend/schema/migrations/app/042_analytics_acquisition_geo.cql"
+tier = "prod"
+status = "active"
+description = "analytics acquisition + geo: campaign_daily (utm/ref tags) and geo_country_daily (country from GeoIP, no IP stored)"

@@ -85,6 +85,69 @@ def test_bot_name_identifies_crawlers() -> None:
     assert a.bot_name("SomeNewCrawler/9") == "Other bot"
 
 
+def test_browser_family_is_specific_first() -> None:
+    # Edge ships "Edg/" alongside "Chrome/" and "Safari/" — the specific token wins.
+    assert a.browser_family(
+        "Mozilla/5.0 (Windows NT 10.0) Chrome/120 Safari/537.36 Edg/120"
+    ) == "Edge"
+    # Plain Chrome ships "Safari/" too, but must classify as Chrome.
+    assert a.browser_family(
+        "Mozilla/5.0 (Windows NT 10.0) Chrome/120 Safari/537.36"
+    ) == "Chrome"
+    # Real Safari has no Chrome token.
+    assert a.browser_family(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) Version/17 Safari/605"
+    ) == "Safari"
+    assert a.browser_family("Mozilla/5.0 (X11; Linux) Firefox/121") == "Firefox"
+    assert a.browser_family(None) == "Other"
+    assert a.browser_family("MyCustomFetcher/1.0") == "Other"
+
+
+def test_referrer_category_channels() -> None:
+    assert a.referrer_category("ecosia.org") == "Search"
+    assert a.referrer_category("google.com") == "Search"
+    assert a.referrer_category("reddit.com") == "Social"
+    assert a.referrer_category("t.co") == "Social"
+    assert a.referrer_category("perplexity.ai") == "AI assistant"
+    # A more specific sub-domain wins over the broader family it sits under.
+    assert a.referrer_category("gemini.google.com") == "AI assistant"
+    assert a.referrer_category("cointelegraph.com") == "News & aggregators"
+    assert a.referrer_category("some-random-blog.example") == "Other"
+    # The synthetic buckets pass through unchanged.
+    assert a.referrer_category("(direct)") == "Direct"
+    assert a.referrer_category("(internal)") == "Internal"
+
+
+def test_section_bucket_routes() -> None:
+    assert a.section_bucket("/") == "Home"
+    assert a.section_bucket("/search") == "Search"
+    assert a.section_bucket("/section/defi") == "Section · defi"
+    assert a.section_bucket(
+        "/news/articles/00000000-0000-0000-0000-000000000000"
+    ) == "Article"
+    assert a.section_bucket("/some/unknown/path") == "Other"
+
+
+def test_normalize_referrer_url_strips_noise() -> None:
+    # Tracking/campaign params and the fragment are dropped, host loses 'www.',
+    # the path is kept — so the exact thread/page is preserved without dupes.
+    assert a.normalize_referrer_url(
+        "https://www.reddit.com/r/algorand/comments/xyz/?utm_source=foo&fbclid=bar#c1"
+    ) == "reddit.com/r/algorand/comments/xyz/"
+    # A meaningful query param survives.
+    assert a.normalize_referrer_url(
+        "https://news.example.com/feed?id=42&utm_medium=email"
+    ) == "news.example.com/feed?id=42"
+    # Self-referrals and blanks never get a URL counter.
+    assert a.normalize_referrer_url(None) is None
+    assert a.normalize_referrer_url("") is None
+    assert a.normalize_referrer_url("https://www.algorand.pxke.me/news") is None
+    # Pathless referrer normalizes to a bare "/".
+    assert a.normalize_referrer_url("https://t.co") == "t.co/"
+    # Output is length-capped.
+    assert len(a.normalize_referrer_url("https://x.example/" + "a" * 500)) <= 300
+
+
 def test_uv_token_is_stable_and_distinct() -> None:
     # Same visitor -> same 16-byte token (so period uniques dedupe across days);
     # different IP or UA -> different token. No raw IP is recoverable.
@@ -109,6 +172,104 @@ def test_record_search_skips_empty_and_bots(monkeypatch) -> None:
     a.record_search("", 3)
     a.record_search("algorand", 3, user_agent="Googlebot/2.1")
     assert called is False
+
+
+class _FakeRedis:
+    """Minimal in-memory stand-in for the bits record_session touches."""
+
+    def __init__(self) -> None:
+        self.store: dict = {}
+
+    def exists(self, k):
+        return 1 if k in self.store else 0
+
+    def set(self, k, v, ex=None):
+        self.store[k] = v
+
+
+def test_record_session_new_then_returning(monkeypatch) -> None:
+    fake = _FakeRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    bumps: list = []
+
+    class _Sess:
+        def execute_async(self, stmt, params):
+            bumps.append(params)  # (day, vtype)
+
+    sess = _Sess()
+    day = "2026-06-27"
+
+    # First hit -> a new session, classified 'new'.
+    a.record_session(sess, lambda cql: cql, "8.8.8.8", "Mozilla/5.0", day)
+    assert bumps == [(day, "new")]
+
+    # Second hit while the 30-min window lives -> same session, no new bump.
+    a.record_session(sess, lambda cql: cql, "8.8.8.8", "Mozilla/5.0", day)
+    assert len(bumps) == 1
+
+    # Session window expires (drop sess:) but the seen: marker persists ->
+    # the next visit is a returning session.
+    token = a._uv_token("8.8.8.8", "Mozilla/5.0").hex()
+    del fake.store[f"{a._SESSION_PREFIX}{token}"]
+    a.record_session(sess, lambda cql: cql, "8.8.8.8", "Mozilla/5.0", day)
+    assert bumps[-1] == (day, "returning")
+
+
+def test_record_session_skips_without_ip(monkeypatch) -> None:
+    # No client IP -> never touches Redis or Cassandra.
+    def _boom():
+        raise AssertionError("must not touch Redis")
+
+    monkeypatch.setattr(a, "_uv_redis", _boom)
+    a.record_session(None, lambda cql: cql, None, "Mozilla/5.0", "2026-06-27")
+
+
+def test_referrer_host_folds_social_subdomains() -> None:
+    # Link-shim / mobile sub-domains collapse to the canonical host.
+    assert a.referrer_host("https://m.facebook.com/x") == "facebook.com"
+    assert a.referrer_host("https://l.facebook.com/l.php?u=y") == "facebook.com"
+    assert a.referrer_host("https://lm.facebook.com/") == "facebook.com"
+    assert a.referrer_host("https://out.reddit.com/t3_abc") == "reddit.com"
+    # A normal host is unchanged.
+    assert a.referrer_host("https://www.ecosia.org/search?q=algorand") == "ecosia.org"
+
+
+def test_campaign_label() -> None:
+    assert a.campaign_label({"utm_source": "facebook", "utm_campaign": "Reti-Launch"}) \
+        == "facebook / reti-launch"
+    # utm_medium is the fallback partner to utm_source.
+    assert a.campaign_label({"utm_source": "newsletter", "utm_medium": "email"}) \
+        == "newsletter / email"
+    assert a.campaign_label({"utm_source": "twitter"}) == "twitter"
+    assert a.campaign_label({"ref": "fb-2026-06-27"}) == "ref:fb-2026-06-27"
+    # List-valued params (some frameworks) take the first value.
+    assert a.campaign_label({"utm_source": ["x"]}) == "x"
+    # Nothing taggable -> None.
+    assert a.campaign_label({}) is None
+    assert a.campaign_label({"q": "algorand"}) is None
+    # Values are length-capped.
+    assert len(a.campaign_label({"ref": "z" * 200})) <= 64
+
+
+def test_country_for_ip_failopen_without_db() -> None:
+    # No GeoIP db configured -> '' (never raises, never blocks a pageview).
+    a._geoip_reader.cache_clear()
+    assert a.country_for_ip("8.8.8.8") == ""
+    assert a.country_for_ip(None) == ""
+    assert a.country_for_ip("") == ""
+
+
+def test_ai_crawler_stats_share() -> None:
+    rows = [
+        {"bot": "GPTBot", "views": 30},
+        {"bot": "ClaudeBot", "views": 10},
+        {"bot": "Googlebot", "views": 60},  # not an AI crawler
+    ]
+    s = a.ai_crawler_stats(rows)
+    assert s["views"] == 40
+    assert abs(s["share_of_bots"] - 0.4) < 1e-9
+    # Empty -> zero share, no ZeroDivisionError.
+    assert a.ai_crawler_stats([]) == {"views": 0, "share_of_bots": 0.0}
 
 
 def test_recent_days_window() -> None:

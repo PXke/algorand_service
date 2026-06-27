@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # in prod — a stable salt keeps a visitor's token consistent so period-unique
     # counts (PFCOUNT over several daily HLLs) dedupe the same person across days.
     analytics_hll_salt: str = "pxke-analytics-uv"
+    # Path to a local GeoIP country database (DB-IP Lite or MaxMind GeoLite2, in
+    # MaxMind .mmdb format) used to resolve a country code from the client IP at
+    # record time. Country-level only — the IP itself is never stored. Empty ->
+    # geography is silently disabled. Provisioned to shared/geoip by deploy.sh.
+    geoip_db_path: str = ""
 
     auth_domain: str = "algorand-platform.local"
     auth_uri: str = "https://algorand-platform.local/sign-in"

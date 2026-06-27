@@ -44,6 +44,24 @@ def _header(request: Request, name: str) -> str:
     return h.get(name) or h.get(name.lower()) or h.get(name.title()) or ""
 
 
+def _query_params(request: Request) -> dict:
+    """Best-effort dict of the request's query params (Robyn shapes vary)."""
+    qp = getattr(request, "query_params", None)
+    if qp is None:
+        return {}
+    for attr in ("to_dict", "queries"):
+        fn = getattr(qp, attr, None)
+        if callable(fn):
+            try:
+                return dict(fn())
+            except Exception:
+                pass
+    try:
+        return dict(qp)
+    except Exception:
+        return {}
+
+
 def _record(request: Request, path: str) -> None:
     """Best-effort pageview record for a public document route."""
     # Owner opt-out: the app sets this cookie while the admin wallet is connected.
@@ -55,6 +73,8 @@ def _record(request: Request, path: str) -> None:
         user_agent=_header(request, "user-agent"),
         # Behind nginx the real client is in X-Forwarded-For / X-Real-IP.
         client_ip=_header(request, "x-forwarded-for") or _header(request, "x-real-ip"),
+        # Campaign tag (utm_*/ref) off the landing URL — names dark-social traffic.
+        campaign=analytics_store.campaign_label(_query_params(request)),
     )
 
 

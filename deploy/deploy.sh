@@ -280,6 +280,26 @@ for side in backend workers; do
 done
 ln -sf '${SHARED}/backend.env' '${CURRENT}/backend/.env'
 ln -sf '${SHARED}/workers.env' '${CURRENT}/workers/.env'
+
+# GeoIP country DB (DB-IP Lite — no account/key) for country-level analytics.
+# Privacy-safe: only the resolved country is counted, the IP is never stored.
+# Idempotent — refreshed at most once per calendar month, and fail-soft.
+GEOIP_DIR='${SHARED}/geoip'
+mkdir -p "\$GEOIP_DIR"
+MMDB="\$GEOIP_DIR/country.mmdb"
+MONTH="\$(date -u +%Y-%m)"
+if [[ ! -s "\$MMDB" || "\$(cat "\$GEOIP_DIR/.month" 2>/dev/null)" != "\$MONTH" ]]; then
+  URL="https://download.db-ip.com/free/dbip-country-lite-\${MONTH}.mmdb.gz"
+  if curl -fsSL "\$URL" -o "\$MMDB.gz" && gunzip -f "\$MMDB.gz"; then
+    echo "\$MONTH" > "\$GEOIP_DIR/.month"
+    echo "NOTE: fetched DB-IP country database (\$MONTH)"
+  else
+    rm -f "\$MMDB.gz"
+    echo "warn: DB-IP country db fetch failed — geography stays empty until next deploy"
+  fi
+fi
+grep -q '^GEOIP_DB_PATH=' '${SHARED}/backend.env' \
+  || echo "GEOIP_DB_PATH=\$MMDB" >> '${SHARED}/backend.env'
 EOF
 
   if [[ "$DEPLOY_SKIP_MIGRATE" != "1" ]]; then
