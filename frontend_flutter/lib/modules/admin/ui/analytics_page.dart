@@ -31,6 +31,15 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
   bool _loading = true;
   String? _error;
   int _days = 14;
+  String _group = 'Overview';
+
+  static const List<String> _groups = [
+    'Overview',
+    'Acquisition',
+    'Content',
+    'Audience',
+    'Crawlers',
+  ];
 
   @override
   void initState() {
@@ -110,33 +119,110 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
           if (data != null && data['error'] != null)
             ErrorBanner(message: 'Analytics unavailable (no data yet).'),
           if (data != null && data['error'] == null) ...[
+            _alertsStrip(theme, colors, data['alerts']),
             _totals(theme, colors, data),
             const SizedBox(height: AppLayout.sectionGap),
-            _dailyChart(theme, colors, data),
+            _groupSelector(theme, colors),
             const SizedBox(height: AppLayout.sectionGap),
-            _topPages(theme, colors, data['top_paths']),
-            const SizedBox(height: AppLayout.sectionGap),
-            _rankTable(theme, colors, 'Top referrers', data['top_referrers'], 'referrer'),
-            const SizedBox(height: AppLayout.sectionGap),
-            _rankTable(theme, colors, 'Direct breakdown (UA class)',
-                data['direct_uaclass'], 'ua_class'),
-            const SizedBox(height: AppLayout.sectionGap),
-            _directSamples(theme, colors, data['direct_samples']),
-            const SizedBox(height: AppLayout.sectionGap),
-            _rankTable(theme, colors, 'Top searches', data['top_searches'], 'query'),
-            const SizedBox(height: AppLayout.sectionGap),
-            _rankTable(theme, colors, 'Searches with no results',
-                data['zero_searches'], 'query'),
-            const SizedBox(height: AppLayout.sectionGap),
-            _rankTable(theme, colors, 'Crawlers', data['top_bots'], 'bot'),
-            const SizedBox(height: AppLayout.sectionGap),
-            _referrerPaths(theme, colors, data['referrer_paths']),
-            const SizedBox(height: AppLayout.sectionGap),
-            _rankTable(theme, colors, 'Broken / missing URLs (404)',
-                data['top_notfound'], 'path', labelKey: 'label'),
+            ..._groupChildren(theme, colors, data),
           ],
       ],
     );
+  }
+
+  /// Segmented selector that switches which group of sections is shown, so the
+  /// page stays scannable instead of one long scroll. Horizontally scrollable so
+  /// it never overflows on a narrow admin pane.
+  Widget _groupSelector(ThemeData theme, dynamic colors) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: SegmentedButton<String>(
+        segments: [
+          for (final g in _groups)
+            ButtonSegment(value: g, label: Text(g)),
+        ],
+        selected: {_group},
+        showSelectedIcon: false,
+        onSelectionChanged: (s) => setState(() => _group = s.first),
+      ),
+    );
+  }
+
+  /// The sections for the active group, interleaved with section gaps.
+  List<Widget> _groupChildren(
+      ThemeData theme, dynamic colors, Map<String, dynamic> data) {
+    final List<Widget> sections;
+    switch (_group) {
+      case 'Acquisition':
+        sections = [
+          _donutRow(theme, colors, [
+            _donutCard(theme, colors, 'Referrer channels',
+                data['referrer_categories'], 'category'),
+          ]),
+          _rankTable(theme, colors, 'Campaigns (utm / ref tags)',
+              data['campaigns'], 'campaign'),
+          _rankTable(theme, colors, 'Top referrers', data['top_referrers'], 'referrer'),
+          _rankTable(theme, colors, 'Top referrers (full URL)',
+              data['top_referrer_urls'], 'referrer_url', linkExternal: true),
+          _referrerPaths(theme, colors, data['referrer_paths']),
+          _rankTable(theme, colors, 'Direct breakdown (UA class)',
+              data['direct_uaclass'], 'ua_class'),
+          _directSamples(theme, colors, data['direct_samples']),
+        ];
+        break;
+      case 'Content':
+        sections = [
+          _topPages(theme, colors, data['top_paths']),
+          _rankTable(theme, colors, 'Sections', data['sections'], 'section'),
+          _editorialScorecard(theme, colors, data['articles']),
+          _rankTable(theme, colors, 'Top searches', data['top_searches'], 'query'),
+          _rankTable(theme, colors, 'Searches with no results',
+              data['zero_searches'], 'query'),
+          _rankTable(theme, colors, 'Broken / missing URLs (404)',
+              data['top_notfound'], 'path', labelKey: 'label'),
+        ];
+        break;
+      case 'Audience':
+        sections = [
+          _donutRow(theme, colors, [
+            _donutCard(theme, colors, 'Devices', data['device'], 'device'),
+            _donutCard(theme, colors, 'Browsers', data['browser'], 'browser'),
+          ]),
+          _sessionsChart(theme, colors, data['sessions_daily']),
+          _hourChart(theme, colors, data['hours']),
+          _countries(theme, colors, data['geo']),
+        ];
+        break;
+      case 'Crawlers':
+        sections = [
+          _aiCrawler(theme, colors, data['ai_crawler']),
+          _rankTable(theme, colors, 'All crawlers', data['top_bots'], 'bot'),
+        ];
+        break;
+      case 'Overview':
+      default:
+        sections = [
+          _dailyChart(theme, colors, data),
+          _donutRow(theme, colors, [
+            _donutCard(theme, colors, 'Referrer channels',
+                data['referrer_categories'], 'category'),
+            _donutCard(theme, colors, 'Devices', data['device'], 'device'),
+          ]),
+        ];
+        break;
+    }
+    final out = <Widget>[];
+    for (var i = 0; i < sections.length; i++) {
+      out.add(sections[i]);
+      if (i != sections.length - 1) {
+        out.add(const SizedBox(height: AppLayout.sectionGap));
+      }
+    }
+    return out;
+  }
+
+  Widget _donutRow(ThemeData theme, dynamic colors, List<Widget> donuts) {
+    return Wrap(spacing: 16, runSpacing: 16, children: donuts);
   }
 
   /// Which referrer drove which landing page: "source → page  ×views".
@@ -280,29 +366,57 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
     final prevHumanUnique = (prev['human_unique'] as num?)?.toInt() ?? 0;
     final total = human + bot;
     final share = total == 0 ? 0.0 : human / total;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          children: [
-            _statCard(theme, colors, 'Human views', human, Icons.person_outline,
-                delta: _delta(human, prevHuman)),
-            const SizedBox(width: 16),
-            _statCard(theme, colors, 'Unique visitors', humanUnique,
-                Icons.groups_outlined, delta: _delta(humanUnique, prevHumanUnique)),
-            const SizedBox(width: 16),
-            _statCard(theme, colors, 'Bot views', bot, Icons.smart_toy_outlined,
-                delta: _delta(bot, prevBot)),
-            const SizedBox(width: 16),
-            _statCard(theme, colors, 'Human share', human,
-                Icons.pie_chart_outline,
-                valueText: '${(share * 100).round()}%'),
-          ],
-        ),
-        const SizedBox(height: 12),
-        _splitBar(theme, colors, share),
-      ],
-    );
+
+    final sessions = (data['sessions'] as Map?) ?? const {};
+    final sessTotal = (sessions['total'] as num?)?.toInt() ?? 0;
+    final returningRate = (sessions['returning_rate'] as num?)?.toDouble() ?? 0.0;
+    final pagesPerVisit = (sessions['pages_per_visit'] as num?)?.toDouble() ?? 0.0;
+    final prevSessions = (prev['sessions'] as num?)?.toInt() ?? 0;
+    final ai = (data['ai_crawler'] as Map?) ?? const {};
+    final aiShare = (ai['share_of_bots'] as num?)?.toDouble() ?? 0.0;
+
+    return LayoutBuilder(builder: (context, constraints) {
+      // Reflow the stat cards instead of overflowing on narrow widths: aim for 4
+      // across on wide screens, 2 across when cramped.
+      final perRow = constraints.maxWidth < 720 ? 2 : 4;
+      final cardWidth =
+          (constraints.maxWidth - 16 * (perRow - 1)) / perRow;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Wrap(
+            spacing: 16,
+            runSpacing: 16,
+            children: [
+              _statCard(theme, colors, 'Human views', human, Icons.person_outline,
+                  width: cardWidth, delta: _delta(human, prevHuman)),
+              _statCard(theme, colors, 'Unique visitors', humanUnique,
+                  Icons.groups_outlined,
+                  width: cardWidth, delta: _delta(humanUnique, prevHumanUnique)),
+              _statCard(theme, colors, 'Visits', sessTotal, Icons.login_outlined,
+                  width: cardWidth, delta: _delta(sessTotal, prevSessions)),
+              _statCard(theme, colors, 'Returning', sessTotal,
+                  Icons.replay_outlined,
+                  width: cardWidth, valueText: '${(returningRate * 100).round()}%'),
+              _statCard(theme, colors, 'Pages / visit', sessTotal,
+                  Icons.auto_stories_outlined,
+                  width: cardWidth,
+                  valueText: pagesPerVisit.toStringAsFixed(1)),
+              _statCard(theme, colors, 'Bot views', bot, Icons.smart_toy_outlined,
+                  width: cardWidth, delta: _delta(bot, prevBot)),
+              _statCard(theme, colors, 'AI-crawler share', bot,
+                  Icons.auto_awesome_outlined,
+                  width: cardWidth, valueText: '${(aiShare * 100).round()}%'),
+              _statCard(theme, colors, 'Human share', human,
+                  Icons.pie_chart_outline,
+                  width: cardWidth, valueText: '${(share * 100).round()}%'),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _splitBar(theme, colors, share),
+        ],
+      );
+    });
   }
 
   /// Percent change vs the prior period, or null when there's no baseline.
@@ -335,8 +449,9 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
   }
 
   Widget _statCard(ThemeData theme, dynamic colors, String label, int value, IconData icon,
-      {double? delta, String? valueText}) {
-    return Expanded(
+      {double? delta, String? valueText, double? width}) {
+    return SizedBox(
+      width: width,
       child: Container(
         padding: const EdgeInsets.all(18),
         decoration: BoxDecoration(
@@ -499,9 +614,579 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
     );
   }
 
+  // ── Segmentation donuts (device / referrer channel / browser) ──────────────
+
+  /// A categorical palette for the donut/segment charts, cycled by index.
+  List<Color> _palette(ThemeData theme) => [
+        theme.colorScheme.primary,
+        Colors.teal.shade400,
+        Colors.orange.shade400,
+        Colors.purple.shade300,
+        Colors.blue.shade400,
+        Colors.pink.shade300,
+        Colors.green.shade400,
+        Colors.amber.shade600,
+        Colors.indigo.shade300,
+        Colors.brown.shade400,
+      ];
+
+  /// A fixed-width card with a donut + legend for one categorical breakdown.
+  /// `rows` is a ranked list of `{<keyName>, views}`.
+  Widget _donutCard(
+      ThemeData theme, dynamic colors, String title, dynamic rows, String keyName) {
+    final list = (rows as List?) ?? const [];
+    final total = list.fold<int>(
+        0, (sum, r) => sum + (((r as Map)['views'] as num?)?.toInt() ?? 0));
+    final palette = _palette(theme);
+    return SizedBox(
+      width: 320,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: theme.textTheme.titleMedium),
+          const SizedBox(height: 8),
+          Container(
+            decoration: BoxDecoration(
+              color: colors.panelBackground,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: colors.border),
+            ),
+            padding: const EdgeInsets.all(16),
+            child: total == 0
+                ? Text('No data yet', style: theme.textTheme.bodySmall)
+                : Row(
+                    children: [
+                      SizedBox(
+                        width: 110,
+                        height: 110,
+                        child: PieChart(
+                          PieChartData(
+                            sectionsSpace: 2,
+                            centerSpaceRadius: 30,
+                            sections: [
+                              for (int i = 0; i < list.length; i++)
+                                PieChartSectionData(
+                                  value: (((list[i] as Map)['views'] as num?)
+                                              ?.toDouble() ??
+                                          0),
+                                  color: palette[i % palette.length],
+                                  radius: 22,
+                                  showTitle: false,
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            for (int i = 0; i < list.length; i++)
+                              _donutLegendRow(
+                                theme,
+                                colors,
+                                palette[i % palette.length],
+                                (list[i] as Map)[keyName]?.toString() ?? '',
+                                ((list[i] as Map)['views'] as num?)?.toInt() ?? 0,
+                                total,
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _donutLegendRow(ThemeData theme, dynamic colors, Color color,
+      String label, int value, int total) {
+    final pct = total == 0 ? 0 : (value / total * 100).round();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Container(
+            width: 9,
+            height: 9,
+            decoration:
+                BoxDecoration(color: color, borderRadius: BorderRadius.circular(2)),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall),
+          ),
+          const SizedBox(width: 6),
+          Text('$pct%',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: colors.muted, fontWeight: FontWeight.w600)),
+        ],
+      ),
+    );
+  }
+
+  /// Hour-of-day distribution (UTC) — 24 bars showing when readers show up.
+  Widget _hourChart(ThemeData theme, dynamic colors, dynamic rows) {
+    final list = (rows as List?) ?? const [];
+    final hasData = list.any((r) => (((r as Map)['views'] as num?)?.toInt() ?? 0) > 0);
+    if (!hasData) {
+      return _section(theme, colors, 'By hour of day (UTC)',
+          [Text('No data yet', style: theme.textTheme.bodySmall)]);
+    }
+    final accent = theme.colorScheme.primary;
+    double maxY = 1;
+    for (final r in list) {
+      maxY = math.max(maxY, ((r as Map)['views'] as num?)?.toDouble() ?? 0);
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('By hour of day (UTC)', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Container(
+          decoration: BoxDecoration(
+            color: colors.panelBackground,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: colors.border),
+          ),
+          padding: const EdgeInsets.fromLTRB(8, 16, 16, 8),
+          child: SizedBox(
+            height: 180,
+            child: BarChart(
+              BarChartData(
+                maxY: maxY * 1.15,
+                alignment: BarChartAlignment.spaceAround,
+                gridData: FlGridData(
+                  show: true,
+                  drawVerticalLine: false,
+                  getDrawingHorizontalLine: (v) =>
+                      FlLine(color: colors.border, strokeWidth: 0.6),
+                ),
+                borderData: FlBorderData(show: false),
+                titlesData: FlTitlesData(
+                  topTitles:
+                      const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  rightTitles:
+                      const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  leftTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: true, reservedSize: 34)),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 22,
+                      getTitlesWidget: (value, meta) {
+                        final h = value.toInt();
+                        if (h % 6 != 0) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text('${h}h',
+                              style: TextStyle(fontSize: 10, color: colors.muted)),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                barGroups: [
+                  for (final r in list)
+                    BarChartGroupData(
+                      x: ((r as Map)['hour'] as num?)?.toInt() ?? 0,
+                      barRods: [
+                        BarChartRodData(
+                          toY: (r['views'] as num?)?.toDouble() ?? 0,
+                          color: accent,
+                          width: 7,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── New-vs-returning sessions (Audience) ───────────────────────────────────
+
+  Widget _sessionsChart(ThemeData theme, dynamic colors, dynamic rows) {
+    final list = (rows as List?) ?? const [];
+    final hasData = list.any((r) =>
+        (((r as Map)['new'] as num?)?.toInt() ?? 0) +
+            ((r['returning'] as num?)?.toInt() ?? 0) >
+        0);
+    if (!hasData) {
+      return _section(theme, colors, 'Visits — new vs returning',
+          [Text('No data yet', style: theme.textTheme.bodySmall)]);
+    }
+    final accent = theme.colorScheme.primary;
+    final returningColor = Colors.teal.shade400;
+    double maxY = 1;
+    for (final r in list) {
+      final v = (((r as Map)['new'] as num?)?.toDouble() ?? 0) +
+          ((r['returning'] as num?)?.toDouble() ?? 0);
+      maxY = math.max(maxY, v);
+    }
+    final labels = [
+      for (final r in list)
+        ((r as Map)['day']?.toString() ?? '')
+            .replaceFirst('${DateTime.now().year}-', '')
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text('Visits — new vs returning', style: theme.textTheme.titleMedium),
+            const Spacer(),
+            _legendDot(theme, accent, 'New'),
+            const SizedBox(width: 12),
+            _legendDot(theme, returningColor, 'Returning'),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Container(
+          decoration: BoxDecoration(
+            color: colors.panelBackground,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: colors.border),
+          ),
+          padding: const EdgeInsets.fromLTRB(8, 16, 16, 8),
+          child: SizedBox(
+            height: 180,
+            child: BarChart(
+              BarChartData(
+                maxY: maxY * 1.15,
+                alignment: BarChartAlignment.spaceAround,
+                gridData: FlGridData(
+                  show: true,
+                  drawVerticalLine: false,
+                  getDrawingHorizontalLine: (v) =>
+                      FlLine(color: colors.border, strokeWidth: 0.6),
+                ),
+                borderData: FlBorderData(show: false),
+                titlesData: FlTitlesData(
+                  topTitles:
+                      const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  rightTitles:
+                      const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  leftTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: true, reservedSize: 34)),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 24,
+                      getTitlesWidget: (value, meta) {
+                        final i = value.toInt();
+                        if (i < 0 || i >= labels.length) {
+                          return const SizedBox.shrink();
+                        }
+                        if (labels.length > 7 && i % 2 != 0) {
+                          return const SizedBox.shrink();
+                        }
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(labels[i],
+                              style: TextStyle(fontSize: 10, color: colors.muted)),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                barGroups: [
+                  for (int i = 0; i < list.length; i++)
+                    BarChartGroupData(
+                      x: i,
+                      barRods: [
+                        BarChartRodData(
+                          toY: (((list[i] as Map)['new'] as num?)?.toDouble() ?? 0) +
+                              (((list[i] as Map)['returning'] as num?)?.toDouble() ??
+                                  0),
+                          width: 9,
+                          borderRadius: BorderRadius.circular(2),
+                          rodStackItems: [
+                            BarChartRodStackItem(
+                              0,
+                              ((list[i] as Map)['new'] as num?)?.toDouble() ?? 0,
+                              accent,
+                            ),
+                            BarChartRodStackItem(
+                              ((list[i] as Map)['new'] as num?)?.toDouble() ?? 0,
+                              (((list[i] as Map)['new'] as num?)?.toDouble() ?? 0) +
+                                  (((list[i] as Map)['returning'] as num?)
+                                          ?.toDouble() ??
+                                      0),
+                              returningColor,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── AI-crawler visibility (Crawlers) ───────────────────────────────────────
+
+  Widget _aiCrawler(ThemeData theme, dynamic colors, dynamic ai) {
+    final m = (ai as Map?) ?? const {};
+    final views = (m['views'] as num?)?.toInt() ?? 0;
+    final share = (m['share_of_bots'] as num?)?.toDouble() ?? 0.0;
+    final daily = (m['daily'] as List?) ?? const [];
+    final accent = theme.colorScheme.primary;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('AI crawlers', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Container(
+          decoration: BoxDecoration(
+            color: colors.panelBackground,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: colors.border),
+          ),
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    Icon(Icons.auto_awesome_outlined, size: 16, color: colors.muted),
+                    const SizedBox(width: 6),
+                    Text('GPTBot · ClaudeBot · Perplexity · CCBot · Bytespider',
+                        style:
+                            theme.textTheme.labelSmall?.copyWith(color: colors.muted)),
+                  ]),
+                  const SizedBox(height: 8),
+                  Text('$views', style: theme.textTheme.headlineSmall),
+                  Text('${(share * 100).round()}% of bot traffic',
+                      style:
+                          theme.textTheme.bodySmall?.copyWith(color: colors.muted)),
+                ],
+              ),
+              const SizedBox(width: 20),
+              Expanded(
+                child: SizedBox(
+                  height: 70,
+                  child: _sparkline(daily, accent),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── Editorial scorecard (Content) ──────────────────────────────────────────
+
+  Widget _editorialScorecard(ThemeData theme, dynamic colors, dynamic rows) {
+    final list = (rows as List?) ?? const [];
+    return _section(
+      theme,
+      colors,
+      'Article performance',
+      list.isEmpty
+          ? [Text('No data yet', style: theme.textTheme.bodySmall)]
+          : [
+              for (final r in list) _scorecardRow(theme, colors, r as Map),
+            ],
+    );
+  }
+
+  Widget _scorecardRow(ThemeData theme, dynamic colors, Map r) {
+    final label = r['label']?.toString() ?? r['path']?.toString() ?? '';
+    final section = r['section']?.toString();
+    final age = (r['age_days'] as num?)?.toInt();
+    final views = (r['views'] as num?)?.toInt() ?? 0;
+    final daily = (r['daily'] as List?) ?? const [];
+    final accent = theme.colorScheme.primary;
+    final ageText = age == null
+        ? null
+        : age <= 0
+            ? 'today'
+            : age == 1
+                ? '1d old'
+                : '${age}d old';
+    return InkWell(
+      onTap: () => _openPath(r['path']?.toString()),
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyMedium?.copyWith(color: accent)),
+                  const SizedBox(height: 2),
+                  Row(children: [
+                    if (section != null && section.isNotEmpty) ...[
+                      Text(section,
+                          style: theme.textTheme.labelSmall
+                              ?.copyWith(color: colors.muted)),
+                      const SizedBox(width: 8),
+                    ],
+                    if (ageText != null)
+                      Text(ageText,
+                          style: theme.textTheme.labelSmall
+                              ?.copyWith(color: colors.muted)),
+                  ]),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            SizedBox(width: 90, height: 34, child: _sparkline(daily, accent)),
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 50,
+              child: Text('$views',
+                  textAlign: TextAlign.right,
+                  style: theme.textTheme.bodyMedium
+                      ?.copyWith(fontWeight: FontWeight.w700)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// A compact filled line chart of a `[{day, views}]` series, no axes.
+  Widget _sparkline(List<dynamic> daily, Color color) {
+    if (daily.isEmpty) return const SizedBox.shrink();
+    final spots = <FlSpot>[
+      for (int i = 0; i < daily.length; i++)
+        FlSpot(i.toDouble(),
+            ((daily[i] as Map)['views'] as num?)?.toDouble() ?? 0),
+    ];
+    double maxY = 1;
+    for (final s in spots) {
+      maxY = math.max(maxY, s.y);
+    }
+    return LineChart(
+      LineChartData(
+        minY: 0,
+        maxY: maxY * 1.1,
+        gridData: const FlGridData(show: false),
+        titlesData: const FlTitlesData(show: false),
+        borderData: FlBorderData(show: false),
+        lineTouchData: const LineTouchData(enabled: false),
+        lineBarsData: [
+          LineChartBarData(
+            spots: spots,
+            isCurved: true,
+            barWidth: 2,
+            color: color,
+            dotData: const FlDotData(show: false),
+            belowBarData: BarAreaData(
+              show: true,
+              color: color.withValues(alpha: 0.12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Anomaly alerts strip (top of page) ─────────────────────────────────────
+
+  Widget _alertsStrip(ThemeData theme, dynamic colors, dynamic rows) {
+    final list = (rows as List?) ?? const [];
+    if (list.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppLayout.sectionGap),
+      child: Column(
+        children: [for (final r in list) _alertChip(theme, r as Map)],
+      ),
+    );
+  }
+
+  Widget _alertChip(ThemeData theme, Map r) {
+    final warn = (r['level']?.toString() ?? 'info') == 'warn';
+    final color = warn ? Colors.orange.shade800 : theme.colorScheme.primary;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        children: [
+          Icon(warn ? Icons.warning_amber_rounded : Icons.info_outline,
+              size: 16, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(r['text']?.toString() ?? '',
+                style: theme.textTheme.bodyMedium
+                    ?.copyWith(color: color, fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Countries (Audience), with DB-IP attribution ───────────────────────────
+
+  Widget _countries(ThemeData theme, dynamic colors, dynamic rows) {
+    final list = (rows as List?) ?? const [];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _section(
+          theme,
+          colors,
+          'Countries',
+          list.isEmpty
+              ? [Text('No data yet', style: theme.textTheme.bodySmall)]
+              : [
+                  for (final r in list)
+                    _row(
+                      theme,
+                      '${_flagEmoji((r as Map)['country']?.toString() ?? '')}  '
+                          '${r['country']?.toString() ?? '—'}',
+                      '${r['views']}',
+                    ),
+                ],
+        ),
+        const SizedBox(height: 6),
+        Text('IP geolocation by DB-IP (db-ip.com)',
+            style: theme.textTheme.labelSmall?.copyWith(color: colors.muted)),
+      ],
+    );
+  }
+
+  /// Regional-indicator flag emoji for a 2-letter ISO country code.
+  String _flagEmoji(String cc) {
+    final up = cc.toUpperCase();
+    if (up.length != 2) return '🏳️';
+    final a = up.codeUnitAt(0), b = up.codeUnitAt(1);
+    if (a < 65 || a > 90 || b < 65 || b > 90) return '🏳️';
+    return String.fromCharCode(0x1F1E6 + (a - 65)) +
+        String.fromCharCode(0x1F1E6 + (b - 65));
+  }
+
   Widget _rankTable(
       ThemeData theme, dynamic colors, String title, dynamic rows, String key,
-      {String? labelKey, bool linkable = false}) {
+      {String? labelKey, bool linkable = false, bool linkExternal = false}) {
     final list = (rows as List?) ?? const [];
     return _section(
       theme,
@@ -515,7 +1200,11 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
                   theme,
                   (r as Map)[labelKey ?? key]?.toString() ?? '',
                   '${r['views']}',
-                  onTap: linkable ? () => _openPath(r[key]?.toString()) : null,
+                  onTap: linkExternal
+                      ? () => _openExternal(r[key]?.toString())
+                      : linkable
+                          ? () => _openPath(r[key]?.toString())
+                          : null,
                 ),
             ],
     );
@@ -601,6 +1290,15 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
   Future<void> _openPath(String? path) async {
     if (path == null || path.isEmpty) return;
     final uri = Uri.base.resolve(path); // resolve against the site's origin
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  /// Open a referrer's full URL (stored scheme-less, e.g. "reddit.com/r/..").
+  Future<void> _openExternal(String? url) async {
+    if (url == null || url.isEmpty) return;
+    final uri = Uri.parse(url.startsWith('http') ? url : 'https://$url');
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     }
