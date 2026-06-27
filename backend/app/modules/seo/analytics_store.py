@@ -33,6 +33,12 @@ _BOT_TOKENS = (
     "gtmetrix", "petalbot", "bytespider", "dataforseo", "mj12bot", "dotbot",
     "screaming frog", "telegrambot", "whatsapp", "discordbot", "slackbot",
     "twitterbot", "linkedinbot", "skypeuripreview", "google favicon",
+    # Internet-wide scanners / scrapers that send a browser-ish "Mozilla/" UA and
+    # no Referer, so they slip the checks below and inflate human "(direct)".
+    "zgrab", "zmap", "masscan", "nmap", "pathscan", "visionheight", "censys",
+    "shodan", "internetmeasurement", "internet-measurement", "leakix", "expanse",
+    "paloaltonetworks", "netsystemsresearch", "l9explore", "l9tcpid", "odin",
+    "scanworld", "scaninfo", "/scan", "researchscan", "aani", "gdnplus",
 )
 
 _TODAY_FMT = "%Y-%m-%d"
@@ -401,10 +407,21 @@ def _own_host() -> str:
     return host.split(":")[0]
 
 
+def _extra_internal_hosts() -> set[str]:
+    """Alternate hostnames that serve this same site (ANALYTICS_INTERNAL_HOSTS)."""
+    return {
+        h.strip().lower().replace("www.", "")
+        for h in settings.analytics_internal_hosts.split(",")
+        if h.strip()
+    }
+
+
 def _is_self_referral(host: str) -> bool:
-    """True when `host` is our own site or the hosting server's IP — an in-site
-    navigation, not a real external referral."""
+    """True when `host` is our own site, an alternate hostname that serves it, or
+    the hosting server's IP — an in-site navigation, not a real external referral."""
     if host in _ignored_hosts():
+        return True
+    if host in _extra_internal_hosts():  # exact match — keep unrelated sub-domains external
         return True
     own = _own_host()
     return bool(own) and (host == own or host.endswith("." + own))

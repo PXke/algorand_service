@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     # in prod — a stable salt keeps a visitor's token consistent so period-unique
     # counts (PFCOUNT over several daily HLLs) dedupe the same person across days.
     analytics_hll_salt: str = "pxke-analytics-uv"
+    # Extra hostnames that also serve this same site (e.g. the nginx fallback
+    # vhost answers on these too). A Referer from one of them is in-site
+    # navigation -> counted as '(internal)', not an external referrer. Exact-host
+    # match only, so unrelated sub-domains on the same apex stay external.
+    analytics_internal_hosts: str = (
+        "pxke.me,wordpress.pxke.me,algosearch.pxke.me,apialgosearch.pxke.me"
+    )
     # Path to a local GeoIP country database (DB-IP Lite or MaxMind GeoLite2, in
     # MaxMind .mmdb format) used to resolve a country code from the client IP at
     # record time. Country-level only — the IP itself is never stored. Empty ->

@@ -224,6 +224,29 @@ def test_record_session_skips_without_ip(monkeypatch) -> None:
     a.record_session(None, lambda cql: cql, None, "Mozilla/5.0", "2026-06-27")
 
 
+def test_is_bot_flags_internet_scanners() -> None:
+    # Scanners send a browser-ish Mozilla/ UA + no Referer, so they used to slip
+    # into human "(direct)". They must now classify as bots.
+    assert a.is_bot("Mozilla/5.0 zgrab/0.x")
+    assert a.is_bot("Mozilla/5.0 (compatible; pathscan/1.0)")
+    assert a.is_bot("visionheight.com/scan Mozilla/5.0 (Macintosh) Chrome/120")
+    assert a.is_bot("Mozilla/5.0 (compatible; CensysInspect/1.1)")
+    # A genuine browser is still human.
+    assert not a.is_bot(
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        "AppleWebKit/605 Mobile Safari/604"
+    )
+
+
+def test_referrer_host_folds_alternate_self_hosts() -> None:
+    # The site also answers on these hostnames -> in-site navigation, '(internal)'.
+    assert a.referrer_host("https://pxke.me/x") == "(internal)"
+    assert a.referrer_host("https://wordpress.pxke.me/y") == "(internal)"
+    assert a.referrer_host("https://algosearch.pxke.me/z") == "(internal)"
+    # An unrelated sub-domain on the same apex stays a real external referrer.
+    assert a.referrer_host("https://blog.pxke.me/post") == "blog.pxke.me"
+
+
 def test_referrer_host_folds_social_subdomains() -> None:
     # Link-shim / mobile sub-domains collapse to the canonical host.
     assert a.referrer_host("https://m.facebook.com/x") == "facebook.com"
