@@ -57,4 +57,10 @@ register_seo_routes(app)
 
 
 if __name__ == "__main__":
+    # Robyn reads processes/workers off app.config (normally the `robyn` CLI's
+    # --processes/--workers). We start via `python -m app.main`, so set them here
+    # from settings — the default 1/1 serialises every request behind one slow
+    # blocking handler.
+    app.config.processes = max(1, settings.app_processes)
+    app.config.workers = max(1, settings.app_workers)
     app.start(host=settings.app_host, port=settings.app_port)

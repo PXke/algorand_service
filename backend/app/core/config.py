@@ -8,6 +8,12 @@ class Settings(BaseSettings):
     app_env: str = "dev"
     app_host: str = "0.0.0.0"
     app_port: int = 8080
+    # Robyn concurrency. `processes` = separate OS processes (separate GILs -> true
+    # parallelism for the blocking Cassandra/Redis handlers); `workers` = Actix I/O
+    # worker threads per process. Default 1/1 serialises everything behind one slow
+    # request, so we run several. Tune per box via APP_PROCESSES / APP_WORKERS.
+    app_processes: int = 4
+    app_workers: int = 2
 
     # Public-facing site (used to build absolute canonical / OG / sitemap URLs
     # in the SEO-rendered document routes). Override per-env via PUBLIC_SITE_URL.
