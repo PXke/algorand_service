@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import secrets
 
+import msgspec
+
 from app.core.config import settings
 from app.core.errors import PlatformError
 from app.modules.auth.models.schemas import Arc0060Proof, Caip122Payload, SessionInfo
@@ -108,7 +110,9 @@ class AuthService:
         self._store.delete_session(token)
 
     def caip122_payload(self, challenge: AuthChallenge) -> Caip122Payload:
-        return Caip122Payload.model_validate(challenge.caip122.to_dict())
+        return msgspec.convert(
+            challenge.caip122.to_dict(), Caip122Payload, strict=False
+        )
 
     @property
     def session_ttl(self) -> int:

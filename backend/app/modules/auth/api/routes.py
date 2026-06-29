@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from robyn import Request, Response
 
+from app.core import serialization
 from app.core.errors import PlatformError
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.modules.auth.models.schemas import NonceRequest, VerifyRequest
@@ -15,8 +16,8 @@ def register_auth_routes(app) -> None:
     @app.post("/api/v1/auth/nonce")
     async def auth_nonce(request: Request) -> Response:
         try:
-            payload = NonceRequest.model_validate_json(request.body)
-        except Exception as exc:
+            payload = serialization.decode(request.body, NonceRequest)
+        except serialization.DecodeError as exc:
             return json_error_response(400, "invalid_request", str(exc))
 
         try:
@@ -29,15 +30,15 @@ def register_auth_routes(app) -> None:
             "wallet_address": payload.wallet_address,
             "nonce": challenge.nonce,
             "signing_message": challenge.signing_message,
-            "caip122": caip122.model_dump(by_alias=True),
+            "caip122": serialization.to_builtins(caip122),
             "expires_in_seconds": auth_service.nonce_ttl,
         }
 
     @app.post("/api/v1/auth/verify-wallet-signature")
     async def auth_verify(request: Request) -> Response:
         try:
-            payload = VerifyRequest.model_validate_json(request.body)
-        except Exception as exc:
+            payload = serialization.decode(request.body, VerifyRequest)
+        except serialization.DecodeError as exc:
             return json_error_response(400, "invalid_request", str(exc))
 
         verified = auth_service.verify_nonce_signature(
@@ -78,7 +79,7 @@ def register_auth_routes(app) -> None:
                 "invalid_or_expired_session",
                 "Session is invalid or expired",
             )
-        return info.model_dump()
+        return serialization.to_builtins(info)
 
     @app.post("/api/v1/auth/logout")
     async def auth_logout(request: Request) -> dict[str, bool]:

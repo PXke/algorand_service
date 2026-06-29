@@ -1,8 +1,12 @@
+"""Registry models. ServiceRegistryItem (wire schema) lives in app/schemas.py
+and is re-exported here; the two frozen dataclasses below are internal value
+objects (never serialised over the API) and stay local."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pydantic import BaseModel
+from app.schemas import ServiceRegistryItem  # noqa: F401
 
 
 @dataclass(frozen=True)
@@ -27,14 +31,3 @@ class ChainTransaction:
     receiver: str | None = None
     amount_microalgos: int | None = None
     txn_json: str | None = None
-
-
-class ServiceRegistryItem(BaseModel):
-    service_id: str
-    display_name: str
-    match_kind: str
-    match_value: str
-    scrape_url: str | None = None
-    enabled: bool = True
-    source_kind: str = "web"
-    origin: str = "seed"

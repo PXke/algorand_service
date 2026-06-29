@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from robyn import Request
 
+from app.core import serialization
 from app.modules.placements.services.placement_service import PlacementService
 
 
@@ -14,4 +15,4 @@ def register_placement_routes(app) -> None:
         limit_param = request.query_params.get("limit", "")
         limit = int(limit_param) if limit_param.isdigit() else None
         items = service.list_feed_placements(slot=slot, limit=limit)
-        return {"items": [item.model_dump() for item in items]}
+        return {"items": serialization.to_builtins(items)}

@@ -1,0 +1,350 @@
+"""All API request/response models, consolidated as msgspec.Struct.
+
+Single source of truth for the wire schemas (replaces the per-module pydantic
+schema files, which now re-export from here). Every struct is `kw_only=True`
+(pydantic models were keyword-only too, so construction is unchanged and field
+ordering is unconstrained). Constraints use `Annotated[..., msgspec.Meta(...)]`;
+the CAIP-122 kebab-case keys use `field(name=...)`; cross-field / normalising
+validation lives in `__post_init__`.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Literal
+
+import msgspec
+from msgspec import Meta, field
+
+from app.modules.admin.classifier_constants import CONTENT_CATEGORIES, QUALITY_LEVELS
+
+# ── Common constrained aliases ────────────────────────────────────────────────
+WalletAddress = Annotated[str, Meta(min_length=58, max_length=58)]
+
+
+# ── News ──────────────────────────────────────────────────────────────────────
+class ArticleFeedItem(msgspec.Struct, kw_only=True):
+    article_id: str
+    service_id: str
+    title: str
+    summary: str
+    published_at_epoch: int
+    trigger_txid: str | None = None
+    trigger_round: int | None = None
+    tags: list[str] = field(default_factory=list)
+    trigger_kind: str = "editorial"
+    image_url: str | None = None
+    source_url: str | None = None
+
+
+class ArticleDetail(msgspec.Struct, kw_only=True):
+    article_id: str
+    service_id: str
+    title: str
+    summary: str
+    body: str
+    published_at_epoch: int
+    trigger_txid: str | None = None
+    trigger_round: int | None = None
+    source_url: str | None = None
+    tags: list[str] = field(default_factory=list)
+    trigger_kind: str = "editorial"
+    views: int = 0
+    image_url: str | None = None
+
+
+class NewsFeedResponse(msgspec.Struct, kw_only=True):
+    items: list[ArticleFeedItem]
+
+
+class ServiceEventItem(msgspec.Struct, kw_only=True):
+    service_id: str
+    event_id: str
+    txid: str
+    round: int
+    occurred_at_epoch: int
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+class NonceRequest(msgspec.Struct, kw_only=True):
+    wallet_address: WalletAddress
+
+
+class Caip122Payload(msgspec.Struct, kw_only=True):
+    domain: str
+    account_address: str
+    uri: str
+    chain_id: str
+    nonce: str
+    version: str = "1"
+    type: str = "ed25519"
+    statement: str | None = None
+    # CAIP-122 wire keys are kebab-case; the previous pydantic model used aliases.
+    issued_at: str | None = field(name="issued-at", default=None)
+    expiration_time: str | None = field(name="expiration-time", default=None)
+    not_before: str | None = field(name="not-before", default=None)
+    request_id: str | None = field(name="request-id", default=None)
+    resources: list[str] | None = None
+
+
+class NonceResponse(msgspec.Struct, kw_only=True):
+    wallet_address: str
+    nonce: str
+    signing_message: str
+    caip122: Caip122Payload
+    expires_in_seconds: int
+
+
+class Arc0060Proof(msgspec.Struct, kw_only=True):
+    data_b64: str
+    signature_b64: str
+    authenticator_data_b64: str
+    domain: str
+    request_id: str | None = None
+
+
+class VerifyRequest(msgspec.Struct, kw_only=True):
+    wallet_address: WalletAddress
+    nonce: str
+    proof_method: Literal["arc0025_txn", "arc0060", "legacy_message"] = "arc0060"
+    signature_b64: str | None = None
+    signed_txn_b64: str | None = None
+    arc0060: Arc0060Proof | None = None
+
+    def __post_init__(self) -> None:
+        if self.proof_method == "arc0060":
+            if self.arc0060 is None:
+                raise ValueError("arc0060 proof is required when proof_method is arc0060")
+        elif self.proof_method == "arc0025_txn" and not self.signed_txn_b64:
+            raise ValueError("signed_txn_b64 is required when proof_method is arc0025_txn")
+        elif self.proof_method == "legacy_message" and not self.signature_b64:
+            raise ValueError("signature_b64 is required when proof_method is legacy_message")
+
+
+class VerifyResponse(msgspec.Struct, kw_only=True):
+    session_token: str
+    wallet_address: str
+    issued_at_epoch: int
+    expires_in_epoch: int
+    expires_in_seconds: int
+    proof_method: str
+
+
+class SessionInfo(msgspec.Struct, kw_only=True):
+    wallet_address: str
+    issued_at_epoch: int
+    expires_in_epoch: int
+
+
+# ── Ingest ────────────────────────────────────────────────────────────────────
+class IngestSignalRequest(msgspec.Struct, kw_only=True):
+    """Push official announcements when bots cannot join Discord/Telegram."""
+
+    service_id: Annotated[str, Meta(min_length=1, max_length=128)]
+    display_name: Annotated[str, Meta(min_length=1, max_length=256)]
+    page_text: Annotated[str, Meta(min_length=1, max_length=100_000)]
+    page_title: Annotated[str, Meta(max_length=512)] = "Announcement"
+    source_url: Annotated[str, Meta(max_length=2048)] = ""
+    source_kind: Annotated[str, Meta(max_length=32)] = "push"
+    match_kind: Annotated[str, Meta(max_length=64)] = "push"
+    match_value: Annotated[str, Meta(max_length=512)] = ""
+    mail_from: Annotated[str, Meta(max_length=512)] = ""
+
+
+# ── Search ────────────────────────────────────────────────────────────────────
+class SearchHit(msgspec.Struct, kw_only=True):
+    article_id: str
+    title: str
+    summary: str
+    service_id: str | None = None
+    published_at_epoch: int | None = None
+    score: float | None = None
+
+
+class SearchResponse(msgspec.Struct, kw_only=True):
+    query: str
+    engine: str
+    items: list[SearchHit] = field(default_factory=list)
+
+
+# ── Suggestions ───────────────────────────────────────────────────────────────
+class CreateSuggestionRequest(msgspec.Struct, kw_only=True):
+    title: Annotated[str, Meta(min_length=3, max_length=200)]
+    body: Annotated[str, Meta(min_length=10, max_length=5000)]
+    submission_txid: Annotated[str, Meta(min_length=52, max_length=52)]
+
+
+class SuggestionResponse(msgspec.Struct, kw_only=True):
+    suggestion_id: str
+    wallet_address: str
+    title: str
+    body: str
+    submission_txid: str
+    status: str
+    created_at_epoch: int
+    upvote_count: int = 0
+
+
+class SuggestionConfigResponse(msgspec.Struct, kw_only=True):
+    treasury_address: str
+    min_microalgos: int
+    min_algo_display: str
+
+
+class SuggestionListResponse(msgspec.Struct, kw_only=True):
+    items: list[SuggestionResponse]
+
+
+class UpvoteRequest(msgspec.Struct, kw_only=True):
+    signature_b64: Annotated[str, Meta(min_length=16, max_length=2048)]
+
+
+class UpvoteResponse(msgspec.Struct, kw_only=True):
+    suggestion_id: str
+    upvote_count: int
+
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+class PriceMetricsResponse(msgspec.Struct, kw_only=True):
+    asset_id: str
+    asset_name: str
+    currency: str
+    price_usd: float
+    change_24h_pct: float | None
+    sample_count_24h: int
+    available: bool
+    prepared_at_epoch: int | None
+    market_cap_usd: float | None = None
+    volume_24h_usd: float | None = None
+
+
+class MetricTile(msgspec.Struct, kw_only=True):
+    id: str
+    label: str
+    value: str
+    hint: str | None = None
+    available: bool = True
+
+
+class MetricsDashboardResponse(msgspec.Struct, kw_only=True):
+    tiles: list[MetricTile]
+
+
+# ── Placements ────────────────────────────────────────────────────────────────
+class FeedPlacementItem(msgspec.Struct, kw_only=True):
+    placement_id: str
+    slot: str
+    sponsor_name: str
+    headline: str
+    body: str
+    image_url: str | None = None
+    target_url: str | None = None
+    priority: int = 0
+
+
+# ── Registry ──────────────────────────────────────────────────────────────────
+class ServiceRegistryItem(msgspec.Struct, kw_only=True):
+    service_id: str
+    display_name: str
+    match_kind: str
+    match_value: str
+    scrape_url: str | None = None
+    enabled: bool = True
+    source_kind: str = "web"
+    origin: str = "seed"
+
+
+# ── Admin ─────────────────────────────────────────────────────────────────────
+class ArticlePatchRequest(msgspec.Struct, kw_only=True):
+    title: Annotated[str, Meta(max_length=512)] | None = None
+    summary: Annotated[str, Meta(max_length=2000)] | None = None
+    body: Annotated[str, Meta(max_length=200_000)] | None = None
+
+
+class EditorialBriefCreate(msgspec.Struct, kw_only=True):
+    title: Annotated[str, Meta(min_length=1, max_length=256)]
+    body_markdown: Annotated[str, Meta(min_length=1, max_length=100_000)]
+    keywords: Annotated[str, Meta(max_length=1024)] = ""
+    status: Annotated[str, Meta(max_length=32)] = "queued"
+
+
+class EditorialBriefUpdate(msgspec.Struct, kw_only=True):
+    title: Annotated[str, Meta(max_length=256)] | None = None
+    body_markdown: Annotated[str, Meta(max_length=100_000)] | None = None
+    keywords: Annotated[str, Meta(max_length=1024)] | None = None
+    status: Annotated[str, Meta(max_length=32)] | None = None
+
+
+class OfficialChannelCreate(msgspec.Struct, kw_only=True):
+    kind: Annotated[str, Meta(pattern="^(discord|telegram|mail_domain)$")]
+    channel_id: Annotated[str, Meta(min_length=1, max_length=256)]
+    label: Annotated[str, Meta(max_length=256)] = ""
+
+
+class ClassifierFeedbackCreate(msgspec.Struct, kw_only=True):
+    url: Annotated[str, Meta(min_length=1, max_length=2048)]
+    approved: bool
+    text_sample: Annotated[str, Meta(max_length=8000)] = ""
+    category: Annotated[str, Meta(max_length=64)] = "generic"
+    predicted_category: Annotated[str, Meta(max_length=64)] | None = None
+    quality: Annotated[str, Meta(max_length=32)] = "medium"
+    # Multiple categories/keywords for the article (first is primary).
+    categories: list[str] = field(default_factory=list)
+    # Source verdict, separate from the article verdict: is the SOURCE worth
+    # watching? Rejecting a low-quality article keeps a good source alive.
+    source_relevant: bool = True
+    predicted_publish: bool = False
+    # Training mode: record the label + grade dimensions (both models learn) but
+    # do NOT publish an accepted article to the live feed.
+    training_only: bool = False
+    # Human-corrected per-dimension scores (0-10), only the disputed ones.
+    corrected_scores: dict[str, float] = field(default_factory=dict)
+    # Gatekeeper validation anchor flags.
+    anchor: bool = False
+    factuality_fail: bool = False
+    tone_fail: bool = False
+    error_types: list[str] = field(default_factory=list)
+    review_id: Annotated[str, Meta(max_length=64)] | None = None
+    article_id: Annotated[str, Meta(max_length=64)] | None = None
+
+    def __post_init__(self) -> None:
+        for attr in ("category", "predicted_category"):
+            value = getattr(self, attr)
+            if value is None:
+                continue
+            normalized = value.strip().lower()
+            if normalized not in CONTENT_CATEGORIES:
+                raise ValueError(
+                    f"category must be one of: {', '.join(CONTENT_CATEGORIES)}"
+                )
+            setattr(self, attr, normalized)
+        quality = self.quality.strip().lower()
+        if quality not in QUALITY_LEVELS:
+            raise ValueError(f"quality must be one of: {', '.join(QUALITY_LEVELS)}")
+        self.quality = quality
+
+
+class GatekeeperAnchorCreate(msgspec.Struct, kw_only=True):
+    """Tag an already-published article into the gatekeeper validation anchor set."""
+
+    article_id: Annotated[str, Meta(min_length=1, max_length=64)]
+    factuality_fail: bool = False
+    tone_fail: bool = False
+    error_types: list[str] = field(default_factory=list)
+
+
+class SourceUpsertRequest(msgspec.Struct, kw_only=True):
+    service_id: Annotated[str, Meta(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*$")]
+    display_name: Annotated[str, Meta(min_length=1, max_length=256)]
+    scrape_url: Annotated[str, Meta(min_length=1, max_length=2048)]
+    match_kind: Annotated[str, Meta(max_length=64)] = "domain"
+    match_value: Annotated[str, Meta(max_length=512)] = ""
+    enabled: bool = True
+
+
+class ScraperRunRequest(msgspec.Struct, kw_only=True):
+    action: Annotated[str, Meta(min_length=1, max_length=64)]
+
+
+class DomainSetRequest(msgspec.Struct, kw_only=True):
+    domain: Annotated[str, Meta(min_length=3, max_length=256)]
+    is_relevant: bool

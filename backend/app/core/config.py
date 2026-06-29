@@ -1,9 +1,18 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+"""Application settings (msgspec.Struct, env-driven).
+
+Replaces pydantic-settings: fields default below, and are overridden from a `.env`
+file (dev) then the process environment (prod, injected via the systemd
+EnvironmentFile) by the matching UPPER-CASED name. Values are coerced to the
+field type. Unknown env vars are ignored.
+"""
+
+import os
+from typing import get_args
+
+import msgspec
 
 
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
-
+class Settings(msgspec.Struct, kw_only=True):
     app_name: str = "algorand-platform-api"
     app_env: str = "dev"
     app_host: str = "0.0.0.0"
@@ -120,4 +129,50 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
-settings = Settings()
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _parse_dotenv(path: str) -> dict[str, str]:
+    """Minimal KEY=VALUE .env reader (comments/blank lines skipped, quotes stripped)."""
+    out: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                out[key.strip()] = value.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def _coerce(value: str, typ: object):
+    """Coerce an env string to a Struct field's type (bool/int/float/str)."""
+    candidates = set(get_args(typ)) | {typ}
+    if bool in candidates:  # checked first — bool is a subclass of int
+        return value.strip().lower() in _TRUTHY
+    if int in candidates:
+        return int(value)
+    if float in candidates:
+        return float(value)
+    return value
+
+
+def _load() -> Settings:
+    dotenv = _parse_dotenv(".env")
+    overrides: dict[str, object] = {}
+    for fld in msgspec.structs.fields(Settings):
+        env_name = fld.name.upper()
+        if env_name in os.environ:
+            raw = os.environ[env_name]
+        elif env_name in dotenv:
+            raw = dotenv[env_name]
+        else:
+            continue
+        overrides[fld.name] = _coerce(raw, fld.type)
+    return Settings(**overrides)
+
+
+settings = _load()

@@ -4,6 +4,7 @@ from dataclasses import asdict
 
 from robyn import Request, Response
 
+from app.core import serialization
 from app.core.http_errors import json_error_response
 from app.modules.admin.auth import require_admin_wallet, verified_admin_wallet
 from app.modules.admin.schemas import (
@@ -50,7 +51,7 @@ def register_admin_routes(app) -> None:
             return denied
         article_id = request.path_params.get("article_id", "")
         try:
-            payload = ArticlePatchRequest.model_validate_json(request.body or b"{}")
+            payload = serialization.decode(request.body or b"{}", ArticlePatchRequest)
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         wallet = verified_admin_wallet(request)
@@ -97,7 +98,7 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         try:
-            payload = EditorialBriefCreate.model_validate_json(request.body)
+            payload = serialization.decode(request.body, EditorialBriefCreate)
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         wallet = verified_admin_wallet(request)
@@ -135,7 +136,7 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         try:
-            payload = OfficialChannelCreate.model_validate_json(request.body)
+            payload = serialization.decode(request.body, OfficialChannelCreate)
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         wallet = verified_admin_wallet(request)
@@ -209,7 +210,7 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         try:
-            payload = ClassifierFeedbackCreate.model_validate_json(request.body)
+            payload = serialization.decode(request.body, ClassifierFeedbackCreate)
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         wallet = verified_admin_wallet(request)
@@ -256,7 +257,7 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         try:
-            payload = GatekeeperAnchorCreate.model_validate_json(request.body)
+            payload = serialization.decode(request.body, GatekeeperAnchorCreate)
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         wallet = verified_admin_wallet(request)
@@ -308,7 +309,7 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         try:
-            payload = SourceUpsertRequest.model_validate_json(request.body)
+            payload = serialization.decode(request.body, SourceUpsertRequest)
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         from app.modules.registry.models import ServiceEntry
@@ -357,7 +358,7 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         try:
-            payload = ScraperRunRequest.model_validate_json(request.body)
+            payload = serialization.decode(request.body, ScraperRunRequest)
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         from app.modules.admin.scrapers import SCRAPER_ACTIONS, trigger_scraper
@@ -639,7 +640,7 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         try:
-            payload = DomainSetRequest.model_validate_json(request.body)
+            payload = serialization.decode(request.body, DomainSetRequest)
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         from app.core.cassandra import get_cassandra_session

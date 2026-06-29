@@ -1,14 +1,3 @@
-from __future__ import annotations
+"""Re-export shim — definitions live in app/schemas.py (msgspec.Struct)."""
 
-from pydantic import BaseModel
-
-
-class FeedPlacementItem(BaseModel):
-    placement_id: str
-    slot: str
-    sponsor_name: str
-    headline: str
-    body: str
-    image_url: str | None = None
-    target_url: str | None = None
-    priority: int = 0
+from app.schemas import FeedPlacementItem  # noqa: F401

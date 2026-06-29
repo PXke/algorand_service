@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.core import serialization
 from app.core.http_errors import json_error_response
 from app.modules.search.services.search_service import SearchService
 from app.modules.seo import analytics_store
@@ -24,4 +25,4 @@ def register_search_routes(app) -> None:
         # Record the term for editorial demand analytics (bots skipped inside).
         ua = request.headers.get("user-agent") or request.headers.get("User-Agent")
         analytics_store.record_search(query, len(result.items), user_agent=ua)
-        return result.model_dump()
+        return serialization.to_builtins(result)

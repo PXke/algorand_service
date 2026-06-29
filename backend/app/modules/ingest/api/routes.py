@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import msgspec
 from robyn import Request, Response
 
+from app.core import serialization
 from app.core.config import settings
 from app.core.http_errors import json_error_response
 from app.modules.ingest.queue import push_signal
@@ -42,11 +44,11 @@ def register_ingest_routes(app) -> None:
             return json_error_response(400, "invalid_request", "JSON object required")
 
         try:
-            payload = IngestSignalRequest.model_validate(body)
+            payload = msgspec.convert(body, IngestSignalRequest, strict=False)
         except Exception as exc:
             return json_error_response(400, "validation_error", str(exc))
 
-        depth = push_signal(payload.model_dump())
+        depth = push_signal(serialization.to_builtins(payload))
         return {
             "status": "queued",
             "queue": "algorand:ingest:external_signals",

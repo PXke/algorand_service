@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from email.utils import formatdate
 
 from robyn import Request, Response
 
+from app.core import serialization
 from app.core.config import settings
 from app.core.http_errors import json_error_response
 from app.modules.news.services.news_service import NewsService
@@ -33,14 +33,13 @@ def register_news_routes(app) -> None:
             limit=limit, service_id=service_id, cursor_epoch_ms=cursor
         )
 
-        body = json.dumps(
+        body = serialization.encode(
             {
-                "items": [item.model_dump() for item in items],
+                "items": items,
                 "next_cursor": next_cursor,
                 "has_more": next_cursor is not None,
-            },
-            separators=(",", ":"),
-        )
+            }
+        ).decode("utf-8")
         etag = f'"{hashlib.sha256(body.encode("utf-8")).hexdigest()[:32]}"'
         headers = {
             "Content-Type": "application/json",
@@ -70,4 +69,4 @@ def register_news_routes(app) -> None:
         from app.modules.news.stores.view_counts import record_view
 
         record_view(article_id)
-        return detail.model_dump()
+        return serialization.to_builtins(detail)

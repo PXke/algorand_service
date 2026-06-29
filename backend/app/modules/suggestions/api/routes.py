@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from robyn import Request, Response
 
+from app.core import serialization
 from app.core.config import settings
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.modules.auth.services.auth_service import AuthService
@@ -46,7 +47,7 @@ def register_suggestions_routes(app) -> None:
             min_microalgos=min_micro,
             min_algo_display=algo_display or "0",
         )
-        return payload.model_dump()
+        return serialization.to_builtins(payload)
 
     @app.post("/api/v1/suggestions")
     async def create_suggestion(request: Request) -> Response:
@@ -55,8 +56,8 @@ def register_suggestions_routes(app) -> None:
             return json_error_response(401, "unauthorized", "Valid session required")
 
         try:
-            payload = CreateSuggestionRequest.model_validate_json(request.body)
-        except Exception as exc:
+            payload = serialization.decode(request.body, CreateSuggestionRequest)
+        except serialization.DecodeError as exc:
             return json_error_response(400, "invalid_request", str(exc))
 
         try:
@@ -64,13 +65,13 @@ def register_suggestions_routes(app) -> None:
         except SuggestionError as exc:
             return json_error_from_platform(exc)
 
-        return created.model_dump()
+        return serialization.to_builtins(created)
 
     @app.get("/api/v1/suggestions")
     async def list_suggestions(request: Request) -> Response:
         _ = request
         items = suggestion_service.list_open_suggestions()
-        return {"items": [item.model_dump() for item in items]}
+        return {"items": serialization.to_builtins(items)}
 
     @app.post("/api/v1/suggestions/:suggestion_id/upvote")
     async def upvote_suggestion(request: Request) -> Response:
@@ -83,8 +84,8 @@ def register_suggestions_routes(app) -> None:
             return json_error_response(400, "invalid_request", "suggestion_id required")
 
         try:
-            payload = UpvoteRequest.model_validate_json(request.body)
-        except Exception as exc:
+            payload = serialization.decode(request.body, UpvoteRequest)
+        except serialization.DecodeError as exc:
             return json_error_response(400, "invalid_request", str(exc))
 
         try:

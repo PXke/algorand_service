@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.core import serialization
 from app.modules.registry.services.registry_service import RegistryService
 
 
@@ -14,4 +15,4 @@ def register_registry_routes(app) -> None:
             "yes",
         }
         items = registry_service.list_services(seeds_only=seeds_only)
-        return {"items": [item.model_dump() for item in items]}
+        return {"items": serialization.to_builtins(items)}

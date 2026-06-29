@@ -1,5 +1,4 @@
 import pytest
-from pydantic import ValidationError
 
 from app.modules.admin.schemas import ClassifierFeedbackCreate
 
@@ -18,5 +17,7 @@ def test_classifier_feedback_accepts_category_and_quality() -> None:
 
 
 def test_classifier_feedback_rejects_invalid_quality() -> None:
-    with pytest.raises(ValidationError):
+    # __post_init__ raises ValueError on a bad quality (on direct construction);
+    # msgspec.json.decode would re-wrap this as a msgspec.ValidationError.
+    with pytest.raises(ValueError):
         ClassifierFeedbackCreate(url="https://example.com", approved=False, quality="trash")

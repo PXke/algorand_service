@@ -1,15 +1,3 @@
-from __future__ import annotations
+"""Re-export shim — definitions live in app/schemas.py (msgspec.Struct)."""
 
-from pydantic import BaseModel
-
-
-class MetricTile(BaseModel):
-    id: str
-    label: str
-    value: str
-    hint: str | None = None
-    available: bool = True
-
-
-class MetricsDashboardResponse(BaseModel):
-    tiles: list[MetricTile]
+from app.schemas import MetricsDashboardResponse, MetricTile  # noqa: F401
