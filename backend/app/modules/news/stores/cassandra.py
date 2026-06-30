@@ -22,6 +22,7 @@ def _epoch(dt: datetime | None) -> int:
 class CassandraArticleStore:
     def insert(self, article: StoredArticle, *, feed_bucket: str = "main") -> None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import NewsStmts
 
         session = get_cassandra_session()
         published_at = datetime.fromtimestamp(article.published_at_epoch, tz=UTC)
@@ -29,12 +30,7 @@ class CassandraArticleStore:
 
         tags = list(article.tags or [])
         session.execute(
-            """
-            INSERT INTO articles_by_id (
-              article_id, service_id, title, summary, body,
-              trigger_txid, trigger_round, source_url, published_at, tags, image_url
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            NewsStmts.INSERT_BY_ID,
             (
                 article_uuid,
                 article.service_id,
@@ -50,11 +46,7 @@ class CassandraArticleStore:
             ),
         )
         session.execute(
-            """
-            INSERT INTO articles_feed (
-              bucket, published_at, article_id, service_id, title, summary, tags, image_url
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            NewsStmts.INSERT_FEED,
             (
                 feed_month(published_at),
                 published_at,
@@ -81,6 +73,7 @@ class CassandraArticleStore:
         """Keyset-paginated feed across month partitions. Returns (items,
         next_cursor_ms); next_cursor is None when no more pages."""
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import NewsStmts
 
         session = get_cassandra_session()
         cursor_dt = cursor_from_ms(cursor_epoch_ms)
@@ -90,13 +83,7 @@ class CassandraArticleStore:
             if len(items) >= limit:
                 break
             rows = session.execute(
-                """
-                SELECT article_id, service_id, title, summary, published_at, tags,
-                       image_url, source_url
-                FROM articles_feed
-                WHERE bucket = %s AND published_at < %s
-                LIMIT %s
-                """,
+                NewsStmts.FEED_PAGE,
                 (bucket, cursor_dt, limit - len(items)),
             )
             for row in rows:
@@ -120,21 +107,14 @@ class CassandraArticleStore:
 
     def get(self, article_id: str) -> StoredArticle | None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import NewsStmts
 
         session = get_cassandra_session()
         try:
             aid = UUID(article_id)
         except ValueError:
             return None
-        row = session.execute(
-            """
-            SELECT article_id, service_id, title, summary, body,
-                   trigger_txid, trigger_round, source_url, published_at, tags, image_url
-            FROM articles_by_id
-            WHERE article_id = %s
-            """,
-            (aid,),
-        ).one()
+        row = session.execute(NewsStmts.GET_FULL, (aid,)).one()
         if row is None:
             return None
         published_at = row.published_at

@@ -450,25 +450,14 @@ def register_admin_routes(app) -> None:
         status = (request.query_params.get("status", "") or "").strip().lower()
 
         def _compute() -> dict:
+            from app.core.statements import DomainTrackingStmts
+
             session = get_cassandra_session()
             if status in ("pending", "approved", "dead_end"):
                 # SAI-indexed filter — no full-table scan.
-                rows = session.execute(
-                    """
-                    SELECT domain, last_crawled_at, relevance_score, category,
-                           is_relevant, metadata, frontier_status
-                    FROM domain_tracking WHERE frontier_status = %s LIMIT 500
-                    """,
-                    (status,),
-                )
+                rows = session.execute(DomainTrackingStmts.LIST_BY_STATUS, (status,))
             else:
-                rows = session.execute(
-                    """
-                    SELECT domain, last_crawled_at, relevance_score, category,
-                           is_relevant, metadata, frontier_status
-                    FROM domain_tracking LIMIT 500
-                    """
-                )
+                rows = session.execute(DomainTrackingStmts.LIST_BRIEF)
             items = []
             for row in rows:
                 meta = dict(row.metadata or {})
@@ -514,10 +503,11 @@ def register_admin_routes(app) -> None:
             items.sort(key=lambda it: it.get("content_relevance") or -1.0, reverse=True)
             # Pages harvested per domain: one single-partition COUNT each, fired
             # concurrently so the admin view stays responsive even with ~500 domains.
+            from app.core.statements import CrawledPageStmts
+
             count_futures = {
                 item["domain"]: session.execute_async(
-                    "SELECT COUNT(*) AS c FROM crawled_pages_by_domain WHERE domain = %s",
-                    (item["domain"],),
+                    CrawledPageStmts.COUNT_BY_DOMAIN, (item["domain"],)
                 )
                 for item in items
                 if item["domain"]
@@ -570,14 +560,10 @@ def register_admin_routes(app) -> None:
             return denied
         from app.core.cassandra import get_cassandra_session
 
+        from app.core.statements import ToolInsightStmts
+
         session = get_cassandra_session()
-        rows = session.execute(
-            """
-            SELECT created_at, capability, reason, service_id, source_url, model
-            FROM tool_suggestions WHERE bucket = %s LIMIT 300
-            """,
-            ("all",),
-        )
+        rows = session.execute(ToolInsightStmts.LIST_SUGGESTIONS, ("all",))
         items = [
             {
                 "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -602,15 +588,10 @@ def register_admin_routes(app) -> None:
 
         from app.core.cassandra import get_cassandra_session
 
+        from app.core.statements import ToolInsightStmts
+
         session = get_cassandra_session()
-        rows = session.execute(
-            """
-            SELECT created_at, session_id, service_id, source_url, model, status,
-                   rounds, tool_calls, duration_ms, messages, final_output
-            FROM compose_sessions WHERE bucket = %s LIMIT 20
-            """,
-            ("all",),
-        )
+        rows = session.execute(ToolInsightStmts.LIST_COMPOSE_SESSIONS, ("all",))
         items = []
         for r in rows:
             try:
@@ -644,15 +625,11 @@ def register_admin_routes(app) -> None:
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import DomainTrackingStmts
 
         session = get_cassandra_session()
         row = session.execute(
-            """
-            SELECT domain, last_crawled_at, last_online_at, relevance_score,
-                   category, is_relevant, metadata
-            FROM domain_tracking WHERE domain = %s
-            """,
-            (payload.domain,),
+            DomainTrackingStmts.GET_FOR_CORRECTION, (payload.domain,)
         ).one()
         from datetime import UTC, datetime
 
@@ -662,12 +639,7 @@ def register_admin_routes(app) -> None:
         meta["frontier_status"] = "approved" if payload.is_relevant else "dead_end"
         pending_url = meta.pop("pending_url", "")
         session.execute(
-            """
-            INSERT INTO domain_tracking (
-              domain, last_crawled_at, last_online_at, relevance_score,
-              category, is_relevant, metadata, frontier_status
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            DomainTrackingStmts.INSERT,
             (
                 payload.domain,
                 row.last_crawled_at if row is not None else now,
@@ -689,27 +661,18 @@ def register_admin_routes(app) -> None:
             # (front of the frontier queue) — kicks off the initial harvest;
             # matches CRAWL_INITIAL_HARVEST_PRIORITY on the worker side.
             seed_priority = 50
+            from app.core.statements import UrlQueueStmts
+
             session.execute(
-                """
-                INSERT INTO url_queue (
-                  queue_id, url, source, priority, enqueued_at, status, metadata
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
+                UrlQueueStmts.INSERT,
                 (queue_id, pending_url, "frontier_approval", seed_priority, now, "pending", {}),
             )
             session.execute(
-                """
-                INSERT INTO url_queue_by_url (url, queue_id, enqueued_at, status)
-                VALUES (%s, %s, %s, %s)
-                """,
+                UrlQueueStmts.INSERT_BY_URL,
                 (pending_url, queue_id, now, "pending"),
             )
             session.execute(
-                """
-                INSERT INTO url_queue_pending (
-                  status, priority, enqueued_at, queue_id, url, source
-                ) VALUES (%s, %s, %s, %s, %s, %s)
-                """,
+                UrlQueueStmts.INSERT_PENDING,
                 ("pending", seed_priority, now, queue_id, pending_url, "frontier_approval"),
             )
             enqueued = True
@@ -720,18 +683,14 @@ def register_admin_routes(app) -> None:
             # re-judge individual pages for relevance.
             scrape_url = pending_url or f"https://{payload.domain}"
             service_id = payload.domain.replace(".", "-").lower()
+            from app.core.statements import ServiceRegistryStmts
+
             existing = session.execute(
-                "SELECT service_id FROM service_registry WHERE service_id = %s",
-                (service_id,),
+                ServiceRegistryStmts.GET_ID, (service_id,)
             ).one()
             if existing is None:
                 session.execute(
-                    """
-                    INSERT INTO service_registry (
-                      service_id, display_name, match_kind, match_value,
-                      scrape_url, enabled, updated_at, origin
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
+                    ServiceRegistryStmts.UPSERT,
                     (
                         service_id,
                         payload.domain,
@@ -880,15 +839,11 @@ def register_admin_routes(app) -> None:
             return {"items": []}
         from app.core.cassandra import get_cassandra_session
 
+        from app.core.statements import InvestigationStmts
+
         session = get_cassandra_session()
         try:
-            rows = session.execute(
-                """
-                SELECT created_at, tool, arguments, result_json
-                FROM investigation_findings WHERE service_id = %s LIMIT 50
-                """,
-                (url,),
-            )
+            rows = session.execute(InvestigationStmts.LIST, (url,))
         except Exception:
             return {"items": []}
         import json as _json

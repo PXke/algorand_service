@@ -8,15 +8,11 @@ from app.modules.metrics.price_metrics_models import PriceMetricsBrief, PriceSam
 
 def insert_sample(tick: PriceTick) -> None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PriceMetricsStmts
 
     session = get_cassandra_session()
     session.execute(
-        """
-        INSERT INTO price_metric_samples (
-          asset_id, collected_at, price_usd, currency,
-          change_24h_pct, market_cap_usd, volume_24h_usd, source
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) USING TTL 31536000
-        """,
+        PriceMetricsStmts.INSERT_SAMPLE,
         (
             tick.asset_id,
             tick.collected_at,
@@ -38,17 +34,13 @@ def list_recent_samples(
 ) -> list[PriceSampleRow]:
     from app.core.cassandra import get_cassandra_session
 
+    from app.core.statements import PriceMetricsStmts
+
     cap = limit if limit is not None else PRICE_METRICS_SAMPLE_LIMIT
     cutoff = datetime.now(tz=UTC) - timedelta(days=lookback_days)
     session = get_cassandra_session()
     rows = session.execute(
-        """
-        SELECT asset_id, collected_at, price_usd, currency,
-               change_24h_pct, market_cap_usd, volume_24h_usd, source
-        FROM price_metric_samples
-        WHERE asset_id = %s AND collected_at >= %s
-        LIMIT %s
-        """,
+        PriceMetricsStmts.LIST_SAMPLES,
         (asset_id.strip().lower(), cutoff, cap),
     )
     items: list[PriceSampleRow] = []
@@ -71,15 +63,11 @@ def list_recent_samples(
 
 def save_brief(brief: PriceMetricsBrief) -> None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PriceMetricsStmts
 
     session = get_cassandra_session()
     session.execute(
-        """
-        INSERT INTO price_metrics_brief (
-          asset_id, prepared_at, asset_name, currency, current_price_usd,
-          change_24h_pct, sample_count_24h, sample_count_7d, mistral_context
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+        PriceMetricsStmts.INSERT_BRIEF,
         (
             brief.asset_id,
             brief.prepared_at,
@@ -96,16 +84,11 @@ def save_brief(brief: PriceMetricsBrief) -> None:
 
 def load_brief(asset_id: str) -> PriceMetricsBrief | None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PriceMetricsStmts
 
     session = get_cassandra_session()
     row = session.execute(
-        """
-        SELECT asset_id, prepared_at, asset_name, currency, current_price_usd,
-               change_24h_pct, sample_count_24h, sample_count_7d, mistral_context
-        FROM price_metrics_brief
-        WHERE asset_id = %s
-        """,
-        (asset_id.strip().lower(),),
+        PriceMetricsStmts.GET_BRIEF, (asset_id.strip().lower(),)
     ).one()
     if row is None:
         return None

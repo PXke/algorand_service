@@ -51,10 +51,10 @@ def _admin_category_for_domain(url: str) -> str | None:
         return None
     try:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import DomainTrackingStmts
 
         row = get_cassandra_session().execute(
-            "SELECT metadata FROM domain_tracking WHERE domain = %s",
-            (host,),
+            DomainTrackingStmts.GET_METADATA, (host,)
         ).one()
     except Exception:
         return None

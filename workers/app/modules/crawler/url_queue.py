@@ -65,6 +65,7 @@ def enqueue_url(
     """Enqueue a URL for web crawling. Returns (queue_id, created). Skips duplicate pending URLs."""
     from app.core.cassandra import get_cassandra_session
     from app.core.config import URL_QUEUE_ENABLED
+    from app.core.statements import UrlQueueStmts
 
     if not URL_QUEUE_ENABLED:
         return "", False
@@ -78,14 +79,10 @@ def enqueue_url(
         return "", False
 
     session = get_cassandra_session()
-    existing = session.execute(
-        "SELECT queue_id, status FROM url_queue_by_url WHERE url = %s",
-        (normalized,),
-    ).one()
+    existing = session.execute(UrlQueueStmts.BY_URL, (normalized,)).one()
     if existing is not None:
         row = session.execute(
-            "SELECT status FROM url_queue WHERE queue_id = %s",
-            (existing.queue_id,),
+            UrlQueueStmts.GET_STATUS, (existing.queue_id,)
         ).one()
         if row and str(row.status) == "pending":
             return str(existing.queue_id), False
@@ -96,26 +93,12 @@ def enqueue_url(
     meta = dict(metadata or {})
 
     session.execute(
-        """
-        INSERT INTO url_queue (
-          queue_id, url, source, priority, enqueued_at, status, metadata
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """,
+        UrlQueueStmts.INSERT,
         (queue_id, normalized, source, priority, now, status, meta),
     )
+    session.execute(UrlQueueStmts.INSERT_BY_URL, (normalized, queue_id, now))
     session.execute(
-        """
-        INSERT INTO url_queue_by_url (url, queue_id, enqueued_at)
-        VALUES (%s, %s, %s)
-        """,
-        (normalized, queue_id, now),
-    )
-    session.execute(
-        """
-        INSERT INTO url_queue_pending (
-          status, priority, enqueued_at, queue_id, url, source
-        ) VALUES (%s, %s, %s, %s, %s, %s)
-        """,
+        UrlQueueStmts.INSERT_PENDING,
         (status, priority, now, queue_id, normalized, source),
     )
     return str(queue_id), True
@@ -125,39 +108,23 @@ def dequeue_url() -> dict[str, Any] | None:
     """Pop highest-priority pending URL and mark it processing."""
     from app.core.cassandra import get_cassandra_session
     from app.core.config import URL_QUEUE_ENABLED
+    from app.core.statements import UrlQueueStmts
 
     if not URL_QUEUE_ENABLED:
         return None
 
     session = get_cassandra_session()
-    row = session.execute(
-        """
-        SELECT queue_id, url, source, priority, enqueued_at
-        FROM url_queue_pending
-        WHERE status = %s
-        LIMIT 1
-        """,
-        ("pending",),
-    ).one()
+    row = session.execute(UrlQueueStmts.PEEK_PENDING, ("pending",)).one()
     if row is None:
         return None
 
     queue_id = row.queue_id
+    session.execute(UrlQueueStmts.UPDATE_STATUS, ("processing", queue_id))
     session.execute(
-        "UPDATE url_queue SET status = %s WHERE queue_id = %s",
-        ("processing", queue_id),
-    )
-    session.execute(
-        """
-        DELETE FROM url_queue_pending
-        WHERE status = %s AND priority = %s AND enqueued_at = %s AND queue_id = %s
-        """,
+        UrlQueueStmts.DELETE_PENDING,
         ("pending", row.priority, row.enqueued_at, queue_id),
     )
-    detail = session.execute(
-        "SELECT metadata FROM url_queue WHERE queue_id = %s",
-        (queue_id,),
-    ).one()
+    detail = session.execute(UrlQueueStmts.GET_METADATA, (queue_id,)).one()
     meta = dict(detail.metadata or {}) if detail is not None else {}
     return {
         "queue_id": str(queue_id),
@@ -170,24 +137,20 @@ def dequeue_url() -> dict[str, Any] | None:
 
 def mark_url_done(queue_id: str, *, status: str = "done") -> None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import UrlQueueStmts
 
     session = get_cassandra_session()
     try:
         qid = uuid.UUID(queue_id)
     except ValueError:
         return
-    session.execute(
-        "UPDATE url_queue SET status = %s WHERE queue_id = %s",
-        (status, qid),
-    )
+    session.execute(UrlQueueStmts.UPDATE_STATUS, (status, qid))
 
 
 def pending_url_count() -> int:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import UrlQueueStmts
 
     session = get_cassandra_session()
-    rows = session.execute(
-        "SELECT queue_id FROM url_queue_pending WHERE status = %s LIMIT 10000",
-        ("pending",),
-    )
+    rows = session.execute(UrlQueueStmts.LIST_PENDING_IDS, ("pending",))
     return sum(1 for _ in rows)

@@ -638,14 +638,10 @@ def recompose_review(review_id: str) -> dict[str, str]:
     except ValueError:
         return {"status": "error", "reason": "bad_review_id"}
 
+    from app.core.statements import ClassifierReviewStmts
+
     session = get_cassandra_session()
-    row = session.execute(
-        """
-        SELECT url, page_text, page_title, category, storage_score, metadata
-        FROM classifier_review_queue WHERE review_id = %s
-        """,
-        (rid,),
-    ).one()
+    row = session.execute(ClassifierReviewStmts.GET_FOR_PUBLISH, (rid,)).one()
     if row is None:
         return {"status": "error", "reason": "review_not_found"}
 

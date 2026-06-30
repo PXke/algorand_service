@@ -20,12 +20,10 @@ def load_official_channel_ids(kind: str) -> set[str]:
     values: set[str] = set()
     try:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import OfficialChannelStmts
 
         session = get_cassandra_session()
-        rows = session.execute(
-            "SELECT channel_id FROM official_channels WHERE kind = %s",
-            (kind,),
-        )
+        rows = session.execute(OfficialChannelStmts.BY_KIND, (kind,))
         values = {str(row.channel_id).strip().lower() for row in rows if row.channel_id}
     except Exception:
         return cached[1] if cached else set()

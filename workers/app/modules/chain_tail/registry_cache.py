@@ -17,14 +17,10 @@ class ServiceEntry:
 @lru_cache(maxsize=1)
 def load_enabled_services() -> tuple[ServiceEntry, ...]:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ServiceRegistryStmts
 
     session = get_cassandra_session()
-    rows = session.execute(
-        """
-        SELECT service_id, display_name, match_kind, match_value, scrape_url, enabled
-        FROM service_registry
-        """
-    )
+    rows = session.execute(ServiceRegistryStmts.LIST_ALL)
     entries: list[ServiceEntry] = []
     for row in rows:
         if not row.enabled:

@@ -18,6 +18,7 @@ class ArticleVersionRow:
 
 def next_version_number(article_id: str) -> int:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleVersionStmts
 
     try:
         aid = UUID(article_id)
@@ -25,15 +26,7 @@ def next_version_number(article_id: str) -> int:
         return 1
     session = get_cassandra_session()
     try:
-        row = session.execute(
-            """
-            SELECT version FROM article_versions
-            WHERE article_id = %s
-            ORDER BY version DESC
-            LIMIT 1
-            """,
-            (aid,),
-        ).one()
+        row = session.execute(ArticleVersionStmts.LATEST, (aid,)).one()
     except Exception:
         return 1
     if row is None or row.version is None:
@@ -51,17 +44,14 @@ def save_article_version(
     editor: str = "agent",
 ) -> int:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleVersionStmts
 
     version = next_version_number(article_id)
     aid = UUID(article_id)
     now = datetime.now(tz=UTC)
     session = get_cassandra_session()
     session.execute(
-        """
-        INSERT INTO article_versions (
-          article_id, version, title, summary, body, edit_reason, editor, edited_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+        ArticleVersionStmts.INSERT,
         (aid, version, title, summary, body, edit_reason, editor, now),
     )
     return version
@@ -69,6 +59,7 @@ def save_article_version(
 
 def list_article_versions(article_id: str, *, limit: int = 20) -> list[ArticleVersionRow]:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleVersionStmts
 
     try:
         aid = UUID(article_id)
@@ -76,15 +67,7 @@ def list_article_versions(article_id: str, *, limit: int = 20) -> list[ArticleVe
         return []
     session = get_cassandra_session()
     try:
-        rows = session.execute(
-            """
-            SELECT version, title, summary, body, edit_reason, editor, edited_at
-            FROM article_versions
-            WHERE article_id = %s
-            LIMIT %s
-            """,
-            (aid, limit),
-        )
+        rows = session.execute(ArticleVersionStmts.LIST, (aid, limit))
     except Exception:
         return []
     out: list[ArticleVersionRow] = []

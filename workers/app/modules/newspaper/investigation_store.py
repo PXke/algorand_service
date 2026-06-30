@@ -16,13 +16,10 @@ def load_investigation_trace(service_id: str, *, limit: int = 25) -> str:
         return ""
     try:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import InvestigationStmts
 
         session = get_cassandra_session()
-        rows = session.execute(
-            "SELECT tool, arguments, result_json FROM investigation_findings "
-            "WHERE service_id = %s LIMIT %s",
-            (service_id, limit),
-        )
+        rows = session.execute(InvestigationStmts.LIST, (service_id, limit))
         lines = [
             f"{r.tool}({r.arguments}) -> {r.result_json}"
             for r in rows
@@ -44,17 +41,14 @@ def store_investigation_findings(
         from cassandra.util import uuid_from_time
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import InvestigationStmts
 
         session = get_cassandra_session()
         now = datetime.now(tz=UTC)
         n = 0
         for entry in trace[:25]:
             session.execute(
-                """
-                INSERT INTO investigation_findings (
-                  service_id, created_at, finding_id, source_url, tool, arguments, result_json
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
+                InvestigationStmts.INSERT,
                 (
                     service_id or "unknown",
                     now,

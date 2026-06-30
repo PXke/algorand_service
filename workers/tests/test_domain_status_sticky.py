@@ -32,8 +32,14 @@ class _FakeSession:
         self._existing = existing_row
         self.inserted = None
 
+    # The statement registry resolves DomainTrackingStmts.* by calling
+    # get_cassandra_session().prepare(cql); return the CQL text so execute() can
+    # still branch on it (SELECT vs INSERT).
+    def prepare(self, cql):
+        return cql
+
     def execute(self, query, params=None):
-        q = " ".join(query.split())
+        q = " ".join(str(query).split())
         if q.startswith("SELECT"):
             return _Result(self._existing)
         if q.startswith("INSERT INTO domain_tracking"):
@@ -45,6 +51,9 @@ def _patch(monkeypatch, fake):
     import app.core.cassandra as c
 
     monkeypatch.setattr(c, "get_cassandra_session", lambda: fake)
+    # The registry caches prepared statements by CQL via prepare_cached's
+    # lru_cache; clear it so each test's fake session is the one that "prepares".
+    c.prepare_cached.cache_clear()
 
 
 # Positions in the INSERT params tuple.

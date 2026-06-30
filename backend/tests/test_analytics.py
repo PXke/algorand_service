@@ -193,25 +193,32 @@ def test_record_session_new_then_returning(monkeypatch) -> None:
     bumps: list = []
 
     class _Sess:
+        # `prepare` lets the statement registry resolve AnalyticsStmts.SESSION_BUMP
+        # (the descriptor calls get_cassandra_session().prepare(cql)); the resolved
+        # statement is ignored by execute_async, which just records the params.
+        def prepare(self, cql):
+            return cql
+
         def execute_async(self, stmt, params):
             bumps.append(params)  # (day, vtype)
 
     sess = _Sess()
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: sess)
     day = "2026-06-27"
 
     # First hit -> a new session, classified 'new'.
-    a.record_session(sess, lambda cql: cql, "8.8.8.8", "Mozilla/5.0", day)
+    a.record_session(sess, "8.8.8.8", "Mozilla/5.0", day)
     assert bumps == [(day, "new")]
 
     # Second hit while the 30-min window lives -> same session, no new bump.
-    a.record_session(sess, lambda cql: cql, "8.8.8.8", "Mozilla/5.0", day)
+    a.record_session(sess, "8.8.8.8", "Mozilla/5.0", day)
     assert len(bumps) == 1
 
     # Session window expires (drop sess:) but the seen: marker persists ->
     # the next visit is a returning session.
     token = a._uv_token("8.8.8.8", "Mozilla/5.0").hex()
     del fake.store[f"{a._SESSION_PREFIX}{token}"]
-    a.record_session(sess, lambda cql: cql, "8.8.8.8", "Mozilla/5.0", day)
+    a.record_session(sess, "8.8.8.8", "Mozilla/5.0", day)
     assert bumps[-1] == (day, "returning")
 
 
@@ -221,7 +228,7 @@ def test_record_session_skips_without_ip(monkeypatch) -> None:
         raise AssertionError("must not touch Redis")
 
     monkeypatch.setattr(a, "_uv_redis", _boom)
-    a.record_session(None, lambda cql: cql, None, "Mozilla/5.0", "2026-06-27")
+    a.record_session(None, None, "Mozilla/5.0", "2026-06-27")
 
 
 def test_is_bot_flags_internet_scanners() -> None:

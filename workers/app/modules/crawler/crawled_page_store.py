@@ -99,6 +99,7 @@ def upsert_crawled_page(
     crawled_at: datetime | None = None,
 ) -> CrawledPageRecord:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import CrawledPageStmts
 
     now = crawled_at or datetime.now(tz=UTC)
     domain = _normalize_domain(url)
@@ -109,12 +110,7 @@ def upsert_crawled_page(
 
     session = get_cassandra_session()
     session.execute(
-        """
-        INSERT INTO crawled_pages_by_id (
-          page_id, url, domain, title, description, body, service_id, source,
-          keywords, classifier_score, crawled_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+        CrawledPageStmts.INSERT_BY_ID,
         (
             page_uuid,
             url,
@@ -130,11 +126,7 @@ def upsert_crawled_page(
         ),
     )
     session.execute(
-        """
-        INSERT INTO crawled_pages_by_domain (
-          domain, crawled_at, page_id, url, title, description, service_id, source, keywords
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+        CrawledPageStmts.INSERT_BY_DOMAIN,
         (
             domain,
             now,
@@ -166,6 +158,7 @@ def crawled_page_count_for_url(url: str) -> int:
     """Pages already harvested for the URL's domain (single-partition COUNT).
     Used to front-load a new domain's initial harvest at high priority."""
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import CrawledPageStmts
 
     domain = _normalize_domain(url)
     if not domain:
@@ -173,8 +166,7 @@ def crawled_page_count_for_url(url: str) -> int:
     try:
         session = get_cassandra_session()
         row = session.execute(
-            "SELECT COUNT(*) AS c FROM crawled_pages_by_domain WHERE domain = %s",
-            (domain,),
+            CrawledPageStmts.COUNT_BY_DOMAIN, (domain,)
         ).one()
         return int(row.c) if row and row.c is not None else 0
     except Exception:

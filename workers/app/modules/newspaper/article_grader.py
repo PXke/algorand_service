@@ -111,10 +111,8 @@ def _recent_articles(limit: int = 60) -> list[_Recent]:
     if (time.monotonic() - float(_RECENT_CACHE["at"])) < _RECENT_TTL_SECONDS and _RECENT_CACHE["rows"]:
         return _RECENT_CACHE["rows"]  # type: ignore[return-value]
 
-    from app.core.cassandra import get_cassandra_session
     from app.modules.newspaper.view_counts import get_views_bulk
 
-    session = get_cassandra_session()
     now = datetime.now(tz=UTC)
     # Cover the full age-decay horizon (~10 weeks) so older near-duplicates are
     # SEEN and tapered by age, rather than hard-cut by a too-short month window.
@@ -123,14 +121,16 @@ def _recent_articles(limit: int = 60) -> list[_Recent]:
     for _ in range(4):  # current + 3 prior months spans 70+ days in all cases
         buckets.add(cursor.strftime("%Y-%m"))
         cursor = (cursor - timedelta(days=1)).replace(day=1)
+    from app.core.cassandra import execute_parallel_with_args
+    from app.core.statements import FeedStmts
+
     rows: list = []
-    for bucket in buckets:
-        rows.extend(
-            session.execute(
-                "SELECT article_id, title, tags, published_at FROM articles_feed WHERE bucket=%s",
-                (bucket,),
-            )
-        )
+    # Fan the per-month bucket reads out concurrently rather than serially.
+    for ok, page in execute_parallel_with_args(
+        FeedStmts.BY_BUCKET_RECENT, [(bucket,) for bucket in buckets]
+    ):
+        if ok:
+            rows.extend(page)
     rows = rows[:limit]
     views = get_views_bulk([str(r.article_id) for r in rows]) if rows else {}
 
@@ -348,7 +348,11 @@ def grade_article_draft(
     if novelty_score < 0.5:
         issues.append("low novelty — very close to a recent article; add a fresh angle or skip")
     if recency_score < 0.4:
-        issues.append("stale — the most recent date in the text is old; needs a current hook")
+        issues.append(
+            "stale — source/event is old with no current-month hook; frame as a "
+            "status update (not breaking news), avoid future-tense for the current "
+            "year, and anchor with live chain metrics (TVL, node counts) you fetched"
+        )
     if relevance_score < 0.4:
         issues.append("weak Algorand relevance — tie it more directly to Algorand")
     issues.extend(f"structure — {h.name}: {h.observed}" for h in struct if not h.passed)

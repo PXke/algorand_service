@@ -24,11 +24,11 @@ def _has_pending_classifier_review() -> bool:
 def _has_pending_feed_release() -> bool:
     from app.core import config
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PendingFeedStmts
 
     bucket = getattr(config, "NEWS_FEED_BUCKET", "main") or "main"
     row = get_cassandra_session().execute(
-        "SELECT article_id FROM pending_feed_queue WHERE bucket = %s LIMIT 1",
-        (bucket,),
+        PendingFeedStmts.PEEK_ID, (bucket,)
     ).one()
     return row is not None
 

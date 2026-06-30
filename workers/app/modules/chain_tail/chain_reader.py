@@ -16,12 +16,10 @@ class RoundTransaction:
 
 def get_conduit_head_round() -> int | None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ChainStmts
 
     session = get_cassandra_session()
-    row = session.execute(
-        "SELECT value FROM conduit_meta WHERE id = %s",
-        ("last_ingested_round",),
-    ).one()
+    row = session.execute(ChainStmts.CONDUIT_HEAD, ("last_ingested_round",)).one()
     if row is None:
         return None
     return int(row.value)
@@ -46,16 +44,10 @@ def get_algod_head_round() -> int:
 
 def list_transactions_for_round(round_num: int) -> list[RoundTransaction]:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ChainStmts
 
     session = get_cassandra_session()
-    rows = session.execute(
-        """
-        SELECT txid, round, sender, txn_type, txn_json, receiver, amount_microalgos
-        FROM transactions_by_round
-        WHERE round = %s
-        """,
-        (round_num,),
-    )
+    rows = session.execute(ChainStmts.TXNS_BY_ROUND, (round_num,))
     items: list[RoundTransaction] = []
     for row in rows:
         items.append(

@@ -16,6 +16,7 @@ def enqueue_classifier_review(
     metadata: dict[str, str] | None = None,
 ) -> str:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ClassifierReviewStmts
 
     review_id = uuid.uuid4()
     now = datetime.now(tz=UTC)
@@ -23,12 +24,7 @@ def enqueue_classifier_review(
     meta = json.dumps(metadata or {}, separators=(",", ":"))
     session = get_cassandra_session()
     session.execute(
-        """
-        INSERT INTO classifier_review_queue (
-          review_id, url, page_text, page_title, category,
-          storage_score, status, created_at, metadata
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+        ClassifierReviewStmts.INSERT_QUEUE,
         (
             review_id,
             url,
@@ -42,11 +38,7 @@ def enqueue_classifier_review(
         ),
     )
     session.execute(
-        """
-        INSERT INTO classifier_review_pending (
-          status, created_at, review_id, url, category
-        ) VALUES (%s, %s, %s, %s, %s)
-        """,
+        ClassifierReviewStmts.INSERT_PENDING,
         (status, now, review_id, url, category),
     )
     return str(review_id)
@@ -55,10 +47,10 @@ def enqueue_classifier_review(
 def count_pending_reviews(*, scan_limit: int = 500) -> int:
     """Number of items currently awaiting admin classification."""
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ClassifierReviewStmts
 
     rows = get_cassandra_session().execute(
-        "SELECT review_id FROM classifier_review_pending WHERE status = %s LIMIT %s",
-        ("pending", scan_limit),
+        ClassifierReviewStmts.COUNT_PENDING, ("pending", scan_limit)
     )
     return sum(1 for _ in rows)
 
@@ -73,43 +65,31 @@ def has_pending_review_for_url(url: str, *, scan_limit: int = 500) -> bool:
     """True when a pending review already covers this URL (dedupe guard so a
     fast-changing source doesn't pile up one held article per crawl cycle)."""
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ClassifierReviewStmts
 
     session = get_cassandra_session()
     rows = session.execute(
-        """
-        SELECT url FROM classifier_review_pending
-        WHERE status = %s
-        LIMIT %s
-        """,
-        ("pending", scan_limit),
+        ClassifierReviewStmts.LIST_PENDING_URLS, ("pending", scan_limit)
     )
     normalized = url.strip().rstrip("/")
     return any((row.url or "").strip().rstrip("/") == normalized for row in rows)
 
 
 def list_pending_reviews(*, limit: int = 50) -> list[dict[str, Any]]:
-    from app.core.cassandra import get_cassandra_session
+    from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
+    from app.core.statements import ClassifierReviewStmts
 
     session = get_cassandra_session()
-    rows = session.execute(
-        """
-        SELECT review_id, url, category, created_at
-        FROM classifier_review_pending
-        WHERE status = %s
-        LIMIT %s
-        """,
-        ("pending", limit),
+    pending = list(
+        session.execute(ClassifierReviewStmts.LIST_PENDING, ("pending", limit))
+    )
+    # Fan the per-row detail lookups out concurrently (aligned with `pending`).
+    details = execute_parallel_with_args(
+        ClassifierReviewStmts.GET_DETAIL, [(row.review_id,) for row in pending]
     )
     items: list[dict[str, Any]] = []
-    for row in rows:
-        detail = session.execute(
-            """
-            SELECT review_id, url, page_title, page_text, category, storage_score, metadata
-            FROM classifier_review_queue
-            WHERE review_id = %s
-            """,
-            (row.review_id,),
-        ).one()
+    for _row, (ok, result) in zip(pending, details, strict=True):
+        detail = result.one() if ok else None
         if detail is None:
             continue
         article_id = ""
@@ -153,16 +133,10 @@ def complete_classifier_review(
     except ValueError:
         return False
 
+    from app.core.statements import ClassifierReviewStmts
+
     session = get_cassandra_session()
-    row = session.execute(
-        """
-        SELECT review_id, url, page_text, page_title, category, storage_score,
-               status, created_at, metadata
-        FROM classifier_review_queue
-        WHERE review_id = %s
-        """,
-        (rid,),
-    ).one()
+    row = session.execute(ClassifierReviewStmts.GET_FULL, (rid,)).one()
     if row is None:
         return False
 
@@ -171,12 +145,7 @@ def complete_classifier_review(
         created = created.replace(tzinfo=UTC)
 
     session.execute(
-        """
-        INSERT INTO classifier_review_queue (
-          review_id, url, page_text, page_title, category,
-          storage_score, status, created_at, metadata
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+        ClassifierReviewStmts.INSERT_QUEUE,
         (
             rid,
             row.url,
@@ -191,10 +160,7 @@ def complete_classifier_review(
     )
     if created is not None:
         session.execute(
-            """
-            DELETE FROM classifier_review_pending
-            WHERE status = %s AND created_at = %s AND review_id = %s
-            """,
+            ClassifierReviewStmts.DELETE_PENDING,
             ("pending", created, rid),
         )
     return True

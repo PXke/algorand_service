@@ -364,30 +364,18 @@ def drain_approved_feed_queue() -> dict[str, object]:
     if not due:
         return {"status": "skipped", "reason": f"min_gap ({remaining}s remaining)", "published": 0}
 
+    from app.core.statements import ArticleStmts, FeedStmts, PendingFeedStmts
+
     session = get_cassandra_session()
     bucket = getattr(cfg, "NEWS_FEED_BUCKET", "main") or "main"
     # One per run — the min-gap pacing keeps releases at most one per hour.
-    rows = list(
-        session.execute(
-            "SELECT bucket, interest_score, approved_at, article_id FROM pending_feed_queue "
-            "WHERE bucket = %s LIMIT 1",
-            (bucket,),
-        )
-    )
+    rows = list(session.execute(PendingFeedStmts.PEEK, (bucket,)))
     published = 0
     for r in rows:
-        art = session.execute(
-            "SELECT article_id, service_id, title, summary, published_at, tags "
-            "FROM articles_by_id WHERE article_id = %s",
-            (r.article_id,),
-        ).one()
+        art = session.execute(ArticleStmts.GET_FOR_FEED, (r.article_id,)).one()
         if art is not None:
             session.execute(
-                """
-                INSERT INTO articles_feed (
-                  bucket, published_at, article_id, service_id, title, summary, tags
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
+                FeedStmts.INSERT_BASIC,
                 (
                     _feed_month(art.published_at or datetime.now(tz=UTC)),
                     art.published_at or datetime.now(tz=UTC),
@@ -401,8 +389,7 @@ def drain_approved_feed_queue() -> dict[str, object]:
             published += 1
             record_feed_release()
         session.execute(
-            "DELETE FROM pending_feed_queue WHERE bucket = %s AND interest_score = %s "
-            "AND approved_at = %s AND article_id = %s",
+            PendingFeedStmts.DELETE,
             (r.bucket, r.interest_score, r.approved_at, r.article_id),
         )
     return {"status": "ok", "published": published, "slots": slots}

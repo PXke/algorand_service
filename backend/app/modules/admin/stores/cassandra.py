@@ -71,6 +71,7 @@ class AdminCassandraStore:
 
     def _save_version_snapshot(self, article: StoredArticle, *, editor: str) -> None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ArticleVersionStmts
 
         try:
             aid = UUID(article.article_id)
@@ -79,13 +80,7 @@ class AdminCassandraStore:
         session = get_cassandra_session()
         version = 1
         try:
-            row = session.execute(
-                """
-                SELECT version FROM article_versions
-                WHERE article_id = %s ORDER BY version DESC LIMIT 1
-                """,
-                (aid,),
-            ).one()
+            row = session.execute(ArticleVersionStmts.LATEST, (aid,)).one()
             if row and row.version is not None:
                 version = int(row.version) + 1
         except Exception:
@@ -93,12 +88,7 @@ class AdminCassandraStore:
         now = datetime.now(tz=UTC)
         try:
             session.execute(
-                """
-                INSERT INTO article_versions (
-                  article_id, version, title, summary, body,
-                  edit_reason, editor, edited_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """,
+                ArticleVersionStmts.INSERT,
                 (
                     aid,
                     version,
@@ -123,6 +113,7 @@ class AdminCassandraStore:
         tag_extra: str = "",
     ) -> None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ArticleStmts, FeedStmts
 
         aid = UUID(current.article_id)
         published_at = datetime.fromtimestamp(current.published_at_epoch, tz=UTC)
@@ -131,20 +122,11 @@ class AdminCassandraStore:
             tags.append(tag_extra)
         session = get_cassandra_session()
         session.execute(
-            """
-            UPDATE articles_by_id
-            SET title = %s, summary = %s, body = %s, tags = %s
-            WHERE article_id = %s
-            """,
+            ArticleStmts.UPDATE_CONTENT,
             (title, summary, body, tags, aid),
         )
         session.execute(
-            """
-            INSERT INTO articles_feed (
-              bucket, published_at, article_id, service_id, title, summary, tags,
-              image_url, source_url
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            FeedStmts.INSERT_FULL,
             (
                 feed_month(published_at),
                 published_at,
@@ -164,6 +146,12 @@ class AdminCassandraStore:
             return False
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import (
+            ArticleMatchStmts,
+            ArticleStmts,
+            ArticleVersionStmts,
+            FeedStmts,
+        )
 
         try:
             aid = UUID(article_id)
@@ -173,66 +161,40 @@ class AdminCassandraStore:
         session = get_cassandra_session()
 
         # Exact stored timestamp -> its month bucket -> precise feed-row delete.
-        ts_row = session.execute(
-            "SELECT published_at FROM articles_by_id WHERE article_id = %s",
-            (aid,),
-        ).one()
+        ts_row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
         if ts_row is not None and ts_row.published_at is not None:
             session.execute(
-                """
-                DELETE FROM articles_feed
-                WHERE bucket = %s AND published_at = %s AND article_id = %s
-                """,
+                FeedStmts.DELETE,
                 (feed_month(ts_row.published_at), ts_row.published_at, aid),
             )
 
         try:
-            match_rows = session.execute(
-                """
-                SELECT key_type, key_value FROM article_match_keys_by_article
-                WHERE article_id = %s
-                """,
-                (aid,),
-            )
+            match_rows = session.execute(ArticleMatchStmts.LIST_BY_ARTICLE, (aid,))
             for row in match_rows:
                 session.execute(
-                    """
-                    DELETE FROM article_match_keys
-                    WHERE key_type = %s AND key_value = %s AND article_id = %s
-                    """,
+                    ArticleMatchStmts.DELETE_KEY,
                     (row.key_type, row.key_value, aid),
                 )
                 session.execute(
-                    """
-                    DELETE FROM article_match_keys_by_article
-                    WHERE article_id = %s AND key_type = %s AND key_value = %s
-                    """,
+                    ArticleMatchStmts.DELETE_KEY_BY_ARTICLE,
                     (aid, row.key_type, row.key_value),
                 )
         except Exception:
             pass
 
         try:
-            version_rows = session.execute(
-                "SELECT version FROM article_versions WHERE article_id = %s",
-                (aid,),
-            )
+            version_rows = session.execute(ArticleVersionStmts.LIST_VERSIONS, (aid,))
             for row in version_rows:
-                session.execute(
-                    "DELETE FROM article_versions WHERE article_id = %s AND version = %s",
-                    (aid, row.version),
-                )
+                session.execute(ArticleVersionStmts.DELETE, (aid, row.version))
         except Exception:
             pass
 
-        session.execute(
-            "DELETE FROM articles_by_id WHERE article_id = %s",
-            (aid,),
-        )
+        session.execute(ArticleStmts.DELETE, (aid,))
         return True
 
     def list_versions(self, article_id: str, *, limit: int = 20) -> list[dict]:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ArticleVersionStmts
 
         try:
             aid = UUID(article_id)
@@ -240,13 +202,7 @@ class AdminCassandraStore:
             return []
         session = get_cassandra_session()
         try:
-            rows = session.execute(
-                """
-                SELECT version, title, summary, edit_reason, editor, edited_at
-                FROM article_versions WHERE article_id = %s LIMIT %s
-                """,
-                (aid, limit),
-            )
+            rows = session.execute(ArticleVersionStmts.LIST, (aid, limit))
         except Exception:
             return []
         out = []
@@ -274,17 +230,13 @@ class AdminCassandraStore:
         wallet_address: str,
     ) -> dict:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import EditorialBriefStmts
 
         brief_id = uuid.uuid4()
         now = datetime.now(tz=UTC)
         session = get_cassandra_session()
         session.execute(
-            """
-            INSERT INTO editorial_briefs (
-              brief_id, title, body_markdown, keywords, status,
-              wallet_address, created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            EditorialBriefStmts.INSERT,
             (
                 brief_id,
                 title,
@@ -305,16 +257,11 @@ class AdminCassandraStore:
 
     def list_briefs(self, *, limit: int = 50) -> list[dict]:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import EditorialBriefStmts
 
         session = get_cassandra_session()
         try:
-            rows = session.execute(
-                """
-                SELECT brief_id, title, keywords, status, wallet_address, created_at, updated_at
-                FROM editorial_briefs LIMIT %s
-                """,
-                (limit,),
-            )
+            rows = session.execute(EditorialBriefStmts.LIST, (limit,))
         except Exception:
             return []
         items = []
@@ -334,20 +281,14 @@ class AdminCassandraStore:
 
     def get_brief(self, brief_id: str) -> dict | None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import EditorialBriefStmts
 
         try:
             bid = UUID(brief_id)
         except ValueError:
             return None
         session = get_cassandra_session()
-        row = session.execute(
-            """
-            SELECT brief_id, title, body_markdown, keywords, status,
-                   wallet_address, created_at, updated_at
-            FROM editorial_briefs WHERE brief_id = %s
-            """,
-            (bid,),
-        ).one()
+        row = session.execute(EditorialBriefStmts.GET, (bid,)).one()
         if row is None:
             return None
         created = row.created_at
@@ -365,25 +306,16 @@ class AdminCassandraStore:
 
     def list_official_channels(self, *, kind: str | None = None, limit: int = 200) -> list[dict]:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import OfficialChannelStmts
 
         session = get_cassandra_session()
         try:
             if kind:
                 rows = session.execute(
-                    """
-                    SELECT kind, channel_id, label, added_by, created_at
-                    FROM official_channels WHERE kind = %s LIMIT %s
-                    """,
-                    (kind, limit),
+                    OfficialChannelStmts.LIST_BY_KIND, (kind, limit)
                 )
             else:
-                rows = session.execute(
-                    """
-                    SELECT kind, channel_id, label, added_by, created_at
-                    FROM official_channels LIMIT %s
-                    """,
-                    (limit,),
-                )
+                rows = session.execute(OfficialChannelStmts.LIST_ALL, (limit,))
         except Exception:
             return []
         items = []
@@ -409,14 +341,12 @@ class AdminCassandraStore:
         added_by: str,
     ) -> dict:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import OfficialChannelStmts
 
         session = get_cassandra_session()
         now = datetime.now(tz=UTC)
         session.execute(
-            """
-            INSERT INTO official_channels (kind, channel_id, label, added_by, created_at)
-            VALUES (%s, %s, %s, %s, %s)
-            """,
+            OfficialChannelStmts.INSERT,
             (kind, channel_id, label, added_by, now),
         )
         return {
@@ -429,12 +359,10 @@ class AdminCassandraStore:
 
     def delete_official_channel(self, *, kind: str, channel_id: str) -> None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import OfficialChannelStmts
 
         session = get_cassandra_session()
-        session.execute(
-            "DELETE FROM official_channels WHERE kind = %s AND channel_id = %s",
-            (kind, channel_id),
-        )
+        session.execute(OfficialChannelStmts.DELETE, (kind, channel_id))
 
     def _grade_meta_for_review(self, review_id: str) -> dict[str, str]:
         """Pull the article grade + subscores from a review item so they're
@@ -442,15 +370,13 @@ class AdminCassandraStore:
         import json
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ClassifierReviewStmts
 
         out: dict[str, str] = {}
         try:
             row = (
                 get_cassandra_session()
-                .execute(
-                    "SELECT metadata FROM classifier_review_queue WHERE review_id = %s",
-                    (UUID(review_id),),
-                )
+                .execute(ClassifierReviewStmts.GET_METADATA, (UUID(review_id),))
                 .one()
             )
             raw = dict(row.metadata or {}).get("raw") if row else None
@@ -472,14 +398,11 @@ class AdminCassandraStore:
         `graded_*` are rows that captured grade dimensions (only since the capture
         was added) — those are what the learned grader trains on."""
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ClassifierFeedbackStmts
 
         session = get_cassandra_session()
         rows = list(
-            session.execute(
-                "SELECT feedback_id, approved FROM classifier_feedback_by_time "
-                "WHERE bucket = %s LIMIT 5000",
-                ("main",),
-            )
+            session.execute(ClassifierFeedbackStmts.LIST_BY_TIME, ("main",))
         )
         total = len(rows)
         approved = sum(1 for r in rows if r.approved)
@@ -488,13 +411,9 @@ class AdminCassandraStore:
         # up to 400 sequential round-trips (this was the Training tab's slow point).
         from cassandra.concurrent import execute_concurrent_with_args
 
-        from app.core.cassandra import prepare_cached
-
-        detail_stmt = prepare_cached(
-            "SELECT approved, metadata FROM classifier_feedback WHERE feedback_id = ?"
-        )
         for ok, res in execute_concurrent_with_args(
-            session, detail_stmt, [(r.feedback_id,) for r in rows[:400]],
+            session, ClassifierFeedbackStmts.GET_GRADE,
+            [(r.feedback_id,) for r in rows[:400]],
             concurrency=64, raise_on_first_error=False,
         ):
             if not ok:
@@ -590,14 +509,11 @@ class AdminCassandraStore:
                     error_types=[str(t) for t in (error_types or [])],
                     admin_wallet=admin_wallet,
                 )
+        from app.core.statements import ClassifierFeedbackStmts
+
         session = get_cassandra_session()
         session.execute(
-            """
-            INSERT INTO classifier_feedback (
-              feedback_id, url, text_sample, category, predicted_category, quality,
-              predicted_publish, approved, admin_wallet, created_at, metadata
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            ClassifierFeedbackStmts.INSERT,
             (
                 feedback_id,
                 url,
@@ -613,11 +529,7 @@ class AdminCassandraStore:
             ),
         )
         session.execute(
-            """
-            INSERT INTO classifier_feedback_by_time (
-              bucket, created_at, feedback_id, url, approved
-            ) VALUES (%s, %s, %s, %s, %s)
-            """,
+            ClassifierFeedbackStmts.INSERT_BY_TIME,
             ("main", now, feedback_id, url, approved),
         )
         self._apply_classifier_corrections(
@@ -670,6 +582,7 @@ class AdminCassandraStore:
         from cassandra.util import uuid_from_time
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import GatekeeperStmts
 
         # If an article_text was not passed in, snapshot it now from the article.
         if not article_text and article_id:
@@ -682,12 +595,7 @@ class AdminCassandraStore:
         now = datetime.now(tz=UTC)
         anchor_id = uuid_from_time(now)
         get_cassandra_session().execute(
-            """
-            INSERT INTO gatekeeper_anchors (
-              bucket, created_at, anchor_id, article_id, url, source_text,
-              article_text, factuality_fail, tone_fail, error_types, admin_wallet
-            ) VALUES ('main', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            GatekeeperStmts.INSERT_ANCHOR,
             (
                 now, anchor_id, article_id or "", url[:512],
                 (source_text or "")[:8000], (article_text or "")[:8000],
@@ -701,12 +609,9 @@ class AdminCassandraStore:
         """List anchors (newest-first, deduped to the latest tag per article).
         Returns {count, target, items}."""
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import GatekeeperStmts
 
-        rows = get_cassandra_session().execute(
-            "SELECT created_at, anchor_id, article_id, url, factuality_fail, "
-            "tone_fail, error_types FROM gatekeeper_anchors WHERE bucket = 'main' LIMIT %s",
-            (limit,),
-        )
+        rows = get_cassandra_session().execute(GatekeeperStmts.LIST_ANCHORS, (limit,))
         seen: set[str] = set()
         items: list[dict] = []
         for r in rows:
@@ -732,11 +637,9 @@ class AdminCassandraStore:
         import json as _json
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import GatekeeperStmts
 
-        row = get_cassandra_session().execute(
-            "SELECT computed_at, report_json, n_anchors, trusted_count "
-            "FROM gatekeeper_validation_report WHERE bucket = 'main' LIMIT 1"
-        ).one()
+        row = get_cassandra_session().execute(GatekeeperStmts.GET_REPORT).one()
         if row is None or not row.report_json:
             return None
         try:
@@ -805,18 +708,13 @@ class AdminCassandraStore:
         source_relevant: bool = True,
     ) -> None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ArticleStmts, DomainTrackingStmts
 
         domain = self._domain_from_url(url)
         if domain:
             session = get_cassandra_session()
             row = session.execute(
-                """
-                SELECT domain, last_crawled_at, last_online_at, relevance_score,
-                       category, is_relevant, metadata
-                FROM domain_tracking
-                WHERE domain = %s
-                """,
-                (domain,),
+                DomainTrackingStmts.GET_FOR_CORRECTION, (domain,)
             ).one()
             metadata = dict(row.metadata or {}) if row is not None else {}
             metadata["quality"] = quality
@@ -831,12 +729,7 @@ class AdminCassandraStore:
             # spam) marks the domain a dead end.
             domain_relevant = source_relevant and quality != "spam"
             session.execute(
-                """
-                INSERT INTO domain_tracking (
-                  domain, last_crawled_at, last_online_at, relevance_score,
-                  category, is_relevant, metadata, frontier_status
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """,
+                DomainTrackingStmts.INSERT,
                 (
                     domain,
                     row.last_crawled_at if row is not None else datetime.now(tz=UTC),
@@ -856,10 +749,7 @@ class AdminCassandraStore:
         except ValueError:
             return
         session = get_cassandra_session()
-        row = session.execute(
-            "SELECT tags FROM articles_by_id WHERE article_id = %s",
-            (aid,),
-        ).one()
+        row = session.execute(ArticleStmts.GET_TAGS, (aid,)).one()
         if row is None:
             return
         tags = list(row.tags or [])
@@ -873,15 +763,13 @@ class AdminCassandraStore:
             updated = True
         if not updated:
             return
-        session.execute(
-            "UPDATE articles_by_id SET tags = %s WHERE article_id = %s",
-            (tags, aid),
-        )
+        session.execute(ArticleStmts.UPDATE_TAGS, (tags, aid))
 
     def _complete_classifier_review(self, review_id: str, *, resolution: str) -> bool:
         from uuid import UUID
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ClassifierReviewStmts
 
         try:
             rid = UUID(review_id)
@@ -889,25 +777,12 @@ class AdminCassandraStore:
             return False
         session = get_cassandra_session()
         now = datetime.now(tz=UTC)
-        row = session.execute(
-            """
-            SELECT review_id, url, page_text, page_title, category, storage_score,
-                   created_at, metadata
-            FROM classifier_review_queue
-            WHERE review_id = %s
-            """,
-            (rid,),
-        ).one()
+        row = session.execute(ClassifierReviewStmts.GET_FULL, (rid,)).one()
         if row is None:
             return False
         created = row.created_at
         session.execute(
-            """
-            INSERT INTO classifier_review_queue (
-              review_id, url, page_text, page_title, category,
-              storage_score, status, created_at, metadata
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            ClassifierReviewStmts.INSERT_QUEUE,
             (
                 rid,
                 row.url,
@@ -922,10 +797,7 @@ class AdminCassandraStore:
         )
         if created is not None:
             session.execute(
-                """
-                DELETE FROM classifier_review_pending
-                WHERE status = %s AND created_at = %s AND review_id = %s
-                """,
+                ClassifierReviewStmts.DELETE_PENDING,
                 ("pending", created, rid),
             )
         return True
@@ -934,32 +806,20 @@ class AdminCassandraStore:
         from uuid import UUID
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ArticleStmts, FeedStmts
 
         try:
             aid = UUID(article_id)
         except ValueError:
             return False
         session = get_cassandra_session()
-        row = session.execute(
-            """
-            SELECT article_id, service_id, title, summary, published_at, tags,
-                   image_url, source_url
-            FROM articles_by_id
-            WHERE article_id = %s
-            """,
-            (aid,),
-        ).one()
+        row = session.execute(ArticleStmts.GET_FEED_ROW, (aid,)).one()
         if row is None:
             return False
         published_at = row.published_at or datetime.now(tz=UTC)
         tags = list(row.tags or [])
         session.execute(
-            """
-            INSERT INTO articles_feed (
-              bucket, published_at, article_id, service_id, title, summary, tags,
-              image_url, source_url
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            FeedStmts.INSERT_FULL,
             (
                 feed_month(published_at), published_at, aid, row.service_id,
                 row.title, row.summary or "", tags, row.image_url, row.source_url,
@@ -986,14 +846,13 @@ class AdminCassandraStore:
     def _feed_count_today(self, session, bucket: str = "") -> int:
         from datetime import UTC, datetime, timedelta
 
+        from app.core.statements import FeedStmts
+
         day_start = datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         day_end = day_start + timedelta(days=1)
         # Today is always within the current month partition.
         rows = session.execute(
-            """
-            SELECT article_id FROM articles_feed
-            WHERE bucket = %s AND published_at >= %s AND published_at < %s
-            """,
+            FeedStmts.COUNT_TODAY,
             (feed_month(day_start), day_start, day_end),
         )
         return sum(1 for _ in rows)
@@ -1067,6 +926,7 @@ class AdminCassandraStore:
 
         from app.core.cassandra import get_cassandra_session
         from app.core.config import settings
+        from app.core.statements import PendingFeedStmts
 
         session = get_cassandra_session()
         bucket = getattr(settings, "news_feed_bucket", "main") or "main"
@@ -1085,10 +945,7 @@ class AdminCassandraStore:
 
         score = 0.0  # interest unknown here; FIFO within the day is fine
         session.execute(
-            """
-            INSERT INTO pending_feed_queue (bucket, interest_score, approved_at, article_id)
-            VALUES (%s, %s, %s, %s)
-            """,
+            PendingFeedStmts.INSERT,
             (bucket, score, datetime.now(tz=UTC), aid),
         )
         return "queued_daily_cap"
@@ -1098,27 +955,25 @@ class AdminCassandraStore:
         from uuid import UUID
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ArticleStmts
 
         try:
             aid = UUID(article_id)
         except ValueError:
             return
         session = get_cassandra_session()
-        row = session.execute(
-            "SELECT tags FROM articles_by_id WHERE article_id = %s", (aid,)
-        ).one()
+        row = session.execute(ArticleStmts.GET_TAGS, (aid,)).one()
         if row is None:
             return
         tags = list(row.tags or [])
         for c in categories:
             if c and c not in tags:
                 tags.append(c)
-        session.execute(
-            "UPDATE articles_by_id SET tags = %s WHERE article_id = %s", (tags[:12], aid)
-        )
+        session.execute(ArticleStmts.UPDATE_TAGS, (tags[:12], aid))
 
     def list_classifier_reviews(self, *, limit: int = 50, scan_limit: int = 500) -> list[dict]:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ArticleStmts, ClassifierReviewStmts
 
         session = get_cassandra_session()
         try:
@@ -1126,13 +981,7 @@ class AdminCassandraStore:
             # global; the Cassandra clustering order (created_at ASC) is just the
             # scan order, not the display order — see _rank_reviews below.
             rows = session.execute(
-                """
-                SELECT review_id, url, category, created_at
-                FROM classifier_review_pending
-                WHERE status = %s
-                LIMIT %s
-                """,
-                ("pending", scan_limit),
+                ClassifierReviewStmts.LIST_PENDING, ("pending", scan_limit)
             )
         except Exception:
             return []
@@ -1140,21 +989,15 @@ class AdminCassandraStore:
 
         from cassandra.concurrent import execute_concurrent_with_args
 
-        from app.core.cassandra import prepare_cached
-
         review_ids = [row.review_id for row in rows]
         if not review_ids:
             return []
 
         # Phase 1: fetch every queue detail in ONE concurrent batch instead of a
         # sequential SELECT per pending row (was the dominant cost of this tab).
-        detail_stmt = prepare_cached(
-            "SELECT review_id, url, page_title, page_text, category, storage_score, metadata "
-            "FROM classifier_review_queue WHERE review_id = ?"
-        )
         details = []
         for ok, res in execute_concurrent_with_args(
-            session, detail_stmt, [(rid,) for rid in review_ids],
+            session, ClassifierReviewStmts.GET_DETAIL, [(rid,) for rid in review_ids],
             concurrency=64, raise_on_first_error=False,
         ):
             if not ok:
@@ -1210,11 +1053,9 @@ class AdminCassandraStore:
                     pass
         article_by_id: dict[str, object] = {}
         if uuid_args:
-            article_stmt = prepare_cached(
-                "SELECT article_id, title, summary, service_id FROM articles_by_id WHERE article_id = ?"
-            )
             for ok, res in execute_concurrent_with_args(
-                session, article_stmt, uuid_args, concurrency=64, raise_on_first_error=False,
+                session, ArticleStmts.GET_SUMMARY_CARD, uuid_args,
+                concurrency=64, raise_on_first_error=False,
             ):
                 if not ok:
                     continue

@@ -9,6 +9,7 @@ from app.modules.suggestions.models.domain import StoredSuggestion, SuggestionEr
 class CassandraSuggestionStore:
     def insert(self, item: StoredSuggestion) -> None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import SuggestionStmts
 
         if self.has_submission_txid(item.submission_txid):
             raise SuggestionError("duplicate_txid", "submission_txid already used")
@@ -16,11 +17,7 @@ class CassandraSuggestionStore:
         session = get_cassandra_session()
         created_at = datetime.fromtimestamp(item.created_at_epoch, tz=UTC)
         session.execute(
-            """
-            INSERT INTO suggestions_by_status (
-              status, created_at, suggestion_id, wallet_address, title, body, submission_txid
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """,
+            SuggestionStmts.INSERT,
             (
                 item.status,
                 created_at,
@@ -34,17 +31,10 @@ class CassandraSuggestionStore:
 
     def list_open(self) -> list[StoredSuggestion]:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import SuggestionStmts
 
         session = get_cassandra_session()
-        rows = session.execute(
-            """
-            SELECT suggestion_id, wallet_address, title, body, submission_txid, created_at
-            FROM suggestions_by_status
-            WHERE status = %s
-            LIMIT 200
-            """,
-            ("open",),
-        )
+        rows = session.execute(SuggestionStmts.LIST_OPEN, ("open",))
         items: list[StoredSuggestion] = []
         for row in rows:
             created_at = row.created_at
@@ -64,20 +54,14 @@ class CassandraSuggestionStore:
 
     def get(self, suggestion_id: str) -> StoredSuggestion | None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import SuggestionStmts
 
         session = get_cassandra_session()
         try:
             sid = UUID(suggestion_id)
         except ValueError:
             return None
-        rows = session.execute(
-            """
-            SELECT suggestion_id, wallet_address, title, body, submission_txid, created_at, status
-            FROM suggestions_by_status
-            WHERE status = %s AND suggestion_id = %s ALLOW FILTERING
-            """,
-            ("open", sid),
-        )
+        rows = session.execute(SuggestionStmts.GET, ("open", sid))
         row = rows.one()
         if row is None:
             return None
@@ -95,14 +79,8 @@ class CassandraSuggestionStore:
 
     def has_submission_txid(self, submission_txid: str) -> bool:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import SuggestionStmts
 
         session = get_cassandra_session()
-        row = session.execute(
-            """
-            SELECT suggestion_id FROM suggestions_by_status
-            WHERE submission_txid = %s ALLOW FILTERING
-            LIMIT 1
-            """,
-            (submission_txid,),
-        ).one()
+        row = session.execute(SuggestionStmts.HAS_TXID, (submission_txid,)).one()
         return row is not None

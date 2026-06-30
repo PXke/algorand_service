@@ -30,11 +30,10 @@ def run_annotator_validation() -> dict:
 
     try:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import GatekeeperStmts
 
         get_cassandra_session().execute(
-            "INSERT INTO gatekeeper_validation_report "
-            "(bucket, computed_at, report_json, n_anchors, trusted_count) "
-            "VALUES ('main', %s, %s, %s, %s)",
+            GatekeeperStmts.INSERT_REPORT,
             (
                 datetime.now(tz=UTC),
                 json.dumps(summary, separators=(",", ":")),

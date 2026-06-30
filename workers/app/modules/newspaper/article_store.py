@@ -33,21 +33,14 @@ class ArticleDetail:
 
 def get_article(article_id: str) -> ArticleDetail | None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts
 
     session = get_cassandra_session()
     try:
         aid = UUID(article_id)
     except ValueError:
         return None
-    row = session.execute(
-        """
-        SELECT article_id, service_id, title, summary, body,
-               trigger_txid, trigger_round, source_url, published_at
-        FROM articles_by_id
-        WHERE article_id = %s
-        """,
-        (aid,),
-    ).one()
+    row = session.execute(ArticleStmts.GET_BY_ID, (aid,)).one()
     if row is None:
         return None
     published_at = row.published_at
@@ -67,16 +60,14 @@ def get_article(article_id: str) -> ArticleDetail | None:
 
 def article_exists(article_id: str | UUID) -> bool:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts
 
     try:
         aid = article_id if isinstance(article_id, UUID) else UUID(str(article_id))
     except ValueError:
         return False
     session = get_cassandra_session()
-    row = session.execute(
-        "SELECT article_id FROM articles_by_id WHERE article_id = %s",
-        (aid,),
-    ).one()
+    row = session.execute(ArticleStmts.EXISTS, (aid,)).one()
     return row is not None
 
 
@@ -100,21 +91,16 @@ def count_feed_articles_with_tag_on_day(
     """Count today's feed rows that include a given tag (e.g. breaking)."""
     from datetime import UTC, datetime
 
-    from app.core.cassandra import get_cassandra_session
+    from app.core.cassandra import execute_parallel_with_args
+    from app.core.statements import FeedStmts
 
-    session = get_cassandra_session()
+    buckets = list(months_back(datetime.now(tz=UTC), 2))
     rows = []
-    for mbucket in months_back(datetime.now(tz=UTC), 2):
-        page = session.execute(
-            """
-            SELECT published_at, tags
-            FROM articles_feed
-            WHERE bucket = %s
-            LIMIT %s
-            """,
-            (mbucket, limit),
-        )
-        rows.extend(list(page))
+    for ok, page in execute_parallel_with_args(
+        FeedStmts.BY_BUCKET_TAGS, [(mbucket, limit) for mbucket in buckets]
+    ):
+        if ok:
+            rows.extend(list(page))
     needle = tag.strip().lower()
     count = 0
     for row in rows:
@@ -133,23 +119,22 @@ def count_feed_articles_with_tag_on_day(
 def list_feed_articles(*, bucket: str = NEWS_FEED_BUCKET, limit: int = 100) -> list[FeedArticleRow]:
     from datetime import UTC, datetime
 
-    from app.core.cassandra import get_cassandra_session
+    from app.core.cassandra import execute_parallel_with_args
+    from app.core.statements import FeedStmts
 
-    session = get_cassandra_session()
+    # Fan the per-month bucket reads out concurrently (newest bucket first), then
+    # take the first `limit` rows. Each bucket is capped at `limit` so the union is
+    # at most buckets*limit before truncation.
+    buckets = list(months_back(datetime.now(tz=UTC), 18))
     rows = []
-    for mbucket in months_back(datetime.now(tz=UTC), 18):
+    for ok, page in execute_parallel_with_args(
+        FeedStmts.BY_BUCKET, [(mbucket, limit) for mbucket in buckets]
+    ):
+        if ok:
+            rows.extend(list(page))
         if len(rows) >= limit:
             break
-        page = session.execute(
-            """
-            SELECT article_id, service_id, title, summary, published_at
-            FROM articles_feed
-            WHERE bucket = %s
-            LIMIT %s
-            """,
-            (mbucket, limit - len(rows)),
-        )
-        rows.extend(list(page))
+    rows = rows[:limit]
     items: list[FeedArticleRow] = []
     for row in rows:
         published_at = row.published_at
@@ -185,6 +170,7 @@ def insert_stored_article(
     Returns (article_id, feed_published).
     """
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts, FeedStmts
 
     article_id = article_id or uuid.uuid4()
     published_at = datetime.now(tz=UTC)
@@ -193,12 +179,7 @@ def insert_stored_article(
 
     session = get_cassandra_session()
     session.execute(
-        """
-        INSERT INTO articles_by_id (
-          article_id, service_id, title, summary, body,
-          trigger_txid, trigger_round, source_url, published_at, tags, image_url
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+        ArticleStmts.INSERT,
         (
             article_id,
             service_id,
@@ -215,12 +196,7 @@ def insert_stored_article(
     )
     if publish_to_feed:
         session.execute(
-            """
-            INSERT INTO articles_feed (
-              bucket, published_at, article_id, service_id, title, summary, tags,
-              image_url, source_url
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            FeedStmts.INSERT,
             (
                 feed_month(published_at),
                 published_at,
@@ -286,34 +262,22 @@ def update_article(
     except ValueError:
         return False
 
+    from app.core.statements import ArticleStmts, FeedStmts
+
     published_at = datetime.fromtimestamp(existing.published_at_epoch, tz=UTC)
     tag_list = list(tags) if tags is not None else None
     if tag_list is None:
         from app.core.cassandra import get_cassandra_session as gcs
 
-        row = gcs().execute(
-            "SELECT tags FROM articles_by_id WHERE article_id = %s",
-            (aid,),
-        ).one()
+        row = gcs().execute(ArticleStmts.GET_TAGS, (aid,)).one()
         tag_list = list(row.tags or []) if row else []
     if "updated" not in {t.lower() for t in tag_list}:
         tag_list = [*tag_list, "updated"]
 
     session = get_cassandra_session()
+    session.execute(ArticleStmts.UPDATE, (title, summary, body, tag_list, aid))
     session.execute(
-        """
-        UPDATE articles_by_id
-        SET title = %s, summary = %s, body = %s, tags = %s
-        WHERE article_id = %s
-        """,
-        (title, summary, body, tag_list, aid),
-    )
-    session.execute(
-        """
-        INSERT INTO articles_feed (
-          bucket, published_at, article_id, service_id, title, summary, tags
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """,
+        FeedStmts.INSERT_BASIC,
         (
             feed_month(published_at),
             published_at,
@@ -336,6 +300,7 @@ def update_article_image(article_id: str, image_url: str) -> bool:
     from a seconds-truncated epoch would miss the real clustering key and upsert a
     phantom row with null service_id/title (which then 500s the feed)."""
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts, FeedStmts
 
     if not image_url:
         return False
@@ -344,19 +309,13 @@ def update_article_image(article_id: str, image_url: str) -> bool:
     except ValueError:
         return False
     session = get_cassandra_session()
-    row = session.execute(
-        "SELECT published_at FROM articles_by_id WHERE article_id = %s", (aid,)
-    ).one()
+    row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
     if row is None or row.published_at is None:
         return False
     published_at = row.published_at  # full-precision datetime, matches the feed PK
+    session.execute(ArticleStmts.UPDATE_IMAGE, (image_url, aid))
     session.execute(
-        "UPDATE articles_by_id SET image_url = %s WHERE article_id = %s",
-        (image_url, aid),
-    )
-    session.execute(
-        "UPDATE articles_feed SET image_url = %s "
-        "WHERE bucket = %s AND published_at = %s AND article_id = %s",
+        FeedStmts.UPDATE_IMAGE,
         (image_url, feed_month(published_at), published_at, aid),
     )
     return True
@@ -400,14 +359,11 @@ def record_service_event(
     match_value: str,
 ) -> None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ServiceEventStmts
 
     session = get_cassandra_session()
     session.execute(
-        """
-        INSERT INTO service_events (
-          service_id, occurred_at, event_id, txid, round, match_kind, match_value
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """,
+        ServiceEventStmts.INSERT,
         (
             service_id,
             datetime.now(tz=UTC),

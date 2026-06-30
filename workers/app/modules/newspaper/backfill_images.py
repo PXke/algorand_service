@@ -21,6 +21,7 @@ from app.modules.newspaper.source_image import resolve_source_images
 
 def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts
 
     session = get_cassandra_session()
     scanned = updated = skipped = failed = 0
@@ -28,8 +29,7 @@ def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
         scanned += 1
         aid = str(row.article_id)
         meta = session.execute(
-            "SELECT service_id, source_url, image_url FROM articles_by_id WHERE article_id = %s",
-            (UUID(aid),),
+            ArticleStmts.GET_IMAGE_META, (UUID(aid),)
         ).one()
         if meta is None:
             continue
@@ -65,14 +65,13 @@ def resync_feed_images(*, limit: int = 500, dry_run: bool = False) -> dict:
     """Copy each article's image_url from the detail row into the feed projection
     (idempotent). Heals rows whose feed image got out of sync with the detail."""
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts
 
     session = get_cassandra_session()
     synced = 0
     for row in list_feed_articles(limit=limit):
         aid = str(row.article_id)
-        meta = session.execute(
-            "SELECT image_url FROM articles_by_id WHERE article_id = %s", (UUID(aid),)
-        ).one()
+        meta = session.execute(ArticleStmts.GET_IMAGE, (UUID(aid),)).one()
         image = (meta.image_url or "").strip() if meta else ""
         if not image:
             continue
@@ -89,11 +88,10 @@ def cleanup_phantoms(*, dry_run: bool = False) -> dict:
     """Delete malformed feed rows (null service_id/title) left by an earlier
     partial upsert, so they stop counting against the feed page size."""
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import FeedStmts
 
     session = get_cassandra_session()
-    rows = session.execute(
-        "SELECT bucket, published_at, article_id, service_id, title FROM articles_feed"
-    )
+    rows = session.execute(FeedStmts.SCAN_ALL)
     deleted = 0
     for r in rows:
         if (r.service_id or "") and (r.title or ""):
@@ -103,8 +101,7 @@ def cleanup_phantoms(*, dry_run: bool = False) -> dict:
               f"bucket={r.bucket} aid={r.article_id}")
         if not dry_run:
             session.execute(
-                "DELETE FROM articles_feed "
-                "WHERE bucket = %s AND published_at = %s AND article_id = %s",
+                FeedStmts.DELETE,
                 (r.bucket, r.published_at, r.article_id),
             )
     result = {"deleted_phantoms": deleted, "dry_run": dry_run}

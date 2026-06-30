@@ -95,6 +95,8 @@ def _resolve_labels(session, paths: list[str]) -> dict[str, str]:
     """Map each path to a human-readable label, resolving article titles by id."""
     from uuid import UUID
 
+    from app.core.statements import ArticleStmts
+
     labels = {p: _static_label(p) for p in paths}
     for p in paths:
         if not p.startswith(_ARTICLE_PREFIX):
@@ -105,9 +107,7 @@ def _resolve_labels(session, paths: list[str]) -> dict[str, str]:
             labels[p] = "Article"
             continue
         try:
-            row = session.execute(
-                "SELECT title FROM articles_by_id WHERE article_id = %s", (aid,)
-            ).one()
+            row = session.execute(ArticleStmts.GET_TITLE, (aid,)).one()
         except Exception:  # missing row / table — fall back to a generic label
             row = None
         labels[p] = (row.title if row and row.title else None) or "Article"
@@ -301,7 +301,7 @@ _SESSION_TTL_SECONDS = 30 * 60
 
 
 def record_session(
-    session, prepare_cached, client_ip: str | None, user_agent: str | None, day: str
+    session, client_ip: str | None, user_agent: str | None, day: str
 ) -> None:
     """Best-effort: stitch this human pageview into a session and, on a new
     session, bump session_daily split by new/returning. Fails open."""
@@ -325,13 +325,9 @@ def record_session(
         log.debug("session record (redis) skipped: %s", exc)
         return
     try:
-        session.execute_async(
-            prepare_cached(
-                "UPDATE session_daily SET sessions = sessions + 1 "
-                "WHERE day = ? AND vtype = ?"
-            ),
-            (day, vtype),
-        )
+        from app.core.statements import AnalyticsStmts
+
+        session.execute_async(AnalyticsStmts.SESSION_BUMP, (day, vtype))
     except Exception as exc:
         log.debug("session record (cassandra) skipped: %s", exc)
 
@@ -342,12 +338,11 @@ def _session_counts(window: list[str]) -> dict[str, int]:
     out = {"new": 0, "returning": 0, "total": 0}
     try:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import AnalyticsStmts
 
         cs = get_cassandra_session()
         for day in window:
-            rows = cs.execute(
-                "SELECT vtype, sessions FROM session_daily WHERE day = %s", (day,)
-            )
+            rows = cs.execute(AnalyticsStmts.SESSION_BY_DAY, (day,))
             for r in rows:
                 n = int(r.sessions)
                 out[r.vtype] = out.get(r.vtype, 0) + n
@@ -593,22 +588,12 @@ def _record_direct(
 ) -> None:
     """Diagnostics for a human pageview that landed in '(direct)': bump the
     UA-class counter and append a short-lived raw sample (TTL on the table)."""
-    from app.core.cassandra import prepare_cached
+    from app.core.statements import AnalyticsStmts
 
     uac = ua_class(user_agent)
+    session.execute_async(AnalyticsStmts.DIRECT_UACLASS_BUMP, (day, uac))
     session.execute_async(
-        prepare_cached(
-            "UPDATE pageview_direct_uaclass_daily SET views = views + 1 "
-            "WHERE day = ? AND ua_class = ?"
-        ),
-        (day, uac),
-    )
-    session.execute_async(
-        prepare_cached(
-            "INSERT INTO pageview_direct_sample "
-            "(day, ts, path, referer, user_agent, ua_class) "
-            "VALUES (?, now(), ?, ?, ?, ?)"
-        ),
+        AnalyticsStmts.DIRECT_SAMPLE_INSERT,
         (day, path[:200], (referer or "")[:300], (user_agent or "")[:300], uac),
     )
 
@@ -621,94 +606,42 @@ def record_pageview(
     if is_internal_client(client_ip):
         return  # don't count the server itself / internal probes
     try:
-        from app.core.cassandra import get_cassandra_session, prepare_cached
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import AnalyticsStmts
 
         session = get_cassandra_session()
         day = _today()
         kind = "bot" if is_bot(user_agent) else "human"
         # Privacy-safe unique visitor count (Redis HLL), independent of Cassandra.
         record_unique(kind, client_ip, user_agent, day)
-        session.execute_async(
-            prepare_cached(
-                "UPDATE pageview_daily SET views = views + 1 WHERE kind = ? AND day = ?"
-            ),
-            (kind, day),
-        )
+        session.execute_async(AnalyticsStmts.PAGEVIEW_BUMP, (kind, day))
         # Per-path counter, split by kind so Top Pages can show human vs bot.
-        session.execute_async(
-            prepare_cached(
-                "UPDATE pageview_path_kind_daily SET views = views + 1 "
-                "WHERE day = ? AND path = ? AND kind = ?"
-            ),
-            (day, path[:200], kind),
-        )
+        session.execute_async(AnalyticsStmts.PATH_KIND_BUMP, (day, path[:200], kind))
         if kind == "bot":
             # Which crawler — so the bot column identifies Googlebot/GPTBot/etc.
-            session.execute_async(
-                prepare_cached(
-                    "UPDATE pageview_bot_daily SET views = views + 1 "
-                    "WHERE day = ? AND bot = ?"
-                ),
-                (day, bot_name(user_agent)),
-            )
+            session.execute_async(AnalyticsStmts.BOT_BUMP, (day, bot_name(user_agent)))
         else:
             # Server-side session stitching + new-vs-returning split (human only).
-            record_session(session, prepare_cached, client_ip, user_agent, day)
+            record_session(session, client_ip, user_agent, day)
             # Country (GeoIP, no IP stored) and campaign tag (utm/ref) — human only.
             country = country_for_ip(client_ip)
             if country:
-                session.execute_async(
-                    prepare_cached(
-                        "UPDATE geo_country_daily SET views = views + 1 "
-                        "WHERE day = ? AND country = ?"
-                    ),
-                    (day, country),
-                )
+                session.execute_async(AnalyticsStmts.GEO_BUMP, (day, country))
             if campaign:
-                session.execute_async(
-                    prepare_cached(
-                        "UPDATE campaign_daily SET views = views + 1 "
-                        "WHERE day = ? AND campaign = ?"
-                    ),
-                    (day, campaign[:80]),
-                )
+                session.execute_async(AnalyticsStmts.CAMPAIGN_BUMP, (day, campaign[:80]))
             # Site-wide device + browser + hour-of-day segmentation (human only).
+            session.execute_async(AnalyticsStmts.DEVICE_BUMP, (day, ua_class(user_agent)))
             session.execute_async(
-                prepare_cached(
-                    "UPDATE pageview_device_daily SET views = views + 1 "
-                    "WHERE day = ? AND device = ?"
-                ),
-                (day, ua_class(user_agent)),
+                AnalyticsStmts.BROWSER_BUMP, (day, browser_family(user_agent))
             )
             session.execute_async(
-                prepare_cached(
-                    "UPDATE pageview_browser_daily SET views = views + 1 "
-                    "WHERE day = ? AND browser = ?"
-                ),
-                (day, browser_family(user_agent)),
-            )
-            session.execute_async(
-                prepare_cached(
-                    "UPDATE pageview_hour_daily SET views = views + 1 "
-                    "WHERE day = ? AND hour = ?"
-                ),
-                (day, datetime.now(UTC).hour),
+                AnalyticsStmts.HOUR_BUMP, (day, datetime.now(UTC).hour)
             )
             referrer = referrer_host(referer)
-            session.execute_async(
-                prepare_cached(
-                    "UPDATE pageview_referrer_daily SET views = views + 1 "
-                    "WHERE day = ? AND referrer = ?"
-                ),
-                (day, referrer),
-            )
+            session.execute_async(AnalyticsStmts.REFERRER_BUMP, (day, referrer))
             # Source -> landing-page attribution (which referrer drove which page).
             session.execute_async(
-                prepare_cached(
-                    "UPDATE pageview_referrer_path_daily SET views = views + 1 "
-                    "WHERE day = ? AND referrer = ? AND path = ?"
-                ),
-                (day, referrer, path[:200]),
+                AnalyticsStmts.REFERRER_PATH_BUMP, (day, referrer, path[:200])
             )
             if referrer == "(direct)":
                 _record_direct(session, day, path, referer, user_agent)
@@ -718,11 +651,7 @@ def record_pageview(
                 ref_url = normalize_referrer_url(referer)
                 if ref_url:
                     session.execute_async(
-                        prepare_cached(
-                            "UPDATE pageview_referrer_url_daily SET views = views + 1 "
-                            "WHERE day = ? AND referrer_url = ?"
-                        ),
-                        (day, ref_url),
+                        AnalyticsStmts.REFERRER_URL_BUMP, (day, ref_url)
                     )
     except Exception as exc:  # missing tables / cassandra down — analytics is non-critical
         log.debug("pageview record skipped: %s", exc)
@@ -735,26 +664,15 @@ def record_search(query: str, result_count: int, *, user_agent: str | None = Non
     if not q or is_bot(user_agent):
         return
     try:
-        from app.core.cassandra import get_cassandra_session, prepare_cached
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import AnalyticsStmts
 
         session = get_cassandra_session()
         day = _today()
         q = q[:120]
-        session.execute_async(
-            prepare_cached(
-                "UPDATE search_query_daily SET searches = searches + 1 "
-                "WHERE day = ? AND query = ?"
-            ),
-            (day, q),
-        )
+        session.execute_async(AnalyticsStmts.SEARCH_BUMP, (day, q))
         if result_count <= 0:
-            session.execute_async(
-                prepare_cached(
-                    "UPDATE search_zero_daily SET searches = searches + 1 "
-                    "WHERE day = ? AND query = ?"
-                ),
-                (day, q),
-            )
+            session.execute_async(AnalyticsStmts.SEARCH_ZERO_BUMP, (day, q))
     except Exception as exc:
         log.debug("search record skipped: %s", exc)
 
@@ -765,15 +683,12 @@ def record_notfound(*, path: str, client_ip: str | None = None) -> None:
     if is_internal_client(client_ip):
         return
     try:
-        from app.core.cassandra import get_cassandra_session, prepare_cached
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import AnalyticsStmts
 
         session = get_cassandra_session()
         session.execute_async(
-            prepare_cached(
-                "UPDATE pageview_notfound_daily SET views = views + 1 "
-                "WHERE day = ? AND path = ?"
-            ),
-            (_today(), path[:200]),
+            AnalyticsStmts.NOTFOUND_BUMP, (_today(), path[:200])
         )
     except Exception as exc:
         log.debug("notfound record skipped: %s", exc)
@@ -784,14 +699,14 @@ def _recent_direct_samples(session, window: set[str], limit: int) -> list[dict]:
 
     The table clusters newest-first, so a per-day LIMIT yields the most recent
     rows without an ALLOW FILTERING scan; we stop once `limit` are collected."""
+    from app.core.statements import AnalyticsStmts
+
     samples: list[dict] = []
     for day in sorted(window, reverse=True):
         if len(samples) >= limit:
             break
         rows = session.execute(
-            "SELECT path, referer, user_agent, ua_class FROM pageview_direct_sample "
-            "WHERE day = %s LIMIT %s",
-            (day, limit - len(samples)),
+            AnalyticsStmts.DIRECT_SAMPLE_BY_DAY, (day, limit - len(samples))
         )
         for r in rows:
             samples.append({
@@ -831,12 +746,12 @@ def _build_alerts(session, out: dict, window: set[str], prev_window: set[str]) -
 
     # 404 spike vs the prior period (whole-window totals, not just the top N).
     def _sum_notfound(win: set[str]) -> int:
+        from app.core.statements import AnalyticsStmts
+
         tot = 0
         try:
             for day in win:
-                for r in session.execute(
-                    "SELECT views FROM pageview_notfound_daily WHERE day = %s", (day,)
-                ):
+                for r in session.execute(AnalyticsStmts.NOTFOUND_VIEWS_BY_DAY, (day,)):
                     tot += int(r.views)
         except Exception:
             return 0
@@ -874,6 +789,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
     }
     try:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import AnalyticsStmts, ArticleStmts
 
         session = get_cassandra_session()
         window = set(_recent_days(days))
@@ -882,9 +798,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
         # Per-kind partition is one row/day — read it whole once, then slice both
         # the current and prior window in-app (avoids the driver's `IN` quirk).
         def _series(kind: str) -> dict[str, int]:
-            rows = session.execute(
-                "SELECT day, views FROM pageview_daily WHERE kind = %s", (kind,)
-            )
+            rows = session.execute(AnalyticsStmts.PAGEVIEW_SERIES_BY_KIND, (kind,))
             return {r.day: int(r.views) for r in rows}
 
         human, bot = _series("human"), _series("bot")
@@ -924,24 +838,25 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
         out["prev_totals"]["returning"] = prev_sess.get("returning", 0)
 
         # Each day is its own partition — read the N day-partitions and aggregate.
-        def _aggregate(table: str, key: str, value_col: str = "views") -> list[dict]:
+        # `stmt` is a fully-defined prepared statement from AnalyticsStmts; `key`
+        # and `value_col` are the result COLUMN NAMES used to shape the rows (not
+        # CQL fragments — nothing about the query is built at runtime).
+        def _aggregate(stmt, key: str, value_col: str = "views") -> list[dict]:
             agg: dict[str, int] = {}
             for day in window:
-                rows = session.execute(
-                    f"SELECT {key}, {value_col} FROM {table} WHERE day = %s", (day,)
-                )
+                rows = session.execute(stmt, (day,))
                 for r in rows:
                     k = getattr(r, key)
                     agg[k] = agg.get(k, 0) + int(getattr(r, value_col))
             ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:top]
             return [{key: k, "views": v} for k, v in ranked]
 
-        def _safe_aggregate(table: str, key: str, value_col: str = "views") -> list[dict]:
+        def _safe_aggregate(stmt, key: str, value_col: str = "views") -> list[dict]:
             """`_aggregate` but tolerant of a not-yet-migrated table (new in 039)."""
             try:
-                return _aggregate(table, key, value_col)
+                return _aggregate(stmt, key, value_col)
             except Exception as exc:
-                log.warning("%s aggregate skipped: %s", table, exc)
+                log.warning("%s aggregate skipped: %s", key, exc)
                 return []
 
         def _aggregate_referrer_paths() -> list[dict]:
@@ -949,11 +864,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
             agg: dict[tuple[str, str], int] = {}
             try:
                 for day in window:
-                    rows = session.execute(
-                        "SELECT referrer, path, views FROM pageview_referrer_path_daily "
-                        "WHERE day = %s",
-                        (day,),
-                    )
+                    rows = session.execute(AnalyticsStmts.REFERRER_PATH_BY_DAY, (day,))
                     for r in rows:
                         agg[(r.referrer, r.path)] = agg.get((r.referrer, r.path), 0) + int(r.views)
             except Exception as exc:
@@ -967,10 +878,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
             agg: dict[str, dict[str, int]] = {}
             try:
                 for day in window:
-                    rows = session.execute(
-                        "SELECT path, kind, views FROM pageview_path_kind_daily WHERE day = %s",
-                        (day,),
-                    )
+                    rows = session.execute(AnalyticsStmts.PATH_KIND_BY_DAY, (day,))
                     for r in rows:
                         bucket = agg.setdefault(r.path, {"human": 0, "bot": 0})
                         bucket[r.kind] = bucket.get(r.kind, 0) + int(r.views)
@@ -987,14 +895,14 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
             ]
 
         out["top_paths"] = _aggregate_paths()
-        out["top_referrers"] = _aggregate("pageview_referrer_daily", "referrer")
+        out["top_referrers"] = _aggregate(AnalyticsStmts.AGG_REFERRER, "referrer")
 
         # Breakdown of the '(direct)' bucket: UA-class counts + a recent raw
         # sample. Both tables are new (migration 038) — tolerate their absence so
         # an un-migrated env still renders the rest of the page.
         try:
             out["direct_uaclass"] = _aggregate(
-                "pageview_direct_uaclass_daily", "ua_class"
+                AnalyticsStmts.AGG_DIRECT_UACLASS, "ua_class"
             )
         except Exception as exc:
             log.warning("direct ua-class aggregate skipped: %s", exc)
@@ -1005,11 +913,11 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
 
         # Analytics expansion (migration 039): search demand, bot identities,
         # source->landing attribution, dead links. Each tolerates an absent table.
-        out["top_searches"] = _safe_aggregate("search_query_daily", "query", "searches")
-        out["zero_searches"] = _safe_aggregate("search_zero_daily", "query", "searches")
-        out["top_bots"] = _safe_aggregate("pageview_bot_daily", "bot")
+        out["top_searches"] = _safe_aggregate(AnalyticsStmts.AGG_SEARCH, "query", "searches")
+        out["zero_searches"] = _safe_aggregate(AnalyticsStmts.AGG_SEARCH_ZERO, "query", "searches")
+        out["top_bots"] = _safe_aggregate(AnalyticsStmts.AGG_BOT, "bot")
         out["referrer_paths"] = _aggregate_referrer_paths()
-        out["top_notfound"] = _safe_aggregate("pageview_notfound_daily", "path")
+        out["top_notfound"] = _safe_aggregate(AnalyticsStmts.AGG_NOTFOUND, "path")
 
         # Analytics segmentation (migration 040): site-wide device/browser, the
         # hour-of-day distribution, full external referrer URLs, plus two read-time
@@ -1019,10 +927,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
             sums = dict.fromkeys(range(24), 0)
             try:
                 for day in window:
-                    rows = session.execute(
-                        "SELECT hour, views FROM pageview_hour_daily WHERE day = %s",
-                        (day,),
-                    )
+                    rows = session.execute(AnalyticsStmts.HOUR_BY_DAY, (day,))
                     for r in rows:
                         if r.hour is not None and 0 <= r.hour <= 23:
                             sums[r.hour] += int(r.views)
@@ -1037,10 +942,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
             agg: dict[str, int] = {}
             try:
                 for day in window:
-                    rows = session.execute(
-                        "SELECT referrer, views FROM pageview_referrer_daily WHERE day = %s",
-                        (day,),
-                    )
+                    rows = session.execute(AnalyticsStmts.AGG_REFERRER, (day,))
                     for r in rows:
                         cat = referrer_category(r.referrer)
                         agg[cat] = agg.get(cat, 0) + int(r.views)
@@ -1065,7 +967,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
                 try:
                     aid = UUID(path[len(_ARTICLE_PREFIX):])
                     row = session.execute(
-                        "SELECT tags FROM articles_by_id WHERE article_id = %s", (aid,)
+                        ArticleStmts.GET_TAGS, (aid,)
                     ).one()
                     if row and row.tags:
                         label = "Section · " + str(row.tags[0])
@@ -1077,10 +979,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
             agg: dict[str, int] = {}
             try:
                 for day in window:
-                    rows = session.execute(
-                        "SELECT path, kind, views FROM pageview_path_kind_daily WHERE day = %s",
-                        (day,),
-                    )
+                    rows = session.execute(AnalyticsStmts.PATH_KIND_BY_DAY, (day,))
                     for r in rows:
                         if r.kind != "human":
                             continue
@@ -1102,10 +1001,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
             per_day = {d: {"new": 0, "returning": 0} for d in window}
             try:
                 for day in window:
-                    rows = session.execute(
-                        "SELECT vtype, sessions FROM session_daily WHERE day = %s",
-                        (day,),
-                    )
+                    rows = session.execute(AnalyticsStmts.SESSION_BY_DAY, (day,))
                     for r in rows:
                         if r.vtype in per_day[day]:
                             per_day[day][r.vtype] += int(r.sessions)
@@ -1124,10 +1020,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
             total_bot = total_ai = 0
             try:
                 for day in window:
-                    rows = session.execute(
-                        "SELECT bot, views FROM pageview_bot_daily WHERE day = %s",
-                        (day,),
-                    )
+                    rows = session.execute(AnalyticsStmts.AGG_BOT, (day,))
                     for r in rows:
                         v = int(r.views)
                         total_bot += v
@@ -1152,10 +1045,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
             per_article: dict[str, dict[str, int]] = {}
             try:
                 for day in window:
-                    rows = session.execute(
-                        "SELECT path, kind, views FROM pageview_path_kind_daily WHERE day = %s",
-                        (day,),
-                    )
+                    rows = session.execute(AnalyticsStmts.PATH_KIND_BY_DAY, (day,))
                     for r in rows:
                         if r.kind != "human":
                             continue
@@ -1175,11 +1065,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
                 title, published, tag = "Article", None, None
                 try:
                     aid = UUID(path[len(_ARTICLE_PREFIX):])
-                    row = session.execute(
-                        "SELECT title, published_at, tags FROM articles_by_id "
-                        "WHERE article_id = %s",
-                        (aid,),
-                    ).one()
+                    row = session.execute(ArticleStmts.GET_CARD, (aid,)).one()
                     if row:
                         title = row.title or "Article"
                         published = row.published_at
@@ -1202,19 +1088,19 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
                 })
             return rows_out
 
-        out["device"] = _safe_aggregate("pageview_device_daily", "device")
-        out["browser"] = _safe_aggregate("pageview_browser_daily", "browser")
+        out["device"] = _safe_aggregate(AnalyticsStmts.AGG_DEVICE, "device")
+        out["browser"] = _safe_aggregate(AnalyticsStmts.AGG_BROWSER, "browser")
         out["hours"] = _aggregate_hours()
         out["referrer_categories"] = _aggregate_referrer_categories()
         out["sections"] = _aggregate_sections()
         out["top_referrer_urls"] = _safe_aggregate(
-            "pageview_referrer_url_daily", "referrer_url"
+            AnalyticsStmts.AGG_REFERRER_URL, "referrer_url"
         )
         out["sessions_daily"] = _session_daily_series()
         out["ai_crawler"] = _ai_crawler()
         out["articles"] = _editorial_scorecard()
-        out["geo"] = _safe_aggregate("geo_country_daily", "country")
-        out["campaigns"] = _safe_aggregate("campaign_daily", "campaign")
+        out["geo"] = _safe_aggregate(AnalyticsStmts.AGG_GEO, "country")
+        out["campaigns"] = _safe_aggregate(AnalyticsStmts.AGG_CAMPAIGN, "campaign")
         out["alerts"] = _build_alerts(session, out, window, prev_window)
 
         # Attach human-readable labels (article titles, friendly route names) to

@@ -35,42 +35,28 @@ class CassandraChainRepository:
 
     def get_transaction(self, txid: str) -> IndexedTransaction | None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ChainStmts
 
         session = get_cassandra_session()
-        row = session.execute(
-            """
-            SELECT txid, round, intra, sender, txn_type, txn_json, receiver, amount_microalgos
-            FROM transactions_by_id
-            WHERE txid = %s
-            """,
-            (txid,),
-        ).one()
+        row = session.execute(ChainStmts.GET_TXN, (txid,)).one()
         return row_to_indexed_transaction(row)
 
     def get_chain_head_round(self) -> int | None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ChainStmts
 
         session = get_cassandra_session()
-        row = session.execute(
-            "SELECT value FROM conduit_meta WHERE id = %s",
-            ("last_ingested_round",),
-        ).one()
+        row = session.execute(ChainStmts.CONDUIT_HEAD, ("last_ingested_round",)).one()
         if row is None:
             return None
         return int(row.value)
 
     def list_transactions_for_round(self, round: int) -> list[IndexedTransaction]:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ChainStmts
 
         session = get_cassandra_session()
-        rows = session.execute(
-            """
-            SELECT txid, round, intra, sender, txn_type, txn_json, receiver, amount_microalgos
-            FROM transactions_by_round
-            WHERE round = %s
-            """,
-            (round,),
-        )
+        rows = session.execute(ChainStmts.TXNS_BY_ROUND, (round,))
         items: list[IndexedTransaction] = []
         for row in rows:
             tx = row_to_indexed_transaction(row)

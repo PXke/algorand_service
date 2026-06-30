@@ -42,15 +42,13 @@ def classify_pending_domains(
     validated first; protected domains are never auto-rejected."""
     from app.core.cassandra import get_cassandra_session
     from app.core.config import FRONTIER_CONTENT_REJECT_SCORE
+    from app.core.statements import DomainTrackingStmts
     from app.modules.crawler.domain_tracker import is_protected_domain, update_domain_status
     from app.modules.scraper.crawlers.web_crawler import WebCrawlerDriver
     from app.modules.search.classifier.score import score_page
 
     session = get_cassandra_session()
-    rows = session.execute(
-        "SELECT domain, frontier_status, is_relevant, metadata FROM domain_tracking LIMIT %s",
-        (limit * 30,),
-    )
+    rows = session.execute(DomainTrackingStmts.LIST, (limit * 30,))
     pending = []
     for r in rows:
         meta = dict(r.metadata or {})
@@ -99,7 +97,7 @@ def classify_pending_domains(
             else:
                 new_meta["frontier_status"] = "pending"
                 session.execute(
-                    "UPDATE domain_tracking SET metadata = %s WHERE domain = %s",
+                    DomainTrackingStmts.UPDATE_METADATA,
                     (new_meta, domain),
                 )
     samples.sort(key=lambda s: s["score"])

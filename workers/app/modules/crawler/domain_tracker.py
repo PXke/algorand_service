@@ -215,19 +215,12 @@ def domain_from_url(url: str) -> str:
 
 def get_domain_status(domain: str) -> dict[str, Any] | None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import DomainTrackingStmts
 
     if not domain:
         return None
     session = get_cassandra_session()
-    row = session.execute(
-        """
-        SELECT domain, last_crawled_at, last_online_at, relevance_score,
-               category, is_relevant, metadata, frontier_status
-        FROM domain_tracking
-        WHERE domain = %s
-        """,
-        (domain,),
-    ).one()
+    row = session.execute(DomainTrackingStmts.GET_STATUS, (domain,)).one()
     if row is None:
         return None
     return {
@@ -301,16 +294,13 @@ def update_domain_status(
     the human marker — making reactivation un-sticky.
     """
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import DomainTrackingStmts
 
     if not domain:
         return
     now = datetime.now(tz=UTC)
     session = get_cassandra_session()
-    existing = session.execute(
-        "SELECT last_online_at, category, is_relevant, metadata, frontier_status "
-        "FROM domain_tracking WHERE domain = %s",
-        (domain,),
-    ).one()
+    existing = session.execute(DomainTrackingStmts.GET_FOR_UPDATE, (domain,)).one()
 
     # Decision columns: preserve unless the caller overrides them explicitly.
     if is_relevant is not None:
@@ -334,12 +324,7 @@ def update_domain_status(
     last_online = now if online else (existing.last_online_at if existing else None)
 
     session.execute(
-        """
-        INSERT INTO domain_tracking (
-          domain, last_crawled_at, last_online_at, relevance_score,
-          category, is_relevant, metadata, frontier_status
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+        DomainTrackingStmts.INSERT,
         (
             domain,
             now,
@@ -483,6 +468,7 @@ def register_pending_domain(
     from datetime import UTC, datetime
 
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import DomainTrackingStmts
 
     now = datetime.now(tz=UTC)
     try:
@@ -504,12 +490,7 @@ def register_pending_domain(
         # (and so frontier_set_by_admin stays the human-only permanence marker).
         metadata["frontier_status_source"] = "auto_approved"
     get_cassandra_session().execute(
-        """
-        INSERT INTO domain_tracking (
-          domain, last_crawled_at, last_online_at, relevance_score,
-          category, is_relevant, metadata, frontier_status
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+        DomainTrackingStmts.INSERT,
         (
             domain,
             now,

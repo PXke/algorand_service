@@ -58,13 +58,11 @@ def load_anchor_pairs(*, classify: ClassifyFn | None = None, limit: int = 200) -
     ``annotator.mistral_classifier()``) to exercise Tier 2; omit for Tier-1-only."""
     try:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import GatekeeperStmts
         from app.modules.newspaper.investigation_store import load_investigation_trace
 
         rows = get_cassandra_session().execute(
-            "SELECT anchor_id, article_id, url, source_text, article_text, "
-            "factuality_fail, tone_fail, error_types FROM gatekeeper_anchors "
-            "WHERE bucket = 'main' LIMIT %s",
-            (limit,),
+            GatekeeperStmts.LIST_ANCHORS, (limit,)
         )
         pairs: list[Pair] = []
         seen: set[str] = set()

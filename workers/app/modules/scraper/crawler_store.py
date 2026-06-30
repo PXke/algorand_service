@@ -50,14 +50,10 @@ def load_crawler_config() -> dict[str, CrawlerConfigRow]:
     merged = _defaults()
     try:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import CrawlerConfigStmts
 
         session = get_cassandra_session()
-        rows = session.execute(
-            """
-            SELECT crawler_type, display_name, description, enabled
-            FROM crawler_config
-            """
-        )
+        rows = session.execute(CrawlerConfigStmts.LIST_ALL)
         for row in rows:
             ctype = str(row.crawler_type).strip().lower()
             if ctype not in merged:

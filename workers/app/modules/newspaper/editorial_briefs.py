@@ -51,17 +51,12 @@ def find_matching_queued_briefs(
     Load queued editorial_briefs and return those whose keywords appear in ingest text.
     """
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import EditorialBriefStmts
 
     haystack = " ".join([page_title, page_text, publish_topic])
     session = get_cassandra_session()
     try:
-        rows = session.execute(
-            """
-            SELECT brief_id, title, body_markdown, keywords, status
-            FROM editorial_briefs LIMIT %s
-            """,
-            (limit,),
-        )
+        rows = session.execute(EditorialBriefStmts.LIST, (limit,))
     except Exception:
         return []
 

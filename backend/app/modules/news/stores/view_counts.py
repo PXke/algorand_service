@@ -31,11 +31,9 @@ def record_view(article_id: str) -> None:
         return
     try:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ViewCountStmts
 
-        get_cassandra_session().execute(
-            "UPDATE article_view_counts SET views = views + 1 WHERE article_id = %s",
-            (aid,),
-        )
+        get_cassandra_session().execute(ViewCountStmts.BUMP, (aid,))
     except Exception:
         pass
 
@@ -48,11 +46,9 @@ def get_views(article_id: str) -> int:
         return 0
     try:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ViewCountStmts
 
-        row = get_cassandra_session().execute(
-            "SELECT views FROM article_view_counts WHERE article_id = %s",
-            (aid,),
-        ).one()
+        row = get_cassandra_session().execute(ViewCountStmts.GET, (aid,)).one()
     except Exception:
         return 0
     return int(row.views) if row and row.views is not None else 0

@@ -167,6 +167,7 @@ def record_classifier_feedback(
     from datetime import UTC, datetime
 
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ClassifierFeedbackStmts
 
     predicted = (predicted_category or category).strip().lower()
     corrected = category.strip().lower()
@@ -175,12 +176,7 @@ def record_classifier_feedback(
     now = datetime.now(tz=UTC)
     session = get_cassandra_session()
     session.execute(
-        """
-        INSERT INTO classifier_feedback (
-          feedback_id, url, text_sample, category, predicted_category, quality,
-          predicted_publish, approved, admin_wallet, created_at, metadata
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+        ClassifierFeedbackStmts.INSERT,
         (
             feedback_id,
             url,
@@ -196,11 +192,7 @@ def record_classifier_feedback(
         ),
     )
     session.execute(
-        """
-        INSERT INTO classifier_feedback_by_time (
-          bucket, created_at, feedback_id, url, approved
-        ) VALUES (%s, %s, %s, %s, %s)
-        """,
+        ClassifierFeedbackStmts.INSERT_BY_TIME,
         ("main", now, feedback_id, url, approved),
     )
     return str(feedback_id)
@@ -210,32 +202,21 @@ def retrain_publish_classifier(*, limit: int = 500) -> dict[str, object]:
     """Retrain RandomForest from classifier_feedback rows."""
     from datetime import UTC, datetime
 
-    from app.core.cassandra import get_cassandra_session
+    from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
+    from app.core.statements import ClassifierFeedbackStmts
 
     session = get_cassandra_session()
-    index_rows = session.execute(
-        """
-        SELECT feedback_id
-        FROM classifier_feedback_by_time
-        WHERE bucket = %s
-        LIMIT %s
-        """,
-        ("main", limit),
+    index_rows = list(
+        session.execute(ClassifierFeedbackStmts.LIST_IDS, ("main", limit))
     )
     samples: list[tuple[str, str, str, int]] = []
     cat_samples: list[tuple[str, str, str]] = []
-    for index_row in index_rows:
-        fid = index_row.feedback_id
-        if fid is None:
-            continue
-        row = session.execute(
-            """
-            SELECT url, text_sample, category, predicted_category, quality, approved
-            FROM classifier_feedback
-            WHERE feedback_id = %s
-            """,
-            (fid,),
-        ).one()
+    fids = [r.feedback_id for r in index_rows if r.feedback_id is not None]
+    # Fan the per-id detail lookups out concurrently instead of one round-trip each.
+    for ok, result in execute_parallel_with_args(
+        ClassifierFeedbackStmts.GET, [(fid,) for fid in fids]
+    ):
+        row = result.one() if ok else None
         if row is None:
             continue
         text = row.text_sample or ""

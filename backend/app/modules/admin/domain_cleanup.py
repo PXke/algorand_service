@@ -28,14 +28,10 @@ def _merge_status(statuses: list[str | None]) -> str | None:
 
 def cleanup(*, apply: bool = False) -> dict:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import DomainTrackingStmts
 
     session = get_cassandra_session()
-    rows = list(
-        session.execute(
-            "SELECT domain, last_crawled_at, last_online_at, relevance_score, "
-            "category, is_relevant, metadata, frontier_status FROM domain_tracking"
-        )
-    )
+    rows = list(session.execute(DomainTrackingStmts.LIST_ALL))
     groups: dict[str, list] = {}
     for r in rows:
         groups.setdefault(_registrable(r.domain or ""), []).append(r)
@@ -72,13 +68,11 @@ def cleanup(*, apply: bool = False) -> dict:
 
         if apply:
             session.execute(
-                "INSERT INTO domain_tracking (domain, last_crawled_at, last_online_at, "
-                "relevance_score, category, is_relevant, metadata, frontier_status) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                DomainTrackingStmts.INSERT,
                 (reg, last_crawled, last_online, relevance, category, is_relevant, meta, status),
             )
             for victim in victims:
-                session.execute("DELETE FROM domain_tracking WHERE domain = %s", (victim,))
+                session.execute(DomainTrackingStmts.DELETE, (victim,))
         deleted += len(victims)
 
     result = {"groups_merged": merged_groups, "rows_deleted": deleted, "applied": apply}

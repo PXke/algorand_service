@@ -7,15 +7,10 @@ from app.modules.newspaper.service_profile import score_service_impressiveness
 
 def get_stored_service_weight(service_id: str) -> int:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ServiceProfileStmts
 
     session = get_cassandra_session()
-    row = session.execute(
-        """
-        SELECT impressiveness_score FROM service_profiles
-        WHERE service_id = %s
-        """,
-        (service_id,),
-    ).one()
+    row = session.execute(ServiceProfileStmts.GET_WEIGHT, (service_id,)).one()
     if row is None or row.impressiveness_score is None:
         return 0
     return int(row.impressiveness_score)
@@ -32,14 +27,11 @@ def upsert_service_profile(
         source_url=source_url,
     )
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ServiceProfileStmts
 
     session = get_cassandra_session()
     session.execute(
-        """
-        INSERT INTO service_profiles (
-          service_id, impressiveness_score, text_chars, reasons, updated_at
-        ) VALUES (%s, %s, %s, %s, %s)
-        """,
+        ServiceProfileStmts.INSERT,
         (
             service_id,
             score,

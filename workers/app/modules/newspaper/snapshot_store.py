@@ -10,17 +10,10 @@ def source_id_for_service(service_id: str) -> str:
 def get_latest_snapshot(source_id: str) -> tuple[str, str, str] | None:
     """Return (content_hash, title, body) for latest snapshot or None."""
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import SnapshotStmts
 
     session = get_cassandra_session()
-    row = session.execute(
-        """
-        SELECT content_hash, title, body
-        FROM page_snapshots
-        WHERE source_id = %s
-        LIMIT 1
-        """,
-        (source_id,),
-    ).one()
+    row = session.execute(SnapshotStmts.GET_LATEST, (source_id,)).one()
     if row is None:
         return None
     return row.content_hash, row.title or "", row.body or ""
@@ -36,20 +29,15 @@ def insert_snapshot(
     body: str,
 ) -> None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import SnapshotStmts
 
     session = get_cassandra_session()
     now = datetime.now(tz=UTC)
     session.execute(
-        """
-        INSERT INTO page_snapshots (source_id, captured_at, content_hash, title, body)
-        VALUES (%s, %s, %s, %s, %s) USING TTL 3888000
-        """,
+        SnapshotStmts.INSERT,
         (source_id, now, content_hash, title, body),
     )
     session.execute(
-        """
-        INSERT INTO page_sources (source_id, service_id, url, enabled, updated_at)
-        VALUES (%s, %s, %s, %s, %s)
-        """,
+        SnapshotStmts.INSERT_SOURCE,
         (source_id, service_id, url, True, now),
     )

@@ -21,11 +21,13 @@ def get_views_bulk(article_ids: list[str]) -> dict[str, int]:
         return {}
     try:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ViewCountStmts
 
         # IN on the partition key; callers cap the list to a small recent window.
+        # Prepared `IN ?` binds the id list directly (no client-side `[...]`
+        # rendering of the old `IN %s` SimpleStatement).
         rows = get_cassandra_session().execute(
-            "SELECT article_id, views FROM article_view_counts WHERE article_id IN %s",
-            (tuple(uuids),),
+            ViewCountStmts.GET_BULK, (uuids,)
         )
     except Exception:
         return {}

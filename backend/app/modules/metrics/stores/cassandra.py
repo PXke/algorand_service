@@ -24,28 +24,18 @@ class StoredPriceBrief:
 
 def load_price_brief(asset_id: str) -> StoredPriceBrief | None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PriceMetricsStmts
 
     session = get_cassandra_session()
     row = session.execute(
-        """
-        SELECT asset_id, asset_name, currency, current_price_usd, change_24h_pct,
-               sample_count_24h, prepared_at
-        FROM price_metrics_brief
-        WHERE asset_id = %s
-        """,
-        (asset_id.strip().lower(),),
+        PriceMetricsStmts.GET_BRIEF, (asset_id.strip().lower(),)
     ).one()
     if row is None:
         return None
 
     market_cap: float | None = None
     sample_row = session.execute(
-        """
-        SELECT market_cap_usd FROM price_metric_samples
-        WHERE asset_id = %s
-        LIMIT 1
-        """,
-        (asset_id.strip().lower(),),
+        PriceMetricsStmts.SAMPLE_MARKET_CAP, (asset_id.strip().lower(),)
     ).one()
     if sample_row is not None and sample_row.market_cap_usd is not None:
         market_cap = float(sample_row.market_cap_usd)
@@ -64,16 +54,11 @@ def load_price_brief(asset_id: str) -> StoredPriceBrief | None:
 
 def load_latest_price_sample(asset_id: str) -> StoredPriceSample | None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PriceMetricsStmts
 
     session = get_cassandra_session()
     rows = session.execute(
-        """
-        SELECT market_cap_usd, volume_24h_usd, collected_at
-        FROM price_metric_samples
-        WHERE asset_id = %s
-        LIMIT 20
-        """,
-        (asset_id.strip().lower(),),
+        PriceMetricsStmts.LATEST_SAMPLES, (asset_id.strip().lower(),)
     )
     latest = None
     latest_at = None

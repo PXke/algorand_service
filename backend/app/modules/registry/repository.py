@@ -36,40 +36,29 @@ class InMemoryServiceRegistryRepository:
 class CassandraServiceRegistryRepository:
     def list_enabled(self) -> list[ServiceEntry]:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ServiceRegistryStmts
 
         session = get_cassandra_session()
-        rows = session.execute(
-            """
-            SELECT service_id, display_name, match_kind, match_value, scrape_url, enabled, origin
-            FROM service_registry
-            """
-        )
+        rows = session.execute(ServiceRegistryStmts.LIST_ALL)
         return [_row_to_entry(row) for row in rows if row.enabled]
 
     def list_all(self) -> list[ServiceEntry]:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ServiceRegistryStmts
 
         session = get_cassandra_session()
-        rows = session.execute(
-            """
-            SELECT service_id, display_name, match_kind, match_value, scrape_url, enabled, origin
-            FROM service_registry
-            """
-        )
+        rows = session.execute(ServiceRegistryStmts.LIST_ALL)
         return [_row_to_entry(row) for row in rows]
 
     def upsert(self, entry: ServiceEntry) -> None:
         from datetime import UTC, datetime
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ServiceRegistryStmts
 
         session = get_cassandra_session()
         session.execute(
-            """
-            INSERT INTO service_registry (
-              service_id, display_name, match_kind, match_value, scrape_url, enabled, updated_at, origin
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            ServiceRegistryStmts.UPSERT,
             (
                 entry.service_id,
                 entry.display_name,
@@ -84,12 +73,10 @@ class CassandraServiceRegistryRepository:
 
     def delete(self, service_id: str) -> None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ServiceRegistryStmts
 
         session = get_cassandra_session()
-        session.execute(
-            "DELETE FROM service_registry WHERE service_id = %s",
-            (service_id,),
-        )
+        session.execute(ServiceRegistryStmts.DELETE, (service_id,))
 
 
 def _effective_origin(row, *, match_kind: str) -> str:

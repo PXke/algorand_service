@@ -89,24 +89,22 @@ def find_article_for_followup(
         return None
     moment = now or datetime.now(tz=UTC)
     try:
-        from app.core.cassandra import get_cassandra_session
-
-        session = get_cassandra_session()
+        from app.core.cassandra import execute_parallel_with_args
+        from app.core.statements import ArticleMatchStmts
     except Exception:
         return None
 
-    for key_type, key_value in keys:
-        try:
-            rows = session.execute(
-                """
-                SELECT article_id, edit_window_closes_at
-                FROM article_match_keys
-                WHERE key_type = %s AND key_value = %s
-                """,
-                (key_type, key_value),
-            )
-        except Exception:
-            return None
+    try:
+        # Look every key up concurrently; results align with `keys` (input order),
+        # so we keep the first-key-wins precedence the sequential loop had.
+        results = execute_parallel_with_args(
+            ArticleMatchStmts.FIND_BY_KEY, [(kt, kv) for kt, kv in keys]
+        )
+    except Exception:
+        return None
+    for ok, rows in results:
+        if not ok:
+            continue
         for row in rows:
             closes = row.edit_window_closes_at
             if closes and closes.replace(tzinfo=UTC) > moment:
@@ -124,6 +122,7 @@ def register_article_match_keys(
     if not keys:
         return 0
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleMatchStmts
 
     session = get_cassandra_session()
     aid = UUID(article_id)
@@ -132,19 +131,11 @@ def register_article_match_keys(
     count = 0
     for key_type, key_value in keys:
         session.execute(
-            """
-            INSERT INTO article_match_keys (
-              key_type, key_value, article_id, linked_at, edit_window_closes_at
-            ) VALUES (%s, %s, %s, %s, %s)
-            """,
+            ArticleMatchStmts.INSERT_KEY,
             (key_type, key_value, aid, linked, closes),
         )
         session.execute(
-            """
-            INSERT INTO article_match_keys_by_article (
-              article_id, key_type, key_value, linked_at
-            ) VALUES (%s, %s, %s, %s)
-            """,
+            ArticleMatchStmts.INSERT_KEY_BY_ARTICLE,
             (aid, key_type, key_value, linked),
         )
         count += 1

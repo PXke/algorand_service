@@ -72,21 +72,21 @@ def _training_rows(limit: int) -> tuple[list[list[float]], list[str], list[int]]
     """Pull (scalar_features, article_text, label) from classifier_feedback rows
     that captured the grade dimensions. ``article_text`` is "" for rows labelled
     before article-text capture (2026-06-18) — those train scalar-only."""
-    from app.core.cassandra import get_cassandra_session
+    from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
+    from app.core.statements import ClassifierFeedbackStmts
 
     session = get_cassandra_session()
-    index = session.execute(
-        "SELECT feedback_id FROM classifier_feedback_by_time WHERE bucket = %s LIMIT %s",
-        ("main", limit),
+    index = list(
+        session.execute(ClassifierFeedbackStmts.LIST_IDS, ("main", limit))
     )
     scalars: list[list[float]] = []
     texts: list[str] = []
     y: list[int] = []
-    for idx in index:
-        row = session.execute(
-            "SELECT approved, metadata FROM classifier_feedback WHERE feedback_id = %s",
-            (idx.feedback_id,),
-        ).one()
+    # Fan the per-id detail lookups out concurrently instead of one round-trip each.
+    for ok, result in execute_parallel_with_args(
+        ClassifierFeedbackStmts.GET_GRADE, [(idx.feedback_id,) for idx in index]
+    ):
+        row = result.one() if ok else None
         if row is None or not row.metadata:
             continue
         meta = dict(row.metadata)

@@ -34,16 +34,12 @@ def record_tool_suggestion(
         from cassandra.util import uuid_from_time
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
         now = datetime.now(tz=UTC)
         session.execute(
-            """
-            INSERT INTO tool_suggestions (
-              bucket, created_at, suggestion_id, capability, reason,
-              service_id, source_url, model, resolved
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            ToolInsightStmts.INSERT_SUGGESTION,
             (
                 _BUCKET,
                 now,
@@ -111,17 +107,13 @@ def record_compose_session(
             slim.append(entry)
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
         if session_id is None or created_at is None:
             session_id, created_at = new_session_ref()
         session.execute(
-            """
-            INSERT INTO compose_sessions (
-              bucket, created_at, session_id, service_id, source_url, model,
-              status, rounds, tool_calls, duration_ms, messages, final_output
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            ToolInsightStmts.INSERT_COMPOSE_SESSION,
             (
                 _BUCKET,
                 created_at,
@@ -172,13 +164,13 @@ def record_tool_usage_from_trace(trace: list[dict[str, Any]] | None) -> bool:
             return False
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
         day = datetime.now(tz=UTC).strftime("%Y-%m-%d")
         for tool, n in calls.items():
             session.execute(
-                "UPDATE tool_usage_stats SET calls = calls + %s, errors = errors + %s "
-                "WHERE day = %s AND tool = %s",
+                ToolInsightStmts.BUMP_USAGE,
                 (n, errors.get(tool, 0), day, tool),
             )
         return True

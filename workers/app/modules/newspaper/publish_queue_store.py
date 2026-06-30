@@ -59,12 +59,10 @@ def enqueue_publish(
 ) -> tuple[str, bool]:
     """Insert queue row. Returns (queue_id, created). Skips if dedupe_key already pending."""
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PublishQueueStmts
 
     session = get_cassandra_session()
-    existing = session.execute(
-        "SELECT queue_id FROM publish_queue_dedupe WHERE dedupe_key = %s",
-        (dedupe_key,),
-    ).one()
+    existing = session.execute(PublishQueueStmts.DEDUPE_GET, (dedupe_key,)).one()
     if existing is not None:
         return str(existing.queue_id), False
 
@@ -74,13 +72,7 @@ def enqueue_publish(
     payload_json = json.dumps(payload, separators=(",", ":"))
 
     session.execute(
-        """
-        INSERT INTO publish_queue (
-          queue_id, status, priority, topic, publish_kind,
-          service_id, display_name, scrape_url, dedupe_key,
-          payload, created_at, updated_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+        PublishQueueStmts.INSERT,
         (
             queue_id,
             status,
@@ -97,12 +89,7 @@ def enqueue_publish(
         ),
     )
     session.execute(
-        """
-        INSERT INTO publish_queue_pending (
-          status, priority, created_at, queue_id,
-          service_id, topic, publish_kind
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """,
+        PublishQueueStmts.INSERT_PENDING,
         (
             status,
             priority,
@@ -113,40 +100,26 @@ def enqueue_publish(
             publish_kind.value,
         ),
     )
-    session.execute(
-        """
-        INSERT INTO publish_queue_dedupe (dedupe_key, queue_id, created_at)
-        VALUES (%s, %s, %s)
-        """,
-        (dedupe_key, queue_id, now),
-    )
+    session.execute(PublishQueueStmts.INSERT_DEDUPE, (dedupe_key, queue_id, now))
     return str(queue_id), True
 
 
 def list_pending_queue(*, limit: int = 50) -> list[QueuedPublishRow]:
-    from app.core.cassandra import get_cassandra_session
+    from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
+    from app.core.statements import PublishQueueStmts
 
     session = get_cassandra_session()
-    rows = session.execute(
-        """
-        SELECT queue_id, priority, topic, publish_kind, service_id,
-               created_at
-        FROM publish_queue_pending
-        WHERE status = %s
-        LIMIT %s
-        """,
-        ("pending", limit),
+    pending = list(
+        session.execute(PublishQueueStmts.LIST_PENDING, ("pending", limit))
+    )
+    # Fan the per-row detail lookups out concurrently instead of one round-trip
+    # per pending row; results come back aligned with `pending` (input order).
+    details = execute_parallel_with_args(
+        PublishQueueStmts.GET_DETAIL, [(row.queue_id,) for row in pending]
     )
     out: list[QueuedPublishRow] = []
-    for row in rows:
-        detail = session.execute(
-            """
-            SELECT display_name, scrape_url, payload, created_at
-            FROM publish_queue
-            WHERE queue_id = %s
-            """,
-            (row.queue_id,),
-        ).one()
+    for row, (ok, result) in zip(pending, details, strict=True):
+        detail = result.one() if ok else None
         if detail is None:
             continue
         try:
@@ -225,10 +198,10 @@ def count_pending_queue() -> int:
     key) — does NOT materialise rows or hit the per-row detail table the way
     ``list_pending_queue`` does, so it stays cheap regardless of queue depth."""
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PublishQueueStmts
 
     row = get_cassandra_session().execute(
-        "SELECT COUNT(*) AS n FROM publish_queue_pending WHERE status = %s",
-        ("pending",),
+        PublishQueueStmts.COUNT_PENDING, ("pending",)
     ).one()
     return int(row.n) if row is not None else 0
 
@@ -243,6 +216,7 @@ def mark_queue_status(queue_id: str, status: str) -> None:
     done, deferred, indexed_only, or expired.
     """
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PublishQueueStmts
 
     session = get_cassandra_session()
     try:
@@ -250,36 +224,16 @@ def mark_queue_status(queue_id: str, status: str) -> None:
     except ValueError:
         return
 
-    row = session.execute(
-        """
-        SELECT status, priority, created_at, dedupe_key
-        FROM publish_queue
-        WHERE queue_id = %s
-        """,
-        (qid,),
-    ).one()
+    row = session.execute(PublishQueueStmts.GET_STATUS_ROW, (qid,)).one()
     if row is None:
         return
 
     now = datetime.now(tz=UTC)
-    session.execute(
-        """
-        UPDATE publish_queue
-        SET status = %s, updated_at = %s
-        WHERE queue_id = %s
-        """,
-        (status, now, qid),
-    )
+    session.execute(PublishQueueStmts.UPDATE_STATUS, (status, now, qid))
     if row.status == "pending" and row.created_at is not None:
         session.execute(
-            """
-            DELETE FROM publish_queue_pending
-            WHERE status = %s AND priority = %s AND created_at = %s AND queue_id = %s
-            """,
+            PublishQueueStmts.DELETE_PENDING,
             ("pending", row.priority, row.created_at, qid),
         )
     if row.dedupe_key:
-        session.execute(
-            "DELETE FROM publish_queue_dedupe WHERE dedupe_key = %s",
-            (row.dedupe_key,),
-        )
+        session.execute(PublishQueueStmts.DELETE_DEDUPE, (row.dedupe_key,))

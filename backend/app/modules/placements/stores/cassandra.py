@@ -9,19 +9,11 @@ from app.modules.placements.models import FeedPlacementItem
 class PlacementsStore:
     def list_active(self, *, slot: str, limit: int = 10) -> list[FeedPlacementItem]:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import PlacementStmts
 
         session = get_cassandra_session()
         now = datetime.now(tz=UTC)
-        rows = session.execute(
-            """
-            SELECT placement_id, slot, sponsor_name, headline, body,
-                   image_url, target_url, priority, enabled, active_from, active_until
-            FROM feed_placements_by_slot
-            WHERE slot = %s
-            LIMIT %s
-            """,
-            (slot, limit),
-        )
+        rows = session.execute(PlacementStmts.LIST_BY_SLOT, (slot, limit))
         items: list[FeedPlacementItem] = []
         for row in rows:
             if row.enabled is False:
@@ -60,16 +52,12 @@ class PlacementsStore:
         active_until: datetime | None = None,
     ) -> None:
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import PlacementStmts
 
         session = get_cassandra_session()
         now = datetime.now(tz=UTC)
         session.execute(
-            """
-            INSERT INTO feed_placements (
-              placement_id, slot, sponsor_name, headline, body, image_url, target_url,
-              priority, enabled, active_from, active_until, created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            PlacementStmts.INSERT,
             (
                 placement_id,
                 slot,
@@ -86,12 +74,7 @@ class PlacementsStore:
             ),
         )
         session.execute(
-            """
-            INSERT INTO feed_placements_by_slot (
-              slot, priority, placement_id, sponsor_name, headline, body,
-              image_url, target_url, enabled, active_from, active_until
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+            PlacementStmts.INSERT_BY_SLOT,
             (
                 slot,
                 priority,

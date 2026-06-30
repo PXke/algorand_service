@@ -7,16 +7,10 @@ from typing import Any
 
 def load_intelligence(service_id: str) -> dict[str, Any] | None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import IntelligenceStmts
 
     session = get_cassandra_session()
-    row = session.execute(
-        """
-        SELECT primary_domain, intelligence_json, first_seen_at
-        FROM service_intelligence
-        WHERE service_id = %s
-        """,
-        (service_id,),
-    ).one()
+    row = session.execute(IntelligenceStmts.GET, (service_id,)).one()
     if row is None or not row.intelligence_json:
         return None
     try:
@@ -37,13 +31,11 @@ def save_intelligence(
     is_first: bool,
 ) -> None:
     from app.core.cassandra import get_cassandra_session
+    from app.core.statements import IntelligenceStmts
 
     now = datetime.now(tz=UTC)
     session = get_cassandra_session()
-    existing = session.execute(
-        "SELECT first_seen_at FROM service_intelligence WHERE service_id = %s",
-        (service_id,),
-    ).one()
+    existing = session.execute(IntelligenceStmts.GET_FIRST_SEEN, (service_id,)).one()
     first_seen = existing.first_seen_at if existing and existing.first_seen_at else now
     if is_first:
         first_seen = now
@@ -57,11 +49,7 @@ def save_intelligence(
     }
 
     session.execute(
-        """
-        INSERT INTO service_intelligence (
-          service_id, primary_domain, intelligence_json, first_seen_at, updated_at
-        ) VALUES (%s, %s, %s, %s, %s)
-        """,
+        IntelligenceStmts.INSERT,
         (
             service_id,
             primary_domain,
