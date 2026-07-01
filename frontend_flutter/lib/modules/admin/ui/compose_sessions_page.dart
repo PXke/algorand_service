@@ -12,9 +12,19 @@ import '../../../core/ui/loading_strip.dart';
 import '../../../core/ui/page_content.dart';
 import '../../auth/providers/auth_providers.dart';
 
-/// Admin tab: full agentic transcript of recent article composes — the writer's
-/// system/user prompt, each assistant turn, every tool call + result, and the
-/// final output. For debugging/analysing what the model actually did.
+const _kActiveStatuses = {'researching', 'writing'};
+const _kActivePollInterval = Duration(seconds: 8);
+const _kIdlePollInterval = Duration(seconds: 30);
+
+/// Admin tab: recent article-compose sessions — the writer's system/user
+/// prompt, each assistant turn, every tool call + result, and the final
+/// output. For debugging/analysing what the model actually did.
+///
+/// The list view is summary-only (status/timing); a session's full transcript
+/// is fetched on demand when it's expanded, not on every poll — the messages
+/// blob can be up to ~140KB per session, and re-fetching + re-rendering all
+/// of that every few seconds for sessions nobody is looking at is the reason
+/// this tab used to feel slow.
 class ComposeSessionsTab extends ConsumerStatefulWidget {
   const ComposeSessionsTab({super.key});
 
@@ -24,6 +34,10 @@ class ComposeSessionsTab extends ConsumerStatefulWidget {
 
 class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
   List<Map<String, dynamic>> _items = const [];
+  final Map<String, Map<String, dynamic>> _details = {};
+  final Set<String> _detailLoading = {};
+  final Set<String> _detailErrors = {};
+  final Set<String> _expandedSessionIds = {};
   bool _loading = true;
   String? _error;
   Timer? _poll;
@@ -32,9 +46,6 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
-    // Live progress: compose now takes minutes, so quietly re-poll so an
-    // in-progress session advances (researching -> writing -> ok) on screen.
-    _poll = Timer.periodic(const Duration(seconds: 8), (_) => _quietReload());
   }
 
   @override
@@ -43,8 +54,19 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
     super.dispose();
   }
 
+  bool get _hasActiveSession =>
+      _items.any((s) => _kActiveStatuses.contains(s['status']?.toString()));
+
+  void _scheduleNextPoll() {
+    _poll?.cancel();
+    // Live progress needs a tight loop (compose can take minutes and status
+    // advances researching -> writing -> ok); once nothing is in flight there's
+    // nothing to catch except a brand-new session starting, so back off.
+    final interval = _hasActiveSession ? _kActivePollInterval : _kIdlePollInterval;
+    _poll = Timer(interval, _quietReload);
+  }
+
   Future<void> _quietReload() async {
-    if (_loading) return;
     final wallet = ref.read(walletAuthStateProvider).walletAddress;
     if (wallet == null || wallet.isEmpty) return;
     try {
@@ -52,8 +74,26 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
           await ref.read(adminApiProvider).listComposeSessions(walletAddress: wallet);
       if (!mounted) return;
       setState(() => _items = items);
+      _refreshExpandedActiveDetails();
     } catch (_) {
       // Silent — the next tick retries; manual refresh surfaces errors.
+    } finally {
+      if (mounted) _scheduleNextPoll();
+    }
+  }
+
+  /// A session still `researching`/`writing` that the admin has expanded
+  /// should keep advancing on screen, so re-fetch its transcript on every
+  /// poll while both conditions hold; anything else (collapsed, or already
+  /// finished) keeps whatever was fetched once and is never re-fetched.
+  void _refreshExpandedActiveDetails() {
+    for (final s in _items) {
+      final sessionId = s['session_id']?.toString() ?? '';
+      final createdAt = s['created_at']?.toString() ?? '';
+      if (sessionId.isEmpty || createdAt.isEmpty) continue;
+      if (!_expandedSessionIds.contains(sessionId)) continue;
+      if (!_kActiveStatuses.contains(s['status']?.toString())) continue;
+      _loadDetail(sessionId, createdAt, force: true);
     }
   }
 
@@ -66,6 +106,7 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
       });
       return;
     }
+    _poll?.cancel();
     setState(() {
       _loading = true;
       _error = null;
@@ -78,12 +119,40 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
         _items = items;
         _loading = false;
       });
+      _refreshExpandedActiveDetails();
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _error = e.toString();
         _loading = false;
       });
+    } finally {
+      if (mounted) _scheduleNextPoll();
+    }
+  }
+
+  Future<void> _loadDetail(String sessionId, String createdAt, {bool force = false}) async {
+    if (_detailLoading.contains(sessionId)) return;
+    if (!force && _details.containsKey(sessionId)) return;
+    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    if (wallet == null || wallet.isEmpty) return;
+    setState(() {
+      _detailLoading.add(sessionId);
+      _detailErrors.remove(sessionId);
+    });
+    try {
+      final detail = await ref.read(adminApiProvider).getComposeSessionDetail(
+            walletAddress: wallet,
+            sessionId: sessionId,
+            createdAt: createdAt,
+          );
+      if (!mounted) return;
+      setState(() => _details[sessionId] = detail);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _detailErrors.add(sessionId));
+    } finally {
+      if (mounted) setState(() => _detailLoading.remove(sessionId));
     }
   }
 
@@ -100,8 +169,8 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
             children: [
               Expanded(
                 child: Text(
-                  'Full transcript of recent article composes — prompts, every tool '
-                  'call + result, and the final output. Newest first, last ~20.',
+                  'Recent article composes — expand one for its full transcript '
+                  '(prompts, tool calls, output). Newest first, last ~20.',
                   style: theme.textTheme.bodySmall?.copyWith(color: colors.muted),
                 ),
               ),
@@ -125,6 +194,7 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
               icon: Icons.forum_outlined,
             ),
           ..._items.map((s) => Padding(
+                key: ValueKey(s['session_id']),
                 padding: const EdgeInsets.only(bottom: AppLayout.itemGap),
                 child: _sessionCard(theme, colors, s),
               )),
@@ -134,15 +204,15 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
   }
 
   Widget _sessionCard(ThemeData theme, AppThemeColors colors, Map<String, dynamic> s) {
+    final sessionId = s['session_id']?.toString() ?? '';
+    final createdAt = s['created_at']?.toString() ?? '';
     final source = (s['source_url']?.toString() ?? '').trim();
     final model = s['model']?.toString() ?? '';
     final status = s['status']?.toString() ?? '';
     final rounds = s['rounds']?.toString() ?? '0';
     final toolCalls = s['tool_calls']?.toString() ?? '0';
     final durationMs = (s['duration_ms'] as num?)?.toInt() ?? 0;
-    final date = (s['created_at']?.toString() ?? '').replaceFirst('T', ' ').split('.').first;
-    final messages = (s['messages'] as List?) ?? const [];
-    final finalOutput = s['final_output']?.toString() ?? '';
+    final date = createdAt.replaceFirst('T', ' ').split('.').first;
 
     return Container(
       decoration: BoxDecoration(
@@ -156,6 +226,16 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
         child: ExpansionTile(
           tilePadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
           childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+          onExpansionChanged: (expanded) {
+            if (expanded) {
+              _expandedSessionIds.add(sessionId);
+              if (sessionId.isNotEmpty && createdAt.isNotEmpty) {
+                _loadDetail(sessionId, createdAt);
+              }
+            } else {
+              _expandedSessionIds.remove(sessionId);
+            }
+          },
           title: Text(
             source.isEmpty ? '(no source)' : source,
             maxLines: 1,
@@ -166,16 +246,42 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
             '$date · $model · ${rounds}r · $toolCalls tools · ${(durationMs / 1000).toStringAsFixed(1)}s · $status',
             style: theme.textTheme.labelSmall?.copyWith(color: colors.subtle),
           ),
-          children: [
-            ...messages.whereType<Map>().map((m) => _messageRow(theme, colors, m)),
-            if (finalOutput.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              _label(theme, 'FINAL OUTPUT'),
-              _mono(theme, colors, finalOutput, colors.accent),
-            ],
-          ],
+          children: [_sessionDetail(theme, colors, sessionId)],
         ),
       ),
+    );
+  }
+
+  Widget _sessionDetail(ThemeData theme, AppThemeColors colors, String sessionId) {
+    if (_detailLoading.contains(sessionId)) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 12),
+        child: LoadingStrip(visible: true),
+      );
+    }
+    if (_detailErrors.contains(sessionId)) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Text(
+          'Failed to load transcript — try re-expanding.',
+          style: theme.textTheme.bodySmall?.copyWith(color: colors.muted),
+        ),
+      );
+    }
+    final detail = _details[sessionId];
+    if (detail == null) return const SizedBox.shrink();
+    final messages = (detail['messages'] as List?) ?? const [];
+    final finalOutput = detail['final_output']?.toString() ?? '';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ...messages.whereType<Map>().map((m) => _messageRow(theme, colors, m)),
+        if (finalOutput.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          _label(theme, 'FINAL OUTPUT'),
+          _mono(theme, colors, finalOutput, colors.accent),
+        ],
+      ],
     );
   }
 

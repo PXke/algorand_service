@@ -255,6 +255,8 @@ class AdminApi {
     return items.whereType<Map<String, dynamic>>().toList();
   }
 
+  /// Summary only (status/timing) — no messages/final_output. Cheap enough to
+  /// poll; fetch a transcript on demand via [getComposeSessionDetail].
   Future<List<Map<String, dynamic>>> listComposeSessions({
     required String walletAddress,
   }) async {
@@ -265,6 +267,21 @@ class AdminApi {
     final items = body['items'];
     if (items is! List) return const [];
     return items.whereType<Map<String, dynamic>>().toList();
+  }
+
+  /// Full transcript (messages + final_output) for one session. `createdAt`
+  /// must be the exact ISO string from the session's list entry (it's part of
+  /// the Cassandra row key alongside sessionId).
+  Future<Map<String, dynamic>> getComposeSessionDetail({
+    required String walletAddress,
+    required String sessionId,
+    required String createdAt,
+  }) async {
+    final query = Uri(queryParameters: {'created_at': createdAt}).query;
+    return _client.getJson(
+      '/api/v1/admin/compose-sessions/$sessionId?$query',
+      headers: _adminHeaders(walletAddress),
+    );
   }
 
   Future<Map<String, dynamic>> composeNextReview({

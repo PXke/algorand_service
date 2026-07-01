@@ -265,6 +265,17 @@ class ToolInsightStmts:
         "rounds, tool_calls, duration_ms, messages, final_output "
         "FROM compose_sessions WHERE bucket = ? LIMIT 20"
     )
+    # Summary-only variant for the polled list view — skips messages/final_output,
+    # which can be up to ~140KB per row (see tool_insights_store.record_compose_session).
+    LIST_COMPOSE_SESSIONS_SUMMARY = _Stmt(
+        "SELECT created_at, session_id, service_id, source_url, model, status, "
+        "rounds, tool_calls, duration_ms "
+        "FROM compose_sessions WHERE bucket = ? LIMIT 20"
+    )
+    GET_COMPOSE_SESSION_DETAIL = _Stmt(
+        "SELECT messages, final_output FROM compose_sessions "
+        "WHERE bucket = ? AND created_at = ? AND session_id = ?"
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -55,7 +55,10 @@ def register_admin_routes(app) -> None:
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         wallet = verified_admin_wallet(request)
-        updated = store.update_article(
+        import asyncio
+
+        updated = await asyncio.to_thread(
+            store.update_article,
             article_id,
             title=payload.title,
             summary=payload.summary,
@@ -72,7 +75,10 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         article_id = request.path_params.get("article_id", "")
-        if not store.delete_article(article_id):
+        import asyncio
+
+        deleted = await asyncio.to_thread(store.delete_article, article_id)
+        if not deleted:
             return json_error_response(404, "not_found", "Article not found")
         return {"deleted": True, "article_id": article_id}
 
@@ -82,7 +88,9 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         article_id = request.path_params.get("article_id", "")
-        versions = store.list_versions(article_id)
+        import asyncio
+
+        versions = await asyncio.to_thread(store.list_versions, article_id)
         return {"article_id": article_id, "versions": versions}
 
     @app.get("/api/v1/admin/briefs")
@@ -90,7 +98,10 @@ def register_admin_routes(app) -> None:
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
-        return {"items": store.list_briefs()}
+        import asyncio
+
+        items = await asyncio.to_thread(store.list_briefs)
+        return {"items": items}
 
     @app.post("/api/v1/admin/briefs")
     async def admin_create_brief(request: Request) -> Response:
@@ -102,7 +113,10 @@ def register_admin_routes(app) -> None:
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         wallet = verified_admin_wallet(request)
-        item = store.create_brief(
+        import asyncio
+
+        item = await asyncio.to_thread(
+            store.create_brief,
             title=payload.title,
             body_markdown=payload.body_markdown,
             keywords=payload.keywords,
@@ -130,7 +144,9 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         brief_id = request.path_params.get("brief_id", "")
-        item = store.get_brief(brief_id)
+        import asyncio
+
+        item = await asyncio.to_thread(store.get_brief, brief_id)
         if item is None:
             return json_error_response(404, "not_found", "Brief not found")
         return item
@@ -141,7 +157,9 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         brief_id = request.path_params.get("brief_id", "")
-        item = store.get_brief(brief_id)
+        import asyncio
+
+        item = await asyncio.to_thread(store.get_brief, brief_id)
         if item is None:
             return json_error_response(404, "not_found", "Brief not found")
         # Already has an article -> refresh it in place; otherwise this is the
@@ -169,7 +187,10 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         kind = request.query_params.get("kind", "") or None
-        return {"items": store.list_official_channels(kind=kind)}
+        import asyncio
+
+        items = await asyncio.to_thread(store.list_official_channels, kind=kind)
+        return {"items": items}
 
     @app.post("/api/v1/admin/official-channels")
     async def admin_add_official_channel(request: Request) -> Response:
@@ -181,7 +202,10 @@ def register_admin_routes(app) -> None:
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         wallet = verified_admin_wallet(request)
-        return store.upsert_official_channel(
+        import asyncio
+
+        return await asyncio.to_thread(
+            store.upsert_official_channel,
             kind=payload.kind,
             channel_id=payload.channel_id.strip(),
             label=payload.label,
@@ -197,7 +221,9 @@ def register_admin_routes(app) -> None:
         channel_id = request.path_params.get("channel_id", "")
         if not kind or not channel_id:
             return json_error_response(400, "invalid_request", "kind and channel_id required")
-        store.delete_official_channel(kind=kind, channel_id=channel_id)
+        import asyncio
+
+        await asyncio.to_thread(store.delete_official_channel, kind=kind, channel_id=channel_id)
         return {"deleted": True, "kind": kind, "channel_id": channel_id}
 
     @app.get("/api/v1/admin/classifier-reviews")
@@ -257,7 +283,10 @@ def register_admin_routes(app) -> None:
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         wallet = verified_admin_wallet(request)
-        result = store.record_classifier_feedback(
+        import asyncio
+
+        result = await asyncio.to_thread(
+            store.record_classifier_feedback,
             url=payload.url,
             text_sample=payload.text_sample,
             category=payload.category,
@@ -290,7 +319,9 @@ def register_admin_routes(app) -> None:
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
-        return store.list_gatekeeper_anchors()
+        import asyncio
+
+        return await asyncio.to_thread(store.list_gatekeeper_anchors)
 
     @app.post("/api/v1/admin/gatekeeper/anchor")
     async def admin_add_gatekeeper_anchor(request: Request) -> Response:
@@ -304,8 +335,11 @@ def register_admin_routes(app) -> None:
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         wallet = verified_admin_wallet(request)
+        import asyncio
+
         try:
-            anchor_id = store.record_gatekeeper_anchor(
+            anchor_id = await asyncio.to_thread(
+                store.record_gatekeeper_anchor,
                 article_id=payload.article_id,
                 url="",
                 source_text="",
@@ -343,7 +377,9 @@ def register_admin_routes(app) -> None:
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
-        report = store.get_gatekeeper_validation_report()
+        import asyncio
+
+        report = await asyncio.to_thread(store.get_gatekeeper_validation_report)
         return report if report is not None else {"report": None}
 
     @app.post("/api/v1/admin/sources")
@@ -459,10 +495,15 @@ def register_admin_routes(app) -> None:
             "investigation_findings",
             "compose_sessions",
         )
-        session = get_cassandra_session()
-        try:
+        def _truncate_all() -> None:
+            session = get_cassandra_session()
             for table in tables:
                 session.execute(f"TRUNCATE {table}")
+
+        import asyncio
+
+        try:
+            await asyncio.to_thread(_truncate_all)
         except Exception as exc:
             return json_error_response(500, "reset_failed", str(exc))
         typesense = clear_search_index()
@@ -477,9 +518,14 @@ def register_admin_routes(app) -> None:
             return denied
         from app.core.cassandra import get_cassandra_session
 
-        session = get_cassandra_session()
-        session.execute("TRUNCATE classifier_review_pending")
-        session.execute("TRUNCATE classifier_review_queue")
+        def _truncate() -> None:
+            session = get_cassandra_session()
+            session.execute("TRUNCATE classifier_review_pending")
+            session.execute("TRUNCATE classifier_review_queue")
+
+        import asyncio
+
+        await asyncio.to_thread(_truncate)
         return {"cleared": True}
 
     @app.get("/api/v1/admin/domains")
@@ -606,45 +652,47 @@ def register_admin_routes(app) -> None:
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ToolInsightStmts
 
-        session = get_cassandra_session()
-        rows = session.execute(ToolInsightStmts.LIST_SUGGESTIONS, ("all",))
-        items = [
-            {
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-                "capability": r.capability or "",
-                "reason": r.reason or "",
-                "service_id": r.service_id or "",
-                "source_url": r.source_url or "",
-                "model": r.model or "",
-            }
-            for r in rows
-        ]
-        return {"items": items}
+        def _compute() -> dict:
+            from app.core.cassandra import get_cassandra_session
+            from app.core.statements import ToolInsightStmts
+
+            session = get_cassandra_session()
+            rows = session.execute(ToolInsightStmts.LIST_SUGGESTIONS, ("all",))
+            items = [
+                {
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "capability": r.capability or "",
+                    "reason": r.reason or "",
+                    "service_id": r.service_id or "",
+                    "source_url": r.source_url or "",
+                    "model": r.model or "",
+                }
+                for r in rows
+            ]
+            return {"items": items}
+
+        import asyncio
+
+        return await asyncio.to_thread(_compute)
 
     @app.get("/api/v1/admin/compose-sessions")
     async def admin_list_compose_sessions(request: Request) -> Response:
-        """Full agentic transcripts of recent article composes, newest first —
-        read exactly what the writer model did (prompts, tool calls, output)."""
+        """Recent article-compose sessions, newest first — status/timing only.
+        Polled every few seconds by the admin UI for live progress, so this is
+        deliberately summary-only (no messages/final_output, which can be up to
+        ~140KB per row); fetch a transcript on demand via GET .../:session_id."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
-        import json as _json
 
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ToolInsightStmts
+        def _compute() -> dict:
+            from app.core.cassandra import get_cassandra_session
+            from app.core.statements import ToolInsightStmts
 
-        session = get_cassandra_session()
-        rows = session.execute(ToolInsightStmts.LIST_COMPOSE_SESSIONS, ("all",))
-        items = []
-        for r in rows:
-            try:
-                msgs = _json.loads(r.messages) if r.messages else []
-            except Exception:
-                msgs = []
-            items.append(
+            session = get_cassandra_session()
+            rows = session.execute(ToolInsightStmts.LIST_COMPOSE_SESSIONS_SUMMARY, ("all",))
+            items = [
                 {
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                     "session_id": str(r.session_id),
@@ -655,11 +703,59 @@ def register_admin_routes(app) -> None:
                     "rounds": r.rounds or 0,
                     "tool_calls": r.tool_calls or 0,
                     "duration_ms": r.duration_ms or 0,
-                    "messages": msgs,
-                    "final_output": r.final_output or "",
                 }
-            )
-        return {"items": items}
+                for r in rows
+            ]
+            return {"items": items}
+
+        import asyncio
+
+        from app.core.cache import cached_json
+
+        # Short TTL: this is polled every ~8s from possibly several open admin
+        # tabs, so a few seconds of staleness collapses concurrent polls into
+        # one Cassandra read instead of one per request.
+        return await asyncio.to_thread(cached_json, "admin:compose-sessions", 5, _compute)
+
+    @app.get("/api/v1/admin/compose-sessions/:session_id")
+    async def admin_get_compose_session(request: Request) -> Response:
+        """Full transcript (messages + final_output) for one compose session —
+        fetched on demand when the admin expands a session, not on every poll."""
+        denied = require_admin_wallet(request)
+        if denied is not None:
+            return denied
+        session_id = request.path_params.get("session_id", "")
+        created_at_raw = request.query_params.get("created_at", "")
+        try:
+            from datetime import datetime as _datetime
+            from uuid import UUID
+
+            sid = UUID(session_id)
+            created_at = _datetime.fromisoformat(created_at_raw)
+        except ValueError:
+            return json_error_response(400, "invalid_request", "bad session_id/created_at")
+
+        def _compute() -> dict:
+            import json as _json
+
+            from app.core.cassandra import get_cassandra_session
+            from app.core.statements import ToolInsightStmts
+
+            session = get_cassandra_session()
+            row = session.execute(
+                ToolInsightStmts.GET_COMPOSE_SESSION_DETAIL, ("all", created_at, sid)
+            ).one()
+            if row is None:
+                return {"messages": [], "final_output": ""}
+            try:
+                msgs = _json.loads(row.messages) if row.messages else []
+            except Exception:
+                msgs = []
+            return {"messages": msgs, "final_output": row.final_output or ""}
+
+        import asyncio
+
+        return await asyncio.to_thread(_compute)
 
     @app.post("/api/v1/admin/domains/set")
     async def admin_set_domain(request: Request) -> Response:
@@ -670,140 +766,148 @@ def register_admin_routes(app) -> None:
             payload = serialization.decode(request.body, DomainSetRequest)
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import DomainTrackingStmts
+        wallet = verified_admin_wallet(request)
 
-        session = get_cassandra_session()
-        row = session.execute(
-            DomainTrackingStmts.GET_FOR_CORRECTION, (payload.domain,)
-        ).one()
-        from datetime import UTC, datetime
+        def _compute() -> dict:
+            from app.core.cassandra import get_cassandra_session
+            from app.core.statements import DomainTrackingStmts
 
-        now = datetime.now(tz=UTC)
-        meta = dict(row.metadata or {}) if row is not None else {}
-        meta["frontier_set_by_admin"] = "true"
-        meta["frontier_status"] = "approved" if payload.is_relevant else "dead_end"
-        pending_url = meta.pop("pending_url", "")
-        session.execute(
-            DomainTrackingStmts.INSERT,
-            (
-                payload.domain,
-                row.last_crawled_at if row is not None else now,
-                row.last_online_at if row is not None else now,
-                float(row.relevance_score or 0) if row is not None else 0.0,
-                (row.category if row is not None else "") or "",
-                payload.is_relevant,
-                meta,
-                "approved" if payload.is_relevant else "dead_end",
-            ),
-        )
-        enqueued = False
-        if payload.is_relevant and pending_url:
-            # Approving a held domain starts its exploration right away.
-            import uuid as uuid_mod
-
-            queue_id = uuid_mod.uuid4()
-            # High priority so a newly approved domain starts crawling promptly
-            # (front of the frontier queue) — kicks off the initial harvest;
-            # matches CRAWL_INITIAL_HARVEST_PRIORITY on the worker side.
-            seed_priority = 50
-            from app.core.statements import UrlQueueStmts
-
-            session.execute(
-                UrlQueueStmts.INSERT,
-                (queue_id, pending_url, "frontier_approval", seed_priority, now, "pending", {}),
-            )
-            session.execute(
-                UrlQueueStmts.INSERT_BY_URL,
-                (pending_url, queue_id, now, "pending"),
-            )
-            session.execute(
-                UrlQueueStmts.INSERT_PENDING,
-                ("pending", seed_priority, now, queue_id, pending_url, "frontier_approval"),
-            )
-            enqueued = True
-        source_created = False
-        if payload.is_relevant:
-            # Domain-centric model: an approved domain becomes a monitored
-            # source so its content is reported on going forward — we don't
-            # re-judge individual pages for relevance.
-            scrape_url = pending_url or f"https://{payload.domain}"
-            service_id = payload.domain.replace(".", "-").lower()
-            from app.core.statements import ServiceRegistryStmts
-
-            existing = session.execute(
-                ServiceRegistryStmts.GET_ID, (service_id,)
+            session = get_cassandra_session()
+            row = session.execute(
+                DomainTrackingStmts.GET_FOR_CORRECTION, (payload.domain,)
             ).one()
-            if existing is None:
+            from datetime import UTC, datetime
+
+            now = datetime.now(tz=UTC)
+            meta = dict(row.metadata or {}) if row is not None else {}
+            meta["frontier_set_by_admin"] = "true"
+            meta["frontier_status"] = "approved" if payload.is_relevant else "dead_end"
+            pending_url = meta.pop("pending_url", "")
+            session.execute(
+                DomainTrackingStmts.INSERT,
+                (
+                    payload.domain,
+                    row.last_crawled_at if row is not None else now,
+                    row.last_online_at if row is not None else now,
+                    float(row.relevance_score or 0) if row is not None else 0.0,
+                    (row.category if row is not None else "") or "",
+                    payload.is_relevant,
+                    meta,
+                    "approved" if payload.is_relevant else "dead_end",
+                ),
+            )
+            enqueued = False
+            if payload.is_relevant and pending_url:
+                # Approving a held domain starts its exploration right away.
+                import uuid as uuid_mod
+
+                queue_id = uuid_mod.uuid4()
+                # High priority so a newly approved domain starts crawling promptly
+                # (front of the frontier queue) — kicks off the initial harvest;
+                # matches CRAWL_INITIAL_HARVEST_PRIORITY on the worker side.
+                seed_priority = 50
+                from app.core.statements import UrlQueueStmts
+
                 session.execute(
-                    ServiceRegistryStmts.UPSERT,
-                    (
-                        service_id,
-                        payload.domain,
-                        "domain",
-                        payload.domain,
-                        scrape_url,
-                        True,
-                        now,
-                        "domain",
-                    ),
+                    UrlQueueStmts.INSERT,
+                    (queue_id, pending_url, "frontier_approval", seed_priority, now, "pending", {}),
                 )
-                source_created = True
-            # Event-driven: kick the crawl + scrape now so an approved domain is
-            # explored immediately instead of waiting for the (now hourly) beat.
+                session.execute(
+                    UrlQueueStmts.INSERT_BY_URL,
+                    (pending_url, queue_id, now, "pending"),
+                )
+                session.execute(
+                    UrlQueueStmts.INSERT_PENDING,
+                    ("pending", seed_priority, now, queue_id, pending_url, "frontier_approval"),
+                )
+                enqueued = True
+            source_created = False
+            if payload.is_relevant:
+                # Domain-centric model: an approved domain becomes a monitored
+                # source so its content is reported on going forward — we don't
+                # re-judge individual pages for relevance.
+                scrape_url = pending_url or f"https://{payload.domain}"
+                service_id = payload.domain.replace(".", "-").lower()
+                from app.core.statements import ServiceRegistryStmts
+
+                existing = session.execute(
+                    ServiceRegistryStmts.GET_ID, (service_id,)
+                ).one()
+                if existing is None:
+                    session.execute(
+                        ServiceRegistryStmts.UPSERT,
+                        (
+                            service_id,
+                            payload.domain,
+                            "domain",
+                            payload.domain,
+                            scrape_url,
+                            True,
+                            now,
+                            "domain",
+                        ),
+                    )
+                    source_created = True
+                # Event-driven: kick the crawl + scrape now so an approved domain is
+                # explored immediately instead of waiting for the (now hourly) beat.
+                try:
+                    from celery import Celery
+
+                    from app.core.config import settings
+
+                    app = Celery(broker=settings.celery_broker_url)
+                    if enqueued:
+                        app.send_task("app.tasks.crawler.drain_url_queue", queue="scrape")
+                    app.send_task(
+                        "app.tasks.scrape.fetch_source",
+                        args=[service_id, scrape_url],
+                        queue="scrape",
+                    )
+                except Exception:
+                    pass
+            # Close the learning loop: log this domain decision as classifier
+            # feedback (preview text + approved flag) so the relevance model trains
+            # on it and generalizes to similar new domains — not just this one.
             try:
-                from celery import Celery
-
-                from app.core.config import settings
-
-                app = Celery(broker=settings.celery_broker_url)
-                if enqueued:
-                    app.send_task("app.tasks.crawler.drain_url_queue", queue="scrape")
-                app.send_task(
-                    "app.tasks.scrape.fetch_source",
-                    args=[service_id, scrape_url],
-                    queue="scrape",
-                )
+                blob = " ".join(
+                    x
+                    for x in (
+                        meta.get("preview_title", ""),
+                        meta.get("preview_description", ""),
+                        meta.get("preview_keywords", ""),
+                        meta.get("link_text", ""),
+                    )
+                    if x
+                ).strip()
+                if blob:
+                    store.record_classifier_feedback(
+                        url=pending_url or f"https://{payload.domain}",
+                        text_sample=blob[:2000],
+                        category="news" if payload.is_relevant else "generic",
+                        predicted_category=None,
+                        quality="high" if payload.is_relevant else "spam",
+                        predicted_publish=payload.is_relevant,
+                        approved=payload.is_relevant,
+                        admin_wallet=wallet,
+                        source_relevant=payload.is_relevant,
+                        training_only=True,
+                    )
             except Exception:
                 pass
-        # Close the learning loop: log this domain decision as classifier
-        # feedback (preview text + approved flag) so the relevance model trains
-        # on it and generalizes to similar new domains — not just this one.
-        try:
-            blob = " ".join(
-                x
-                for x in (
-                    meta.get("preview_title", ""),
-                    meta.get("preview_description", ""),
-                    meta.get("preview_keywords", ""),
-                    meta.get("link_text", ""),
-                )
-                if x
-            ).strip()
-            if blob:
-                store.record_classifier_feedback(
-                    url=pending_url or f"https://{payload.domain}",
-                    text_sample=blob[:2000],
-                    category="news" if payload.is_relevant else "generic",
-                    predicted_category=None,
-                    quality="high" if payload.is_relevant else "spam",
-                    predicted_publish=payload.is_relevant,
-                    approved=payload.is_relevant,
-                    admin_wallet=verified_admin_wallet(request),
-                    source_relevant=payload.is_relevant,
-                    training_only=True,
-                )
-        except Exception:
-            pass
 
+            return {
+                "saved": True,
+                "domain": payload.domain,
+                "is_relevant": payload.is_relevant,
+                "exploration_started": enqueued,
+                "source_created": source_created,
+            }
+
+        import asyncio
+
+        result = await asyncio.to_thread(_compute)
         _invalidate_domains_cache()
-        return {
-            "saved": True,
-            "domain": payload.domain,
-            "is_relevant": payload.is_relevant,
-            "exploration_started": enqueued,
-            "source_created": source_created,
-        }
+        return result
 
     @app.post("/api/v1/admin/domains/clear")
     async def admin_clear_domains(request: Request) -> Response:
@@ -812,9 +916,11 @@ def register_admin_routes(app) -> None:
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
+        import asyncio
+
         from app.core.cassandra import get_cassandra_session
 
-        get_cassandra_session().execute("TRUNCATE domain_tracking")
+        await asyncio.to_thread(get_cassandra_session().execute, "TRUNCATE domain_tracking")
         _invalidate_domains_cache()
         return {"cleared": True}
 
@@ -883,28 +989,34 @@ def register_admin_routes(app) -> None:
         url = request.query_params.get("url", "") or ""
         if not url:
             return {"items": []}
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import InvestigationStmts
 
-        session = get_cassandra_session()
-        try:
-            rows = session.execute(InvestigationStmts.LIST, (url,))
-        except Exception:
-            return {"items": []}
-        import json as _json
+        def _compute() -> dict:
+            import json as _json
 
-        items = []
-        for r in rows:
+            from app.core.cassandra import get_cassandra_session
+            from app.core.statements import InvestigationStmts
+
+            session = get_cassandra_session()
             try:
-                result = _json.loads(r.result_json) if r.result_json else {}
+                rows = session.execute(InvestigationStmts.LIST, (url,))
             except Exception:
-                result = {}
-            items.append(
-                {
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
-                    "tool": r.tool,
-                    "arguments": r.arguments,
-                    "result": result,
-                }
-            )
-        return {"items": items}
+                return {"items": []}
+            items = []
+            for r in rows:
+                try:
+                    result = _json.loads(r.result_json) if r.result_json else {}
+                except Exception:
+                    result = {}
+                items.append(
+                    {
+                        "created_at": r.created_at.isoformat() if r.created_at else None,
+                        "tool": r.tool,
+                        "arguments": r.arguments,
+                        "result": result,
+                    }
+                )
+            return {"items": items}
+
+        import asyncio
+
+        return await asyncio.to_thread(_compute)
