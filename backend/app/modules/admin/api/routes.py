@@ -38,11 +38,24 @@ def register_admin_routes(app) -> None:
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
-        from app.modules.seo.analytics_store import read_analytics
-
         days_param = request.query_params.get("days", "")
-        days = int(days_param) if days_param.isdigit() else 14
-        return read_analytics(days=max(1, min(days, 90)))
+        days = max(1, min(int(days_param) if days_param.isdigit() else 14, 90))
+
+        def _compute() -> dict:
+            from app.modules.seo.analytics_store import read_analytics
+
+            return read_analytics(days=days)
+
+        import asyncio
+
+        from app.core.cache import cached_json
+
+        # This aggregate does a full sequential pass over `days` day-partitions
+        # plus several site-wide aggregates (~1s) — the original motivation for
+        # running Robyn multi-process, but the handler itself was never offloaded.
+        # 30s TTL: an admin reloading the tab a few times in a row shouldn't
+        # re-run the whole thing every time.
+        return await asyncio.to_thread(cached_json, f"admin:analytics:{days}", 30, _compute)
 
     @app.patch("/api/v1/admin/articles/:article_id")
     async def admin_patch_article(request: Request) -> Response:
