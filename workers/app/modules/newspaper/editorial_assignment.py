@@ -155,6 +155,13 @@ def assign_editorial_brief(brief_id: str) -> dict[str, Any]:
         dedupe_key=f"editorial-assignment:{brief.brief_id}:initial",
         payload=payload,
     )
+    if created:
+        # An assignment is a deliberate, one-off admin action — unlike the
+        # passive scrape/mail pipeline, it should compose right away rather
+        # than wait for the next hourly standard-queue beat.
+        from app.modules.newspaper.tasks.queue_drain_tasks import drain_standard_publish_queue
+
+        drain_standard_publish_queue.delay()
     return {
         "status": "enqueued" if created else "duplicate",
         "brief_id": brief.brief_id,
@@ -213,6 +220,10 @@ def refresh_editorial_brief(brief_id: str) -> dict[str, Any]:
     # compose just delays the next attempt by one cadence period, which is
     # simpler than threading a completion callback back through the drain.
     mark_brief_run(brief_id=brief.brief_id)
+    if created:
+        from app.modules.newspaper.tasks.queue_drain_tasks import drain_standard_publish_queue
+
+        drain_standard_publish_queue.delay()
     return {
         "status": "enqueued" if created else "duplicate",
         "brief_id": brief.brief_id,

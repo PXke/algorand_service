@@ -45,6 +45,11 @@ def test_assign_editorial_brief_forces_relevance_and_enqueues(monkeypatch) -> No
     monkeypatch.setattr(
         "app.modules.newspaper.publish_queue_store.enqueue_publish", fake_enqueue_publish
     )
+    drain_calls = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.tasks.queue_drain_tasks.drain_standard_publish_queue.delay",
+        lambda: drain_calls.append(1),
+    )
 
     result = ea.assign_editorial_brief("00000000-0000-0000-0000-000000000001")
 
@@ -56,6 +61,30 @@ def test_assign_editorial_brief_forces_relevance_and_enqueues(monkeypatch) -> No
     assert captured_enqueue_kwargs["priority"] == 199
     assert captured_enqueue_kwargs["payload"]["publish_mode"] == "create"
     assert captured_enqueue_kwargs["payload"]["source_kind"] == "editorial_assignment"
+    assert drain_calls == [1]
+
+
+def test_assign_editorial_brief_duplicate_does_not_redrain(monkeypatch) -> None:
+    monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", True)
+    monkeypatch.setattr(ea, "get_brief", lambda brief_id: _brief(brief_id=brief_id))
+    monkeypatch.setattr(
+        "app.modules.newspaper.publish_score.compute_priority",
+        lambda **kwargs: type("B", (), {"total": 100})(),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.publish_queue_store.enqueue_publish",
+        lambda **kw: ("existing-queue-id", False),
+    )
+    drain_calls = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.tasks.queue_drain_tasks.drain_standard_publish_queue.delay",
+        lambda: drain_calls.append(1),
+    )
+
+    result = ea.assign_editorial_brief("00000000-0000-0000-0000-000000000001")
+
+    assert result["status"] == "duplicate"
+    assert not drain_calls
 
 
 def test_assign_editorial_brief_disabled_flag(monkeypatch) -> None:
@@ -124,6 +153,11 @@ def test_refresh_edits_existing_article_and_bumps_last_run(monkeypatch) -> None:
     monkeypatch.setattr(
         ea, "mark_brief_run", lambda **kw: mark_run_calls.append(kw)
     )
+    drain_calls = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.tasks.queue_drain_tasks.drain_standard_publish_queue.delay",
+        lambda: drain_calls.append(1),
+    )
 
     result = ea.refresh_editorial_brief("00000000-0000-0000-0000-000000000001")
 
@@ -131,6 +165,7 @@ def test_refresh_edits_existing_article_and_bumps_last_run(monkeypatch) -> None:
     assert captured_enqueue_kwargs["payload"]["publish_mode"] == "edit"
     assert captured_enqueue_kwargs["payload"]["linked_article_id"] == linked_id
     assert mark_run_calls == [{"brief_id": "00000000-0000-0000-0000-000000000001"}]
+    assert drain_calls == [1]
 
 
 def test_scan_schedule_assigns_unlinked_and_refreshes_due(monkeypatch) -> None:
