@@ -108,7 +108,20 @@ def register_admin_routes(app) -> None:
             keywords=payload.keywords,
             status=payload.status,
             wallet_address=wallet,
+            refresh_every_days=payload.refresh_every_days,
         )
+        try:
+            from celery import Celery
+
+            from app.core.config import settings
+
+            Celery(broker=settings.celery_broker_url).send_task(
+                "app.tasks.newspaper.assign_editorial_brief",
+                kwargs={"brief_id": item["brief_id"]},
+                queue="pipeline",
+            )
+        except Exception:
+            pass  # best-effort — the hourly scheduler picks up unlinked briefs anyway
         return item
 
     @app.get("/api/v1/admin/briefs/:brief_id")
@@ -121,6 +134,34 @@ def register_admin_routes(app) -> None:
         if item is None:
             return json_error_response(404, "not_found", "Brief not found")
         return item
+
+    @app.post("/api/v1/admin/briefs/:brief_id/assign-now")
+    async def admin_assign_brief_now(request: Request) -> Response:
+        denied = require_admin_wallet(request)
+        if denied is not None:
+            return denied
+        brief_id = request.path_params.get("brief_id", "")
+        item = store.get_brief(brief_id)
+        if item is None:
+            return json_error_response(404, "not_found", "Brief not found")
+        # Already has an article -> refresh it in place; otherwise this is the
+        # (first, or retried) initial assignment.
+        task_name = (
+            "app.tasks.newspaper.refresh_editorial_brief"
+            if item.get("linked_article_id")
+            else "app.tasks.newspaper.assign_editorial_brief"
+        )
+        try:
+            from celery import Celery
+
+            from app.core.config import settings
+
+            Celery(broker=settings.celery_broker_url).send_task(
+                task_name, kwargs={"brief_id": brief_id}, queue="pipeline"
+            )
+            return {"status": "queued", "brief_id": brief_id}
+        except Exception as exc:
+            return json_error_response(500, "assign_failed", str(exc))
 
     @app.get("/api/v1/admin/official-channels")
     async def admin_list_official_channels(request: Request) -> Response:
@@ -184,7 +225,9 @@ def register_admin_routes(app) -> None:
         # Short TTL: scans up to 5000 rows + a concurrent detail batch; doesn't
         # need to be real-time. Invalidated on each feedback write below.
         # to_thread keeps the cache-miss recompute off the event loop.
-        return await asyncio.to_thread(cached_json, "admin:training_stats", 30, store.training_stats)
+        return await asyncio.to_thread(
+            cached_json, "admin:training_stats", 30, store.training_stats
+        )
 
     @app.post("/api/v1/admin/retrain")
     async def admin_retrain(request: Request) -> Response:
@@ -467,20 +510,23 @@ def register_admin_routes(app) -> None:
                     )
                 except (ValueError, TypeError):
                     content_rel = None
+                is_relevant = bool(row.is_relevant) if row.is_relevant is not None else True
                 items.append(
                     {
                         "domain": row.domain,
-                        "last_crawled_at": row.last_crawled_at.isoformat() if row.last_crawled_at else None,
+                        "last_crawled_at": (
+                            row.last_crawled_at.isoformat() if row.last_crawled_at else None
+                        ),
                         "relevance_score": float(row.relevance_score or 0),
                         "category": row.category or "",
-                        "is_relevant": bool(row.is_relevant) if row.is_relevant is not None else True,
+                        "is_relevant": is_relevant,
                         "quality": meta.get("quality", ""),
                         "category_admin": meta.get("category_admin", ""),
                         "frontier_status": (
                             getattr(row, "frontier_status", None)
                             or (
                                 "dead_end"
-                                if not (bool(row.is_relevant) if row.is_relevant is not None else True)
+                                if not is_relevant
                                 else meta.get("frontier_status", "approved")
                             )
                         ),
@@ -549,7 +595,9 @@ def register_admin_routes(app) -> None:
         # the recompute (and its blocking COUNT waits) off the event loop.
         import asyncio
 
-        return await asyncio.to_thread(cached_json, f"admin:domains:{status or 'all'}", 15, _compute)
+        return await asyncio.to_thread(
+            cached_json, f"admin:domains:{status or 'all'}", 15, _compute
+        )
 
     @app.get("/api/v1/admin/tool-suggestions")
     async def admin_list_tool_suggestions(request: Request) -> Response:
@@ -559,7 +607,6 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         from app.core.cassandra import get_cassandra_session
-
         from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
@@ -587,7 +634,6 @@ def register_admin_routes(app) -> None:
         import json as _json
 
         from app.core.cassandra import get_cassandra_session
-
         from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
@@ -838,7 +884,6 @@ def register_admin_routes(app) -> None:
         if not url:
             return {"items": []}
         from app.core.cassandra import get_cassandra_session
-
         from app.core.statements import InvestigationStmts
 
         session = get_cassandra_session()

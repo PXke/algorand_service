@@ -58,25 +58,6 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
     except Exception:
         enrichment_block = ""
 
-    try:
-        from app.core import config as worker_config
-        from app.modules.newspaper.editorial_briefs import load_editorial_brief_block
-
-        if worker_config.WRITER_EDITORIAL_BRIEFS_ENABLED:
-            brief_block = load_editorial_brief_block(
-                page_text=str(payload.get("page_text", "")),
-                page_title=str(payload.get("page_title", "")),
-                publish_topic=topic.value,
-            )
-            if brief_block:
-                enrichment_block = (
-                    f"{enrichment_block}\n\n{brief_block}".strip()
-                    if enrichment_block
-                    else brief_block
-                )
-    except Exception:
-        pass
-
     new_text = str(payload.get("page_text", ""))
     new_title = str(payload.get("page_title", ""))
 
@@ -157,7 +138,11 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
             match_value=str(payload.get("match_value", "")),
         )
     else:
-        keys = [(str(k[0]), str(k[1])) for k in keys if isinstance(k, (list, tuple)) and len(k) == 2]
+        keys = [
+            (str(k[0]), str(k[1]))
+            for k in keys
+            if isinstance(k, (list, tuple)) and len(k) == 2
+        ]
     register_article_match_keys(article_id=linked_id, keys=keys)
 
     return {

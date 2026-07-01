@@ -537,8 +537,21 @@ class GatekeeperStmts:
 # --------------------------------------------------------------------------- #
 class EditorialBriefStmts:
     LIST = _Stmt(
-        "SELECT brief_id, title, body_markdown, keywords, status "
+        "SELECT brief_id, title, body_markdown, keywords, status, "
+        "refresh_every_days, last_run_at, linked_article_id "
         "FROM editorial_briefs LIMIT ?"
+    )
+    GET = _Stmt(
+        "SELECT brief_id, title, body_markdown, keywords, status, "
+        "refresh_every_days, last_run_at, linked_article_id "
+        "FROM editorial_briefs WHERE brief_id = ?"
+    )
+    UPDATE_LAST_RUN = _Stmt(
+        "UPDATE editorial_briefs SET last_run_at = ? WHERE brief_id = ?"
+    )
+    UPDATE_LINK = _Stmt(
+        "UPDATE editorial_briefs SET last_run_at = ?, linked_article_id = ? "
+        "WHERE brief_id = ?"
     )
 
 

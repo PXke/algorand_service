@@ -86,7 +86,7 @@ class AdminCassandraStore:
         except Exception:
             pass
         now = datetime.now(tz=UTC)
-        try:
+        with contextlib.suppress(Exception):
             session.execute(
                 ArticleVersionStmts.INSERT,
                 (
@@ -100,8 +100,6 @@ class AdminCassandraStore:
                     now,
                 ),
             )
-        except Exception:
-            pass
 
     def _write_article(
         self,
@@ -228,6 +226,7 @@ class AdminCassandraStore:
         keywords: str,
         status: str,
         wallet_address: str,
+        refresh_every_days: int = 0,
     ) -> dict:
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import EditorialBriefStmts
@@ -246,12 +245,14 @@ class AdminCassandraStore:
                 wallet_address,
                 now,
                 now,
+                refresh_every_days,
             ),
         )
         return {
             "brief_id": str(brief_id),
             "title": title,
             "status": status,
+            "refresh_every_days": refresh_every_days,
             "created_at_epoch": int(now.timestamp()),
         }
 
@@ -267,6 +268,7 @@ class AdminCassandraStore:
         items = []
         for row in rows:
             created = row.created_at
+            last_run = row.last_run_at
             items.append(
                 {
                     "brief_id": str(row.brief_id),
@@ -275,6 +277,11 @@ class AdminCassandraStore:
                     "status": row.status or "draft",
                     "wallet_address": row.wallet_address or "",
                     "created_at_epoch": int(created.timestamp()) if created else 0,
+                    "refresh_every_days": int(row.refresh_every_days or 0),
+                    "last_run_at_epoch": int(last_run.timestamp()) if last_run else 0,
+                    "linked_article_id": (
+                        str(row.linked_article_id) if row.linked_article_id else ""
+                    ),
                 }
             )
         return items
@@ -293,6 +300,7 @@ class AdminCassandraStore:
             return None
         created = row.created_at
         updated = row.updated_at
+        last_run = row.last_run_at
         return {
             "brief_id": str(row.brief_id),
             "title": row.title,
@@ -302,6 +310,9 @@ class AdminCassandraStore:
             "wallet_address": row.wallet_address or "",
             "created_at_epoch": int(created.timestamp()) if created else 0,
             "updated_at_epoch": int(updated.timestamp()) if updated else 0,
+            "refresh_every_days": int(row.refresh_every_days or 0),
+            "last_run_at_epoch": int(last_run.timestamp()) if last_run else 0,
+            "linked_article_id": str(row.linked_article_id) if row.linked_article_id else "",
         }
 
     def list_official_channels(self, *, kind: str | None = None, limit: int = 200) -> list[dict]:
@@ -409,12 +420,12 @@ class AdminCassandraStore:
         graded = graded_pos = graded_neg = 0
         # Fetch the grade-dimension detail rows in ONE concurrent batch instead of
         # up to 400 sequential round-trips (this was the Training tab's slow point).
-        from cassandra.concurrent import execute_concurrent_with_args
+        from app.core.cassandra import execute_parallel_with_args
 
-        for ok, res in execute_concurrent_with_args(
-            session, ClassifierFeedbackStmts.GET_GRADE,
+        for ok, res in execute_parallel_with_args(
+            ClassifierFeedbackStmts.GET_GRADE,
             [(r.feedback_id,) for r in rows[:400]],
-            concurrency=64, raise_on_first_error=False,
+            concurrency=64, raise_on_error=False,
         ):
             if not ok:
                 continue
@@ -544,7 +555,8 @@ class AdminCassandraStore:
         if article_id and cats:
             self._apply_article_categories(article_id, cats)
         if review_id:
-            self._complete_classifier_review(review_id, resolution="approved" if approved else "rejected")
+            resolution = "approved" if approved else "rejected"
+            self._complete_classifier_review(review_id, resolution=resolution)
         # A rejected URL is a strong "not relevant" signal — keep the worker from
         # re-enqueueing it until the classifier has a chance to learn from this.
         if not approved:
@@ -987,7 +999,7 @@ class AdminCassandraStore:
             return []
         import json
 
-        from cassandra.concurrent import execute_concurrent_with_args
+        from app.core.cassandra import execute_parallel_with_args
 
         review_ids = [row.review_id for row in rows]
         if not review_ids:
@@ -996,9 +1008,9 @@ class AdminCassandraStore:
         # Phase 1: fetch every queue detail in ONE concurrent batch instead of a
         # sequential SELECT per pending row (was the dominant cost of this tab).
         details = []
-        for ok, res in execute_concurrent_with_args(
-            session, ClassifierReviewStmts.GET_DETAIL, [(rid,) for rid in review_ids],
-            concurrency=64, raise_on_first_error=False,
+        for ok, res in execute_parallel_with_args(
+            ClassifierReviewStmts.GET_DETAIL, [(rid,) for rid in review_ids],
+            concurrency=64, raise_on_error=False,
         ):
             if not ok:
                 continue
@@ -1047,15 +1059,13 @@ class AdminCassandraStore:
         uuid_args = []
         for _d, article_id, *_rest in parsed_rows:
             if article_id:
-                try:
+                with contextlib.suppress(ValueError):
                     uuid_args.append((UUID(article_id),))
-                except ValueError:
-                    pass
         article_by_id: dict[str, object] = {}
         if uuid_args:
-            for ok, res in execute_concurrent_with_args(
-                session, ArticleStmts.GET_SUMMARY_CARD, uuid_args,
-                concurrency=64, raise_on_first_error=False,
+            for ok, res in execute_parallel_with_args(
+                ArticleStmts.GET_SUMMARY_CARD, uuid_args,
+                concurrency=64, raise_on_error=False,
             ):
                 if not ok:
                     continue

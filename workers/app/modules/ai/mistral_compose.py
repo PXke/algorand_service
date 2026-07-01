@@ -643,6 +643,19 @@ Source material (may be days or years old — judge figures against today's date
 {diff_block}
 {_clip(enrichment_block, 5000) if enrichment_block else ""}"""
 
+    return _compose_via_writer_tools(
+        system=system, user=user, source_url=source_url, mistral=mistral
+    )
+
+
+def _compose_via_writer_tools(
+    *, system: str, user: str, source_url: str, mistral: MistralClient
+) -> MistralArticleFields:
+    """Shared research -> write -> grade/revise loop behind every writer-tools
+    compose path. Only depends on the system/user prompt pair and a label
+    (``source_url``) used for tool scoping and session/investigation bookkeeping
+    — it doesn't assume the source material was a real scraped page, so callers
+    can feed it a from-scratch topic assignment just as well as a scrape diff."""
     from app.core.config import WRITER_TOOLS_ENABLED
 
     messages = [
@@ -847,6 +860,82 @@ Source material (may be days or years old — judge figures against today's date
 
     payload = mistral.chat_json_object(messages)
     return _parse_article_fields(payload)
+
+
+def compose_assignment_article_mistral(
+    *,
+    brief_title: str,
+    brief_body: str,
+    keywords: str,
+    brief_id: str,
+    client: MistralClient | None = None,
+) -> MistralArticleFields:
+    """Generate a from-scratch article for an editor-assigned topic (no scraped
+    source page). Unlike ``compose_scrape_article_mistral``, the brief text is
+    NOT verified fact — the model must substantiate the topic itself via tools
+    before writing, using the same research -> write -> grade/revise loop."""
+    mistral = client or get_mistral_client()
+    today = _today_utc()
+
+    system = (
+        "You are an expert journalist and news writer for a premier Algorand-focused "
+        "media outlet. You have been assigned an original story by an editor — it has "
+        "NOT been pre-researched, so your job is to investigate it yourself with your "
+        "tools and then write a captivating, optimistic, and highly professional "
+        "article from what you verify.\n\n"
+        "Writing guidelines:\n"
+        "- Tone: professional, objective, and positive. Strictly avoid sensationalism, "
+        "marketing speak, and fluffy language. The writing must be high-signal and "
+        "sound distinctly human.\n"
+        "- Establish the Stakes: never announce a technical upgrade or new feature "
+        "without immediately explaining the real-world friction it eliminates or the "
+        "threat it defends against.\n"
+        "- Narrative Synthesis: identify the connective tissue between your research "
+        "findings. Weave distinct developments into a unified narrative rather than "
+        "presenting them as isolated bullet points.\n"
+        "- Concrete Scenarios: translate abstract blockchain concepts into concrete "
+        "operational scenarios to make the implications vivid for the reader.\n"
+        "- Depth: develop the story to the full depth your verified research supports. "
+        "Don't be terse when you have the material — explain how it works, who it "
+        "affects, and why it matters, and draw out the implications. Thorough writing "
+        "built on real, cited findings is the goal; brevity is for when the verified "
+        "material genuinely runs out, not a default.\n"
+        "- Audience: intelligent general readers who are NOT crypto specialists. Briefly "
+        "explain blockchain/DeFi/Algorand jargon in plain language on first use (e.g. "
+        "what an ASA, validator, or TVL is), spell out acronyms once, and never assume "
+        "prior crypto knowledge — without dumbing the story down or over-explaining basics.\n"
+        "- Expertise: seamlessly integrate your deep knowledge of the Algorand ecosystem.\n"
+        f"{_recency_rule(today)}"
+        "- Accuracy: the editorial pointers below are a starting brief, NOT verified "
+        "fact — confirm everything via your tools this session before relying on it. "
+        "Use only facts you have verified; never invent quotes, numbers, or on-chain "
+        "events. If your research cannot substantiate enough of the assigned topic, "
+        "say so plainly in the article rather than inventing content.\n"
+        f"- {_STRICT_QUOTE_GROUNDING}\n"
+        f"{_ARTICLE_FORMAT_RULES}\n\n"
+        f"{_JSON_ONLY}"
+    )
+    user = f"""Write the article now on the assigned topic below.
+
+Today (UTC): {today}
+Assignment source: editorial brief (not a scraped page — research this from scratch)
+
+Topic / working title: {brief_title}
+Focus keywords: {keywords or "(none given)"}
+
+Editorial pointers (a starting brief, NOT verified fact — confirm via tools before
+relying on anything here):
+```
+{_clip(brief_body)}
+```
+
+This is a from-scratch research assignment. Use your tools extensively (official
+sites, GitHub, on-chain data, market data, etc. as relevant) to gather current,
+verifiable facts before writing."""
+
+    return _compose_via_writer_tools(
+        system=system, user=user, source_url=f"editorial://brief/{brief_id}", mistral=mistral
+    )
 
 
 def compose_article_edit_mistral(

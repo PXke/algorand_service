@@ -640,9 +640,11 @@ class _AdminBriefsTabState extends ConsumerState<_AdminBriefsTab> {
   final _titleController = TextEditingController();
   final _keywordsController = TextEditingController();
   final _bodyController = TextEditingController();
+  final _refreshDaysController = TextEditingController(text: '0');
   List<Map<String, dynamic>> _briefs = [];
   bool _submitting = false;
   String? _error;
+  String? _assigningBriefId;
 
   @override
   void initState() {
@@ -655,6 +657,7 @@ class _AdminBriefsTabState extends ConsumerState<_AdminBriefsTab> {
     _titleController.dispose();
     _keywordsController.dispose();
     _bodyController.dispose();
+    _refreshDaysController.dispose();
     super.dispose();
   }
 
@@ -679,25 +682,46 @@ class _AdminBriefsTabState extends ConsumerState<_AdminBriefsTab> {
     if (wallet == null || _titleController.text.trim().isEmpty) return;
     setState(() => _submitting = true);
     try {
+      final refreshDays = int.tryParse(_refreshDaysController.text.trim()) ?? 0;
       await ref.read(adminApiProvider).createBrief(
         walletAddress: wallet,
         title: _titleController.text.trim(),
         bodyMarkdown: _bodyController.text,
         keywords: _keywordsController.text.trim(),
+        refreshEveryDays: refreshDays,
       );
       _titleController.clear();
       _bodyController.clear();
       _keywordsController.clear();
+      _refreshDaysController.text = '0';
       await _refresh();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Brief queued for the writer agent')),
+        const SnackBar(content: Text('Brief assigned to the writer agent')),
       );
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = e.toString());
     } finally {
       if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  Future<void> _assignNow(String briefId) async {
+    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    if (wallet == null) return;
+    setState(() => _assigningBriefId = briefId);
+    try {
+      await ref.read(adminApiProvider).assignBriefNow(walletAddress: wallet, briefId: briefId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Queued for the writer agent')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _assigningBriefId = null);
     }
   }
 
@@ -716,22 +740,23 @@ class _AdminBriefsTabState extends ConsumerState<_AdminBriefsTab> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text('New writer brief', style: theme.textTheme.titleSmall),
+                Text('Assign the writer a topic', style: theme.textTheme.titleSmall),
                 const SizedBox(height: 4),
                 Text(
-                  'Ideas for the writer agent — pointers and angles, not final copy.',
+                  'Writes an original article on this topic now. Set a refresh cadence to '
+                  'keep it updated in place instead of writing a new one each time.',
                   style: theme.textTheme.bodySmall?.copyWith(color: colors.muted),
                 ),
                 const SizedBox(height: 16),
                 TextField(
                   controller: _titleController,
-                  decoration: const InputDecoration(labelText: 'Title'),
+                  decoration: const InputDecoration(labelText: 'Topic / working title'),
                 ),
                 const SizedBox(height: 12),
                 TextField(
                   controller: _keywordsController,
                   decoration: const InputDecoration(
-                    labelText: 'Keywords',
+                    labelText: 'Focus keywords',
                     hintText: 'comma-separated',
                   ),
                 ),
@@ -739,10 +764,19 @@ class _AdminBriefsTabState extends ConsumerState<_AdminBriefsTab> {
                 TextField(
                   controller: _bodyController,
                   decoration: const InputDecoration(
-                    labelText: 'Notes (markdown)',
+                    labelText: 'Editorial pointers (markdown)',
                     alignLabelWithHint: true,
                   ),
                   maxLines: 6,
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _refreshDaysController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Refresh every N days',
+                    hintText: '0 = one-off, no recurring refresh',
+                  ),
                 ),
                 const SizedBox(height: 16),
                 Align(
@@ -756,7 +790,7 @@ class _AdminBriefsTabState extends ConsumerState<_AdminBriefsTab> {
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.send_outlined, size: 18),
-                    label: const Text('Queue brief'),
+                    label: const Text('Assign to writer'),
                   ),
                 ),
               ],
@@ -764,27 +798,61 @@ class _AdminBriefsTabState extends ConsumerState<_AdminBriefsTab> {
           ),
         ),
         const SizedBox(height: AppLayout.sectionGap),
-        Text('Queued briefs', style: theme.textTheme.titleSmall),
+        Text('Assigned briefs', style: theme.textTheme.titleSmall),
         const SizedBox(height: AppLayout.itemGap),
         if (_briefs.isEmpty)
           Text(
-            'Nothing queued yet.',
+            'Nothing assigned yet.',
             style: theme.textTheme.bodySmall?.copyWith(color: colors.muted),
           ),
         ..._briefs.map(
-          (b) => Padding(
-            padding: const EdgeInsets.only(bottom: AppLayout.itemGap),
-            child: _SectionCard(
-              child: ListTile(
-                title: Text(b['title']?.toString() ?? '', style: theme.textTheme.bodyMedium),
-                subtitle: Text(
-                  (b['keywords']?.toString().isNotEmpty ?? false) ? b['keywords'].toString() : '—',
-                  style: theme.textTheme.bodySmall?.copyWith(color: colors.muted),
+          (b) {
+            final briefId = b['brief_id']?.toString() ?? '';
+            final refreshDays = (b['refresh_every_days'] as num?)?.toInt() ?? 0;
+            final linked = b['linked_article_id']?.toString() ?? '';
+            final lastRunEpoch = (b['last_run_at_epoch'] as num?)?.toInt() ?? 0;
+            final cadence = refreshDays > 0 ? 'Refreshes every $refreshDays d' : 'One-off';
+            final lastRun = lastRunEpoch > 0
+                ? DateTime.fromMillisecondsSinceEpoch(lastRunEpoch * 1000).toIso8601String()
+                : 'not run yet';
+            final subtitleParts = [
+              if (b['keywords']?.toString().isNotEmpty ?? false) b['keywords'].toString(),
+              cadence,
+              linked.isEmpty ? 'no article yet' : 'last run: $lastRun',
+            ];
+            return Padding(
+              padding: const EdgeInsets.only(bottom: AppLayout.itemGap),
+              child: _SectionCard(
+                child: ListTile(
+                  title: Text(b['title']?.toString() ?? '', style: theme.textTheme.bodyMedium),
+                  subtitle: Text(
+                    subtitleParts.join(' · '),
+                    style: theme.textTheme.bodySmall?.copyWith(color: colors.muted),
+                  ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _StatusChip(text: b['status']?.toString() ?? ''),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        tooltip: linked.isEmpty ? 'Write now' : 'Refresh now',
+                        icon: _assigningBriefId == briefId
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.play_arrow_outlined, size: 20),
+                        onPressed: _assigningBriefId == briefId || briefId.isEmpty
+                            ? null
+                            : () => _assignNow(briefId),
+                      ),
+                    ],
+                  ),
                 ),
-                trailing: _StatusChip(text: b['status']?.toString() ?? ''),
               ),
-            ),
-          ),
+            );
+          },
         ),
       ],
     );

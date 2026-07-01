@@ -69,6 +69,13 @@ def test_evaluate_blocks_small_diff() -> None:
     assert decision.reason == "diff_too_small"
 
 
+def test_evaluate_allows_editorial_assignment_with_no_diff() -> None:
+    # Assignments/refreshes have no diff — must NOT hit the CONTENT_UPDATE
+    # small-diff rejection, which is why they get their own PublishKind.
+    decision = evaluate_enqueue(PublishKind.EDITORIAL_ASSIGNMENT, diff=None)
+    assert decision.allowed
+
+
 def test_classify_scam_alert_topic() -> None:
     topic = classify_publish_topic(
         page_text="URGENT scam alert: phishing link impersonating official wallet",

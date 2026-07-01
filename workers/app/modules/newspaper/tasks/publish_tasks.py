@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import time
 
 from app.celery_app import celery_app
@@ -169,25 +170,6 @@ def publish_from_queued_row(
         enrichment_block = ""
 
     try:
-        from app.core import config as worker_config
-        from app.modules.newspaper.editorial_briefs import load_editorial_brief_block
-
-        if worker_config.WRITER_EDITORIAL_BRIEFS_ENABLED:
-            brief_block = load_editorial_brief_block(
-                page_text=str(payload.get("page_text", "")),
-                page_title=str(payload.get("page_title", "")),
-                publish_topic=topic.value,
-            )
-            if brief_block:
-                enrichment_block = (
-                    f"{enrichment_block}\n\n{brief_block}".strip()
-                    if enrichment_block
-                    else brief_block
-                )
-    except Exception:
-        pass
-
-    try:
         composed = compose_scrape_article(
             service_name=row.display_name,
             source_url=row.scrape_url,
@@ -203,6 +185,8 @@ def publish_from_queued_row(
             mistral_only=mistral_only,
             enrichment_block=enrichment_block,
             transcript_text=str(payload.get("transcript_text", "")),
+            keywords=str(payload.get("keywords", "")),
+            brief_id=str(payload.get("brief_id", "")),
         )
     except MistralError as exc:
         return {
@@ -355,6 +339,13 @@ def publish_from_queued_row(
             from app.modules.crawler.domain_tracker import record_domain_compose
 
             record_domain_compose(compose_domain)
+        if payload.get("source_kind") == "editorial_assignment":
+            from app.modules.newspaper.editorial_assignment import mark_brief_run
+
+            with contextlib.suppress(Exception):
+                mark_brief_run(
+                    brief_id=str(payload.get("brief_id", "")), article_id=held_article_id
+                )
         return {
             "status": "review",
             "service_id": row.service_id,
@@ -363,7 +354,7 @@ def publish_from_queued_row(
         }
 
     from app.modules.newspaper.publish_daily_guard import (
-        PublishCapExceeded,
+        PublishCapExceededError,
         assert_publish_allowed,
         release_publish_slot,
         reserve_publish_slot,
@@ -374,7 +365,7 @@ def publish_from_queued_row(
         reserved, reserve_reason = reserve_publish_slot(tier=tier)
         if not reserved:
             return {"status": "rate_limited", "reason": reserve_reason, "tier": tier.value}
-    except PublishCapExceeded as exc:
+    except PublishCapExceededError as exc:
         return {"status": "rate_limited", "reason": str(exc), "tier": tier.value}
 
     title, summary, body = composed.title, composed.summary, sanitize_body(composed.body)
@@ -451,7 +442,11 @@ def publish_from_queued_row(
                 match_value=str(payload.get("match_value", "")),
             )
         else:
-            keys = [(str(k[0]), str(k[1])) for k in keys if isinstance(k, (list, tuple)) and len(k) == 2]
+            keys = [
+                (str(k[0]), str(k[1]))
+                for k in keys
+                if isinstance(k, (list, tuple)) and len(k) == 2
+            ]
         register_article_match_keys(article_id=article_id, keys=keys)
 
     # Published straight to the feed is a created article — count it toward the
@@ -460,6 +455,12 @@ def publish_from_queued_row(
         from app.modules.crawler.domain_tracker import record_domain_compose
 
         record_domain_compose(compose_domain)
+
+    if payload.get("source_kind") == "editorial_assignment":
+        from app.modules.newspaper.editorial_assignment import mark_brief_run
+
+        with contextlib.suppress(Exception):
+            mark_brief_run(brief_id=str(payload.get("brief_id", "")), article_id=article_id)
 
     return {
         "status": "published",
@@ -765,3 +766,32 @@ def recompose_review(review_id: str) -> dict[str, str]:
         },
     )
     return {"status": "ok", "review_id": new_review_id, "article_id": article_id}
+
+
+@celery_app.task(name="app.tasks.newspaper.assign_editorial_brief")
+def assign_editorial_brief(brief_id: str) -> dict[str, str]:
+    """First-run assignment for an active editorial brief — thin wrapper, see
+    app.modules.newspaper.editorial_assignment for the actual logic."""
+    from app.modules.newspaper.editorial_assignment import assign_editorial_brief as _assign
+
+    return _assign(brief_id)
+
+
+@celery_app.task(name="app.tasks.newspaper.refresh_editorial_brief")
+def refresh_editorial_brief(brief_id: str) -> dict[str, str]:
+    """Cadence refresh for an editorial brief's linked article — thin wrapper,
+    see app.modules.newspaper.editorial_assignment for the actual logic."""
+    from app.modules.newspaper.editorial_assignment import refresh_editorial_brief as _refresh
+
+    return _refresh(brief_id)
+
+
+@celery_app.task(name="app.tasks.newspaper.scan_editorial_brief_schedule")
+def scan_editorial_brief_schedule() -> dict[str, object]:
+    """Safety-net beat: assign any active brief still missing its first article,
+    and refresh any brief whose cadence has elapsed."""
+    from app.modules.newspaper.editorial_assignment import (
+        scan_editorial_brief_schedule as _scan,
+    )
+
+    return _scan()

@@ -264,7 +264,10 @@ class EditorialBriefCreate(msgspec.Struct, kw_only=True):
     title: Annotated[str, Meta(min_length=1, max_length=256)]
     body_markdown: Annotated[str, Meta(min_length=1, max_length=100_000)]
     keywords: Annotated[str, Meta(max_length=1024)] = ""
-    status: Annotated[str, Meta(max_length=32)] = "queued"
+    status: Annotated[str, Meta(max_length=32)] = "active"
+    # 0 = one-off assignment; >0 = re-trigger an in-place edit of the resulting
+    # article every N days (see app.tasks.newspaper.scan_editorial_brief_schedule).
+    refresh_every_days: Annotated[int, Meta(ge=0, le=3650)] = 0
 
 
 class EditorialBriefUpdate(msgspec.Struct, kw_only=True):

@@ -134,6 +134,10 @@ def _build_beat_schedule() -> dict:
             "task": "app.tasks.newspaper.poll_mail_inbox",
             "schedule": float(os.getenv("MAIL_POLL_SECONDS", "300")),
         }
+    schedule["scan-editorial-brief-schedule"] = {
+        "task": "app.tasks.newspaper.scan_editorial_brief_schedule",
+        "schedule": float(os.getenv("EDITORIAL_BRIEF_SCAN_SECONDS", "3600")),
+    }
     return schedule
 
 

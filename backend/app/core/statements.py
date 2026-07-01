@@ -132,16 +132,18 @@ class EditorialBriefStmts:
     INSERT = _Stmt(
         "INSERT INTO editorial_briefs ("
         "brief_id, title, body_markdown, keywords, status, "
-        "wallet_address, created_at, updated_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "wallet_address, created_at, updated_at, refresh_every_days"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     LIST = _Stmt(
-        "SELECT brief_id, title, keywords, status, wallet_address, created_at, updated_at "
+        "SELECT brief_id, title, keywords, status, wallet_address, created_at, updated_at, "
+        "refresh_every_days, last_run_at, linked_article_id "
         "FROM editorial_briefs LIMIT ?"
     )
     GET = _Stmt(
         "SELECT brief_id, title, body_markdown, keywords, status, "
-        "wallet_address, created_at, updated_at "
+        "wallet_address, created_at, updated_at, "
+        "refresh_every_days, last_run_at, linked_article_id "
         "FROM editorial_briefs WHERE brief_id = ?"
     )
 

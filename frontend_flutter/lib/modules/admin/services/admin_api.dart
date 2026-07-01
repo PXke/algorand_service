@@ -337,7 +337,8 @@ class AdminApi {
     required String title,
     required String bodyMarkdown,
     String keywords = '',
-    String status = 'queued',
+    String status = 'active',
+    int refreshEveryDays = 0,
   }) async {
     return _client.postJson(
       '/api/v1/admin/briefs',
@@ -346,7 +347,21 @@ class AdminApi {
         'body_markdown': bodyMarkdown,
         'keywords': keywords,
         'status': status,
+        'refresh_every_days': refreshEveryDays,
       },
+      headers: _adminHeaders(walletAddress),
+    );
+  }
+
+  /// Triggers the writer now for this brief — a fresh assignment if it has no
+  /// article yet, or an in-place refresh of its existing article otherwise
+  /// (decided server-side).
+  Future<Map<String, dynamic>> assignBriefNow({
+    required String walletAddress,
+    required String briefId,
+  }) async {
+    return _client.postJson(
+      '/api/v1/admin/briefs/$briefId/assign-now',
       headers: _adminHeaders(walletAddress),
     );
   }

@@ -7,6 +7,7 @@ from app.core import config
 from app.core.config import MISTRAL_FALLBACK_TEMPLATE, mistral_configured
 from app.modules.ai.mistral_client import MistralError
 from app.modules.ai.mistral_compose import (
+    compose_assignment_article_mistral,
     compose_recap_from_transcript_mistral,
     compose_scrape_article_mistral,
     compose_weekly_digest_article_mistral,
@@ -52,9 +53,31 @@ def compose_scrape_article(
     enrichment_block: str = "",
     transcript_text: str = "",
     source_links: list[dict[str, str]] | None = None,
+    keywords: str = "",
+    brief_id: str = "",
 ) -> ArticleComposeResult:
     """Compose by publish kind (discovery vs update) with optional Mistral."""
     topic = publish_topic or PublishTopic.GENERIC
+
+    if topic == PublishTopic.EDITORIAL_ASSIGNMENT and mistral_configured():
+        try:
+            fields = compose_assignment_article_mistral(
+                brief_title=page_title,
+                brief_body=page_text,
+                keywords=keywords,
+                brief_id=brief_id or source_url,
+            )
+            return ArticleComposeResult(
+                title=fields.title,
+                summary=fields.summary,
+                body=fields.body,
+                composer="mistral_assignment",
+                publish_kind=publish_kind.value,
+                extra_tags=getattr(fields, "tags", ()),
+            )
+        except MistralError as exc:
+            logger.warning("Editorial assignment compose failed: %s", exc)
+            raise
 
     if topic == PublishTopic.COMMUNITY_RECAP and transcript_text and mistral_configured():
         try:
