@@ -115,8 +115,8 @@ def ingest_publish_signal(
         return _skip("recently_rejected")
 
     # Novelty for selection ranking: how different this headline is from what
-    # we've published recently (1.0 = nothing close). Together with relevance it
-    # is the ONLY thing that sets queue priority.
+    # we've published recently (1.0 = nothing close). Together with relevance
+    # and source timeliness this sets queue priority.
     from app.modules.newspaper.article_grader import (
         recent_content_similarity,
         recent_title_similarity,
@@ -144,6 +144,7 @@ def ingest_publish_signal(
         service_id=service_id,
         page_text=page_text,
         page_title=page_title,
+        published_at=published_at,
         is_first_snapshot=is_first,
         diff=diff,
         source_kind=source_kind,
@@ -223,6 +224,7 @@ def ingest_publish_signal(
             "linked_article_id": mode_info.get("linked_article_id") or "",
             "match_keys": [list(pair) for pair in mode_info.get("match_keys", [])],
             "signals": signals.to_payload(),
+            "priority_breakdown": intent.priority_breakdown,
         },
         priority=intent.priority,
         publish_kind=intent.kind,

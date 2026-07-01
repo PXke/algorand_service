@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 # Where a publish date hides, in priority order (meta property/name → content).
 _PUBLISHED_META = (
@@ -154,6 +154,12 @@ def _parse_iso(value: str) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt
+
+
+def parse_published_date(value: str) -> date | None:
+    """Parse a metadata publish timestamp to a calendar date, or None."""
+    dt = _parse_iso(value)
+    return dt.date() if dt else None
 
 
 def published_age_days(published_at: str) -> float | None:

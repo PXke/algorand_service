@@ -71,6 +71,9 @@ CRAWL_URL_RECRAWL_COOLDOWN_SECONDS = env_int("CRAWL_URL_RECRAWL_COOLDOWN_SECONDS
 WRITER_ENRICHMENT_ENABLED = env_bool("WRITER_ENRICHMENT_ENABLED", True)
 WRITER_ENRICHMENT_PROBE_DOMAIN = env_bool("WRITER_ENRICHMENT_PROBE_DOMAIN", True)
 WRITER_ENRICHMENT_FETCH_TWEETS = env_bool("WRITER_ENRICHMENT_FETCH_TWEETS", True)
+# Gates the editorial-assignment pipeline (app.modules.newspaper.editorial_assignment):
+# admin-authored briefs actively enqueue a "write this topic" article on creation
+# and, on their cadence, an in-place refresh of the resulting article.
 WRITER_EDITORIAL_BRIEFS_ENABLED = env_bool("WRITER_EDITORIAL_BRIEFS_ENABLED", True)
 
 ARTICLE_EDIT_WINDOW_HOURS = env_int("ARTICLE_EDIT_WINDOW_HOURS", 24)
@@ -311,12 +314,13 @@ NOVELTY_CONTENT_WINDOW_HOURS = env_int("NOVELTY_CONTENT_WINDOW_HOURS", 24 * 70)
 # penalized hard for a week and freely allowed again after ~10 weeks.
 NOVELTY_DECAY_FULL_DAYS = env_int("NOVELTY_DECAY_FULL_DAYS", 7)
 NOVELTY_DECAY_ZERO_DAYS = env_int("NOVELTY_DECAY_ZERO_DAYS", 70)
-# Selection ranking is driven by the trained signals ONLY — how relevant and how
-# novel a candidate is. These two weights set the queue priority; the old
-# topic/trust/service-weight heuristics are kept for observability but no longer
-# decide what we write about (they over-rated off-topic service-discovery pages).
+# Selection ranking: relevance, novelty, and source timeliness. Relevance is the
+# spine — it MULTIPLIES, so an off-topic page scores ~0 no matter how "novel" or
+# "fresh" it looks. Timeliness uses page metadata and title/lead dates so a
+# months-old announcement sinks below comparable fresh coverage.
 RELEVANCE_PRIORITY_WEIGHT = env_int("RELEVANCE_PRIORITY_WEIGHT", 100)
 NOVELTY_PRIORITY_WEIGHT = env_int("NOVELTY_PRIORITY_WEIGHT", 100)
+RECENCY_PRIORITY_WEIGHT = env_int("RECENCY_PRIORITY_WEIGHT", 80)
 
 # YouTube transcripts (Stage 2) via a third-party API — the prod IP is anti-bot
 # blocked for direct yt-dlp/captions. Provider-agnostic: URL template (may use
@@ -352,7 +356,7 @@ GRADER_TEXT_MIN_SAMPLES = env_int("GRADER_TEXT_MIN_SAMPLES", 60)
 # Article length grading: the grader's length subscore is a Gaussian peaking at
 # LENGTH_TARGET_WORDS, width LENGTH_SIGMA_WORDS. Editorial preference is ~800-word
 # pieces, so both thin stubs and bloated walls score low (≈0.6 at ±sigma; with
-# σ=350 the >0.6 band is roughly 500–1100 words).
+# sigma=350 the >0.6 band is roughly 500-1100 words).
 LENGTH_TARGET_WORDS = env_int("LENGTH_TARGET_WORDS", 800)
 LENGTH_SIGMA_WORDS = env_int("LENGTH_SIGMA_WORDS", 350)
 CLASSIFIER_CONFIDENCE_THRESHOLD = float(os.getenv("CLASSIFIER_CONFIDENCE_THRESHOLD", "0.8"))

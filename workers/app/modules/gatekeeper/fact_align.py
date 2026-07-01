@@ -218,18 +218,101 @@ def extract_dates(text: str, *, min_year: int = 1990, max_year: int | None = Non
     return out
 
 
+_LEAD_CHARS = 500
+
+
+def _past_event_dates(text: str, *, today: date) -> list[date]:
+    """Dates mentioned in ``text`` that are today or earlier — roadmap/future
+    mentions are excluded so they do not inflate timeliness."""
+    return [d for d in extract_dates(text) if d <= today]
+
+
+def event_anchor_date(
+    *,
+    published_at: str = "",
+    page_title: str = "",
+    page_text: str = "",
+    today: date | None = None,
+) -> date | None:
+    """Best guess at when the *story* happened — not forward-looking roadmap dates.
+
+    Priority: (1) structured page ``published_at`` metadata, (2) the most recent
+    past-or-present date in the title + lead."""
+    from app.modules.scraper.core.page_metadata import parse_published_date
+
+    today = today or date.today()
+    meta = parse_published_date(published_at)
+    if meta is not None:
+        return meta
+
+    lead = f"{page_title}\n{page_text[:_LEAD_CHARS]}"
+    past = _past_event_dates(lead, today=today)
+    if past:
+        return max(past)
+    return None
+
+
+def _timeliness_from_anchor(
+    anchor: date | None,
+    *,
+    today: date | None = None,
+    stale_days: int = 90,
+    unknown_prior: float = 0.5,
+) -> float:
+    if anchor is None:
+        return unknown_prior
+    today = today or date.today()
+    age = (today - anchor).days
+    if age <= 0:
+        return 1.0
+    return max(0.0, 1.0 - age / max(1, stale_days))
+
+
+def source_timeliness_score(
+    *,
+    published_at: str = "",
+    page_title: str = "",
+    page_text: str = "",
+    today: date | None = None,
+    stale_days: int | None = None,
+    unknown_prior: float = 0.5,
+) -> float:
+    """0.0 = very stale, 1.0 = fresh. Used for publish-queue priority.
+
+    ``unknown_prior`` applies when no anchor date can be inferred (typically 0.5
+    so undated landing pages are neither boosted nor heavily penalized)."""
+    if stale_days is None:
+        from app.core.config import PAGE_STALE_MAX_AGE_DAYS
+
+        stale_days = PAGE_STALE_MAX_AGE_DAYS
+    anchor = event_anchor_date(
+        published_at=published_at,
+        page_title=page_title,
+        page_text=page_text,
+        today=today,
+    )
+    return _timeliness_from_anchor(
+        anchor,
+        today=today,
+        stale_days=stale_days,
+        unknown_prior=unknown_prior,
+    )
+
+
 def content_recency_score(
     text: str, *, today: date | None = None, stale_days: int = 365
 ) -> float | None:
-    """Recency of the *content* from the most recent date it mentions (not the
-    publish timestamp). 1.0 = mentions today/future, decaying to 0.0 at
-    ``stale_days`` old. Returns None when the text names no parseable date, so
-    the caller can apply a neutral prior."""
-    dates = extract_dates(text)
-    if not dates:
-        return None
+    """Recency of draft *content* from the most recent past event date it names.
+
+    Ignores forward-looking roadmap dates (unlike the old max-all-dates rule).
+    Returns None when the text names no parseable past date, so the caller can
+    apply a neutral prior."""
     today = today or date.today()
-    age = (today - max(dates)).days
+    past = _past_event_dates(text, today=today)
+    if not past:
+        return None
+    anchor = max(past)
+    age = (today - anchor).days
     if age <= 0:
         return 1.0
     return max(0.0, 1.0 - age / max(1, stale_days))

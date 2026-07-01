@@ -75,5 +75,42 @@ def test_content_recency_recent_vs_stale() -> None:
     assert fa.content_recency_score("data from 18/06/2026", today=today) > 0.99
     assert fa.content_recency_score("history from 10/10/1990", today=today) == 0.0
     assert fa.content_recency_score("no dates here", today=today) is None
-    # Future/scheduled date clamps to fully recent.
-    assert fa.content_recency_score("event 2027-01-01", today=today) == 1.0
+    # Forward-looking roadmap dates do not count as a recent event hook.
+    assert fa.content_recency_score("planned for 2027-01-01", today=today) is None
+
+
+def test_event_anchor_prefers_metadata_over_roadmap_text() -> None:
+    from datetime import date
+
+    anchor = fa.event_anchor_date(
+        published_at="2025-11-15T10:00:00Z",
+        page_title="Noah x Algorand",
+        page_text="Announced November 2025. Rollout planned for 2026.",
+        today=date(2026, 6, 29),
+    )
+    assert anchor == date(2025, 11, 15)
+
+
+def test_source_timeliness_stale_pr_vs_fresh() -> None:
+    from datetime import date
+
+    today = date(2026, 6, 29)
+    stale = fa.source_timeliness_score(
+        published_at="2025-11-15T10:00:00Z",
+        page_title="Noah partnership",
+        page_text="Rollout planned for 2026.",
+        today=today,
+        stale_days=90,
+    )
+    fresh = fa.source_timeliness_score(
+        published_at="2026-06-29T10:00:00Z",
+        page_text="Launch this week on Algorand mainnet.",
+        today=today,
+        stale_days=90,
+    )
+    assert stale == 0.0
+    assert fresh == 1.0
+
+
+def test_source_timeliness_unknown_is_neutral() -> None:
+    assert fa.source_timeliness_score(page_text="Algorand wallet features.") == 0.5

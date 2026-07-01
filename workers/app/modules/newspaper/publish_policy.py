@@ -16,6 +16,7 @@ class PublishKind(StrEnum):
     WEEKLY_DIGEST = "weekly_digest"
     SERVICE_DISCOVERY = "service_discovery"
     CONTENT_UPDATE = "content_update"
+    EDITORIAL_ASSIGNMENT = "editorial_assignment"
 
 
 class PublishTier(StrEnum):
@@ -34,6 +35,7 @@ class PublishTopic(StrEnum):
     CONTENT_UPDATE = "content_update"
     CHAIN_ACTIVITY = "chain_activity"
     GENERIC = "generic"
+    EDITORIAL_ASSIGNMENT = "editorial_assignment"
 
 
 TOPIC_PRIORITY: dict[PublishTopic, int] = {
@@ -41,6 +43,7 @@ TOPIC_PRIORITY: dict[PublishTopic, int] = {
     PublishTopic.NETWORK_INCIDENT: 98,
     PublishTopic.SDK_RELEASE: 90,
     PublishTopic.COMMUNITY_EVENT: 85,
+    PublishTopic.EDITORIAL_ASSIGNMENT: 85,
     PublishTopic.COMMUNITY_RECAP: 82,
     PublishTopic.NEW_SERVICE: 80,
     PublishTopic.PRICING_CHANGE: 75,
@@ -274,6 +277,7 @@ def build_publish_intent(
     source_kind: str | None = None,
     source_url: str = "",
     page_title: str = "",
+    published_at: str = "",
     mail_from: str = "",
     stored_service_weight: int = 0,
     chain_triggered: bool = False,
@@ -312,6 +316,8 @@ def build_publish_intent(
         diff=diff,
         source_kind=source_kind,
         source_url=source_url,
+        page_title=page_title,
+        published_at=published_at,
         mail_from=mail_from,
         stored_service_weight=stored_service_weight,
         relevance=relevance,
@@ -324,7 +330,9 @@ def build_publish_intent(
         tier=tier,
         priority=breakdown.total,
         priority_breakdown=(
-            f"relevance={breakdown.relevance_bonus}+novelty={breakdown.novelty_bonus} "
+            f"relevance={breakdown.relevance_bonus}+novelty={breakdown.novelty_bonus}"
+            f"+timeliness={breakdown.timeliness_bonus}"
+            f"(score={breakdown.timeliness_score}) "
             f"(heuristics topic={breakdown.topic_base} trust={breakdown.source_trust} "
             f"service={breakdown.service_weight} no longer ranked)"
         ),
