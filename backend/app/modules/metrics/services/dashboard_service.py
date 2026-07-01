@@ -53,7 +53,11 @@ class MetricsDashboardService:
                 MetricTile(
                     id="algo_price",
                     label="ALGO",
-                    value=f"${spot.price_usd:.4f}" if spot.price_usd < 1 else f"${spot.price_usd:,.2f}",
+                    value=(
+                        f"${spot.price_usd:.4f}"
+                        if spot.price_usd < 1
+                        else f"${spot.price_usd:,.2f}"
+                    ),
                     hint=hint,
                     available=True,
                 )

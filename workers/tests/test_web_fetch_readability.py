@@ -16,11 +16,15 @@ _ARTICLE_BODY = (
 _PAGE = f"""
 <html><head><title>XBTO expands</title></head>
 <body>
-  <nav class="navbar"><a href="/home">Home</a><a href="/markets">Markets</a><a href="/about">About</a></nav>
+  <nav class="navbar">
+    <a href="/home">Home</a><a href="/markets">Markets</a><a href="/about">About</a>
+  </nav>
   <div id="cookie-consent">We use cookies. Accept all cookies to continue browsing.</div>
   <header><a href="/login">Log in</a><a href="/signup">Sign up</a></header>
   <article><p>{_ARTICLE_BODY}</p></article>
-  <footer class="site-footer">Terms of Service · Privacy · © 2026 · Subscribe to our newsletter</footer>
+  <footer class="site-footer">
+    Terms of Service · Privacy · © 2026 · Subscribe to our newsletter
+  </footer>
 </body></html>
 """
 

@@ -395,10 +395,7 @@ def _is_blocklisted(domain: str) -> bool:
     blocked = set(_DEAD_END_DOMAINS)
     blocked.update(d.strip().lower() for d in FRONTIER_BLOCKLIST_EXTRA.split(",") if d.strip())
     parts = domain.lower().split(".")
-    for i in range(len(parts) - 1):
-        if ".".join(parts[i:]) in blocked:
-            return True
-    return False
+    return any(".".join(parts[i:]) in blocked for i in range(len(parts) - 1))
 
 
 def is_dead_end_domain(domain: str) -> bool:

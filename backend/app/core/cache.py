@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from contextlib import suppress
 from functools import lru_cache
 from typing import TypeVar
 
@@ -31,17 +32,13 @@ def cached_json(key: str, ttl_seconds: int, compute: Callable[[], T]) -> T:
     """Return cached JSON for `key`, else run `compute()`, cache it, and return it.
     `compute`'s result must be JSON-serializable."""
     full = _PREFIX + key
-    try:
+    with suppress(Exception):  # cache miss / Redis down → recompute
         hit = _client().get(full)
         if hit is not None:
             return json.loads(hit)
-    except Exception:
-        pass  # cache miss / Redis down → recompute
     value = compute()
-    try:
+    with suppress(Exception):
         _client().set(full, json.dumps(value, separators=(",", ":")), ex=ttl_seconds)
-    except Exception:
-        pass
     return value
 
 
@@ -49,7 +46,5 @@ def invalidate(*keys: str) -> None:
     """Drop cache entries now (e.g. after a write that changes the aggregate)."""
     if not keys:
         return
-    try:
+    with suppress(Exception):
         _client().delete(*[_PREFIX + k for k in keys])
-    except Exception:
-        pass

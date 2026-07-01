@@ -10,7 +10,7 @@ def _subs(v: float = 0.5) -> dict:
 
 def test_scalar_model_path(monkeypatch) -> None:
     class _M:
-        def predict_proba(self, X):
+        def predict_proba(self, x):
             return [[0.3, 0.7]]
 
     monkeypatch.setattr(gm, "_load_model", lambda: _M())
@@ -26,9 +26,9 @@ def test_text_aware_model_path(monkeypatch) -> None:
     vec = TfidfVectorizer().fit(["algorand mainnet upgrade", "defi staking rewards"])
 
     class _MT:
-        def predict_proba(self, X):
-            # X must be the hstacked (text | scalar) matrix.
-            assert X.shape[1] == len(vec.get_feature_names_out()) + len(gm.FEATURE_ORDER)
+        def predict_proba(self, x):
+            # x must be the hstacked (text | scalar) matrix.
+            assert x.shape[1] == len(vec.get_feature_names_out()) + len(gm.FEATURE_ORDER)
             return [[0.1, 0.9]]
 
     monkeypatch.setattr(gm, "_load_model", lambda: {"vectorizer": vec, "model": _MT()})

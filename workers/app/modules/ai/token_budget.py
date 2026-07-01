@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-# Mistral's Tekken tokenizer averages ~3.5–4 chars/token on English + markdown.
+# Mistral's Tekken tokenizer averages ~3.5-4 chars/token on English + markdown.
 # We use a LOW ratio on purpose: it OVER-counts tokens, so we stay under the real
 # limit rather than discovering the overflow when the API rejects the request.
 _CHARS_PER_TOKEN = 3.2

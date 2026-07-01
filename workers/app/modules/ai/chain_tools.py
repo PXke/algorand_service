@@ -258,7 +258,11 @@ def _tool_testnet_lookup(
         if not isinstance(data, dict) or data.get("error"):
             return data if isinstance(data, dict) else {"error": "unexpected indexer response"}
         if data.get("_status") == 404:
-            return {"app_id": int(app_id), "found": False, "error": "application not found on testnet"}
+            return {
+                "app_id": int(app_id),
+                "found": False,
+                "error": "application not found on testnet",
+            }
         app = data.get("application", {}) or {}
         return {
             "app_id": int(app_id),

@@ -49,7 +49,7 @@ DEFAULT_THRESHOLD = 0.35
 # score + the enqueue/quality floor). Matched on WORD BOUNDARIES so "algo" no
 # longer fires on "algorithm" and "asa" not on "nasa" — the substring matching
 # that the two ad-hoc keyword lists in publish_classifier used to do. score_page
-# keeps its own phrase-tuned POSITIVE_KEYWORDS for the weighted 0–1 classifier.
+# keeps its own phrase-tuned POSITIVE_KEYWORDS for the weighted 0-1 classifier.
 RELEVANCE_KEYWORDS: tuple[str, ...] = (
     "algorand", "algo", "asa", "defi", "mainnet", "testnet",
     "microalgo", "ppos", "algod",

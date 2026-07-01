@@ -22,7 +22,11 @@ def _session_wallet(request: Request) -> str:
     The session token is minted only after a nonce + wallet-signature proof at
     sign-in, so the wallet behind it has cryptographically proven key ownership.
     """
-    token = (request.headers.get("x-session-token") or request.headers.get("X-Session-Token") or "").strip()
+    token = (
+        request.headers.get("x-session-token")
+        or request.headers.get("X-Session-Token")
+        or ""
+    ).strip()
     if not token:
         return ""
     rec = _session_store.get_session(token)

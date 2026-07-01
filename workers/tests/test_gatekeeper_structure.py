@@ -23,7 +23,10 @@ def test_buried_metrics_flags_metric_dump() -> None:
 
 
 def test_metrics_in_a_table_do_not_count() -> None:
-    md = "| Metric | Value |\n| -- | -- |\n| TPS | 9400 |\n| Latency | 2.9 ms |\n| TVL | $312 million |"
+    md = (
+        "| Metric | Value |\n| -- | -- |\n| TPS | 9400 |\n"
+        "| Latency | 2.9 ms |\n| TVL | $312 million |"
+    )
     blocks = s._classify_blocks(md)
     assert s.buried_metrics(blocks).passed  # they're in a table, not prose
 

@@ -57,7 +57,8 @@ def compose_service_discovery_article(
         body_lines.append(excerpt)
     else:
         body_lines.append(
-            f"The monitored source ({source_url}) is active; read the original page for full detail."
+            f"The monitored source ({source_url}) is active; read the original page "
+            "for full detail."
         )
 
     body_lines.extend(["", "## Why it matters", ""])

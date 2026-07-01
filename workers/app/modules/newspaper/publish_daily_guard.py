@@ -108,7 +108,8 @@ def release_publish_slot(*, tier: PublishTier) -> None:
 
 
 def is_standard_publish_saturated(*, when: datetime | None = None) -> bool:
-    return published_count_today(tier=PublishTier.STANDARD, when=when) >= config.NEWS_MAX_ARTICLES_PER_DAY
+    count = published_count_today(tier=PublishTier.STANDARD, when=when)
+    return count >= config.NEWS_MAX_ARTICLES_PER_DAY
 
 
 def is_any_publish_saturated(*, when: datetime | None = None) -> bool:
@@ -123,8 +124,8 @@ def assert_publish_allowed(*, tier: PublishTier) -> None:
     current = published_count_today(tier=tier)
     if current >= cap:
         msg = f"{tier.value} daily publish cap reached ({current}/{cap})"
-        raise PublishCapExceeded(msg)
+        raise PublishCapExceededError(msg)
 
 
-class PublishCapExceeded(Exception):
+class PublishCapExceededError(Exception):
     pass

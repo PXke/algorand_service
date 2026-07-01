@@ -2,7 +2,7 @@ from app.modules.newspaper.service_discovery_compose import compose_service_disc
 
 
 def test_discovery_framing() -> None:
-    title, summary, body = compose_service_discovery_article(
+    title, _summary, body = compose_service_discovery_article(
         service_name="AlgoSwap",
         source_url="https://example.com",
         page_title="Introducing AlgoSwap",

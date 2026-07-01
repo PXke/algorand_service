@@ -131,9 +131,7 @@ def is_bot(user_agent: str | None) -> bool:
     # Every mainstream browser sends a "Mozilla/..." product token. A non-empty
     # UA without it is a library/scraper that just isn't in the denylist above —
     # the main thing that was inflating "human (direct)".
-    if "mozilla/" not in ua:
-        return True
-    return False
+    return "mozilla/" not in ua
 
 
 def ua_class(user_agent: str | None) -> str:

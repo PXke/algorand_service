@@ -621,7 +621,7 @@ def _tool_medium_articles(source: str, limit: int = 15) -> dict[str, Any]:
     to quantify a blog's output and spot cross-posting patterns."""
     from urllib.parse import urlsplit
 
-    from lxml import etree as LET
+    from lxml import etree
 
     s = (source or "").strip()
     if not s:
@@ -656,7 +656,7 @@ def _tool_medium_articles(source: str, limit: int = 15) -> dict[str, Any]:
         resp.raise_for_status()
         # recover=True tolerates the slightly-malformed XML some Medium custom-domain
         # feeds emit (stray entities/tags) instead of hard-failing the whole feed.
-        root = LET.fromstring(resp.content, parser=LET.XMLParser(recover=True))
+        root = etree.fromstring(resp.content, parser=etree.XMLParser(recover=True))
     except Exception as exc:
         return {"feed": feed_url, "error": str(exc)[:200], "articles": []}
     if root is None:
@@ -882,7 +882,10 @@ _MEDIUM_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
-                "source": {"type": "string", "description": "@handle, medium URL, or custom domain"},
+                "source": {
+                    "type": "string",
+                    "description": "@handle, medium URL, or custom domain",
+                },
                 "limit": {"type": "integer", "description": "1-30, default 15"},
             },
             "required": ["source"],

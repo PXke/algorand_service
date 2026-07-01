@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import email
 import hashlib
 import imaplib
@@ -74,10 +75,8 @@ def fetch_unread_messages(*, limit: int = 20) -> list[dict[str, str]]:
             )
         return messages
     finally:
-        try:
+        with contextlib.suppress(Exception):
             client.logout()
-        except Exception:
-            pass
 
 
 def _extract_body(msg: email.message.Message) -> str:

@@ -9,7 +9,10 @@ from app.modules.scraper.core.browser_scraper import BrowserScraper
 def test_browser_scraper_happy_path():
     page = BrowserPageResult(
         title="Roadmap",
-        text="Line one\nLine two with enough content to pass minimum length checks for browser scrape.",
+        text=(
+            "Line one\nLine two with enough content to pass minimum length "
+            "checks for browser scrape."
+        ),
         final_url="https://app.example.com/roadmap",
         engine="playwright",
     )

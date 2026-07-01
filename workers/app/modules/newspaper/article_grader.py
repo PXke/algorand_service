@@ -14,7 +14,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 _STOP = frozenset(
-    ["the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are", "was", "were", "be", "been", "with", "from", "at", "by", "as", "this", "that", "these", "those", "it", "its", "algorand", "algo"]
+    [
+        "the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are",
+        "was", "were", "be", "been", "with", "from", "at", "by", "as", "this",
+        "that", "these", "those", "it", "its", "algorand", "algo",
+    ]
 )
 
 
@@ -108,7 +112,8 @@ def _recent_articles(limit: int = 60) -> list[_Recent]:
 
     # Cached ~60s: novelty is now checked on every ingest (priority) and at every
     # compose, so re-scanning the feed each call would be wasteful.
-    if (time.monotonic() - float(_RECENT_CACHE["at"])) < _RECENT_TTL_SECONDS and _RECENT_CACHE["rows"]:
+    cache_age = time.monotonic() - float(_RECENT_CACHE["at"])
+    if cache_age < _RECENT_TTL_SECONDS and _RECENT_CACHE["rows"]:
         return _RECENT_CACHE["rows"]  # type: ignore[return-value]
 
     from app.modules.newspaper.view_counts import get_views_bulk

@@ -12,7 +12,9 @@ from app.modules.auth.utils.algorand_txn_verify import verify_auth_transaction
 MSG = "Sign in to algorand.pxke.me nonce=abc123"
 
 
-def _signed_auth_txn(sk: str, addr: str, *, receiver: str | None = None, amount: int = 0, note: str = MSG) -> str:
+def _signed_auth_txn(
+    sk: str, addr: str, *, receiver: str | None = None, amount: int = 0, note: str = MSG
+) -> str:
     sp = transaction.SuggestedParams(
         fee=1000,
         first=1000,

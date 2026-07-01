@@ -281,11 +281,16 @@ SUGGEST_TOOL_SCHEMA: dict[str, Any] = {
             "properties": {
                 "capability": {
                     "type": "string",
-                    "description": "short name of the GENUINELY missing tool/data, e.g. 'twitter_x_search'",
+                    "description": (
+                        "short name of the GENUINELY missing tool/data, e.g. 'twitter_x_search'"
+                    ),
                 },
                 "reason": {
                     "type": "string",
-                    "description": "how it would have improved this story (what you couldn't get or had to work around)",
+                    "description": (
+                        "how it would have improved this story (what you couldn't get or "
+                        "had to work around)"
+                    ),
                 },
             },
             "required": ["capability"],
@@ -317,7 +322,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_algo_market",
-            "description": "Current ALGO price (USD), 24h change, market cap, volume and trend narrative.",
+            "description": (
+                "Current ALGO price (USD), 24h change, market cap, volume and trend narrative."
+            ),
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -339,7 +346,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_price_history",
-            "description": "ALGO daily price series (x=dates, y=USD) for plotting a line or bar chart.",
+            "description": (
+                "ALGO daily price series (x=dates, y=USD) for plotting a line or bar chart."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"days": {"type": "integer", "description": "1-30, default 7"}},
@@ -350,7 +359,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "recent_articles",
-            "description": "Recently published articles on this platform, for context and cross-references.",
+            "description": (
+                "Recently published articles on this platform, for context and cross-references."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"limit": {"type": "integer", "description": "1-15"}},
@@ -361,7 +372,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "search_platform",
-            "description": "Search previously published articles by keywords to avoid repetition and add links.",
+            "description": (
+                "Search previously published articles by keywords to avoid repetition "
+                "and add links."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -386,7 +400,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "query": {"type": "string"},
                     "limit": {"type": "integer", "description": "1-10, default 5"},
-                    "domain": {"type": "string", "description": "optional domain filter, e.g. algorand.foundation"},
+                    "domain": {
+                        "type": "string",
+                        "description": "optional domain filter, e.g. algorand.foundation",
+                    },
                     "service_id": {"type": "string", "description": "optional service_id filter"},
                 },
                 "required": ["query"],
@@ -406,7 +423,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "article_id": {"type": "string", "description": "article_id from another tool's result"},
+                    "article_id": {
+                        "type": "string",
+                        "description": "article_id from another tool's result",
+                    },
                 },
                 "required": ["article_id"],
             },
@@ -438,7 +458,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "source": {"type": "string", "description": "source domain, URL, or publisher name"},
+                    "source": {
+                        "type": "string",
+                        "description": "source domain, URL, or publisher name",
+                    },
                     "limit": {"type": "integer", "description": "1-15, default 8"},
                 },
                 "required": ["source"],

@@ -45,11 +45,10 @@ def _samples_in_window(
 ) -> list[PriceSampleRow]:
     cutoff = now - timedelta(hours=hours)
     # Cassandra returns naive UTC timestamps; the cutoff is aware.
-    return [
-        row
-        for row in samples
-        if (row.collected_at.replace(tzinfo=UTC) if row.collected_at.tzinfo is None else row.collected_at) >= cutoff
-    ]
+    def _aware(collected_at):
+        return collected_at.replace(tzinfo=UTC) if collected_at.tzinfo is None else collected_at
+
+    return [row for row in samples if _aware(row.collected_at) >= cutoff]
 
 
 def _format_window(stats: WindowStats | None) -> list[str]:

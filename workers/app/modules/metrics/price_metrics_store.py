@@ -33,7 +33,6 @@ def list_recent_samples(
     limit: int | None = None,
 ) -> list[PriceSampleRow]:
     from app.core.cassandra import get_cassandra_session
-
     from app.core.statements import PriceMetricsStmts
 
     cap = limit if limit is not None else PRICE_METRICS_SAMPLE_LIMIT

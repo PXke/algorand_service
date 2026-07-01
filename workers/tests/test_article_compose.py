@@ -2,7 +2,7 @@ from app.modules.newspaper.article_compose import compose_article
 
 
 def test_compose_article_editorial_title_not_service_colon() -> None:
-    title, summary, body = compose_article(
+    title, _summary, body = compose_article(
         service_name="Algorand Foundation",
         source_url="https://example.com",
         page_title="Example Domain",

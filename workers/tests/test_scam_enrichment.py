@@ -6,7 +6,7 @@ from app.modules.newspaper.scam_enrichment import (
 
 def test_extract_algoblow_domain():
     text = "DO NOT interact with algoblow.com! Malicious rekey requests."
-    urls, domains = extract_domains_and_urls(text)
+    _urls, domains = extract_domains_and_urls(text)
     assert "algoblow.com" in domains
 
 

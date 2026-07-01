@@ -31,7 +31,11 @@ class WriterAgentPlan:
     max_tool_rounds: int = 10  # matches MISTRAL_MAX_TOOL_ROUNDS default
 
     def as_markdown(self) -> str:
-        lines = ["### Writer agent (planned)", f"- Model: `{self.model}`", f"- Thinking: {self.thinking}"]
+        lines = [
+            "### Writer agent (planned)",
+            f"- Model: `{self.model}`",
+            f"- Thinking: {self.thinking}",
+        ]
         lines.append("- Tools:")
         for tool in self.tools:
             lines.append(f"  - `{tool.name}`: {tool.description}")

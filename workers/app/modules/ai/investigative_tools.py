@@ -159,7 +159,11 @@ def extract_document_metadata(file_url: str) -> dict[str, Any]:
                 pass
             return {"kind": "image", "format": img.format, "size": img.size, "exif": out}
         except Exception:
-            return {"kind": "binary", "note": "no EXIF/PDF metadata extractable", "content_type": ctype}
+            return {
+                "kind": "binary",
+                "note": "no EXIF/PDF metadata extractable",
+                "content_type": ctype,
+            }
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -309,37 +313,139 @@ def search_leak_databases(entity_name: str) -> dict[str, Any]:
 
 
 INVESTIGATIVE_SCHEMAS: list[dict[str, Any]] = [
-    {"type": "function", "function": {"name": "fetch_archive_snapshot",
-        "description": "Wayback Machine snapshot of a URL near a date — proves what a page said before edits/deletion.",
-        "parameters": {"type": "object", "properties": {
-            "url": {"type": "string"}, "target_date": {"type": "string", "description": "YYYYMMDD, optional"}},
-            "required": ["url"]}}},
-    {"type": "function", "function": {"name": "fetch_archive_text",
-        "description": "Read the TEXT of a Wayback snapshot (title + body) to quote titles/dates/content from a deleted or rewritten page — not just prove it existed.",
-        "parameters": {"type": "object", "properties": {
-            "url": {"type": "string"}, "target_date": {"type": "string", "description": "YYYYMMDD, optional"},
-            "max_chars": {"type": "integer", "description": "cap on returned text, default 6000"}},
-            "required": ["url"]}}},
-    {"type": "function", "function": {"name": "extract_document_metadata",
-        "description": "EXIF/PDF metadata (author, timestamps, GPS, software) from a leaked file URL.",
-        "parameters": {"type": "object", "properties": {"file_url": {"type": "string"}}, "required": ["file_url"]}}},
-    {"type": "function", "function": {"name": "resolve_domain_infrastructure",
-        "description": "WHOIS/RDAP + DNS + IP host/geo behind a domain — who registered it and where it is hosted.",
-        "parameters": {"type": "object", "properties": {"domain": {"type": "string"}}, "required": ["domain"]}}},
-    {"type": "function", "function": {"name": "screen_sanctions_and_pep",
-        "description": "OpenSanctions check: is a person/entity a PEP, sanctioned, or on a watchlist?",
-        "parameters": {"type": "object", "properties": {
-            "person_name": {"type": "string"}, "dob": {"type": "string"}}, "required": ["person_name"]}}},
-    {"type": "function", "function": {"name": "query_corporate_registry",
-        "description": "OpenCorporates: board, incorporation date, registered address, status of a company.",
-        "parameters": {"type": "object", "properties": {
-            "company_name": {"type": "string"}, "jurisdiction": {"type": "string"}}, "required": ["company_name"]}}},
-    {"type": "function", "function": {"name": "query_court_dockets",
-        "description": "CourtListener: lawsuits, bankruptcies, criminal cases against an entity.",
-        "parameters": {"type": "object", "properties": {"entity_name": {"type": "string"}}, "required": ["entity_name"]}}},
-    {"type": "function", "function": {"name": "search_leak_databases",
-        "description": "ICIJ Offshore Leaks (Panama/Pandora Papers) hits for an entity.",
-        "parameters": {"type": "object", "properties": {"entity_name": {"type": "string"}}, "required": ["entity_name"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_archive_snapshot",
+            "description": (
+                "Wayback Machine snapshot of a URL near a date — proves what a page "
+                "said before edits/deletion."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "target_date": {"type": "string", "description": "YYYYMMDD, optional"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_archive_text",
+            "description": (
+                "Read the TEXT of a Wayback snapshot (title + body) to quote "
+                "titles/dates/content from a deleted or rewritten page — not just "
+                "prove it existed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "target_date": {"type": "string", "description": "YYYYMMDD, optional"},
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "cap on returned text, default 6000",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "extract_document_metadata",
+            "description": (
+                "EXIF/PDF metadata (author, timestamps, GPS, software) from a leaked "
+                "file URL."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"file_url": {"type": "string"}},
+                "required": ["file_url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resolve_domain_infrastructure",
+            "description": (
+                "WHOIS/RDAP + DNS + IP host/geo behind a domain — who registered it "
+                "and where it is hosted."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"domain": {"type": "string"}},
+                "required": ["domain"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "screen_sanctions_and_pep",
+            "description": (
+                "OpenSanctions check: is a person/entity a PEP, sanctioned, or on a "
+                "watchlist?"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "person_name": {"type": "string"},
+                    "dob": {"type": "string"},
+                },
+                "required": ["person_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_corporate_registry",
+            "description": (
+                "OpenCorporates: board, incorporation date, registered address, "
+                "status of a company."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "company_name": {"type": "string"},
+                    "jurisdiction": {"type": "string"},
+                },
+                "required": ["company_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_court_dockets",
+            "description": (
+                "CourtListener: lawsuits, bankruptcies, criminal cases against an entity."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"entity_name": {"type": "string"}},
+                "required": ["entity_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_leak_databases",
+            "description": "ICIJ Offshore Leaks (Panama/Pandora Papers) hits for an entity.",
+            "parameters": {
+                "type": "object",
+                "properties": {"entity_name": {"type": "string"}},
+                "required": ["entity_name"],
+            },
+        },
+    },
 ]
 
 INVESTIGATIVE_HANDLERS: dict[str, Any] = {

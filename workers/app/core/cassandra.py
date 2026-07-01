@@ -74,7 +74,9 @@ def execute_parallel(statements_and_params, *, concurrency: int = 32, raise_on_e
     )
 
 
-def execute_parallel_with_args(statement, args_seq, *, concurrency: int = 32, raise_on_error: bool = True):
+def execute_parallel_with_args(
+    statement, args_seq, *, concurrency: int = 32, raise_on_error: bool = True
+):
     """Run ONE statement concurrently over many parameter tuples; results in input
     order as (success, result_or_exc) tuples."""
     from cassandra.concurrent import execute_concurrent_with_args

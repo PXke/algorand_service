@@ -90,7 +90,8 @@ def compose_content_update_article(
     else:
         body_lines.append(
             "The monitored page **no longer matches** the previous snapshot. "
-            "Below are highlights from newly added lines; removed text is omitted from this summary."
+            "Below are highlights from newly added lines; removed text is omitted "
+            "from this summary."
         )
 
     if added:

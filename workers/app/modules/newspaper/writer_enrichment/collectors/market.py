@@ -20,7 +20,9 @@ def collect_market_context(asset_id: str = "algorand") -> dict[str, Any]:
         if latest is not None:
             out["price_usd"] = round(float(latest.price_usd), 6)
             out["change_24h_pct"] = (
-                round(float(latest.change_24h_pct), 2) if latest.change_24h_pct is not None else None
+                round(float(latest.change_24h_pct), 2)
+                if latest.change_24h_pct is not None
+                else None
             )
             out["market_cap_usd"] = latest.market_cap_usd
             out["volume_24h_usd"] = latest.volume_24h_usd

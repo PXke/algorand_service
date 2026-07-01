@@ -76,7 +76,10 @@ class SearchService:
                 doc_id = str(doc.get("id", ""))
                 if collection == PAGES_COLLECTION:
                     url = doc.get("url")
-                    summary = str(doc.get("description", "")).strip() or str(doc.get("body", ""))[:240]
+                    summary = (
+                        str(doc.get("description", "")).strip()
+                        or str(doc.get("body", ""))[:240]
+                    )
                     if url:
                         summary = f"{url}\n{summary}".strip()
                     hits.append(

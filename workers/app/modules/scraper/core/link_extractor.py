@@ -22,7 +22,9 @@ _SKIP_EXTENSIONS = (
 )
 
 
-def extract_page_links(raw_html: str, base_url: str, *, limit: int = 60) -> tuple[list[str], list[str]]:
+def extract_page_links(
+    raw_html: str, base_url: str, *, limit: int = 60
+) -> tuple[list[str], list[str]]:
     """Absolute http(s) links from a page's anchors: (same_domain, external)."""
     from urllib.parse import urljoin, urlparse
 
