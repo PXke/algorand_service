@@ -741,10 +741,11 @@ def register_admin_routes(app) -> None:
         created_at_raw = request.query_params.get("created_at", "")
         try:
             from datetime import datetime as _datetime
+            from urllib.parse import unquote
             from uuid import UUID
 
             sid = UUID(session_id)
-            created_at = _datetime.fromisoformat(created_at_raw)
+            created_at = _datetime.fromisoformat(unquote(created_at_raw))
         except ValueError:
             return json_error_response(400, "invalid_request", "bad session_id/created_at")
 
@@ -999,7 +1000,9 @@ def register_admin_routes(app) -> None:
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
-        url = request.query_params.get("url", "") or ""
+        from urllib.parse import unquote
+
+        url = unquote(request.query_params.get("url", "") or "")
         if not url:
             return {"items": []}
 
