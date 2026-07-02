@@ -42,7 +42,7 @@ class _FakeSession:
         q = " ".join(str(query).split())
         if q.startswith("SELECT"):
             return _Result(self._existing)
-        if q.startswith("INSERT INTO domain_tracking"):
+        if q.startswith("INSERT INTO") and "domain_tracking" in q:
             self.inserted = params
         return _Result(None)
 
