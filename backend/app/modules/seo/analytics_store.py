@@ -9,6 +9,7 @@ fire-and-forget so they never add latency; reads are admin-only and infrequent.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import ipaddress
 import logging
@@ -91,25 +92,14 @@ def section_bucket(path: str) -> str:
     return "Other"
 
 
-def _resolve_labels(session, paths: list[str]) -> dict[str, str]:
-    """Map each path to a human-readable label, resolving article titles by id."""
-    from uuid import UUID
-
-    from app.core.statements import ArticleStmts
-
+def _resolve_labels(paths: list[str], article_cards: dict[str, object]) -> dict[str, str]:
+    """Map each path to a human-readable label, from the already-fetched article
+    metadata batch (see `_fetch_article_cards`) rather than a fresh DB lookup."""
     labels = {p: _static_label(p) for p in paths}
     for p in paths:
         if not p.startswith(_ARTICLE_PREFIX):
             continue
-        try:
-            aid = UUID(p[len(_ARTICLE_PREFIX):])
-        except ValueError:
-            labels[p] = "Article"
-            continue
-        try:
-            row = session.execute(ArticleStmts.GET_TITLE, (aid,)).one()
-        except Exception:  # missing row / table — fall back to a generic label
-            row = None
+        row = article_cards.get(p)
         labels[p] = (row.title if row and row.title else None) or "Article"
     return labels
 
@@ -330,23 +320,16 @@ def record_session(
         log.debug("session record (cassandra) skipped: %s", exc)
 
 
-def _session_counts(window: list[str]) -> dict[str, int]:
-    """New/returning/total session counts summed across the window. Tolerant of an
-    un-migrated table (returns zeros)."""
+def _session_counts_from_rows(session_by_day: dict[str, list]) -> dict[str, int]:
+    """New/returning/total session counts summed across already-fetched
+    `session_daily` rows. An empty/missing input (un-migrated table) yields
+    zeros."""
     out = {"new": 0, "returning": 0, "total": 0}
-    try:
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import AnalyticsStmts
-
-        cs = get_cassandra_session()
-        for day in window:
-            rows = cs.execute(AnalyticsStmts.SESSION_BY_DAY, (day,))
-            for r in rows:
-                n = int(r.sessions)
-                out[r.vtype] = out.get(r.vtype, 0) + n
-                out["total"] += n
-    except Exception as exc:
-        log.warning("session counts skipped: %s", exc)
+    for rows in session_by_day.values():
+        for r in rows:
+            n = int(r.sessions)
+            out[r.vtype] = out.get(r.vtype, 0) + n
+            out["total"] += n
     return out
 
 
@@ -717,9 +700,10 @@ def _recent_direct_samples(session, window: set[str], limit: int) -> list[dict]:
     return samples
 
 
-def _build_alerts(session, out: dict, window: set[str], prev_window: set[str]) -> list[dict]:
-    """A small rules pass producing at-a-glance anomaly chips, mostly over data
-    already aggregated in `out`. Each alert is {level: info|warn, text}."""
+def _build_alerts(out: dict, cur404: int, prev404: int) -> list[dict]:
+    """A small rules pass producing at-a-glance anomaly chips, over data already
+    aggregated in `out` (plus the whole-window 404 totals, not just the top N,
+    passed in separately). Each alert is {level: info|warn, text}."""
     alerts: list[dict] = []
 
     def add(level: str, text: str) -> None:
@@ -742,20 +726,7 @@ def _build_alerts(session, out: dict, window: set[str], prev_window: set[str]) -
     if int(sess.get("total", 0)) >= 20 and float(sess.get("returning_rate", 0.0)) < 0.1:
         add("warn", f"Low returning-visitor rate ({round(sess['returning_rate'] * 100)}%).")
 
-    # 404 spike vs the prior period (whole-window totals, not just the top N).
-    def _sum_notfound(win: set[str]) -> int:
-        from app.core.statements import AnalyticsStmts
-
-        tot = 0
-        try:
-            for day in win:
-                for r in session.execute(AnalyticsStmts.NOTFOUND_VIEWS_BY_DAY, (day,)):
-                    tot += int(r.views)
-        except Exception:
-            return 0
-        return tot
-
-    cur404, prev404 = _sum_notfound(window), _sum_notfound(prev_window)
+    # 404 spike vs the prior period.
     if cur404 >= 10 and (prev404 == 0 or cur404 >= 2 * prev404):
         add("warn", f"Broken/404 requests elevated ({cur404} in window).")
 
@@ -770,6 +741,256 @@ def _build_alerts(session, out: dict, window: set[str], prev_window: set[str]) -
         add("info", f"{len(zero)} search term(s) returned no results — content gaps.")
 
     return alerts
+
+
+# ── Bulk day-partition fan-out ───────────────────────────────────────────────
+# Every read-path table below is one partition per day; the old implementation
+# queried each table in its own sequential per-day loop (15+ tables x up to 90
+# days = 1000+ blocking round-trips per read_analytics() call, several of them
+# re-scanning the same table under different names — e.g. pageview_path_kind
+# was read once each for top-pages, sections and the editorial scorecard).
+# `_fetch_tables_by_day` runs every (table, day) pair in one concurrent batch
+# via the driver's execute_concurrent, and callers share the result instead of
+# re-querying.
+def _fetch_tables_by_day(
+    specs: dict[str, object], days: list[str], *, concurrency: int = 48
+) -> dict[str, dict[str, list]]:
+    """specs: {name: prepared_statement}. Returns {name: {day: rows}}, silently
+    omitting a (name, day) whose query errored (e.g. a table a migration hasn't
+    created yet) — same fail-open contract the old per-table try/except had."""
+    from app.core.cassandra import execute_parallel
+
+    pairs: list[tuple[str, str]] = []
+    batch = []
+    for name, stmt in specs.items():
+        for day in days:
+            pairs.append((name, day))
+            batch.append((stmt, (day,)))
+    out: dict[str, dict[str, list]] = {name: {} for name in specs}
+    if not batch:
+        return out
+    results = execute_parallel(batch, concurrency=concurrency, raise_on_error=False)
+    for (name, day), (ok, res) in zip(pairs, results, strict=True):
+        if ok:
+            out[name][day] = list(res)
+        else:
+            log.debug("%s/%s fetch skipped: %s", name, day, res)
+    return out
+
+
+def _rank(
+    by_day: dict[str, list], key: str, value_col: str = "views", limit: int | None = None
+) -> list[dict]:
+    """Sum `value_col` per distinct `key` across already-fetched {day: rows},
+    ranked descending. Output rows are always shaped {key: ..., "views": ...}
+    regardless of the source column's name."""
+    agg: dict = {}
+    for rows in by_day.values():
+        for r in rows:
+            k = getattr(r, key)
+            agg[k] = agg.get(k, 0) + int(getattr(r, value_col))
+    ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)
+    if limit is not None:
+        ranked = ranked[:limit]
+    return [{key: k, "views": v} for k, v in ranked]
+
+
+def _sum_views(by_day: dict[str, list]) -> int:
+    return sum(int(r.views) for rows in by_day.values() for r in rows)
+
+
+def _paths_from_rows(path_kind_by_day: dict[str, list], *, limit: int) -> list[dict]:
+    """Top pages carry a human/bot split (from the kind-partitioned table)."""
+    agg: dict[str, dict[str, int]] = {}
+    for rows in path_kind_by_day.values():
+        for r in rows:
+            bucket = agg.setdefault(r.path, {"human": 0, "bot": 0})
+            bucket[r.kind] = bucket.get(r.kind, 0) + int(r.views)
+    ranked = sorted(
+        agg.items(), key=lambda kv: kv[1]["human"] + kv[1]["bot"], reverse=True
+    )[:limit]
+    return [
+        {"path": p, "human": v["human"], "bot": v["bot"], "views": v["human"] + v["bot"]}
+        for p, v in ranked
+    ]
+
+
+def _referrer_paths_from_rows(rp_by_day: dict[str, list], *, limit: int) -> list[dict]:
+    """Top (referrer, landing-path) pairs over the window."""
+    agg: dict[tuple[str, str], int] = {}
+    for rows in rp_by_day.values():
+        for r in rows:
+            agg[(r.referrer, r.path)] = agg.get((r.referrer, r.path), 0) + int(r.views)
+    ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    return [{"referrer": k[0], "path": k[1], "views": v} for k, v in ranked]
+
+
+def _hours_from_rows(hour_by_day: dict[str, list]) -> list[dict]:
+    """Human views per hour-of-day (0-23), summed across the window."""
+    sums = dict.fromkeys(range(24), 0)
+    for rows in hour_by_day.values():
+        for r in rows:
+            if r.hour is not None and 0 <= r.hour <= 23:
+                sums[r.hour] += int(r.views)
+    return [{"hour": h, "views": sums[h]} for h in range(24)]
+
+
+def _referrer_categories_from_rows(referrer_by_day: dict[str, list]) -> list[dict]:
+    """All referrer hosts rolled up into acquisition channels (Search, Social,
+    AI, News, Direct, Internal, Other) over the window."""
+    agg: dict[str, int] = {}
+    for rows in referrer_by_day.values():
+        for r in rows:
+            cat = referrer_category(r.referrer)
+            agg[cat] = agg.get(cat, 0) + int(r.views)
+    ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)
+    return [{"category": k, "views": v} for k, v in ranked]
+
+
+def _sections_from_rows(
+    path_kind_by_day: dict[str, list], article_cards: dict[str, object], *, limit: int
+) -> list[dict]:
+    """Human views per content section. Article paths resolve to the article's
+    primary tag ('Section · DeFi') via the pre-fetched article metadata batch;
+    everything else buckets by route (Home, Section · X, Search, Other)."""
+    agg: dict[str, int] = {}
+    for rows in path_kind_by_day.values():
+        for r in rows:
+            if r.kind != "human":
+                continue
+            path = r.path or ""
+            if path.startswith(_ARTICLE_PREFIX):
+                row = article_cards.get(path)
+                bucket = "Section · " + str(row.tags[0]) if row and row.tags else "Article"
+            else:
+                bucket = section_bucket(path)
+            agg[bucket] = agg.get(bucket, 0) + int(r.views)
+    ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    return [{"section": k, "views": v} for k, v in ranked]
+
+
+def _session_daily_from_rows(
+    session_by_day: dict[str, list], window: set[str]
+) -> list[dict]:
+    """Per-day new/returning session counts for the Audience chart."""
+    per_day = {d: {"new": 0, "returning": 0} for d in window}
+    for day, rows in session_by_day.items():
+        if day not in per_day:
+            continue
+        for r in rows:
+            if r.vtype in per_day[day]:
+                per_day[day][r.vtype] += int(r.sessions)
+    return [
+        {"day": d, "new": per_day[d]["new"], "returning": per_day[d]["returning"]}
+        for d in sorted(window)
+    ]
+
+
+def _ai_crawler_from_rows(bot_by_day: dict[str, list], window: set[str]) -> dict:
+    """AI-crawler views (GPTBot/ClaudeBot/…), their share of all bot traffic,
+    and a per-day trend."""
+    daily = dict.fromkeys(window, 0)
+    total_bot = total_ai = 0
+    for day, rows in bot_by_day.items():
+        for r in rows:
+            v = int(r.views)
+            total_bot += v
+            if r.bot in AI_CRAWLERS:
+                daily[day] = daily.get(day, 0) + v
+                total_ai += v
+    return {
+        "views": total_ai,
+        "share_of_bots": (total_ai / total_bot) if total_bot else 0.0,
+        "daily": [{"day": d, "views": daily.get(d, 0)} for d in sorted(window)],
+    }
+
+
+def _editorial_scorecard_from_rows(
+    path_kind_by_day: dict[str, list],
+    article_cards: dict[str, object],
+    window: set[str],
+    *,
+    limit: int,
+) -> list[dict]:
+    """Top articles by human views, each with age-since-publish and a daily view
+    series — so a slow-burn explainer is distinguishable from a one-day spike."""
+    per_article: dict[str, dict[str, int]] = {}
+    for day, rows in path_kind_by_day.items():
+        for r in rows:
+            if r.kind != "human":
+                continue
+            path = r.path or ""
+            if not path.startswith(_ARTICLE_PREFIX):
+                continue
+            per_article.setdefault(path, {})[day] = int(r.views)
+    ranked = sorted(
+        per_article.items(), key=lambda kv: sum(kv[1].values()), reverse=True
+    )[:limit]
+    today = datetime.now(UTC).date()
+    rows_out: list[dict] = []
+    for path, byday in ranked:
+        row = article_cards.get(path)
+        title = (row.title if row and row.title else None) or "Article"
+        published = row.published_at if row else None
+        tag = str(row.tags[0]) if row and row.tags else None
+        published_iso, age_days = None, None
+        if published is not None:
+            try:
+                published_iso = published.isoformat()
+                age_days = (today - published.date()).days
+            except Exception:
+                pass
+        rows_out.append({
+            "path": path, "label": title, "section": tag,
+            "published_at": published_iso, "age_days": age_days,
+            "views": sum(byday.values()),
+            "daily": [{"day": d, "views": byday.get(d, 0)} for d in sorted(window)],
+        })
+    return rows_out
+
+
+def _distinct_article_ids(by_day: dict[str, dict[str, list]]) -> dict:
+    """Every distinct article path referenced anywhere in the fetched tables,
+    mapped to its parsed UUID — the union covers sections, the editorial
+    scorecard and path-label resolution, so article metadata is fetched once."""
+    from uuid import UUID
+
+    ids: dict[str, UUID] = {}
+
+    def _consider(path: str) -> None:
+        if not path or path in ids or not path.startswith(_ARTICLE_PREFIX):
+            return
+        with contextlib.suppress(ValueError):
+            ids[path] = UUID(path[len(_ARTICLE_PREFIX):])
+
+    for table in ("path_kind", "referrer_path", "notfound"):
+        for rows in by_day.get(table, {}).values():
+            for r in rows:
+                _consider(r.path or "")
+    return ids
+
+
+def _fetch_article_cards(article_ids: dict) -> dict[str, object]:
+    """One concurrent batch fetching title/published_at/tags for every distinct
+    article path in `article_ids`, reused by section bucketing, the editorial
+    scorecard and path-label resolution instead of each querying it again."""
+    from app.core.cassandra import execute_parallel_with_args
+    from app.core.statements import ArticleStmts
+
+    if not article_ids:
+        return {}
+    paths = list(article_ids)
+    results = execute_parallel_with_args(
+        ArticleStmts.GET_CARD, [(article_ids[p],) for p in paths],
+        concurrency=48, raise_on_error=False,
+    )
+    out: dict[str, object] = {}
+    for path, (ok, res) in zip(paths, results, strict=True):
+        if ok:
+            row = res.one()
+            if row:
+                out[path] = row
+    return out
 
 
 def read_analytics(days: int = 14, *, top: int = 20) -> dict:
@@ -787,7 +1008,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
     }
     try:
         from app.core.cassandra import get_cassandra_session
-        from app.core.statements import AnalyticsStmts, ArticleStmts
+        from app.core.statements import AnalyticsStmts
 
         session = get_cassandra_session()
         window = set(_recent_days(days))
@@ -821,9 +1042,40 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
             "human_unique": uv_human_prev,
         }
 
+        # Every remaining table is one partition per day. Instead of a sequential
+        # per-day loop per table (was 15+ tables x up to 90 days = 1000+ blocking
+        # round-trips), fetch every (table, day) pair for the current window in
+        # one concurrent batch and have every aggregation below share it — several
+        # tables (path_kind, referrer, bot, session) were previously re-scanned
+        # 2-3x under different names.
+        table_specs = {
+            "path_kind": AnalyticsStmts.PATH_KIND_BY_DAY,
+            "referrer": AnalyticsStmts.AGG_REFERRER,
+            "direct_uaclass": AnalyticsStmts.AGG_DIRECT_UACLASS,
+            "search": AnalyticsStmts.AGG_SEARCH,
+            "search_zero": AnalyticsStmts.AGG_SEARCH_ZERO,
+            "bot": AnalyticsStmts.AGG_BOT,
+            "notfound": AnalyticsStmts.AGG_NOTFOUND,
+            "referrer_path": AnalyticsStmts.REFERRER_PATH_BY_DAY,
+            "hour": AnalyticsStmts.HOUR_BY_DAY,
+            "device": AnalyticsStmts.AGG_DEVICE,
+            "browser": AnalyticsStmts.AGG_BROWSER,
+            "referrer_url": AnalyticsStmts.AGG_REFERRER_URL,
+            "session": AnalyticsStmts.SESSION_BY_DAY,
+            "geo": AnalyticsStmts.AGG_GEO,
+            "campaign": AnalyticsStmts.AGG_CAMPAIGN,
+        }
+        by_day = _fetch_tables_by_day(table_specs, sorted(window))
+        # The prior window only needs two tables (session totals for the
+        # returning-rate comparison, notfound totals for the 404-spike alert).
+        prev_by_day = _fetch_tables_by_day(
+            {"session": AnalyticsStmts.SESSION_BY_DAY, "notfound": AnalyticsStmts.AGG_NOTFOUND},
+            sorted(prev_window),
+        )
+
         # Sessions & returning visitors (server-side, from session_daily). Pages
         # per visit divides human pageviews by total sessions.
-        sess = _session_counts(sorted(window))
+        sess = _session_counts_from_rows(by_day["session"])
         sess_total = sess.get("total", 0)
         human_total = out["totals"]["human"]
         out["sessions"] = {
@@ -831,281 +1083,55 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
             "returning_rate": (sess.get("returning", 0) / sess_total) if sess_total else 0.0,
             "pages_per_visit": (human_total / sess_total) if sess_total else 0.0,
         }
-        prev_sess = _session_counts(sorted(prev_window))
+        prev_sess = _session_counts_from_rows(prev_by_day["session"])
         out["prev_totals"]["sessions"] = prev_sess.get("total", 0)
         out["prev_totals"]["returning"] = prev_sess.get("returning", 0)
 
-        # Each day is its own partition — read the N day-partitions and aggregate.
-        # `stmt` is a fully-defined prepared statement from AnalyticsStmts; `key`
-        # and `value_col` are the result COLUMN NAMES used to shape the rows (not
-        # CQL fragments — nothing about the query is built at runtime).
-        def _aggregate(stmt, key: str, value_col: str = "views") -> list[dict]:
-            agg: dict[str, int] = {}
-            for day in window:
-                rows = session.execute(stmt, (day,))
-                for r in rows:
-                    k = getattr(r, key)
-                    agg[k] = agg.get(k, 0) + int(getattr(r, value_col))
-            ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:top]
-            return [{key: k, "views": v} for k, v in ranked]
+        # Article metadata (title/published_at/tags) for every distinct article
+        # path referenced anywhere below, fetched once and shared by sections,
+        # the editorial scorecard and path-label resolution.
+        article_cards = _fetch_article_cards(_distinct_article_ids(by_day))
 
-        def _safe_aggregate(stmt, key: str, value_col: str = "views") -> list[dict]:
-            """`_aggregate` but tolerant of a not-yet-migrated table (new in 039)."""
-            try:
-                return _aggregate(stmt, key, value_col)
-            except Exception as exc:
-                log.warning("%s aggregate skipped: %s", key, exc)
-                return []
-
-        def _aggregate_referrer_paths() -> list[dict]:
-            """Top (referrer, landing-path) pairs over the window."""
-            agg: dict[tuple[str, str], int] = {}
-            try:
-                for day in window:
-                    rows = session.execute(AnalyticsStmts.REFERRER_PATH_BY_DAY, (day,))
-                    for r in rows:
-                        agg[(r.referrer, r.path)] = agg.get((r.referrer, r.path), 0) + int(r.views)
-            except Exception as exc:
-                log.warning("referrer-path aggregate skipped: %s", exc)
-                return []
-            ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:top]
-            return [{"referrer": k[0], "path": k[1], "views": v} for k, v in ranked]
-
-        # Top pages carry a human/bot split (read from the kind-partitioned table).
-        def _aggregate_paths() -> list[dict]:
-            agg: dict[str, dict[str, int]] = {}
-            try:
-                for day in window:
-                    rows = session.execute(AnalyticsStmts.PATH_KIND_BY_DAY, (day,))
-                    for r in rows:
-                        bucket = agg.setdefault(r.path, {"human": 0, "bot": 0})
-                        bucket[r.kind] = bucket.get(r.kind, 0) + int(r.views)
-            except Exception as exc:  # table not migrated yet — keep the rest of the page
-                log.warning("top-pages aggregate skipped: %s", exc)
-                return []
-            ranked = sorted(
-                agg.items(), key=lambda kv: kv[1]["human"] + kv[1]["bot"], reverse=True
-            )[:top]
-            return [
-                {"path": p, "human": v["human"], "bot": v["bot"],
-                 "views": v["human"] + v["bot"]}
-                for p, v in ranked
-            ]
-
-        out["top_paths"] = _aggregate_paths()
-        out["top_referrers"] = _aggregate(AnalyticsStmts.AGG_REFERRER, "referrer")
+        out["top_paths"] = _paths_from_rows(by_day["path_kind"], limit=top)
+        out["top_referrers"] = _rank(by_day["referrer"], "referrer", limit=top)
 
         # Breakdown of the '(direct)' bucket: UA-class counts + a recent raw
-        # sample. Both tables are new (migration 038) — tolerate their absence so
-        # an un-migrated env still renders the rest of the page.
-        try:
-            out["direct_uaclass"] = _aggregate(
-                AnalyticsStmts.AGG_DIRECT_UACLASS, "ua_class"
-            )
-        except Exception as exc:
-            log.warning("direct ua-class aggregate skipped: %s", exc)
+        # sample. The sample read stays sequential/early-stopping (it wants only
+        # the newest `top` rows, not a full-window scan).
+        out["direct_uaclass"] = _rank(by_day["direct_uaclass"], "ua_class", limit=top)
         try:
             out["direct_samples"] = _recent_direct_samples(session, window, limit=top)
         except Exception as exc:
             log.warning("direct samples read skipped: %s", exc)
 
-        # Analytics expansion (migration 039): search demand, bot identities,
-        # source->landing attribution, dead links. Each tolerates an absent table.
-        out["top_searches"] = _safe_aggregate(AnalyticsStmts.AGG_SEARCH, "query", "searches")
-        out["zero_searches"] = _safe_aggregate(AnalyticsStmts.AGG_SEARCH_ZERO, "query", "searches")
-        out["top_bots"] = _safe_aggregate(AnalyticsStmts.AGG_BOT, "bot")
-        out["referrer_paths"] = _aggregate_referrer_paths()
-        out["top_notfound"] = _safe_aggregate(AnalyticsStmts.AGG_NOTFOUND, "path")
+        out["top_searches"] = _rank(by_day["search"], "query", "searches", limit=top)
+        out["zero_searches"] = _rank(by_day["search_zero"], "query", "searches", limit=top)
+        out["top_bots"] = _rank(by_day["bot"], "bot", limit=top)
+        out["referrer_paths"] = _referrer_paths_from_rows(by_day["referrer_path"], limit=top)
+        out["top_notfound"] = _rank(by_day["notfound"], "path", limit=top)
 
-        # Analytics segmentation (migration 040): site-wide device/browser, the
-        # hour-of-day distribution, full external referrer URLs, plus two read-time
-        # rollups (referrer categories, sections) over existing tables.
-        def _aggregate_hours() -> list[dict]:
-            """Human views per hour-of-day (0-23), summed across the window."""
-            sums = dict.fromkeys(range(24), 0)
-            try:
-                for day in window:
-                    rows = session.execute(AnalyticsStmts.HOUR_BY_DAY, (day,))
-                    for r in rows:
-                        if r.hour is not None and 0 <= r.hour <= 23:
-                            sums[r.hour] += int(r.views)
-            except Exception as exc:
-                log.warning("hour aggregate skipped: %s", exc)
-                return []
-            return [{"hour": h, "views": sums[h]} for h in range(24)]
-
-        def _aggregate_referrer_categories() -> list[dict]:
-            """All referrer hosts rolled up into acquisition channels (Search,
-            Social, AI, News, Direct, Internal, Other) over the window."""
-            agg: dict[str, int] = {}
-            try:
-                for day in window:
-                    rows = session.execute(AnalyticsStmts.AGG_REFERRER, (day,))
-                    for r in rows:
-                        cat = referrer_category(r.referrer)
-                        agg[cat] = agg.get(cat, 0) + int(r.views)
-            except Exception as exc:
-                log.warning("referrer-category aggregate skipped: %s", exc)
-                return []
-            ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)
-            return [{"category": k, "views": v} for k, v in ranked]
-
-        def _aggregate_sections() -> list[dict]:
-            """Human views per content section. Article paths resolve to the
-            article's primary tag ('Section · DeFi'); everything else buckets by
-            route (Home, Section · X, Search, Other)."""
-            from uuid import UUID
-
-            tag_cache: dict[str, str] = {}
-
-            def _article_section(path: str) -> str:
-                if path in tag_cache:
-                    return tag_cache[path]
-                label = "Article"
-                try:
-                    aid = UUID(path[len(_ARTICLE_PREFIX):])
-                    row = session.execute(
-                        ArticleStmts.GET_TAGS, (aid,)
-                    ).one()
-                    if row and row.tags:
-                        label = "Section · " + str(row.tags[0])
-                except Exception:  # bad uuid / missing row — keep the generic bucket
-                    pass
-                tag_cache[path] = label
-                return label
-
-            agg: dict[str, int] = {}
-            try:
-                for day in window:
-                    rows = session.execute(AnalyticsStmts.PATH_KIND_BY_DAY, (day,))
-                    for r in rows:
-                        if r.kind != "human":
-                            continue
-                        path = r.path or ""
-                        bucket = (
-                            _article_section(path)
-                            if path.startswith(_ARTICLE_PREFIX)
-                            else section_bucket(path)
-                        )
-                        agg[bucket] = agg.get(bucket, 0) + int(r.views)
-            except Exception as exc:
-                log.warning("section aggregate skipped: %s", exc)
-                return []
-            ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:top]
-            return [{"section": k, "views": v} for k, v in ranked]
-
-        def _session_daily_series() -> list[dict]:
-            """Per-day new/returning session counts for the Audience chart."""
-            per_day = {d: {"new": 0, "returning": 0} for d in window}
-            try:
-                for day in window:
-                    rows = session.execute(AnalyticsStmts.SESSION_BY_DAY, (day,))
-                    for r in rows:
-                        if r.vtype in per_day[day]:
-                            per_day[day][r.vtype] += int(r.sessions)
-            except Exception as exc:
-                log.warning("session daily series skipped: %s", exc)
-                return []
-            return [
-                {"day": d, "new": per_day[d]["new"], "returning": per_day[d]["returning"]}
-                for d in sorted(window)
-            ]
-
-        def _ai_crawler() -> dict:
-            """AI-crawler views (GPTBot/ClaudeBot/…), their share of all bot
-            traffic, and a per-day trend."""
-            daily = dict.fromkeys(window, 0)
-            total_bot = total_ai = 0
-            try:
-                for day in window:
-                    rows = session.execute(AnalyticsStmts.AGG_BOT, (day,))
-                    for r in rows:
-                        v = int(r.views)
-                        total_bot += v
-                        if r.bot in AI_CRAWLERS:
-                            daily[day] += v
-                            total_ai += v
-            except Exception as exc:
-                log.warning("ai-crawler aggregate skipped: %s", exc)
-                return {}
-            return {
-                "views": total_ai,
-                "share_of_bots": (total_ai / total_bot) if total_bot else 0.0,
-                "daily": [{"day": d, "views": daily[d]} for d in sorted(window)],
-            }
-
-        def _editorial_scorecard() -> list[dict]:
-            """Top articles by human views, each with age-since-publish and a daily
-            view series — so a slow-burn explainer is distinguishable from a
-            one-day spike."""
-            from uuid import UUID
-
-            per_article: dict[str, dict[str, int]] = {}
-            try:
-                for day in window:
-                    rows = session.execute(AnalyticsStmts.PATH_KIND_BY_DAY, (day,))
-                    for r in rows:
-                        if r.kind != "human":
-                            continue
-                        path = r.path or ""
-                        if not path.startswith(_ARTICLE_PREFIX):
-                            continue
-                        per_article.setdefault(path, {})[day] = int(r.views)
-            except Exception as exc:
-                log.warning("editorial scorecard read skipped: %s", exc)
-                return []
-            ranked = sorted(
-                per_article.items(), key=lambda kv: sum(kv[1].values()), reverse=True
-            )[:top]
-            today = datetime.now(UTC).date()
-            rows_out: list[dict] = []
-            for path, byday in ranked:
-                title, published, tag = "Article", None, None
-                try:
-                    aid = UUID(path[len(_ARTICLE_PREFIX):])
-                    row = session.execute(ArticleStmts.GET_CARD, (aid,)).one()
-                    if row:
-                        title = row.title or "Article"
-                        published = row.published_at
-                        if row.tags:
-                            tag = str(row.tags[0])
-                except Exception:  # bad uuid / missing row — keep generic metadata
-                    pass
-                published_iso, age_days = None, None
-                if published is not None:
-                    try:
-                        published_iso = published.isoformat()
-                        age_days = (today - published.date()).days
-                    except Exception:
-                        pass
-                rows_out.append({
-                    "path": path, "label": title, "section": tag,
-                    "published_at": published_iso, "age_days": age_days,
-                    "views": sum(byday.values()),
-                    "daily": [{"day": d, "views": byday.get(d, 0)} for d in sorted(window)],
-                })
-            return rows_out
-
-        out["device"] = _safe_aggregate(AnalyticsStmts.AGG_DEVICE, "device")
-        out["browser"] = _safe_aggregate(AnalyticsStmts.AGG_BROWSER, "browser")
-        out["hours"] = _aggregate_hours()
-        out["referrer_categories"] = _aggregate_referrer_categories()
-        out["sections"] = _aggregate_sections()
-        out["top_referrer_urls"] = _safe_aggregate(
-            AnalyticsStmts.AGG_REFERRER_URL, "referrer_url"
+        out["device"] = _rank(by_day["device"], "device", limit=top)
+        out["browser"] = _rank(by_day["browser"], "browser", limit=top)
+        out["hours"] = _hours_from_rows(by_day["hour"])
+        out["referrer_categories"] = _referrer_categories_from_rows(by_day["referrer"])
+        out["sections"] = _sections_from_rows(by_day["path_kind"], article_cards, limit=top)
+        out["top_referrer_urls"] = _rank(by_day["referrer_url"], "referrer_url", limit=top)
+        out["sessions_daily"] = _session_daily_from_rows(by_day["session"], window)
+        out["ai_crawler"] = _ai_crawler_from_rows(by_day["bot"], window)
+        out["articles"] = _editorial_scorecard_from_rows(
+            by_day["path_kind"], article_cards, window, limit=top
         )
-        out["sessions_daily"] = _session_daily_series()
-        out["ai_crawler"] = _ai_crawler()
-        out["articles"] = _editorial_scorecard()
-        out["geo"] = _safe_aggregate(AnalyticsStmts.AGG_GEO, "country")
-        out["campaigns"] = _safe_aggregate(AnalyticsStmts.AGG_CAMPAIGN, "campaign")
-        out["alerts"] = _build_alerts(session, out, window, prev_window)
+        out["geo"] = _rank(by_day["geo"], "country", limit=top)
+        out["campaigns"] = _rank(by_day["campaign"], "campaign", limit=top)
+        cur404 = _sum_views(by_day["notfound"])
+        prev404 = _sum_views(prev_by_day["notfound"])
+        out["alerts"] = _build_alerts(out, cur404, prev404)
 
         # Attach human-readable labels (article titles, friendly route names) to
         # every list that carries a path.
         path_lists = [out["top_paths"], out["referrer_paths"], out["top_notfound"]]
         all_paths = [r["path"] for lst in path_lists for r in lst if r.get("path")]
-        labels = _resolve_labels(session, all_paths)
+        labels = _resolve_labels(all_paths, article_cards)
         for lst in path_lists:
             for r in lst:
                 if r.get("path"):
