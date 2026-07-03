@@ -29,6 +29,7 @@ class ArticleDetail:
     trigger_txid: str
     trigger_round: int
     source_url: str
+    prompt_version: str = ""
 
 
 def get_article(article_id: str) -> ArticleDetail | None:
@@ -55,6 +56,7 @@ def get_article(article_id: str) -> ArticleDetail | None:
         trigger_txid=row.trigger_txid or "",
         trigger_round=int(row.trigger_round) if row.trigger_round is not None else 0,
         source_url=row.source_url or "",
+        prompt_version=getattr(row, "prompt_version", "") or "",
     )
 
 
@@ -164,6 +166,7 @@ def insert_stored_article(
     article_id: UUID | None = None,
     tags: list[str] | None = None,
     image_url: str = "",
+    prompt_version: str = "",
 ) -> tuple[str, bool]:
     """
     Store article in articles_by_id; optionally publish to articles_feed.
@@ -192,6 +195,7 @@ def insert_stored_article(
             published_at,
             tag_list,
             image,
+            prompt_version or None,
         ),
     )
     if publish_to_feed:
@@ -225,6 +229,7 @@ def insert_article(
     article_id: UUID | None = None,
     tags: list[str] | None = None,
     image_url: str = "",
+    prompt_version: str = "",
 ) -> str:
     aid, _ = insert_stored_article(
         service_id=service_id,
@@ -238,6 +243,7 @@ def insert_article(
         article_id=article_id,
         tags=tags,
         image_url=image_url,
+        prompt_version=prompt_version,
     )
     return aid
 
@@ -332,6 +338,7 @@ def insert_article_if_absent(
     trigger_round: int,
     source_url: str,
     tags: list[str] | None = None,
+    prompt_version: str = "",
 ) -> tuple[str, bool]:
     """Insert digest article; return (id, created). Skips when id already exists."""
     if article_exists(article_id):
@@ -346,6 +353,7 @@ def insert_article_if_absent(
         source_url=source_url,
         article_id=article_id,
         tags=tags,
+        prompt_version=prompt_version,
     )
     return str(article_id), True
 

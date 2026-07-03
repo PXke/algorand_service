@@ -166,6 +166,14 @@ class SearchResponse(msgspec.Struct, kw_only=True):
     items: list[SearchHit] = field(default_factory=list)
 
 
+# ── Analytics ─────────────────────────────────────────────────────────────────
+class PageviewBeaconRequest(msgspec.Struct, kw_only=True):
+    """Client-side beacon for a Flutter in-app route change (no full document
+    request, so the SSR pageview record never sees it)."""
+
+    path: Annotated[str, Meta(min_length=1, max_length=200)]
+
+
 # ── Suggestions ───────────────────────────────────────────────────────────────
 class CreateSuggestionRequest(msgspec.Struct, kw_only=True):
     title: Annotated[str, Meta(min_length=3, max_length=200)]
@@ -342,6 +350,13 @@ class SourceUpsertRequest(msgspec.Struct, kw_only=True):
     match_kind: Annotated[str, Meta(max_length=64)] = "domain"
     match_value: Annotated[str, Meta(max_length=512)] = ""
     enabled: bool = True
+
+
+class ServiceMergeRequest(msgspec.Struct, kw_only=True):
+    target_service_id: Annotated[
+        str, Meta(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    ]
+    source_service_ids: Annotated[list[str], Meta(min_length=1, max_length=32)]
 
 
 class ScraperRunRequest(msgspec.Struct, kw_only=True):

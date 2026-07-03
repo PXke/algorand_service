@@ -181,8 +181,9 @@ _BLUESKY_SCHEMA = {
 }
 
 
-def _guarded_get(url: str, *, headers: dict | None = None, params: dict | None = None,
-                 timeout: float = 12.0):
+def _guarded_get(
+    url: str, *, headers: dict | None = None, params: dict | None = None, timeout: float = 12.0
+):
     """SSRF-guarded GET for external / LLM-supplied URLs (revalidates each redirect)."""
     from app.core.net_guard import guarded_get
 
@@ -192,8 +193,9 @@ def _guarded_get(url: str, *, headers: dict | None = None, params: dict | None =
     return guarded_get(url, headers=h, params=params, timeout=timeout)
 
 
-def _guarded_post(url: str, *, json: Any = None, headers: dict | None = None,
-                  timeout: float = 12.0):
+def _guarded_post(
+    url: str, *, json: Any = None, headers: dict | None = None, timeout: float = 12.0
+):
     """SSRF-guarded POST for a known external JSON API. Validates the host is
     public and does NOT follow redirects (so it can't be bounced to an internal
     one). Used for fixed endpoints we choose, not LLM-supplied URLs."""
@@ -209,9 +211,41 @@ def _guarded_post(url: str, *, json: Any = None, headers: dict | None = None,
         return client.post(url, json=json, headers=h)
 
 
+def _github_owner_repos(owner: str, headers: dict) -> dict[str, Any]:
+    """Repo list for a GitHub org/user, most recently pushed first — returned when
+    the model passes an owner instead of owner/name (the top prod failure mode for
+    this tool), so it can pick a repo and call again instead of dead-ending."""
+    try:
+        resp = _guarded_get(
+            f"https://api.github.com/users/{owner}/repos",
+            params={"sort": "pushed", "per_page": 8},
+            headers=headers,
+        )
+        if resp.status_code == 404:
+            return {"owner": owner, "error": "owner not found on GitHub"}
+        resp.raise_for_status()
+        repos = resp.json()
+    except Exception as exc:
+        return {"owner": owner, "error": str(exc)[:200]}
+    return {
+        "owner": owner,
+        "repos": [
+            {
+                "repo": r.get("full_name"),
+                "description": (r.get("description") or "")[:160],
+                "stars": r.get("stargazers_count"),
+                "pushed_at": r.get("pushed_at"),
+            }
+            for r in repos
+            if isinstance(r, dict)
+        ][:8],
+        "hint": "call github_activity again with one of these 'owner/name' repos",
+    }
+
+
 def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
     """Recent activity for a GitHub repo: metadata, latest releases and commits.
-    Accepts 'owner/name' or a github.com URL. GITHUB_TOKEN optional (higher rate)."""
+    Accepts 'owner/name' or a github.com URL; a bare owner/org lists its repos."""
     import os
 
     slug = (repo or "").strip().rstrip("/")
@@ -220,17 +254,27 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
     slug = "/".join(slug.split("/")[:2])
     if slug.endswith(".git"):
         slug = slug[:-4]
-    if slug.count("/") != 1 or not all(slug.split("/")):
-        return {"error": f"expected owner/name, got '{repo}'"}
     n = max(1, min(int(limit), 10))
     headers = {"Accept": "application/vnd.github+json"}
     token = os.getenv("GITHUB_TOKEN", "").strip()
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if "/" not in slug and slug:
+        # An org/user, not a repo — list its repos instead of erroring.
+        return _github_owner_repos(slug, headers)
+    if slug.count("/") != 1 or not all(slug.split("/")):
+        return {"error": f"expected owner/name, got '{repo}'"}
     out: dict[str, Any] = {"repo": slug}
     try:
         meta_resp = _guarded_get(f"https://api.github.com/repos/{slug}", headers=headers)
         if meta_resp.status_code == 404:
+            # A wrong repo guess under a real owner (prod: 'AlgoNode/algonode') —
+            # surface the owner's actual repos rather than a dead end.
+            owner = slug.split("/")[0]
+            listing = _github_owner_repos(owner, headers)
+            if listing.get("repos"):
+                listing["error"] = f"repo '{slug}' not found; owner's repos listed"
+                return listing
             return {"repo": slug, "error": "repo not found"}
         meta_resp.raise_for_status()
         meta = meta_resp.json()
@@ -245,7 +289,8 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
     try:
         rel = _guarded_get(
             f"https://api.github.com/repos/{slug}/releases",
-            params={"per_page": n}, headers=headers,
+            params={"per_page": n},
+            headers=headers,
         ).json()
         out["releases"] = [
             {
@@ -254,14 +299,16 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
                 "published_at": x.get("published_at"),
                 "notes": (x.get("body") or "")[:500],
             }
-            for x in rel if isinstance(x, dict)
+            for x in rel
+            if isinstance(x, dict)
         ][:n]
     except Exception:
         out["releases"] = []
     try:
         commits = _guarded_get(
             f"https://api.github.com/repos/{slug}/commits",
-            params={"per_page": n}, headers=headers,
+            params={"per_page": n},
+            headers=headers,
         ).json()
         out["recent_commits"] = [
             {
@@ -269,7 +316,8 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
                 "date": c.get("commit", {}).get("author", {}).get("date"),
                 "author": (c.get("author") or {}).get("login"),
             }
-            for c in commits if isinstance(c, dict)
+            for c in commits
+            if isinstance(c, dict)
         ][:n]
     except Exception:
         out["recent_commits"] = []
@@ -278,15 +326,49 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
         # a stronger "anonymous team" signal than the last few commit authors.
         contributors = _guarded_get(
             f"https://api.github.com/repos/{slug}/contributors",
-            params={"per_page": n}, headers=headers,
+            params={"per_page": n},
+            headers=headers,
         ).json()
         out["top_contributors"] = [
             {"login": c.get("login"), "contributions": c.get("contributions")}
-            for c in contributors if isinstance(c, dict)
+            for c in contributors
+            if isinstance(c, dict)
         ][:n]
     except Exception:
         out["top_contributors"] = []
     return out
+
+
+def _fetch_failure_hint(url: str, error: str) -> str:
+    """Steer the writer to the dedicated tool for hosts that block direct fetches.
+
+    Prod transcripts show the model repeatedly fetch_url-ing medium.com (403) and
+    reddit.com (403) while the purpose-built tools sit unused — a hint inside the
+    error result is followed far more reliably than a schema description."""
+    from urllib.parse import urlsplit
+
+    host = urlsplit(url).netloc.lower()
+    if host.endswith("medium.com"):
+        return (
+            "medium.com blocks direct fetches — use medium_api_article_list "
+            "with the @handle or publication URL instead"
+        )
+    if host.endswith("reddit.com"):
+        return (
+            "reddit.com blocks server fetches — use reddit_api_post_history "
+            "for a user's posts/comments instead"
+        )
+    if host.endswith("github.com"):
+        return (
+            "for GitHub use github_activity (repo metadata/releases/commits) or "
+            "github_repository_contents (read files) instead of fetching the page"
+        )
+    if "404" in error or "410" in error:
+        return (
+            "the page is gone — fetch_archive_text can read a Wayback Machine "
+            "snapshot of it if the historical content matters"
+        )
+    return ""
 
 
 def _tool_fetch_url(url: str, max_chars: int = 6000) -> dict[str, Any]:
@@ -298,12 +380,14 @@ def _tool_fetch_url(url: str, max_chars: int = 6000) -> dict[str, Any]:
     if not u.startswith(("http://", "https://")):
         u = "https://" + u
     try:
-        resp = _guarded_get(
-            u, headers={"Accept": "text/html,application/xhtml+xml"}, timeout=15.0
-        )
+        resp = _guarded_get(u, headers={"Accept": "text/html,application/xhtml+xml"}, timeout=15.0)
         resp.raise_for_status()
     except Exception as exc:
-        return {"url": u, "error": str(exc)[:200]}
+        out: dict[str, Any] = {"url": u, "error": str(exc)[:200]}
+        hint = _fetch_failure_hint(u, out["error"])
+        if hint:
+            out["hint"] = hint
+        return out
     ctype = resp.headers.get("content-type", "")
     base = str(resp.url)
     # PDFs (whitepapers, audits, tokenomics docs) are common source links; read
@@ -482,7 +566,12 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10) -> dict[str, Any]:
     parts = urlsplit(raw)
     if not parts.netloc:
         return {"error": f"could not parse forum_url '{forum_url}'"}
-    base = f"{parts.scheme}://{parts.netloc}"
+    host = parts.netloc.lower()
+    # The model plausibly guesses this host for the Algorand forum (seen in prod);
+    # it doesn't resolve — the real forum lives at forum.algorand.org.
+    if host == "forum.algorand.foundation":
+        host = "forum.algorand.org"
+    base = f"{parts.scheme}://{host}"
     n = max(1, min(int(limit), 25))
     hdr = {"Accept": "application/json"}
     out: dict[str, Any] = {"forum": base}
@@ -495,8 +584,12 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10) -> dict[str, Any]:
         out["stats"] = {
             k: stats[k]
             for k in (
-                "topic_count", "post_count", "user_count",
-                "topics_last_day", "posts_last_day", "active_users_last_day",
+                "topic_count",
+                "post_count",
+                "user_count",
+                "topics_last_day",
+                "posts_last_day",
+                "active_users_last_day",
             )
             if k in stats
         }
@@ -507,8 +600,10 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10) -> dict[str, Any]:
     cat_names: dict[Any, str] = {}
     try:
         clist = (
-            (_guarded_get(f"{base}/categories.json", headers=hdr).json() or {})
-            .get("category_list", {}) or {}
+            (_guarded_get(f"{base}/categories.json", headers=hdr).json() or {}).get(
+                "category_list", {}
+            )
+            or {}
         ).get("categories", []) or []
         out["categories"] = [
             {
@@ -516,7 +611,8 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10) -> dict[str, Any]:
                 "topics": c.get("topic_count"),
                 "description": (c.get("description_text") or "")[:160],
             }
-            for c in clist[:15] if isinstance(c, dict)
+            for c in clist[:15]
+            if isinstance(c, dict)
         ]
         cat_names = {c.get("id"): c.get("name") or "" for c in clist if isinstance(c, dict)}
     except Exception:
@@ -524,8 +620,8 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10) -> dict[str, Any]:
 
     try:
         topics = (
-            (_guarded_get(f"{base}/latest.json", headers=hdr).json() or {})
-            .get("topic_list", {}) or {}
+            (_guarded_get(f"{base}/latest.json", headers=hdr).json() or {}).get("topic_list", {})
+            or {}
         ).get("topics", []) or []
         out["recent_topics"] = [
             {
@@ -536,10 +632,12 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10) -> dict[str, Any]:
                 "last_activity": t.get("last_posted_at") or t.get("bumped_at"),
                 "url": (
                     f"{base}/t/{t.get('slug')}/{t.get('id')}"
-                    if t.get("slug") and t.get("id") else ""
+                    if t.get("slug") and t.get("id")
+                    else ""
                 ),
             }
-            for t in topics[:n] if isinstance(t, dict)
+            for t in topics[:n]
+            if isinstance(t, dict)
         ]
     except Exception as exc:
         out["latest_error"] = str(exc)[:160]
@@ -570,7 +668,10 @@ def _tool_github_repo_contents(repo: str, path: str = "", ref: str = "") -> dict
 
     slug = _normalize_repo_slug(repo)
     if not slug:
-        return {"error": f"expected owner/name, got '{repo}'"}
+        return {
+            "error": f"expected owner/name, got '{repo}' — for an owner's repo "
+            "list, call github_activity with just the owner"
+        }
     p = (path or "").strip().lstrip("/")
     headers = {"Accept": "application/vnd.github+json"}
     token = os.getenv("GITHUB_TOKEN", "").strip()
@@ -590,7 +691,8 @@ def _tool_github_repo_contents(repo: str, path: str = "", ref: str = "") -> dict
     if isinstance(data, list):  # directory listing
         entries = [
             {"name": e.get("name"), "type": e.get("type"), "size": e.get("size")}
-            for e in data if isinstance(e, dict)
+            for e in data
+            if isinstance(e, dict)
         ]
         return {"repo": slug, "path": p or "/", "kind": "dir", "entries": entries[:100]}
     if isinstance(data, dict) and data.get("type") == "file":
@@ -608,8 +710,12 @@ def _tool_github_repo_contents(repo: str, path: str = "", ref: str = "") -> dict
                 text = ""
         cap = 12000
         return {
-            "repo": slug, "path": data.get("path"), "kind": "file",
-            "size": data.get("size"), "text": text[:cap], "truncated": len(text) > cap,
+            "repo": slug,
+            "path": data.get("path"),
+            "kind": "file",
+            "size": data.get("size"),
+            "text": text[:cap],
+            "truncated": len(text) > cap,
         }
     return {"repo": slug, "path": p, "error": "unexpected contents response"}
 
@@ -664,12 +770,14 @@ def _tool_medium_articles(source: str, limit: int = 15) -> dict[str, Any]:
     articles = []
     for it in root.findall(".//item")[:n]:
         cats = [c.text.strip() for c in it.findall("category") if c.text]
-        articles.append({
-            "title": (it.findtext("title") or "").strip(),
-            "link": (it.findtext("link") or "").strip(),
-            "published": (it.findtext("pubDate") or "").strip(),
-            "categories": cats[:8],
-        })
+        articles.append(
+            {
+                "title": (it.findtext("title") or "").strip(),
+                "link": (it.findtext("link") or "").strip(),
+                "published": (it.findtext("pubDate") or "").strip(),
+                "categories": cats[:8],
+            }
+        )
     return {"feed": feed_url, "count": len(articles), "articles": articles}
 
 
@@ -702,7 +810,7 @@ def _tool_reddit_history(user: str, kind: str = "submitted", limit: int = 15) ->
             return {
                 "user": u,
                 "error": "reddit blocked this request (403) — it rate-limits server IPs; "
-                         "treat as unavailable for this story",
+                "treat as unavailable for this story",
                 "items": [],
             }
         resp.raise_for_status()
@@ -721,22 +829,26 @@ def _tool_reddit_history(user: str, kind: str = "submitted", limit: int = 15) ->
         d = (c.get("data") or {}) if isinstance(c, dict) else {}
         perma = f"https://www.reddit.com{d.get('permalink', '')}" if d.get("permalink") else ""
         if k == "submitted":
-            items.append({
-                "subreddit": d.get("subreddit"),
-                "title": (d.get("title") or "")[:200],
-                "score": d.get("score"),
-                "num_comments": d.get("num_comments"),
-                "date": _iso(d.get("created_utc")),
-                "permalink": perma,
-            })
+            items.append(
+                {
+                    "subreddit": d.get("subreddit"),
+                    "title": (d.get("title") or "")[:200],
+                    "score": d.get("score"),
+                    "num_comments": d.get("num_comments"),
+                    "date": _iso(d.get("created_utc")),
+                    "permalink": perma,
+                }
+            )
         else:
-            items.append({
-                "subreddit": d.get("subreddit"),
-                "body": (d.get("body") or "")[:300],
-                "score": d.get("score"),
-                "date": _iso(d.get("created_utc")),
-                "permalink": perma,
-            })
+            items.append(
+                {
+                    "subreddit": d.get("subreddit"),
+                    "body": (d.get("body") or "")[:300],
+                    "score": d.get("score"),
+                    "date": _iso(d.get("created_utc")),
+                    "permalink": perma,
+                }
+            )
     return {"user": u, "kind": k, "count": len(items), "items": items}
 
 
@@ -748,12 +860,16 @@ _GITHUB_SCHEMA = {
             "Recent GitHub activity for a repo (metadata, latest releases, recent "
             "commits, and top contributors) — use to report shipped updates, version "
             "launches, dev momentum, or who actually builds a project. Pass "
-            "'owner/name' or a github.com URL."
+            "'owner/name' or a github.com URL; passing just an owner/org lists its "
+            "repositories so you can pick one."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "repo": {"type": "string", "description": "owner/name or github.com URL"},
+                "repo": {
+                    "type": "string",
+                    "description": "owner/name, a github.com URL, or a bare owner/org",
+                },
                 "limit": {"type": "integer", "description": "1-10 releases/commits, default 5"},
             },
             "required": ["repo"],
@@ -818,12 +934,16 @@ _DISCOURSE_SCHEMA = {
             "(topic/post/user counts, last-day activity), top categories, and recent "
             "topics with reply/view counts. Use to gauge what the community is "
             "discussing NOW instead of a stale page snapshot. Pass the forum's base "
-            "URL, e.g. https://forum.folks.finance."
+            "URL, e.g. https://forum.folks.finance — the official Algorand forum "
+            "is https://forum.algorand.org."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "forum_url": {"type": "string", "description": "forum base URL, e.g. https://forum.folks.finance"},
+                "forum_url": {
+                    "type": "string",
+                    "description": "forum base URL, e.g. https://forum.folks.finance",
+                },
                 "limit": {"type": "integer", "description": "1-25 recent topics, default 10"},
             },
             "required": ["forum_url"],
@@ -930,8 +1050,14 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from app.core.config import BLUESKY_SEARCH_ENABLED, SEARXNG_URL
 
     schemas: list[dict[str, Any]] = [
-        _GITHUB_SCHEMA, _GITHUB_CONTENTS_SCHEMA, _FETCH_SCHEMA, _DEFILLAMA_SCHEMA,
-        _DISCOURSE_SCHEMA, _NODE_STATS_SCHEMA, _MEDIUM_SCHEMA, _REDDIT_SCHEMA,
+        _GITHUB_SCHEMA,
+        _GITHUB_CONTENTS_SCHEMA,
+        _FETCH_SCHEMA,
+        _DEFILLAMA_SCHEMA,
+        _DISCOURSE_SCHEMA,
+        _NODE_STATS_SCHEMA,
+        _MEDIUM_SCHEMA,
+        _REDDIT_SCHEMA,
     ]
     handlers: dict[str, Any] = {
         "github_activity": _tool_github_activity,

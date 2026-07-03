@@ -98,7 +98,7 @@ def test_run_polls_all_scrape_sources(monkeypatch) -> None:
         has_pending_classifier_review=lambda: False,
         has_pending_feed_release=lambda: False,
         is_throttled=lambda _sid: False,
-        record_scrape=lambda _sid: None,
+        record_scrape=lambda _sid, ok=True: None,
     )
     assert result["status"] == "ok"
     assert result["checked"] == 1

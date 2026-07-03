@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import ssl
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 def probe_domain(domain: str, *, timeout: float = 12.0) -> dict[str, Any]:
@@ -63,7 +66,7 @@ def primary_domain_from_source(source_url: str, page_text: str) -> str:
         try:
             return urlparse(source_url).netloc.lower().removeprefix("www.")
         except Exception:
-            pass
+            logger.debug("failed to parse netloc from %s", source_url, exc_info=True)
     from app.modules.newspaper.scam_enrichment import extract_domains_and_urls
 
     _urls, domains = extract_domains_and_urls(page_text)

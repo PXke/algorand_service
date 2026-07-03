@@ -413,3 +413,19 @@ file = "backend/schema/migrations/app/043_editorial_brief_assignment.cql"
 tier = "prod"
 status = "active"
 description = "editorial_briefs: refresh_every_days, last_run_at, linked_article_id for active topic assignment + recurring refresh"
+
+[[migrations]]
+stream = "app"
+version = "044"
+file = "backend/schema/migrations/app/044_articles_prompt_version.cql"
+tier = "prod"
+status = "active"
+description = "articles_by_id: prompt_version text column so stored articles can be correlated with the compose PROMPT_VERSION that wrote them"
+
+[[migrations]]
+stream = "app"
+version = "045"
+file = "backend/schema/migrations/app/045_service_sources.cql"
+tier = "prod"
+status = "active"
+description = "service layer: service_sources (N sources per service, web/youtube/mail) + service_by_domain reverse lookup, so multi-domain entities feed one service-watch aggregate"

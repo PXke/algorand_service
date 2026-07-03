@@ -172,7 +172,9 @@ def _init_bugsnag() -> None:
         handler.setLevel(logging.ERROR)
         logging.getLogger().addHandler(handler)
     except Exception:
-        pass
+        logging.getLogger(__name__).warning(
+            "bugsnag setup failed; error reporting disabled", exc_info=True
+        )
 
 
 _init_bugsnag()

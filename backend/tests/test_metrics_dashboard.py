@@ -21,7 +21,7 @@ def test_dashboard_includes_articles_tile(monkeypatch) -> None:
     news = NewsService(store=store)
     monkeypatch.setattr(
         "app.modules.metrics.services.dashboard_service.fetch_algod_status",
-        lambda **kwargs: {"last-round": 12345, "time-since-last-round": 3_000_000},
+        lambda **kwargs: {"last-round": 12345, "time-since-last-round": 3_000_000_000},
     )
 
     service = MetricsDashboardService(news_service=news)

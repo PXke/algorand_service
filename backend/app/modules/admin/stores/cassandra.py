@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import uuid
 from datetime import UTC, datetime
 from urllib.parse import urlparse
@@ -9,6 +10,8 @@ from uuid import UUID
 from app.core.feed_bucket import feed_month
 from app.modules.admin.classifier_constants import CONTENT_CATEGORIES
 from app.modules.news.stores.base import StoredArticle
+
+logger = logging.getLogger(__name__)
 
 # Max review items a single source domain may occupy in the admin window, so a
 # burst of pages from one site can't crowd out everything else. Over-cap items
@@ -84,7 +87,7 @@ class AdminCassandraStore:
             if row and row.version is not None:
                 version = int(row.version) + 1
         except Exception:
-            pass
+            logger.warning("failed to read latest version for article %s", aid, exc_info=True)
         now = datetime.now(tz=UTC)
         with contextlib.suppress(Exception):
             session.execute(
@@ -178,14 +181,14 @@ class AdminCassandraStore:
                     (aid, row.key_type, row.key_value),
                 )
         except Exception:
-            pass
+            logger.warning("failed to delete match rows for article %s", aid, exc_info=True)
 
         try:
             version_rows = session.execute(ArticleVersionStmts.LIST_VERSIONS, (aid,))
             for row in version_rows:
                 session.execute(ArticleVersionStmts.DELETE, (aid, row.version))
         except Exception:
-            pass
+            logger.warning("failed to delete version rows for article %s", aid, exc_info=True)
 
         session.execute(ArticleStmts.DELETE, (aid,))
         return True
@@ -401,7 +404,7 @@ class AdminCassandraStore:
                         gd, separators=(",", ":")
                     )
         except Exception:
-            pass
+            logger.debug("failed to parse review metadata for %s", review_id, exc_info=True)
         return out
 
     def training_stats(self) -> dict:
@@ -504,7 +507,11 @@ class AdminCassandraStore:
                         f"{getattr(art, 'title', '')}\n{art.body}"
                     )[:8000]
             except Exception:
-                pass
+                logger.warning(
+                    "failed to snapshot article text for feedback on %s",
+                    article_id,
+                    exc_info=True,
+                )
         # Gatekeeper validation anchor: the human ground truth the annotator is
         # checked against. Written to the dedicated gatekeeper_anchors table (the
         # single source of truth), isolated from all model training.
@@ -603,7 +610,11 @@ class AdminCassandraStore:
                 if art is not None and getattr(art, "body", ""):
                     article_text = f"{getattr(art, 'title', '')}\n{art.body}"[:8000]
             except Exception:
-                pass
+                logger.warning(
+                    "failed to snapshot article text for anchor on %s",
+                    article_id,
+                    exc_info=True,
+                )
         now = datetime.now(tz=UTC)
         anchor_id = uuid_from_time(now)
         get_cassandra_session().execute(
@@ -853,7 +864,7 @@ class AdminCassandraStore:
             # something an admin click should trigger.)
             app.send_task("app.tasks.newspaper.drain_standard_publish_queue", queue="pipeline")
         except Exception:
-            pass
+            logger.warning("failed to trigger compose-next task", exc_info=True)
 
     def _feed_count_today(self, session, bucket: str = "") -> int:
         from datetime import UTC, datetime, timedelta
@@ -905,7 +916,7 @@ class AdminCassandraStore:
             client = redis.from_url(settings.redis_url, decode_responses=True)
             client.set("news:last_feed_release_epoch", str(int(time.time())))
         except Exception:
-            pass
+            logger.warning("failed to record feed release timestamp", exc_info=True)
 
     @staticmethod
     def _record_url_rejected(url: str) -> None:
@@ -929,7 +940,7 @@ class AdminCassandraStore:
                 ex=int(settings.url_reject_cooldown_ttl),
             )
         except Exception:
-            pass
+            logger.warning("failed to record rejected-url cooldown for %s", url, exc_info=True)
 
     def _publish_or_queue_article(self, article_id: str) -> str:
         """Publish to the feed if under the daily cap; otherwise hold in

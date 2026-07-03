@@ -13,11 +13,7 @@ from app.modules.newspaper.publish_policy import (
 )
 
 
-def test_classify_first_scrape_as_discovery(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "app.modules.newspaper.publish_policy.count_articles_for_service",
-        lambda service_id: 0,
-    )
+def test_classify_first_scrape_as_discovery() -> None:
     kind = classify_scrape_publish(
         service_id="new-tool",
         page_text="hello",
@@ -27,25 +23,20 @@ def test_classify_first_scrape_as_discovery(monkeypatch) -> None:
     assert kind == PublishKind.SERVICE_DISCOVERY
 
 
-def test_classify_announcement_as_discovery(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "app.modules.newspaper.publish_policy.count_articles_for_service",
-        lambda service_id: 2,
-    )
+def test_discovery_never_refires_after_first_snapshot() -> None:
+    # Announcement-sounding text and zero published articles must NOT
+    # resurrect discovery — one discovery per service, ever; everything
+    # after the first snapshot is an update.
     kind = classify_scrape_publish(
         service_id="existing",
         page_text="We are launching a new service with pricing on Algorand",
         is_first_snapshot=False,
         diff="+line",
     )
-    assert kind == PublishKind.SERVICE_DISCOVERY
+    assert kind == PublishKind.CONTENT_UPDATE
 
 
-def test_classify_minor_diff_as_update(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "app.modules.newspaper.publish_policy.count_articles_for_service",
-        lambda service_id: 3,
-    )
+def test_classify_minor_diff_as_update() -> None:
     kind = classify_scrape_publish(
         service_id="existing",
         page_text="footer copyright changed",

@@ -12,11 +12,14 @@ Run on a host with the app env loaded:
 
 from __future__ import annotations
 
+import logging
 import sys
 from uuid import UUID
 
 from app.modules.newspaper.article_store import list_feed_articles, update_article_image
 from app.modules.newspaper.source_image import resolve_source_images
+
+logger = logging.getLogger(__name__)
 
 
 def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
@@ -42,13 +45,13 @@ def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
         image = og or logo
         if not image:
             failed += 1
-            print(f"  no image  {meta.service_id}")
+            logger.info("  no image  %s", meta.service_id)
             continue
         if dry_run:
-            print(f"  WOULD set {meta.service_id} -> {image}")
+            logger.info("  WOULD set %s -> %s", meta.service_id, image)
         else:
             update_article_image(aid, image)
-            print(f"  set       {meta.service_id} -> {image}")
+            logger.info("  set       %s -> %s", meta.service_id, image)
         updated += 1
     result = {
         "scanned": scanned,
@@ -57,7 +60,7 @@ def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
         "no_image_found": failed,
         "dry_run": dry_run,
     }
-    print(result)
+    logger.info(result)
     return result
 
 
@@ -76,11 +79,11 @@ def resync_feed_images(*, limit: int = 500, dry_run: bool = False) -> dict:
         if not image:
             continue
         synced += 1
-        print(f"  {'WOULD sync' if dry_run else 'synced'} {aid} -> {image[:60]}")
+        logger.info("  %s %s -> %s", "WOULD sync" if dry_run else "synced", aid, image[:60])
         if not dry_run:
             update_article_image(aid, image)
     result = {"synced": synced, "dry_run": dry_run}
-    print(result)
+    logger.info(result)
     return result
 
 
@@ -97,19 +100,24 @@ def cleanup_phantoms(*, dry_run: bool = False) -> dict:
         if (r.service_id or "") and (r.title or ""):
             continue
         deleted += 1
-        print(f"  {'WOULD delete' if dry_run else 'deleted'} phantom "
-              f"bucket={r.bucket} aid={r.article_id}")
+        logger.info(
+            "  %s phantom bucket=%s aid=%s",
+            "WOULD delete" if dry_run else "deleted",
+            r.bucket,
+            r.article_id,
+        )
         if not dry_run:
             session.execute(
                 FeedStmts.DELETE,
                 (r.bucket, r.published_at, r.article_id),
             )
     result = {"deleted_phantoms": deleted, "dry_run": dry_run}
-    print(result)
+    logger.info(result)
     return result
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     dry = "--dry-run" in sys.argv
     if "--cleanup" in sys.argv:
         cleanup_phantoms(dry_run=dry)

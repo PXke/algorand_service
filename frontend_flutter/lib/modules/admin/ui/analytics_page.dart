@@ -371,6 +371,10 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
     final sessTotal = (sessions['total'] as num?)?.toInt() ?? 0;
     final returningRate = (sessions['returning_rate'] as num?)?.toDouble() ?? 0.0;
     final pagesPerVisit = (sessions['pages_per_visit'] as num?)?.toDouble() ?? 0.0;
+    // Sessions that never got a confirmed 2nd hit — a bot-likelihood signal
+    // (UA denylist alone misses a scraper spoofing a browser UA), not a hard
+    // filter: plenty of genuine one-and-done readers land in here too.
+    final bounceRate = (sessions['bounce_rate'] as num?)?.toDouble() ?? 0.0;
     final prevSessions = (prev['sessions'] as num?)?.toInt() ?? 0;
     final ai = (data['ai_crawler'] as Map?) ?? const {};
     final aiShare = (ai['share_of_bots'] as num?)?.toDouble() ?? 0.0;
@@ -402,6 +406,9 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
                   Icons.auto_stories_outlined,
                   width: cardWidth,
                   valueText: pagesPerVisit.toStringAsFixed(1)),
+              _statCard(theme, colors, 'Likely single-hit', sessTotal,
+                  Icons.help_outline,
+                  width: cardWidth, valueText: '${(bounceRate * 100).round()}%'),
               _statCard(theme, colors, 'Bot views', bot, Icons.smart_toy_outlined,
                   width: cardWidth, delta: _delta(bot, prevBot)),
               _statCard(theme, colors, 'AI-crawler share', bot,

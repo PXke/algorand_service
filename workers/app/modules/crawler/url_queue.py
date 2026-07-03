@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_url(url: str) -> str:
@@ -52,7 +55,7 @@ def mark_url_crawled(url: str) -> None:
             _cooldown_key(normalized), "1", ex=CRAWL_URL_RECRAWL_COOLDOWN_SECONDS
         )
     except Exception:
-        pass
+        logger.warning("failed to mark url crawled: %s", normalized, exc_info=True)
 
 
 def enqueue_url(

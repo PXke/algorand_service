@@ -31,6 +31,34 @@ def robots_txt() -> str:
     return "\n".join(lines) + "\n"
 
 
+def llms_txt() -> str:
+    """llms.txt (llmstxt.org): a markdown site guide for AI crawlers — a real
+    audience here (their share of bot traffic is tracked as a first-class
+    analytics stat). Points them at the full-content feed and sitemap instead
+    of leaving them to scrape the Flutter shell."""
+    lines = [
+        f"# {settings.site_name}",
+        "",
+        f"> {settings.site_tagline}",
+        "",
+        f"{settings.site_name} publishes AI-assisted journalism about the Algorand "
+        "ecosystem: on-chain events, market data and community sources under "
+        "automated editorial review, with source links on every story.",
+        "",
+        "## Content",
+        "",
+        f"- [Latest articles (RSS, full text)]({absolute('/feed.xml')}): every "
+        "article's complete body ships in content:encoded",
+        f"- [Sitemap]({absolute('/sitemap.xml')}): all article and section URLs",
+        f"- [About]({absolute('/about')}): editorial and AI-authorship disclosure",
+        "",
+        "## Sections",
+        "",
+    ]
+    lines += [f"- [{s.label}]({absolute(f'/section/{s.slug}')}): {s.description}" for s in SECTIONS]
+    return "\n".join(lines) + "\n"
+
+
 def _url(loc: str, lastmod: str | None = None, changefreq: str | None = None) -> str:
     parts = [f"<loc>{escape(loc)}</loc>"]
     if lastmod:
@@ -52,8 +80,7 @@ def sitemap_xml(items: list[ArticleFeedItem]) -> str:
     ]
     urls += [_url(absolute(f"/section/{s.slug}"), changefreq="daily") for s in SECTIONS]
     urls += [
-        _url(absolute(article_path(i.article_id)), _iso_date(i.published_at_epoch))
-        for i in items
+        _url(absolute(article_path(i.article_id)), _iso_date(i.published_at_epoch)) for i in items
     ]
     body = "".join(urls)
     return (

@@ -45,6 +45,9 @@ def get_cassandra_session() -> CassandraSession:
         # libev: the fast C event loop for the driver's async I/O (vs the default
         # pure-python asyncore reactor). Every execute() rides this loop.
         connection_class=LibevConnection,
+        # Cassandra 5 speaks native protocol v5; pinning it skips the driver's
+        # trial-and-error downgrade (66 -> 65 -> 5) that warns on every boot.
+        protocol_version=5,
     )
     return cluster.connect(settings.cassandra_keyspace)
 

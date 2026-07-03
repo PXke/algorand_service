@@ -245,24 +245,29 @@ find '${CURRENT}/frontend_web' -type f \
     if [[ "\$have_brotli" == 1 ]]; then brotli -q 11 -f "\$f" -o "\$f.br"; fi
   done
 
-# Python venv shared across releases; deps are the union of backend + workers
+# Python venv shared across releases; deps are the pinned union of backend +
+# workers (requirements.lock.txt, regenerated via deploy/scripts/lock_requirements.sh
+# and committed to the repo — keeps prod on the exact versions tested in CI).
 if [[ ! -x '${VENV}/bin/python' ]]; then python3 -m venv '${VENV}'; fi
-'${VENV}/bin/python' - <<'PY' > /tmp/algorand-requirements.txt
-import tomllib
-for proj in ("backend", "workers"):
-    with open(f"${CURRENT}/{proj}/pyproject.toml", "rb") as fh:
-        for dep in tomllib.load(fh)["project"]["dependencies"]:
-            print(dep)
-PY
 # Reinstalling deps on every deploy is slow (and pointless when they're
-# unchanged). Hash the resolved requirement set and skip pip when it matches.
-REQ_HASH=\$(sha256sum /tmp/algorand-requirements.txt | cut -d' ' -f1)
+# unchanged). Hash the lock file and skip pip when it matches.
+REQ_HASH=\$(sha256sum '${CURRENT}/requirements.lock.txt' | cut -d' ' -f1)
 if [[ "\$(cat '${SHARED}/.requirements.sha256' 2>/dev/null)" == "\$REQ_HASH" ]]; then
   echo "deps unchanged — skipping pip install"
 else
   '${VENV}/bin/pip' install --quiet --upgrade pip setuptools wheel
-  '${VENV}/bin/pip' install --quiet -r /tmp/algorand-requirements.txt
+  '${VENV}/bin/pip' install --quiet -r '${CURRENT}/requirements.lock.txt'
   echo "\$REQ_HASH" > '${SHARED}/.requirements.sha256'
+fi
+
+# Playwright's browser lives in ~/.cache/ms-playwright and is versioned to the
+# playwright package, so a lock-file bump silently strands the old binary and
+# every SPA-fallback scrape starts erroring (only visible as per-source errors
+# in the diff-beat results). Idempotent + ~1s when already installed. Fail-soft:
+# HTTP scraping still works without it, so a download hiccup must not abort the
+# deploy — but say so loudly.
+if ! '${VENV}/bin/python' -m playwright install chromium; then
+  echo "WARN: playwright browser install FAILED — SPA scraping degraded until fixed"
 fi
 
 # Shared env files survive releases; bootstrap from templates on first deploy

@@ -37,7 +37,7 @@ class _Stmt:
 class ArticleStmts:
     GET_BY_ID = _Stmt(
         "SELECT article_id, service_id, title, summary, body, "
-        "trigger_txid, trigger_round, source_url, published_at "
+        "trigger_txid, trigger_round, source_url, published_at, prompt_version "
         "FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
     EXISTS = _Stmt("SELECT article_id FROM algorand_platform.articles_by_id WHERE article_id = ?")
@@ -58,8 +58,9 @@ class ArticleStmts:
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.articles_by_id ("
         "article_id, service_id, title, summary, body, "
-        "trigger_txid, trigger_round, source_url, published_at, tags, image_url"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "trigger_txid, trigger_round, source_url, published_at, tags, image_url, "
+        "prompt_version"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     UPDATE = _Stmt(
         "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ? "
@@ -296,6 +297,16 @@ class CrawledPageStmts:
     COUNT_BY_DOMAIN = _Stmt(
         "SELECT COUNT(*) AS c FROM algorand_platform.crawled_pages_by_domain WHERE domain = ?"
     )
+    # Service-context aggregation: newest harvested pages per host (clustering
+    # is crawled_at DESC), bodies fetched by id in a parallel second pass.
+    LIST_BY_DOMAIN = _Stmt(
+        "SELECT crawled_at, page_id, url, title "
+        "FROM algorand_platform.crawled_pages_by_domain WHERE domain = ? LIMIT ?"
+    )
+    GET_BODY = _Stmt(
+        "SELECT url, title, body, crawled_at "
+        "FROM algorand_platform.crawled_pages_by_id WHERE page_id = ?"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -322,7 +333,8 @@ class ClassifierFeedbackStmts:
         "FROM algorand_platform.classifier_feedback WHERE feedback_id = ?"
     )
     GET_GRADE = _Stmt(
-        "SELECT approved, metadata FROM algorand_platform.classifier_feedback WHERE feedback_id = ?"
+        "SELECT url, approved, metadata FROM algorand_platform.classifier_feedback "
+        "WHERE feedback_id = ?"
     )
 
 
@@ -527,6 +539,40 @@ class ServiceRegistryStmts:
     LIST_ALL = _Stmt(
         "SELECT service_id, display_name, match_kind, match_value, scrape_url, enabled "
         "FROM algorand_platform.service_registry"
+    )
+    GET_ID = _Stmt(
+        "SELECT service_id FROM algorand_platform.service_registry WHERE service_id = ?"
+    )
+    # Mirrors the backend admin store's UPSERT — keep the column lists in sync.
+    UPSERT = _Stmt(
+        "INSERT INTO algorand_platform.service_registry ("
+        "service_id, display_name, match_kind, match_value, scrape_url, enabled, "
+        "updated_at, origin"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# service_sources / service_by_domain (service layer — one service, N sources)
+# --------------------------------------------------------------------------- #
+class ServiceSourceStmts:
+    UPSERT = _Stmt(
+        "INSERT INTO algorand_platform.service_sources ("
+        "service_id, source_id, source_type, url, domain, enabled, added_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    LIST_FOR_SERVICE = _Stmt(
+        "SELECT source_id, source_type, url, domain, enabled "
+        "FROM algorand_platform.service_sources WHERE service_id = ?"
+    )
+    DELETE_FOR_SERVICE = _Stmt(
+        "DELETE FROM algorand_platform.service_sources WHERE service_id = ?"
+    )
+    UPSERT_BY_DOMAIN = _Stmt(
+        "INSERT INTO algorand_platform.service_by_domain (domain, service_id) VALUES (?, ?)"
+    )
+    GET_BY_DOMAIN = _Stmt(
+        "SELECT service_id FROM algorand_platform.service_by_domain WHERE domain = ?"
     )
 
 

@@ -6,10 +6,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from app.core import config
-from app.modules.newspaper.article_store import (
-    count_articles_for_service,
-    count_articles_published_on_utc_day,
-)
+from app.modules.newspaper.article_store import count_articles_published_on_utc_day
 
 
 class PublishKind(StrEnum):
@@ -52,26 +49,6 @@ TOPIC_PRIORITY: dict[PublishTopic, int] = {
     PublishTopic.GENERIC: 40,
 }
 
-
-_DISCOVERY_PHRASES = (
-    "introducing",
-    "announcing",
-    "announcement",
-    "launch",
-    "launched",
-    "now live",
-    "new service",
-    "new product",
-    "we built",
-    "we're building",
-    "pricing",
-    "beta access",
-    "early access",
-    "just released",
-    "release notes",
-    "github.com",
-    "open source",
-)
 
 _SCAM_PHRASES = (
     "scam alert",
@@ -220,11 +197,18 @@ def classify_scrape_publish(
     is_first_snapshot: bool,
     diff: str | None,
 ) -> PublishKind:
-    """Choose discovery vs content-update for a crawl/scrape publish."""
-    prior = count_articles_for_service(service_id)
-    if prior == 0 or is_first_snapshot:
-        return PublishKind.SERVICE_DISCOVERY
-    if _looks_like_announcement(page_text):
+    """Choose discovery vs content-update for a crawl/scrape publish.
+
+    Discovery = the service's FIRST snapshot, exactly once per service. Every
+    later change is a content update, which only enqueues on a significant diff
+    (see evaluate_enqueue) — that diff IS the story ("product X shipped/changed
+    Y"). It must never depend on published-article counts or announcement-y
+    page text: the old `prior == 0` check re-fired discovery on every homepage
+    churn for services that hadn't composed yet (a ~700-row queue flood at
+    ~7 published articles/day), and marketing pages permanently
+    _looks_like_announcement.
+    """
+    if is_first_snapshot:
         return PublishKind.SERVICE_DISCOVERY
     return PublishKind.CONTENT_UPDATE
 
@@ -283,6 +267,8 @@ def build_publish_intent(
     chain_triggered: bool = False,
     relevance: float | None = None,
     novelty: float | None = None,
+    classifier_publish: bool | None = None,
+    classifier_confidence: float = 0.0,
 ) -> PublishIntent:
     from app.modules.newspaper.event_lifecycle import detect_event_context
     from app.modules.newspaper.publish_score import compute_priority
@@ -322,6 +308,9 @@ def build_publish_intent(
         stored_service_weight=stored_service_weight,
         relevance=relevance,
         novelty=novelty,
+        is_event=bool(event_id),
+        classifier_publish=classifier_publish,
+        classifier_confidence=classifier_confidence,
     )
     tier = classify_publish_tier(topic=topic, page_text=page_text)
     return PublishIntent(
@@ -332,7 +321,10 @@ def build_publish_intent(
         priority_breakdown=(
             f"relevance={breakdown.relevance_bonus}+novelty={breakdown.novelty_bonus}"
             f"+timeliness={breakdown.timeliness_bonus}"
-            f"(score={breakdown.timeliness_score}) "
+            f"(score={breakdown.timeliness_score})"
+            f"+diff={breakdown.diff_bonus}+announce={breakdown.announce_bonus}"
+            f"+classifier={breakdown.classifier_adjust}"
+            f"{' [seo_spam]' if breakdown.seo_spam else ''} "
             f"(heuristics topic={breakdown.topic_base} trust={breakdown.source_trust} "
             f"service={breakdown.service_weight} no longer ranked)"
         ),
@@ -368,11 +360,6 @@ def build_dedupe_key(
 ) -> str:
     short_hash = content_hash[:16] if content_hash else "none"
     return f"{service_id}:{topic}:{tier}:{short_hash}"
-
-
-def _looks_like_announcement(text: str) -> bool:
-    lower = text.lower()
-    return any(phrase in lower for phrase in _DISCOVERY_PHRASES)
 
 
 def _contains_any(text: str, phrases: tuple[str, ...]) -> bool:

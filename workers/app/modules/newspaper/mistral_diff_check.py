@@ -42,7 +42,7 @@ def run_mistral_diff_check(
     has_pending_feed_release: Callable[[], bool] = _has_pending_feed_release,
     pause_on_feed_backlog: bool | None = None,
     is_throttled: Callable[[str], bool] = scrape_throttled,
-    record_scrape: Callable[[str], None] = mark_scraped,
+    record_scrape: Callable[..., None] = mark_scraped,
 ) -> dict[str, object]:
     """
     Poll scrape sources, detect snapshot diffs, publish with Mistral when content changed.
@@ -69,10 +69,11 @@ def run_mistral_diff_check(
 
     entries = [e for e in load_services() if e.scrape_url and _is_web(e.scrape_url)]
 
-    # Success-path poll throttle: this beat fires every ~10 min, but a source need
-    # not be re-fetched that often. Skip any source polled within
-    # SCRAPE_COOLDOWN_SECONDS so we don't recrawl the same domain dozens of times
-    # a day (event-driven/breaking publishes don't go through this beat).
+    # Watch cadence: this beat fires every ~10 min so NEW services get their
+    # first snapshot promptly, but a healthy source is only re-scraped once per
+    # SERVICE_RESCRAPE_DAYS (weekly by default) — the diff between those scrapes
+    # is the update story (event-driven/breaking publishes don't go through
+    # this beat).
     results: list[dict[str, str]] = []
     checked = 0
     throttled = 0
@@ -97,9 +98,11 @@ def run_mistral_diff_check(
             # One bad source (dead domain, scrape error) must not abort the whole
             # batch — record and continue to the next.
             outcome = {"status": "error", "reason": str(exc)[:200]}
-        # Stamp the throttle after the attempt (success OR error), so a flaky
-        # source isn't re-hammered every beat either.
-        record_scrape(entry.service_id)
+        # Stamp the throttle after the attempt. Success stamps the full
+        # re-scrape window (weekly cadence); an error stamps only the short
+        # cooldown so the source retries soon instead of losing a whole window
+        # — while still not being re-hammered every beat.
+        record_scrape(entry.service_id, ok=outcome.get("status") != "error")
         results.append({"service_id": entry.service_id, **outcome})
 
     summary = _summarize_results(results)

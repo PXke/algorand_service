@@ -6,9 +6,12 @@ in-memory store (dev/tests), so endpoints can always call record_view safely.
 
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _cassandra_enabled() -> bool:
@@ -35,7 +38,7 @@ def record_view(article_id: str) -> None:
 
         get_cassandra_session().execute(ViewCountStmts.BUMP, (aid,))
     except Exception:
-        pass
+        logger.warning("failed to bump view count for article %s", article_id, exc_info=True)
 
 
 def get_views(article_id: str) -> int:

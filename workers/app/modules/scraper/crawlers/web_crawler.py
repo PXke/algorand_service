@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
 
 from app.modules.scraper.core.base import BaseScraper, ScrapeResult
@@ -8,6 +10,8 @@ from app.modules.scraper.core.http_scraper import HttpScraper
 from app.modules.scraper.core.scrape_engine import uses_browser_engine
 from app.modules.scraper.crawler_registry import is_web_spa_enabled
 from app.modules.scraper.crawler_types import CrawlerType
+
+logger = logging.getLogger(__name__)
 
 # SPA root containers in the RAW html (extracted text never contains tags).
 _SPA_ROOT_MARKERS = ('id="root"', "id='root'", 'id="app"', "id='app'", "__next", "__nuxt", "ng-app")
@@ -171,7 +175,7 @@ class WebCrawlerDriver:
                 service_id=service_id,
             )
         except Exception:
-            pass
+            logger.warning("failed to enqueue crawled-page indexing for %s", url, exc_info=True)
         # One-hop frontier: this page passed the quality gate, so its links are
         # worth queueing (dead-end domains are filtered inside).
         try:
@@ -183,7 +187,7 @@ class WebCrawlerDriver:
                 source="web",
             )
         except Exception:
-            pass
+            logger.warning("failed to enqueue page links from %s", url, exc_info=True)
         if queue_id:
             mark_url_done(queue_id)
         return {

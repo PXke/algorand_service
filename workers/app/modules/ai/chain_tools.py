@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _TIMEOUT = 15.0
 
@@ -70,7 +73,7 @@ def _decode_value(v: dict) -> Any:
         try:
             return _encode_address(raw)
         except Exception:
-            pass
+            logger.debug("failed to encode 32-byte value as address; falling back to hex")
     return "0x" + raw.hex()
 
 

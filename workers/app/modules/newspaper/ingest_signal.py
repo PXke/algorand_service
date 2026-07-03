@@ -7,6 +7,7 @@ from app.core import config
 from app.modules.newspaper.article_matching import resolve_publish_mode
 from app.modules.newspaper.event_lifecycle import EventPhase, build_event_dedupe_key
 from app.modules.newspaper.publish_policy import (
+    PublishKind,
     PublishTier,
     build_dedupe_key,
     build_publish_intent,
@@ -154,6 +155,8 @@ def ingest_publish_signal(
         chain_triggered=round_num > 0,
         relevance=signals.relevance,
         novelty=novelty,
+        classifier_publish=signals.publish_decision,
+        classifier_confidence=signals.confidence,
     )
     enqueue_decision = evaluate_enqueue(intent.kind, diff=diff)
     if not enqueue_decision.allowed:
@@ -180,6 +183,13 @@ def ingest_publish_signal(
     )
     if mode_info["publish_mode"] == "edit" and mode_info.get("linked_article_id"):
         dedupe_key = f"edit:{mode_info['linked_article_id']}:{content_hash[:16]}"
+    elif intent.kind == PublishKind.SERVICE_DISCOVERY:
+        # No content hash: ONE discovery candidate per service, ever. A hashed
+        # key let every homepage churn mint a "new" discovery row (the ~700-row
+        # queue flood). After this row resolves, a snapshot exists, so the kind
+        # can never be SERVICE_DISCOVERY again — the dedupe row being cleaned up
+        # on resolve does not reopen the door.
+        dedupe_key = f"discovery:{service_id}"
     elif intent.event_id and intent.event_phase:
         dedupe_key = build_event_dedupe_key(
             service_id=service_id,

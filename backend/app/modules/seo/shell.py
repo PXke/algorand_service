@@ -1,8 +1,9 @@
 """Loads the built Flutter `index.html` and injects per-route SEO markup.
 
 Humans still boot Flutter normally (the bootstrap script is untouched); crawlers
-read the injected `<head>` tags, JSON-LD and the `<noscript>` body. Same bytes go
-to everyone — no User-Agent cloaking.
+read the injected `<head>` tags, JSON-LD and the visible `#ssr-body` content,
+which removes itself once Flutter paints. Same bytes go to everyone — no
+User-Agent cloaking.
 """
 
 from __future__ import annotations
@@ -27,6 +28,19 @@ _HEAD_CLOSE_RE = re.compile(r"</head>", re.IGNORECASE)
 _BODY_OPEN_RE = re.compile(r"<body[^>]*>", re.IGNORECASE)
 
 _cache: dict[str, object] = {"path": None, "mtime": 0.0, "html": None}
+
+# Without hints the engine's ~3MB critical path (main.dart.js -> canvaskit.js
+# -> canvaskit.wasm) is discovered serially, each fetch starting only after the
+# previous script executes. Preloading lets the browser pull all of it in
+# parallel with HTML parsing, which directly shortens how long visitors sit on
+# the pre-boot #ssr-body content. The wasm is fetch()ed by canvaskit.js with
+# default (same-origin credentials) semantics, which `as="fetch"` matches.
+_PRELOADS = (
+    '<link rel="preload" href="/main.dart.js" as="script">\n'
+    '<link rel="preload" href="/canvaskit/canvaskit.js" as="script">\n'
+    '<link rel="preload" href="/canvaskit/canvaskit.wasm" as="fetch" '
+    'type="application/wasm">'
+)
 
 
 def _candidate_dirs() -> list[Path]:
@@ -77,7 +91,7 @@ def load_template() -> str | None:
 
 def render_document(head_html: str, body_html: str) -> str | None:
     """Inject `head_html` (title/meta/JSON-LD) before </head> and `body_html`
-    (the crawlable noscript content) right after <body>. Strips the static
+    (the crawlable `#ssr-body` content) right after <body>. Strips the static
     title/description so ours win."""
     template = load_template()
     if template is None:
@@ -89,7 +103,12 @@ def render_document(head_html: str, body_html: str) -> str | None:
     doc = _CANON_RE.sub("", doc)
     doc = _RSS_RE.sub("", doc)
     if _HEAD_CLOSE_RE.search(doc):
-        doc = _HEAD_CLOSE_RE.sub(head_html + "\n</head>", doc, count=1)
+        # Inject via a callable: a plain replacement string is processed for
+        # backslash escapes by re.sub, which turned the \n sequences json.dumps
+        # wrote inside the JSON-LD articleBody into raw newlines — invalid JSON
+        # that made Google drop the whole NewsArticle block.
+        injected = _PRELOADS + "\n" + head_html + "\n</head>"
+        doc = _HEAD_CLOSE_RE.sub(lambda m: injected, doc, count=1)
     if _BODY_OPEN_RE.search(doc):
         doc = _BODY_OPEN_RE.sub(lambda m: m.group(0) + "\n" + body_html, doc, count=1)
     return doc

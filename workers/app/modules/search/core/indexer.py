@@ -45,7 +45,7 @@ def _ensure_collection(client: Any, schema: dict[str, object]) -> None:
         client.collections[name].retrieve()
         return
     except Exception:
-        pass
+        logger.debug("typesense collection %r not found; creating", name, exc_info=True)
     client.collections.create(schema)
 
 

@@ -7,8 +7,11 @@ testable helper; ``structure_report_markdown`` formats them into a table and
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 # --- thresholds -----------------------------------------------------------
 MAX_DESERT_PARAGRAPHS = 4          # FAIL when > 4 consecutive prose blocks
@@ -186,6 +189,7 @@ def structure_report_markdown(md: str) -> str:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     sample = """# Algorand Q2 Network Report
 
 ## Throughput
@@ -201,4 +205,4 @@ while TVL climbed to $312 million and staking rewards paid out 84,000 ALGO.
 
 See the [governance portal](https://algorand.foundation) for details.
 """
-    print(structure_report_markdown(sample))
+    logger.info(structure_report_markdown(sample))

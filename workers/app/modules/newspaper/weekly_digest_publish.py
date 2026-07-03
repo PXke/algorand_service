@@ -57,6 +57,7 @@ def run_weekly_digest_publish(
             title=title,
             publish_kind="weekly_digest",
         ),
+        prompt_version=getattr(composed, "prompt_version", ""),
     )
 
     if not created:

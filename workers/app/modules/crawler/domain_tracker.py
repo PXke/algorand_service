@@ -449,6 +449,48 @@ def frontier_status(domain: str) -> str:
     return "dead_end" if not status.get("is_relevant", True) else "approved"
 
 
+def ensure_monitored_service(domain: str, *, scrape_url: str = "") -> bool:
+    """Approved domain → monitored source in service_registry, so the weekly
+    diff beat watches it and its evolution can become update articles. Worker-
+    side mirror of the backend admin-approve bridge (admin_set_domain); without
+    it, auto-approved domains were crawled for the research corpus but could
+    never produce a publish candidate. Never overwrites an existing row (the
+    admin may have customised it), and never spawns a service for a domain some
+    service already owns (e.g. after an admin merge). Returns True when a new
+    service was created."""
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ServiceRegistryStmts
+    from app.modules.newspaper.service_sources import add_web_source, service_for_domain
+
+    if not domain:
+        return False
+    owner = service_for_domain(domain)
+    if owner:
+        return False
+    service_id = domain.replace(".", "-").lower()
+    session = get_cassandra_session()
+    url = scrape_url or f"https://{domain}"
+    if session.execute(ServiceRegistryStmts.GET_ID, (service_id,)).one() is not None:
+        # Legacy service that predates the source tables — claim the mapping.
+        add_web_source(service_id, domain=domain, url=url)
+        return False
+    session.execute(
+        ServiceRegistryStmts.UPSERT,
+        (
+            service_id,
+            domain,
+            "domain",
+            domain,
+            url,
+            True,
+            datetime.now(tz=UTC),
+            "domain",
+        ),
+    )
+    add_web_source(service_id, domain=domain, url=url)
+    return True
+
+
 def register_pending_domain(
     domain: str,
     *,

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import Any
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 ARTICLES_COLLECTION = "articles"
 PAGES_COLLECTION = "pages"
@@ -75,11 +78,12 @@ def ensure_collection(schema: dict[str, object]) -> bool:
         client.collections[name].retrieve()
         return True
     except Exception:
-        pass
+        logger.debug("typesense collection %r not found; creating", name, exc_info=True)
     try:
         client.collections.create(schema)
         return True
     except Exception:
+        logger.warning("failed to create typesense collection %r", name, exc_info=True)
         return False
 
 
@@ -103,5 +107,5 @@ def clear_search_index() -> dict[str, object]:
             client.collections[name].delete()
             cleared.append(name)
         except Exception:
-            pass
+            logger.warning("failed to delete typesense collection %r", name, exc_info=True)
     return {"status": "ok", "cleared": cleared}

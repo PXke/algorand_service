@@ -66,6 +66,16 @@ def enqueue_publish(
     if existing is not None:
         return str(existing.queue_id), False
 
+    # One pending candidate per service: a source that keeps changing must not
+    # stack rows — the next re-scrape re-offers the story once this one resolves.
+    # Breaking (scam/incident) bypasses the cap so an alert is never held behind
+    # a pending standard update. The pending partition is scanned, which is fine
+    # at its intended size (a handful of weekly diffs, not the old homepage flood).
+    if str(payload.get("tier", "")) != PublishTier.BREAKING.value:
+        for row in session.execute(PublishQueueStmts.LIST_PENDING, ("pending", 2000)):
+            if row.service_id == service_id:
+                return str(row.queue_id), False
+
     queue_id = uuid.uuid4()
     now = datetime.now(tz=UTC)
     status = "pending"

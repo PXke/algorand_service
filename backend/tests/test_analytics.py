@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from app.modules.seo import analytics_store as a
 
 
@@ -186,6 +188,13 @@ class _FakeRedis:
     def set(self, k, v, ex=None):
         self.store[k] = v
 
+    def incr(self, k):
+        self.store[k] = int(self.store.get(k, 0)) + 1
+        return self.store[k]
+
+    def expire(self, k, ttl):
+        pass
+
 
 def test_record_session_new_then_returning(monkeypatch) -> None:
     fake = _FakeRedis()
@@ -210,9 +219,14 @@ def test_record_session_new_then_returning(monkeypatch) -> None:
     a.record_session(sess, "8.8.8.8", "Mozilla/5.0", day)
     assert bumps == [(day, "new")]
 
-    # Second hit while the 30-min window lives -> same session, no new bump.
+    # Second hit while the 30-min window lives -> same session, no new/returning
+    # bump, but it does confirm the session as multi-page (not a bounce).
     a.record_session(sess, "8.8.8.8", "Mozilla/5.0", day)
-    assert len(bumps) == 1
+    assert bumps == [(day, "new"), (day, "multipage")]
+
+    # A 3rd hit in the same session doesn't re-confirm multipage.
+    a.record_session(sess, "8.8.8.8", "Mozilla/5.0", day)
+    assert len(bumps) == 2
 
     # Session window expires (drop sess:) but the seen: marker persists ->
     # the next visit is a returning session.
@@ -243,6 +257,20 @@ def test_is_bot_flags_internet_scanners() -> None:
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
         "AppleWebKit/605 Mobile Safari/604"
     )
+
+
+def test_session_counts_excludes_multipage_from_total() -> None:
+    # `multipage` confirms a subset of already-counted new/returning sessions —
+    # it must not inflate `total` (used for returning-rate/pages-per-visit).
+    by_day = {
+        "2026-06-27": [
+            SimpleNamespace(vtype="new", sessions=10),
+            SimpleNamespace(vtype="returning", sessions=4),
+            SimpleNamespace(vtype="multipage", sessions=6),
+        ],
+    }
+    out = a._session_counts_from_rows(by_day)
+    assert out == {"new": 10, "returning": 4, "total": 14, "multipage": 6}
 
 
 def test_referrer_host_folds_alternate_self_hosts() -> None:

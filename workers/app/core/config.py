@@ -115,6 +115,22 @@ BROWSER_CHANNEL = env_str("BROWSER_CHANNEL", "")
 BROWSER_STORAGE_STATE_PATH = env_str("BROWSER_STORAGE_STATE_PATH", "")
 
 SCRAPE_COOLDOWN_SECONDS = env_int("SCRAPE_COOLDOWN_SECONDS", 3600)
+# Watch cadence for monitored services: a healthy source is re-scraped for
+# diffs at most once per this many days (the diff IS the update story, so
+# polling faster only burns requests). Fractional values work for testing;
+# <= 0 falls back to SCRAPE_COOLDOWN_SECONDS. Failed polls retry on the
+# shorter SCRAPE_COOLDOWN_SECONDS instead of losing a whole window.
+SERVICE_RESCRAPE_DAYS = env_float("SERVICE_RESCRAPE_DAYS", 7.0)
+# Service-watch context: the snapshot/diff/compose unit for a web service is an
+# AGGREGATE of its recently harvested pages across all of the service's domains
+# (never just the homepage). ~48k chars ≈ 12k tokens for the composer. Sections
+# are ordered by URL so the aggregate is stable and the weekly diff shows real
+# content evolution, not page reshuffling.
+SERVICE_CONTEXT_ENABLED = env_bool("SERVICE_CONTEXT_ENABLED", True)
+SERVICE_CONTEXT_MAX_CHARS = env_int("SERVICE_CONTEXT_MAX_CHARS", 48_000)
+SERVICE_CONTEXT_MAX_PAGES = env_int("SERVICE_CONTEXT_MAX_PAGES", 12)
+SERVICE_CONTEXT_PER_PAGE_CHARS = env_int("SERVICE_CONTEXT_PER_PAGE_CHARS", 6_000)
+SERVICE_CONTEXT_MAX_AGE_DAYS = env_int("SERVICE_CONTEXT_MAX_AGE_DAYS", 30)
 # Exponential backoff on consecutive scrape failures (e.g. 429 storms):
 # first failure waits the base, each subsequent one multiplies up to the cap.
 # Reset to zero on the next successful scrape.
@@ -191,7 +207,11 @@ MISTRAL_CONTEXT_SAFETY_TOKENS = env_int("MISTRAL_CONTEXT_SAFETY_TOKENS", 4000)
 MISTRAL_TIMEOUT_SECONDS = env_int("MISTRAL_TIMEOUT_SECONDS", 120)
 MISTRAL_ENABLED = env_bool("MISTRAL_ENABLED", False)
 MISTRAL_FALLBACK_TEMPLATE = env_bool("MISTRAL_FALLBACK_TEMPLATE", True)
-MISTRAL_MAX_SOURCE_CHARS = env_int("MISTRAL_MAX_SOURCE_CHARS", 12000)
+# ~48k chars ≈ 12k TOKENS of source context for the composer — sized to carry
+# the full service-watch aggregate (SERVICE_CONTEXT_MAX_CHARS), not one page.
+# The original intent was 12k tokens; an earlier reading as 12k CHARS silently
+# quartered the composer's context.
+MISTRAL_MAX_SOURCE_CHARS = env_int("MISTRAL_MAX_SOURCE_CHARS", 48_000)
 # Periodic re-scrape of ALL monitored sources to detect content diffs and compose
 # updates. Heavy (scrapes every source), so keep it infrequent — it is the writer's
 # main background churn. 1h; lower only if you need faster update detection.
@@ -223,10 +243,13 @@ WRITER_REVIEW_MIN_GRADE = env_float("WRITER_REVIEW_MIN_GRADE", 7.0)
 # grade instead, so the model fetches context rather than padding to a word count.
 LENGTH_OK_MIN_WORDS = env_int("LENGTH_OK_MIN_WORDS", 250)
 LENGTH_OK_MAX_WORDS = env_int("LENGTH_OK_MAX_WORDS", 2000)
-# Stage-1 research FLOOR: after the research pass, if the writer made fewer than
-# this many distinct tool calls (EXCLUDING review_draft self-checks), it is sent
-# back once to dig deeper before it may write. Enforced mechanically, so research
-# depth is no longer a graded dimension. Aim ~6 genuine research calls.
+# Stage-1 research FLOOR: after the research pass, if the writer touched fewer
+# than this many distinct SOURCES (domains fetched, or a stable per-tool identity
+# for calls with no URL — see _distinct_research_calls; EXCLUDING review_draft
+# self-checks), it is sent back once to dig deeper before it may write. Enforced
+# mechanically, so research depth is no longer a graded dimension. Counting
+# sources rather than raw tool-name variety means it can't be satisfied by
+# several trivial calls that all skim the same one or two domains.
 RESEARCH_MIN_TOOL_CALLS = env_int("RESEARCH_MIN_TOOL_CALLS", 6)
 RESEARCH_FLOOR_ENABLED = env_bool("RESEARCH_FLOOR_ENABLED", True)
 RESEARCH_FLOOR_MAX_PASSES = env_int("RESEARCH_FLOOR_MAX_PASSES", 1)
@@ -321,6 +344,22 @@ NOVELTY_DECAY_ZERO_DAYS = env_int("NOVELTY_DECAY_ZERO_DAYS", 70)
 RELEVANCE_PRIORITY_WEIGHT = env_int("RELEVANCE_PRIORITY_WEIGHT", 100)
 NOVELTY_PRIORITY_WEIGHT = env_int("NOVELTY_PRIORITY_WEIGHT", 100)
 RECENCY_PRIORITY_WEIGHT = env_int("RECENCY_PRIORITY_WEIGHT", 80)
+# Diff-driven selection: for content updates, the size of the change is the
+# newsworthiness signal (the diff IS the event) — scaled by relevance and
+# normalised at DIFF_SIGNIFICANCE_NORM_LINES added lines for full credit.
+# Discoveries fire once per service ever, so precise ordering among them
+# matters little: they get a flat relevance-scaled DISCOVERY_PRIORITY_WEIGHT.
+DIFF_PRIORITY_WEIGHT = env_int("DIFF_PRIORITY_WEIGHT", 80)
+DIFF_SIGNIFICANCE_NORM_LINES = env_int("DIFF_SIGNIFICANCE_NORM_LINES", 40)
+DISCOVERY_PRIORITY_WEIGHT = env_int("DISCOVERY_PRIORITY_WEIGHT", 60)
+# Announcement-shaped candidates (event detected, urgency phrasing, or a
+# launch/partnership/release title) earn a relevance-gated bonus — evergreen
+# SEO pages can't, and detected spam also forfeits its timeliness points.
+ANNOUNCE_PRIORITY_BONUS = env_int("ANNOUNCE_PRIORITY_BONUS", 40)
+# Learned signal: a confident publish classifier verdict nudges priority
+# (bonus scaled by confidence when True, a halving-style malus when False).
+# Inert in training mode, where predict_publish defers everything to review.
+CLASSIFIER_PRIORITY_WEIGHT = env_int("CLASSIFIER_PRIORITY_WEIGHT", 30)
 
 # YouTube transcripts (Stage 2) via a third-party API — the prod IP is anti-bot
 # blocked for direct yt-dlp/captions. Provider-agnostic: URL template (may use
@@ -455,3 +494,12 @@ GATEKEEPER_FACT_MIN = env_float("GATEKEEPER_FACT_MIN", 0.80)
 # absent the model heads are dormant: the deterministic gate still runs, and the
 # article grader falls back to the sklearn grader, then the heuristic floor.
 GATEKEEPER_MODEL_PATH = env_str("GATEKEEPER_MODEL_PATH", "data/models/gatekeeper_mtth.pt")
+# The quality head can be trained (from classifier_feedback labels) well before
+# there's a gold-run/corruptor corpus for factuality+tone. A checkpoint existing
+# is therefore NOT enough to serve it live — this must also be true, so a
+# training run never silently flips live grading. Flip deliberately once vetted.
+GATEKEEPER_QUALITY_LIVE = env_bool("GATEKEEPER_QUALITY_LIVE", False)
+# Floor for training the quality head: higher than the sklearn grader's
+# GRADER_MIN_SAMPLES (40) since a bad BERT fine-tune is far more expensive to
+# redo and harder to eyeball than a logistic regression.
+GATEKEEPER_QUALITY_MIN_SAMPLES = env_int("GATEKEEPER_QUALITY_MIN_SAMPLES", 150)

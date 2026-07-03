@@ -7,7 +7,10 @@ never aborts the article.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _tool_get_algo_market() -> dict[str, Any]:
@@ -244,8 +247,8 @@ def _tool_source_history(source: str, limit: int = 8) -> dict[str, Any]:
 
 def _tool_review_draft(title: str, body: str) -> dict[str, Any]:
     """Self-assessment for the writer: grade its own draft 0-10 with subscores
-    (novelty/relevance/recency/length/specificity/structure/popularity) + issues,
-    so it can fix problems once before finishing."""
+    (novelty/relevance/recency/length/structure) + issues, so it can fix
+    problems once before finishing."""
     from app.modules.newspaper.article_grader import grade_article_draft
 
     try:
@@ -266,7 +269,8 @@ SUGGEST_TOOL_SCHEMA: dict[str, Any] = {
             "for mainnet holdings and contract state, testnet_lookup to verify a "
             "Testnet txn/app deploy, github_activity for repo momentum and "
             "github_repository_contents to READ contract source, search_leak_databases "
-            "for offshore leaks, screen_sanctions_and_pep for people, discourse_forum "
+            "for offshore leaks and screen_sanctions_and_pep for people (present on "
+            "investigative stories), discourse_forum "
             "for forum activity, search_bluesky for community sentiment (use this "
             "instead of X/Twitter), medium_api_article_list for a blog's article list, "
             "reddit_api_post_history for a user's Reddit history, fetch_archive_text to "
@@ -475,7 +479,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "description": (
                 "Self-assess your draft BEFORE finishing: returns a quality grade 0-10 with "
                 "per-dimension subscores (novelty vs recent articles, relevance, recency, "
-                "length, specificity, structure) and concrete issues to fix. Call this ONCE "
+                "length, structure) and concrete issues to fix. Call this ONCE "
                 "when the draft is ready; if the grade is below ~6 or there are issues, revise "
                 "to address them, then finish. Do NOT call it repeatedly."
             ),
@@ -505,12 +509,22 @@ TOOL_HANDLERS: dict[str, Any] = {
 }
 
 
+# Story lanes whose subject is a person/company under scrutiny — the only ones
+# where entity-background OSINT (sanctions/registry/dockets/leaks) earns its
+# schema budget. An empty topic (callers that predate lanes) keeps everything.
+_ENTITY_OSINT_TOPICS = ("scam_alert", "editorial_assignment")
+
+
 def all_tools(
     context: dict[str, Any] | None = None,
+    *,
+    topic: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Writer tools plus, when enabled, the investigative OSINT and external
     research (web search + Bluesky) toolsets. ``context`` (service_id, source_url,
-    model) tags any suggest_tool calls with the story they came from."""
+    model) tags any suggest_tool calls with the story they came from. ``topic``
+    (a PublishTopic value) lane-gates entity-background OSINT tools to
+    investigative stories; empty means ungated."""
     schemas = list(TOOL_SCHEMAS)
     handlers = dict(TOOL_HANDLERS)
     schemas.append(SUGGEST_TOOL_SCHEMA)
@@ -519,15 +533,15 @@ def all_tools(
         from app.core.config import INVESTIGATIVE_TOOLS_ENABLED
 
         if INVESTIGATIVE_TOOLS_ENABLED:
-            from app.modules.ai.investigative_tools import (
-                INVESTIGATIVE_HANDLERS,
-                INVESTIGATIVE_SCHEMAS,
-            )
+            from app.modules.ai.investigative_tools import investigative_tools
 
-            schemas.extend(INVESTIGATIVE_SCHEMAS)
-            handlers.update(INVESTIGATIVE_HANDLERS)
+            inv_schemas, inv_handlers = investigative_tools(
+                include_entity_osint=(not topic or topic in _ENTITY_OSINT_TOPICS)
+            )
+            schemas.extend(inv_schemas)
+            handlers.update(inv_handlers)
     except Exception:
-        pass
+        logger.warning("failed to load investigative tools", exc_info=True)
     try:
         from app.modules.ai.research_tools import research_tools
 
@@ -535,7 +549,7 @@ def all_tools(
         schemas.extend(research_schemas)
         handlers.update(research_handlers)
     except Exception:
-        pass
+        logger.warning("failed to load research tools", exc_info=True)
     try:
         from app.modules.ai.chain_tools import chain_tools
 
@@ -543,5 +557,5 @@ def all_tools(
         schemas.extend(chain_schemas)
         handlers.update(chain_handlers)
     except Exception:
-        pass
+        logger.warning("failed to load chain tools", exc_info=True)
     return schemas, handlers

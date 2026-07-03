@@ -1,10 +1,12 @@
 """First-party pageview analytics over Cassandra counters + Redis HLL.
 
-Recorded server-side from the SSR document routes (and the search API) — no
-client JS, and it stays within the Cassandra/Typesense/Redis stack. Pageview,
-referrer, bot, search and 404 tallies are Cassandra counters; unique-visitor
-counts are privacy-safe Redis HyperLogLogs (no raw IP stored). Writes are
-fire-and-forget so they never add latency; reads are admin-only and infrequent.
+Recorded server-side from the SSR document routes (and the search API), plus a
+first-party beacon POST for Flutter in-app route changes (see
+seo/api/routes.py:beacon_pageview) — no third-party JS, and it stays within
+the Cassandra/Typesense/Redis stack. Pageview, referrer, bot, search and 404
+tallies are Cassandra counters; unique-visitor counts are privacy-safe Redis
+HyperLogLogs (no raw IP stored). Writes are fire-and-forget so they never add
+latency; reads are admin-only and infrequent.
 """
 
 from __future__ import annotations
@@ -22,24 +24,86 @@ from app.core.config import settings
 log = logging.getLogger(__name__)
 
 _BOT_TOKENS = (
-    "bot", "crawl", "spider", "slurp", "bingpreview", "facebookexternalhit",
-    "embedly", "quora link preview", "outbrain", "pinterest", "vkshare",
-    "w3c_validator", "headless", "python-requests", "httpx", "curl", "wget",
-    "go-http-client", "ahrefs", "semrush", "gptbot", "ccbot", "claudebot",
-    "perplexitybot", "google-extended", "applebot", "yandex", "duckduckbot",
+    "bot",
+    "crawl",
+    "spider",
+    "slurp",
+    "bingpreview",
+    "facebookexternalhit",
+    "embedly",
+    "quora link preview",
+    "outbrain",
+    "pinterest",
+    "vkshare",
+    "w3c_validator",
+    "headless",
+    "python-requests",
+    "httpx",
+    "curl",
+    "wget",
+    "go-http-client",
+    "ahrefs",
+    "semrush",
+    "gptbot",
+    "ccbot",
+    "claudebot",
+    "perplexitybot",
+    "google-extended",
+    "applebot",
+    "yandex",
+    "duckduckbot",
     # Uptime monitors, link unfurlers and SEO/scraping tools — non-human traffic
     # that lacks the tokens above and would otherwise count as "human".
-    "uptimerobot", "pingdom", "statuscake", "site24x7", "betteruptime",
-    "datadog", "newrelicpinger", "prometheus", "kube-probe", "lighthouse",
-    "gtmetrix", "petalbot", "bytespider", "dataforseo", "mj12bot", "dotbot",
-    "screaming frog", "telegrambot", "whatsapp", "discordbot", "slackbot",
-    "twitterbot", "linkedinbot", "skypeuripreview", "google favicon",
+    "uptimerobot",
+    "pingdom",
+    "statuscake",
+    "site24x7",
+    "betteruptime",
+    "datadog",
+    "newrelicpinger",
+    "prometheus",
+    "kube-probe",
+    "lighthouse",
+    "gtmetrix",
+    "petalbot",
+    "bytespider",
+    "dataforseo",
+    "mj12bot",
+    "dotbot",
+    "screaming frog",
+    "telegrambot",
+    "whatsapp",
+    "discordbot",
+    "slackbot",
+    "twitterbot",
+    "linkedinbot",
+    "skypeuripreview",
+    "google favicon",
     # Internet-wide scanners / scrapers that send a browser-ish "Mozilla/" UA and
     # no Referer, so they slip the checks below and inflate human "(direct)".
-    "zgrab", "zmap", "masscan", "nmap", "pathscan", "visionheight", "censys",
-    "shodan", "internetmeasurement", "internet-measurement", "leakix", "expanse",
-    "paloaltonetworks", "netsystemsresearch", "l9explore", "l9tcpid", "odin",
-    "scanworld", "scaninfo", "/scan", "researchscan", "aani", "gdnplus",
+    "zgrab",
+    "zmap",
+    "masscan",
+    "nmap",
+    "pathscan",
+    "visionheight",
+    "censys",
+    "shodan",
+    "internetmeasurement",
+    "internet-measurement",
+    "leakix",
+    "expanse",
+    "paloaltonetworks",
+    "netsystemsresearch",
+    "l9explore",
+    "l9tcpid",
+    "odin",
+    "scanworld",
+    "scaninfo",
+    "/scan",
+    "researchscan",
+    "aani",
+    "gdnplus",
 )
 
 _TODAY_FMT = "%Y-%m-%d"
@@ -75,7 +139,7 @@ def _static_label(path: str) -> str:
     if path in _STATIC_PATH_LABELS:
         return _STATIC_PATH_LABELS[path]
     if path.startswith(_SECTION_PREFIX):
-        return "Section · " + path[len(_SECTION_PREFIX):]
+        return "Section · " + path[len(_SECTION_PREFIX) :]
     return path
 
 
@@ -86,7 +150,7 @@ def section_bucket(path: str) -> str:
     if path in _STATIC_PATH_LABELS:
         return _STATIC_PATH_LABELS[path]
     if path.startswith(_SECTION_PREFIX):
-        return "Section · " + path[len(_SECTION_PREFIX):]
+        return "Section · " + path[len(_SECTION_PREFIX) :]
     if path.startswith(_ARTICLE_PREFIX):
         return "Article"
     return "Other"
@@ -107,8 +171,15 @@ def _resolve_labels(paths: list[str], article_cards: dict[str, object]) -> dict[
 # Automation/headless signatures. Some (e.g. "headless") also appear in the bot
 # denylist; kept here too so ua_class can label a UA even outside is_bot.
 _HEADLESS_TOKENS = (
-    "headless", "phantomjs", "electron", "puppeteer", "playwright",
-    "selenium", "webdriver", "cypress", "splash",
+    "headless",
+    "phantomjs",
+    "electron",
+    "puppeteer",
+    "playwright",
+    "selenium",
+    "webdriver",
+    "cypress",
+    "splash",
 )
 
 
@@ -179,22 +250,60 @@ _BOT_NAMES = (
     ("Bytespider", ("bytespider",)),
     ("AhrefsBot", ("ahrefs",)),
     ("SemrushBot", ("semrush",)),
-    ("Social unfurler", (
-        "facebookexternalhit", "twitterbot", "linkedinbot", "slackbot",
-        "discordbot", "telegrambot", "whatsapp", "skypeuripreview", "embedly",
-        "pinterest", "vkshare", "quora link preview",
-    )),
-    ("Uptime monitor", (
-        "uptimerobot", "pingdom", "statuscake", "site24x7", "betteruptime",
-        "datadog", "newrelicpinger", "prometheus", "kube-probe",
-    )),
-    ("SEO/audit tool", (
-        "petalbot", "dataforseo", "mj12bot", "dotbot", "screaming frog",
-        "lighthouse", "gtmetrix", "w3c_validator",
-    )),
-    ("Generic HTTP client", (
-        "python-requests", "httpx", "curl", "wget", "go-http-client",
-    )),
+    (
+        "Social unfurler",
+        (
+            "facebookexternalhit",
+            "twitterbot",
+            "linkedinbot",
+            "slackbot",
+            "discordbot",
+            "telegrambot",
+            "whatsapp",
+            "skypeuripreview",
+            "embedly",
+            "pinterest",
+            "vkshare",
+            "quora link preview",
+        ),
+    ),
+    (
+        "Uptime monitor",
+        (
+            "uptimerobot",
+            "pingdom",
+            "statuscake",
+            "site24x7",
+            "betteruptime",
+            "datadog",
+            "newrelicpinger",
+            "prometheus",
+            "kube-probe",
+        ),
+    ),
+    (
+        "SEO/audit tool",
+        (
+            "petalbot",
+            "dataforseo",
+            "mj12bot",
+            "dotbot",
+            "screaming frog",
+            "lighthouse",
+            "gtmetrix",
+            "w3c_validator",
+        ),
+    ),
+    (
+        "Generic HTTP client",
+        (
+            "python-requests",
+            "httpx",
+            "curl",
+            "wget",
+            "go-http-client",
+        ),
+    ),
 )
 
 
@@ -212,9 +321,15 @@ def bot_name(user_agent: str | None) -> str:
 # Crawlers that fetch content to train or ground LLMs. "Are AIs reading us" is a
 # first-class signal for a content site, so we surface their share of bot traffic
 # as a headline KPI. Names match the labels `bot_name` already stores.
-AI_CRAWLERS = frozenset({
-    "GPTBot", "ClaudeBot", "PerplexityBot", "CCBot", "Bytespider",
-})
+AI_CRAWLERS = frozenset(
+    {
+        "GPTBot",
+        "ClaudeBot",
+        "PerplexityBot",
+        "CCBot",
+        "Bytespider",
+    }
+)
 
 
 def ai_crawler_stats(bot_rows: list[dict]) -> dict:
@@ -288,11 +403,14 @@ _SEEN_PREFIX = "algorand:seen:"
 _SESSION_TTL_SECONDS = 30 * 60
 
 
-def record_session(
-    session, client_ip: str | None, user_agent: str | None, day: str
-) -> None:
+def record_session(session, client_ip: str | None, user_agent: str | None, day: str) -> None:
     """Best-effort: stitch this human pageview into a session and, on a new
-    session, bump session_daily split by new/returning. Fails open."""
+    session, bump session_daily split by new/returning. Also confirms a session
+    as multi-page the moment its 2nd hit lands (vtype="multipage", counted
+    separately from new/returning — see `_session_counts_from_rows`). A UA
+    denylist alone can't catch a scraper spoofing a browser UA; a session that
+    never gets a 2nd hit is a cheap, record-time-free bot-likelihood signal for
+    the breakdowns instead. Fails open."""
     if not client_ip:
         return
     ip = client_ip.split(",")[0].strip()  # left-most of any X-Forwarded-For chain
@@ -302,9 +420,17 @@ def record_session(
         r = _uv_redis()
         token = _uv_token(ip, user_agent).hex()
         sess_key = f"{_SESSION_PREFIX}{token}"
-        is_new_session = not r.exists(sess_key)
-        r.set(sess_key, "1", ex=_SESSION_TTL_SECONDS)  # (re)slide the 30-min window
+        hits = r.incr(sess_key)
+        r.expire(sess_key, _SESSION_TTL_SECONDS)  # (re)slide the 30-min window
+        is_new_session = hits == 1
         if not is_new_session:
+            if hits == 2:  # first repeat hit — confirms this session isn't a bounce
+                try:
+                    from app.core.statements import AnalyticsStmts
+
+                    session.execute_async(AnalyticsStmts.SESSION_BUMP, (day, "multipage"))
+                except Exception as exc:
+                    log.debug("session multipage record skipped: %s", exc)
             return  # mid-session pageview — already counted at session start
         seen_key = f"{_SEEN_PREFIX}{token}"
         vtype = "returning" if r.exists(seen_key) else "new"
@@ -323,13 +449,16 @@ def record_session(
 def _session_counts_from_rows(session_by_day: dict[str, list]) -> dict[str, int]:
     """New/returning/total session counts summed across already-fetched
     `session_daily` rows. An empty/missing input (un-migrated table) yields
-    zeros."""
-    out = {"new": 0, "returning": 0, "total": 0}
+    zeros. `multipage` (sessions confirmed to have a 2nd hit) is tracked
+    separately and excluded from `total` — it's a subset of new+returning,
+    not an additional session."""
+    out = {"new": 0, "returning": 0, "total": 0, "multipage": 0}
     for rows in session_by_day.values():
         for r in rows:
             n = int(r.sessions)
             out[r.vtype] = out.get(r.vtype, 0) + n
-            out["total"] += n
+            if r.vtype in ("new", "returning"):
+                out["total"] += n
     return out
 
 
@@ -369,11 +498,7 @@ def country_for_ip(client_ip: str | None) -> str:
 
 def _ignored_hosts() -> set[str]:
     """Hosts/IPs that count as our own (the server IP, configured office IPs)."""
-    return {
-        h.strip().lower()
-        for h in settings.analytics_ignore_ips.split(",")
-        if h.strip()
-    }
+    return {h.strip().lower() for h in settings.analytics_ignore_ips.split(",") if h.strip()}
 
 
 def _own_host() -> str:
@@ -443,12 +568,35 @@ def referrer_host(referer: str | None) -> str:
 
 # Query params that carry no source identity — campaign/click tags that would
 # otherwise explode the full-URL cardinality with near-duplicate rows.
-_TRACKING_PARAMS = frozenset({
-    "fbclid", "gclid", "dclid", "gbraid", "wbraid", "msclkid", "yclid",
-    "mc_eid", "mc_cid", "igshid", "igsh", "ref", "ref_src", "ref_url",
-    "ref_source", "source", "cmpid", "campaign", "_hsenc", "_hsmi",
-    "vero_id", "vero_conv", "oly_anon_id", "oly_enc_id", "spm",
-})
+_TRACKING_PARAMS = frozenset(
+    {
+        "fbclid",
+        "gclid",
+        "dclid",
+        "gbraid",
+        "wbraid",
+        "msclkid",
+        "yclid",
+        "mc_eid",
+        "mc_cid",
+        "igshid",
+        "igsh",
+        "ref",
+        "ref_src",
+        "ref_url",
+        "ref_source",
+        "source",
+        "cmpid",
+        "campaign",
+        "_hsenc",
+        "_hsmi",
+        "vero_id",
+        "vero_conv",
+        "oly_anon_id",
+        "oly_enc_id",
+        "spm",
+    }
+)
 
 
 def normalize_referrer_url(referer: str | None) -> str | None:
@@ -468,7 +616,8 @@ def normalize_referrer_url(referer: str | None) -> str | None:
     if not host or _is_self_referral(host):
         return None
     kept = [
-        (k, v) for k, v in parse_qsl(u.query, keep_blank_values=False)
+        (k, v)
+        for k, v in parse_qsl(u.query, keep_blank_values=False)
         if k.lower() not in _TRACKING_PARAMS and not k.lower().startswith("utm_")
     ]
     query = urlencode(kept)
@@ -482,27 +631,79 @@ def normalize_referrer_url(referer: str | None) -> str | None:
 # gemini.google.com -> AI) wins over a broader family domain. '(direct)' and
 # '(internal)' are handled apart.
 _REFERRER_CATEGORIES = (
-    ("AI assistant", (
-        "chatgpt.com", "openai.com", "perplexity.ai", "claude.ai", "anthropic.com",
-        "gemini.google.com", "bard.google.com", "copilot.microsoft.com",
-        "phind.com", "you.com",
-    )),
-    ("News & aggregators", (
-        "coindesk.com", "cointelegraph.com", "cryptoslate.com", "decrypt.co",
-        "theblock.co", "bloomberg.com", "feedly.com", "flipboard.com",
-        "news.google.com", "techcrunch.com", "messari.io", "news.ycombinator.com",
-    )),
-    ("Social", (
-        "reddit.com", "t.co", "twitter.com", "x.com", "facebook.com",
-        "lnkd.in", "linkedin.com", "youtube.com", "youtu.be", "instagram.com",
-        "tiktok.com", "t.me", "telegram.org", "discord.com", "mastodon.social",
-        "bsky.app", "lemmy.world", "threads.net", "medium.com",
-    )),
-    ("Search", (
-        "google.com", "bing.com", "duckduckgo.com", "ecosia.org", "yahoo.com",
-        "yandex.com", "baidu.com", "qwant.com", "startpage.com",
-        "search.brave.com", "search.marginalia.nu", "kagi.com",
-    )),
+    (
+        "AI assistant",
+        (
+            "chatgpt.com",
+            "openai.com",
+            "perplexity.ai",
+            "claude.ai",
+            "anthropic.com",
+            "gemini.google.com",
+            "bard.google.com",
+            "copilot.microsoft.com",
+            "phind.com",
+            "you.com",
+        ),
+    ),
+    (
+        "News & aggregators",
+        (
+            "coindesk.com",
+            "cointelegraph.com",
+            "cryptoslate.com",
+            "decrypt.co",
+            "theblock.co",
+            "bloomberg.com",
+            "feedly.com",
+            "flipboard.com",
+            "news.google.com",
+            "techcrunch.com",
+            "messari.io",
+            "news.ycombinator.com",
+        ),
+    ),
+    (
+        "Social",
+        (
+            "reddit.com",
+            "t.co",
+            "twitter.com",
+            "x.com",
+            "facebook.com",
+            "lnkd.in",
+            "linkedin.com",
+            "youtube.com",
+            "youtu.be",
+            "instagram.com",
+            "tiktok.com",
+            "t.me",
+            "telegram.org",
+            "discord.com",
+            "mastodon.social",
+            "bsky.app",
+            "lemmy.world",
+            "threads.net",
+            "medium.com",
+        ),
+    ),
+    (
+        "Search",
+        (
+            "google.com",
+            "bing.com",
+            "duckduckgo.com",
+            "ecosia.org",
+            "yahoo.com",
+            "yandex.com",
+            "baidu.com",
+            "qwant.com",
+            "startpage.com",
+            "search.brave.com",
+            "search.marginalia.nu",
+            "kagi.com",
+        ),
+    ),
 )
 
 
@@ -532,6 +733,7 @@ def campaign_label(params: dict) -> str | None:
     in-app traffic that arrives with no Referer. Prefers utm_source(+utm_campaign),
     falls back to a bare `ref`. Values are lower-cased, trimmed and length-capped
     to keep cardinality bounded."""
+
     def _g(key: str) -> str:
         v = params.get(key)
         if isinstance(v, (list, tuple)):  # some frameworks give a list per key
@@ -580,8 +782,12 @@ def _record_direct(
 
 
 def record_pageview(
-    *, path: str, referer: str | None, user_agent: str | None,
-    client_ip: str | None = None, campaign: str | None = None,
+    *,
+    path: str,
+    referer: str | None,
+    user_agent: str | None,
+    client_ip: str | None = None,
+    campaign: str | None = None,
 ) -> None:
     """Best-effort counter bumps for one document request. Never raises."""
     if is_internal_client(client_ip):
@@ -612,18 +818,12 @@ def record_pageview(
                 session.execute_async(AnalyticsStmts.CAMPAIGN_BUMP, (day, campaign[:80]))
             # Site-wide device + browser + hour-of-day segmentation (human only).
             session.execute_async(AnalyticsStmts.DEVICE_BUMP, (day, ua_class(user_agent)))
-            session.execute_async(
-                AnalyticsStmts.BROWSER_BUMP, (day, browser_family(user_agent))
-            )
-            session.execute_async(
-                AnalyticsStmts.HOUR_BUMP, (day, datetime.now(UTC).hour)
-            )
+            session.execute_async(AnalyticsStmts.BROWSER_BUMP, (day, browser_family(user_agent)))
+            session.execute_async(AnalyticsStmts.HOUR_BUMP, (day, datetime.now(UTC).hour))
             referrer = referrer_host(referer)
             session.execute_async(AnalyticsStmts.REFERRER_BUMP, (day, referrer))
             # Source -> landing-page attribution (which referrer drove which page).
-            session.execute_async(
-                AnalyticsStmts.REFERRER_PATH_BUMP, (day, referrer, path[:200])
-            )
+            session.execute_async(AnalyticsStmts.REFERRER_PATH_BUMP, (day, referrer, path[:200]))
             if referrer == "(direct)":
                 _record_direct(session, day, path, referer, user_agent)
             else:
@@ -631,9 +831,7 @@ def record_pageview(
                 # host). Skipped for direct/internal by normalize_referrer_url.
                 ref_url = normalize_referrer_url(referer)
                 if ref_url:
-                    session.execute_async(
-                        AnalyticsStmts.REFERRER_URL_BUMP, (day, ref_url)
-                    )
+                    session.execute_async(AnalyticsStmts.REFERRER_URL_BUMP, (day, ref_url))
     except Exception as exc:  # missing tables / cassandra down — analytics is non-critical
         log.debug("pageview record skipped: %s", exc)
 
@@ -668,9 +866,7 @@ def record_notfound(*, path: str, client_ip: str | None = None) -> None:
         from app.core.statements import AnalyticsStmts
 
         session = get_cassandra_session()
-        session.execute_async(
-            AnalyticsStmts.NOTFOUND_BUMP, (_today(), path[:200])
-        )
+        session.execute_async(AnalyticsStmts.NOTFOUND_BUMP, (_today(), path[:200]))
     except Exception as exc:
         log.debug("notfound record skipped: %s", exc)
 
@@ -686,17 +882,17 @@ def _recent_direct_samples(session, window: set[str], limit: int) -> list[dict]:
     for day in sorted(window, reverse=True):
         if len(samples) >= limit:
             break
-        rows = session.execute(
-            AnalyticsStmts.DIRECT_SAMPLE_BY_DAY, (day, limit - len(samples))
-        )
+        rows = session.execute(AnalyticsStmts.DIRECT_SAMPLE_BY_DAY, (day, limit - len(samples)))
         for r in rows:
-            samples.append({
-                "day": day,
-                "path": r.path,
-                "referer": r.referer or "",
-                "user_agent": r.user_agent or "",
-                "ua_class": r.ua_class,
-            })
+            samples.append(
+                {
+                    "day": day,
+                    "path": r.path,
+                    "referer": r.referer or "",
+                    "user_agent": r.user_agent or "",
+                    "ua_class": r.ua_class,
+                }
+            )
     return samples
 
 
@@ -806,9 +1002,7 @@ def _paths_from_rows(path_kind_by_day: dict[str, list], *, limit: int) -> list[d
         for r in rows:
             bucket = agg.setdefault(r.path, {"human": 0, "bot": 0})
             bucket[r.kind] = bucket.get(r.kind, 0) + int(r.views)
-    ranked = sorted(
-        agg.items(), key=lambda kv: kv[1]["human"] + kv[1]["bot"], reverse=True
-    )[:limit]
+    ranked = sorted(agg.items(), key=lambda kv: kv[1]["human"] + kv[1]["bot"], reverse=True)[:limit]
     return [
         {"path": p, "human": v["human"], "bot": v["bot"], "views": v["human"] + v["bot"]}
         for p, v in ranked
@@ -869,9 +1063,7 @@ def _sections_from_rows(
     return [{"section": k, "views": v} for k, v in ranked]
 
 
-def _session_daily_from_rows(
-    session_by_day: dict[str, list], window: set[str]
-) -> list[dict]:
+def _session_daily_from_rows(session_by_day: dict[str, list], window: set[str]) -> list[dict]:
     """Per-day new/returning session counts for the Audience chart."""
     per_day = {d: {"new": 0, "returning": 0} for d in window}
     for day, rows in session_by_day.items():
@@ -923,9 +1115,7 @@ def _editorial_scorecard_from_rows(
             if not path.startswith(_ARTICLE_PREFIX):
                 continue
             per_article.setdefault(path, {})[day] = int(r.views)
-    ranked = sorted(
-        per_article.items(), key=lambda kv: sum(kv[1].values()), reverse=True
-    )[:limit]
+    ranked = sorted(per_article.items(), key=lambda kv: sum(kv[1].values()), reverse=True)[:limit]
     today = datetime.now(UTC).date()
     rows_out: list[dict] = []
     for path, byday in ranked:
@@ -938,14 +1128,19 @@ def _editorial_scorecard_from_rows(
             try:
                 published_iso = published.isoformat()
                 age_days = (today - published.date()).days
-            except Exception:
-                pass
-        rows_out.append({
-            "path": path, "label": title, "section": tag,
-            "published_at": published_iso, "age_days": age_days,
-            "views": sum(byday.values()),
-            "daily": [{"day": d, "views": byday.get(d, 0)} for d in sorted(window)],
-        })
+            except Exception as exc:
+                log.debug("scorecard age calc skipped for %s: %s", path, exc)
+        rows_out.append(
+            {
+                "path": path,
+                "label": title,
+                "section": tag,
+                "published_at": published_iso,
+                "age_days": age_days,
+                "views": sum(byday.values()),
+                "daily": [{"day": d, "views": byday.get(d, 0)} for d in sorted(window)],
+            }
+        )
     return rows_out
 
 
@@ -961,7 +1156,7 @@ def _distinct_article_ids(by_day: dict[str, dict[str, list]]) -> dict:
         if not path or path in ids or not path.startswith(_ARTICLE_PREFIX):
             return
         with contextlib.suppress(ValueError):
-            ids[path] = UUID(path[len(_ARTICLE_PREFIX):])
+            ids[path] = UUID(path[len(_ARTICLE_PREFIX) :])
 
     for table in ("path_kind", "referrer_path", "notfound"):
         for rows in by_day.get(table, {}).values():
@@ -981,8 +1176,10 @@ def _fetch_article_cards(article_ids: dict) -> dict[str, object]:
         return {}
     paths = list(article_ids)
     results = execute_parallel_with_args(
-        ArticleStmts.GET_CARD, [(article_ids[p],) for p in paths],
-        concurrency=48, raise_on_error=False,
+        ArticleStmts.GET_CARD,
+        [(article_ids[p],) for p in paths],
+        concurrency=48,
+        raise_on_error=False,
     )
     out: dict[str, object] = {}
     for path, (ok, res) in zip(paths, results, strict=True):
@@ -996,15 +1193,32 @@ def _fetch_article_cards(article_ids: dict) -> dict[str, object]:
 def read_analytics(days: int = 14, *, top: int = 20) -> dict:
     """Daily human/bot series + aggregated top paths and referrers over `days`."""
     out: dict = {
-        "days": days, "daily": [], "top_paths": [], "top_referrers": [],
-        "totals": {}, "prev_totals": {},
-        "direct_uaclass": [], "direct_samples": [],
-        "top_searches": [], "zero_searches": [], "top_bots": [],
-        "referrer_paths": [], "top_notfound": [],
-        "device": [], "browser": [], "hours": [],
-        "referrer_categories": [], "sections": [], "top_referrer_urls": [],
-        "sessions": {}, "sessions_daily": [], "ai_crawler": {},
-        "articles": [], "geo": [], "campaigns": [], "alerts": [],
+        "days": days,
+        "daily": [],
+        "top_paths": [],
+        "top_referrers": [],
+        "totals": {},
+        "prev_totals": {},
+        "direct_uaclass": [],
+        "direct_samples": [],
+        "top_searches": [],
+        "zero_searches": [],
+        "top_bots": [],
+        "referrer_paths": [],
+        "top_notfound": [],
+        "device": [],
+        "browser": [],
+        "hours": [],
+        "referrer_categories": [],
+        "sections": [],
+        "top_referrer_urls": [],
+        "sessions": {},
+        "sessions_daily": [],
+        "ai_crawler": {},
+        "articles": [],
+        "geo": [],
+        "campaigns": [],
+        "alerts": [],
     }
     try:
         from app.core.cassandra import get_cassandra_session
@@ -1027,14 +1241,19 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
         _, uv_bot = _unique_counts("bot", sorted(window))
         _, uv_human_prev = _unique_counts("human", sorted(prev_window))
         out["daily"] = [
-            {"day": d, "human": human.get(d, 0), "bot": bot.get(d, 0),
-             "human_unique": uv_human_day.get(d, 0)}
+            {
+                "day": d,
+                "human": human.get(d, 0),
+                "bot": bot.get(d, 0),
+                "human_unique": uv_human_day.get(d, 0),
+            }
             for d in sorted(window)
         ]
         out["totals"] = {
             "human": sum(human.get(d, 0) for d in window),
             "bot": sum(bot.get(d, 0) for d in window),
-            "human_unique": uv_human, "bot_unique": uv_bot,
+            "human_unique": uv_human,
+            "bot_unique": uv_bot,
         }
         out["prev_totals"] = {
             "human": sum(human.get(d, 0) for d in prev_window),
@@ -1078,10 +1297,16 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
         sess = _session_counts_from_rows(by_day["session"])
         sess_total = sess.get("total", 0)
         human_total = out["totals"]["human"]
+        # Sessions that never got a confirmed 2nd hit — a cheap bot-likelihood
+        # signal (a UA denylist alone misses a scraper spoofing a browser UA)
+        # surfaced here for the breakdown, not used to filter anything.
+        bounce_sessions = max(sess_total - sess.get("multipage", 0), 0)
         out["sessions"] = {
             **sess,
             "returning_rate": (sess.get("returning", 0) / sess_total) if sess_total else 0.0,
             "pages_per_visit": (human_total / sess_total) if sess_total else 0.0,
+            "bounce_sessions": bounce_sessions,
+            "bounce_rate": (bounce_sessions / sess_total) if sess_total else 0.0,
         }
         prev_sess = _session_counts_from_rows(prev_by_day["session"])
         out["prev_totals"]["sessions"] = prev_sess.get("total", 0)

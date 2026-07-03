@@ -34,6 +34,25 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
+def _parse_json_object(raw: str) -> dict[str, Any] | None:
+    """Parse a model reply as a JSON object, salvaging the common failure
+    shapes (markdown fences, prose around the object) by parsing the first
+    '{' through the last '}'. None when nothing object-like parses."""
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(raw[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _message_text(message: dict[str, Any]) -> str:
     """Extract assistant text from a chat message.
 
@@ -145,7 +164,7 @@ class MistralClient:
             name = getattr(current_task, "name", None) or "no-celery-task"
             logger.info("Mistral %s | model=%s | celery_task=%s", op, self._model, name)
         except Exception:
-            pass
+            logger.debug("failed to log celery task context for Mistral %s call", op, exc_info=True)
 
     def chat_completion(
         self,
@@ -190,12 +209,31 @@ class MistralClient:
             json_object=True,
             temperature=temperature,
         )
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise MistralError(f"Mistral returned non-JSON content: {raw[:200]}") from exc
-        if not isinstance(parsed, dict):
-            raise MistralError("Mistral JSON root must be an object")
+        parsed = _parse_json_object(raw)
+        if parsed is not None:
+            return parsed
+        # Despite response_format=json_object the model occasionally wraps the
+        # JSON in prose/fences or drifts entirely (seen on review_draft calls).
+        # One corrective retry with the bad reply in context fixes most cases —
+        # cheaper than failing the whole compose/revision step.
+        retry_messages = [
+            *messages,
+            {"role": "assistant", "content": raw[:4000]},
+            {
+                "role": "user",
+                "content": "Your previous reply was not a valid JSON object. "
+                "Reply again with ONLY the JSON object — no prose, no fences.",
+            },
+        ]
+        raw = self.chat_completion(
+            retry_messages,
+            max_tokens=max_tokens,
+            json_object=True,
+            temperature=temperature,
+        )
+        parsed = _parse_json_object(raw)
+        if parsed is None:
+            raise MistralError(f"Mistral returned non-JSON content: {raw[:200]}")
         return parsed
 
     def chat_with_tools(

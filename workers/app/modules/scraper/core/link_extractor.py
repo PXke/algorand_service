@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def _preview_has_algorand_signal(preview: dict[str, str]) -> bool:
     """True when a domain's landing-page preview actually mentions the Algorand
@@ -92,7 +96,7 @@ def fetch_domain_preview(url: str) -> dict[str, str]:
         )
         out["preview_score"] = f"{score_content_for_storage(blob, url):.1f}"
     except Exception:
-        pass
+        logger.warning("failed to fetch domain preview for %s", url, exc_info=True)
     return out
 
 
@@ -111,6 +115,7 @@ def enqueue_page_links(
     from app.modules.crawler.domain_tracker import (
         domain_crawl_count,
         domain_from_url,
+        ensure_monitored_service,
         evaluate_frontier_link,
         is_protected_domain,
         record_domain_auto_approved,
@@ -232,6 +237,10 @@ def enqueue_page_links(
             )
             if created:
                 counts["external"] += 1
+            # Auto-approve = full approval: also register the monitored source
+            # (as the admin approve does), so the domain's evolution can reach
+            # the publish queue — not just the research corpus.
+            ensure_monitored_service(domain, scrape_url=url)
             record_domain_auto_approved(domain)
             counts["auto_approved"] += 1
         else:

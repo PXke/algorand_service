@@ -81,15 +81,21 @@ _SCORER: dict[str, object] = {}
 
 
 def quality_proba(*, title: str, body: str, source_url: str = "") -> float | None:
-    """P(good article) from the trained ModernBERT quality head, or None when no
-    trained model exists / the ML stack is absent (caller falls back to the
-    sklearn grader, then the heuristic floor). The scorer is cached per path —
-    loading ModernBERT per article would be far too slow."""
+    """P(good article) from the trained ModernBERT quality head, or None when
+    GATEKEEPER_QUALITY_LIVE is off, no trained model exists, or the ML stack is
+    absent (caller falls back to the sklearn grader, then the heuristic floor).
+    The flag is separate from checkpoint existence: a quality-only checkpoint can
+    be trained well before there's a gold-run corpus for factuality/tone, so
+    serving it live is an explicit opt-in, not automatic on file presence. The
+    scorer is cached per path — loading ModernBERT per article would be far too
+    slow."""
     try:
         import os
 
-        from app.core.config import GATEKEEPER_MODEL_PATH
+        from app.core.config import GATEKEEPER_MODEL_PATH, GATEKEEPER_QUALITY_LIVE
 
+        if not GATEKEEPER_QUALITY_LIVE:
+            return None
         if not GATEKEEPER_MODEL_PATH or not os.path.exists(GATEKEEPER_MODEL_PATH):
             return None
         from app.modules.gatekeeper.inference import GatekeeperScorer, quality_grade

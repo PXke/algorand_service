@@ -35,6 +35,7 @@ class ArticleComposeResult:
     composer: str
     publish_kind: str = ""
     extra_tags: tuple[str, ...] = ()
+    prompt_version: str = ""
 
 
 def compose_scrape_article(
@@ -74,6 +75,7 @@ def compose_scrape_article(
                 composer="mistral_assignment",
                 publish_kind=publish_kind.value,
                 extra_tags=getattr(fields, "tags", ()),
+                prompt_version=getattr(fields, "prompt_version", ""),
             )
         except MistralError as exc:
             logger.warning("Editorial assignment compose failed: %s", exc)
@@ -94,6 +96,7 @@ def compose_scrape_article(
                 composer="mistral_transcript",
                 publish_kind=publish_kind.value,
                 extra_tags=getattr(fields, "tags", ()),
+                prompt_version=getattr(fields, "prompt_version", ""),
             )
         except MistralError as exc:
             logger.warning("Transcript recap compose failed, using fallback: %s", exc)
@@ -113,6 +116,7 @@ def compose_scrape_article(
                 is_first_snapshot=is_first_snapshot,
                 enrichment_block=enrichment_block,
                 source_links=source_links,
+                publish_topic=topic.value,
             )
             return ArticleComposeResult(
                 title=fields.title,
@@ -121,6 +125,7 @@ def compose_scrape_article(
                 composer="mistral",
                 publish_kind=publish_kind.value,
                 extra_tags=getattr(fields, "tags", ()),
+                prompt_version=getattr(fields, "prompt_version", ""),
             )
         except MistralError:
             if MISTRAL_FALLBACK_TEMPLATE:
@@ -195,6 +200,7 @@ def compose_scrape_article(
             is_first_snapshot=is_first_snapshot,
             enrichment_block=enrichment_block,
             source_links=source_links,
+            publish_topic=topic.value,
         )
         return ArticleComposeResult(
             title=fields.title,
@@ -203,6 +209,7 @@ def compose_scrape_article(
             composer="mistral",
             publish_kind=publish_kind.value,
             extra_tags=getattr(fields, "tags", ()),
+            prompt_version=getattr(fields, "prompt_version", ""),
         )
     except MistralError as exc:
         logger.warning(
@@ -237,6 +244,7 @@ def compose_weekly_price(
             summary=fields.summary,
             body=fields.body,
             composer="mistral",
+            prompt_version=getattr(fields, "prompt_version", ""),
         )
     except MistralError as exc:
         logger.warning(
@@ -275,6 +283,7 @@ def compose_weekly_digest(
                 summary=fields.summary,
                 body=fields.body,
                 composer="mistral",
+                prompt_version=getattr(fields, "prompt_version", ""),
             )
         except MistralError:
             if MISTRAL_FALLBACK_TEMPLATE:
@@ -292,6 +301,7 @@ def compose_weekly_digest(
             summary=fields.summary,
             body=fields.body,
             composer="mistral",
+            prompt_version=getattr(fields, "prompt_version", ""),
         )
     except MistralError as exc:
         logger.warning(

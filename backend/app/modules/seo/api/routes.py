@@ -2,21 +2,31 @@
 
 nginx (web vhost) proxies navigation requests for these paths to the backend so
 crawlers and social scrapers receive real `<title>`/meta/OG/JSON-LD and a
-`<noscript>` body, while humans still boot the Flutter app from the same HTML.
+visible `#ssr-body` content, while humans still boot the Flutter app from the same HTML.
 Static assets keep being served from disk by nginx.
 """
 
 from __future__ import annotations
 
+import logging
+from uuid import UUID
+
 from robyn import Request, Response
 
+from app.core import serialization
 from app.core.config import settings
+from app.core.http_errors import json_error_response
 from app.modules.news.services.news_service import NewsService
 from app.modules.seo import analytics_store, feeds, render, shell, sitemap
+from app.modules.seo.markdown import md_to_html
 from app.modules.seo.sections import SECTIONS, matches_section, section_for_slug
+from app.schemas import PageviewBeaconRequest
+
+logger = logging.getLogger(__name__)
 
 _HOME_LIMIT = 30
 _SECTION_LIMIT = 30
+_FEED_FULL_CONTENT_LIMIT = 20  # newest items carry full content:encoded HTML
 _SITEMAP_LIMIT = 500
 
 
@@ -55,7 +65,7 @@ def _query_params(request: Request) -> dict:
             try:
                 return dict(fn())
             except Exception:
-                pass
+                logger.debug("query_params.%s() shape unusable", attr, exc_info=True)
     try:
         return dict(qp)
     except Exception:
@@ -76,6 +86,26 @@ def _record(request: Request, path: str) -> None:
         # Campaign tag (utm_*/ref) off the landing URL — names dark-social traffic.
         campaign=analytics_store.campaign_label(_query_params(request)),
     )
+
+
+_BEACON_STATIC_PATHS = {"/", "/news", "/about", "/search", "/suggestions"}
+
+
+def _is_known_app_path(path: str) -> bool:
+    """True for a path the Flutter router can actually land on — keeps the
+    unauthenticated beacon from letting a client bump counters for arbitrary
+    made-up paths (cardinality/data-quality, not just a hard filter)."""
+    if path in _BEACON_STATIC_PATHS:
+        return True
+    if path.startswith("/news/articles/"):
+        try:
+            UUID(path[len("/news/articles/") :])
+        except ValueError:
+            return False
+        return True
+    if path.startswith("/section/"):
+        return section_for_slug(path[len("/section/") :]) is not None
+    return False
 
 
 def _record_notfound(request: Request, path: str) -> None:
@@ -158,6 +188,20 @@ def register_seo_routes(app) -> None:
         _ = request
         return _doc_response(render.render_noindex("Admin"), "no-store")
 
+    @app.post("/api/v1/analytics/pageview")
+    async def beacon_pageview(request: Request) -> Response:
+        """Client-side beacon for a Flutter in-app route change — the initial
+        document load is already recorded server-side; this covers navigation
+        after that, which never hits a document route."""
+        try:
+            payload = serialization.decode(request.body, PageviewBeaconRequest)
+        except serialization.DecodeError as exc:
+            return json_error_response(400, "invalid_request", str(exc))
+        if not _is_known_app_path(payload.path):
+            return json_error_response(400, "invalid_request", "unknown path")
+        _record(request, payload.path)
+        return {"ok": True}
+
     @app.get("/robots.txt")
     async def robots(request: Request) -> Response:
         _ = request
@@ -169,8 +213,28 @@ def register_seo_routes(app) -> None:
     async def rss_feed(request: Request) -> Response:
         _ = request
         items = news.list_feed(limit=50)
+        # Full article HTML for the newest items only: readers and AI crawlers
+        # get whole pieces, without 50 point-reads on every feed render (the
+        # response is cached 15 min anyway).
+        bodies: dict[str, str] = {}
+        for item in items[:_FEED_FULL_CONTENT_LIMIT]:
+            try:
+                detail = news.get_article(item.article_id)
+                if detail is not None and detail.body:
+                    bodies[item.article_id] = md_to_html(detail.body)
+            except Exception:  # a missing body never breaks the feed
+                continue
         return _text_response(
-            feeds.rss_xml(items), "application/rss+xml; charset=utf-8", "public, max-age=900"
+            feeds.rss_xml(items, bodies=bodies),
+            "application/rss+xml; charset=utf-8",
+            "public, max-age=900",
+        )
+
+    @app.get("/llms.txt")
+    async def llms_txt(request: Request) -> Response:
+        _ = request
+        return _text_response(
+            sitemap.llms_txt(), "text/plain; charset=utf-8", "public, max-age=3600"
         )
 
     @app.get("/sitemap.xml")

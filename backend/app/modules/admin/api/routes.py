@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 
 from robyn import Request, Response
@@ -15,9 +16,12 @@ from app.modules.admin.schemas import (
     GatekeeperAnchorCreate,
     OfficialChannelCreate,
     ScraperRunRequest,
+    ServiceMergeRequest,
     SourceUpsertRequest,
 )
 from app.modules.admin.stores.cassandra import AdminCassandraStore
+
+logger = logging.getLogger(__name__)
 
 # Cache keys for the domains list (one per status filter + the unfiltered view).
 _DOMAIN_CACHE_KEYS = ("admin:domains:all", "admin:domains:pending",
@@ -148,7 +152,8 @@ def register_admin_routes(app) -> None:
                 queue="pipeline",
             )
         except Exception:
-            pass  # best-effort — the hourly scheduler picks up unlinked briefs anyway
+            # best-effort — the hourly scheduler picks up unlinked briefs anyway
+            logger.debug("failed to assign editorial brief eagerly", exc_info=True)
         return item
 
     @app.get("/api/v1/admin/briefs/:brief_id")
@@ -270,7 +275,7 @@ def register_admin_routes(app) -> None:
 
     @app.post("/api/v1/admin/retrain")
     async def admin_retrain(request: Request) -> Response:
-        """Trigger a retrain of the publish classifier + learned grader now."""
+        """Trigger a retrain of the publish classifier + gatekeeper quality head now."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -279,9 +284,11 @@ def register_admin_routes(app) -> None:
 
             from app.core.config import settings
 
-            Celery(broker=settings.celery_broker_url).send_task(
-                "app.tasks.crawler.retrain_publish_classifier", queue="scrape"
-            )
+            client = Celery(broker=settings.celery_broker_url)
+            client.send_task("app.tasks.crawler.retrain_publish_classifier", queue="scrape")
+            # Separate queue: a BERT fine-tune is a much heavier CPU job than the
+            # RandomForest retrain above, and gatekeeper tasks already route here.
+            client.send_task("app.tasks.gatekeeper.train_quality_head", queue="pipeline")
             return {"status": "queued"}
         except Exception as exc:
             return json_error_response(500, "retrain_failed", str(exc))
@@ -418,7 +425,56 @@ def register_admin_routes(app) -> None:
                 origin="admin",
             )
         )
+        # Service layer: record the web source + claim the domain so future
+        # discovery of the same registrable domain attaches here instead of
+        # spawning a parallel service.
+        url = payload.scrape_url.strip()
+        if url.lower().startswith(("http://", "https://")):
+            from app.modules.registry.sources import add_web_source, domain_from_url
+
+            domain = domain_from_url(url)
+            if domain:
+                add_web_source(payload.service_id, domain=domain, url=url)
         return {"saved": True, "service_id": payload.service_id}
+
+    @app.post("/api/v1/admin/sources/merge")
+    async def admin_merge_services(request: Request) -> Response:
+        """Fold services into one (multi-domain entities like algorand.co +
+        algorand.com): sources move to the target, domains re-point, merged
+        services are disabled. The target's next weekly poll aggregates across
+        all of its domains."""
+        denied = require_admin_wallet(request)
+        if denied is not None:
+            return denied
+        try:
+            payload = serialization.decode(request.body, ServiceMergeRequest)
+        except Exception as exc:
+            return json_error_response(400, "invalid_request", str(exc))
+        import asyncio
+
+        from app.modules.registry.sources import merge_services
+
+        result = await asyncio.to_thread(
+            merge_services,
+            target_service_id=payload.target_service_id,
+            source_service_ids=payload.source_service_ids,
+        )
+        return result
+
+    @app.get("/api/v1/admin/sources/:service_id/sources")
+    async def admin_list_service_sources(request: Request) -> Response:
+        denied = require_admin_wallet(request)
+        if denied is not None:
+            return denied
+        service_id = request.path_params.get("service_id", "")
+        if not service_id:
+            return json_error_response(400, "invalid_request", "service_id required")
+        import asyncio
+
+        from app.modules.registry.sources import list_sources
+
+        items = await asyncio.to_thread(list_sources, service_id)
+        return {"service_id": service_id, "items": items}
 
     @app.delete("/api/v1/admin/sources/:service_id")
     async def admin_delete_source(request: Request) -> Response:
@@ -839,9 +895,14 @@ def register_admin_routes(app) -> None:
             if payload.is_relevant:
                 # Domain-centric model: an approved domain becomes a monitored
                 # source so its content is reported on going forward — we don't
-                # re-judge individual pages for relevance.
+                # re-judge individual pages for relevance. If another service
+                # already OWNS this domain (admin merge), attach there instead
+                # of spawning a parallel service.
+                from app.modules.registry.sources import add_web_source, service_for_domain
+
                 scrape_url = pending_url or f"https://{payload.domain}"
-                service_id = payload.domain.replace(".", "-").lower()
+                owner = service_for_domain(payload.domain)
+                service_id = owner or payload.domain.replace(".", "-").lower()
                 from app.core.statements import ServiceRegistryStmts
 
                 existing = session.execute(
@@ -862,6 +923,8 @@ def register_admin_routes(app) -> None:
                         ),
                     )
                     source_created = True
+                if not owner:
+                    add_web_source(service_id, domain=payload.domain, url=scrape_url)
                 # Event-driven: kick the crawl + scrape now so an approved domain is
                 # explored immediately instead of waiting for the (now hourly) beat.
                 try:
@@ -878,7 +941,11 @@ def register_admin_routes(app) -> None:
                         queue="scrape",
                     )
                 except Exception:
-                    pass
+                    logger.warning(
+                        "failed to trigger crawl/scrape for approved domain %s",
+                        payload.domain,
+                        exc_info=True,
+                    )
             # Close the learning loop: log this domain decision as classifier
             # feedback (preview text + approved flag) so the relevance model trains
             # on it and generalizes to similar new domains — not just this one.
@@ -907,7 +974,11 @@ def register_admin_routes(app) -> None:
                         training_only=True,
                     )
             except Exception:
-                pass
+                logger.warning(
+                    "failed to record classifier feedback for domain %s",
+                    payload.domain,
+                    exc_info=True,
+                )
 
             return {
                 "saved": True,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _USER_AGENT = "algorand-platform-newspaper/1.0 (+https://algorand.pxke.me)"
 
@@ -39,7 +42,7 @@ def mark_transcript_attempted(video_id: str) -> None:
             _attempt_key(video_id), "1", ex=YOUTUBE_TRANSCRIPT_ATTEMPT_TTL
         )
     except Exception:
-        pass
+        logger.warning("failed to mark transcript attempted for %s", video_id, exc_info=True)
 
 
 def _extract_transcript_text(data: Any) -> str:

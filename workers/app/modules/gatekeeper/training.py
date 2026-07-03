@@ -91,16 +91,21 @@ def train_gatekeeper(train_loader: Any, cfg: TrainConfig | None = None) -> dict:
             optimizer.zero_grad()
             with torch.autocast(device_type="cpu", dtype=dtype, enabled=cfg.use_bf16):
                 out = model(batch["input_ids"], batch["attention_mask"])
-                loss = (
-                    criterion(out["factuality"], batch["soft_label_factuality"])
-                    + criterion(out["tone"], batch["soft_label_tone"])
-                )
-                # Quality and relevance heads train only when the batch carries
-                # those labels (gold/corrupted runs may not all be graded). Optional.
-                if "soft_label_quality" in batch:
-                    loss = loss + criterion(out["quality"], batch["soft_label_quality"])
-                if "soft_label_relevance" in batch:
-                    loss = loss + criterion(out["relevance"], batch["soft_label_relevance"])
+                # Every head trains only when the batch carries its label — gold/
+                # corrupted runs supply factuality+tone, feedback-derived batches
+                # (no corruptor corpus yet) supply quality only. Optional per head.
+                loss = None
+                for head, key in (
+                    ("factuality", "soft_label_factuality"),
+                    ("tone", "soft_label_tone"),
+                    ("quality", "soft_label_quality"),
+                    ("relevance", "soft_label_relevance"),
+                ):
+                    if key in batch:
+                        head_loss = criterion(out[head], batch[key])
+                        loss = head_loss if loss is None else loss + head_loss
+            if loss is None:
+                continue
             loss.backward()
             optimizer.step()
             last_loss = float(loss.detach().float().item())

@@ -460,6 +460,38 @@ class ServiceRegistryStmts:
     )
     DELETE = _Stmt("DELETE FROM algorand_platform.service_registry WHERE service_id = ?")
     GET_ID = _Stmt("SELECT service_id FROM algorand_platform.service_registry WHERE service_id = ?")
+    SET_ENABLED = _Stmt(
+        "UPDATE algorand_platform.service_registry SET enabled = ?, updated_at = ? "
+        "WHERE service_id = ?"
+    )
+    GET_SCRAPE_URL = _Stmt(
+        "SELECT scrape_url FROM algorand_platform.service_registry WHERE service_id = ?"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# service_sources / service_by_domain (service layer — one service, N sources)
+# Keep in sync with the workers' ServiceSourceStmts.
+# --------------------------------------------------------------------------- #
+class ServiceSourceStmts:
+    UPSERT = _Stmt(
+        "INSERT INTO algorand_platform.service_sources ("
+        "service_id, source_id, source_type, url, domain, enabled, added_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    LIST_FOR_SERVICE = _Stmt(
+        "SELECT source_id, source_type, url, domain, enabled "
+        "FROM algorand_platform.service_sources WHERE service_id = ?"
+    )
+    DELETE_FOR_SERVICE = _Stmt(
+        "DELETE FROM algorand_platform.service_sources WHERE service_id = ?"
+    )
+    UPSERT_BY_DOMAIN = _Stmt(
+        "INSERT INTO algorand_platform.service_by_domain (domain, service_id) VALUES (?, ?)"
+    )
+    GET_BY_DOMAIN = _Stmt(
+        "SELECT service_id FROM algorand_platform.service_by_domain WHERE domain = ?"
+    )
 
 
 # --------------------------------------------------------------------------- #

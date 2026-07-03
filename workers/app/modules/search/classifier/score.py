@@ -43,6 +43,29 @@ REJECT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\balgonquin\b", re.IGNORECASE),
 )
 
+# Evergreen SEO-farm shapes ("Algorand price prediction 2024, 2025 - 2030",
+# "how to buy ALGO", casino/exchange listicles). These pages mention Algorand
+# heavily, so keyword density alone ranks them ABOVE real news — they must be
+# penalized even when keyword hits are present (unlike REJECT_PATTERNS, which
+# only fires on keyword-free noise). Shared so the 0-1 score, the priority
+# ranking's timeliness withhold, and the frontier all agree on the verdict.
+SEO_SPAM_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"price\s+(prediction|forecast)", re.IGNORECASE),
+    re.compile(r"\b20\d{2}\s*[-–—,]\s*20\d{2}\b"),
+    re.compile(r"how\s+to\s+buy\b", re.IGNORECASE),
+    re.compile(r"\bcasino", re.IGNORECASE),
+    re.compile(r"best\s+crypto\s+(exchange|wallet|app|casino|saving)", re.IGNORECASE),
+    re.compile(r"is\s+it\s+a\s+good\s+investment", re.IGNORECASE),
+    re.compile(r"should\s+you\s+(buy|invest)", re.IGNORECASE),
+)
+
+
+def seo_spam_hits(text: str) -> int:
+    """Count of distinct SEO-spam shapes present (0 = looks organic)."""
+    if not text:
+        return 0
+    return sum(1 for pat in SEO_SPAM_PATTERNS if pat.search(text))
+
 DEFAULT_THRESHOLD = 0.35
 
 # The single source of Algorand keyword truth for crude hit-counting (storage
@@ -105,6 +128,11 @@ def score_page(*, url: str, text: str, threshold: float = DEFAULT_THRESHOLD) -> 
     if reject_hits and keyword_hits == 0:
         score -= 0.25
         reasons.append(f"reject_noise:{reject_hits}")
+
+    spam_hits = seo_spam_hits(text)
+    if spam_hits:
+        score -= min(0.45, spam_hits * 0.15)
+        reasons.append(f"seo_spam:{spam_hits}")
 
     if "algorand" in lowered:
         score += 0.15

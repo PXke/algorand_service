@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import time
 
 from app.celery_app import celery_app
@@ -13,6 +14,8 @@ from app.modules.newspaper.publish_policy import PublishKind, PublishTier, Publi
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow
 from app.modules.scraper.core.factory import get_scraper_for_url
 from app.modules.search.tasks.index_tasks import index_article, index_crawled_page
+
+logger = logging.getLogger(__name__)
 
 
 def _with_hero_image(body: str, og_image: str, alt: str) -> str:
@@ -237,7 +240,7 @@ def publish_from_queued_row(
             hero_image = _og
             image_field = _og or _logo
         except Exception:
-            pass
+            logger.warning("failed to resolve source images for %s", row.scrape_url, exc_info=True)
 
     if clf_decision is not True or gate_enforced_review:
         from app.modules.crawler.classifier_review_store import (
@@ -280,6 +283,7 @@ def publish_from_queued_row(
             publish_to_feed=False,
             image_url=image_field,
             tags=held_tags,
+            prompt_version=getattr(composed, "prompt_version", ""),
         )
         # Grade the draft so the human reviewer sees a quality score + reasons.
         grade_meta: dict[str, str] = {}
@@ -318,7 +322,7 @@ def publish_from_queued_row(
             if gate is not None:
                 grade_meta.update(gate.as_metadata())
         except Exception:
-            pass
+            logger.warning("gatekeeper grading failed for %s", row.scrape_url, exc_info=True)
         review_id = enqueue_classifier_review(
             url=row.scrape_url,
             page_text=page_text_for_clf,
@@ -395,6 +399,7 @@ def publish_from_queued_row(
                 ),
                 getattr(composed, "extra_tags", ()),
             ),
+            prompt_version=getattr(composed, "prompt_version", ""),
         )
     except Exception:
         release_publish_slot(tier=tier)
@@ -414,7 +419,7 @@ def publish_from_queued_row(
 
         ping([article_url(article_id)])
     except Exception:
-        pass
+        logger.warning("IndexNow ping failed for article %s", article_id, exc_info=True)
     page_text = str(payload.get("page_text", ""))
     page_title = str(payload.get("page_title", ""))
     if page_text:
@@ -552,14 +557,43 @@ def run_publish_pipeline(
 
             enqueue_page_links(raw_html=result.raw_html, page_url=scrape_url, source="web")
         except Exception:
-            pass
+            logger.warning("failed to enqueue page links from %s", scrape_url, exc_info=True)
+
+    # Service-watch aggregate: for web services the snapshot/diff/compose unit
+    # is the service's aggregated recent pages (all its domains), never just
+    # this one URL. Falls back to the single page when there is no harvest yet
+    # or aggregation fails. Also re-queues the aggregate's pages for a fresh
+    # crawl so next week's aggregate reflects current content.
+    page_text = result.text
+    if source_kind == "web" and worker_config.SERVICE_CONTEXT_ENABLED:
+        try:
+            from app.modules.newspaper.service_context import (
+                build_service_context,
+                refresh_service_pages,
+            )
+
+            page_text = build_service_context(
+                service_id=service_id,
+                display_name=display_name,
+                entry_url=scrape_url,
+                entry_title=result.title,
+                entry_text=result.text,
+            )
+            refresh_service_pages(service_id, entry_url=scrape_url)
+        except Exception:
+            logger.warning(
+                "service context aggregation failed for %s — using entry page only",
+                service_id,
+                exc_info=True,
+            )
+            page_text = result.text
 
     outcome = ingest_publish_signal(
         service_id=service_id,
         display_name=display_name,
         source_url=scrape_url,
         page_title=result.title,
-        page_text=result.text,
+        page_text=page_text,
         source_kind=source_kind,
         match_kind=match_kind,
         match_value=match_value,
@@ -719,6 +753,7 @@ def recompose_review(review_id: str) -> dict[str, str]:
         publish_to_feed=False,
         image_url=og_image,
         tags=tags,
+        prompt_version=getattr(composed, "prompt_version", ""),
     )
 
     # Grade + deterministic gate, mirroring publish_from_queued_row so the
@@ -748,7 +783,7 @@ def recompose_review(review_id: str) -> dict[str, str]:
         if gate is not None:
             grade_meta.update(gate.as_metadata())
     except Exception:
-        pass
+        logger.warning("gatekeeper grading failed for %s", url, exc_info=True)
 
     # The old review was already completed (slot freed on click); enqueue the
     # fresh proposal for the same URL so it lands in the queue the admin watches.

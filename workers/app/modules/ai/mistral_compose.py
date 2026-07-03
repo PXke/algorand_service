@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -18,6 +20,14 @@ from app.modules.metrics.price_metrics_store import load_mistral_context
 from app.modules.newspaper.price_analysis import WeeklyPriceSnapshot
 from app.modules.newspaper.weekly_digest import WeeklyDigestContext
 
+logger = logging.getLogger(__name__)
+
+# Bump whenever a compose prompt in this module changes materially (system
+# guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
+# every stored article so analytics can correlate a prompt edit with a shift in
+# grades/engagement instead of guessing from deploy timestamps.
+PROMPT_VERSION = "2026-07-02"
+
 
 @dataclass(frozen=True)
 class MistralArticleFields:
@@ -25,6 +35,7 @@ class MistralArticleFields:
     summary: str
     body: str
     tags: tuple[str, ...] = ()
+    prompt_version: str = PROMPT_VERSION
 
 
 # The single hardest accuracy rule. The small model, told to write full-depth,
@@ -103,8 +114,8 @@ _TOOLS_GUIDANCE = (
     "source earns a short piece; a rich one earns a thorough one. Stop only when the "
     "verified material is genuinely exhausted. Making things up is the one thing "
     "that is never acceptable.\n"
-    + _STRICT_QUOTE_GROUNDING +
-    "TOOL GAPS (do this every story, do not skip): after researching, ask whether "
+    + _STRICT_QUOTE_GROUNDING
+    + "TOOL GAPS (do this every story, do not skip): after researching, ask whether "
     "any fact, number, or source would have made THIS story sharper, deeper, or "
     "better verified if a tool could have fetched it. Call suggest_tool for EACH "
     "such gap — even when you finished the article without it. This is NOT only for "
@@ -197,16 +208,63 @@ _NARRATIVE_GUIDANCE = (
 )
 
 
+def _urls_from_result(result: Any) -> list[str]:
+    """Best-effort extraction of every URL a tool result carries — a single fetch
+    exposes a top-level "url", while search-style tools nest hits under a list
+    key (search_web's "results", search_bluesky's "posts", etc.)."""
+    urls: list[str] = []
+    if not isinstance(result, dict):
+        return urls
+    top = result.get("url")
+    if isinstance(top, str) and top:
+        urls.append(top)
+    for key in ("results", "posts", "matches", "items", "links"):
+        items = result.get(key)
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    u = item.get("url")
+                    if isinstance(u, str) and u:
+                        urls.append(u)
+    return urls
+
+
+def _research_call_signals(entry: dict) -> set[str]:
+    """The distinct source(s) one research call actually touched: the domain(s)
+    in its result, else a domain-like argument, else the tool name. Keying on
+    bare tool identity let the floor be satisfied by several trivial calls that
+    all skim the same one or two domains; keying on domains instead rewards what
+    the floor is meant to enforce — breadth of sources, not call count."""
+    tool = entry.get("tool")
+    if not tool or tool == "review_draft":
+        return set()
+    domains = {urlparse(u).netloc.lower() for u in _urls_from_result(entry.get("result")) if u}
+    domains.discard("")
+    if domains:
+        return domains
+    args = entry.get("arguments") if isinstance(entry.get("arguments"), dict) else {}
+    for key in ("domain", "url", "repo", "protocol", "forum_url", "source"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return {f"{tool}:{value.strip().lower()}"}
+    return {tool}
+
+
 def _distinct_research_calls(trace: list[dict]) -> int:
-    """Count distinct research tools used so far, excluding review_draft self-checks."""
-    return len({e.get("tool") for e in trace if e.get("tool") and e.get("tool") != "review_draft"})
+    """Count distinct research sources touched so far (domains fetched, or a
+    stable per-tool identity for calls with no URL), excluding review_draft
+    self-checks."""
+    signals: set[str] = set()
+    for entry in trace:
+        signals |= _research_call_signals(entry)
+    return len(signals)
 
 
 def _research_floor_nudge(have: int, need: int, digest: str) -> str:
     """A stronger directive to send the model back for a deeper research pass when
     it stopped too early (the Stage-1 research floor)."""
     return (
-        f"\n\nSTOP — you only made {have} distinct research tool call(s); this story "
+        f"\n\nSTOP — you only touched {have} distinct research source(s); this story "
         f"needs at least {need} before writing. You have so far gathered:\n{digest}\n\n"
         "Now dig deeper with DIFFERENT tools and arguments than above — e.g. "
         "search_bluesky for current community sentiment, search_web for recent "
@@ -229,14 +287,10 @@ def _debug_tool_turn(debug: dict | None, name: str, arguments: dict, result: dic
     debug["messages"].append(
         {
             "role": "assistant",
-            "tool_calls": [
-                {"function": {"name": name, "arguments": _json.dumps(arguments)}}
-            ],
+            "tool_calls": [{"function": {"name": name, "arguments": _json.dumps(arguments)}}],
         }
     )
-    debug["messages"].append(
-        {"role": "tool", "name": name, "content": _json.dumps(result)[:4000]}
-    )
+    debug["messages"].append({"role": "tool", "name": name, "content": _json.dumps(result)[:4000]})
 
 
 def _review_and_revise(
@@ -287,20 +341,27 @@ def _review_and_revise(
 
     issues_block = "\n".join(f"- {i}" for i in fixable[:8])
     too_long = any(i.startswith("too long") for i in fixable)
+    # The reviser is judged by the 75% word-count guard below; give it that
+    # constraint as a CONCRETE number — "keep roughly the same length" alone
+    # still lost >25% of the words in ~10% of prod revisions, wasting the call.
+    draft_words = len(body.split())
+    min_words = int(draft_words * 0.8)
     length_rule = (
         "Trim padding/filler to bring it under the limit, but keep every real fact."
         if too_long
-        else "PRESERVE every fact AND keep roughly the same length — only REORGANIZE "
+        else "PRESERVE every fact AND keep the same length — only REORGANIZE "
         "the existing prose into headings, short paragraphs and at least one list or "
-        "table. Do NOT drop information, summarize away detail, or shorten the article."
+        "table. Do NOT drop information, summarize away detail, or shorten the article: "
+        f"the draft is {draft_words} words and your revision MUST stay above "
+        f"{min_words} words or it will be rejected."
     )
     revise_user = (
-        gen_user
-        + f"\n\nA reviewer flagged these formatting/length problems:\n{issues_block}\n\n"
+        gen_user + f"\n\nA reviewer flagged these formatting/length problems:\n{issues_block}\n\n"
         f"{length_rule} Do NOT add, invent, or restate facts beyond the research "
         "findings above, and do not pad with new filler. Return the full revised "
         "article as the same JSON object."
     )
+
     def _note_revision_failure(reason: str) -> None:
         # Surface WHY the revision didn't happen instead of silently keeping the
         # weak draft — otherwise a rate-limited/failed revision is invisible and
@@ -347,12 +408,10 @@ def _review_and_revise(
             "words": len(revised_body.split()),
             "recheck": True,
         }
-        trace.append(
-            {"tool": "review_draft", "arguments": recheck_args, "result": regrade}
-        )
+        trace.append({"tool": "review_draft", "arguments": recheck_args, "result": regrade})
         _debug_tool_turn(debug, "review_draft", recheck_args, regrade)
     except Exception:
-        pass
+        logger.warning("failed to record post-revision grade telemetry", exc_info=True)
     return revised
 
 
@@ -367,6 +426,102 @@ _CHART_EXAMPLE = (
     '{"type": "bar", "title": "<what this chart shows>", '
     '"x": ["<label A>", "<label B>"], '
     '"series": [{"name": "<series name>", "y": [12, 30]}]}'
+)
+
+# A real published article that scored well on the deterministic grader, shown
+# as a worked example instead of yet another prohibition — a good few-shot
+# example reliably buys more format/tone compliance from a small model than
+# another negative rule, and lets some narrower rules stay implicit. The TOPIC
+# and FACTS are not to be reused, only the shape: problem->solution framing,
+# scannable headers, a table for dense data, first-mention links, and an
+# honest closing Source list. Trimmed of the citation block reference_block.py
+# appends automatically after generation (that's not the model's own output,
+# so including it here would teach a duplicate Sources section).
+_GOOD_EXAMPLE_ARTICLE = {
+    "title": "Nodely: The Global Backbone for Algorand’s Developer Ecosystem",
+    "summary": (
+        "Nodely provides free, low-latency node and indexer infrastructure for "
+        "Algorand and AVM chains, serving 115M+ daily requests across 20+ "
+        "locations with no vendor lock-in."
+    ),
+    "tags": ["infrastructure", "api", "node", "indexer", "algorand"],
+    "body": (
+        "## The Reliability Gap in Blockchain Development\n\n"
+        "For decentralized applications, uninterrupted access to chain data is "
+        "non-negotiable. Developers building on Algorand face a choice: run "
+        "their own nodes—a resource-intensive operation requiring "
+        "specialized expertise—or rely on third-party providers that may "
+        "introduce latency spikes, downtime, or restrictive terms. The "
+        "friction is real: without robust infrastructure, even well-designed "
+        "applications can fail at the point of user interaction.\n\n"
+        "## A Globally Distributed Solution\n\n"
+        "[Nodely](https://nodely.io/) resolves this by operating a globally "
+        "distributed network of nodes and indexers. Its infrastructure spans "
+        "20+ geographic locations, currently handling 115M+ daily API "
+        "requests through 75+ indexers. The platform supports 75+ customers "
+        "across 5+ AVM-compatible chains, including Algorand’s mainnet "
+        "and testnet, with full archival access to historical data.\n\n"
+        "Beyond core node services, Nodely provides additional utilities: an "
+        "IPFS Gateway for Algorand ASA CIDs, a BigQuery dataset for "
+        "analytics, and public node telemetry dashboards. 24/7 support is "
+        "available via Telegram or Discord, with free support extended to "
+        "non-commercial projects.\n\n"
+        "## Tiered Access for Every Stage\n\n"
+        "Nodely’s pricing model scales with project needs, eliminating "
+        "surprises with fixed costs:\n\n"
+        "| Tier | Price | Throughput | SLO | Notable Features |\n"
+        "|------|-------|------------|-----|------------------|\n"
+        "| Free | 0 ALGO/forever | 60 req/s per browser | 99.95% | IPFS "
+        "Gateway, no keys needed |\n"
+        "| Unlimited | $256/month | 6000 req/s per key/site, 500 req/s per "
+        "IP | 99.99% | Full API at 25 locations |\n"
+        "| Business | $256/month* | 500 req/s per IP, 200K reqs daily | "
+        "100% | Fee abstraction, validator node service, 1M TX included |\n"
+        "| Enterprise | $1024/month/region | Custom | Custom | Dedicated "
+        "infrastructure |\n\n"
+        "*Annual subscription only\n\n"
+        "The free tier is explicitly production-ready, requiring only that "
+        "projects attribute Nodely on their site. For teams ready to "
+        "self-host, Nodely offers setup tuning services, applying its "
+        "experience in running APIs at scale to optimize custom "
+        "configurations.\n\n"
+        "## Technical Foundation and Philosophy\n\n"
+        "Nodely’s infrastructure is built on vanilla open-source node "
+        "and indexer APIs, ensuring no vendor lock-in. Projects can "
+        "seamlessly migrate to self-hosted setups when ready. The "
+        "team’s background in telecom infrastructure since 2006 "
+        "enables bare-metal configurations that reduce latency by orders of "
+        "magnitude compared to cloud-based alternatives. Streaming add-ons "
+        "leverage projects open-sourced on Nodely’s "
+        "[GitHub](https://github.com/algonode), maintaining transparency "
+        "and community collaboration.\n\n"
+        "## Ecosystem Context\n\n"
+        "As of June 29, 2026, Algorand’s mainnet maintains 2,740 "
+        "full-time nodes. Nodely’s [status "
+        "page](https://algonode.betteruptime.com/) confirms all services "
+        "are operational, with the last update at 10:14am UTC. This "
+        "reliability is critical as the network continues to grow, "
+        "ensuring developers can focus on building rather than maintaining "
+        "infrastructure.\n\n"
+        "## Team and Evolution\n\n"
+        "Originally launched as AlgoNode, Nodely is developed by a team of "
+        "site reliability engineers with extensive experience in critical "
+        "infrastructure. The [AlgoNode GitHub "
+        "organization](https://github.com/algonode) (verified domain: "
+        "nodely.io) maintains 15+ open-source repositories supporting the "
+        "ecosystem.\n\n"
+        "## Source\n"
+        "- [Nodely](https://nodely.io/)\n"
+        "- [AlgoNode GitHub](https://github.com/algonode)\n"
+        "- [Nodely Status](https://algonode.betteruptime.com/)"
+    ),
+}
+_GOOD_EXAMPLE = (
+    "\n\nWORKED EXAMPLE (a real published article that scored well — study "
+    "its structure, technical translation, data presentation and sourcing; "
+    "never reuse its topic, facts or specific phrasing for an unrelated "
+    "story):\n"
+    f"{json.dumps(_GOOD_EXAMPLE_ARTICLE)}\n"
 )
 
 # Article schema + writing/format rules for scraped-source articles. These are
@@ -395,8 +550,8 @@ _ARTICLE_FORMAT_RULES = (
     "prompts and other page boilerplate in the source — extract the actual story. If the "
     "source carries no real news, write a brief honest note rather than padding\n"
     "  - a chart is OPTIONAL: include ONE only if this article itself has a trend or "
-    "comparison worth visualizing, and chart that subject's own data. Do NOT chart the "
-    "ALGO price unless the story is about price/markets. Fenced format:\n"
+    "comparison worth visualizing, and chart that subject's own data — never ALGO "
+    "price/market metrics by default (see the ALGO PRICE/MARKET RULE). Fenced format:\n"
     "    ```chart\n"
     f"    {_CHART_EXAMPLE}\n"
     "    ```\n"
@@ -412,6 +567,7 @@ _ARTICLE_FORMAT_RULES = (
     "tokenization, wallet, nft, sdk, partnership) — specific, not generic\n"
     "- On-chain context (the round and tx given in the payload) is background only — do "
     "not list it in the body"
+    f"{_GOOD_EXAMPLE}"
 )
 
 
@@ -436,13 +592,9 @@ def _recency_rule(today: str) -> str:
         "the announcement just happened — no 'planned for' the current year, no "
         "'coming soon' for a window that has already started. Frame the piece as a "
         "Status Update or Ecosystem Overview and anchor it at the current point in the "
-        "year rather than the announcement date (phrase this in your own words — do not "
-        "reuse this instruction verbatim as an opener). A live metric you fetched may "
-        "serve as that anchor, but include one ONLY when it materially helps the reader "
-        "understand THIS story (a tokenomics, treasury, or markets angle). Do NOT inject "
-        "TVL, node counts, price or chain stats into a product, dev-tool, partnership or "
-        "governance piece to manufacture recency — an unnecessary metric reads as "
-        "automated. When in doubt, leave it out.\n"
+        "year rather than the announcement date, in your own words — do not pad this "
+        "with an unrelated live metric just to look current (see the ALGO PRICE/MARKET "
+        "RULE for when a fetched metric actually belongs in a story).\n"
     )
 
 
@@ -569,6 +721,7 @@ def compose_scrape_article_mistral(
     is_first_snapshot: bool,
     enrichment_block: str = "",
     source_links: list[dict[str, str]] | None = None,
+    publish_topic: str = "",
     client: MistralClient | None = None,
 ) -> MistralArticleFields:
     """Generate newspaper article fields from scrape context via Mistral."""
@@ -644,12 +797,21 @@ Source material (may be days or years old — judge figures against today's date
 {_clip(enrichment_block, 5000) if enrichment_block else ""}"""
 
     return _compose_via_writer_tools(
-        system=system, user=user, source_url=source_url, mistral=mistral
+        system=system,
+        user=user,
+        source_url=source_url,
+        mistral=mistral,
+        topic=publish_topic,
     )
 
 
 def _compose_via_writer_tools(
-    *, system: str, user: str, source_url: str, mistral: MistralClient
+    *,
+    system: str,
+    user: str,
+    source_url: str,
+    mistral: MistralClient,
+    topic: str = "",
 ) -> MistralArticleFields:
     """Shared research -> write -> grade/revise loop behind every writer-tools
     compose path. Only depends on the system/user prompt pair and a label
@@ -672,11 +834,12 @@ def _compose_via_writer_tools(
                 "source_url": source_url,
                 "model": MISTRAL_MODEL_WRITER,
             }
-            tool_schemas, tool_handlers = all_tools(context=tool_context)
+            tool_schemas, tool_handlers = all_tools(context=tool_context, topic=topic)
             trace: list = []
             debug: dict = {}
             import json as _json
             import time as _time
+
             _t0 = _time.monotonic()
             from app.core.config import (
                 MISTRAL_TEMP_RESEARCH,
@@ -697,11 +860,15 @@ def _compose_via_writer_tools(
             def _checkpoint(stage_status: str) -> None:
                 with contextlib.suppress(Exception):
                     record_compose_session(
-                        debug=debug, trace=trace, service_id=source_url,
-                        source_url=source_url, model=MISTRAL_MODEL_WRITER,
+                        debug=debug,
+                        trace=trace,
+                        service_id=source_url,
+                        source_url=source_url,
+                        model=MISTRAL_MODEL_WRITER,
                         status=stage_status,
                         duration_ms=int((_time.monotonic() - _t0) * 1000),
-                        session_id=_sid, created_at=_screated,
+                        session_id=_sid,
+                        created_at=_screated,
                     )
 
             if WRITER_TWO_STAGE:
@@ -710,12 +877,11 @@ def _compose_via_writer_tools(
                 # draft yet), low temp for deterministic tool selection. We keep the
                 # trace; the model's prose here is discarded.
                 research_schemas = [
-                    s for s in tool_schemas
+                    s
+                    for s in tool_schemas
                     if (s.get("function") or {}).get("name") != "review_draft"
                 ]
-                research_handlers = {
-                    k: v for k, v in tool_handlers.items() if k != "review_draft"
-                }
+                research_handlers = {k: v for k, v in tool_handlers.items() if k != "review_draft"}
                 mistral.chat_with_tools(
                     [
                         {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
@@ -767,9 +933,11 @@ def _compose_via_writer_tools(
                     "raw source material where they differ; treat them as ground "
                     "truth and do not contradict or invent beyond them):\n"
                     f"{digest}\n\n"
-                    "Build the article around these findings." + _NARRATIVE_GUIDANCE
+                    "Build the article around these findings."
+                    + _NARRATIVE_GUIDANCE
                     + " Write it now."
-                    if digest else ""
+                    if digest
+                    else ""
                 )
                 payload = mistral.chat_json_object(
                     [
@@ -817,30 +985,42 @@ def _compose_via_writer_tools(
             _duration_ms = int((_time.monotonic() - _t0) * 1000)
             try:
                 from app.modules.newspaper.investigation_store import store_investigation_findings
+
                 store_investigation_findings(
                     service_id=source_url, source_url=source_url, trace=trace
                 )
             except Exception:
-                pass
+                logger.warning(
+                    "failed to store investigation findings for %s", source_url, exc_info=True
+                )
             try:
                 from app.modules.ai.tool_insights_store import (
                     record_compose_session,
                     record_tool_usage_from_trace,
                     report_tool_errors_from_trace,
                 )
+
                 report_tool_errors_from_trace(
-                    trace, service_id=source_url, source_url=source_url,
+                    trace,
+                    service_id=source_url,
+                    source_url=source_url,
                     model=MISTRAL_MODEL_WRITER,
                 )
                 record_tool_usage_from_trace(trace)
                 record_compose_session(
-                    debug=debug, trace=trace, service_id=source_url,
-                    source_url=source_url, model=MISTRAL_MODEL_WRITER,
-                    final_output=raw, status="ok", duration_ms=_duration_ms,
-                    session_id=_sid, created_at=_screated,
+                    debug=debug,
+                    trace=trace,
+                    service_id=source_url,
+                    source_url=source_url,
+                    model=MISTRAL_MODEL_WRITER,
+                    final_output=raw,
+                    status="ok",
+                    duration_ms=_duration_ms,
+                    session_id=_sid,
+                    created_at=_screated,
                 )
             except Exception:
-                pass
+                logger.warning("failed to record tool-insights session", exc_info=True)
             return _parse_article_fields(payload)
         except MistralError:
             # A real API error (rate limit, etc.) — already retried with backoff
@@ -934,7 +1114,11 @@ sites, GitHub, on-chain data, market data, etc. as relevant) to gather current,
 verifiable facts before writing."""
 
     return _compose_via_writer_tools(
-        system=system, user=user, source_url=f"editorial://brief/{brief_id}", mistral=mistral
+        system=system,
+        user=user,
+        source_url=f"editorial://brief/{brief_id}",
+        mistral=mistral,
+        topic="editorial_assignment",
     )
 
 
@@ -1022,7 +1206,7 @@ New reporting to integrate:
             raise
         except Exception:
             # Tool/parse failure (the API worked): fall back to single-shot.
-            pass
+            logger.debug("tool-call compose failed; falling back to single-shot", exc_info=True)
 
     payload = mistral.chat_json_object(messages)
     return _parse_article_fields(payload)
@@ -1134,7 +1318,7 @@ Data source: CoinGecko market chart.{_price_metrics_block(snapshot.asset_id)}"""
             raise
         except Exception:
             # Tool/parse failure (the API worked): fall back to single-shot.
-            pass
+            logger.debug("tool-call compose failed; falling back to single-shot", exc_info=True)
 
     payload = mistral.chat_json_object(messages)
     return _parse_article_fields(payload)
@@ -1153,9 +1337,7 @@ def compose_weekly_digest_article_mistral(
     article_lines = []
     for item in context.articles[:25]:
         url = f"{PUBLIC_ARTICLE_BASE_URL}/{item.article_id}"
-        article_lines.append(
-            f"- [{item.title}]({url}) | {item.summary[:200]}"
-        )
+        article_lines.append(f"- [{item.title}]({url}) | {item.summary[:200]}")
     feed_block = "\n".join(article_lines) if article_lines else "(no feed articles this week)"
 
     system = (

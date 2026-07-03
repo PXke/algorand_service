@@ -116,9 +116,11 @@ def classify_pending_domains(
 
 @celery_app.task(name="app.tasks.crawler.retrain_publish_classifier")
 def retrain_publish_classifier_task() -> dict[str, object]:
+    # The sklearn "learned grader" (grader_model.train_grader) used to run here
+    # too, but its output has no live reader — the gatekeeper quality head
+    # replaces it (see app.tasks.gatekeeper.train_quality_head, queued
+    # separately by admin_retrain since it's a much heavier CPU job).
     from app.modules.ai.publish_classifier import retrain_publish_classifier
-    from app.modules.newspaper.grader_model import train_grader
 
     classifier = retrain_publish_classifier()
-    grader = train_grader()
-    return {"classifier": classifier, "grader": grader}
+    return {"classifier": classifier}

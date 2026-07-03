@@ -1,7 +1,7 @@
 """Live deterministic gate: combines completeness + numeric entailment into a
 single pass/fail with reviewer-facing reasons."""
 
-from app.modules.gatekeeper.live import GateConfig, run_deterministic_gate
+from app.modules.gatekeeper.live import GateConfig, quality_proba, run_deterministic_gate
 
 
 def test_clean_draft_passes() -> None:
@@ -44,3 +44,17 @@ def test_as_metadata_shape() -> None:
     md = g.as_metadata()
     assert md["gk_passed"] == "1"
     assert set(md) == {"gk_factuality", "gk_completeness", "gk_passed", "gk_reasons"}
+
+
+def test_quality_proba_off_by_default(monkeypatch) -> None:
+    # A checkpoint existing must never be enough on its own -- the explicit
+    # live flag is required, so a training run never silently flips grading.
+    monkeypatch.setattr("app.core.config.GATEKEEPER_QUALITY_LIVE", False)
+    monkeypatch.setattr("app.core.config.GATEKEEPER_MODEL_PATH", __file__)  # any existing path
+    assert quality_proba(title="t", body="b") is None
+
+
+def test_quality_proba_none_without_checkpoint_even_when_live(monkeypatch) -> None:
+    monkeypatch.setattr("app.core.config.GATEKEEPER_QUALITY_LIVE", True)
+    monkeypatch.setattr("app.core.config.GATEKEEPER_MODEL_PATH", "/nonexistent/gatekeeper.pt")
+    assert quality_proba(title="t", body="b") is None

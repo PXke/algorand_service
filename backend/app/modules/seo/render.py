@@ -1,5 +1,12 @@
-"""Builds the per-route `<head>` markup, JSON-LD and crawlable `<noscript>`
-body that get injected into the Flutter shell (see shell.render_document)."""
+"""Builds the per-route `<head>` markup, JSON-LD and crawlable SSR body that
+get injected into the Flutter shell (see shell.render_document).
+
+The SSR body is a REAL visible `<div id="ssr-body">`, not `<noscript>`:
+Googlebot renders JS, ignores noscript, and Flutter paints to canvas — so
+noscript-only content is invisible to exactly the crawler that matters most.
+The div is served identically to everyone (no user-agent cloaking), doubles as
+a fast first paint while Flutter boots, and removes itself on the engine's
+`flutter-first-frame` event."""
 
 from __future__ import annotations
 
@@ -77,8 +84,9 @@ def _meta_block(
         f'<link rel="alternate" type="application/rss+xml" '
         f'title="{_attr(settings.site_name)}" href="{_attr(absolute("/feed.xml"))}">',
     ]
-    if robots:
-        parts.append(f'<meta name="robots" content="{_attr(robots)}">')
+    # Indexable pages opt into large image previews (Google Discover / News
+    # cards); explicit robots values (noindex pages) pass through unchanged.
+    parts.append(f'<meta name="robots" content="{_attr(robots or "max-image-preview:large")}">')
     # Open Graph
     parts += [
         f'<meta property="og:type" content="{_attr(og_type)}">',
@@ -128,6 +136,38 @@ def article_path(article_id: str) -> str:
     return f"/news/articles/{article_id}"
 
 
+# Readable fallback styling for the pre-boot paint (and no-JS readers); the
+# Flutter app replaces it on first frame. Kept tiny and inline so the SSR body
+# needs no extra request.
+_SSR_STYLE = (
+    "<style>#ssr-body{max-width:720px;margin:0 auto;padding:24px;"
+    "font:17px/1.6 Georgia,'Times New Roman',serif;color:#1a1a1a}"
+    "#ssr-body img{max-width:100%;height:auto}"
+    "#ssr-body a{color:#0b57d0}"
+    # The loading notice only exists for humans watching the app boot, so it is
+    # hidden from the reading flow's start: JS reveals it, and it dies with the
+    # div on first frame. No-JS readers and crawlers never see it.
+    "#ssr-loading{display:none;font:13px/1.4 system-ui,sans-serif;color:#666;"
+    "border-bottom:1px solid #ddd;padding-bottom:10px;margin-bottom:18px}</style>"
+)
+_SSR_LOADING = (
+    '<p id="ssr-loading">Loading the interactive edition…</p>'
+    "<script>document.getElementById('ssr-loading').style.display='block';</script>"
+)
+# Flutter's engine dispatches `flutter-first-frame` on window once the real UI
+# has painted; drop the SSR content then so it never duplicates the app for
+# users or screen readers. If Flutter fails to boot, the content stays — a
+# working degraded page instead of a blank one.
+_SSR_REMOVE_SCRIPT = (
+    "<script>window.addEventListener('flutter-first-frame',function(){"
+    "var e=document.getElementById('ssr-body');e&&e.remove();});</script>"
+)
+
+
+def ssr_container(inner_html: str) -> str:
+    return f'{_SSR_STYLE}<div id="ssr-body">{_SSR_LOADING}{inner_html}</div>{_SSR_REMOVE_SCRIPT}'
+
+
 def _breadcrumb(trail: list[tuple[str, str]]) -> dict:
     """BreadcrumbList JSON-LD from (name, absolute_url) pairs."""
     return {
@@ -160,6 +200,7 @@ def _website_jsonld() -> dict:
 
 
 # --- Page builders: each returns (head_html, body_html) -----------------------
+
 
 def _section_for(tags: list[str]) -> Section | None:
     return next((s for s in SECTIONS if matches_section(s, tags)), None)
@@ -217,12 +258,10 @@ def render_article(article: ArticleDetail) -> tuple[str, str]:
         if article.source_url
         else ""
     )
-    body = (
-        "<noscript>"
-        f'<article><h1>{html.escape(article.title)}</h1>'
+    body = ssr_container(
+        f"<article><h1>{html.escape(article.title)}</h1>"
         f'<p><time datetime="{_attr(published_iso)}">{published_iso[:10]}</time></p>'
         f"{img_html}{md_to_html(article.body)}{source}</article>"
-        "</noscript>"
     )
     return head, body
 
@@ -249,13 +288,15 @@ def _feed_list_jsonld(items: list[ArticleFeedItem], canonical: str, name: str) -
     }
 
 
-def _feed_noscript(items: list[ArticleFeedItem], heading: str) -> str:
+def _feed_ssr(items: list[ArticleFeedItem], heading: str) -> str:
+    """Crawlable (and pre-boot visible) feed listing — these are the only real
+    internal links Google's renderer ever sees, since the Flutter app is canvas."""
     links = "".join(
         f'<li><a href="{_attr(article_path(item.article_id))}">'
         f"{html.escape(item.title)}</a> — {html.escape(truncate(item.summary, 140))}</li>"
         for item in items
     )
-    return f"<noscript><h1>{html.escape(heading)}</h1><ul>{links}</ul></noscript>"
+    return ssr_container(f"<h1>{html.escape(heading)}</h1><ul>{links}</ul>")
 
 
 def render_home(items: list[ArticleFeedItem]) -> tuple[str, str]:
@@ -274,7 +315,7 @@ def render_home(items: list[ArticleFeedItem]) -> tuple[str, str]:
             _feed_list_jsonld(items, canonical, f"{settings.site_name} — Latest"),
         ],
     )
-    body = _feed_noscript(items, f"{settings.site_name} — Latest Algorand news")
+    body = _feed_ssr(items, f"{settings.site_name} — Latest Algorand news")
     return head, body
 
 
@@ -291,7 +332,7 @@ def render_section(section: Section, items: list[ArticleFeedItem]) -> tuple[str,
         image_dims=_DEFAULT_IMAGE_DIMS,
         json_ld=[_feed_list_jsonld(items, canonical, title), _breadcrumb(trail)],
     )
-    body = _feed_noscript(items, section.label)
+    body = _feed_ssr(items, section.label)
     return head, body
 
 
@@ -321,10 +362,10 @@ def render_about() -> tuple[str, str]:
         "under automated editorial review, with source links on every story. The "
         "organisation, not an individual byline, is the author of record."
     )
-    body = (
-        f"<noscript><h1>About {html.escape(settings.site_name)}</h1>"
+    body = ssr_container(
+        f"<h1>About {html.escape(settings.site_name)}</h1>"
         f"<p>{html.escape(settings.site_tagline)}</p>"
-        f"<h2>Written with AI</h2><p>{html.escape(disclosure)}</p></noscript>"
+        f"<h2>Written with AI</h2><p>{html.escape(disclosure)}</p>"
     )
     return head, body
 

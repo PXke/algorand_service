@@ -14,6 +14,7 @@ import '../../modules/newspaper/ui/section_page.dart';
 import '../../modules/search/ui/search_page.dart';
 import '../../modules/shell/ui/app_shell.dart';
 import '../../modules/suggestions/ui/suggestions_page.dart';
+import 'pageview_beacon.dart';
 
 /// Gentle fade-and-rise transition between products.
 CustomTransitionPage<void> _page(GoRouterState state, Widget child) {
@@ -39,8 +40,10 @@ CustomTransitionPage<void> _page(GoRouterState state, Widget child) {
 }
 
 GoRouter createAppRouter() {
-  return GoRouter(
+  final beaconObserver = PageviewBeaconObserver();
+  final router = GoRouter(
     initialLocation: '/',
+    observers: [beaconObserver],
     routes: [
       ShellRoute(
         builder: (context, state, child) => AppShell(child: child),
@@ -100,4 +103,6 @@ GoRouter createAppRouter() {
       ),
     ],
   );
+  beaconObserver.attachRouter(router);
+  return router;
 }

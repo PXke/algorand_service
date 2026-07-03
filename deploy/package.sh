@@ -95,7 +95,7 @@ XZ_OPT='-9e -T0' tar caf "$ARCHIVE" \
   --exclude='deploy/build' \
   --exclude='*.symbols' \
   --transform='s|^frontend_flutter/build/web|frontend_web|' \
-  backend workers schema conduit/schema deploy frontend_flutter/build/web
+  requirements.lock.txt backend workers schema conduit/schema deploy frontend_flutter/build/web
 
 cp "$BUILD_INFO" "$OUT_DIR/BUILD_INFO-latest.txt"
 (

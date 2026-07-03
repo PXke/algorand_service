@@ -100,19 +100,27 @@ def clear_scrape_cooldown(service_id: str) -> None:
 
 
 # --- Success-path poll throttle --------------------------------------------
-# Distinct from the failure backoff above: caps how OFTEN a healthy source is
-# re-scraped, so the ~10-min diff beat doesn't re-fetch the same domain every
-# run. Gated by SCRAPE_COOLDOWN_SECONDS (set 0 to disable). Fails OPEN so a Redis
-# outage never silently halts polling.
+# Distinct from the failure backoff above: sets the watch CADENCE for a healthy
+# monitored service. A successful poll stamps the full SERVICE_RESCRAPE_DAYS
+# window (weekly by default — the service-evolution diff is the story; there is
+# nothing to gain from re-fetching sooner). A failed poll stamps only
+# SCRAPE_COOLDOWN_SECONDS so one transient error doesn't cost a whole window.
+# Fails OPEN so a Redis outage never silently halts polling.
 def _throttle_key(service_id: str) -> str:
     return f"scrape:throttle:{service_id}"
 
 
-def scrape_throttled(service_id: str) -> bool:
-    """True when this source was polled within SCRAPE_COOLDOWN_SECONDS."""
-    from app.core.config import SCRAPE_COOLDOWN_SECONDS
+def rescrape_window_seconds(*, ok: bool = True) -> int:
+    from app.core.config import SCRAPE_COOLDOWN_SECONDS, SERVICE_RESCRAPE_DAYS
 
-    if SCRAPE_COOLDOWN_SECONDS <= 0 or not service_id:
+    if not ok or SERVICE_RESCRAPE_DAYS <= 0:
+        return SCRAPE_COOLDOWN_SECONDS
+    return int(SERVICE_RESCRAPE_DAYS * 86400)
+
+
+def scrape_throttled(service_id: str) -> bool:
+    """True when this source was polled within its re-scrape window."""
+    if rescrape_window_seconds() <= 0 or not service_id:
         return False
     try:
         return bool(_client().exists(_throttle_key(service_id)))
@@ -120,13 +128,12 @@ def scrape_throttled(service_id: str) -> bool:
         return False
 
 
-def mark_scraped(service_id: str) -> None:
+def mark_scraped(service_id: str, *, ok: bool = True) -> None:
     """Stamp a poll so the source isn't re-fetched until the window elapses."""
-    from app.core.config import SCRAPE_COOLDOWN_SECONDS
-
-    if SCRAPE_COOLDOWN_SECONDS <= 0 or not service_id:
+    window = rescrape_window_seconds(ok=ok)
+    if window <= 0 or not service_id:
         return
     try:
-        _client().set(_throttle_key(service_id), "1", ex=SCRAPE_COOLDOWN_SECONDS)
+        _client().set(_throttle_key(service_id), "1", ex=window)
     except Exception:
         return

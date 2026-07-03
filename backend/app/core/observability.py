@@ -13,6 +13,8 @@ import os
 
 _DEFAULT_KEY = "b83be2212bf6cbca2e5abc3510f91210"
 
+logger = logging.getLogger(__name__)
+
 
 def init_bugsnag(*, project_root: str = "", release_stage: str = "prod") -> None:
     try:
@@ -33,4 +35,4 @@ def init_bugsnag(*, project_root: str = "", release_stage: str = "prod") -> None
         logging.getLogger().addHandler(handler)
     except Exception:
         # Never let observability setup break the app.
-        pass
+        logger.warning("bugsnag setup failed; error reporting disabled", exc_info=True)

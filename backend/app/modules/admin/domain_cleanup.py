@@ -9,9 +9,12 @@ Run on a host with the app env loaded:
 
 from __future__ import annotations
 
+import logging
 import sys
 
 from app.modules.admin.stores.cassandra import AdminCassandraStore
+
+logger = logging.getLogger(__name__)
 
 # Higher rank wins when merging a group's frontier_status.
 _STATUS_RANK = {"approved": 3, "pending": 2, "dead_end": 1, "": 0, None: 0}
@@ -61,10 +64,10 @@ def cleanup(*, apply: bool = False) -> dict:
             meta["frontier_status"] = status
 
         victims = [m.domain for m in members if m.domain != reg]
-        print(f"{reg}  <- status={status}  ({len(members)} rows)")
+        logger.info("%s  <- status=%s  (%d rows)", reg, status, len(members))
         for m in members:
             mark = "KEEP/UPGRADE" if m.domain == reg else "delete"
-            print(f"    {mark:12} {m.domain}  [{m.frontier_status}]")
+            logger.info("    %-12s %s  [%s]", mark, m.domain, m.frontier_status)
 
         if apply:
             session.execute(
@@ -76,9 +79,10 @@ def cleanup(*, apply: bool = False) -> dict:
         deleted += len(victims)
 
     result = {"groups_merged": merged_groups, "rows_deleted": deleted, "applied": apply}
-    print(result)
+    logger.info(result)
     return result
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     cleanup(apply="--apply" in sys.argv)

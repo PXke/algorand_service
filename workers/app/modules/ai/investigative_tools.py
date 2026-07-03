@@ -10,9 +10,12 @@ Provenance -> Identity -> Assets -> History -> Network.
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _UA = "algorand-platform-newspaper/1.0 (+https://algorand.pxke.me)"
 _TIMEOUT = 12.0
@@ -84,9 +87,7 @@ def fetch_archive_text(url: str, target_date: str = "", max_chars: int = 6000) -
     # (no Wayback toolbar/banner injected into the HTML).
     import re
 
-    raw_url = re.sub(
-        r"(/web/\d{14})/", r"\1id_/", archive_url, count=1
-    ) or archive_url
+    raw_url = re.sub(r"(/web/\d{14})/", r"\1id_/", archive_url, count=1) or archive_url
     try:
         r = guarded_get(raw_url, headers={"User-Agent": _UA}, timeout=15.0)
         r.raise_for_status()
@@ -150,13 +151,13 @@ def extract_document_metadata(file_url: str) -> dict[str, Any]:
                 for k, v in exif.get_ifd(0x8769).items():  # ExifIFD (software, timestamps)
                     out[TAGS.get(k, str(k))] = str(v)[:200]
             except Exception:
-                pass
+                logger.debug("no ExifIFD sub-tags for %s", file_url, exc_info=True)
             try:
                 gps = exif.get_ifd(0x8825)  # GPSInfo
                 if gps:
                     out["GPS"] = {GPSTAGS.get(k, str(k)): str(v) for k, v in gps.items()}
             except Exception:
-                pass
+                logger.debug("no GPSInfo sub-tags for %s", file_url, exc_info=True)
             return {"kind": "image", "format": img.format, "size": img.size, "exif": out}
         except Exception:
             return {
@@ -188,7 +189,7 @@ def resolve_domain_infrastructure(domain: str) -> dict[str, Any]:
                     "city": geo.get("city"),
                 }
             except Exception:
-                pass
+                logger.debug("ip geolocation lookup failed for %s", ips[0], exc_info=True)
     except Exception as exc:
         out["dns_error"] = str(exc)
     try:
@@ -312,7 +313,9 @@ def search_leak_databases(entity_name: str) -> dict[str, Any]:
         return {"error": str(exc), "note": "ICIJ has no official API; best-effort"}
 
 
-INVESTIGATIVE_SCHEMAS: list[dict[str, Any]] = [
+# Archive/infrastructure tools: useful on ANY story (verify what a page said,
+# who runs a domain), so they register unconditionally.
+ARCHIVE_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
@@ -359,8 +362,7 @@ INVESTIGATIVE_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "extract_document_metadata",
             "description": (
-                "EXIF/PDF metadata (author, timestamps, GPS, software) from a leaked "
-                "file URL."
+                "EXIF/PDF metadata (author, timestamps, GPS, software) from a leaked file URL."
             ),
             "parameters": {
                 "type": "object",
@@ -384,13 +386,20 @@ INVESTIGATIVE_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+]
+
+# Entity-background OSINT (sanctions, corporate registries, court dockets,
+# offshore leaks): only relevant when a story investigates a person/company —
+# scam alerts and editorial assignments. Prod transcripts showed generic stories
+# never call these, so keeping them out of that lane saves schema budget and
+# keeps the tool list scannable for the model.
+ENTITY_OSINT_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
             "name": "screen_sanctions_and_pep",
             "description": (
-                "OpenSanctions check: is a person/entity a PEP, sanctioned, or on a "
-                "watchlist?"
+                "OpenSanctions check: is a person/entity a PEP, sanctioned, or on a watchlist?"
             ),
             "parameters": {
                 "type": "object",
@@ -448,13 +457,39 @@ INVESTIGATIVE_SCHEMAS: list[dict[str, Any]] = [
     },
 ]
 
-INVESTIGATIVE_HANDLERS: dict[str, Any] = {
+ARCHIVE_HANDLERS: dict[str, Any] = {
     "fetch_archive_snapshot": fetch_archive_snapshot,
     "fetch_archive_text": fetch_archive_text,
     "extract_document_metadata": extract_document_metadata,
     "resolve_domain_infrastructure": resolve_domain_infrastructure,
+}
+
+ENTITY_OSINT_HANDLERS: dict[str, Any] = {
     "screen_sanctions_and_pep": screen_sanctions_and_pep,
     "query_corporate_registry": query_corporate_registry,
     "query_court_dockets": query_court_dockets,
     "search_leak_databases": search_leak_databases,
 }
+
+
+def investigative_tools(
+    *, include_entity_osint: bool
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Investigative toolset as (schemas, handlers).
+
+    Archive/infrastructure tools always register. Entity-background OSINT joins
+    only for investigative lanes, and query_corporate_registry only when
+    OPENCORPORATES_API_TOKEN is set — without it OpenCorporates returns a
+    permanent 401, so registering it just burns a writer turn.
+    """
+    schemas = list(ARCHIVE_SCHEMAS)
+    handlers = dict(ARCHIVE_HANDLERS)
+    if include_entity_osint:
+        has_oc_token = bool(os.getenv("OPENCORPORATES_API_TOKEN", "").strip())
+        for schema in ENTITY_OSINT_SCHEMAS:
+            name = schema["function"]["name"]
+            if name == "query_corporate_registry" and not has_oc_token:
+                continue
+            schemas.append(schema)
+            handlers[name] = ENTITY_OSINT_HANDLERS[name]
+    return schemas, handlers

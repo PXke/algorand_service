@@ -23,12 +23,15 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY pyproject.toml .
+COPY requirements.lock.txt requirements-dev.lock.txt .
 COPY backend/pyproject.toml backend/
 COPY workers/pyproject.toml workers/
 RUN if [ "$PLATFORM_DEV" = "1" ]; then \
-      pip install "./backend[dev]" ./workers; \
+      pip install -r requirements-dev.lock.txt \
+      && pip install --no-deps "./backend[dev]" ./workers; \
     else \
-      pip install ./backend ./workers; \
+      pip install -r requirements.lock.txt \
+      && pip install --no-deps ./backend ./workers; \
     fi
 
 # Playwright Chromium for worker browser scraper (hard targets / Discord web).
