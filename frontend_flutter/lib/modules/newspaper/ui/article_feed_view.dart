@@ -93,9 +93,10 @@ class _ArticleFeedViewState extends ConsumerState<ArticleFeedView> {
       _error = null;
     });
     try {
+      final lang = Localizations.localeOf(context).languageCode;
       final client = ref.read(apiClientProvider);
       final feedPage =
-          await _newsApi().fetchFeedPage(limit: 50, serviceId: widget.serviceId);
+          await _newsApi().fetchFeedPage(limit: 50, serviceId: widget.serviceId, lang: lang);
       List<Map<String, dynamic>> placements = const [];
       if (widget.showPlacements) {
         try {
@@ -123,8 +124,9 @@ class _ArticleFeedViewState extends ConsumerState<ArticleFeedView> {
     if (cursor == null) return;
     setState(() => _loadingMore = true);
     try {
+      final lang = Localizations.localeOf(context).languageCode;
       final page = await _newsApi()
-          .fetchFeedPage(limit: 50, cursor: cursor, serviceId: widget.serviceId);
+          .fetchFeedPage(limit: 50, cursor: cursor, serviceId: widget.serviceId, lang: lang);
       if (!mounted) return;
       setState(() {
         _items = [..._items, ...page.items];

@@ -83,8 +83,9 @@ class _FrontPageState extends ConsumerState<FrontPage> {
       });
     }
     try {
+      final lang = Localizations.localeOf(context).languageCode;
       final client = ref.read(apiClientProvider);
-      final page = await NewsApi(client).fetchFeedPage(limit: 30);
+      final page = await NewsApi(client).fetchFeedPage(limit: 30, lang: lang);
       if (!mounted) return;
       setState(() {
         _items = page.items;

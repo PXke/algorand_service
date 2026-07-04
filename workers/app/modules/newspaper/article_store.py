@@ -16,6 +16,7 @@ class FeedArticleRow:
     title: str
     summary: str
     published_at_epoch: int
+    translations: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class ArticleDetail:
     trigger_round: int
     source_url: str
     prompt_version: str = ""
+    translations: dict[str, str] | None = None
 
 
 def get_article(article_id: str) -> ArticleDetail | None:
@@ -57,6 +59,7 @@ def get_article(article_id: str) -> ArticleDetail | None:
         trigger_round=int(row.trigger_round) if row.trigger_round is not None else 0,
         source_url=row.source_url or "",
         prompt_version=getattr(row, "prompt_version", "") or "",
+        translations=getattr(row, "translations", None),
     )
 
 
@@ -148,6 +151,7 @@ def list_feed_articles(*, bucket: str = NEWS_FEED_BUCKET, limit: int = 100) -> l
                 title=row.title,
                 summary=row.summary or "",
                 published_at_epoch=epoch,
+                translations=getattr(row, "translations", None),
             )
         )
     return items
@@ -382,3 +386,41 @@ def record_service_event(
             match_value,
         ),
     )
+
+def update_article_translations(article_id: str, translations: dict[str, str]) -> bool:
+    """Update article translations map; refresh feed row at original published_at."""
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts, FeedStmts
+    from datetime import UTC, datetime
+    from uuid import UUID
+    import json
+
+    existing = get_article(article_id)
+    if existing is None:
+        return False
+
+    try:
+        aid = UUID(article_id)
+    except ValueError:
+        return False
+
+    session = get_cassandra_session()
+    
+    # We must fetch the exact published_at timestamp to update the feed PK
+    row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
+    if row is None or row.published_at is None:
+        return False
+    published_at = row.published_at
+
+    # Update detail table
+    session.execute(
+        "UPDATE articles_by_id SET translations = translations + %s WHERE article_id = %s",
+        (translations, aid),
+    )
+    
+    # Update feed table
+    session.execute(
+        "UPDATE articles_feed SET translations = translations + %s WHERE bucket = %s AND published_at = %s AND article_id = %s",
+        (translations, feed_month(published_at), published_at, aid),
+    )
+    return True

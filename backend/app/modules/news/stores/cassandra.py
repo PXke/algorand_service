@@ -100,6 +100,7 @@ class CassandraArticleStore:
                         tags=list(row.tags or []),
                         image_url=getattr(row, "image_url", None),
                         source_url=getattr(row, "source_url", None),
+                        translations=getattr(row, "translations", None),
                     )
                 )
         next_cursor = to_ms(last_dt) if (len(items) >= limit and last_dt) else None
@@ -131,4 +132,5 @@ class CassandraArticleStore:
             source_url=row.source_url,
             tags=list(row.tags or []),
             image_url=getattr(row, "image_url", None),
+            translations=getattr(row, "translations", None),
         )

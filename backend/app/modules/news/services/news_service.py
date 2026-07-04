@@ -22,8 +22,9 @@ class NewsService:
         *,
         limit: int | None = None,
         service_id: str | None = None,
+        lang: str | None = None,
     ) -> list[ArticleFeedItem]:
-        items, _ = self.list_feed_page(limit=limit, service_id=service_id)
+        items, _ = self.list_feed_page(limit=limit, service_id=service_id, lang=lang)
         return items
 
     def list_feed_page(
@@ -32,34 +33,50 @@ class NewsService:
         limit: int | None = None,
         service_id: str | None = None,
         cursor_epoch_ms: int | None = None,
+        lang: str | None = None,
     ) -> tuple[list[ArticleFeedItem], int | None]:
         cap = limit if limit is not None else settings.news_feed_limit
         if service_id:
             # Filtered view: over-fetch and filter (no cross-partition cursor).
             articles = self._store.list_feed(limit=max(cap * 4, 100))
             articles = [a for a in articles if a.service_id == service_id][:cap]
-            return [self._to_feed_item(a) for a in articles], None
+            return [self._to_feed_item(a, lang) for a in articles], None
         articles, next_cursor = self._store.list_feed_page(
             limit=cap, cursor_epoch_ms=cursor_epoch_ms
         )
         # Defensive: skip any malformed feed rows (e.g. a partial upsert that
         # left service_id/title null) so one bad row can't 500 the whole feed.
         articles = [a for a in articles if a.service_id and a.title]
-        return [self._to_feed_item(a) for a in articles], next_cursor
+        return [self._to_feed_item(a, lang) for a in articles], next_cursor
 
-    def get_article(self, article_id: str) -> ArticleDetail | None:
+    def get_article(self, article_id: str, lang: str | None = None) -> ArticleDetail | None:
         article = self._store.get(article_id)
         if article is None:
             return None
+            
+        title = article.title
+        summary = article.summary
+        body = article.body
+        
+        if lang and article.translations and lang in article.translations:
+            import json
+            try:
+                t = json.loads(article.translations[lang])
+                if t.get("title"): title = t["title"]
+                if t.get("summary"): summary = t["summary"]
+                if t.get("body"): body = t["body"]
+            except Exception:
+                pass
+                
         tags = list(article.tags or [])
         from app.modules.news.stores.view_counts import get_views
 
         return ArticleDetail(
             article_id=article.article_id,
             service_id=article.service_id,
-            title=article.title,
-            summary=article.summary,
-            body=article.body,
+            title=title,
+            summary=summary,
+            body=body,
             published_at_epoch=article.published_at_epoch,
             trigger_txid=article.trigger_txid,
             trigger_round=article.trigger_round,
@@ -77,13 +94,25 @@ class NewsService:
         )
 
     @staticmethod
-    def _to_feed_item(article) -> ArticleFeedItem:
+    def _to_feed_item(article, lang: str | None = None) -> ArticleFeedItem:
         tags = list(article.tags or [])
+        
+        title = article.title
+        summary = article.summary
+        if lang and getattr(article, "translations", None) and lang in article.translations:
+            import json
+            try:
+                t = json.loads(article.translations[lang])
+                if t.get("title"): title = t["title"]
+                if t.get("summary"): summary = t["summary"]
+            except Exception:
+                pass
+                
         return ArticleFeedItem(
             article_id=article.article_id,
             service_id=article.service_id,
-            title=article.title,
-            summary=article.summary,
+            title=title,
+            summary=summary,
             published_at_epoch=article.published_at_epoch,
             trigger_txid=article.trigger_txid,
             trigger_round=article.trigger_round,

@@ -351,8 +351,18 @@ def publish_from_queued_row(
                 mark_brief_run(
                     brief_id=str(payload.get("brief_id", "")), article_id=held_article_id
                 )
-        return {
-            "status": "review",
+    try:
+        from app.celery_app import celery_app
+        for lang in ["zh", "hi", "es", "fr", "ar"]:
+            celery_app.send_task(
+                "app.tasks.newspaper.translate_article",
+                args=[held_article_id, lang, held_title, held_summary, composed.body]
+            )
+    except Exception:
+        logger.warning("Failed to enqueue translation tasks", exc_info=True)
+
+    return {
+        "status": "review",
             "service_id": row.service_id,
             "article_id": held_article_id,
             "review_id": review_id,
@@ -467,6 +477,16 @@ def publish_from_queued_row(
 
         with contextlib.suppress(Exception):
             mark_brief_run(brief_id=str(payload.get("brief_id", "")), article_id=article_id)
+
+    try:
+        from app.celery_app import celery_app
+        for lang in ["zh", "hi", "es", "fr", "ar"]:
+            celery_app.send_task(
+                "app.tasks.newspaper.translate_article",
+                args=[str(article_id), lang, title, summary, body]
+            )
+    except Exception:
+        logger.warning("Failed to enqueue translation tasks", exc_info=True)
 
     return {
         "status": "published",
@@ -801,6 +821,17 @@ def recompose_review(review_id: str) -> dict[str, str]:
             **grade_meta,
         },
     )
+    
+    try:
+        from app.celery_app import celery_app
+        for lang in ["zh", "hi", "es", "fr", "ar"]:
+            celery_app.send_task(
+                "app.tasks.newspaper.translate_article",
+                args=[article_id, lang, composed.title, composed.summary, composed.body]
+            )
+    except Exception:
+        logger.warning("Failed to enqueue translation tasks", exc_info=True)
+
     return {"status": "ok", "review_id": new_review_id, "article_id": article_id}
 
 
@@ -831,3 +862,28 @@ def scan_editorial_brief_schedule() -> dict[str, object]:
     )
 
     return _scan()
+
+@celery_app.task(name="app.tasks.newspaper.translate_article")
+def translate_article_task(article_id: str, lang: str, english_title: str, english_summary: str, english_body: str) -> dict[str, str]:
+    """Background task to translate an article into a target language using the LLM."""
+    from app.modules.ai.mistral_compose import translate_article_mistral
+    from app.modules.newspaper.article_store import update_article_translations
+    import json
+    
+    try:
+        translated = translate_article_mistral(
+            english_title=english_title,
+            english_summary=english_summary,
+            english_body=english_body,
+            target_language=lang,
+        )
+        
+        # Store as JSON in the Cassandra map
+        import json
+        translations = {lang: json.dumps(translated, ensure_ascii=False)}
+        
+        update_article_translations(article_id, translations)
+        return {"status": "ok", "article_id": article_id, "lang": lang}
+    except Exception as e:
+        logger.error(f"Failed to translate article {article_id} to {lang}: {e}")
+        return {"status": "error", "reason": str(e)}

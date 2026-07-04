@@ -29,8 +29,10 @@ def register_news_routes(app) -> None:
         service_id = request.query_params.get("service_id", "") or None
         cursor_param = request.query_params.get("cursor", "")
         cursor = int(cursor_param) if cursor_param.isdigit() else None
+        lang = request.query_params.get("lang", "") or None
+        
         items, next_cursor = news_service.list_feed_page(
-            limit=limit, service_id=service_id, cursor_epoch_ms=cursor
+            limit=limit, service_id=service_id, cursor_epoch_ms=cursor, lang=lang
         )
 
         body = serialization.encode(
@@ -62,7 +64,9 @@ def register_news_routes(app) -> None:
         article_id = request.path_params.get("article_id", "")
         if not article_id:
             return json_error_response(400, "invalid_request", "article_id required")
-        detail = news_service.get_article(article_id)
+            
+        lang = request.query_params.get("lang", "") or None
+        detail = news_service.get_article(article_id, lang=lang)
         if detail is None:
             return json_error_response(404, "not_found", "Article not found")
         # Count the read (best-effort). detail.views is the count before this hit.

@@ -9,15 +9,16 @@ class NewsApi {
     return _client.getJson('/api/v1/news/stats');
   }
 
-  Future<List<Map<String, dynamic>>> fetchFeed({int limit = 50}) async {
-    final page = await fetchFeedPage(limit: limit);
+  Future<List<Map<String, dynamic>>> fetchFeed({int limit = 50, String? lang}) async {
+    final page = await fetchFeedPage(limit: limit, lang: lang);
     return page.items;
   }
 
-  Future<FeedPage> fetchFeedPage({int limit = 50, int? cursor, String? serviceId}) async {
+  Future<FeedPage> fetchFeedPage({int limit = 50, int? cursor, String? serviceId, String? lang}) async {
     final params = <String, String>{'limit': '$limit'};
     if (cursor != null) params['cursor'] = '$cursor';
     if (serviceId != null && serviceId.isNotEmpty) params['service_id'] = serviceId;
+    if (lang != null && lang.isNotEmpty && lang != 'en') params['lang'] = lang;
     final qs = params.entries
         .map((e) => '${e.key}=${Uri.encodeQueryComponent(e.value)}')
         .join('&');
@@ -28,8 +29,10 @@ class NewsApi {
     return FeedPage(items: items, nextCursor: next is int ? next : null);
   }
 
-  Future<Map<String, dynamic>> fetchArticle(String articleId) async {
-    return _client.getJson('/api/v1/news/articles/$articleId');
+  Future<Map<String, dynamic>> fetchArticle(String articleId, {String? lang}) async {
+    String qs = '';
+    if (lang != null && lang.isNotEmpty && lang != 'en') qs = '?lang=$lang';
+    return _client.getJson('/api/v1/news/articles/$articleId$qs');
   }
 }
 

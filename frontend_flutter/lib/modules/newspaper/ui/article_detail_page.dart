@@ -60,13 +60,14 @@ class _ArticleDetailPageState extends ConsumerState<ArticleDetailPage> {
       _related = const [];
     });
     try {
-      final article = await NewsApi(ref.read(apiClientProvider)).fetchArticle(widget.articleId);
+      final lang = Localizations.localeOf(context).languageCode;
+      final article = await NewsApi(ref.read(apiClientProvider)).fetchArticle(widget.articleId, lang: lang);
       if (!mounted) return;
       setState(() {
         _article = article;
         _loading = false;
       });
-      _loadRelated(article);
+      _loadRelated(article, lang);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -77,9 +78,9 @@ class _ArticleDetailPageState extends ConsumerState<ArticleDetailPage> {
   }
 
   /// Pulls the recent feed and keeps stories that share a tag with this one.
-  Future<void> _loadRelated(Map<String, dynamic> article) async {
+  Future<void> _loadRelated(Map<String, dynamic> article, String lang) async {
     try {
-      final page = await NewsApi(ref.read(apiClientProvider)).fetchFeedPage(limit: 50);
+      final page = await NewsApi(ref.read(apiClientProvider)).fetchFeedPage(limit: 50, lang: lang);
       final tags = _articleTags(article).map((t) => t.toLowerCase()).toSet();
       if (tags.isEmpty) return;
       final id = article['article_id']?.toString();

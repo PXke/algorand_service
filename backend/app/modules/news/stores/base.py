@@ -17,6 +17,7 @@ class StoredArticle:
     source_url: str | None = None
     tags: list[str] | None = None
     image_url: str | None = None
+    translations: dict[str, str] | None = None
 
 
 class ArticleStore(Protocol):

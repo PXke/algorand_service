@@ -1433,3 +1433,56 @@ Articles published this week ({len(context.articles)}):
         max_tokens=2048,
     )
     return _parse_article_fields(payload)
+
+def translate_article_mistral(
+    *,
+    english_title: str,
+    english_summary: str,
+    english_body: str,
+    target_language: str,
+    client: MistralClient | None = None,
+) -> dict[str, str]:
+    """Translate an English article to the target language via Mistral."""
+    mistral = client or get_mistral_client()
+    
+    language_map = {
+        "zh": "Chinese (Simplified)",
+        "hi": "Hindi",
+        "es": "Spanish (Castilian)",
+        "fr": "French",
+        "ar": "Arabic",
+    }
+    lang_name = language_map.get(target_language, target_language)
+
+    system = (
+        f"You are a professional journalist localizing an Algorand news article into {lang_name}. "
+        "Do not translate names like 'Algorand', 'ALGO', or specific DeFi protocol names unless "
+        "there is a universally accepted localized brand name. Keep the tone professional, objective, "
+        "and clear. Keep markdown formatting intact.\n\n"
+        "Write the translation as a single JSON object adhering exactly to this schema:\n"
+        '{"title": "string", "summary": "string", "body": "string"}\n\n'
+        f"{_JSON_ONLY}"
+    )
+    user = f"""Translate this article into {lang_name}.
+
+Title:
+{english_title}
+
+Summary:
+{english_summary}
+
+Body:
+{english_body}"""
+
+    payload = mistral.chat_json_object(
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+    )
+    
+    return {
+        "title": str(payload.get("title") or "").strip() or english_title,
+        "summary": str(payload.get("summary") or "").strip() or english_summary,
+        "body": _coerce_markdown(payload.get("body")).strip() or english_body,
+    }
