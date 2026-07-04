@@ -68,8 +68,9 @@ if [[ -d "$CK" ]]; then
   rm -rf "$CK/experimental_webparagraph"
   rm -f "$CK"/wimp.js "$CK"/wimp.wasm
   rm -f "$CK"/skwasm_heavy.js "$CK"/skwasm_heavy.wasm
-  # Chromium-only fallback (~1.6 MB saved vs shipping both canvaskit variants).
-  rm -f "$CK/canvaskit.js" "$CK/canvaskit.wasm"
+  # Keep canvaskit.js/wasm — Firefox and Safari use the dart2js fallback with the
+  # generic variant (Flutter disables skwasm on gecko/webkit). Chromium visitors
+  # on the skwasm path never download these files.
 fi
 find "$WEB" -name '*.map' -delete 2>/dev/null || true
 find "$WEB" -name '*.symbols' -delete 2>/dev/null || true
