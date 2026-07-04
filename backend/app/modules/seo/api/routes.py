@@ -24,7 +24,7 @@ from app.schemas import PageviewBeaconRequest
 
 logger = logging.getLogger(__name__)
 
-_HOME_LIMIT = 30
+_HOME_LIMIT = 12
 _SECTION_LIMIT = 30
 _FEED_FULL_CONTENT_LIMIT = 20  # newest items carry full content:encoded HTML
 _SITEMAP_LIMIT = 500

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../auth/auth_entry.dart' deferred as auth;
+import '../auth_chunk_ready.dart';
 
 /// Loads the wallet-auth deferred chunk after first paint so returning visitors
 /// get session restore without blocking initial JS evaluation.
@@ -33,6 +34,7 @@ class _AuthChunkPreloaderState extends ConsumerState<AuthChunkPreloader> {
     if (!mounted) return;
     try {
       await auth.loadLibrary();
+      authChunkReady.value = true;
       if (mounted) ref.read(auth.walletAuthClientProvider);
     } catch (_) {
       // Non-fatal — the wallet button loads the chunk on demand anyway.

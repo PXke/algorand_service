@@ -84,7 +84,7 @@ class _FrontPageState extends ConsumerState<FrontPage> {
     }
     try {
       final client = ref.read(apiClientProvider);
-      final page = await NewsApi(client).fetchFeedPage(limit: 50);
+      final page = await NewsApi(client).fetchFeedPage(limit: 30);
       if (!mounted) return;
       setState(() {
         _items = page.items;
