@@ -445,3 +445,11 @@ file = "backend/schema/migrations/app/047_contact_messages.cql"
 tier = "prod"
 status = "active"
 description = "contact_messages: reader messages from the public /contact form, month-bucketed for a bounded admin inbox read"
+
+[[migrations]]
+stream = "app"
+version = "048"
+file = "backend/schema/migrations/app/048_article_translations.cql"
+tier = "prod"
+status = "active"
+description = "articles_feed + articles_by_id: translations map<text,text> for the Mistral article-translation pipeline"

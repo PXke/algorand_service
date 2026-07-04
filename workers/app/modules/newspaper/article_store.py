@@ -391,13 +391,7 @@ def update_article_translations(article_id: str, translations: dict[str, str]) -
     """Update article translations map; refresh feed row at original published_at."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
-    from datetime import UTC, datetime
     from uuid import UUID
-    import json
-
-    existing = get_article(article_id)
-    if existing is None:
-        return False
 
     try:
         aid = UUID(article_id)
@@ -405,22 +399,16 @@ def update_article_translations(article_id: str, translations: dict[str, str]) -
         return False
 
     session = get_cassandra_session()
-    
+
     # We must fetch the exact published_at timestamp to update the feed PK
     row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
     if row is None or row.published_at is None:
         return False
     published_at = row.published_at
 
-    # Update detail table
+    session.execute(ArticleStmts.UPDATE_TRANSLATIONS, (translations, aid))
     session.execute(
-        "UPDATE articles_by_id SET translations = translations + %s WHERE article_id = %s",
-        (translations, aid),
-    )
-    
-    # Update feed table
-    session.execute(
-        "UPDATE articles_feed SET translations = translations + %s WHERE bucket = %s AND published_at = %s AND article_id = %s",
+        FeedStmts.UPDATE_TRANSLATIONS,
         (translations, feed_month(published_at), published_at, aid),
     )
     return True

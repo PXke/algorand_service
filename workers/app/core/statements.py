@@ -70,6 +70,10 @@ class ArticleStmts:
         "UPDATE algorand_platform.articles_by_id SET image_url = ? "
         "WHERE article_id = ?"
     )
+    UPDATE_TRANSLATIONS = _Stmt(
+        "UPDATE algorand_platform.articles_by_id SET translations = translations + ? "
+        "WHERE article_id = ?"
+    )
 
 
 class FeedStmts:
@@ -97,6 +101,10 @@ class FeedStmts:
     )
     UPDATE_IMAGE = _Stmt(
         "UPDATE algorand_platform.articles_feed SET image_url = ? "
+        "WHERE bucket = ? AND published_at = ? AND article_id = ?"
+    )
+    UPDATE_TRANSLATIONS = _Stmt(
+        "UPDATE algorand_platform.articles_feed SET translations = translations + ? "
         "WHERE bucket = ? AND published_at = ? AND article_id = ?"
     )
     SCAN_ALL = _Stmt(
