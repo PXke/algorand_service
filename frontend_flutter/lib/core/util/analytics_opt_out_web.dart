@@ -7,7 +7,11 @@ import 'dart:html' as html;
 const _name = 'pxke_no_track';
 
 void setAnalyticsOptOut(bool enabled) {
+  final host = html.window.location.hostname ?? '';
+  // Share the opt-out cookie with the API subdomain (algorand-api.pxke.me).
+  final domain =
+      host == 'pxke.me' || host.endsWith('.pxke.me') ? '; domain=.pxke.me' : '';
   html.document.cookie = enabled
-      ? '$_name=1; path=/; max-age=31536000; SameSite=Lax'
-      : '$_name=; path=/; max-age=0; SameSite=Lax';
+      ? '$_name=1; path=/$domain; max-age=31536000; SameSite=Lax'
+      : '$_name=; path=/$domain; max-age=0; SameSite=Lax';
 }

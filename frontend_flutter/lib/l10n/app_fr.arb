@@ -36,6 +36,8 @@
   "localeSpanish": "Español",
   "localeFrench": "Français",
   "localeArabic": "العربية",
+  "localeChinese": "Chine",
+  "localeHindi": "हिन्दी",
   "navLanguage": "LANGUE",
   "walletConnected": "Connecté",
   "walletDisconnect": "Déconnecter",
@@ -53,9 +55,10 @@
   "walletOpenFailed": "Could not open wallet app — copy the URI and paste it in Pera or Defly",
   "walletCancel": "Cancel",
   "walletDone": "Done",
+  "newsFeedTitle": "Derniers articles",
   "newsSubtitleDefault": "On-chain triggers and crawled sources publish here when content changes.",
+  "articlePublicationDetailsHint": "Éditeur, date et lien source",
   "newsPriceUnavailable": "ALGO price unavailable — run price metrics collection",
-  "newsArticleCount": "{count} articles in the curated feed",
   "@newsArticleCount": {
     "placeholders": {
       "count": {
@@ -63,13 +66,20 @@
       }
     }
   },
+  "newsArticleCount": "{count} articles in the curated feed",
   "newsEmptyFilteredTitle": "No articles yet",
   "newsEmptyTitle": "Feed is empty",
   "newsSponsoredLabel": "Sponsored",
+  "@newsSponsoredBy": {
+    "placeholders": {
+      "sponsor": {
+        "type": "String"
+      }
+    }
+  },
   "newsSponsoredBy": "Sponsored · {sponsor}",
   "newsEmptyFilteredMessage": "This source has not published any articles. Check that workers are polling and content has changed.",
   "newsEmptyMessage": "Start Conduit, Celery workers, and seed service_registry to populate the feed.",
-  "newsFilterShowing": "Showing articles from {serviceId}",
   "@newsFilterShowing": {
     "placeholders": {
       "serviceId": {
@@ -77,6 +87,7 @@
       }
     }
   },
+  "newsFilterShowing": "Showing articles from {serviceId}",
   "clearFilter": "Clear",
   "articleUntitled": "Untitled",
   "articleSectionTitle": "Article",
@@ -91,7 +102,6 @@
   "articleMetaSourceUrl": "Source URL",
   "articleOpenInBrowser": "Open in browser",
   "articleViewOnExplorer": "Voir sur l'explorateur Algorand",
-  "articleMoreFrom": "More from {serviceId}",
   "@articleMoreFrom": {
     "placeholders": {
       "serviceId": {
@@ -99,6 +109,7 @@
       }
     }
   },
+  "articleMoreFrom": "More from {serviceId}",
   "articleViewSource": "View source",
   "adminTitle": "Source administration",
   "adminSubtitle": "Registered crawlers and feeds (visible to admin wallets only).",
@@ -113,7 +124,6 @@
   "sourcesMetaMatchRule": "Match rule",
   "sourcesViewArticles": "View articles",
   "sourcesDisabled": "Disabled",
-  "filterAll": "All ({count})",
   "@filterAll": {
     "placeholders": {
       "count": {
@@ -121,7 +131,7 @@
       }
     }
   },
-  "filterDiscord": "Discord ({count})",
+  "filterAll": "All ({count})",
   "@filterDiscord": {
     "placeholders": {
       "count": {
@@ -129,7 +139,7 @@
       }
     }
   },
-  "filterReddit": "Reddit ({count})",
+  "filterDiscord": "Discord ({count})",
   "@filterReddit": {
     "placeholders": {
       "count": {
@@ -137,7 +147,7 @@
       }
     }
   },
-  "filterWeb": "Web ({count})",
+  "filterReddit": "Reddit ({count})",
   "@filterWeb": {
     "placeholders": {
       "count": {
@@ -145,7 +155,7 @@
       }
     }
   },
-  "matchRuleValue": "{kind} = {value}",
+  "filterWeb": "Web ({count})",
   "@matchRuleValue": {
     "placeholders": {
       "kind": {
@@ -156,6 +166,7 @@
       }
     }
   },
+  "matchRuleValue": "{kind} = {value}",
   "sourceKindDiscord": "Discord",
   "sourceKindReddit": "Reddit",
   "sourceKindWeb": "Web",
@@ -176,7 +187,6 @@
   "searchQueryLabel": "Requête",
   "searchQueryHint": "Mots-clés, titres, résumés…",
   "searchAction": "Rechercher",
-  "searchEngine": "Engine: {name}",
   "@searchEngine": {
     "placeholders": {
       "name": {
@@ -184,6 +194,7 @@
       }
     }
   },
+  "searchEngine": "Engine: {name}",
   "searchEmptyTitle": "Aucun résultat",
   "searchEmptyMessage": "Essayez d'autres mots-clés ou vérifiez l'indexation.",
   "searchErrorBackend": "Recherche indisponible. Vérifiez que l'API et la base de données sont démarrées.",
@@ -202,7 +213,6 @@
   "suggestionsUpvoteDialogTitle": "Sign upvote message",
   "suggestionsCopyMessage": "Copy message",
   "suggestionsMessageCopied": "Signing message copied to clipboard",
-  "suggestionsTreasuryHelp": "Send at least {minAlgo} ALGO to the platform treasury before submitting:\n{address}",
   "@suggestionsTreasuryHelp": {
     "placeholders": {
       "minAlgo": {
@@ -213,7 +223,7 @@
       }
     }
   },
-  "suggestionsUpvoteCount": "{count, plural, =0{No upvotes yet} =1{1 upvote} other{{count} upvotes}}",
+  "suggestionsTreasuryHelp": "Send at least {minAlgo} ALGO to the platform treasury before submitting:\n{address}",
   "@suggestionsUpvoteCount": {
     "placeholders": {
       "count": {
@@ -221,8 +231,8 @@
       }
     }
   },
+  "suggestionsUpvoteCount": "{count, plural, =0{No upvotes yet} =1{1 upvote} other{{count} upvotes}}",
   "close": "Close",
-  "suggestionsTxShort": "Tx {txid}",
   "@suggestionsTxShort": {
     "placeholders": {
       "txid": {
@@ -230,11 +240,11 @@
       }
     }
   },
+  "suggestionsTxShort": "Tx {txid}",
   "snackConnectWallet": "Connect your wallet first",
   "snackSuggestionSubmitted": "Suggestion submitted",
   "snackUpvoteRecorded": "Upvote recorded",
   "snackChooseSuggestionUpvote": "Choose a suggestion to upvote first",
-  "metaPublishedEpoch": "Published: {epoch}",
   "@metaPublishedEpoch": {
     "placeholders": {
       "epoch": {
@@ -242,7 +252,7 @@
       }
     }
   },
-  "metaPublishedRelative": "Published: {when}",
+  "metaPublishedEpoch": "Published: {epoch}",
   "@metaPublishedRelative": {
     "placeholders": {
       "when": {
@@ -250,8 +260,8 @@
       }
     }
   },
+  "metaPublishedRelative": "Published: {when}",
   "timeJustNow": "just now",
-  "timeMinutesAgo": "{count}m ago",
   "@timeMinutesAgo": {
     "placeholders": {
       "count": {
@@ -259,7 +269,7 @@
       }
     }
   },
-  "timeHoursAgo": "{count}h ago",
+  "timeMinutesAgo": "{count}m ago",
   "@timeHoursAgo": {
     "placeholders": {
       "count": {
@@ -267,7 +277,7 @@
       }
     }
   },
-  "timeDaysAgo": "{count}d ago",
+  "timeHoursAgo": "{count}h ago",
   "@timeDaysAgo": {
     "placeholders": {
       "count": {
@@ -275,7 +285,7 @@
       }
     }
   },
-  "metaRound": "Round: {round}",
+  "timeDaysAgo": "{count}d ago",
   "@metaRound": {
     "placeholders": {
       "round": {
@@ -283,7 +293,7 @@
       }
     }
   },
-  "metaService": "Service : {serviceId}",
+  "metaRound": "Round: {round}",
   "@metaService": {
     "placeholders": {
       "serviceId": {
@@ -291,6 +301,74 @@
       }
     }
   },
+  "metaService": "Service : {serviceId}",
+  "navFrontPage": "Une",
+  "navLatest": "Dernières",
+  "navSections": "RUBRIQUES",
+  "navAbout": "À propos",
+  "navApps": "Apps",
+  "navProductsMenuHint": "Explorer la plateforme",
+  "frontPageTopStories": "À la une",
+  "frontPageLatest": "Dernières",
+  "frontPageMore": "Plus de la rédaction",
+  "@frontPageSectionStories": {
+    "placeholders": {
+      "section": {
+        "type": "String"
+      }
+    }
+  },
+  "frontPageSectionStories": "Plus dans {section}",
+  "sectionMarkets": "Marchés",
+  "sectionSecurity": "Sécurité",
+  "sectionDevelopers": "Développeurs",
+  "sectionCommunity": "Communauté",
+  "sectionEcosystem": "Écosystème",
+  "sectionEmptyTitle": "Rien ici pour l'instant",
+  "sectionEmptyMessage": "Aucun article dans cette rubrique pour l'instant. Revenez bientôt.",
+  "bylineNewsroom": "La rédaction",
+  "bylineMarketsDesk": "Rédaction Marchés",
+  "bylineChainDesk": "Rédaction On-Chain",
+  "@articleByline": {
+    "placeholders": {
+      "desk": {
+        "type": "String"
+      }
+    }
+  },
+  "articleByline": "Par {desk}",
+  "@articleReadingTime": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "articleReadingTime": "{count} min de lecture",
+  "articleRelatedTitle": "Articles connexes",
+  "articleShare": "Partager",
+  "articleLinkCopied": "Lien copié dans le presse-papiers",
+  "footerTagline": "Couverture indépendante et automatisée de l'écosystème Algorand.",
+  "footerSectionsHeading": "Rubriques",
+  "footerAboutHeading": "À propos",
+  "@footerRights": {
+    "placeholders": {
+      "year": {
+        "type": "String"
+      }
+    }
+  },
+  "footerRights": "© {year} PXke Algorand. Couverture indépendante de l'écosystème Algorand.",
+  "aboutTitle": "À propos de PXke Algorand",
+  "aboutLead": "PXke Algorand est une rédaction indépendante qui couvre la blockchain Algorand — marchés, protocole, gouvernance et projets qui s'y construisent.",
+  "aboutHowHeading": "Comment nous publions",
+  "aboutHowBody": "Notre couverture est assemblée automatiquement à partir d'événements on-chain, de données de marché planifiées et de sources communautaires surveillées, puis organisée en rubriques. Chaque article indique sa provenance.",
+  "aboutAiHeading": "Rédigé avec l'IA",
+  "aboutAiBody": "PXke Algorand publie du journalisme assisté par IA. Les articles sont rédigés par des modèles de langage à partir d'événements on-chain, de données de marché et de sources communautaires, sous revue éditoriale automatisée.",
+  "aboutProvenanceHeading": "Provenance et transparence",
+  "aboutProvenanceBody": "Les articles on-chain sont déclenchés par des transactions vérifiables et renvoient vers l'explorateur Algorand. Les articles marché s'appuient sur CoinGecko. Les contenus sponsorisés sont toujours signalés.",
+  "aboutStandardsHeading": "Standards éditoriaux",
+  "aboutStandardsBody": "Nous visons l'exactitude et une attribution claire. Cette publication n'est pas un conseil en investissement. Une erreur ? Contactez-nous via les liens source de n'importe quel article.",
   "seedsTitle": "Graines",
   "seedsSubtitle": "Points de départ configurés manuellement pour le crawler. Les domaines approuvés via la découverte figurent dans l’onglet Domaines.",
   "sourcesAdd": "Ajouter une source",
@@ -298,7 +376,6 @@
   "sourcesEditTitle": "Modifier la source",
   "sourcesAddTitle": "Ajouter une source",
   "sourcesDeleteTitle": "Supprimer la source ?",
-  "sourcesDeleteBody": "« {serviceId} » ne sera plus explorée. Les articles déjà publiés restent en ligne.",
   "@sourcesDeleteBody": {
     "placeholders": {
       "serviceId": {
@@ -306,11 +383,30 @@
       }
     }
   },
+  "sourcesDeleteBody": "« {serviceId} » ne sera plus explorée. Les articles déjà publiés restent en ligne.",
   "sourcesDelete": "Supprimer",
   "sourcesSave": "Enregistrer",
   "sourcesAddAction": "Ajouter",
   "sourcesRequiredFields": "L’identifiant, le nom et l’URL sont obligatoires.",
   "sourcesChangesNextPoll": "Les modifications s’appliquent au prochain passage du crawler.",
+  "sourcesMerge": "Fusionner",
+  "sourcesMergeTitle": "Fusionner des services",
+  "sourcesMergeIntro": "Regroupez plusieurs services en un. Les sources et domaines des services choisis passent à la cible ; les services vidés sont désactivés.",
+  "sourcesMergeTarget": "Conserver comme cible",
+  "sourcesMergeFold": "Inclure (sera désactivé)",
+  "sourcesMergeAction": "Fusionner",
+  "sourcesMergeNeedsTwo": "Choisissez une cible et au moins un service à inclure.",
+  "@sourcesMergeDone": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "target": {
+        "type": "String"
+      }
+    }
+  },
+  "sourcesMergeDone": "{count} service(s) fusionné(s) dans {target}.",
   "sourcesFieldServiceId": "Identifiant de service",
   "sourcesFieldServiceIdHint": "kebab-case, ex. algorand-foundation-blog",
   "sourcesFieldDisplayName": "Nom affiché",
@@ -334,7 +430,6 @@
   "adminTabSystem": "Système",
   "domainsIntro": "Frontière de crawl : domaines rencontrés par le crawler de liens. Les impasses ne sont jamais explorées — elles sont définies par le score de pertinence, vos verdicts ou manuellement ici.",
   "domainsFilterAll": "Tous",
-  "domainsFilterAllCount": "Tous ({count})",
   "@domainsFilterAllCount": {
     "placeholders": {
       "count": {
@@ -342,8 +437,8 @@
       }
     }
   },
+  "domainsFilterAllCount": "Tous ({count})",
   "domainsFilterPending": "En attente de revue",
-  "domainsFilterPendingCount": "En attente de revue ({count})",
   "@domainsFilterPendingCount": {
     "placeholders": {
       "count": {
@@ -351,8 +446,8 @@
       }
     }
   },
+  "domainsFilterPendingCount": "En attente de revue ({count})",
   "domainsFilterDeadEnds": "Impasses",
-  "domainsFilterDeadEndsCount": "Impasses ({count})",
   "@domainsFilterDeadEndsCount": {
     "placeholders": {
       "count": {
@@ -360,9 +455,9 @@
       }
     }
   },
+  "domainsFilterDeadEndsCount": "Impasses ({count})",
   "domainsEmptyTitle": "Aucun domaine pour l’instant",
   "domainsEmptyMessage": "Le crawler enregistre chaque domaine rencontré en suivant les liens.",
-  "domainsOpenInNewTab": "Ouvrir {domain} dans un nouvel onglet",
   "@domainsOpenInNewTab": {
     "placeholders": {
       "domain": {
@@ -370,7 +465,7 @@
       }
     }
   },
-  "domainsKeywords": "mots-clés : {keywords}",
+  "domainsOpenInNewTab": "Ouvrir {domain} dans un nouvel onglet",
   "@domainsKeywords": {
     "placeholders": {
       "keywords": {
@@ -378,7 +473,7 @@
       }
     }
   },
-  "domainsLinkedAs": "lié comme « {text} »",
+  "domainsKeywords": "mots-clés : {keywords}",
   "@domainsLinkedAs": {
     "placeholders": {
       "text": {
@@ -386,7 +481,7 @@
       }
     }
   },
-  "domainsPredictedInterest": "intérêt prévu {score}",
+  "domainsLinkedAs": "lié comme « {text} »",
   "@domainsPredictedInterest": {
     "placeholders": {
       "score": {
@@ -394,7 +489,7 @@
       }
     }
   },
-  "domainsFoundOn": "trouvé sur {url}",
+  "domainsPredictedInterest": "intérêt prévu {score}",
   "@domainsFoundOn": {
     "placeholders": {
       "url": {
@@ -402,7 +497,7 @@
       }
     }
   },
-  "domainsScore": "score {score}",
+  "domainsFoundOn": "trouvé sur {url}",
   "@domainsScore": {
     "placeholders": {
       "score": {
@@ -410,7 +505,7 @@
       }
     }
   },
-  "domainsCrawled": "exploré le {date}",
+  "domainsScore": "score {score}",
   "@domainsCrawled": {
     "placeholders": {
       "date": {
@@ -418,7 +513,7 @@
       }
     }
   },
-  "domainsPagesCrawled": "{count} pages",
+  "domainsCrawled": "exploré le {date}",
   "@domainsPagesCrawled": {
     "placeholders": {
       "count": {
@@ -426,11 +521,11 @@
       }
     }
   },
+  "domainsPagesCrawled": "{count} pages",
   "domainsDeadEnd": "Impasse",
   "domainsApproveExplore": "Approuver et explorer",
   "domainsMarkDeadEnd": "Marquer comme impasse",
   "domainsRevive": "Réactiver",
-  "domainsApprovedSnack": "{domain} approuvé — le crawler peut l’explorer",
   "@domainsApprovedSnack": {
     "placeholders": {
       "domain": {
@@ -438,7 +533,7 @@
       }
     }
   },
-  "domainsDeadEndSnack": "{domain} marqué comme impasse",
+  "domainsApprovedSnack": "{domain} approuvé — le crawler peut l’explorer",
   "@domainsDeadEndSnack": {
     "placeholders": {
       "domain": {
@@ -446,5 +541,6 @@
       }
     }
   },
+  "domainsDeadEndSnack": "{domain} marqué comme impasse",
   "domainsWalletNotConnected": "Portefeuille non connecté"
 }

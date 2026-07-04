@@ -26,14 +26,56 @@ class WalletAppBarAction extends ConsumerWidget {
       builder: (context, auth, _) {
         if (auth.isAuthenticated) {
           final address = auth.walletAddress ?? '';
+          final narrowToolbar = MediaQuery.sizeOf(context).width < 720;
+          if (narrowToolbar) {
+            return Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: PopupMenuButton<String>(
+                tooltip: l10n.walletConnected,
+                offset: const Offset(0, 40),
+                icon: Icon(
+                  Icons.account_balance_wallet,
+                  size: 22,
+                  color: theme.colorScheme.primary,
+                ),
+                onSelected: (value) {
+                  if (value == 'disconnect') {
+                    client.logout();
+                  }
+                },
+                itemBuilder: (context) => [
+                  PopupMenuItem(
+                    enabled: false,
+                    child: SelectableText(
+                      address,
+                      style: theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+                    ),
+                  ),
+                  const PopupMenuDivider(),
+                  PopupMenuItem(
+                    value: 'disconnect',
+                    child: Text(l10n.walletDisconnect),
+                  ),
+                ],
+              ),
+            );
+          }
+
           return Padding(
             padding: const EdgeInsets.only(right: 4),
             child: PopupMenuButton<String>(
               tooltip: l10n.walletConnected,
               offset: const Offset(0, 40),
               child: Chip(
-                avatar: Icon(Icons.account_balance_wallet_outlined, size: 20, color: theme.colorScheme.primary),
-                label: Text(_shortAddress(address), style: theme.textTheme.labelMedium),
+                avatar: Icon(
+                  Icons.account_balance_wallet_outlined,
+                  size: 20,
+                  color: theme.colorScheme.primary,
+                ),
+                label: Text(
+                  _shortAddress(address),
+                  style: theme.textTheme.labelMedium,
+                ),
                 padding: const EdgeInsets.symmetric(horizontal: 4),
                 visualDensity: VisualDensity.compact,
               ),

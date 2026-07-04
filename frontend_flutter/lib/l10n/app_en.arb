@@ -36,6 +36,8 @@
   "localeSpanish": "Español",
   "localeFrench": "Français",
   "localeArabic": "العربية",
+  "localeChinese": "中文",
+  "localeHindi": "हिन्दी",
   "navLanguage": "LANGUAGE",
   "walletConnected": "Connected",
   "walletDisconnect": "Disconnect",

@@ -190,7 +190,6 @@ class _Nameplate extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
         child: Row(
-          mainAxisSize: MainAxisSize.min,
           children: [
             const BrandMark(),
             const SizedBox(width: 12),

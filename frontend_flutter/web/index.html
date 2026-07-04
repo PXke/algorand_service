@@ -27,12 +27,30 @@
        same files so the engine never opens a third-party font connection. -->
   <style>
     @font-face{font-family:'Roboto';font-style:normal;font-weight:400;
+      font-display:swap;
       src:url('assets/assets/fonts/Inter-w400.ttf') format('truetype')}
     @font-face{font-family:'Roboto';font-style:normal;font-weight:500;
+      font-display:swap;
       src:url('assets/assets/fonts/Inter-w400.ttf') format('truetype')}
-    @font-face{font-family:'Roboto';font-style:normal;font-weight:700;
-      src:url('assets/assets/fonts/Inter-w700.ttf') format('truetype')}
   </style>
+  <!-- Roboto w700 + engine fonts: idle-scheduled so WASM/JS win the critical path. -->
+  <script>
+    (function () {
+      function injectBold() {
+        var s = document.createElement('style');
+        s.textContent =
+          "@font-face{font-family:'Roboto';font-style:normal;font-weight:700;" +
+          "font-display:swap;src:url('assets/assets/fonts/Inter-w700.ttf') format('truetype')}";
+        document.head.appendChild(s);
+      }
+      function schedule() {
+        if (window.requestIdleCallback) requestIdleCallback(injectBold);
+        else setTimeout(injectBold, 1500);
+      }
+      if (document.readyState === 'complete') schedule();
+      else window.addEventListener('load', schedule);
+    })();
+  </script>
 
   <!-- Baseline social-card defaults. The backend's server-rendered document
        routes replace title/description and these og:/twitter: tags per page;

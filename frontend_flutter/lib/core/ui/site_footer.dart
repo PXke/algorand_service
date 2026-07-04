@@ -12,12 +12,80 @@ import 'page_content.dart';
 class SiteFooter extends StatelessWidget {
   const SiteFooter({super.key});
 
+  static const double _wideBreakpoint = 720;
+
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final theme = Theme.of(context);
     final colors = context.appColors;
     final year = DateTime.now().year.toString();
+    final width = MediaQuery.sizeOf(context).width;
+    final wide = width >= _wideBreakpoint;
+    final horizontal = width < 520 ? 16.0 : 32.0;
+
+    final brandBlock = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const BrandMark(size: 30),
+            const SizedBox(width: 12),
+            Flexible(
+              child: Text(
+                l10n.appTitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleLarge,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Text(
+          l10n.footerTagline,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: colors.muted,
+            height: 1.5,
+          ),
+        ),
+      ],
+    );
+
+    final sectionsColumn = _FooterColumn(
+      heading: l10n.footerSectionsHeading,
+      columns: wide ? 2 : 1,
+      links: [
+        for (final s in kNewsSections)
+          _FooterLink(
+            label: s.label(context),
+            onTap: () => context.go('/section/${s.slug}'),
+          ),
+      ],
+    );
+
+    final aboutColumn = _FooterColumn(
+      heading: l10n.footerAboutHeading,
+      links: [
+        _FooterLink(
+          label: l10n.navAbout,
+          onTap: () => context.go('/about'),
+        ),
+        _FooterLink(
+          label: l10n.navLatest,
+          onTap: () => context.go('/news'),
+        ),
+        _FooterLink(
+          label: l10n.navSearch,
+          onTap: () => context.go('/search'),
+        ),
+        _FooterLink(
+          label: l10n.navContact,
+          onTap: () => context.go('/contact'),
+        ),
+      ],
+    );
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -25,69 +93,37 @@ class SiteFooter extends StatelessWidget {
         color: theme.cardTheme.color,
       ),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 40),
+        padding: EdgeInsets.fromLTRB(horizontal, 40, horizontal, 32),
         child: PageContent(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Brand block spans the full width on top; link columns sit below.
-              Row(
-                children: [
-                  const BrandMark(size: 30),
-                  const SizedBox(width: 12),
-                  Text(l10n.appTitle, style: theme.textTheme.titleLarge),
-                ],
-              ),
-              const SizedBox(height: 8),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 460),
-                child: Text(
-                  l10n.footerTagline,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: colors.muted,
-                    height: 1.5,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 28),
-              Wrap(
-                spacing: 72,
-                runSpacing: 24,
-                children: [
-                  _FooterColumn(
-                    heading: l10n.footerSectionsHeading,
-                    columns: 2,
-                    links: [
-                      for (final s in kNewsSections)
-                        _FooterLink(
-                          label: s.label(context),
-                          onTap: () => context.go('/section/${s.slug}'),
-                        ),
-                    ],
-                  ),
-                  _FooterColumn(
-                    heading: l10n.footerAboutHeading,
-                    links: [
-                      _FooterLink(
-                        label: l10n.navAbout,
-                        onTap: () => context.go('/about'),
+              if (wide)
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(flex: 5, child: brandBlock),
+                    const SizedBox(width: 48),
+                    Expanded(
+                      flex: 7,
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(child: sectionsColumn),
+                          const SizedBox(width: 48),
+                          aboutColumn,
+                        ],
                       ),
-                      _FooterLink(
-                        label: l10n.navLatest,
-                        onTap: () => context.go('/news'),
-                      ),
-                      _FooterLink(
-                        label: l10n.navSearch,
-                        onTap: () => context.go('/search'),
-                      ),
-                      _FooterLink(
-                        label: l10n.navContact,
-                        onTap: () => context.go('/contact'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+                    ),
+                  ],
+                )
+              else ...[
+                brandBlock,
+                const SizedBox(height: 28),
+                sectionsColumn,
+                const SizedBox(height: 24),
+                aboutColumn,
+              ],
               const SizedBox(height: 28),
               Divider(height: 1, color: colors.border),
               const SizedBox(height: 16),

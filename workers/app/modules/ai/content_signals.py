@@ -14,6 +14,7 @@ class ContentSignals:
     can never disagree about whether an item needs review."""
 
     category: str
+    categories: tuple[str, ...]
     relevance: float  # on-topic relevance in [0, 1]
     publish_decision: bool | None  # classifier verdict; None => send to review
     confidence: float
@@ -26,6 +27,7 @@ class ContentSignals:
     def to_payload(self) -> dict[str, Any]:
         return {
             "category": self.category,
+            "categories": list(self.categories),
             "relevance": self.relevance,
             "publish_decision": self.publish_decision,
             "confidence": self.confidence,
@@ -39,8 +41,14 @@ class ContentSignals:
         if not isinstance(data, dict) or "category" not in data:
             return None
         try:
+            raw_cats = data.get("categories")
+            if isinstance(raw_cats, list):
+                categories = tuple(str(c) for c in raw_cats if c)
+            else:
+                categories = (str(data["category"]),)
             return cls(
                 category=str(data["category"]),
+                categories=categories or (str(data["category"]),),
                 relevance=float(data.get("relevance", 1.0)),
                 publish_decision=data.get("publish_decision"),
                 confidence=float(data.get("confidence", 0.0)),
@@ -51,17 +59,19 @@ class ContentSignals:
 
 
 def compute_content_signals(text: str, url: str) -> ContentSignals:
-    from app.modules.ai.content_categorizer import categorize_content
+    from app.modules.ai.content_categorizer import categorize_content_all
     from app.modules.ai.publish_classifier import (
         predict_publish,
         relevance_score,
         score_content_for_storage,
     )
 
-    category = categorize_content(text, url)
+    categories = tuple(categorize_content_all(text, url))
+    category = categories[0] if categories else "generic"
     decision, confidence = predict_publish(text, url, category)
     return ContentSignals(
         category=category,
+        categories=categories,
         relevance=relevance_score(text, url),
         publish_decision=decision,
         confidence=confidence,

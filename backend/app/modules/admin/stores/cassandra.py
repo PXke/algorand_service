@@ -1041,15 +1041,17 @@ class AdminCassandraStore:
                 details.append(d)
 
         # Parse metadata (pure Python) and collect the article ids to batch-fetch.
-        parsed_rows: list[tuple] = []  # (detail, article_id, confidence, grade, grade_detail)
+        parsed_rows: list[tuple] = []  # (detail, article_id, confidence, grade, grade_detail, categories)
         for detail in details:
             article_id = ""
             confidence: float | None = None
             grade: float | None = None
             grade_detail: dict | None = None
+            categories: list[str] = []
             # Cassandra map columns come back as OrderedMapSerializedKey, which
             # is NOT a dict subclass — coerce so .get works.
             meta = dict(detail.metadata or {})
+            parsed: dict = {}
             if meta:
                 raw = meta.get("raw")
                 if raw:
@@ -1074,7 +1076,14 @@ class AdminCassandraStore:
                         article_id = str(meta.get("article_id", ""))
                 else:
                     article_id = str(meta.get("article_id", ""))
-            parsed_rows.append((detail, article_id, confidence, grade, grade_detail))
+            cats_raw = parsed.get("categories") or meta.get("categories") or detail.category
+            if isinstance(cats_raw, str) and cats_raw.strip():
+                categories = [c.strip().lower() for c in cats_raw.split(",") if c.strip()]
+            elif isinstance(cats_raw, list):
+                categories = [str(c).strip().lower() for c in cats_raw if c]
+            if not categories and detail.category:
+                categories = [str(detail.category).strip().lower()]
+            parsed_rows.append((detail, article_id, confidence, grade, grade_detail, categories))
 
         # Phase 2: batch-fetch the referenced articles concurrently (was a second
         # sequential SELECT per row).
@@ -1096,7 +1105,7 @@ class AdminCassandraStore:
                     article_by_id[str(a.article_id)] = a
 
         items: list[dict] = []
-        for detail, article_id, confidence, grade, grade_detail in parsed_rows:
+        for detail, article_id, confidence, grade, grade_detail, categories in parsed_rows:
             a = article_by_id.get(article_id)
             items.append(
                 {
@@ -1104,7 +1113,8 @@ class AdminCassandraStore:
                     "url": detail.url,
                     "page_title": detail.page_title or "",
                     "page_text_preview": (detail.page_text or "")[:500],
-                    "category": detail.category or "",
+                    "category": detail.category or (categories[0] if categories else ""),
+                    "categories": categories,
                     "storage_score": float(detail.storage_score or 0),
                     "article_id": article_id,
                     "confidence": confidence,

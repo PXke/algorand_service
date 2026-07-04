@@ -30,15 +30,29 @@ _FEED_FULL_CONTENT_LIMIT = 20  # newest items carry full content:encoded HTML
 _SITEMAP_LIMIT = 500
 
 
-def _doc_response(parts: tuple[str, str], cache: str, status: int = 200) -> Response:
+def _tracking_opted_out(request: Request) -> bool:
+    """True when the viewer asked not to be counted (admin wallet connected)."""
+    return "pxke_no_track=1" in _header(request, "cookie")
+
+
+def _doc_response(
+    parts: tuple[str, str],
+    cache: str,
+    status: int = 200,
+    *,
+    tracked_path: str | None = None,
+) -> Response:
     head, body = parts
+    if tracked_path:
+        body = shell.ssr_track_snippet(tracked_path) + body
     html = shell.render_document(head, body)
     if html is None:
         # Shell template not found — still return valid HTML AND boot Flutter
         # (the bootstrap script must be present or the app renders a blank page).
+        track = shell.ssr_track_snippet(tracked_path) if tracked_path else ""
         html = (
             '<!DOCTYPE html><html lang="en"><head><base href="/">'
-            f"{head}</head><body>{body}"
+            f"{head}</head><body>{track}{body}"
             '<script src="/flutter_bootstrap.js" async></script>'
             "</body></html>"
         )
@@ -74,8 +88,7 @@ def _query_params(request: Request) -> dict:
 
 def _record(request: Request, path: str) -> None:
     """Best-effort pageview record for a public document route."""
-    # Owner opt-out: the app sets this cookie while the admin wallet is connected.
-    if "pxke_no_track=1" in _header(request, "cookie"):
+    if _tracking_opted_out(request):
         return
     analytics_store.record_pageview(
         path=path,
@@ -143,15 +156,17 @@ def register_seo_routes(app) -> None:
 
     @app.get("/")
     async def home(request: Request) -> Response:
-        _record(request, "/")
+        path = "/"
+        _record(request, path)
         items = news.list_feed(limit=_HOME_LIMIT)
-        return _doc_response(render.render_home(items), "public, max-age=120")
+        return _doc_response(render.render_home(items), "public, max-age=120", tracked_path=path)
 
     @app.get("/news")
     async def news_index(request: Request) -> Response:
-        _record(request, "/news")
+        path = "/news"
+        _record(request, path)
         items = news.list_feed(limit=_HOME_LIMIT)
-        return _doc_response(render.render_home(items), "public, max-age=120")
+        return _doc_response(render.render_home(items), "public, max-age=120", tracked_path=path)
 
     @app.get("/news/articles/:article_id")
     async def article(request: Request) -> Response:
@@ -172,10 +187,12 @@ def register_seo_routes(app) -> None:
             return _doc_response(
                 render.render_noindex("Article not found"), "public, max-age=60", status=404
             )
-        _record(request, f"/news/articles/{article_id}")
+        path = f"/news/articles/{article_id}"
+        _record(request, path)
         return _doc_response(
             render.render_article(detail),
             "public, max-age=300, stale-while-revalidate=600",
+            tracked_path=path,
         )
 
     @app.get("/section/:slug")
@@ -187,20 +204,23 @@ def register_seo_routes(app) -> None:
             return _doc_response(
                 render.render_noindex("Section not found"), "public, max-age=60", status=404
             )
-        _record(request, f"/section/{slug}")
+        path = f"/section/{slug}"
+        _record(request, path)
         feed = news.list_feed(limit=200)
         items = [i for i in feed if matches_section(sec, i.tags)][:_SECTION_LIMIT]
-        return _doc_response(render.render_section(sec, items), "public, max-age=120")
+        return _doc_response(render.render_section(sec, items), "public, max-age=120", tracked_path=path)
 
     @app.get("/about")
     async def about(request: Request) -> Response:
-        _record(request, "/about")
-        return _doc_response(render.render_about(), "public, max-age=3600")
+        path = "/about"
+        _record(request, path)
+        return _doc_response(render.render_about(), "public, max-age=3600", tracked_path=path)
 
     @app.get("/contact")
     async def contact(request: Request) -> Response:
-        _record(request, "/contact")
-        return _doc_response(render.render_contact(), "public, max-age=3600")
+        path = "/contact"
+        _record(request, path)
+        return _doc_response(render.render_contact(), "public, max-age=3600", tracked_path=path)
 
     @app.get("/search")
     async def search(request: Request) -> Response:
@@ -222,6 +242,8 @@ def register_seo_routes(app) -> None:
         """Client-side beacon for a Flutter in-app route change — the initial
         document load is already recorded server-side; this covers navigation
         after that, which never hits a document route."""
+        if _tracking_opted_out(request):
+            return {"ok": True}
         try:
             payload = serialization.decode(request.body, PageviewBeaconRequest)
         except serialization.DecodeError as exc:

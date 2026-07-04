@@ -333,6 +333,7 @@ def publish_from_queued_row(
                 "article_id": held_article_id,
                 "source": held_kind or "web",
                 "confidence": f"{clf_confidence:.3f}",
+                "categories": ",".join(signals.categories),
                 "diverted_by": "gatekeeper" if gate_enforced_review else "classifier",
                 **grade_meta,
             },

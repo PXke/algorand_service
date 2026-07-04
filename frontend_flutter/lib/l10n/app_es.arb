@@ -2,22 +2,22 @@
   "@@locale": "es",
   "appTitle": "PXke Algorand Projects",
   "appTagline": "Noticias, fuentes y comunidad",
-  "navNewspaper": "Periódico",
-  "navSources": "Fuentes",
-  "navSuggestions": "Sugerencias",
   "navHome": "Inicio",
   "navNews": "Noticias",
+  "navSources": "Fuentes",
+  "navSuggestions": "Sugerencias",
   "navSearch": "Buscar",
   "navAdmin": "Administración",
   "navProducts": "PRODUCTOS",
   "navWallet": "Cartera",
   "navAppearance": "APARIENCIA",
+  "pageTitleHome": "PXke Algorand Projects",
   "pageTitleArticle": "Artículo",
-  "pageTitleNewspaper": "Periódico",
+  "pageTitleNews": "Noticias",
   "pageTitleSources": "Fuentes de noticias",
   "pageTitleSuggestions": "Sugerencias",
-  "pageTitleHome": "PXke Algorand Projects",
   "pageTitleSearch": "Buscar",
+  "pageTitleAdmin": "Administración",
   "backToFeed": "Volver al feed",
   "homeWelcome": "Plataforma del ecosistema PXke Algorand",
   "homeTagline": "Noticias curadas de disparadores on-chain y fuentes rastreadas, sugerencias comunitarias y búsqueda.",
@@ -36,31 +36,29 @@
   "localeSpanish": "Español",
   "localeFrench": "Français",
   "localeArabic": "العربية",
+  "localeChinese": "中文",
+  "localeHindi": "हिन्दी",
   "navLanguage": "IDIOMA",
   "walletConnected": "Conectado",
   "walletDisconnect": "Desconectar",
   "walletSignInTitle": "Iniciar sesión con cartera",
   "walletSignInBody": "Conecta una cartera Algorand compatible con WalletConnect para enviar sugerencias y votos.",
   "walletConnect": "Conectar cartera",
+  "walletConnectFailed": "Error de conexión. Inténtalo de nuevo o cancela el emparejamiento primero.",
   "walletDialogTitle": "Conectar tu cartera",
   "walletDialogBody": "Escanea el código QR con una cartera compatible (Pera, Defly, etc.) o copia/abre el enlace en el móvil.",
   "walletAwaitingApproval": "Monedero conectado. Vuelve a tu aplicación de monedero para aprobar la solicitud de inicio de sesión y regresa aquí.",
   "walletAwaitingApprovalTitle": "Casi listo",
   "walletCopyUri": "Copiar URI",
+  "walletUriCopied": "URI de WalletConnect copiado",
   "walletOpenWallet": "Abrir cartera",
+  "walletOpenFailed": "No se pudo abrir la cartera — copia el URI y pégalo en Pera o Defly",
+  "walletCancel": "Cancelar",
   "walletDone": "Listo",
-  "newspaperSubtitleDefault": "Los disparadores on-chain y las fuentes rastreadas publican aquí cuando cambia el contenido.",
-  "newspaperPriceUnavailable": "Precio ALGO no disponible — ejecuta la recolección de métricas",
-  "newspaperArticleCount": "{count} artículos en el feed",
-  "newspaperCallout": "Explora fuentes registradas de Discord, Reddit y web.",
-  "newspaperViewSources": "Ver fuentes",
-  "newspaperEmptyFilteredTitle": "Aún no hay artículos",
-  "newspaperEmptyTitle": "El feed está vacío",
-  "newspaperEmptyFilteredMessage": "Esta fuente no ha publicado artículos. Comprueba que los workers estén activos y el contenido haya cambiado.",
   "newsFeedTitle": "Últimos artículos",
   "newsSubtitleDefault": "Los disparadores on-chain y las fuentes rastreadas publican aquí cuando cambia el contenido.",
+  "articlePublicationDetailsHint": "Editor, fecha y enlace de origen",
   "newsPriceUnavailable": "Precio de ALGO no disponible — ejecuta la recolección de métricas",
-  "newsArticleCount": "{count} artículos en el feed curado",
   "@newsArticleCount": {
     "placeholders": {
       "count": {
@@ -68,8 +66,10 @@
       }
     }
   },
+  "newsArticleCount": "{count} artículos en el feed curado",
+  "newsEmptyFilteredTitle": "Aún no hay artículos",
+  "newsEmptyTitle": "El feed está vacío",
   "newsSponsoredLabel": "Patrocinado",
-  "newsSponsoredBy": "Patrocinado · {sponsor}",
   "@newsSponsoredBy": {
     "placeholders": {
       "sponsor": {
@@ -77,27 +77,44 @@
       }
     }
   },
-  "newsEmptyFilteredTitle": "Aún no hay artículos",
-  "newsEmptyTitle": "El feed está vacío",
+  "newsSponsoredBy": "Patrocinado · {sponsor}",
   "newsEmptyFilteredMessage": "Esta fuente no ha publicado artículos. Comprueba que los workers estén activos y el contenido haya cambiado.",
   "newsEmptyMessage": "Inicia Conduit, workers Celery y registra service_registry para poblar el feed.",
+  "@newsFilterShowing": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
   "newsFilterShowing": "Mostrando artículos de {serviceId}",
   "clearFilter": "Quitar",
   "articleUntitled": "Sin título",
   "articleSectionTitle": "Artículo",
   "articlePublicationDetails": "Detalles de publicación",
   "articleMetaService": "Servicio",
+  "articleMetaPublisher": "Editor",
+  "articleMetaDataSource": "Fuente de datos",
+  "articleMetaCoinGecko": "Datos de mercado de CoinGecko",
   "articleMetaPublished": "Publicado",
   "articleMetaRound": "Ronda",
   "articleMetaTriggerTx": "Tx disparador",
   "articleMetaSourceUrl": "URL de origen",
   "articleOpenInBrowser": "Abrir en el navegador",
   "articleViewOnExplorer": "Ver en el explorador de Algorand",
-  "articleMetaPublisher": "Editor",
-  "articleMetaDataSource": "Fuente de datos",
-  "articleMetaCoinGecko": "Datos de mercado de CoinGecko",
-  "articleViewSource": "Ver fuente",
+  "@articleMoreFrom": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
   "articleMoreFrom": "Más de {serviceId}",
+  "articleViewSource": "Ver fuente",
+  "adminTitle": "Administración de fuentes",
+  "adminSubtitle": "Crawlers y feeds registrados (visibles solo para carteras de administrador).",
+  "adminViewFeedArticles": "Ver feed para esta fuente",
+  "adminAccessDenied": "Conecta una cartera de administrador para gestionar fuentes. Establece ADMIN_WALLET_ADDRESSES en el momento de la compilación.",
   "sourcesTitle": "Fuentes de noticias",
   "sourcesSubtitle": "Servicios registrados rastreados por workers. Discord y Reddit se consultan periódicamente; las coincidencias on-chain publican cuando cambia el contenido monitoreado.",
   "sourcesEmptyTitle": "No hay fuentes configuradas",
@@ -106,15 +123,49 @@
   "sourcesMetaScrapeUrl": "URL de rastreo",
   "sourcesMetaMatchRule": "Regla de coincidencia",
   "sourcesViewArticles": "Ver artículos",
-  "adminTitle": "Administración de fuentes",
-  "adminSubtitle": "Crawlers y feeds registrados (visibles solo para carteras de administrador).",
-  "adminViewFeedArticles": "Ver feed para esta fuente",
-  "adminAccessDenied": "Conecta una cartera de administrador para gestionar fuentes. Establece ADMIN_WALLET_ADDRESSES en el momento de la compilación.",
   "sourcesDisabled": "Desactivado",
+  "@filterAll": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "filterAll": "Todos ({count})",
+  "@filterDiscord": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "filterDiscord": "Discord ({count})",
+  "@filterReddit": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "filterReddit": "Reddit ({count})",
+  "@filterWeb": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "filterWeb": "Web ({count})",
+  "@matchRuleValue": {
+    "placeholders": {
+      "kind": {
+        "type": "String"
+      },
+      "value": {
+        "type": "String"
+      }
+    }
+  },
   "matchRuleValue": "{kind} = {value}",
   "sourceKindDiscord": "Discord",
   "sourceKindReddit": "Reddit",
@@ -136,9 +187,17 @@
   "searchQueryLabel": "Consulta",
   "searchQueryHint": "Palabras clave, títulos, resúmenes…",
   "searchAction": "Buscar",
+  "@searchEngine": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
   "searchEngine": "Motor: {name}",
   "searchEmptyTitle": "Sin resultados",
   "searchEmptyMessage": "Prueba diferentes palabras clave o verifica que los artículos estén indexados.",
+  "searchErrorBackend": "La búsqueda no está disponible temporalmente. Verifica que la API y la base de datos estén en ejecución.",
   "suggestionsTitle": "Sugerencias",
   "suggestionsSubtitle": "Envía después de transferir al menos 0.01 ALGO a la tesorería de la plataforma. Los votos usan una firma off-chain de la cartera.",
   "suggestionsNewTitle": "Nueva sugerencia",
@@ -154,39 +213,6 @@
   "suggestionsUpvoteDialogTitle": "Firmar mensaje de voto",
   "suggestionsCopyMessage": "Copiar mensaje",
   "suggestionsMessageCopied": "Mensaje de firma copiado al portapapeles",
-  "suggestionsTreasuryHelp": "Envía al menos {minAlgo} ALGO a la tesorería de la plataforma antes de enviar:\n{address}",
-  "suggestionsUpvoteCount": "{count, plural, =0{Sin votos aún} =1{1 voto} other{{count} votos}}",
-  "close": "Cerrar",
-  "suggestionsTxShort": "Tx {txid}",
-  "snackConnectWallet": "Conecta tu cartera primero",
-  "snackSuggestionSubmitted": "Sugerencia enviada",
-  "snackUpvoteRecorded": "Voto registrado",
-  "snackChooseSuggestionUpvote": "Elige una sugerencia para votar primero",
-  "metaPublishedEpoch": "Publicado: {epoch}",
-  "metaPublishedRelative": "Publicado: {when}",
-  "timeJustNow": "justo ahora",
-  "timeMinutesAgo": "hace {count} min",
-  "timeHoursAgo": "hace {count} h",
-  "timeDaysAgo": "hace {count} d",
-  "metaRound": "Ronda: {round}",
-  "@matchRuleValue": {
-    "placeholders": {
-      "kind": {
-        "type": "String"
-      },
-      "value": {
-        "type": "String"
-      }
-    }
-  },
-  "@searchEngine": {
-    "placeholders": {
-      "name": {
-        "type": "String"
-      }
-    }
-  },
-  "searchErrorBackend": "La búsqueda no está disponible temporalmente. Verifica que la API y la base de datos estén en ejecución.",
   "@suggestionsTreasuryHelp": {
     "placeholders": {
       "minAlgo": {
@@ -197,6 +223,7 @@
       }
     }
   },
+  "suggestionsTreasuryHelp": "Envía al menos {minAlgo} ALGO a la tesorería de la plataforma antes de enviar:\n{address}",
   "@suggestionsUpvoteCount": {
     "placeholders": {
       "count": {
@@ -204,6 +231,8 @@
       }
     }
   },
+  "suggestionsUpvoteCount": "{count, plural, =0{Sin votos aún} =1{1 voto} other{{count} votos}}",
+  "close": "Cerrar",
   "@suggestionsTxShort": {
     "placeholders": {
       "txid": {
@@ -211,6 +240,11 @@
       }
     }
   },
+  "suggestionsTxShort": "Tx {txid}",
+  "snackConnectWallet": "Conecta tu cartera primero",
+  "snackSuggestionSubmitted": "Sugerencia enviada",
+  "snackUpvoteRecorded": "Voto registrado",
+  "snackChooseSuggestionUpvote": "Elige una sugerencia para votar primero",
   "@metaPublishedEpoch": {
     "placeholders": {
       "epoch": {
@@ -218,6 +252,7 @@
       }
     }
   },
+  "metaPublishedEpoch": "Publicado: {epoch}",
   "@metaPublishedRelative": {
     "placeholders": {
       "when": {
@@ -225,6 +260,8 @@
       }
     }
   },
+  "metaPublishedRelative": "Publicado: {when}",
+  "timeJustNow": "justo ahora",
   "@timeMinutesAgo": {
     "placeholders": {
       "count": {
@@ -232,6 +269,7 @@
       }
     }
   },
+  "timeMinutesAgo": "hace {count} min",
   "@timeHoursAgo": {
     "placeholders": {
       "count": {
@@ -239,6 +277,7 @@
       }
     }
   },
+  "timeHoursAgo": "hace {count} h",
   "@timeDaysAgo": {
     "placeholders": {
       "count": {
@@ -246,6 +285,7 @@
       }
     }
   },
+  "timeDaysAgo": "hace {count} d",
   "@metaRound": {
     "placeholders": {
       "round": {
@@ -253,7 +293,7 @@
       }
     }
   },
-  "metaService": "Servicio: {serviceId}",
+  "metaRound": "Ronda: {round}",
   "@metaService": {
     "placeholders": {
       "serviceId": {
@@ -261,6 +301,74 @@
       }
     }
   },
+  "metaService": "Servicio: {serviceId}",
+  "navFrontPage": "Portada",
+  "navLatest": "Últimas",
+  "navSections": "SECCIONES",
+  "navAbout": "Acerca de",
+  "navApps": "Apps",
+  "navProductsMenuHint": "Explorar la plataforma",
+  "frontPageTopStories": "Historias destacadas",
+  "frontPageLatest": "Últimas",
+  "frontPageMore": "Más de la redacción",
+  "@frontPageSectionStories": {
+    "placeholders": {
+      "section": {
+        "type": "String"
+      }
+    }
+  },
+  "frontPageSectionStories": "Más en {section}",
+  "sectionMarkets": "Mercados",
+  "sectionSecurity": "Seguridad",
+  "sectionDevelopers": "Desarrolladores",
+  "sectionCommunity": "Comunidad",
+  "sectionEcosystem": "Ecosistema",
+  "sectionEmptyTitle": "Nada aquí todavía",
+  "sectionEmptyMessage": "Aún no hay historias en esta sección. Vuelve pronto.",
+  "bylineNewsroom": "La Redacción",
+  "bylineMarketsDesk": "Redacción de Mercados",
+  "bylineChainDesk": "Redacción On-Chain",
+  "@articleByline": {
+    "placeholders": {
+      "desk": {
+        "type": "String"
+      }
+    }
+  },
+  "articleByline": "Por {desk}",
+  "@articleReadingTime": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "articleReadingTime": "{count} min de lectura",
+  "articleRelatedTitle": "Historias relacionadas",
+  "articleShare": "Compartir",
+  "articleLinkCopied": "Enlace copiado al portapapeles",
+  "footerTagline": "Cobertura independiente y automatizada del ecosistema Algorand.",
+  "footerSectionsHeading": "Secciones",
+  "footerAboutHeading": "Acerca de",
+  "@footerRights": {
+    "placeholders": {
+      "year": {
+        "type": "String"
+      }
+    }
+  },
+  "footerRights": "© {year} PXke Algorand. Cobertura independiente del ecosistema Algorand.",
+  "aboutTitle": "Acerca de PXke Algorand",
+  "aboutLead": "PXke Algorand es una redacción independiente que cubre la blockchain Algorand: mercados, protocolo, gobernanza y los proyectos que se construyen sobre ella.",
+  "aboutHowHeading": "Cómo publicamos",
+  "aboutHowBody": "Nuestra cobertura se ensambla automáticamente a partir de eventos on-chain, datos de mercado programados y fuentes comunitarias monitorizadas, y luego se organiza en secciones. Cada historia incluye procedencia para que puedas rastrear su origen.",
+  "aboutAiHeading": "Redactado con IA",
+  "aboutAiBody": "PXke Algorand publica periodismo asistido por IA. Los artículos se redactan con modelos de lenguaje a partir de eventos on-chain, datos de mercado y fuentes comunitarias, bajo revisión editorial automatizada. Enlazamos las fuentes originales en cada historia.",
+  "aboutProvenanceHeading": "Procedencia y transparencia",
+  "aboutProvenanceBody": "Las historias on-chain se activan por transacciones verificables y enlazan al explorador de Algorand. Las de mercado usan datos de CoinGecko. Los contenidos patrocinados siempre se etiquetan como tales.",
+  "aboutStandardsHeading": "Estándares editoriales",
+  "aboutStandardsBody": "Buscamos precisión y atribución clara. Esta publicación no es asesoramiento de inversión. ¿Viste un error? Escríbenos desde los enlaces de fuente de cualquier historia.",
   "seedsTitle": "Semillas",
   "seedsSubtitle": "Puntos de partida configurados manualmente para el rastreador. Los dominios aprobados desde el descubrimiento aparecen en la pestaña Dominios.",
   "sourcesAdd": "Añadir fuente",
@@ -268,7 +376,6 @@
   "sourcesEditTitle": "Editar fuente",
   "sourcesAddTitle": "Añadir fuente",
   "sourcesDeleteTitle": "¿Eliminar fuente?",
-  "sourcesDeleteBody": "«{serviceId}» dejará de rastrearse. Los artículos ya publicados se mantienen.",
   "@sourcesDeleteBody": {
     "placeholders": {
       "serviceId": {
@@ -276,11 +383,30 @@
       }
     }
   },
+  "sourcesDeleteBody": "«{serviceId}» dejará de rastrearse. Los artículos ya publicados se mantienen.",
   "sourcesDelete": "Eliminar",
   "sourcesSave": "Guardar",
   "sourcesAddAction": "Añadir",
   "sourcesRequiredFields": "El id de servicio, el nombre y la URL son obligatorios.",
   "sourcesChangesNextPoll": "Los cambios se aplican en la siguiente consulta del rastreador.",
+  "sourcesMerge": "Fusionar",
+  "sourcesMergeTitle": "Fusionar servicios",
+  "sourcesMergeIntro": "Combina varios servicios en uno. Las fuentes y dominios de los servicios elegidos pasan al objetivo; los vaciados se desactivan.",
+  "sourcesMergeTarget": "Conservar como objetivo",
+  "sourcesMergeFold": "Incluir (se desactivará)",
+  "sourcesMergeAction": "Fusionar",
+  "sourcesMergeNeedsTwo": "Elige un objetivo y al menos un servicio para incluir.",
+  "@sourcesMergeDone": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "target": {
+        "type": "String"
+      }
+    }
+  },
+  "sourcesMergeDone": "Se fusionaron {count} servicio(s) en {target}.",
   "sourcesFieldServiceId": "Id de servicio",
   "sourcesFieldServiceIdHint": "kebab-case, p. ej. algorand-foundation-blog",
   "sourcesFieldDisplayName": "Nombre visible",
@@ -304,7 +430,6 @@
   "adminTabSystem": "Sistema",
   "domainsIntro": "Frontera de rastreo: dominios que el rastreador de enlaces ha encontrado. Los callejones sin salida nunca se exploran — se marcan automáticamente por relevancia y tus revisiones, o manualmente aquí.",
   "domainsFilterAll": "Todos",
-  "domainsFilterAllCount": "Todos ({count})",
   "@domainsFilterAllCount": {
     "placeholders": {
       "count": {
@@ -312,8 +437,8 @@
       }
     }
   },
+  "domainsFilterAllCount": "Todos ({count})",
   "domainsFilterPending": "Pendientes de revisión",
-  "domainsFilterPendingCount": "Pendientes de revisión ({count})",
   "@domainsFilterPendingCount": {
     "placeholders": {
       "count": {
@@ -321,8 +446,8 @@
       }
     }
   },
+  "domainsFilterPendingCount": "Pendientes de revisión ({count})",
   "domainsFilterDeadEnds": "Callejones sin salida",
-  "domainsFilterDeadEndsCount": "Callejones sin salida ({count})",
   "@domainsFilterDeadEndsCount": {
     "placeholders": {
       "count": {
@@ -330,9 +455,9 @@
       }
     }
   },
+  "domainsFilterDeadEndsCount": "Callejones sin salida ({count})",
   "domainsEmptyTitle": "Aún no hay dominios",
   "domainsEmptyMessage": "El rastreador registra cada dominio que encuentra al seguir enlaces.",
-  "domainsOpenInNewTab": "Abrir {domain} en una pestaña nueva",
   "@domainsOpenInNewTab": {
     "placeholders": {
       "domain": {
@@ -340,7 +465,7 @@
       }
     }
   },
-  "domainsKeywords": "palabras clave: {keywords}",
+  "domainsOpenInNewTab": "Abrir {domain} en una pestaña nueva",
   "@domainsKeywords": {
     "placeholders": {
       "keywords": {
@@ -348,7 +473,7 @@
       }
     }
   },
-  "domainsLinkedAs": "enlazado como «{text}»",
+  "domainsKeywords": "palabras clave: {keywords}",
   "@domainsLinkedAs": {
     "placeholders": {
       "text": {
@@ -356,7 +481,7 @@
       }
     }
   },
-  "domainsPredictedInterest": "interés previsto {score}",
+  "domainsLinkedAs": "enlazado como «{text}»",
   "@domainsPredictedInterest": {
     "placeholders": {
       "score": {
@@ -364,7 +489,7 @@
       }
     }
   },
-  "domainsFoundOn": "encontrado en {url}",
+  "domainsPredictedInterest": "interés previsto {score}",
   "@domainsFoundOn": {
     "placeholders": {
       "url": {
@@ -372,7 +497,7 @@
       }
     }
   },
-  "domainsScore": "puntuación {score}",
+  "domainsFoundOn": "encontrado en {url}",
   "@domainsScore": {
     "placeholders": {
       "score": {
@@ -380,7 +505,7 @@
       }
     }
   },
-  "domainsCrawled": "rastreado {date}",
+  "domainsScore": "puntuación {score}",
   "@domainsCrawled": {
     "placeholders": {
       "date": {
@@ -388,7 +513,7 @@
       }
     }
   },
-  "domainsPagesCrawled": "{count} páginas",
+  "domainsCrawled": "rastreado {date}",
   "@domainsPagesCrawled": {
     "placeholders": {
       "count": {
@@ -396,11 +521,11 @@
       }
     }
   },
+  "domainsPagesCrawled": "{count} páginas",
   "domainsDeadEnd": "Callejón sin salida",
   "domainsApproveExplore": "Aprobar y explorar",
   "domainsMarkDeadEnd": "Marcar como callejón sin salida",
   "domainsRevive": "Reactivar",
-  "domainsApprovedSnack": "{domain} aprobado — el rastreador puede explorarlo",
   "@domainsApprovedSnack": {
     "placeholders": {
       "domain": {
@@ -408,7 +533,7 @@
       }
     }
   },
-  "domainsDeadEndSnack": "{domain} marcado como callejón sin salida",
+  "domainsApprovedSnack": "{domain} aprobado — el rastreador puede explorarlo",
   "@domainsDeadEndSnack": {
     "placeholders": {
       "domain": {
@@ -416,5 +541,6 @@
       }
     }
   },
+  "domainsDeadEndSnack": "{domain} marcado como callejón sin salida",
   "domainsWalletNotConnected": "Cartera no conectada"
 }

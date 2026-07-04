@@ -122,6 +122,12 @@ class AppLocalizationsEn extends AppLocalizations {
   String get localeArabic => 'العربية';
 
   @override
+  String get localeChinese => '中文';
+
+  @override
+  String get localeHindi => 'हिन्दी';
+
+  @override
   String get navLanguage => 'LANGUAGE';
 
   @override

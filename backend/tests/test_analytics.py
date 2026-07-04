@@ -70,7 +70,22 @@ def test_is_internal_client_filters_self_and_private() -> None:
     assert not a.is_internal_client(None) and not a.is_internal_client("")
 
 
-def test_is_bot_covers_monitors_and_unfurlers() -> None:
+def test_recent_duplicate_pageview_dedupes_burst(monkeypatch) -> None:
+    store: dict[str, str] = {}
+
+    class _FakeRedis:
+        def set(self, key, value, *, nx=False, ex=None):
+            if nx and key in store:
+                return False
+            store[key] = value
+            return True
+
+    monkeypatch.setattr(a, "_uv_redis", lambda: _FakeRedis())
+    ip = "8.8.8.8"
+    ua = "Mozilla/5.0 Chrome/120"
+    assert not a._is_recent_duplicate_pageview(ip, ua, "/news")
+    assert a._is_recent_duplicate_pageview(ip, ua, "/news")
+    assert not a._is_recent_duplicate_pageview(ip, ua, "/about")
     assert a.is_bot("UptimeRobot/2.0 (http://uptimerobot.com)")
     assert a.is_bot("Mozilla/5.0 (compatible; TwitterBot/1.0)")
     assert a.is_bot("Datadog/Synthetics")

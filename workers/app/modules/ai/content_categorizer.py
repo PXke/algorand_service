@@ -24,7 +24,8 @@ _CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _fallback_category(text: str, url: str) -> str:
+def _fallback_categories(text: str, url: str, *, max_categories: int = 3) -> list[str]:
+    """Keyword heuristic returning every category with a positive score."""
     lowered = f"{text}\n{url}".lower()
     scores: dict[str, int] = dict.fromkeys(_CATEGORY_KEYWORDS, 0)
     for cat, keywords in _CATEGORY_KEYWORDS.items():
@@ -32,12 +33,20 @@ def _fallback_category(text: str, url: str) -> str:
             if kw in lowered:
                 scores[cat] += 1
     algo_hits = sum(1 for kw in POSITIVE_KEYWORDS if kw in lowered)
-    if algo_hits >= 3 and max(scores.values(), default=0) == 0:
-        return "service"
-    best = max(scores.items(), key=lambda item: item[1])
-    if best[1] > 0:
-        return best[0]
-    return "generic"
+    ranked = sorted(
+        ((cat, sc) for cat, sc in scores.items() if sc > 0),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    if ranked:
+        return [cat for cat, _ in ranked[:max_categories]]
+    if algo_hits >= 3:
+        return ["service"]
+    return ["generic"]
+
+
+def _fallback_category(text: str, url: str) -> str:
+    return _fallback_categories(text, url)[0]
 
 
 def _admin_category_for_domain(url: str) -> str | None:
@@ -64,18 +73,21 @@ def _admin_category_for_domain(url: str) -> str | None:
     return admin if admin in VALID_CATEGORIES else None
 
 
-def categorize_content(text: str, url: str) -> str:
-    """Categorize page content with NO LLM call: admin per-domain correction,
-    then the trained category model (learned from your corrections), then the
-    keyword heuristic. Mistral is reserved for article composition only."""
+def categorize_content_all(text: str, url: str, *, max_categories: int = 3) -> list[str]:
+    """All applicable content categories (primary first), without an LLM call."""
     admin_category = _admin_category_for_domain(url)
     if admin_category:
-        return admin_category
+        return [admin_category]
 
-    from app.modules.ai.publish_classifier import predict_category_model
+    from app.modules.ai.publish_classifier import predict_categories
 
-    predicted = predict_category_model(text, url)
-    if predicted and predicted in VALID_CATEGORIES:
+    predicted = predict_categories(text, url, max_categories=max_categories)
+    if predicted:
         return predicted
 
-    return _fallback_category(text, url)
+    return _fallback_categories(text, url, max_categories=max_categories)
+
+
+def categorize_content(text: str, url: str) -> str:
+    """Primary category — the first of [categorize_content_all]."""
+    return categorize_content_all(text, url)[0]

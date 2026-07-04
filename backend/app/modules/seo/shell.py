@@ -35,10 +35,6 @@ _cache: dict[str, object] = {"path": None, "mtime": 0.0, "html": None}
 # browsers preload the skwasm path only, everyone else gets canvaskit.
 def _resource_hints() -> str:
     hints = (
-        '<link rel="preload" href="/assets/assets/fonts/Inter-w400.ttf" '
-        'as="font" type="font/ttf" crossorigin>'
-        '<link rel="preload" href="/assets/assets/fonts/Inter-w700.ttf" '
-        'as="font" type="font/ttf" crossorigin>'
         "<script>(function(){"
         "var gc=false;"
         "try{gc=WebAssembly.validate(new Uint8Array("
@@ -65,10 +61,6 @@ def _resource_hints() -> str:
         "}"
         "})();</script>"
     )
-    api = (settings.public_api_url or "").strip().rstrip("/")
-    if api:
-        hints += f'\n<link rel="preconnect" href="{api}" crossorigin>\n'
-        hints += f'<link rel="dns-prefetch" href="{api}">'
     return hints
 
 
@@ -119,6 +111,15 @@ def load_template() -> str | None:
         _cache["mtime"] = mtime
         _cache["html"] = path.read_text(encoding="utf-8")
     return _cache["html"]  # type: ignore[return-value]
+
+
+def ssr_track_snippet(path: str) -> str:
+    """Inline script marking the SSR-recorded path so the Flutter beacon can skip
+    a duplicate count for the same landing page."""
+    safe = path.replace("\\", "\\\\").replace('"', '\\"')
+    return (
+        f'<script>try{{sessionStorage.setItem("pxke_ssr_pv","{safe}")}}catch(e){{}}</script>'
+    )
 
 
 def render_document(head_html: str, body_html: str) -> str | None:

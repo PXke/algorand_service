@@ -4,9 +4,6 @@ import 'site_footer.dart';
 
 /// A scrollable page whose [SiteFooter] is pinned to the bottom of the viewport
 /// when content is short, and flows naturally after content when it's tall.
-///
-/// Uses SliverFillRemaining(hasScrollBody: false) so the footer sticks down
-/// without the cost/fragility of IntrinsicHeight.
 class FooterScaffold extends StatelessWidget {
   const FooterScaffold({
     super.key,
@@ -22,23 +19,29 @@ class FooterScaffold extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final view = CustomScrollView(
-      controller: controller,
-      slivers: [
-        SliverToBoxAdapter(child: content),
-        SliverFillRemaining(
-          hasScrollBody: false,
-          child: Column(
-            children: const [
-              Spacer(),
-              SiteFooter(),
-            ],
+    final scroll = LayoutBuilder(
+      builder: (context, constraints) {
+        return SingleChildScrollView(
+          controller: controller,
+          physics: onRefresh != null
+              ? const AlwaysScrollableScrollPhysics()
+              : null,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: constraints.maxHeight),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                content,
+                const SiteFooter(),
+              ],
+            ),
           ),
-        ),
-      ],
+        );
+      },
     );
 
-    if (onRefresh == null) return view;
-    return RefreshIndicator(onRefresh: onRefresh!, child: view);
+    if (onRefresh == null) return scroll;
+    return RefreshIndicator(onRefresh: onRefresh!, child: scroll);
   }
 }

@@ -122,6 +122,12 @@ class AppLocalizationsAr extends AppLocalizations {
   String get localeArabic => 'العربية';
 
   @override
+  String get localeChinese => '中文';
+
+  @override
+  String get localeHindi => 'الهندية';
+
+  @override
   String get navLanguage => 'اللغة';
 
   @override
@@ -185,8 +191,7 @@ class AppLocalizationsAr extends AppLocalizations {
       'On-chain triggers and crawled sources publish here when content changes.';
 
   @override
-  String get articlePublicationDetailsHint =>
-      'Publisher, date, and source link';
+  String get articlePublicationDetailsHint => 'الناشر والتاريخ ورابط المصدر';
 
   @override
   String get newsPriceUnavailable =>
@@ -543,136 +548,134 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
-  String get navFrontPage => 'Front page';
+  String get navFrontPage => 'الصفحة الأولى';
 
   @override
-  String get navLatest => 'Latest';
+  String get navLatest => 'الأحدث';
 
   @override
-  String get navSections => 'SECTIONS';
+  String get navSections => 'الأقسام';
 
   @override
-  String get navAbout => 'About';
+  String get navAbout => 'حول';
 
   @override
-  String get navApps => 'Apps';
+  String get navApps => 'التطبيقات';
 
   @override
-  String get navProductsMenuHint => 'Explore the platform';
+  String get navProductsMenuHint => 'استكشف المنصة';
 
   @override
-  String get frontPageTopStories => 'Top stories';
+  String get frontPageTopStories => 'أهم القصص';
 
   @override
-  String get frontPageLatest => 'Latest';
+  String get frontPageLatest => 'الأحدث';
 
   @override
-  String get frontPageMore => 'More from the newsroom';
+  String get frontPageMore => 'المزيد من غرفة الأخبار';
 
   @override
   String frontPageSectionStories(String section) {
-    return 'More in $section';
+    return 'المزيد في $section';
   }
 
   @override
-  String get sectionMarkets => 'Markets';
+  String get sectionMarkets => 'الأسواق';
 
   @override
-  String get sectionSecurity => 'Security';
+  String get sectionSecurity => 'الأمن';
 
   @override
-  String get sectionDevelopers => 'Developers';
+  String get sectionDevelopers => 'المطورون';
 
   @override
-  String get sectionCommunity => 'Community';
+  String get sectionCommunity => 'المجتمع';
 
   @override
-  String get sectionEcosystem => 'Ecosystem';
+  String get sectionEcosystem => 'النظام البيئي';
 
   @override
-  String get sectionEmptyTitle => 'Nothing here yet';
+  String get sectionEmptyTitle => 'لا شيء هنا بعد';
 
   @override
-  String get sectionEmptyMessage =>
-      'No stories have been filed in this section. Check back soon.';
+  String get sectionEmptyMessage => 'لا توجد قصص في هذا القسم بعد. عد قريباً.';
 
   @override
-  String get bylineNewsroom => 'The Newsroom';
+  String get bylineNewsroom => 'غرفة الأخبار';
 
   @override
-  String get bylineMarketsDesk => 'Markets Desk';
+  String get bylineMarketsDesk => 'مكتب الأسواق';
 
   @override
-  String get bylineChainDesk => 'On-Chain Desk';
+  String get bylineChainDesk => 'مكتب على السلسلة';
 
   @override
   String articleByline(String desk) {
-    return 'By $desk';
+    return 'بقلم $desk';
   }
 
   @override
   String articleReadingTime(int count) {
-    return '$count min read';
+    return '$count دقائق قراءة';
   }
 
   @override
-  String get articleRelatedTitle => 'Related stories';
+  String get articleRelatedTitle => 'قصص ذات صلة';
 
   @override
-  String get articleShare => 'Share';
+  String get articleShare => 'مشاركة';
 
   @override
-  String get articleLinkCopied => 'Link copied to clipboard';
+  String get articleLinkCopied => 'تم نسخ الرابط';
 
   @override
-  String get footerTagline =>
-      'Independent, automated coverage of the Algorand ecosystem.';
+  String get footerTagline => 'تغطية مستقلة وآلية لنظام Algorand البيئي.';
 
   @override
-  String get footerSectionsHeading => 'Sections';
+  String get footerSectionsHeading => 'الأقسام';
 
   @override
-  String get footerAboutHeading => 'About';
+  String get footerAboutHeading => 'حول';
 
   @override
   String footerRights(String year) {
-    return '© $year PXke Algorand. Independent coverage of the Algorand ecosystem.';
+    return '© $year PXke Algorand. تغطية مستقلة لنظام Algorand البيئي.';
   }
 
   @override
-  String get aboutTitle => 'About PXke Algorand';
+  String get aboutTitle => 'حول PXke Algorand';
 
   @override
   String get aboutLead =>
-      'PXke Algorand is an independent newsroom covering the Algorand blockchain — its markets, protocol, governance, and the projects building on it.';
+      'PXke Algorand هي غرفة أخبار مستقلة تغطي بلوكتشين Algorand — أسواقها وبروتوكولها وحوكمتها والمشاريع المبنية عليها.';
 
   @override
-  String get aboutHowHeading => 'How we publish';
+  String get aboutHowHeading => 'كيف ننشر';
 
   @override
   String get aboutHowBody =>
-      'Our coverage is assembled automatically from on-chain events, scheduled market data, and monitored community sources, then organised into sections by our editorial pipeline. Every story carries a provenance line so you can trace where it came from.';
+      'نُجمّع التغطية تلقائياً من أحداث على السلسلة وبيانات السوق والمصادر المجتمعية المراقبة، ثم ننظمها في أقسام. كل قصة تتضمن مصدراً يمكنك تتبعه.';
 
   @override
-  String get aboutAiHeading => 'Written with AI';
+  String get aboutAiHeading => 'مكتوب بالذكاء الاصطناعي';
 
   @override
   String get aboutAiBody =>
-      'PXke Algorand publishes AI-assisted journalism. Our articles are drafted by AI language models from the on-chain events, market data, and community sources above, under automated editorial review — they are machine-generated rather than written by human reporters. We link to the original sources on every story so you can verify each claim, and the organisation, not an individual byline, is the author of record.';
+      'ينشر PXke Algorand صحافة بمساعدة الذكاء الاصطناعي. تُصاغ المقالات بنماذج لغوية من أحداث على السلسلة وبيانات السوق والمصادر المجتمعية، تحت مراجعة تحريرية آلية.';
 
   @override
-  String get aboutProvenanceHeading => 'Provenance & transparency';
+  String get aboutProvenanceHeading => 'المصدر والشفافية';
 
   @override
   String get aboutProvenanceBody =>
-      'On-chain stories are triggered by verifiable transactions and link back to the Algorand explorer. Market stories draw on CoinGecko data. Sponsored placements are always labelled as such and are kept clearly separate from editorial.';
+      'تُفعَّل قصص على السلسلة بمعاملات قابلة للتحقق وترتبط بمستكشف Algorand. قصص السوق من CoinGecko. المحتوى المموَّل يُوسَّم دائماً.';
 
   @override
-  String get aboutStandardsHeading => 'Editorial standards';
+  String get aboutStandardsHeading => 'المعايير التحريرية';
 
   @override
   String get aboutStandardsBody =>
-      'We aim for accuracy and clear attribution. This publication is not investment advice. Spotted an error? Reach out through the source links on any story.';
+      'نسعى للدقة والإسناد الواضح. هذا ليس نصيحة استثمارية. لاحظت خطأً؟ تواصل عبر روابط المصدر في أي قصة.';
 
   @override
   String get seedsTitle => 'البذور';
@@ -718,31 +721,30 @@ class AppLocalizationsAr extends AppLocalizations {
       'تُطبَّق التغييرات في الدورة التالية للزاحف.';
 
   @override
-  String get sourcesMerge => 'Merge';
+  String get sourcesMerge => 'دمج';
 
   @override
-  String get sourcesMergeTitle => 'Merge services';
+  String get sourcesMergeTitle => 'دمج الخدمات';
 
   @override
   String get sourcesMergeIntro =>
-      'Fold several services into one. The chosen services\' sources and domains move to the target; the emptied services are disabled. Use this when one product spans multiple domains (e.g. algorand.co + algorand.com).';
+      'ادمج عدة خدمات في واحدة. تنتقل مصادر ونطاقات الخدمات المختارة إلى الهدف؛ وتُعطَّل الفارغة.';
 
   @override
-  String get sourcesMergeTarget => 'Keep as target';
+  String get sourcesMergeTarget => 'الإبقاء كهدف';
 
   @override
-  String get sourcesMergeFold => 'Fold in (will be disabled)';
+  String get sourcesMergeFold => 'طي (سيُعطَّل)';
 
   @override
-  String get sourcesMergeAction => 'Merge';
+  String get sourcesMergeAction => 'دمج';
 
   @override
-  String get sourcesMergeNeedsTwo =>
-      'Pick a target and at least one service to fold in.';
+  String get sourcesMergeNeedsTwo => 'اختر هدفاً وخدمة واحدة على الأقل للطي.';
 
   @override
   String sourcesMergeDone(int count, String target) {
-    return 'Merged $count service(s) into $target.';
+    return 'تم دمج $count خدمة في $target.';
   }
 
   @override

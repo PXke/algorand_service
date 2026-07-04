@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/l10n/app_locales.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/l10n/locale_provider.dart';
 
@@ -13,20 +14,20 @@ class LocaleToggleButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = context.l10n;
     final locale = ref.watch(localeProvider);
+    final selected = locale?.languageCode ?? '';
 
     return PopupMenuButton<String>(
       tooltip: l10n.navLanguage,
       icon: const Icon(Icons.translate, size: 20),
-      initialValue: locale?.languageCode ?? '',
-      onSelected: (code) => ref
-          .read(localeProvider.notifier)
-          .setLocale(code.isEmpty ? null : Locale(code)),
+      initialValue: selected,
+      onSelected: (code) =>
+          ref.read(localeProvider.notifier).setLocale(localeFromCode(code)),
       itemBuilder: (context) => [
-        PopupMenuItem(value: '', child: Text(l10n.localeSystem)),
-        PopupMenuItem(value: 'en', child: Text(l10n.localeEnglish)),
-        PopupMenuItem(value: 'es', child: Text(l10n.localeSpanish)),
-        PopupMenuItem(value: 'fr', child: Text(l10n.localeFrench)),
-        PopupMenuItem(value: 'ar', child: Text(l10n.localeArabic)),
+        for (final option in kAppLocaleOptions)
+          PopupMenuItem(
+            value: option.code,
+            child: Text(localeOptionLabel(l10n, option)),
+          ),
       ],
     );
   }
@@ -55,31 +56,15 @@ class LocaleDrawerSection extends ConsumerWidget {
                   ),
             ),
           ),
-          _LocaleOption(
-            label: l10n.localeSystem,
-            selected: locale == null,
-            onTap: () => ref.read(localeProvider.notifier).setLocale(null),
-          ),
-          _LocaleOption(
-            label: l10n.localeEnglish,
-            selected: locale?.languageCode == 'en',
-            onTap: () => ref.read(localeProvider.notifier).setLocale(const Locale('en')),
-          ),
-          _LocaleOption(
-            label: l10n.localeSpanish,
-            selected: locale?.languageCode == 'es',
-            onTap: () => ref.read(localeProvider.notifier).setLocale(const Locale('es')),
-          ),
-          _LocaleOption(
-            label: l10n.localeFrench,
-            selected: locale?.languageCode == 'fr',
-            onTap: () => ref.read(localeProvider.notifier).setLocale(const Locale('fr')),
-          ),
-          _LocaleOption(
-            label: l10n.localeArabic,
-            selected: locale?.languageCode == 'ar',
-            onTap: () => ref.read(localeProvider.notifier).setLocale(const Locale('ar')),
-          ),
+          for (final option in kAppLocaleOptions)
+            _LocaleOption(
+              label: localeOptionLabel(l10n, option),
+              selected: option.code.isEmpty
+                  ? locale == null
+                  : locale?.languageCode == option.code,
+              onTap: () =>
+                  ref.read(localeProvider.notifier).setLocale(option.locale),
+            ),
         ],
       ),
     );
@@ -102,7 +87,10 @@ class _LocaleOption extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
 
     return ListTile(
-      title: Text(label, style: TextStyle(fontWeight: selected ? FontWeight.w600 : FontWeight.w500)),
+      title: Text(
+        label,
+        style: TextStyle(fontWeight: selected ? FontWeight.w600 : FontWeight.w500),
+      ),
       trailing: selected ? Icon(Icons.check, size: 20, color: scheme.primary) : null,
       selected: selected,
       selectedTileColor: scheme.primaryContainer.withValues(alpha: 0.45),

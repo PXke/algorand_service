@@ -781,6 +781,31 @@ def _record_direct(
     )
 
 
+_PVDEDUP_PREFIX = "algorand:pvdedup:"
+_PVDEDUP_TTL_SECONDS = 4
+
+
+def _is_recent_duplicate_pageview(
+    client_ip: str | None, user_agent: str | None, path: str
+) -> bool:
+    """True when the same visitor hit the same path within a few seconds — the
+    usual SSR landing + Flutter beacon double-count, or a route-settling burst."""
+    if not client_ip:
+        return False
+    ip = client_ip.split(",")[0].strip()
+    if not ip:
+        return False
+    try:
+        r = _uv_redis()
+        token = _uv_token(ip, user_agent).hex()
+        key = f"{_PVDEDUP_PREFIX}{token}:{path[:200]}"
+        added = r.set(key, "1", nx=True, ex=_PVDEDUP_TTL_SECONDS)
+        return not added
+    except Exception as exc:
+        log.debug("pageview dedup skipped: %s", exc)
+        return False
+
+
 def record_pageview(
     *,
     path: str,
@@ -792,6 +817,8 @@ def record_pageview(
     """Best-effort counter bumps for one document request. Never raises."""
     if is_internal_client(client_ip):
         return  # don't count the server itself / internal probes
+    if _is_recent_duplicate_pageview(client_ip, user_agent, path):
+        return
     try:
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import AnalyticsStmts

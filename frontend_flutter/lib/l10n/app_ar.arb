@@ -36,6 +36,8 @@
   "localeSpanish": "Español",
   "localeFrench": "Français",
   "localeArabic": "العربية",
+  "localeChinese": "中文",
+  "localeHindi": "الهندية",
   "navLanguage": "اللغة",
   "walletConnected": "متصل",
   "walletDisconnect": "قطع الاتصال",
@@ -55,8 +57,8 @@
   "walletDone": "Done",
   "newsFeedTitle": "أحدث المقالات",
   "newsSubtitleDefault": "On-chain triggers and crawled sources publish here when content changes.",
+  "articlePublicationDetailsHint": "الناشر والتاريخ ورابط المصدر",
   "newsPriceUnavailable": "ALGO price unavailable — run price metrics collection",
-  "newsArticleCount": "{count} articles in the curated feed",
   "@newsArticleCount": {
     "placeholders": {
       "count": {
@@ -64,13 +66,20 @@
       }
     }
   },
+  "newsArticleCount": "{count} articles in the curated feed",
   "newsEmptyFilteredTitle": "No articles yet",
   "newsEmptyTitle": "Feed is empty",
   "newsSponsoredLabel": "Sponsored",
+  "@newsSponsoredBy": {
+    "placeholders": {
+      "sponsor": {
+        "type": "String"
+      }
+    }
+  },
   "newsSponsoredBy": "Sponsored · {sponsor}",
   "newsEmptyFilteredMessage": "This source has not published any articles. Check that workers are polling and content has changed.",
   "newsEmptyMessage": "Start Conduit, Celery workers, and seed service_registry to populate the feed.",
-  "newsFilterShowing": "Showing articles from {serviceId}",
   "@newsFilterShowing": {
     "placeholders": {
       "serviceId": {
@@ -78,6 +87,7 @@
       }
     }
   },
+  "newsFilterShowing": "Showing articles from {serviceId}",
   "clearFilter": "Clear",
   "articleUntitled": "Untitled",
   "articleSectionTitle": "Article",
@@ -92,7 +102,6 @@
   "articleMetaSourceUrl": "Source URL",
   "articleOpenInBrowser": "Open in browser",
   "articleViewOnExplorer": "عرض على مستكشف Algorand",
-  "articleMoreFrom": "More from {serviceId}",
   "@articleMoreFrom": {
     "placeholders": {
       "serviceId": {
@@ -100,6 +109,7 @@
       }
     }
   },
+  "articleMoreFrom": "More from {serviceId}",
   "articleViewSource": "View source",
   "adminTitle": "Source administration",
   "adminSubtitle": "Registered crawlers and feeds (visible to admin wallets only).",
@@ -114,7 +124,6 @@
   "sourcesMetaMatchRule": "Match rule",
   "sourcesViewArticles": "View articles",
   "sourcesDisabled": "Disabled",
-  "filterAll": "All ({count})",
   "@filterAll": {
     "placeholders": {
       "count": {
@@ -122,7 +131,7 @@
       }
     }
   },
-  "filterDiscord": "Discord ({count})",
+  "filterAll": "All ({count})",
   "@filterDiscord": {
     "placeholders": {
       "count": {
@@ -130,7 +139,7 @@
       }
     }
   },
-  "filterReddit": "Reddit ({count})",
+  "filterDiscord": "Discord ({count})",
   "@filterReddit": {
     "placeholders": {
       "count": {
@@ -138,7 +147,7 @@
       }
     }
   },
-  "filterWeb": "Web ({count})",
+  "filterReddit": "Reddit ({count})",
   "@filterWeb": {
     "placeholders": {
       "count": {
@@ -146,7 +155,7 @@
       }
     }
   },
-  "matchRuleValue": "{kind} = {value}",
+  "filterWeb": "Web ({count})",
   "@matchRuleValue": {
     "placeholders": {
       "kind": {
@@ -157,6 +166,7 @@
       }
     }
   },
+  "matchRuleValue": "{kind} = {value}",
   "sourceKindDiscord": "Discord",
   "sourceKindReddit": "Reddit",
   "sourceKindWeb": "Web",
@@ -177,7 +187,6 @@
   "searchQueryLabel": "استعلام البحث",
   "searchQueryHint": "كلمات مفتاحية، عناوين، ملخصات…",
   "searchAction": "بحث",
-  "searchEngine": "Engine: {name}",
   "@searchEngine": {
     "placeholders": {
       "name": {
@@ -185,6 +194,7 @@
       }
     }
   },
+  "searchEngine": "Engine: {name}",
   "searchEmptyTitle": "لا نتائج",
   "searchEmptyMessage": "Try different keywords or check that articles are indexed.",
   "searchErrorBackend": "البحث غير متاح مؤقتًا. تأكد من تشغيل واجهة API وقاعدة البيانات.",
@@ -203,7 +213,6 @@
   "suggestionsUpvoteDialogTitle": "Sign upvote message",
   "suggestionsCopyMessage": "Copy message",
   "suggestionsMessageCopied": "Signing message copied to clipboard",
-  "suggestionsTreasuryHelp": "Send at least {minAlgo} ALGO to the platform treasury before submitting:\n{address}",
   "@suggestionsTreasuryHelp": {
     "placeholders": {
       "minAlgo": {
@@ -214,7 +223,7 @@
       }
     }
   },
-  "suggestionsUpvoteCount": "{count, plural, =0{No upvotes yet} =1{1 upvote} other{{count} upvotes}}",
+  "suggestionsTreasuryHelp": "Send at least {minAlgo} ALGO to the platform treasury before submitting:\n{address}",
   "@suggestionsUpvoteCount": {
     "placeholders": {
       "count": {
@@ -222,8 +231,8 @@
       }
     }
   },
+  "suggestionsUpvoteCount": "{count, plural, =0{No upvotes yet} =1{1 upvote} other{{count} upvotes}}",
   "close": "Close",
-  "suggestionsTxShort": "Tx {txid}",
   "@suggestionsTxShort": {
     "placeholders": {
       "txid": {
@@ -231,11 +240,11 @@
       }
     }
   },
+  "suggestionsTxShort": "Tx {txid}",
   "snackConnectWallet": "Connect your wallet first",
   "snackSuggestionSubmitted": "Suggestion submitted",
   "snackUpvoteRecorded": "Upvote recorded",
   "snackChooseSuggestionUpvote": "Choose a suggestion to upvote first",
-  "metaPublishedEpoch": "Published: {epoch}",
   "@metaPublishedEpoch": {
     "placeholders": {
       "epoch": {
@@ -243,7 +252,7 @@
       }
     }
   },
-  "metaPublishedRelative": "Published: {when}",
+  "metaPublishedEpoch": "Published: {epoch}",
   "@metaPublishedRelative": {
     "placeholders": {
       "when": {
@@ -251,8 +260,8 @@
       }
     }
   },
+  "metaPublishedRelative": "Published: {when}",
   "timeJustNow": "just now",
-  "timeMinutesAgo": "{count}m ago",
   "@timeMinutesAgo": {
     "placeholders": {
       "count": {
@@ -260,7 +269,7 @@
       }
     }
   },
-  "timeHoursAgo": "{count}h ago",
+  "timeMinutesAgo": "{count}m ago",
   "@timeHoursAgo": {
     "placeholders": {
       "count": {
@@ -268,7 +277,7 @@
       }
     }
   },
-  "timeDaysAgo": "{count}d ago",
+  "timeHoursAgo": "{count}h ago",
   "@timeDaysAgo": {
     "placeholders": {
       "count": {
@@ -276,7 +285,7 @@
       }
     }
   },
-  "metaRound": "Round: {round}",
+  "timeDaysAgo": "{count}d ago",
   "@metaRound": {
     "placeholders": {
       "round": {
@@ -284,7 +293,7 @@
       }
     }
   },
-  "metaService": "الخدمة: {serviceId}",
+  "metaRound": "Round: {round}",
   "@metaService": {
     "placeholders": {
       "serviceId": {
@@ -292,6 +301,74 @@
       }
     }
   },
+  "metaService": "الخدمة: {serviceId}",
+  "navFrontPage": "الصفحة الأولى",
+  "navLatest": "الأحدث",
+  "navSections": "الأقسام",
+  "navAbout": "حول",
+  "navApps": "التطبيقات",
+  "navProductsMenuHint": "استكشف المنصة",
+  "frontPageTopStories": "أهم القصص",
+  "frontPageLatest": "الأحدث",
+  "frontPageMore": "المزيد من غرفة الأخبار",
+  "@frontPageSectionStories": {
+    "placeholders": {
+      "section": {
+        "type": "String"
+      }
+    }
+  },
+  "frontPageSectionStories": "المزيد في {section}",
+  "sectionMarkets": "الأسواق",
+  "sectionSecurity": "الأمن",
+  "sectionDevelopers": "المطورون",
+  "sectionCommunity": "المجتمع",
+  "sectionEcosystem": "النظام البيئي",
+  "sectionEmptyTitle": "لا شيء هنا بعد",
+  "sectionEmptyMessage": "لا توجد قصص في هذا القسم بعد. عد قريباً.",
+  "bylineNewsroom": "غرفة الأخبار",
+  "bylineMarketsDesk": "مكتب الأسواق",
+  "bylineChainDesk": "مكتب على السلسلة",
+  "@articleByline": {
+    "placeholders": {
+      "desk": {
+        "type": "String"
+      }
+    }
+  },
+  "articleByline": "بقلم {desk}",
+  "@articleReadingTime": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "articleReadingTime": "{count} دقائق قراءة",
+  "articleRelatedTitle": "قصص ذات صلة",
+  "articleShare": "مشاركة",
+  "articleLinkCopied": "تم نسخ الرابط",
+  "footerTagline": "تغطية مستقلة وآلية لنظام Algorand البيئي.",
+  "footerSectionsHeading": "الأقسام",
+  "footerAboutHeading": "حول",
+  "@footerRights": {
+    "placeholders": {
+      "year": {
+        "type": "String"
+      }
+    }
+  },
+  "footerRights": "© {year} PXke Algorand. تغطية مستقلة لنظام Algorand البيئي.",
+  "aboutTitle": "حول PXke Algorand",
+  "aboutLead": "PXke Algorand هي غرفة أخبار مستقلة تغطي بلوكتشين Algorand — أسواقها وبروتوكولها وحوكمتها والمشاريع المبنية عليها.",
+  "aboutHowHeading": "كيف ننشر",
+  "aboutHowBody": "نُجمّع التغطية تلقائياً من أحداث على السلسلة وبيانات السوق والمصادر المجتمعية المراقبة، ثم ننظمها في أقسام. كل قصة تتضمن مصدراً يمكنك تتبعه.",
+  "aboutAiHeading": "مكتوب بالذكاء الاصطناعي",
+  "aboutAiBody": "ينشر PXke Algorand صحافة بمساعدة الذكاء الاصطناعي. تُصاغ المقالات بنماذج لغوية من أحداث على السلسلة وبيانات السوق والمصادر المجتمعية، تحت مراجعة تحريرية آلية.",
+  "aboutProvenanceHeading": "المصدر والشفافية",
+  "aboutProvenanceBody": "تُفعَّل قصص على السلسلة بمعاملات قابلة للتحقق وترتبط بمستكشف Algorand. قصص السوق من CoinGecko. المحتوى المموَّل يُوسَّم دائماً.",
+  "aboutStandardsHeading": "المعايير التحريرية",
+  "aboutStandardsBody": "نسعى للدقة والإسناد الواضح. هذا ليس نصيحة استثمارية. لاحظت خطأً؟ تواصل عبر روابط المصدر في أي قصة.",
   "seedsTitle": "البذور",
   "seedsSubtitle": "نقاط انطلاق يُعدّها المشرف يدويًا للزاحف. النطاقات المعتمدة من الاكتشاف تظهر في تبويب النطاقات.",
   "sourcesAdd": "إضافة مصدر",
@@ -299,7 +376,6 @@
   "sourcesEditTitle": "تعديل المصدر",
   "sourcesAddTitle": "إضافة مصدر",
   "sourcesDeleteTitle": "حذف المصدر؟",
-  "sourcesDeleteBody": "سيتوقف الزحف إلى «{serviceId}». المقالات المنشورة سابقًا تبقى كما هي.",
   "@sourcesDeleteBody": {
     "placeholders": {
       "serviceId": {
@@ -307,11 +383,30 @@
       }
     }
   },
+  "sourcesDeleteBody": "سيتوقف الزحف إلى «{serviceId}». المقالات المنشورة سابقًا تبقى كما هي.",
   "sourcesDelete": "حذف",
   "sourcesSave": "حفظ",
   "sourcesAddAction": "إضافة",
   "sourcesRequiredFields": "معرّف الخدمة والاسم والرابط مطلوبة.",
   "sourcesChangesNextPoll": "تُطبَّق التغييرات في الدورة التالية للزاحف.",
+  "sourcesMerge": "دمج",
+  "sourcesMergeTitle": "دمج الخدمات",
+  "sourcesMergeIntro": "ادمج عدة خدمات في واحدة. تنتقل مصادر ونطاقات الخدمات المختارة إلى الهدف؛ وتُعطَّل الفارغة.",
+  "sourcesMergeTarget": "الإبقاء كهدف",
+  "sourcesMergeFold": "طي (سيُعطَّل)",
+  "sourcesMergeAction": "دمج",
+  "sourcesMergeNeedsTwo": "اختر هدفاً وخدمة واحدة على الأقل للطي.",
+  "@sourcesMergeDone": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "target": {
+        "type": "String"
+      }
+    }
+  },
+  "sourcesMergeDone": "تم دمج {count} خدمة في {target}.",
   "sourcesFieldServiceId": "معرّف الخدمة",
   "sourcesFieldServiceIdHint": "kebab-case، مثل algorand-foundation-blog",
   "sourcesFieldDisplayName": "الاسم المعروض",
@@ -335,7 +430,6 @@
   "adminTabSystem": "النظام",
   "domainsIntro": "حدود الزحف: النطاقات التي التقى بها زاحف الروابط. المسارات المسدودة لا تُستكشف أبدًا — تُحدَّد تلقائيًا بالأهمية وحكمك اليدوي هنا.",
   "domainsFilterAll": "الكل",
-  "domainsFilterAllCount": "الكل ({count})",
   "@domainsFilterAllCount": {
     "placeholders": {
       "count": {
@@ -343,8 +437,8 @@
       }
     }
   },
+  "domainsFilterAllCount": "الكل ({count})",
   "domainsFilterPending": "بانتظار المراجعة",
-  "domainsFilterPendingCount": "بانتظار المراجعة ({count})",
   "@domainsFilterPendingCount": {
     "placeholders": {
       "count": {
@@ -352,8 +446,8 @@
       }
     }
   },
+  "domainsFilterPendingCount": "بانتظار المراجعة ({count})",
   "domainsFilterDeadEnds": "مسارات مسدودة",
-  "domainsFilterDeadEndsCount": "مسارات مسدودة ({count})",
   "@domainsFilterDeadEndsCount": {
     "placeholders": {
       "count": {
@@ -361,9 +455,9 @@
       }
     }
   },
+  "domainsFilterDeadEndsCount": "مسارات مسدودة ({count})",
   "domainsEmptyTitle": "لا توجد نطاقات بعد",
   "domainsEmptyMessage": "يسجّل الزاحف كل نطاق يجده أثناء متابعة الروابط.",
-  "domainsOpenInNewTab": "فتح {domain} في تبويب جديد",
   "@domainsOpenInNewTab": {
     "placeholders": {
       "domain": {
@@ -371,7 +465,7 @@
       }
     }
   },
-  "domainsKeywords": "كلمات مفتاحية: {keywords}",
+  "domainsOpenInNewTab": "فتح {domain} في تبويب جديد",
   "@domainsKeywords": {
     "placeholders": {
       "keywords": {
@@ -379,7 +473,7 @@
       }
     }
   },
-  "domainsLinkedAs": "مرتبط كـ «{text}»",
+  "domainsKeywords": "كلمات مفتاحية: {keywords}",
   "@domainsLinkedAs": {
     "placeholders": {
       "text": {
@@ -387,7 +481,7 @@
       }
     }
   },
-  "domainsPredictedInterest": "الاهتمام المتوقع {score}",
+  "domainsLinkedAs": "مرتبط كـ «{text}»",
   "@domainsPredictedInterest": {
     "placeholders": {
       "score": {
@@ -395,7 +489,7 @@
       }
     }
   },
-  "domainsFoundOn": "وُجد على {url}",
+  "domainsPredictedInterest": "الاهتمام المتوقع {score}",
   "@domainsFoundOn": {
     "placeholders": {
       "url": {
@@ -403,7 +497,7 @@
       }
     }
   },
-  "domainsScore": "الدرجة {score}",
+  "domainsFoundOn": "وُجد على {url}",
   "@domainsScore": {
     "placeholders": {
       "score": {
@@ -411,7 +505,7 @@
       }
     }
   },
-  "domainsCrawled": "زُحف في {date}",
+  "domainsScore": "الدرجة {score}",
   "@domainsCrawled": {
     "placeholders": {
       "date": {
@@ -419,7 +513,7 @@
       }
     }
   },
-  "domainsPagesCrawled": "{count} صفحة",
+  "domainsCrawled": "زُحف في {date}",
   "@domainsPagesCrawled": {
     "placeholders": {
       "count": {
@@ -427,11 +521,11 @@
       }
     }
   },
+  "domainsPagesCrawled": "{count} صفحة",
   "domainsDeadEnd": "مسار مسدود",
   "domainsApproveExplore": "اعتماد واستكشاف",
   "domainsMarkDeadEnd": "تعليم كمسار مسدود",
   "domainsRevive": "إعادة تفعيل",
-  "domainsApprovedSnack": "تم اعتماد {domain} — يمكن للزاحف استكشافه",
   "@domainsApprovedSnack": {
     "placeholders": {
       "domain": {
@@ -439,7 +533,7 @@
       }
     }
   },
-  "domainsDeadEndSnack": "تم تعليم {domain} كمسار مسدود",
+  "domainsApprovedSnack": "تم اعتماد {domain} — يمكن للزاحف استكشافه",
   "@domainsDeadEndSnack": {
     "placeholders": {
       "domain": {
@@ -447,5 +541,6 @@
       }
     }
   },
+  "domainsDeadEndSnack": "تم تعليم {domain} كمسار مسدود",
   "domainsWalletNotConnected": "المحفظة غير متصلة"
 }

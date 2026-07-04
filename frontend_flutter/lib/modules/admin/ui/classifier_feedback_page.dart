@@ -55,11 +55,18 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
 
   Set<String> _categoriesFor(Map<String, dynamic> item) {
     final key = _itemKey(item);
-    final predicted = (item['category'] as String? ?? 'generic').toLowerCase();
-    return _selectedCategories.putIfAbsent(
-      key,
-      () => {classifierCategories.contains(predicted) ? predicted : 'generic'},
-    );
+    return _selectedCategories.putIfAbsent(key, () {
+      final raw = item['categories'];
+      if (raw is List) {
+        final fromApi = raw
+            .map((e) => e.toString().toLowerCase())
+            .where((c) => classifierCategories.contains(c))
+            .toSet();
+        if (fromApi.isNotEmpty) return fromApi;
+      }
+      final predicted = (item['category'] as String? ?? 'generic').toLowerCase();
+      return {classifierCategories.contains(predicted) ? predicted : 'generic'};
+    });
   }
 
   bool _sourceRelevantFor(Map<String, dynamic> item) =>
@@ -254,6 +261,7 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
     try {
       final api = ref.read(adminApiProvider);
       final predictedCategory = (item['category'] as String? ?? 'generic').toLowerCase();
+      final cats = _categoriesFor(item).toList()..sort();
       // Send only dimensions the reviewer actually changed (vs the auto-score).
       final detail = item['grade_detail'];
       final subs = (detail is Map && detail['subscores'] is Map)
@@ -268,8 +276,8 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
         walletAddress: wallet,
         url: item['url'] as String? ?? '',
         textSample: item['page_text_preview'] as String? ?? '',
-        category: _categoriesFor(item).first,
-        categories: _categoriesFor(item).toList(),
+        category: cats.first,
+        categories: cats,
         predictedCategory: predictedCategory,
         quality: _qualityFor(item),
         sourceRelevant: _sourceRelevantFor(item),
@@ -554,6 +562,13 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
     final title = item['page_title'] as String? ?? item['url'] as String? ?? '';
     final url = item['url'] as String? ?? '';
     final predictedCategory = (item['category'] as String? ?? 'generic').toLowerCase();
+    final predictedCategories = () {
+      final raw = item['categories'];
+      if (raw is List && raw.isNotEmpty) {
+        return raw.map((e) => e.toString().toLowerCase()).toList();
+      }
+      return [predictedCategory];
+    }();
     final score = item['storage_score'];
     final confidence = item['confidence'];
     final preview = item['page_text_preview'] as String? ?? '';
@@ -681,7 +696,7 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
                 ),
                 child: Text(
                   [
-                    'Predicted: ${classifierCategoryLabel(predictedCategory)}',
+                    'Predicted: ${predictedCategories.map(classifierCategoryLabel).join(', ')}',
                     if (score != null) 'score $score',
                     if (confidence is num)
                       'confidence ${(confidence * 100).toStringAsFixed(0)}%',

@@ -297,18 +297,53 @@ def _retrain_category_model(cat_samples: list[tuple[str, str, str]]) -> dict[str
 
 def predict_category_model(text: str, url: str) -> str | None:
     """Trained-model category prediction, or None when no model exists yet."""
+    cats = predict_categories(text, url, max_categories=1)
+    return cats[0] if cats else None
+
+
+def predict_categories(
+    text: str,
+    url: str,
+    *,
+    max_categories: int = 3,
+    min_prob: float = 0.15,
+) -> list[str]:
+    """Return up to ``max_categories`` labels from the trained model's
+    probability distribution (primary first). Empty when no model exists."""
+    from app.modules.ai.content_categorizer import VALID_CATEGORIES
+
     import pickle
 
     path = _category_model_path()
     if not path.is_file():
-        return None
+        return []
     try:
         with path.open("rb") as fh:
             bundle = pickle.load(fh)
         x = bundle["vectorizer"].transform([_text_blob(text, url)])
-        return str(bundle["model"].predict(x)[0])
+        model = bundle["model"]
+        if not hasattr(model, "predict_proba"):
+            label = str(model.predict(x)[0])
+            return [label] if label in VALID_CATEGORIES else []
+        proba = model.predict_proba(x)[0]
+        classes = list(model.classes_)
+        ranked = sorted(zip(classes, proba, strict=False), key=lambda t: t[1], reverse=True)
+        out: list[str] = []
+        for label, prob in ranked:
+            if prob < min_prob:
+                continue
+            norm = str(label).strip().lower()
+            if norm in VALID_CATEGORIES and norm not in out:
+                out.append(norm)
+            if len(out) >= max_categories:
+                break
+        if not out and ranked:
+            norm = str(ranked[0][0]).strip().lower()
+            if norm in VALID_CATEGORIES:
+                out.append(norm)
+        return out
     except Exception:
-        return None
+        return []
 
 
 def service_id_for_url(url: str) -> str:

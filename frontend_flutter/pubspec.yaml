@@ -73,29 +73,14 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
+  # Inter w400 only in the manifest for boot; w700 + serif load via
+  # [DeferredFontLoader] after first paint (web).
+  assets:
+    - assets/fonts/Inter-w700.ttf
+    - assets/fonts/SourceSerif4-w700.ttf
 
-  # An image asset can refer to one or more resolution-specific "variants", see
-  # https://flutter.dev/to/resolution-aware-images
-
-  # For details regarding adding assets from package dependencies, see
-  # https://flutter.dev/to/asset-from-package
-
-  # Bundled variable fonts (was google_fonts, which fetched these from
-  # fonts.gstatic.com at runtime — extra round-trips on slow links and the
-  # package's machinery in the bundle). One variable file per family covers all
-  # weights; Flutter maps FontWeight onto the wght axis.
   fonts:
     - family: Inter
       fonts:
         - asset: assets/fonts/Inter-w400.ttf
           weight: 400
-        - asset: assets/fonts/Inter-w700.ttf
-          weight: 700
-    - family: Source Serif 4
-      fonts:
-        - asset: assets/fonts/SourceSerif4-w700.ttf
-          weight: 700

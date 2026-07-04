@@ -181,6 +181,12 @@ def test_beacon_path_validation_rejects_made_up_paths() -> None:
     assert not _is_known_app_path("/random/garbage")
 
 
+def test_ssr_track_snippet_marks_recorded_path() -> None:
+    snippet = shell.ssr_track_snippet('/news/articles/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d')
+    assert 'sessionStorage.setItem("pxke_ssr_pv"' in snippet
+    assert "/news/articles/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d" in snippet
+
+
 def test_section_lookup_and_matching() -> None:
     sec = section_for_slug("developers")
     assert sec is not None
@@ -348,4 +354,5 @@ def test_shell_injection_adds_engine_preloads(monkeypatch, tmp_path) -> None:
     assert "main.dart.mjs" in doc
     assert "skwasm.wasm" in doc
     assert "canvaskit.wasm" in doc
-    assert 'rel="preconnect" href="https://algorand-api.pxke.me"' in doc
+    # API preconnect removed: feed/markets/auth are deferred; early preconnect
+    # triggered Lighthouse "unused preconnect" and competed with WASM on boot.
