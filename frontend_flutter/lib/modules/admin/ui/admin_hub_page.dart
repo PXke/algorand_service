@@ -10,7 +10,7 @@ import '../../../core/ui/error_banner.dart';
 import '../../../core/ui/layout.dart';
 import '../../../core/ui/loading_strip.dart';
 import '../../../core/ui/page_content.dart';
-import '../../auth/providers/auth_providers.dart';
+import '../../../core/providers/session_providers.dart';
 import '../../newspaper/services/news_api.dart';
 import '../../sources/ui/sources_page.dart';
 import 'analytics_page.dart';
@@ -18,6 +18,7 @@ import 'classifier_feedback_page.dart';
 import 'compose_sessions_page.dart';
 import 'domains_page.dart';
 import 'gatekeeper_page.dart';
+import 'inbox_page.dart';
 import 'tool_insights_page.dart';
 import 'training_page.dart';
 
@@ -50,7 +51,7 @@ class _AdminHubPageState extends ConsumerState<AdminHubPage>
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 11, vsync: this);
+    _tabs = TabController(length: 12, vsync: this);
   }
 
   @override
@@ -143,6 +144,7 @@ class _AdminHubPageState extends ConsumerState<AdminHubPage>
                       _adminHubTab(l10n.adminTabToolInsights, Icons.build_outlined),
                       _adminHubTab(l10n.adminTabSessions, Icons.forum_outlined),
                       _adminHubTab('Analytics', Icons.insights_outlined),
+                      _adminHubTab('Inbox', Icons.mail_outline),
                       _adminHubTab(l10n.adminTabSystem, Icons.settings_outlined),
                     ],
                   ),
@@ -165,6 +167,7 @@ class _AdminHubPageState extends ConsumerState<AdminHubPage>
               ToolInsightsTab(),
               ComposeSessionsTab(),
               AnalyticsTab(),
+              InboxTab(),
               _AdminSystemTab(),
             ],
           ),
@@ -179,7 +182,7 @@ class _EditorBadge extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final colors = context.appColors;
-    final address = ref.watch(walletAuthStateProvider).walletAddress ?? '';
+    final address = ref.watch(sessionStateProvider).walletAddress ?? '';
     final short = address.length > 10
         ? '${address.substring(0, 5)}…${address.substring(address.length - 5)}'
         : address;
@@ -295,7 +298,7 @@ class _AdminArticlesTabState extends ConsumerState<_AdminArticlesTab> {
   }
 
   Future<void> _save() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     final id = _selectedId;
     if (wallet == null || id == null) return;
     setState(() => _saving = true);
@@ -321,7 +324,7 @@ class _AdminArticlesTabState extends ConsumerState<_AdminArticlesTab> {
   }
 
   Future<void> _delete() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     final id = _selectedId;
     if (wallet == null || id == null) return;
 
@@ -662,7 +665,7 @@ class _AdminBriefsTabState extends ConsumerState<_AdminBriefsTab> {
   }
 
   Future<void> _refresh() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null) return;
     try {
       final items = await ref.read(adminApiProvider).listBriefs(walletAddress: wallet);
@@ -678,7 +681,7 @@ class _AdminBriefsTabState extends ConsumerState<_AdminBriefsTab> {
   }
 
   Future<void> _create() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null || _titleController.text.trim().isEmpty) return;
     setState(() => _submitting = true);
     try {
@@ -708,7 +711,7 @@ class _AdminBriefsTabState extends ConsumerState<_AdminBriefsTab> {
   }
 
   Future<void> _assignNow(String briefId) async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null) return;
     setState(() => _assigningBriefId = briefId);
     try {
@@ -944,7 +947,7 @@ class _AdminSystemTabState extends ConsumerState<_AdminSystemTab> {
       _loading = true;
       _error = null;
     });
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     final api = ref.read(adminApiProvider);
     try {
       final health = ref.read(apiClientProvider).getJson('/health/ready');
@@ -989,7 +992,7 @@ class _AdminSystemTabState extends ConsumerState<_AdminSystemTab> {
   }
 
   Future<void> _runAll() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null || _actions.isEmpty) return;
     setState(() => _running.addAll(_actions.map((a) => a['action'].toString())));
     final api = ref.read(adminApiProvider);
@@ -1022,7 +1025,7 @@ class _AdminSystemTabState extends ConsumerState<_AdminSystemTab> {
   bool _clearingDomains = false;
 
   Future<void> _clearDomains() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null) return;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -1060,7 +1063,7 @@ class _AdminSystemTabState extends ConsumerState<_AdminSystemTab> {
   }
 
   Future<void> _resetPipeline() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null) return;
 
     final confirmed = await showDialog<bool>(
@@ -1107,7 +1110,7 @@ class _AdminSystemTabState extends ConsumerState<_AdminSystemTab> {
   }
 
   Future<void> _run(Map<String, dynamic> action) async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     final key = action['action']?.toString() ?? '';
     if (wallet == null || key.isEmpty) return;
     setState(() => _running.add(key));

@@ -8,7 +8,7 @@ import '../../../core/ui/error_banner.dart';
 import '../../../core/ui/layout.dart';
 import '../../../core/ui/loading_strip.dart';
 import '../../../core/ui/page_content.dart';
-import '../../auth/providers/auth_providers.dart';
+import '../../../core/providers/session_providers.dart';
 import '../models/classifier_labels.dart';
 import '../../../core/ui/article_markdown.dart';
 import '../../newspaper/services/news_api.dart';
@@ -71,7 +71,7 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
   }
 
   Future<void> _load() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null || wallet.isEmpty) {
       setState(() {
         _loading = false;
@@ -107,7 +107,7 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
   bool _composing = false;
 
   Future<void> _composeNext() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null) return;
     setState(() => _composing = true);
     try {
@@ -130,7 +130,7 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
   String? _recomposingId;
 
   Future<void> _recompose(Map<String, dynamic> item) async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null) return;
     final reviewId = item['review_id']?.toString() ?? '';
     if (reviewId.isEmpty) return;
@@ -170,7 +170,7 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
   }
 
   Future<void> _clearQueue() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null || wallet.isEmpty) return;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -247,7 +247,7 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
     Map<String, dynamic> item, {
     required bool approved,
   }) async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null || wallet.isEmpty) return;
     final key = _itemKey(item);
     setState(() => _pending.add(key));
@@ -816,7 +816,7 @@ class _EvidencePanelState extends ConsumerState<_EvidencePanel> {
   bool _loading = false;
 
   Future<void> _load() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null) return;
     setState(() => _loading = true);
     try {

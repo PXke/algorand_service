@@ -13,21 +13,26 @@ import 'wallet_connector.dart';
 /// WalletConnect connector implementing ARC-0025 (`algo_signTxn`) and ARC-0060 (`algo_signData`).
 class WalletConnectAlgorandConnector implements WalletConnector {
   WalletConnectAlgorandConnector({required WalletAuthConfig config}) : _config = config {
-    _connector = WalletConnect(
-      bridge: _config.walletConnectBridge,
-      clientMeta: PeerMeta(
-        name: _config.dappName,
-        description: _config.dappDescription,
-        url: _config.dappUrl,
-        icons: _config.dappIcons,
-      ),
-    );
     _algorand = Algorand(algodClient: AlgodClient(apiUrl: _config.algodApiUrl));
   }
 
   final WalletAuthConfig _config;
-  late final WalletConnect _connector;
+  WalletConnect? _connectorInstance;
   late final Algorand _algorand;
+
+  /// Built LAZILY on first use: the WalletConnect constructor opens the bridge
+  /// WebSocket immediately, so constructing it at app startup dialled the
+  /// bridge (with retries) for every visitor — page-load console errors and
+  /// wasted sockets for the vast majority who never log in.
+  WalletConnect get _connector => _connectorInstance ??= WalletConnect(
+        bridge: _config.walletConnectBridge,
+        clientMeta: PeerMeta(
+          name: _config.dappName,
+          description: _config.dappDescription,
+          url: _config.dappUrl,
+          icons: _config.dappIcons,
+        ),
+      );
 
   SessionStatus? _session;
 
@@ -160,8 +165,11 @@ class WalletConnectAlgorandConnector implements WalletConnector {
 
   @override
   Future<void> disconnect() async {
-    if (_connector.connected) {
-      await _connector.killSession();
+    // Never touch the lazy getter here — disconnecting when nothing was ever
+    // connected must not open a bridge socket just to close it.
+    final connector = _connectorInstance;
+    if (connector != null && connector.connected) {
+      await connector.killSession();
     }
     _session = null;
   }

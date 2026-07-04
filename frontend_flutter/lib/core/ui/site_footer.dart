@@ -80,6 +80,10 @@ class SiteFooter extends StatelessWidget {
                         label: l10n.navSearch,
                         onTap: () => context.go('/search'),
                       ),
+                      _FooterLink(
+                        label: l10n.navContact,
+                        onTap: () => context.go('/contact'),
+                      ),
                     ],
                   ),
                 ],

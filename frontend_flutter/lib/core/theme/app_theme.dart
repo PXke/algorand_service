@@ -19,8 +19,24 @@ class AppTheme {
     final isDark = brightness == Brightness.dark;
     final extension = isDark ? AppThemeColors.dark : AppThemeColors.light;
 
+    final materialTypography = Typography.material2021();
+    final typography = Typography(
+      black: materialTypography.black.apply(
+        fontFamily: _sansFamily,
+        bodyColor: isDark ? const Color(0xFFCDD4DE) : const Color(0xFF2C3340),
+        displayColor: isDark ? const Color(0xFFEAEEF4) : const Color(0xFF13161C),
+      ),
+      white: materialTypography.white.apply(
+        fontFamily: _sansFamily,
+        bodyColor: isDark ? const Color(0xFFCDD4DE) : const Color(0xFF2C3340),
+        displayColor: isDark ? const Color(0xFFEAEEF4) : const Color(0xFF13161C),
+      ),
+    );
+
     final base = ThemeData(
       useMaterial3: true,
+      fontFamily: _sansFamily,
+      typography: typography,
       brightness: brightness,
       colorScheme: ColorScheme.fromSeed(
         seedColor: _seed,
@@ -100,6 +116,7 @@ class AppTheme {
       extensions: [extension],
       scaffoldBackgroundColor: scheme.surface,
       textTheme: textTheme,
+      primaryTextTheme: textTheme,
       appBarTheme: AppBarTheme(
         elevation: 0,
         scrolledUnderElevation: 1,

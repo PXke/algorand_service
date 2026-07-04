@@ -10,7 +10,7 @@ import '../../../core/ui/error_banner.dart';
 import '../../../core/ui/layout.dart';
 import '../../../core/ui/loading_strip.dart';
 import '../../../core/ui/page_content.dart';
-import '../../auth/providers/auth_providers.dart';
+import '../../../core/providers/session_providers.dart';
 
 /// Admin tab: crawl frontier — which domains the crawler may explore.
 class DomainsTab extends ConsumerStatefulWidget {
@@ -35,7 +35,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
   }
 
   Future<void> _load() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null || wallet.isEmpty) {
       setState(() {
         _loading = false;
@@ -67,7 +67,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
   }
 
   Future<void> _set(Map<String, dynamic> item, {required bool relevant}) async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     final domain = item['domain']?.toString() ?? '';
     if (wallet == null || domain.isEmpty) return;
     final makeRelevant = relevant;

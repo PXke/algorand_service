@@ -358,11 +358,43 @@ class AppLocalizationsFr extends AppLocalizations {
   String get sourceKindUnknown => 'Source';
 
   @override
+  String get navContact => 'Contact';
+
+  @override
+  String get contactTitle => 'Contact';
+
+  @override
+  String get contactSubtitle =>
+      'Corrections, informations ou remarques — écrivez à la rédaction.';
+
+  @override
+  String get contactNameLabel => 'Votre nom (facultatif)';
+
+  @override
+  String get contactEmailLabel =>
+      'E-mail (facultatif, si vous souhaitez une réponse)';
+
+  @override
+  String get contactMessageLabel => 'Message';
+
+  @override
+  String get contactMessageHint => 'Corrections, informations, remarques…';
+
+  @override
+  String get contactSend => 'Envoyer le message';
+
+  @override
+  String get contactSent => 'Message envoyé — merci de nous avoir écrit.';
+
+  @override
+  String get contactTooShort =>
+      'Merci d\'écrire quelques mots de plus (au moins 10 caractères).';
+
+  @override
   String get searchTitle => 'Recherche';
 
   @override
-  String get searchSubtitle =>
-      'Recherche Typesense si configurée, sinon scan du fil récent.';
+  String get searchSubtitle => 'Recherchez parmi tous nos articles publiés.';
 
   @override
   String get searchQueryLabel => 'Requête';
@@ -687,6 +719,34 @@ class AppLocalizationsFr extends AppLocalizations {
   @override
   String get sourcesChangesNextPoll =>
       'Les modifications s’appliquent au prochain passage du crawler.';
+
+  @override
+  String get sourcesMerge => 'Merge';
+
+  @override
+  String get sourcesMergeTitle => 'Merge services';
+
+  @override
+  String get sourcesMergeIntro =>
+      'Fold several services into one. The chosen services\' sources and domains move to the target; the emptied services are disabled. Use this when one product spans multiple domains (e.g. algorand.co + algorand.com).';
+
+  @override
+  String get sourcesMergeTarget => 'Keep as target';
+
+  @override
+  String get sourcesMergeFold => 'Fold in (will be disabled)';
+
+  @override
+  String get sourcesMergeAction => 'Merge';
+
+  @override
+  String get sourcesMergeNeedsTwo =>
+      'Pick a target and at least one service to fold in.';
+
+  @override
+  String sourcesMergeDone(int count, String target) {
+    return 'Merged $count service(s) into $target.';
+  }
 
   @override
   String get sourcesFieldServiceId => 'Identifiant de service';

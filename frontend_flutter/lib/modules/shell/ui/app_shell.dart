@@ -9,7 +9,7 @@ import '../../../core/theme/app_theme_extension.dart';
 import '../../../core/util/analytics_opt_out.dart';
 import '../../../core/ui/ambient_background.dart';
 import '../../../core/ui/brand_mark.dart';
-import '../../auth/ui/wallet_app_bar_action.dart';
+import 'deferred_wallet_app_bar_action.dart';
 import '../../newspaper/sections.dart';
 import '../../newspaper/ui/markets_bar.dart';
 import '../products.dart';
@@ -79,7 +79,7 @@ class AppShell extends ConsumerWidget {
             ),
           ),
           const AppSwitcher(),
-          const WalletAppBarAction(),
+          const DeferredWalletAppBarAction(),
           if (!compact) const ThemeToggleButton(),
           if (wide) const LocaleToggleButton(),
           SizedBox(width: compact ? 4 : 12),
@@ -127,7 +127,7 @@ class AppShell extends ConsumerWidget {
             ),
       body: Column(
         children: [
-          const MarketsBar(),
+          if (_showMarketsBar(location)) const MarketsBar(),
           Expanded(child: AmbientBackground(child: child)),
         ],
       ),
@@ -152,12 +152,20 @@ class AppShell extends ConsumerWidget {
           icon: section.icon,
         ),
       _NavItem(label: l10n.navAbout, path: '/about', icon: Icons.info_outline),
+      _NavItem(label: l10n.navContact, path: '/contact', icon: Icons.mail_outline),
     ];
   }
 
   static bool _isSelected(String location, _NavItem item) {
     if (item.exact) return location == item.path;
     return location.startsWith(item.path);
+  }
+
+  /// Markets API is deferred; only mount the bar on newspaper feed routes.
+  static bool _showMarketsBar(String location) {
+    return location == '/' ||
+        location == '/news' ||
+        location.startsWith('/section/');
   }
 }
 

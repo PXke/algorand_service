@@ -32,11 +32,11 @@ dependencies:
     sdk: flutter
   flutter_localizations:
     sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
+  web: ^1.1.0
   intl: any
 
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.8
   flutter_riverpod: ^3.3.1
   go_router: ^17.2.3
   http: ^1.6.0
@@ -46,7 +46,7 @@ dependencies:
     path: ../opensource/wallet_auth_flutter
   qr_flutter: ^4.1.0
   bugsnag_flutter: ^4.0.0
-  fl_chart: ^0.69.0
+  fl_chart: ^1.2.0
   flutter_markdown: ^0.7.7+1
   markdown: ^7.3.1
 
@@ -91,9 +91,11 @@ flutter:
   fonts:
     - family: Inter
       fonts:
-        - asset: assets/fonts/Inter.ttf
+        - asset: assets/fonts/Inter-w400.ttf
+          weight: 400
+        - asset: assets/fonts/Inter-w700.ttf
+          weight: 700
     - family: Source Serif 4
       fonts:
-        - asset: assets/fonts/SourceSerif4.ttf
-        - asset: assets/fonts/SourceSerif4-Italic.ttf
-          style: italic
+        - asset: assets/fonts/SourceSerif4-w700.ttf
+          weight: 700

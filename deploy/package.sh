@@ -28,13 +28,16 @@ BUILD_INFO="$OUT_DIR/BUILD_INFO-${STAMP}-${GIT_SHA}.txt"
 
 if [[ "$SKIP_FRONTEND_BUILD" != "1" ]]; then
   command -v flutter >/dev/null 2>&1 || { echo "error: flutter not found (or set SKIP_FRONTEND_BUILD=1)" >&2; exit 1; }
+  echo ">>> Subsetting bundled fonts" >&2
+  python3 "$REPO_ROOT/frontend_flutter/tool/subset_fonts.py" >&2
   echo ">>> Building Flutter web (AUTH_DOMAIN=${FRONTEND_AUTH_DOMAIN})" >&2
   (
     cd "$REPO_ROOT/frontend_flutter"
     # --no-web-resources-cdn: bundle + serve CanvasKit from our own host (brotli'd
     # by nginx) instead of fetching it from gstatic — no dependency on Google CDN
     # reachability for visitors on constrained networks.
-    flutter build web --release --no-web-resources-cdn \
+    flutter build web --release --wasm --no-web-resources-cdn \
+      --pwa-strategy=none \
       --dart-define=API_BASE_URL="$FRONTEND_API_BASE_URL" \
       --dart-define=AUTH_DOMAIN="$FRONTEND_AUTH_DOMAIN" \
       --dart-define=ADMIN_WALLET_ADDRESSES="$FRONTEND_ADMIN_WALLETS" \
@@ -58,16 +61,18 @@ fi
 # the host after unpack (deploy.sh) — bundling them here would only bloat the
 # transferred archive, since already-compressed files don't re-compress.
 
-# Prune CanvasKit renderer variants we never serve. A JS (non---wasm) build uses
-# only canvaskit.js/.wasm and the chromium/ variant; skwasm*, wimp and
-# experimental_webparagraph belong to the --wasm/skwasm path. ~16 MB of dead
-# weight otherwise. (Revisit if we ever switch to `flutter build web --wasm`.)
+# Prune renderer variants we never serve and strip dev-only artifacts.
 CK="$REPO_ROOT/frontend_flutter/build/web/canvaskit"
+WEB="$REPO_ROOT/frontend_flutter/build/web"
 if [[ -d "$CK" ]]; then
   rm -rf "$CK/experimental_webparagraph"
-  rm -f "$CK"/skwasm.js "$CK"/skwasm.wasm "$CK"/skwasm_heavy.js "$CK"/skwasm_heavy.wasm \
-        "$CK"/wimp.js "$CK"/wimp.wasm
+  rm -f "$CK"/wimp.js "$CK"/wimp.wasm
+  rm -f "$CK"/skwasm_heavy.js "$CK"/skwasm_heavy.wasm
+  # Chromium-only fallback (~1.6 MB saved vs shipping both canvaskit variants).
+  rm -f "$CK/canvaskit.js" "$CK/canvaskit.wasm"
 fi
+find "$WEB" -name '*.map' -delete 2>/dev/null || true
+find "$WEB" -name '*.symbols' -delete 2>/dev/null || true
 
 cat >"$BUILD_INFO" <<EOF
 stamp=${STAMP}

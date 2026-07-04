@@ -88,7 +88,7 @@ def _record(request: Request, path: str) -> None:
     )
 
 
-_BEACON_STATIC_PATHS = {"/", "/news", "/about", "/search", "/suggestions"}
+_BEACON_STATIC_PATHS = {"/", "/news", "/about", "/contact", "/search", "/suggestions"}
 
 
 def _is_known_app_path(path: str) -> bool:
@@ -106,6 +106,20 @@ def _is_known_app_path(path: str) -> bool:
     if path.startswith("/section/"):
         return section_for_slug(path[len("/section/") :]) is not None
     return False
+
+
+def _article_tombstoned(article_id: str) -> bool:
+    """Was this article deliberately deleted (vs never existed)? Fail-open to
+    False — a lookup error must degrade to the plain 404, never break SSR."""
+    try:
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import DeletedArticleStmts
+
+        aid = UUID(article_id)
+        row = get_cassandra_session().execute(DeletedArticleStmts.GET, (aid,)).one()
+        return row is not None
+    except Exception:
+        return False
 
 
 def _record_notfound(request: Request, path: str) -> None:
@@ -145,6 +159,16 @@ def register_seo_routes(app) -> None:
         detail = news.get_article(article_id) if article_id else None
         if detail is None:
             _record_notfound(request, f"/news/articles/{article_id}")
+            # 410 Gone for tombstoned (deliberately deleted) articles: their
+            # URLs live on in old sitemaps/crawl queues, and Google drops a 410
+            # promptly instead of re-trying a 404 for months. Fail-open to 404
+            # when the tombstone lookup itself errors.
+            if _article_tombstoned(article_id):
+                return _doc_response(
+                    render.render_noindex("Article removed"),
+                    "public, max-age=86400",
+                    status=410,
+                )
             return _doc_response(
                 render.render_noindex("Article not found"), "public, max-age=60", status=404
             )
@@ -172,6 +196,11 @@ def register_seo_routes(app) -> None:
     async def about(request: Request) -> Response:
         _record(request, "/about")
         return _doc_response(render.render_about(), "public, max-age=3600")
+
+    @app.get("/contact")
+    async def contact(request: Request) -> Response:
+        _record(request, "/contact")
+        return _doc_response(render.render_contact(), "public, max-age=3600")
 
     @app.get("/search")
     async def search(request: Request) -> Response:

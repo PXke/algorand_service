@@ -29,18 +29,50 @@ _BODY_OPEN_RE = re.compile(r"<body[^>]*>", re.IGNORECASE)
 
 _cache: dict[str, object] = {"path": None, "mtime": 0.0, "html": None}
 
-# Without hints the engine's ~3MB critical path (main.dart.js -> canvaskit.js
-# -> canvaskit.wasm) is discovered serially, each fetch starting only after the
-# previous script executes. Preloading lets the browser pull all of it in
-# parallel with HTML parsing, which directly shortens how long visitors sit on
-# the pre-boot #ssr-body content. The wasm is fetch()ed by canvaskit.js with
-# default (same-origin credentials) semantics, which `as="fetch"` matches.
-_PRELOADS = (
-    '<link rel="preload" href="/main.dart.js" as="script">\n'
-    '<link rel="preload" href="/canvaskit/canvaskit.js" as="script">\n'
-    '<link rel="preload" href="/canvaskit/canvaskit.wasm" as="fetch" '
-    'type="application/wasm">'
-)
+# Without hints the engine critical path is discovered serially. A dual --wasm
+# build ships dart2wasm+skwasm AND dart2js+canvaskit; preloading BOTH stacks
+# wastes ~2MB on every visit. Mirror flutter_bootstrap.js: WasmGC-capable
+# browsers preload the skwasm path only, everyone else gets canvaskit.
+def _resource_hints() -> str:
+    hints = (
+        '<link rel="preload" href="/assets/assets/fonts/Inter-w400.ttf" '
+        'as="font" type="font/ttf" crossorigin>'
+        '<link rel="preload" href="/assets/assets/fonts/Inter-w700.ttf" '
+        'as="font" type="font/ttf" crossorigin>'
+        "<script>(function(){"
+        "var gc=false;"
+        "try{gc=WebAssembly.validate(new Uint8Array("
+        "[0,97,115,109,1,0,0,0,1,5,1,95,1,120,0]));}catch(e){}"
+        "function ps(h){var l=document.createElement('link');"
+        "l.rel='preload';l.href=h;l.as='script';document.head.appendChild(l);}"
+        "function pw(h){var l=document.createElement('link');"
+        "l.rel='preload';l.href=h;l.as='fetch';l.type='application/wasm';"
+        "l.crossOrigin='anonymous';document.head.appendChild(l);}"
+        "function pm(h){var l=document.createElement('link');"
+        "l.rel='modulepreload';l.href=h;document.head.appendChild(l);}"
+        "if(gc){"
+        "pm('/main.dart.mjs');pw('/main.dart.wasm');"
+        "ps('/canvaskit/skwasm.js');pw('/canvaskit/skwasm.wasm');"
+        "}else{"
+        "ps('/main.dart.js');"
+        "var v='';"
+        "if(navigator.userAgentData&&navigator.userAgentData.brands){"
+        "for(var i=0;i<navigator.userAgentData.brands.length;i++){"
+        "if(navigator.userAgentData.brands[i].brand==='Chromium'){v='chromium/';break;}}}"
+        "else if(/Chrom(e|ium)/.test(navigator.userAgent)){v='chromium/';}"
+        "ps('/canvaskit/'+v+'canvaskit.js');"
+        "pw('/canvaskit/'+v+'canvaskit.wasm');"
+        "}"
+        "})();</script>"
+    )
+    api = (settings.public_api_url or "").strip().rstrip("/")
+    if api:
+        hints += f'\n<link rel="preconnect" href="{api}" crossorigin>\n'
+        hints += f'<link rel="dns-prefetch" href="{api}">'
+    return hints
+
+
+_PRELOADS = _resource_hints()
 
 
 def _candidate_dirs() -> list[Path]:

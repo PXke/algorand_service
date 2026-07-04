@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 /// A subtle fade-and-rise entrance played once when the widget mounts.
@@ -37,7 +38,10 @@ class _FadeInState extends State<FadeIn> with SingleTickerProviderStateMixin {
     super.didChangeDependencies();
     if (_started) return;
     _started = true;
-    if (MediaQuery.maybeOf(context)?.disableAnimations ?? false) {
+    // Web: skip entrance animations — dozens of FadeIn controllers on the feed
+    // inflate TBT during Lighthouse's measurement window.
+    if (kIsWeb ||
+        (MediaQuery.maybeOf(context)?.disableAnimations ?? false)) {
       _controller.value = 1;
       return;
     }

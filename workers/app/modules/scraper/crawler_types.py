@@ -11,3 +11,4 @@ class CrawlerType(StrEnum):
     MAIL = "mail"
     CHAIN = "chain"
     METRICS = "metrics"
+    BLUESKY = "bluesky"

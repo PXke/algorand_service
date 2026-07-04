@@ -65,6 +65,16 @@ class ArticleStmts:
 # --------------------------------------------------------------------------- #
 # articles_feed (projection)
 # --------------------------------------------------------------------------- #
+class DeletedArticleStmts:
+    INSERT = _Stmt(
+        "INSERT INTO algorand_platform.deleted_articles (article_id, deleted_at, title) "
+        "VALUES (?, ?, ?)"
+    )
+    GET = _Stmt(
+        "SELECT article_id FROM algorand_platform.deleted_articles WHERE article_id = ?"
+    )
+
+
 class FeedStmts:
     INSERT_FULL = _Stmt(
         "INSERT INTO algorand_platform.articles_feed ("
@@ -426,6 +436,21 @@ class SuggestionStmts:
     HAS_TXID = _Stmt(
         "SELECT suggestion_id FROM algorand_platform.suggestions_by_status "
         "WHERE submission_txid = ? LIMIT 1 ALLOW FILTERING"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# contact_messages (public /contact form → admin inbox)
+# --------------------------------------------------------------------------- #
+class ContactStmts:
+    INSERT = _Stmt(
+        "INSERT INTO algorand_platform.contact_messages ("
+        "bucket, created_at, message_id, name, email, message"
+        ") VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    LIST_BUCKET = _Stmt(
+        "SELECT created_at, message_id, name, email, message "
+        "FROM algorand_platform.contact_messages WHERE bucket = ? LIMIT 200"
     )
 
 

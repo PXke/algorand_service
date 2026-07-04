@@ -52,12 +52,44 @@ def test_priority_components_sum_for_updates() -> None:
         novelty=0.4,
         timeliness=0.6,
     )
-    assert b.total == (
+    components = (
         b.relevance_bonus + b.novelty_bonus + b.timeliness_bonus
         + b.diff_bonus + b.announce_bonus
     )
+    # Novelty then scales the whole sum (repetition suppression).
+    assert b.total == round(components * b.novelty_factor)
+    assert b.novelty_factor == 0.3 + 0.7 * 0.4
     assert b.diff_bonus > 0  # 3 added lines earn partial diff credit
     assert b.topic_base > 0  # still computed for observability
+
+
+def test_zero_novelty_suppresses_high_relevance_repeat() -> None:
+    """An already-covered story (novelty 0) must sink below a modest fresh one,
+    even from a maximally relevant source — the Defly-repeat case."""
+    repeat = compute_priority(
+        topic=PublishTopic.CONTENT_UPDATE,
+        publish_kind=PublishKind.CONTENT_UPDATE,
+        page_title="Defly Wallet and Private Keys",
+        page_text="Algorand wallet Defly private keys mainnet.",
+        diff="+++ a\n" + "\n".join(f"+ l{i}" for i in range(40)),
+        source_kind="web",
+        relevance=1.0,
+        novelty=0.0,
+        timeliness=0.5,
+    )
+    fresh = compute_priority(
+        topic=PublishTopic.CONTENT_UPDATE,
+        publish_kind=PublishKind.CONTENT_UPDATE,
+        page_title="Changelog",
+        page_text="Algorand tooling update.",
+        diff="+++ a\n+ x\n+ y\n+ z\n+ w\n+ v",
+        source_kind="web",
+        relevance=0.5,
+        novelty=1.0,
+        timeliness=0.5,
+    )
+    assert repeat.novelty_factor == 0.3
+    assert fresh.total > repeat.total
 
 
 def test_fresh_story_outranks_stale_pr_at_equal_relevance() -> None:

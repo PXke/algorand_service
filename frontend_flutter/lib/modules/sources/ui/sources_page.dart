@@ -13,7 +13,7 @@ import '../../../core/ui/meta_row.dart';
 import '../../../core/providers/admin_provider.dart';
 import '../../../core/ui/page_content.dart';
 import '../../../core/ui/page_header.dart';
-import '../../auth/providers/auth_providers.dart';
+import '../../../core/providers/session_providers.dart';
 import '../models/source_kind.dart';
 import '../services/registry_api.dart';
 import 'source_kind_chip.dart';
@@ -70,6 +70,16 @@ class _SourcesPageState extends ConsumerState<SourcesPage> {
     }
   }
 
+  Future<void> _openMerge() async {
+    final changed = await showDialog<bool>(
+      context: context,
+      builder: (_) => ServiceMergeDialog(services: _seeds),
+    );
+    if (changed == true) {
+      await _load();
+    }
+  }
+
   List<Map<String, dynamic>> get _seeds =>
       _items.where((i) => (i['origin']?.toString() ?? 'seed') != 'domain').toList();
 
@@ -100,10 +110,20 @@ class _SourcesPageState extends ConsumerState<SourcesPage> {
           title: l10n.seedsTitle,
           subtitle: l10n.seedsSubtitle,
           trailing: ref.watch(isAdminWalletProvider)
-              ? FilledButton.icon(
-                  onPressed: () => _openEditor(null),
-                  icon: const Icon(Icons.add, size: 18),
-                  label: Text(l10n.sourcesAdd),
+              ? Wrap(
+                  spacing: 8,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: _seeds.length < 2 ? null : _openMerge,
+                      icon: const Icon(Icons.merge_type, size: 18),
+                      label: Text(l10n.sourcesMerge),
+                    ),
+                    FilledButton.icon(
+                      onPressed: () => _openEditor(null),
+                      icon: const Icon(Icons.add, size: 18),
+                      label: Text(l10n.sourcesAdd),
+                    ),
+                  ],
                 )
               : null,
         ),
@@ -260,6 +280,158 @@ class _FilterBar extends StatelessWidget {
   }
 }
 
+/// Admin dialog: fold several services into one (multi-domain products).
+class ServiceMergeDialog extends ConsumerStatefulWidget {
+  const ServiceMergeDialog({super.key, required this.services});
+
+  final List<Map<String, dynamic>> services;
+
+  @override
+  ConsumerState<ServiceMergeDialog> createState() => _ServiceMergeDialogState();
+}
+
+class _ServiceMergeDialogState extends ConsumerState<ServiceMergeDialog> {
+  String? _target;
+  final Set<String> _fold = <String>{};
+  bool _busy = false;
+  String? _error;
+
+  List<Map<String, dynamic>> get _enabled => widget.services
+      .where((s) => s['enabled'] == true && (s['service_id']?.toString() ?? '').isNotEmpty)
+      .toList();
+
+  Future<void> _merge() async {
+    final wallet = ref.read(sessionStateProvider).walletAddress;
+    final target = _target;
+    final l10n = context.l10n;
+    if (wallet == null) return;
+    if (target == null || _fold.isEmpty) {
+      setState(() => _error = l10n.sourcesMergeNeedsTwo);
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await ref.read(adminApiProvider).mergeServices(
+            walletAddress: wallet,
+            targetServiceId: target,
+            sourceServiceIds: _fold.toList(),
+          );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(l10n.sourcesMergeDone(_fold.length, target))),
+      );
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _busy = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final l10n = context.l10n;
+    final services = _enabled
+      ..sort((a, b) => (a['display_name']?.toString() ?? '')
+          .compareTo(b['display_name']?.toString() ?? ''));
+
+    return AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: Text(l10n.sourcesMergeTitle),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 460),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                l10n.sourcesMergeIntro,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: context.appColors.muted,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                initialValue: _target,
+                isExpanded: true,
+                decoration: InputDecoration(labelText: l10n.sourcesMergeTarget),
+                items: [
+                  for (final s in services)
+                    DropdownMenuItem(
+                      value: s['service_id']?.toString(),
+                      child: Text(
+                        s['display_name']?.toString() ?? s['service_id']?.toString() ?? '',
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+                onChanged: _busy
+                    ? null
+                    : (v) => setState(() {
+                          _target = v;
+                          _fold.remove(v);
+                        }),
+              ),
+              const SizedBox(height: 12),
+              Text(l10n.sourcesMergeFold, style: theme.textTheme.labelMedium),
+              const SizedBox(height: 4),
+              ...services
+                  .where((s) => s['service_id']?.toString() != _target)
+                  .map((s) {
+                final id = s['service_id']?.toString() ?? '';
+                return CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  value: _fold.contains(id),
+                  title: Text(s['display_name']?.toString() ?? id),
+                  subtitle: Text(id, style: theme.textTheme.labelSmall),
+                  onChanged: _busy
+                      ? null
+                      : (v) => setState(() {
+                            if (v == true) {
+                              _fold.add(id);
+                            } else {
+                              _fold.remove(id);
+                            }
+                          }),
+                );
+              }),
+              if (_error != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _error!,
+                  style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.error),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.of(context).pop(false),
+          child: Text(l10n.actionCancel),
+        ),
+        FilledButton(
+          onPressed: _busy ? null : _merge,
+          child: _busy
+              ? const SizedBox(
+                  width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+              : Text(l10n.sourcesMergeAction),
+        ),
+      ],
+    );
+  }
+}
+
 class _StatusLabel extends StatelessWidget {
   const _StatusLabel({required this.text});
 
@@ -333,7 +505,7 @@ class _SourceEditDialogState extends ConsumerState<SourceEditDialog> {
   }
 
   Future<void> _save() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null) return;
     final id = _idController.text.trim();
     final name = _nameController.text.trim();
@@ -369,7 +541,7 @@ class _SourceEditDialogState extends ConsumerState<SourceEditDialog> {
 
   Future<void> _delete() async {
     final l10n = context.l10n;
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     final id = widget.existing?['service_id']?.toString();
     if (wallet == null || id == null) return;
     final confirmed = await showDialog<bool>(

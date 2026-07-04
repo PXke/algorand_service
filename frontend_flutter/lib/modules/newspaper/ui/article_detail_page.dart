@@ -7,7 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../core/api/api_errors.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/providers/api_providers.dart';
-import '../../../core/ui/article_markdown.dart';
+import '../../../core/ui/deferred_article_markdown.dart';
 import '../../../core/ui/error_banner.dart';
 import '../../../core/ui/fade_in.dart';
 import '../../../core/ui/format.dart';
@@ -111,7 +111,12 @@ class _ArticleDetailPageState extends ConsumerState<ArticleDetailPage> {
 
   Future<void> _share(BuildContext context, Map<String, dynamic> article) async {
     final id = article['article_id']?.toString() ?? '';
-    await Clipboard.setData(ClipboardData(text: '/news/articles/$id'));
+    // Absolute URL — a bare path is useless outside the app. Uri.base is the
+    // page's own origin on web, so this works in dev and prod without config.
+    final url = Uri.base.origin.isEmpty
+        ? '/news/articles/$id'
+        : '${Uri.base.origin}/news/articles/$id';
+    await Clipboard.setData(ClipboardData(text: url));
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(context.l10n.articleLinkCopied)),
@@ -279,7 +284,7 @@ class _ArticleDetailPageState extends ConsumerState<ArticleDetailPage> {
                       ),
                     ],
                     const SizedBox(height: 30),
-                    ArticleMarkdown(data: article['body']?.toString() ?? ''),
+                    DeferredArticleMarkdown(data: article['body']?.toString() ?? ''),
                     const SizedBox(height: AppLayout.sectionGap),
                     const Divider(),
                     const SizedBox(height: AppLayout.sectionGap),

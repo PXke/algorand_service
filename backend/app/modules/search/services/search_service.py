@@ -4,9 +4,7 @@ import logging
 
 from app.core.typesense_client import (
     ARTICLES_COLLECTION,
-    PAGES_COLLECTION,
     ensure_articles_collection,
-    ensure_pages_collection,
     get_typesense_client,
 )
 from app.modules.news.services.news_service import NewsService
@@ -53,60 +51,32 @@ class SearchService:
         limit: int,
         service_id: str | None,
     ) -> list[SearchHit]:
+        """PUBLISHED ARTICLES only. The crawled-pages collection is the writer's
+        research corpus — surfacing it to readers mixed raw third-party pages
+        into results, with ids that don't resolve to any article route."""
         hits: list[SearchHit] = []
-        filter_by = f"service_id:={service_id}" if service_id else None
-        collections = [ARTICLES_COLLECTION]
-        if ensure_pages_collection():
-            collections.append(PAGES_COLLECTION)
-
-        per_collection = max(limit, 10)
-        for collection in collections:
-            params: dict = {
-                "q": q,
-                "query_by": "title,description,body,url,domain,keywords"
-                if collection == PAGES_COLLECTION
-                else "title,summary,body",
-                "per_page": per_collection,
-            }
-            if filter_by:
-                params["filter_by"] = filter_by
-            result = client.collections[collection].documents.search(params)
-            for found in result.get("hits", []):
-                doc = found.get("document", {})
-                doc_id = str(doc.get("id", ""))
-                if collection == PAGES_COLLECTION:
-                    url = doc.get("url")
-                    summary = (
-                        str(doc.get("description", "")).strip()
-                        or str(doc.get("body", ""))[:240]
-                    )
-                    if url:
-                        summary = f"{url}\n{summary}".strip()
-                    hits.append(
-                        SearchHit(
-                            article_id=doc_id,
-                            title=str(doc.get("title", "")),
-                            summary=summary,
-                            service_id=doc.get("service_id"),
-                            published_at_epoch=int(doc["published_at"])
-                            if doc.get("published_at") is not None
-                            else None,
-                            score=_text_match_score(found),
-                        )
-                    )
-                else:
-                    hits.append(
-                        SearchHit(
-                            article_id=doc_id,
-                            title=str(doc.get("title", "")),
-                            summary=str(doc.get("summary", "")),
-                            service_id=doc.get("service_id"),
-                            published_at_epoch=int(doc["published_at"])
-                            if doc.get("published_at") is not None
-                            else None,
-                            score=_text_match_score(found),
-                        )
-                    )
+        params: dict = {
+            "q": q,
+            "query_by": "title,summary,body",
+            "per_page": max(limit, 10),
+        }
+        if service_id:
+            params["filter_by"] = f"service_id:={service_id}"
+        result = client.collections[ARTICLES_COLLECTION].documents.search(params)
+        for found in result.get("hits", []):
+            doc = found.get("document", {})
+            hits.append(
+                SearchHit(
+                    article_id=str(doc.get("id", "")),
+                    title=str(doc.get("title", "")),
+                    summary=str(doc.get("summary", "")),
+                    service_id=doc.get("service_id"),
+                    published_at_epoch=int(doc["published_at"])
+                    if doc.get("published_at") is not None
+                    else None,
+                    score=_text_match_score(found),
+                )
+            )
 
         hits.sort(key=lambda item: item.score or 0.0, reverse=True)
         return hits[:limit]

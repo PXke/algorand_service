@@ -1,7 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/app_config.dart';
-import '../../modules/auth/providers/auth_providers.dart';
+import 'session_providers.dart';
 
 /// Incremented after a successful admin pipeline reset so other tabs reload.
 final adminPipelineResetSignalProvider =
@@ -18,7 +18,7 @@ final isAdminWalletProvider = Provider<bool>((ref) {
   final addresses = AppConfig.instance.adminWalletAddresses;
   if (addresses.isEmpty) return false;
 
-  final wallet = ref.watch(walletAuthStateProvider).walletAddress;
+  final wallet = ref.watch(sessionStateProvider).walletAddress;
   if (wallet == null || wallet.isEmpty) return false;
 
   final normalized = wallet.toUpperCase();

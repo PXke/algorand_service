@@ -10,7 +10,7 @@ import '../../../core/ui/error_banner.dart';
 import '../../../core/ui/layout.dart';
 import '../../../core/ui/loading_strip.dart';
 import '../../../core/ui/page_content.dart';
-import '../../auth/providers/auth_providers.dart';
+import '../../../core/providers/session_providers.dart';
 
 const _kActiveStatuses = {'researching', 'writing'};
 const _kActivePollInterval = Duration(seconds: 8);
@@ -67,7 +67,7 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
   }
 
   Future<void> _quietReload() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null || wallet.isEmpty) return;
     try {
       final items =
@@ -98,7 +98,7 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
   }
 
   Future<void> _load() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null || wallet.isEmpty) {
       setState(() {
         _loading = false;
@@ -134,7 +134,7 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
   Future<void> _loadDetail(String sessionId, String createdAt, {bool force = false}) async {
     if (_detailLoading.contains(sessionId)) return;
     if (!force && _details.containsKey(sessionId)) return;
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null || wallet.isEmpty) return;
     setState(() {
       _detailLoading.add(sessionId);

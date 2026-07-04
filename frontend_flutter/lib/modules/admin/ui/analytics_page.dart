@@ -11,7 +11,7 @@ import '../../../core/ui/error_banner.dart';
 import '../../../core/ui/layout.dart';
 import '../../../core/ui/loading_strip.dart';
 import '../../../core/ui/page_content.dart';
-import '../../auth/providers/auth_providers.dart';
+import '../../../core/providers/session_providers.dart';
 
 /// Admin tab: first-party traffic analytics, recorded server-side from the SSR
 /// document routes (no client JS). Shows pageviews split human vs bot, the top
@@ -48,7 +48,7 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
   }
 
   Future<void> _load() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null || wallet.isEmpty) {
       setState(() {
         _loading = false;

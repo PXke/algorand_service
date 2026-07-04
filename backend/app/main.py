@@ -8,6 +8,7 @@ from app.core.health import run_readiness_checks
 from app.core.observability import init_bugsnag
 from app.modules.admin.api.routes import register_admin_routes
 from app.modules.auth.api.routes import register_auth_routes
+from app.modules.contact.api.routes import register_contact_routes
 from app.modules.ingest.api.routes import register_ingest_routes
 from app.modules.media.api.routes import register_media_routes
 from app.modules.metrics.api.routes import register_metrics_routes
@@ -47,6 +48,7 @@ register_ingest_routes(app)
 register_admin_routes(app)
 register_registry_routes(app)
 register_search_routes(app)
+register_contact_routes(app)
 if settings.suggestions_enabled:
     register_suggestions_routes(app)
 

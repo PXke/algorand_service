@@ -74,6 +74,12 @@ def _build_beat_schedule() -> dict:
             "task": "app.tasks.scrape.poll_youtube_sources",
             "schedule": float(os.getenv("YOUTUBE_POLL_SECONDS", "3600")),
         }
+
+    if is_crawler_enabled(CrawlerType.BLUESKY):
+        schedule["bluesky-poll-sources"] = {
+            "task": "app.tasks.scrape.poll_bluesky_sources",
+            "schedule": float(os.getenv("BLUESKY_POLL_SECONDS", "3600")),
+        }
     # Beats are a slow SAFETY-NET heartbeat: the real work is triggered on demand
     # by admin actions (approving an article fires drain_standard_publish_queue;
     # approving a domain fires drain_url_queue + fetch_source). So these can be

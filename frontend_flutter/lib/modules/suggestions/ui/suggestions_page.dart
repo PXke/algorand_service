@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/api/api_errors.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/providers/api_providers.dart';
+import '../../../core/providers/session_providers.dart';
 import '../../../core/ui/error_banner.dart';
 import '../../../core/ui/format.dart';
 import '../../../core/ui/info_callout.dart';

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/ui/lazy_network_image.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/theme/app_theme_extension.dart';
 import '../../../core/ui/article_tag_chip.dart';
@@ -67,8 +68,6 @@ class ArticleCard extends StatelessWidget {
     final kindColor = _kindColor(context);
     final imageUrl = item['image_url']?.toString();
     final hasImage = imageUrl != null && imageUrl.isNotEmpty;
-    // Small per-domain brand chip on tiles (og:image stays for hero/detail).
-    final favicon = faviconUrl(item['source_url']?.toString());
 
     final hPad = hero ? 30.0 : (compact ? 20.0 : 24.0);
     final vPad = hero ? 26.0 : (compact ? 18.0 : 22.0);
@@ -85,19 +84,6 @@ class ArticleCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              if (favicon != null) ...[
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(5),
-                  child: Image.network(
-                    favicon,
-                    width: 18,
-                    height: 18,
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stack) => const SizedBox.shrink(),
-                  ),
-                ),
-                const SizedBox(width: 8),
-              ],
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
@@ -210,14 +196,8 @@ class ArticleCard extends StatelessWidget {
   }
 }
 
-/// Feed preview image with a graceful loading shimmer; on a missing/broken
-/// source image it falls back to the source's brand logo (see [_LogoFallback]).
-///
-/// Smart fit: wide artwork (banners/photos) fills the card edge-to-edge
-/// (`cover`); square or portrait artwork (logos) is shown WHOLE on a faint
-/// section-tinted wash (`contain`) so brand marks aren't cropped. The aspect
-/// ratio is read from the decoded image, so the choice is automatic.
-class _CardImage extends StatefulWidget {
+/// Feed preview image; fetches lazily so proxied hero art stays off boot.
+class _CardImage extends StatelessWidget {
   const _CardImage({
     required this.url,
     required this.height,
@@ -233,73 +213,23 @@ class _CardImage extends StatefulWidget {
   final String? serviceId;
 
   @override
-  State<_CardImage> createState() => _CardImageState();
-}
-
-class _CardImageState extends State<_CardImage> {
-  // Aspect ratios at/above this read as "wide" → fill (cover); below → contain.
-  static const _wideThreshold = 1.4;
-
-  late final ImageProvider _provider;
-  ImageStream? _stream;
-  ImageStreamListener? _listener;
-  double? _aspect; // width / height of the decoded image
-
-  @override
-  void initState() {
-    super.initState();
-    _provider = NetworkImage(proxiedImageUrl(widget.url));
-    _stream = _provider.resolve(const ImageConfiguration());
-    _listener = ImageStreamListener((info, _) {
-      if (!mounted) return;
-      final h = info.image.height.toDouble();
-      if (h > 0) setState(() => _aspect = info.image.width / h);
-    });
-    _stream!.addListener(_listener!);
-  }
-
-  @override
-  void dispose() {
-    if (_stream != null && _listener != null) _stream!.removeListener(_listener!);
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     final colors = context.appColors;
-    // Until dimensions are known, default to cover (good for the common banner).
-    final contain = _aspect != null && _aspect! < _wideThreshold;
-
-    final image = Image(
-      image: _provider,
-      fit: contain ? BoxFit.contain : BoxFit.cover,
-      width: contain ? null : double.infinity,
-      errorBuilder: (context, error, stack) => _LogoFallback(
-        height: widget.height,
-        kindColor: widget.kindColor,
-        sourceUrl: widget.sourceUrl,
-        serviceId: widget.serviceId,
-      ),
-      loadingBuilder: (context, child, progress) {
-        if (progress == null) return child;
-        return Container(
-          height: widget.height,
-          color: colors.border.withValues(alpha: 0.35),
-        );
-      },
-    );
-
-    return SizedBox(
-      height: widget.height,
+    return LazyNetworkImage(
+      url: url,
+      height: height,
       width: double.infinity,
-      child: contain
-          ? Container(
-              color: widget.kindColor.withValues(alpha: 0.08),
-              padding: EdgeInsets.symmetric(vertical: widget.height * 0.16),
-              alignment: Alignment.center,
-              child: image,
-            )
-          : image,
+      fit: BoxFit.cover,
+      placeholder: Container(
+        height: height,
+        color: colors.border.withValues(alpha: 0.35),
+      ),
+      error: _LogoFallback(
+        height: height,
+        kindColor: kindColor,
+        sourceUrl: sourceUrl,
+        serviceId: serviceId,
+      ),
     );
   }
 }
@@ -334,10 +264,10 @@ class _LogoFallback extends StatelessWidget {
       padding: EdgeInsets.symmetric(vertical: height * 0.24),
       child: logo == null
           ? monogram
-          : Image.network(
-              logo,
+          : LazyNetworkImage(
+              url: logo,
               fit: BoxFit.contain,
-              errorBuilder: (context, error, stack) => monogram,
+              error: monogram,
             ),
     );
   }

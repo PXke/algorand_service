@@ -174,6 +174,28 @@ class PageviewBeaconRequest(msgspec.Struct, kw_only=True):
     path: Annotated[str, Meta(min_length=1, max_length=200)]
 
 
+# ── Contact ───────────────────────────────────────────────────────────────────
+class ContactMessageRequest(msgspec.Struct, kw_only=True):
+    message: Annotated[str, Meta(min_length=10, max_length=4000)]
+    name: Annotated[str, Meta(max_length=120)] = ""
+    email: Annotated[str, Meta(max_length=254)] = ""
+    # Honeypot: hidden in the UI, so a human never fills it — a non-empty value
+    # marks a bot and the message is silently dropped.
+    website: Annotated[str, Meta(max_length=254)] = ""
+
+
+class ContactMessageItem(msgspec.Struct, kw_only=True):
+    message_id: str
+    name: str
+    email: str
+    message: str
+    created_at_epoch: int
+
+
+class ContactMessagesResponse(msgspec.Struct, kw_only=True):
+    items: list[ContactMessageItem]
+
+
 # ── Suggestions ───────────────────────────────────────────────────────────────
 class CreateSuggestionRequest(msgspec.Struct, kw_only=True):
     title: Annotated[str, Meta(min_length=3, max_length=200)]

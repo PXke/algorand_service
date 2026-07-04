@@ -324,6 +324,7 @@ def build_publish_intent(
             f"(score={breakdown.timeliness_score})"
             f"+diff={breakdown.diff_bonus}+announce={breakdown.announce_bonus}"
             f"+classifier={breakdown.classifier_adjust}"
+            f"×nov_factor={breakdown.novelty_factor}"
             f"{' [seo_spam]' if breakdown.seo_spam else ''} "
             f"(heuristics topic={breakdown.topic_base} trust={breakdown.source_trust} "
             f"service={breakdown.service_weight} no longer ranked)"

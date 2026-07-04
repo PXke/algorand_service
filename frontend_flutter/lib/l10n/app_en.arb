@@ -170,8 +170,18 @@
   "sourceKindWeb": "Web",
   "sourceKindOnChain": "On-chain",
   "sourceKindUnknown": "Source",
+  "navContact": "Contact",
+  "contactTitle": "Contact",
+  "contactSubtitle": "Corrections, tips or feedback — write to the newsroom.",
+  "contactNameLabel": "Your name (optional)",
+  "contactEmailLabel": "Email (optional, if you want a reply)",
+  "contactMessageLabel": "Message",
+  "contactMessageHint": "Corrections, tips, feedback…",
+  "contactSend": "Send message",
+  "contactSent": "Message sent — thank you for writing to us.",
+  "contactTooShort": "Please write a few more words (at least 10 characters).",
   "searchTitle": "Search",
-  "searchSubtitle": "Full-text search via Typesense when configured; otherwise scans the recent feed.",
+  "searchSubtitle": "Search every article we have published.",
   "searchQueryLabel": "Search query",
   "searchQueryHint": "Keywords, titles, summaries…",
   "searchAction": "Search",
@@ -377,6 +387,24 @@
   "sourcesAddAction": "Add",
   "sourcesRequiredFields": "Service id, name and URL are required.",
   "sourcesChangesNextPoll": "Changes apply on the next crawler poll.",
+  "sourcesMerge": "Merge",
+  "sourcesMergeTitle": "Merge services",
+  "sourcesMergeIntro": "Fold several services into one. The chosen services' sources and domains move to the target; the emptied services are disabled. Use this when one product spans multiple domains (e.g. algorand.co + algorand.com).",
+  "sourcesMergeTarget": "Keep as target",
+  "sourcesMergeFold": "Fold in (will be disabled)",
+  "sourcesMergeAction": "Merge",
+  "sourcesMergeNeedsTwo": "Pick a target and at least one service to fold in.",
+  "sourcesMergeDone": "Merged {count} service(s) into {target}.",
+  "@sourcesMergeDone": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "target": {
+        "type": "String"
+      }
+    }
+  },
   "sourcesFieldServiceId": "Service id",
   "sourcesFieldServiceIdHint": "kebab-case, e.g. algorand-foundation-blog",
   "sourcesFieldDisplayName": "Display name",

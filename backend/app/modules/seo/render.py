@@ -14,6 +14,8 @@ import html
 import json
 from datetime import UTC, datetime
 
+import msgspec
+
 from app.core.config import settings
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
@@ -36,6 +38,15 @@ def _iso(epoch: int) -> str:
 
 def _attr(value: str) -> str:
     return html.escape(value or "", quote=True)
+
+
+def _ssr_feed_script(items: list[ArticleFeedItem]) -> str:
+    """Embed the home feed as JSON so Flutter can paint immediately without
+    waiting on /api/v1/news/feed (SSR HTML is removed on first frame)."""
+    rows = [msgspec.structs.asdict(i) for i in items]
+    payload = json.dumps({"items": rows}, separators=(",", ":"), ensure_ascii=False)
+    payload = payload.replace("</", "<\\/")
+    return f'<script type="application/json" id="pxke-ssr-feed">{payload}</script>'
 
 
 def _json_ld(data: dict | list) -> str:
@@ -249,9 +260,13 @@ def render_article(article: ArticleDetail) -> tuple[str, str]:
         json_ld=[news_article, _breadcrumb(trail)],
     )
 
-    img_html = (
-        f'<img src="{_attr(image)}" alt="{_attr(article.title)}">' if article.image_url else ""
-    )
+    body_html = md_to_html(article.body)
+    # Standalone hero image — but only when the article BODY doesn't already
+    # embed the same image (writers often lead the markdown with the OG image,
+    # which rendered the hero twice back-to-back at the top of the document).
+    img_html = ""
+    if article.image_url and _attr(image) not in body_html:
+        img_html = f'<img src="{_attr(image)}" alt="{_attr(article.title)}">'
     source = (
         f'<p>Source: <a href="{_attr(article.source_url)}" rel="noopener nofollow">'
         f"{_attr(article.source_url)}</a></p>"
@@ -261,7 +276,7 @@ def render_article(article: ArticleDetail) -> tuple[str, str]:
     body = ssr_container(
         f"<article><h1>{html.escape(article.title)}</h1>"
         f'<p><time datetime="{_attr(published_iso)}">{published_iso[:10]}</time></p>'
-        f"{img_html}{md_to_html(article.body)}{source}</article>"
+        f"{img_html}{body_html}{source}</article>"
     )
     return head, body
 
@@ -315,6 +330,7 @@ def render_home(items: list[ArticleFeedItem]) -> tuple[str, str]:
             _feed_list_jsonld(items, canonical, f"{settings.site_name} — Latest"),
         ],
     )
+    head = f"{head}\n{_ssr_feed_script(items)}"
     body = _feed_ssr(items, f"{settings.site_name} — Latest Algorand news")
     return head, body
 
@@ -366,6 +382,35 @@ def render_about() -> tuple[str, str]:
         f"<h1>About {html.escape(settings.site_name)}</h1>"
         f"<p>{html.escape(settings.site_tagline)}</p>"
         f"<h2>Written with AI</h2><p>{html.escape(disclosure)}</p>"
+    )
+    return head, body
+
+
+def render_contact() -> tuple[str, str]:
+    canonical = absolute("/contact")
+    description = f"Contact {settings.site_name}: send corrections, tips or feedback."
+    head = _meta_block(
+        title="Contact",
+        description=description,
+        canonical=canonical,
+        image=absolute(settings.seo_default_image),
+        image_alt=settings.site_name,
+        image_dims=_DEFAULT_IMAGE_DIMS,
+        json_ld=[
+            {
+                "@context": "https://schema.org",
+                "@type": "ContactPage",
+                "url": canonical,
+                "name": f"Contact {settings.site_name}",
+                "publisher": _publisher(),
+            }
+        ],
+    )
+    body = ssr_container(
+        f"<h1>Contact {html.escape(settings.site_name)}</h1>"
+        "<p>Spotted an error, have a tip, or want to reach the newsroom? "
+        "Send us a message with the form on this page — corrections and "
+        "feedback go straight to the editors.</p>"
     )
     return head, body
 

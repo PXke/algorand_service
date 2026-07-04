@@ -27,6 +27,8 @@ class Settings(msgspec.Struct, kw_only=True):
     # Public-facing site (used to build absolute canonical / OG / sitemap URLs
     # in the SEO-rendered document routes). Override per-env via PUBLIC_SITE_URL.
     public_site_url: str = "https://algorand.pxke.me"
+    # API origin for resource hints (preconnect) in SSR HTML. Empty = omitted.
+    public_api_url: str = "https://algorand-api.pxke.me"
     site_name: str = "PXke Algorand"
     site_tagline: str = "Algorand ecosystem news, search and tools."
     # Absolute path to the built Flutter web dir (holds index.html). Empty =

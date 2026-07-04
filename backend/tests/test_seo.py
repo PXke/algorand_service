@@ -161,6 +161,8 @@ def test_rss_feed_structure() -> None:
 def test_render_home_lists_articles() -> None:
     head, body = render.render_home(_feed(3))
     assert "CollectionPage" in head
+    assert 'id="pxke-ssr-feed"' in head
+    assert '"items":' in head
     assert body.count("<li>") == 3
 
 
@@ -340,5 +342,10 @@ def test_shell_injection_adds_engine_preloads(monkeypatch, tmp_path) -> None:
     head, body = render.render_home(_feed(1))
     doc = shell.render_document(head, body)
     assert doc is not None
-    assert '<link rel="preload" href="/main.dart.js" as="script">' in doc
-    assert '<link rel="preload" href="/canvaskit/canvaskit.wasm" as="fetch"' in doc
+    # Renderer preloads are injected by a WasmGC-aware inline script (one stack
+    # per browser — skwasm OR canvaskit, never both).
+    assert "WebAssembly.validate" in doc
+    assert "main.dart.mjs" in doc
+    assert "skwasm.wasm" in doc
+    assert "canvaskit.wasm" in doc
+    assert 'rel="preconnect" href="https://algorand-api.pxke.me"' in doc

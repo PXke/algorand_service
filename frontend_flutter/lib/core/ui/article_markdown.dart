@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../config/app_config.dart';
 import '../theme/app_theme_extension.dart';
 import 'glossary.dart';
+import 'lazy_network_image.dart';
 
 /// Renders article body markdown as long-form editorial prose: serif body
 /// copy, generous leading, and a clear heading hierarchy. No card frame —
@@ -38,10 +38,8 @@ class ArticleMarkdown extends StatelessWidget {
     final bodySize = isMobile ? 17.5 : 19.0;
     final bodyLeading = isMobile ? 1.72 : 1.8;
 
-    // Serif reading voice for body copy; sans stays for captions and code.
-    const serifFamily = 'Source Serif 4';
+    // Inter body on web keeps the font manifest lean (serif w700 for headlines).
     final body = TextStyle(
-      fontFamily: serifFamily,
       fontSize: bodySize,
       height: bodyLeading,
       color: ink,
@@ -50,7 +48,7 @@ class ArticleMarkdown extends StatelessWidget {
     final caption = theme.textTheme.bodyMedium?.copyWith(height: 1.55, color: ink);
 
     TextStyle heading(double size, {double spacing = -0.3}) => TextStyle(
-          fontFamily: serifFamily,
+          fontFamily: 'Source Serif 4',
           fontSize: size,
           height: 1.25,
           color: ink,
@@ -130,10 +128,10 @@ class ArticleMarkdown extends StatelessWidget {
       builders: {'glossary': GlossaryElementBuilder(accent: colors.accent)},
       // Route body images (hero + inline) through the same-origin proxy so
       // CanvasKit can render cross-origin sources that omit CORS headers.
-      imageBuilder: (uri, title, alt) => Image.network(
-        proxiedImageUrl(uri.toString()),
+      imageBuilder: (uri, title, alt) => LazyNetworkImage(
+        url: uri.toString(),
         fit: BoxFit.cover,
-        errorBuilder: (context, error, stack) => const SizedBox.shrink(),
+        error: const SizedBox.shrink(),
       ),
       onTapLink: (text, href, title) {
         final url = href ?? text;

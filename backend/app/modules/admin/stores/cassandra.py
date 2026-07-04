@@ -151,6 +151,7 @@ class AdminCassandraStore:
             ArticleMatchStmts,
             ArticleStmts,
             ArticleVersionStmts,
+            DeletedArticleStmts,
             FeedStmts,
         )
 
@@ -160,6 +161,16 @@ class AdminCassandraStore:
             return False
 
         session = get_cassandra_session()
+
+        # Tombstone FIRST (before any row disappears): the SSR route serves
+        # 410 Gone for tombstoned ids so search engines drop the URL fast
+        # instead of retrying a 404 for months.
+        from datetime import UTC, datetime
+
+        session.execute(
+            DeletedArticleStmts.INSERT,
+            (aid, datetime.now(tz=UTC), (current.title or "")[:300]),
+        )
 
         # Exact stored timestamp -> its month bucket -> precise feed-row delete.
         ts_row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()

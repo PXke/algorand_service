@@ -70,6 +70,27 @@ def _domain_in_cooldown(row) -> bool:
     return bool(dom and domain_in_cooldown(dom))
 
 
+def _novelty_collapsed(row) -> bool:
+    """Fresh novelty at drain time. The enqueue-time novelty is a snapshot; a
+    story on the same subject may have PUBLISHED after this row entered the
+    queue (the Defly case: a newsletter about a wallet we had just covered), so
+    the stored priority silently overstates it. Recompute against articles
+    published NOW and cut the row when novelty has collapsed — one cheap
+    Typesense query beats a six-minute duplicate compose. Fails open (0.0
+    similarity → not collapsed) when Typesense is unavailable."""
+    from app.modules.newspaper.article_grader import (
+        recent_content_similarity,
+        recent_title_similarity,
+    )
+
+    title = str(row.payload.get("page_title", ""))
+    text = str(row.payload.get("page_text", ""))
+    title_sim, _ = recent_title_similarity(title)
+    content_sim, _ = recent_content_similarity(title, text)
+    novelty = 1.0 - max(title_sim, content_sim)
+    return novelty <= config.NOVELTY_DUPLICATE_FLOOR
+
+
 def _resolve(row, outcome: dict) -> str:
     """Mark the queue row done when its compose outcome resolved it (published /
     review / duplicate); leave it pending otherwise. Returns the status string.
@@ -217,6 +238,16 @@ def drain_standard_publish_queue() -> dict[str, object]:
             # review branch, which otherwise composes + continues past this check.
             if _domain_in_cooldown(row):
                 results.append({"queue_id": row.queue_id, "status": "domain_cooldown"})
+                continue
+
+            # Duplicate cut: the story may have been covered since this row was
+            # enqueued — recompute novelty NOW and expire collapsed rows before
+            # any compose (review-bound ones included; a review draft still
+            # re-covers the same story). Standard tier only: breaking has its
+            # own credibility path and must never be suppressed as a repeat.
+            if _novelty_collapsed(row):
+                mark_queue_status(row.queue_id, "expired")
+                results.append({"queue_id": row.queue_id, "status": "novelty_collapsed"})
                 continue
 
             if _row_needs_review(row):

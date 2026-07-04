@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../../core/config/app_config.dart';
+import '../../../core/ui/lazy_network_image.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/theme/app_theme_extension.dart';
 class FeedPlacementCard extends StatelessWidget {
@@ -86,12 +86,12 @@ class FeedPlacementCard extends StatelessWidget {
                 const SizedBox(height: 12),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(8),
-                  child: Image.network(
-                    proxiedImageUrl(imageUrl),
+                  child: LazyNetworkImage(
+                    url: imageUrl,
                     height: 120,
                     width: double.infinity,
                     fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                    error: const SizedBox.shrink(),
                   ),
                 ),
               ],

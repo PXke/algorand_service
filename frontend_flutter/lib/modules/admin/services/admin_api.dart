@@ -186,6 +186,23 @@ class AdminApi {
     );
   }
 
+  /// Fold [sourceServiceIds] into [targetServiceId]: their sources move to the
+  /// target, their domains re-point, and the emptied services are disabled.
+  Future<Map<String, dynamic>> mergeServices({
+    required String walletAddress,
+    required String targetServiceId,
+    required List<String> sourceServiceIds,
+  }) async {
+    return _client.postJson(
+      '/api/v1/admin/sources/merge',
+      body: {
+        'target_service_id': targetServiceId,
+        'source_service_ids': sourceServiceIds,
+      },
+      headers: _adminHeaders(walletAddress),
+    );
+  }
+
   Future<List<Map<String, dynamic>>> listScrapers({
     required String walletAddress,
   }) async {
@@ -429,5 +446,17 @@ class AdminApi {
       '/api/v1/admin/gatekeeper/validation-report',
       headers: _adminHeaders(walletAddress),
     );
+  }
+
+  Future<List<Map<String, dynamic>>> listContactMessages({
+    required String walletAddress,
+  }) async {
+    final body = await _client.getJson(
+      '/api/v1/admin/contact-messages',
+      headers: _adminHeaders(walletAddress),
+    );
+    final items = body['items'];
+    if (items is! List) return const [];
+    return items.whereType<Map<String, dynamic>>().toList();
   }
 }

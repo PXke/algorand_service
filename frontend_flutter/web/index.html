@@ -22,6 +22,18 @@
   <meta name="theme-color" content="#171238">
   <meta name="description" content="Algorand ecosystem news, search and tools.">
 
+  <!-- Flutter's Material typography defaults to Roboto and fetches it from
+       fonts.gstatic.com unless redirected. We bundle Inter — map Roboto to the
+       same files so the engine never opens a third-party font connection. -->
+  <style>
+    @font-face{font-family:'Roboto';font-style:normal;font-weight:400;
+      src:url('assets/assets/fonts/Inter-w400.ttf') format('truetype')}
+    @font-face{font-family:'Roboto';font-style:normal;font-weight:500;
+      src:url('assets/assets/fonts/Inter-w400.ttf') format('truetype')}
+    @font-face{font-family:'Roboto';font-style:normal;font-weight:700;
+      src:url('assets/assets/fonts/Inter-w700.ttf') format('truetype')}
+  </style>
+
   <!-- Baseline social-card defaults. The backend's server-rendered document
        routes replace title/description and these og:/twitter: tags per page;
        they are the fallback for any route served straight from this static
@@ -99,5 +111,26 @@
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
   <script src="flutter_bootstrap.js" async></script>
+  <!-- Re-enable pinch zoom: the Flutter engine rewrites the viewport meta to
+       user-scalable=no at boot, which fails accessibility (low-vision users
+       rely on zoom, and this app is a newspaper — text zoom must work). Watch
+       for the engine's rewrite, undo it once, then disconnect. -->
+  <script>
+    (function () {
+      function fix() {
+        var m = document.querySelector('meta[name="viewport"]');
+        if (m && /user-scalable=no|maximum-scale=1/.test(m.getAttribute('content') || '')) {
+          m.setAttribute('content', 'width=device-width, initial-scale=1.0');
+          return true;
+        }
+        return false;
+      }
+      if (!fix()) {
+        var obs = new MutationObserver(function () { if (fix()) obs.disconnect(); });
+        obs.observe(document.head, { childList: true, subtree: true, attributes: true });
+        setTimeout(function () { obs.disconnect(); }, 20000);
+      }
+    })();
+  </script>
 </body>
 </html>

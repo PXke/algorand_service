@@ -5,7 +5,7 @@ import '../../../core/providers/api_providers.dart';
 import '../../../core/theme/app_theme_extension.dart';
 import '../../../core/ui/error_banner.dart';
 import '../../../core/ui/page_content.dart';
-import '../../auth/providers/auth_providers.dart';
+import '../../../core/providers/session_providers.dart';
 import '../models/classifier_labels.dart';
 
 /// Gatekeeper validation tab: anchor progress (X/40), one-click annotator
@@ -42,7 +42,7 @@ class _GatekeeperTabState extends ConsumerState<GatekeeperTab> {
     super.dispose();
   }
 
-  String? get _wallet => ref.read(walletAuthStateProvider).walletAddress;
+  String? get _wallet => ref.read(sessionStateProvider).walletAddress;
 
   Future<void> _load() async {
     final wallet = _wallet;

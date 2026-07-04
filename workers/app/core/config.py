@@ -131,6 +131,11 @@ SERVICE_CONTEXT_MAX_CHARS = env_int("SERVICE_CONTEXT_MAX_CHARS", 48_000)
 SERVICE_CONTEXT_MAX_PAGES = env_int("SERVICE_CONTEXT_MAX_PAGES", 12)
 SERVICE_CONTEXT_PER_PAGE_CHARS = env_int("SERVICE_CONTEXT_PER_PAGE_CHARS", 6_000)
 SERVICE_CONTEXT_MAX_AGE_DAYS = env_int("SERVICE_CONTEXT_MAX_AGE_DAYS", 30)
+
+# Bluesky source lane (opt-in via CRAWLER_BLUESKY_ENABLED). A service whose
+# scrape_url is a bsky.app profile is polled through the free public AppView;
+# each original post becomes a publish signal. Cap posts read per source poll.
+BLUESKY_MAX_POSTS_PER_SOURCE = env_int("BLUESKY_MAX_POSTS_PER_SOURCE", 20)
 # Exponential backoff on consecutive scrape failures (e.g. 429 storms):
 # first failure waits the base, each subsequent one multiplies up to the cap.
 # Reset to zero on the next successful scrape.
@@ -349,6 +354,16 @@ RECENCY_PRIORITY_WEIGHT = env_int("RECENCY_PRIORITY_WEIGHT", 80)
 # normalised at DIFF_SIGNIFICANCE_NORM_LINES added lines for full credit.
 # Discoveries fire once per service ever, so precise ordering among them
 # matters little: they get a flat relevance-scaled DISCOVERY_PRIORITY_WEIGHT.
+# Repetition suppression: novelty MULTIPLIES the whole priority (like relevance
+# does inside the components) — a zero-novelty candidate keeps only the floor
+# share of its score, so an already-covered story can't outrank fresh ones on
+# relevance+diff alone. Kept soft (not a gate): weekly service updates always
+# resemble the service's previous article somewhat.
+NOVELTY_SUPPRESSION_FLOOR = env_float("NOVELTY_SUPPRESSION_FLOOR", 0.3)
+# Drain-time duplicate cut: novelty is recomputed just before composing; at or
+# below this floor the row is resolved as a duplicate (something on the same
+# story published after it was enqueued) instead of burning a compose.
+NOVELTY_DUPLICATE_FLOOR = env_float("NOVELTY_DUPLICATE_FLOOR", 0.1)
 DIFF_PRIORITY_WEIGHT = env_int("DIFF_PRIORITY_WEIGHT", 80)
 DIFF_SIGNIFICANCE_NORM_LINES = env_int("DIFF_SIGNIFICANCE_NORM_LINES", 40)
 DISCOVERY_PRIORITY_WEIGHT = env_int("DISCOVERY_PRIORITY_WEIGHT", 60)

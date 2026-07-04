@@ -1,8 +1,12 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/api/api_errors.dart';
+import '../../../core/util/ssr_feed_payload.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/providers/api_providers.dart';
 import '../../../core/theme/app_theme_extension.dart';
@@ -35,30 +39,61 @@ class _FrontPageState extends ConsumerState<FrontPage> {
   @override
   void initState() {
     super.initState();
-    _load();
+    final boot = readSsrFeedItems();
+    if (boot != null && boot.isNotEmpty) {
+      _items = boot;
+      _loading = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _refreshInBackground());
+    } else {
+      _load();
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadPlacementsDeferred());
   }
 
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+  void _loadPlacementsDeferred() {
+    unawaited(
+      Future<void>.delayed(const Duration(seconds: 8), _loadPlacements),
+    );
+  }
+
+  /// Re-fetch after painting SSR-hydrated content so the feed stays fresh.
+  Future<void> _refreshInBackground() async {
+    await Future<void>.delayed(const Duration(seconds: 5));
+    if (!mounted) return;
+    await _load(silent: true);
+    if (!mounted) return;
+    await _loadPlacements();
+  }
+
+  Future<void> _loadPlacements() async {
+    try {
+      final placements = await PlacementsApi(ref.read(apiClientProvider)).fetchPlacements();
+      if (!mounted) return;
+      if (placements.isNotEmpty) {
+        setState(() => _placement = placements.first);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _load({bool silent = false}) async {
+    if (!silent) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
     try {
       final client = ref.read(apiClientProvider);
       final page = await NewsApi(client).fetchFeedPage(limit: 50);
-      Map<String, dynamic>? placement;
-      try {
-        final placements = await PlacementsApi(client).fetchPlacements();
-        if (placements.isNotEmpty) placement = placements.first;
-      } catch (_) {}
       if (!mounted) return;
       setState(() {
         _items = page.items;
-        _placement = placement;
         _loading = false;
+        _error = null;
       });
     } catch (e) {
       if (!mounted) return;
+      if (silent && _items.isNotEmpty) return;
       setState(() {
         _error = apiErrorMessage(e);
         _loading = false;
@@ -163,30 +198,53 @@ class _Grid extends StatelessWidget {
           delay: staggerDelay(i ~/ 2),
           child: Padding(
             padding: const EdgeInsets.only(bottom: 16),
-            child: IntrinsicHeight(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expanded(
-                    child: ArticleCard(
-                      item: left,
-                      compact: true,
-                      onTap: () => onOpen(left),
+            child: kIsWeb
+                ? Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: ArticleCard(
+                          item: left,
+                          compact: true,
+                          onTap: () => onOpen(left),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: right == null
+                            ? const SizedBox.shrink()
+                            : ArticleCard(
+                                item: right,
+                                compact: true,
+                                onTap: () => onOpen(right),
+                              ),
+                      ),
+                    ],
+                  )
+                : IntrinsicHeight(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Expanded(
+                          child: ArticleCard(
+                            item: left,
+                            compact: true,
+                            onTap: () => onOpen(left),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: right == null
+                              ? const SizedBox.shrink()
+                              : ArticleCard(
+                                  item: right,
+                                  compact: true,
+                                  onTap: () => onOpen(right),
+                                ),
+                        ),
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: right == null
-                        ? const SizedBox.shrink()
-                        : ArticleCard(
-                            item: right,
-                            compact: true,
-                            onTap: () => onOpen(right),
-                          ),
-                  ),
-                ],
-              ),
-            ),
           ),
         ),
       );

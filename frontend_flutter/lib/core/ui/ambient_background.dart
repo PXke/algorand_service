@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme_extension.dart';
@@ -10,6 +11,7 @@ class AmbientBackground extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (kIsWeb) return child;
     final colors = context.appColors;
     final size = MediaQuery.sizeOf(context);
 

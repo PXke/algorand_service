@@ -51,6 +51,7 @@ def llms_txt() -> str:
         "article's complete body ships in content:encoded",
         f"- [Sitemap]({absolute('/sitemap.xml')}): all article and section URLs",
         f"- [About]({absolute('/about')}): editorial and AI-authorship disclosure",
+        f"- [Contact]({absolute('/contact')}): corrections, tips and feedback form",
         "",
         "## Sections",
         "",
@@ -77,6 +78,7 @@ def sitemap_xml(items: list[ArticleFeedItem]) -> str:
     urls = [
         _url(site_url() + "/", _iso_date(newest), "hourly"),
         _url(absolute("/about"), changefreq="monthly"),
+        _url(absolute("/contact"), changefreq="monthly"),
     ]
     urls += [_url(absolute(f"/section/{s.slug}"), changefreq="daily") for s in SECTIONS]
     urls += [

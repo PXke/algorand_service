@@ -726,6 +726,66 @@ abstract class AppLocalizations {
   /// **'Source'**
   String get sourceKindUnknown;
 
+  /// No description provided for @navContact.
+  ///
+  /// In en, this message translates to:
+  /// **'Contact'**
+  String get navContact;
+
+  /// No description provided for @contactTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Contact'**
+  String get contactTitle;
+
+  /// No description provided for @contactSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Corrections, tips or feedback — write to the newsroom.'**
+  String get contactSubtitle;
+
+  /// No description provided for @contactNameLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Your name (optional)'**
+  String get contactNameLabel;
+
+  /// No description provided for @contactEmailLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Email (optional, if you want a reply)'**
+  String get contactEmailLabel;
+
+  /// No description provided for @contactMessageLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Message'**
+  String get contactMessageLabel;
+
+  /// No description provided for @contactMessageHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Corrections, tips, feedback…'**
+  String get contactMessageHint;
+
+  /// No description provided for @contactSend.
+  ///
+  /// In en, this message translates to:
+  /// **'Send message'**
+  String get contactSend;
+
+  /// No description provided for @contactSent.
+  ///
+  /// In en, this message translates to:
+  /// **'Message sent — thank you for writing to us.'**
+  String get contactSent;
+
+  /// No description provided for @contactTooShort.
+  ///
+  /// In en, this message translates to:
+  /// **'Please write a few more words (at least 10 characters).'**
+  String get contactTooShort;
+
   /// No description provided for @searchTitle.
   ///
   /// In en, this message translates to:
@@ -735,7 +795,7 @@ abstract class AppLocalizations {
   /// No description provided for @searchSubtitle.
   ///
   /// In en, this message translates to:
-  /// **'Full-text search via Typesense when configured; otherwise scans the recent feed.'**
+  /// **'Search every article we have published.'**
   String get searchSubtitle;
 
   /// No description provided for @searchQueryLabel.
@@ -1277,6 +1337,54 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Changes apply on the next crawler poll.'**
   String get sourcesChangesNextPoll;
+
+  /// No description provided for @sourcesMerge.
+  ///
+  /// In en, this message translates to:
+  /// **'Merge'**
+  String get sourcesMerge;
+
+  /// No description provided for @sourcesMergeTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Merge services'**
+  String get sourcesMergeTitle;
+
+  /// No description provided for @sourcesMergeIntro.
+  ///
+  /// In en, this message translates to:
+  /// **'Fold several services into one. The chosen services\' sources and domains move to the target; the emptied services are disabled. Use this when one product spans multiple domains (e.g. algorand.co + algorand.com).'**
+  String get sourcesMergeIntro;
+
+  /// No description provided for @sourcesMergeTarget.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep as target'**
+  String get sourcesMergeTarget;
+
+  /// No description provided for @sourcesMergeFold.
+  ///
+  /// In en, this message translates to:
+  /// **'Fold in (will be disabled)'**
+  String get sourcesMergeFold;
+
+  /// No description provided for @sourcesMergeAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Merge'**
+  String get sourcesMergeAction;
+
+  /// No description provided for @sourcesMergeNeedsTwo.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick a target and at least one service to fold in.'**
+  String get sourcesMergeNeedsTwo;
+
+  /// No description provided for @sourcesMergeDone.
+  ///
+  /// In en, this message translates to:
+  /// **'Merged {count} service(s) into {target}.'**
+  String sourcesMergeDone(int count, String target);
 
   /// No description provided for @sourcesFieldServiceId.
   ///

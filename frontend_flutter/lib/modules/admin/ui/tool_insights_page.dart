@@ -8,7 +8,7 @@ import '../../../core/ui/error_banner.dart';
 import '../../../core/ui/layout.dart';
 import '../../../core/ui/loading_strip.dart';
 import '../../../core/ui/page_content.dart';
-import '../../auth/providers/auth_providers.dart';
+import '../../../core/providers/session_providers.dart';
 
 /// Admin tab: capabilities the writer model asked for (via the suggest_tool
 /// tool) when the existing tools could not give it data a story needed. Grouped
@@ -33,7 +33,7 @@ class _ToolInsightsTabState extends ConsumerState<ToolInsightsTab> {
   }
 
   Future<void> _load() async {
-    final wallet = ref.read(walletAuthStateProvider).walletAddress;
+    final wallet = ref.read(sessionStateProvider).walletAddress;
     if (wallet == null || wallet.isEmpty) {
       setState(() {
         _loading = false;

@@ -25,6 +25,7 @@ class PriorityBreakdown:
     announce_bonus: int = 0
     classifier_adjust: int = 0
     seo_spam: bool = False
+    novelty_factor: float = 1.0
 
 
 def compute_priority(
@@ -151,6 +152,19 @@ def compute_priority(
         classifier_adjust = -round(total * 0.5 * max(0.0, min(1.0, classifier_confidence)))
     total = max(0, min(max_total + CLASSIFIER_PRIORITY_WEIGHT, total + classifier_adjust))
 
+    # Repetition suppression: novelty scales the WHOLE score. The additive
+    # novelty term rewards fresh angles among competitors, but on its own a
+    # zero-novelty candidate only lost that one term — a high-relevance repeat
+    # (e.g. a newsletter re-covering a wallet we just published about) still
+    # outranked fresh stories. The floor keeps legitimate weekly service
+    # updates alive (they always resemble the service's previous article);
+    # unscored candidates (novelty=None → 1.0) are untouched.
+    from app.core.config import NOVELTY_SUPPRESSION_FLOOR
+
+    floor = max(0.0, min(1.0, NOVELTY_SUPPRESSION_FLOOR))
+    novelty_factor = floor + (1.0 - floor) * nov
+    total = round(total * novelty_factor)
+
     return PriorityBreakdown(
         total=total,
         topic_base=topic_base,
@@ -166,15 +180,18 @@ def compute_priority(
         announce_bonus=announce_pts,
         classifier_adjust=classifier_adjust,
         seo_spam=spam,
+        novelty_factor=round(novelty_factor, 2),
     )
 
 
 # Title shapes that signal a concrete happening (launch, partnership, ship,
 # migration) as opposed to a page that merely exists. Stem-matched, title-only.
 _ANNOUNCE_TITLE_STEMS = (
-    "introduc", "launch", "announc", "unveil", "partner", "integrat",
-    "release", "ships", "goes live", "now live", "brings", "acquir",
-    "rebrand", "migrat", "upgrad", "raises", "secures", "debut",
+    # "introducing/introduces", never the bare stem — "Introduction | Pera Docs"
+    # is a docs landing page, not an announcement.
+    "introducing", "introduces", "launch", "announc", "unveil", "partner",
+    "integrat", "release", "ships", "goes live", "now live", "brings",
+    "acquir", "rebrand", "migrat", "upgrad", "raises", "secures", "debut",
 )
 
 

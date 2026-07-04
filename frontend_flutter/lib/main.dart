@@ -1,21 +1,22 @@
-import 'package:bugsnag_flutter/bugsnag_flutter.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_web_plugins/url_strategy.dart';
 
 import 'app.dart';
+import 'core/util/bugsnag_init_stub.dart'
+    if (dart.library.io) 'core/util/bugsnag_init_mobile.dart';
 
 Future<void> main() async {
+  // Path URLs (no /#/): the default HASH strategy made the engine read the
+  // initial route from the empty fragment on SSR-served deep links
+  // (/news/articles/{id}), so go_router fell back to '/' and the app snapped
+  // to the front page the moment the canvas loaded. Must run before the
+  // router is created.
+  usePathUrlStrategy();
   WidgetsFlutterBinding.ensureInitialized();
-  try {
-    await bugsnag.start(apiKey: '7712dd9a5b49cc654fd24ce23a18d0c3');
-    // Route uncaught Flutter framework errors to Bugsnag.
-    final priorOnError = FlutterError.onError;
-    FlutterError.onError = (details) {
-      bugsnag.notify(details.exception, details.stack ?? StackTrace.current);
-      priorOnError?.call(details);
-    };
-  } catch (_) {
-    // Never let crash reporting setup block app start.
-  }
   runApp(ProviderScope(child: AlgorandPlatformApp()));
+  // Crash reporting is mobile-only; web skips it entirely for a leaner bundle.
+  unawaited(initBugsnag());
 }

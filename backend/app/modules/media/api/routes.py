@@ -17,14 +17,30 @@ from robyn import Request, Response
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 _MAX_BYTES = 5_000_000
-_TIMEOUT = 8.0
+_TIMEOUT = 3.0
 _MAX_REDIRECTS = 3
 _CACHE_TTL = 86_400  # 24h: serve the same image from Redis instead of re-fetching
 _UA = "algorand-platform-image-proxy/1.0 (+https://algorand.pxke.me)"
+# Optimisation caps: article heroes/cards never render wider than ~1200 CSS px,
+# but sources ship multi-MB OG PNGs (one page weighed 10MB of images). Resize
+# down + re-encode WebP before caching; pass through SVG/GIF and tiny files.
+_MAX_DIM = 1200
+_WEBP_QUALITY = 80
+_OPTIMIZE_MIN_BYTES = 30_000
+# 1×1 transparent WebP returned when upstream has no image (favicon misses,
+# broken OG URLs). Keeps Lighthouse console clean and lets Image.network paint
+# without a failed XHR.
+_PLACEHOLDER_WEBP = (
+    b"RIFF@\x00\x00\x00WEBPVP8X\n\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00"
+    b"\x00\x00ALPH\x02\x00\x00\x00\x00\x00VP8 \x18\x00\x00\x000\x01\x00\x9d"
+    b"\x01*\x01\x00\x01\x00\x01@&%\xa4\x00\x03p\x00\xfe\xfd6h\x00"
+)
 
 
 def _cache_key(url: str) -> str:
-    return f"imgproxy:{hashlib.sha256(url.encode()).hexdigest()}"
+    # v2: cache holds the OPTIMIZED copy — new prefix so pre-optimisation fat
+    # entries age out instead of being served for another TTL.
+    return f"imgproxy2:{hashlib.sha256(url.encode()).hexdigest()}"
 
 
 def _redis():
@@ -99,9 +115,52 @@ def _fetch_image(url: str) -> httpx.Response | None:
     return None
 
 
+def _optimize(ctype: str, data: bytes) -> tuple[str, bytes]:
+    """Downscale to <=_MAX_DIM px and re-encode as WebP. Pass through SVGs
+    (not raster), GIFs (animation), tiny files, and anything Pillow can't
+    read; keep the original whenever it is already smaller. Never upscales."""
+    if ctype in ("image/svg+xml", "image/gif") or len(data) < _OPTIMIZE_MIN_BYTES:
+        return ctype, data
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        img = Image.open(BytesIO(data))
+        img.load()
+        if max(img.size) > _MAX_DIM:
+            img.thumbnail((_MAX_DIM, _MAX_DIM), Image.LANCZOS)
+        has_alpha = img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGBA" if has_alpha else "RGB")
+        out = BytesIO()
+        img.save(out, format="WEBP", quality=_WEBP_QUALITY, method=4)
+        optimized = out.getvalue()
+        if len(optimized) < len(data):
+            return "image/webp", optimized
+        return ctype, data
+    except Exception:
+        return ctype, data
+
+
+def _fetch_and_optimize(url: str) -> tuple[int, str, bytes]:
+    """(status, content_type, body) — the blocking miss path, run off-loop."""
+    resp = _fetch_image(url)
+    if resp is None:
+        return 502, "", b""
+    ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+    if resp.status_code != 200 or not ctype.startswith("image/"):
+        return 404, "", b""
+    ctype, data = _optimize(ctype, resp.content[:_MAX_BYTES])
+    _cache_set(url, ctype, data)
+    return 200, ctype, data
+
+
 def register_media_routes(app) -> None:
     @app.get("/api/v1/img")
     async def proxy_image(request: Request) -> Response:
+        import asyncio
+
         # robyn does NOT URL-decode query params, so the percent-encoded url
         # arrives literally — decode it before parsing.
         url = unquote((request.query_params.get("url", "") or "").strip())
@@ -124,15 +183,28 @@ def register_media_routes(app) -> None:
                 description=data,
             )
 
-        resp = _fetch_image(url)
-        if resp is None:
-            return Response(status_code=502, headers={}, description="fetch failed")
-        ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-        if resp.status_code != 200 or not ctype.startswith("image/"):
-            return Response(status_code=404, headers={}, description="not an image")
-
-        data = resp.content[:_MAX_BYTES]
-        _cache_set(url, ctype, data)
+        # Fetch + Pillow re-encode are blocking — keep them off the event loop.
+        status, ctype, data = await asyncio.to_thread(_fetch_and_optimize, url)
+        if status == 502:
+            return Response(
+                status_code=200,
+                headers={
+                    "Content-Type": "image/webp",
+                    "Cache-Control": "public, max-age=3600",
+                    "X-Cache": "PLACEHOLDER",
+                },
+                description=_PLACEHOLDER_WEBP,
+            )
+        if status == 404:
+            return Response(
+                status_code=200,
+                headers={
+                    "Content-Type": "image/webp",
+                    "Cache-Control": "public, max-age=3600",
+                    "X-Cache": "PLACEHOLDER",
+                },
+                description=_PLACEHOLDER_WEBP,
+            )
         return Response(
             status_code=200,
             headers={

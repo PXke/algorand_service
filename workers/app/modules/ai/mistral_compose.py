@@ -628,6 +628,32 @@ _PROFILE_GUIDANCE = (
     "entirely rather than implying a date."
 )
 
+# The source material for a web service is a MULTI-PAGE AGGREGATE of that
+# service's web presence (a "# SERVICE WATCH:" header, then "## PAGE:" sections
+# across the service's domains). The composer must read it as one entity's
+# state, not a single article.
+_SERVICE_WATCH_NOTE = (
+    "\n\nSOURCE SHAPE: the material is an AGGREGATE of the service's web presence — "
+    "a '# SERVICE WATCH:' header followed by '## PAGE: <url>' sections spanning the "
+    "service's site(s). Treat it as the current state of ONE product/organisation, "
+    "synthesising across the sections; never write 'according to page 3' or quote the "
+    "'## PAGE:' scaffolding itself."
+)
+
+# Evolution-story mode: a content update fires because the service's aggregate
+# CHANGED week-over-week. The diff is the news; the aggregate is background.
+_EVOLUTION_GUIDANCE = (
+    "\n\nEVOLUTION STORY MODE: this is an UPDATE on a service we already track — it "
+    "was triggered because its web presence CHANGED since we last looked. The unified "
+    "diff below is the STORY: it shows what the team shipped, rebranded, migrated, "
+    "priced, or announced. Lead with that change and why it matters to users; use the "
+    "rest of the aggregate only as background to explain the change. Do NOT re-introduce "
+    "the project from scratch or re-report unchanged, previously-covered material — the "
+    "reader already knows what this service is. If the diff is purely cosmetic (copy "
+    "tweaks, reordering, boilerplate) with no substantive product change, say so plainly "
+    "and keep it brief rather than inflating it into news."
+)
+
 
 def _clip(text: str, limit: int = MISTRAL_MAX_SOURCE_CHARS) -> str:
     text = text.strip()
@@ -776,9 +802,41 @@ def compose_scrape_article_mistral(
     # profile, not breaking news — prevents chronological context collapse upstream.
     from app.core.config import SOURCE_TYPE_ROUTER_ENABLED
 
-    if SOURCE_TYPE_ROUTER_ENABLED and is_static_landing_page(source_url):
+    is_aggregate = page_text.lstrip().startswith("# SERVICE WATCH:")
+    if is_aggregate:
+        system = system + _SERVICE_WATCH_NOTE
+    # An update WITH a diff is an evolution story — the change leads. A first
+    # snapshot (or a static landing page) stays intro/profile-shaped instead.
+    is_evolution = bool(diff) and not is_first_snapshot
+    if is_evolution:
+        system = system + _EVOLUTION_GUIDANCE
+    elif SOURCE_TYPE_ROUTER_ENABLED and is_static_landing_page(source_url):
         system = system + _PROFILE_GUIDANCE
-    user = f"""Write the article now from the material below.
+
+    if is_evolution:
+        # Foreground the change: the diff is the assignment, the aggregate is context.
+        user = f"""Write the article now. This is an UPDATE on a service we already
+track — report on WHAT CHANGED, using the diff as your primary assignment.
+
+Today (UTC): {today}
+Service: {service_name}
+Source URL: {source_url}
+Source domain: {source_domain}
+On-chain context (background only): round {round_num}, tx {txid}
+
+WHAT CHANGED since we last looked (this is the story — unified diff):
+```
+{_clip(diff, 6000)}
+```
+{links_block}
+
+Full service aggregate (BACKGROUND ONLY — explain the change, don't re-report this):
+```
+{_clip(page_text)}
+```
+{_clip(enrichment_block, 5000) if enrichment_block else ""}"""
+    else:
+        user = f"""Write the article now from the material below.
 
 Today (UTC): {today}
 Publisher / monitor: {service_name}

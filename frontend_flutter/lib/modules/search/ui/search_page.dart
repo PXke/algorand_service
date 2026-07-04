@@ -180,17 +180,8 @@ class _SearchPageState extends ConsumerState<SearchPage> {
         const SizedBox(height: AppLayout.sectionGap),
         LoadingStrip(visible: _loading),
         if (_error != null) ErrorBanner(message: _error!),
-        if (_engine != null && _engine != 'error')
-          Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: Row(
-              children: [
-                Icon(Icons.tune, size: 16, color: colors.subtle),
-                const SizedBox(width: 6),
-                Text(l10n.searchEngine(_engine!), style: theme.textTheme.bodySmall),
-              ],
-            ),
-          ),
+        // The backing engine (typesense / feed_scan) is an implementation
+        // detail — readers never see it; 'error' still surfaces a message below.
         if (_engine == 'error' && _error == null)
           Padding(
             padding: const EdgeInsets.only(bottom: 12),

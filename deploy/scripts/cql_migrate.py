@@ -75,7 +75,7 @@ def split_cql_statements(cql: str) -> list[str]:
 def connect_cluster(hosts: list[str], keyspace: str):
     try:
         from cassandra.auth import PlainTextAuthProvider
-        from cassandra.cluster import Cluster
+        from cassandra.cluster import EXEC_PROFILE_DEFAULT, Cluster, ExecutionProfile
         from cassandra.policies import DCAwareRoundRobinPolicy
     except ImportError as exc:  # pragma: no cover
         raise SystemExit(
@@ -93,9 +93,12 @@ def connect_cluster(hosts: list[str], keyspace: str):
         if username
         else None
     )
+    profile = ExecutionProfile(
+        load_balancing_policy=DCAwareRoundRobinPolicy(local_dc=local_dc),
+    )
     cluster = Cluster(
         hosts,
-        load_balancing_policy=DCAwareRoundRobinPolicy(local_dc=local_dc),
+        execution_profiles={EXEC_PROFILE_DEFAULT: profile},
         auth_provider=auth_provider,
     )
     return cluster.connect(keyspace)
