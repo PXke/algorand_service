@@ -14,7 +14,8 @@ dependencies:
     sdk: flutter
   http: ^1.2.0
   crypto: ^3.0.0
-  algorand_dart: ^1.0.3
+  algorand_auth_core:
+    path: ../algorand_auth_core
   ensemble_walletconnect: ^1.0.5
   flutter_secure_storage: ^10.0.0
 

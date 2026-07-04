@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:algorand_dart/algorand_dart.dart';
+import 'package:algorand_auth_core/algorand_auth_core.dart';
 import 'package:ensemble_walletconnect/ensemble_walletconnect.dart';
 import 'package:flutter/foundation.dart';
 
@@ -12,13 +12,13 @@ import 'wallet_connector.dart';
 
 /// WalletConnect connector implementing ARC-0025 (`algo_signTxn`) and ARC-0060 (`algo_signData`).
 class WalletConnectAlgorandConnector implements WalletConnector {
-  WalletConnectAlgorandConnector({required WalletAuthConfig config}) : _config = config {
-    _algorand = Algorand(algodClient: AlgodClient(apiUrl: _config.algodApiUrl));
-  }
+  WalletConnectAlgorandConnector({required WalletAuthConfig config})
+      : _config = config,
+        _algod = AlgodClient(apiUrl: config.algodApiUrl);
 
   final WalletAuthConfig _config;
+  final AlgodClient _algod;
   WalletConnect? _connectorInstance;
-  late final Algorand _algorand;
 
   /// Built LAZILY on first use: the WalletConnect constructor opens the bridge
   /// WebSocket immediately, so constructing it at app startup dialled the
@@ -119,22 +119,14 @@ class WalletConnectAlgorandConnector implements WalletConnector {
       throw StateError('Wallet session is not connected');
     }
 
-    final sender = Address.fromAlgorandAddress(address: walletAddress);
-    final params = await _algorand.getSuggestedTransactionParams();
+    final params = await _algod.suggestedParams();
+    final txBytes = AuthPaymentTransaction.buildUnsignedBytes(
+      senderAddress: walletAddress,
+      note: signingMessage,
+      params: params,
+      feeMicroAlgos: 0,
+    );
 
-    final tx = await (PaymentTransactionBuilder()
-          ..sender = sender
-          ..receiver = sender
-          ..amount = Algo.toMicroAlgos(0)
-          ..noteText = signingMessage
-          ..suggestedParams = params)
-        .build();
-    // This proof is verified by the backend and never broadcast. A 0 fee is
-    // below the network minimum, so the signed blob is unsubmittable even if
-    // leaked — and the wallet shows the login as costing nothing.
-    tx.fee = 0;
-
-    final txBytes = tx.toBytes();
     final walletTxn = {
       'txn': base64Encode(txBytes),
       'signers': [walletAddress],

@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:algorand_dart/algorand_dart.dart';
+import 'package:algorand_auth_core/algorand_auth_core.dart';
 import 'package:crypto/crypto.dart';
 
 import '../caip122/caip122_message.dart';
@@ -48,7 +48,7 @@ Map<String, dynamic> buildArc0060SignRequest({
   required String walletAddress,
   String? requestId,
 }) {
-  final address = Address.fromAlgorandAddress(address: walletAddress);
+  final address = AlgorandAddress.decode(walletAddress);
   final id = requestId ?? _randomBase64(32);
   final authData = buildAuthenticatorData(caip122.domain);
 
