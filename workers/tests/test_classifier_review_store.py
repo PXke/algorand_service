@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 from app.modules.crawler.classifier_review_store import complete_classifier_review
@@ -10,7 +10,7 @@ def test_complete_classifier_review_invalid_id() -> None:
     assert complete_classifier_review("not-a-uuid") is False
 
 
-def test_complete_classifier_review_success() -> None:
+def test_complete_classifier_review_success(fake_cassandra_session) -> None:
     rid = uuid4()
     created = MagicMock()
     created.tzinfo = None
@@ -26,12 +26,7 @@ def test_complete_classifier_review_success() -> None:
     row.created_at = created
     row.metadata = {"raw": '{"article_id":"abc"}'}
 
-    session = MagicMock()
-    session.execute.return_value.one.return_value = row
+    fake_cassandra_session.execute.return_value.one.return_value = row
 
-    with patch(
-        "app.core.cassandra.get_cassandra_session",
-        return_value=session,
-    ):
-        assert complete_classifier_review(str(rid), resolution="approved") is True
-    assert session.execute.call_count >= 2
+    assert complete_classifier_review(str(rid), resolution="approved") is True
+    assert fake_cassandra_session.execute.call_count >= 2

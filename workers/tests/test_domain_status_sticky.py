@@ -9,6 +9,9 @@ from __future__ import annotations
 from app.modules.crawler import domain_tracker
 
 
+from tests.conftest import FakeCassandraResult
+
+
 class _Row:
     def __init__(self, *, frontier_status=None, is_relevant=None, metadata=None,
                  category=None, last_online_at=None):
@@ -17,14 +20,6 @@ class _Row:
         self.metadata = metadata
         self.category = category
         self.last_online_at = last_online_at
-
-
-class _Result:
-    def __init__(self, row):
-        self._row = row
-
-    def one(self):
-        return self._row
 
 
 class _FakeSession:
@@ -41,10 +36,10 @@ class _FakeSession:
     def execute(self, query, params=None):
         q = " ".join(str(query).split())
         if q.startswith("SELECT"):
-            return _Result(self._existing)
+            return FakeCassandraResult(self._existing)
         if q.startswith("INSERT INTO") and "domain_tracking" in q:
             self.inserted = params
-        return _Result(None)
+        return FakeCassandraResult(None)
 
 
 def _patch(monkeypatch, fake):

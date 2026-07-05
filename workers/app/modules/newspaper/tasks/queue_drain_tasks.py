@@ -309,6 +309,16 @@ def drain_standard_publish_queue() -> dict[str, object]:
     }
 
 
+@celery_app.task(name="app.tasks.newspaper.reap_stale_compose_sessions")
+def reap_stale_compose_sessions() -> dict[str, int]:
+    """Maintenance beat: mark any compose_sessions row stuck researching/writing
+    past the staleness window as "stale" (see tool_insights_store for why one
+    can get orphaned there)."""
+    from app.modules.ai.tool_insights_store import reap_stale_compose_sessions as _reap
+
+    return _reap()
+
+
 @celery_app.task(name="app.tasks.newspaper.expire_stale_queue_items")
 def expire_stale_queue_items() -> dict[str, object]:
     """

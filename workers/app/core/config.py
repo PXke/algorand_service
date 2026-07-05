@@ -258,6 +258,13 @@ LENGTH_OK_MAX_WORDS = env_int("LENGTH_OK_MAX_WORDS", 2000)
 RESEARCH_MIN_TOOL_CALLS = env_int("RESEARCH_MIN_TOOL_CALLS", 6)
 RESEARCH_FLOOR_ENABLED = env_bool("RESEARCH_FLOOR_ENABLED", True)
 RESEARCH_FLOOR_MAX_PASSES = env_int("RESEARCH_FLOOR_MAX_PASSES", 1)
+# A compose_session stuck in a non-terminal status (researching/writing) this
+# long is dead, not slow — the compose task's own hard time limit
+# (CELERY_TASK_TIME_LIMIT, 1860s/31min) means a crash that skips the
+# try/except checkpoint finalizers (e.g. a SIGKILL/OOM, or an exception before
+# the first checkpoint) is the only way a row gets stuck; reap_stale_compose_sessions
+# marks it "stale" so the admin Sessions view stops showing it as in-progress.
+COMPOSE_SESSION_STALE_MINUTES = env_int("COMPOSE_SESSION_STALE_MINUTES", 60)
 # Public base URL for linking to an article page from generated content (the
 # weekly digest links each highlight here). Hash route into the Flutter SPA.
 PUBLIC_ARTICLE_BASE_URL = env_str(

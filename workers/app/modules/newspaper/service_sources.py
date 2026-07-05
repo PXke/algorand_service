@@ -82,3 +82,54 @@ def service_for_domain(domain: str) -> str:
         ServiceSourceStmts.GET_BY_DOMAIN, (domain,)
     ).one()
     return str(row.service_id) if row and row.service_id else ""
+
+
+def merge_services(*, target_service_id: str, source_service_ids: list[str]) -> dict:
+    """Fold whole services into ``target_service_id``: their sources move over,
+    their domains re-point, and the emptied services are DISABLED in the
+    registry (not deleted — audit trail + snapshots keep their history). Mirrors
+    the backend admin store's merge_services (kept in sync manually) — added
+    here so the worker side can auto-merge a service whose scrape resolved to a
+    domain a DIFFERENT service already owns (e.g. a rebrand redirect), not just
+    the admin's manual "merge duplicates" action."""
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ServiceRegistryStmts, ServiceSourceStmts
+
+    session = get_cassandra_session()
+    now = datetime.now(tz=UTC)
+    moved: list[str] = []
+    for source_service in source_service_ids:
+        if not source_service or source_service == target_service_id:
+            continue
+        rows = list(session.execute(ServiceSourceStmts.LIST_FOR_SERVICE, (source_service,)))
+        for r in rows:
+            session.execute(
+                ServiceSourceStmts.UPSERT,
+                (
+                    target_service_id,
+                    r.source_id,
+                    r.source_type or "",
+                    r.url or "",
+                    r.domain or "",
+                    bool(r.enabled) if r.enabled is not None else True,
+                    now,
+                ),
+            )
+            if (r.source_type or "") == "web" and r.domain:
+                session.execute(ServiceSourceStmts.UPSERT_BY_DOMAIN, (r.domain, target_service_id))
+            moved.append(r.source_id)
+        # A merged-away service with NO recorded sources still owns its legacy
+        # scrape_url domain implicitly — claim it for the target so the old
+        # service can't be resurrected by the next crawl of that domain.
+        if not rows:
+            from app.modules.crawler.domain_tracker import domain_from_url
+
+            reg = session.execute(ServiceRegistryStmts.GET_SCRAPE_URL, (source_service,)).one()
+            url = (reg.scrape_url or "") if reg else ""
+            domain = domain_from_url(url) if url else ""
+            if domain:
+                add_web_source(target_service_id, domain=domain, url=url)
+                moved.append(f"web:{domain}")
+        session.execute(ServiceSourceStmts.DELETE_FOR_SERVICE, (source_service,))
+        session.execute(ServiceRegistryStmts.SET_ENABLED, (False, now, source_service))
+    return {"target": target_service_id, "moved_sources": moved}

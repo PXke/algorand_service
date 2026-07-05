@@ -135,6 +135,10 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.newspaper.expire_stale_queue_items",
         "schedule": float(os.getenv("PUBLISH_QUEUE_MAINTENANCE_SECONDS", "3600")),
     }
+    schedule["reap-stale-compose-sessions"] = {
+        "task": "app.tasks.newspaper.reap_stale_compose_sessions",
+        "schedule": float(os.getenv("COMPOSE_SESSION_REAP_SECONDS", "3600")),
+    }
     if is_crawler_enabled(CrawlerType.MAIL):
         schedule["mail-poll-inbox"] = {
             "task": "app.tasks.newspaper.poll_mail_inbox",

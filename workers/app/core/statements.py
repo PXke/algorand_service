@@ -473,6 +473,16 @@ class ToolInsightStmts:
         "UPDATE algorand_platform.tool_usage_stats SET calls = calls + ?, errors = errors + ? "
         "WHERE day = ? AND tool = ?"
     )
+    # Reaper: cheap enough to list without paging — compose_sessions has a 7-day
+    # TTL, so the table never grows large.
+    LIST_ALL_SUMMARY = _Stmt(
+        "SELECT created_at, session_id, status FROM algorand_platform.compose_sessions "
+        "WHERE bucket = ? LIMIT 1000"
+    )
+    MARK_STALE = _Stmt(
+        "UPDATE algorand_platform.compose_sessions SET status = ? "
+        "WHERE bucket = ? AND created_at = ? AND session_id = ?"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -558,6 +568,13 @@ class ServiceRegistryStmts:
         "service_id, display_name, match_kind, match_value, scrape_url, enabled, "
         "updated_at, origin"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    SET_ENABLED = _Stmt(
+        "UPDATE algorand_platform.service_registry SET enabled = ?, updated_at = ? "
+        "WHERE service_id = ?"
+    )
+    GET_SCRAPE_URL = _Stmt(
+        "SELECT scrape_url FROM algorand_platform.service_registry WHERE service_id = ?"
     )
 
 

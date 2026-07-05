@@ -134,6 +134,50 @@ def record_compose_session(
         return False
 
 
+_NON_TERMINAL_STATUSES = ("researching", "writing")
+
+
+def reap_stale_compose_sessions(*, stale_minutes: int | None = None) -> dict[str, int]:
+    """Mark any compose_sessions row still stuck in a non-terminal status
+    (researching/writing) past the staleness window as "stale". A crash that
+    skips mistral_compose's own try/except checkpoint finalizers (killed
+    process, OOM, or an exception before the first checkpoint call) otherwise
+    leaves the row looking perpetually in-progress in the admin Sessions view
+    until the table's 7-day TTL quietly drops it. Best-effort, never raises."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.config import COMPOSE_SESSION_STALE_MINUTES
+
+    threshold_minutes = stale_minutes if stale_minutes is not None else COMPOSE_SESSION_STALE_MINUTES
+    cutoff = datetime.now(tz=UTC) - timedelta(minutes=threshold_minutes)
+
+    try:
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ToolInsightStmts
+
+        session = get_cassandra_session()
+        rows = session.execute(ToolInsightStmts.LIST_ALL_SUMMARY, (_BUCKET,))
+        checked = 0
+        reaped = 0
+        for row in rows:
+            checked += 1
+            if row.status not in _NON_TERMINAL_STATUSES:
+                continue
+            created_at = row.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            if created_at >= cutoff:
+                continue
+            session.execute(
+                ToolInsightStmts.MARK_STALE, ("stale", _BUCKET, row.created_at, row.session_id)
+            )
+            reaped += 1
+        return {"checked": checked, "reaped": reaped}
+    except Exception:
+        logger.warning("failed to reap stale compose sessions", exc_info=True)
+        return {"checked": 0, "reaped": 0}
+
+
 def record_tool_usage_from_trace(trace: list[dict[str, Any]] | None) -> bool:
     """Increment durable per-tool, per-day call/error counters (tool_usage_stats)
     from one compose's trace. compose_sessions expires after 7 days, so this is

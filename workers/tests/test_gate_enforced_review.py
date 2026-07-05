@@ -2,7 +2,11 @@
 human review only when GATEKEEPER_ENFORCE is on (default off = shadow)."""
 
 from app.modules.gatekeeper.live import DeterministicGate
-from app.modules.newspaper.tasks.publish_tasks import _gate_enforces_review, _quality_floor_fails
+from app.modules.newspaper.tasks.publish_tasks import (
+    _content_quality_fails,
+    _gate_enforces_review,
+    _quality_floor_fails,
+)
 
 _FAIL = DeterministicGate(factuality_score=0.1, completeness_passed=False, passed=False)
 _PASS = DeterministicGate(factuality_score=0.9, completeness_passed=True, passed=True)
@@ -77,3 +81,10 @@ def test_quality_floor_fails_open_on_missing_or_bad_grade(monkeypatch):
     assert _quality_floor_fails({}) is False
     assert _quality_floor_fails({"grade": None}) is False
     assert _quality_floor_fails({"grade": "not-a-number"}) is False
+
+
+def test_content_quality_fails_below_reject_threshold(monkeypatch):
+    monkeypatch.setattr("app.core.config.FRONTIER_CONTENT_REJECT_SCORE", 0.2, raising=False)
+    assert _content_quality_fails(0.1) is True
+    assert _content_quality_fails(0.2) is False
+    assert _content_quality_fails(0.9) is False

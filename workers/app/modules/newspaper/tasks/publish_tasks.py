@@ -55,6 +55,31 @@ def enqueue_article_translations(article_id: str) -> None:
         logger.warning("Failed to enqueue translation tasks", exc_info=True)
 
 
+def _auto_merge_redirect(*, original_url: str, final_url: str, service_id: str) -> None:
+    """A scrape that resolves to a DIFFERENT registrable domain than requested
+    (a real HTTP redirect — e.g. algonode.io -> nodely.io after a rebrand) is
+    definitionally the same website. Auto-fold the current service into
+    whichever service already owns the resolved domain, rather than the two
+    polling and composing independently forever (the nodely.io/algonode.io
+    duplicate-article incident). Mirrors the admin domain-approval flow's
+    "attach to the existing owner" behavior for brand-new domains, just
+    triggered by a redirect discovered on an ALREADY-tracked service instead of
+    a fresh frontier approval. Best-effort: never blocks the compose in
+    progress. No-op when same domain, no existing owner, or already merged."""
+    from app.modules.crawler.domain_tracker import domain_from_url
+    from app.modules.newspaper.service_sources import merge_services, service_for_domain
+
+    original_domain = domain_from_url(original_url)
+    final_domain = domain_from_url(final_url)
+    if not original_domain or not final_domain or original_domain == final_domain:
+        return
+    target_service = service_for_domain(final_domain)
+    if not target_service or target_service == service_id:
+        return
+    with contextlib.suppress(Exception):
+        merge_services(target_service_id=target_service, source_service_ids=[service_id])
+
+
 def _compose_domain_for_row(row: QueuedPublishRow) -> str:
     """Registrable domain to count against the per-website daily article cap.
     Only web sources are capped (social pollers have their own pacing)."""
@@ -85,6 +110,17 @@ def _gate_enforces_review(
         source_text=page_text, article_text=f"{title}\n{body}", service_id=source_url
     )
     return gate is not None and not gate.passed
+
+
+def _content_quality_fails(relevance: float) -> bool:
+    """Pre-compose veto: judge the actual context about to be handed to Mistral
+    (page_text relevance, same 0-1 score_page scorer classify_pending_domains
+    uses) so a poor-quality source never even reaches the writer. Shares
+    FRONTIER_CONTENT_REJECT_SCORE with the domain classifier — one floor, so a
+    domain-level and a per-compose verdict can't drift apart."""
+    from app.core import config
+
+    return relevance < config.FRONTIER_CONTENT_REJECT_SCORE
 
 
 def _quality_floor_fails(heuristic_grade: dict | None) -> bool:
@@ -210,6 +246,30 @@ def publish_from_queued_row(
     except Exception:
         enrichment_block = ""
 
+    # Classifier signals for the ACTUAL context about to be handed to Mistral
+    # (page_text, same bundle compose_scrape_article receives — for web/service
+    # sources this is the aggregated service_context, not just the raw page).
+    # Computed once at ingest and carried on the payload; recompute only for
+    # rows queued before signals existed. Read BEFORE composing so the content-
+    # quality veto below can skip the Mistral call entirely, not just the feed.
+    from app.modules.ai.content_signals import ContentSignals, compute_content_signals
+
+    page_text_for_clf = str(payload.get("page_text", ""))
+    signals = ContentSignals.from_payload(payload.get("signals")) or compute_content_signals(
+        page_text_for_clf, row.scrape_url
+    )
+    clf_category = signals.category
+    clf_decision, clf_confidence = signals.publish_decision, signals.confidence
+
+    # Content-quality veto: judge the context BEFORE spending a Mistral call on it.
+    if _content_quality_fails(signals.relevance):
+        return {
+            "status": "skipped",
+            "reason": "poor_quality_content",
+            "service_id": row.service_id,
+            "relevance": round(signals.relevance, 3),
+        }
+
     try:
         composed = compose_scrape_article(
             service_name=row.display_name,
@@ -238,17 +298,7 @@ def publish_from_queued_row(
 
     # Classifier gate: only confidently publish-worthy content goes straight
     # to the feed. Everything else is stored unpublished and queued for admin
-    # review — approving the review item publishes the article. The verdict was
-    # computed once at ingest and carried on the payload; recompute only for
-    # rows queued before signals existed.
-    from app.modules.ai.content_signals import ContentSignals, compute_content_signals
-
-    page_text_for_clf = str(payload.get("page_text", ""))
-    signals = ContentSignals.from_payload(payload.get("signals")) or compute_content_signals(
-        page_text_for_clf, row.scrape_url
-    )
-    clf_category = signals.category
-    clf_decision, clf_confidence = signals.publish_decision, signals.confidence
+    # review — approving the review item publishes the article.
 
     # Quality veto on the auto-publish path: a draft Classifier A would send
     # straight to the feed is diverted into the human-review path below when the
@@ -557,6 +607,19 @@ def run_publish_pipeline(
     if disabled:
         return {"status": "skipped", "reason": disabled, "txid": txid}
 
+    # Poor-quality source gate: a domain the content-relevance classifier (or an
+    # admin) has already marked not-relevant must not keep composing just
+    # because it was approved before that verdict existed. Skip before the
+    # scrape so we don't pay for fetching it either. Web-only — chain/mail
+    # sources aren't domain-scored.
+    lower_scrape_url = scrape_url.lower()
+    if lower_scrape_url.startswith(("http://", "https://", "browser://")):
+        from app.modules.crawler.domain_tracker import domain_from_url, is_dead_end_domain
+
+        early_domain = domain_from_url(scrape_url)
+        if early_domain and is_dead_end_domain(early_domain):
+            return {"status": "skipped", "reason": "poor_quality_source", "txid": txid}
+
     scraper = get_scraper_for_url(scrape_url)
     try:
         result = scraper.scrape(url=scrape_url, source_id=service_id)
@@ -565,6 +628,12 @@ def run_publish_pipeline(
         raise
     # Success resets the exponential backoff streak for this source.
     clear_scrape_cooldown(service_id)
+    if lower_scrape_url.startswith(("http://", "https://", "browser://")):
+        _auto_merge_redirect(
+            original_url=scrape_url,
+            final_url=getattr(result, "url", "") or scrape_url,
+            service_id=service_id,
+        )
     # Recency gate: a page whose own publish date is older than the window is
     # low-value to report on now — skip before composing. No date => not gated.
     if worker_config.RECENCY_GATE_ENABLED:

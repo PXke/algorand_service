@@ -3,6 +3,7 @@ examples: label = the human approve/reject decision (same ground truth the
 retired sklearn grader used), text = build_input("", trace, article_text)."""
 
 from app.modules.gatekeeper import feedback_loader as fl
+from tests.conftest import FakeCassandraResult as _Result
 
 
 class _Idx:
@@ -15,14 +16,6 @@ class _Row:
         self.url = url
         self.approved = approved
         self.metadata = metadata
-
-
-class _Result:
-    def __init__(self, row) -> None:
-        self._row = row
-
-    def one(self):
-        return self._row
 
 
 def _stub_session(monkeypatch, index_rows) -> None:

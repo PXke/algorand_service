@@ -4,33 +4,7 @@ stamps a cooldown so the same project isn't published again until it expires."""
 from app.modules.crawler import domain_tracker
 
 
-class _FakeRedis:
-    def __init__(self) -> None:
-        self.store: dict[str, str] = {}
-
-    def incr(self, key):
-        self.store[key] = str(int(self.store.get(key, "0")) + 1)
-        return int(self.store[key])
-
-    def expire(self, key, ttl):
-        return True
-
-    def set(self, key, value, ex=None):
-        self.store[key] = str(value)
-
-    def get(self, key):
-        return self.store.get(key)
-
-
-def _patch_redis(monkeypatch, fake):
-    import redis
-
-    monkeypatch.setattr(redis, "from_url", lambda *a, **k: fake)
-
-
-def test_compose_stamps_cooldown(monkeypatch):
-    fake = _FakeRedis()
-    _patch_redis(monkeypatch, fake)
+def test_compose_stamps_cooldown(patch_redis_from_url):
     assert domain_tracker.domain_in_cooldown("perawallet.app") is False
     domain_tracker.record_domain_compose("perawallet.app")
     assert domain_tracker.domain_in_cooldown("perawallet.app") is True
@@ -38,17 +12,13 @@ def test_compose_stamps_cooldown(monkeypatch):
     assert domain_tracker.domain_in_cooldown("tinyman.org") is False
 
 
-def test_blank_domain_is_safe(monkeypatch):
-    fake = _FakeRedis()
-    _patch_redis(monkeypatch, fake)
+def test_blank_domain_is_safe(patch_redis_from_url):
     assert domain_tracker.domain_in_cooldown("") is False
     domain_tracker.record_domain_compose("")  # no-op
-    assert fake.store == {}
+    assert patch_redis_from_url.store == {}
 
 
-def test_cooldown_disabled_when_hours_zero(monkeypatch):
-    fake = _FakeRedis()
-    _patch_redis(monkeypatch, fake)
+def test_cooldown_disabled_when_hours_zero(monkeypatch, patch_redis_from_url):
     monkeypatch.setattr(
         "app.core.config.COMPOSE_DOMAIN_COOLDOWN_HOURS", 0, raising=False
     )
