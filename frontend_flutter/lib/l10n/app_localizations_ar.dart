@@ -184,6 +184,34 @@ class AppLocalizationsAr extends AppLocalizations {
   String get walletDone => 'Done';
 
   @override
+  String get walletErrorTitle => 'فشل تسجيل الدخول';
+
+  @override
+  String get walletErrorTimeout =>
+      'انتهت مهلة طلب تسجيل الدخول. افتح تطبيق محفظتك وحاول مرة أخرى.';
+
+  @override
+  String get walletErrorRejected => 'تم رفض الطلب في المحفظة.';
+
+  @override
+  String get walletErrorGeneric =>
+      'تعذر إكمال تسجيل الدخول. تحقق من اتصالك وحاول مرة أخرى.';
+
+  @override
+  String get walletRetry => 'إعادة المحاولة';
+
+  @override
+  String get walletShowQr => 'إظهار رمز QR';
+
+  @override
+  String get walletMobileHint =>
+      'اضغط على الزر أدناه لفتح محفظة Algorand الخاصة بك، ووافق على الاتصال، ثم عد إلى هنا.';
+
+  @override
+  String get walletSignExplainer =>
+      'ستطلب محفظتك توقيع رسالة تسجيل الدخول (تعرض المحافظ الأقدم معاملة بقيمة 0 ALGO بدلاً من ذلك). التوقيع مجاني ولا يُرسل أي شيء إلى الشبكة — إنه يثبت فقط ملكيتك للعنوان.';
+
+  @override
   String get newsFeedTitle => 'أحدث المقالات';
 
   @override

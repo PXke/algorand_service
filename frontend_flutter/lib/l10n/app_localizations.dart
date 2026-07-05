@@ -436,6 +436,54 @@ abstract class AppLocalizations {
   /// **'Done'**
   String get walletDone;
 
+  /// No description provided for @walletErrorTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign-in failed'**
+  String get walletErrorTitle;
+
+  /// No description provided for @walletErrorTimeout.
+  ///
+  /// In en, this message translates to:
+  /// **'The sign-in request timed out. Open your wallet app and try again.'**
+  String get walletErrorTimeout;
+
+  /// No description provided for @walletErrorRejected.
+  ///
+  /// In en, this message translates to:
+  /// **'The request was declined in the wallet.'**
+  String get walletErrorRejected;
+
+  /// No description provided for @walletErrorGeneric.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not complete the sign-in. Check your connection and try again.'**
+  String get walletErrorGeneric;
+
+  /// No description provided for @walletRetry.
+  ///
+  /// In en, this message translates to:
+  /// **'Try again'**
+  String get walletRetry;
+
+  /// No description provided for @walletShowQr.
+  ///
+  /// In en, this message translates to:
+  /// **'Show QR code'**
+  String get walletShowQr;
+
+  /// No description provided for @walletMobileHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Tap the button below to open your Algorand wallet, approve the connection, then return here.'**
+  String get walletMobileHint;
+
+  /// No description provided for @walletSignExplainer.
+  ///
+  /// In en, this message translates to:
+  /// **'Your wallet will ask you to sign a sign-in message (older wallets show a 0-ALGO transaction instead). Signing is free and nothing is sent to the network — it only proves you own the address.'**
+  String get walletSignExplainer;
+
   /// No description provided for @newsFeedTitle.
   ///
   /// In en, this message translates to:

@@ -184,6 +184,34 @@ class AppLocalizationsEs extends AppLocalizations {
   String get walletDone => 'Listo';
 
   @override
+  String get walletErrorTitle => 'Error al iniciar sesión';
+
+  @override
+  String get walletErrorTimeout =>
+      'La solicitud de inicio de sesión expiró. Abre tu cartera e inténtalo de nuevo.';
+
+  @override
+  String get walletErrorRejected => 'La solicitud fue rechazada en la cartera.';
+
+  @override
+  String get walletErrorGeneric =>
+      'No se pudo completar el inicio de sesión. Comprueba tu conexión e inténtalo de nuevo.';
+
+  @override
+  String get walletRetry => 'Reintentar';
+
+  @override
+  String get walletShowQr => 'Mostrar código QR';
+
+  @override
+  String get walletMobileHint =>
+      'Toca el botón de abajo para abrir tu cartera de Algorand, aprueba la conexión y vuelve aquí.';
+
+  @override
+  String get walletSignExplainer =>
+      'Tu cartera te pedirá firmar un mensaje de inicio de sesión (las carteras antiguas muestran una transacción de 0 ALGO). Firmar es gratis y nada se envía a la red: solo demuestra que la dirección es tuya.';
+
+  @override
   String get newsFeedTitle => 'Últimos artículos';
 
   @override

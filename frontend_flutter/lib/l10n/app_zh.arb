@@ -1,0 +1,554 @@
+{
+  "@@locale": "zh",
+  "appTitle": "PXke 算法",
+  "appTagline": "独立覆盖Algorand生态系统",
+  "navHome": "家",
+  "navNews": "消息",
+  "navSources": "来源",
+  "navSuggestions": "建议",
+  "navSearch": "搜索",
+  "navAdmin": "行政",
+  "navProducts": "产品",
+  "navWallet": "钱包",
+  "navAppearance": "外貌",
+  "pageTitleHome": "PXke Algorand 项目",
+  "pageTitleArticle": "文章",
+  "pageTitleNews": "消息",
+  "pageTitleSources": "新闻来源",
+  "pageTitleSuggestions": "建议",
+  "pageTitleSearch": "搜索",
+  "pageTitleAdmin": "行政",
+  "backToFeed": "返回饲料",
+  "homeWelcome": "PXke Algorand 生态系统平台",
+  "homeTagline": "来自链上触发器和爬取来源、社区建议和搜索的精选新闻。",
+  "homeNewsDescription": "当受监控的来源或连锁事件发生变化时发布的文章的精选提要。",
+  "homeSourcesDescription": "注册了 Discord、Reddit 和网络爬虫，为新闻管道提供动力。",
+  "homeSuggestionsDescription": "通过钱包支持的身份验证提交并支持社区想法。",
+  "homeSearchDescription": "对已发表文章进行全文搜索。",
+  "homeOpenProduct": "打开",
+  "themeLight": "光",
+  "themeDark": "黑暗的",
+  "themeSystem": "系统",
+  "themeSwitchToLight": "切换到浅色主题",
+  "themeSwitchToDark": "切换到深色主题",
+  "localeSystem": "系统语言",
+  "localeEnglish": "英语",
+  "localeSpanish": "西班牙语",
+  "localeFrench": "法国人",
+  "localeArabic": "巴黎",
+  "localeChinese": "中文",
+  "localeHindi": "हिन्दी",
+  "navLanguage": "语言",
+  "walletConnected": "已连接",
+  "walletDisconnect": "断开",
+  "walletSignInTitle": "使用钱包登录",
+  "walletSignInBody": "连接与 WalletConnect 兼容的 Algorand 钱包以提交建议和点赞。",
+  "walletConnect": "连接钱包",
+  "walletConnectFailed": "连接失败。请重试或先取消配对对话框。",
+  "walletDialogTitle": "连接你的钱包",
+  "walletDialogBody": "使用与 WalletConnect 兼容的 Algorand 钱包（Pera、Defly 等）扫描二维码，或在手机上复制/打开链接。",
+  "walletAwaitingApproval": "钱包已连接。切换回您的钱包应用程序以批准登录请求，然后返回此处。",
+  "walletAwaitingApprovalTitle": "快到了",
+  "walletCopyUri": "复制 URI",
+  "walletUriCopied": "WalletConnect URI 已复制",
+  "walletOpenWallet": "打开钱包",
+  "walletOpenFailed": "无法打开钱包应用程序 — 复制 URI 并将其粘贴到 Pera 或 Defly 中",
+  "walletCancel": "取消",
+  "walletDone": "完毕",
+  "walletErrorTitle": "登录失败",
+  "walletErrorTimeout": "登录请求已超时。请打开钱包应用后重试。",
+  "walletErrorRejected": "请求已在钱包中被拒绝。",
+  "walletErrorGeneric": "无法完成登录。请检查网络连接后重试。",
+  "walletRetry": "重试",
+  "walletShowQr": "显示二维码",
+  "walletMobileHint": "点击下方按钮打开您的 Algorand 钱包，批准连接后返回此页面。",
+  "walletSignExplainer": "您的钱包会请求签署一条登录消息（旧版钱包会改为显示一笔 0 ALGO 交易）。签名免费且不会向网络提交任何内容——仅用于证明地址归您所有。",
+  "newsFeedTitle": "最新文章",
+  "newsSubtitleDefault": "当内容发生变化时，链上触发器和爬网源会在此处发布。",
+  "articlePublicationDetailsHint": "出版商、日期和来源链接",
+  "newsPriceUnavailable": "ALGO 价格不可用 — 运行价格指标收集",
+  "@newsArticleCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "newsArticleCount": "{count} articles in the curated feed",
+  "newsEmptyFilteredTitle": "还没有文章",
+  "newsEmptyTitle": "饲料已空",
+  "newsSponsoredLabel": "赞助",
+  "@newsSponsoredBy": {
+    "placeholders": {
+      "sponsor": {
+        "type": "String"
+      }
+    }
+  },
+  "newsSponsoredBy": "Sponsored · {sponsor}",
+  "newsEmptyFilteredMessage": "该来源尚未发表任何文章。检查工作人员是否正在投票以及内容是否已更改。",
+  "newsEmptyMessage": "启动 Conduit、Celery 工作线程和种子 service_registry 来填充 feed。",
+  "@newsFilterShowing": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
+  "newsFilterShowing": "Showing articles from {serviceId}",
+  "clearFilter": "清除",
+  "articleUntitled": "无题",
+  "articleSectionTitle": "文章",
+  "articlePublicationDetails": "出版详情",
+  "articleMetaService": "服务",
+  "articleMetaPublisher": "出版商",
+  "articleMetaDataSource": "数据来源",
+  "articleMetaCoinGecko": "CoinGecko 市场数据",
+  "articleMetaPublished": "已发表",
+  "articleMetaRound": "圆形的",
+  "articleMetaTriggerTx": "触发发送",
+  "articleMetaSourceUrl": "来源网址",
+  "articleOpenInBrowser": "在浏览器中打开",
+  "articleViewOnExplorer": "在 Algorand 浏览器上查看",
+  "@articleMoreFrom": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
+  "articleMoreFrom": "More from {serviceId}",
+  "articleViewSource": "查看源码",
+  "adminTitle": "源头管理",
+  "adminSubtitle": "注册的爬虫和提要（仅对管理员钱包可见）。",
+  "adminViewFeedArticles": "查看此来源的提要",
+  "adminAccessDenied": "连接管理员钱包来管理来源。在构建时设置 ADMIN_WALLET_ADDRESSES。",
+  "sourcesTitle": "新闻来源",
+  "sourcesSubtitle": "由工作人员抓取的注册服务。 Discord 和 Reddit 按计划进行投票；当监控内容发生变化时，链上匹配触发发布。",
+  "sourcesEmptyTitle": "未配置源",
+  "sourcesEmptyMessage": "使用 Discord 和 Reddit TOML 文件为 service_registry 提供种子，然后运行迁移。在 Cassandra 中注册后，来源就会出现在此处。",
+  "sourcesMetaServiceId": "服务编号",
+  "sourcesMetaScrapeUrl": "抓取网址",
+  "sourcesMetaMatchRule": "比赛规则",
+  "sourcesViewArticles": "查看文章",
+  "sourcesDisabled": "残疾人",
+  "@filterAll": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "filterAll": "All ({count})",
+  "@filterDiscord": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "filterDiscord": "Discord ({count})",
+  "@filterReddit": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "filterReddit": "Reddit ({count})",
+  "@filterWeb": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "filterWeb": "Web ({count})",
+  "@matchRuleValue": {
+    "placeholders": {
+      "kind": {
+        "type": "String"
+      },
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "matchRuleValue": "{kind} = {value}",
+  "sourceKindDiscord": "不和谐",
+  "sourceKindReddit": "红迪网",
+  "sourceKindWeb": "网络",
+  "sourceKindOnChain": "链上",
+  "sourceKindUnknown": "来源",
+  "navContact": "接触",
+  "contactTitle": "接触",
+  "contactSubtitle": "更正、提示或反馈——写信给新闻编辑室。",
+  "contactNameLabel": "你的名字（可选）",
+  "contactEmailLabel": "电子邮件（可选，如果您需要回复）",
+  "contactMessageLabel": "信息",
+  "contactMessageHint": "更正、提示、反馈……",
+  "contactSend": "发送消息",
+  "contactSent": "消息已发送 — 感谢您给我们写信。",
+  "contactTooShort": "请多写几个字（至少10个字符）。",
+  "searchTitle": "搜索",
+  "searchSubtitle": "搜索我们发表的每一篇文章。",
+  "searchQueryLabel": "搜索查询",
+  "searchQueryHint": "关键词、标题、摘要……",
+  "searchAction": "搜索",
+  "@searchEngine": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "searchEngine": "Engine: {name}",
+  "searchEmptyTitle": "没有结果",
+  "searchEmptyMessage": "尝试不同的关键字或检查文章是否已编入索引。",
+  "searchErrorBackend": "暂时无法搜索。检查 API 和数据库是否正在运行。",
+  "suggestionsTitle": "建议",
+  "suggestionsSubtitle": "向平台金库发送至少 0.01 ALGO 后提交。支持投票使用链下钱包签名。",
+  "suggestionsNewTitle": "新建议",
+  "suggestionsFieldTitle": "标题",
+  "suggestionsFieldBody": "身体",
+  "suggestionsFieldTxid": "提交交易ID",
+  "suggestionsSubmit": "提交建议",
+  "suggestionsUpvoteTitle": "点赞",
+  "suggestionsSignatureLabel": "签名（base64）",
+  "suggestionsSignatureHint": "在钱包中签署准备好的消息后",
+  "suggestionsSubmitUpvote": "提交赞成票",
+  "suggestionsPrepareUpvote": "准备投票",
+  "suggestionsUpvoteDialogTitle": "报名投票留言",
+  "suggestionsCopyMessage": "复制消息",
+  "suggestionsMessageCopied": "签名消息已复制到剪贴板",
+  "@suggestionsTreasuryHelp": {
+    "placeholders": {
+      "minAlgo": {
+        "type": "String"
+      },
+      "address": {
+        "type": "String"
+      }
+    }
+  },
+  "suggestionsTreasuryHelp": "Send at least {minAlgo} ALGO to the platform treasury before submitting:\n{address}",
+  "@suggestionsUpvoteCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "suggestionsUpvoteCount": "{count, plural, =0{No upvotes yet} =1{1 upvote} other{{count} upvotes}}",
+  "close": "关闭",
+  "@suggestionsTxShort": {
+    "placeholders": {
+      "txid": {
+        "type": "String"
+      }
+    }
+  },
+  "suggestionsTxShort": "Tx {txid}",
+  "snackConnectWallet": "首先连接你的钱包",
+  "snackSuggestionSubmitted": "已提交建议",
+  "snackUpvoteRecorded": "已记录赞成票",
+  "snackChooseSuggestionUpvote": "选择一个建议先点赞",
+  "@metaPublishedEpoch": {
+    "placeholders": {
+      "epoch": {
+        "type": "String"
+      }
+    }
+  },
+  "metaPublishedEpoch": "Published: {epoch}",
+  "@metaPublishedRelative": {
+    "placeholders": {
+      "when": {
+        "type": "String"
+      }
+    }
+  },
+  "metaPublishedRelative": "Published: {when}",
+  "timeJustNow": "现在",
+  "@timeMinutesAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "timeMinutesAgo": "{count}m ago",
+  "@timeHoursAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "timeHoursAgo": "{count}h ago",
+  "@timeDaysAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "timeDaysAgo": "{count}d ago",
+  "@metaRound": {
+    "placeholders": {
+      "round": {
+        "type": "String"
+      }
+    }
+  },
+  "metaRound": "Round: {round}",
+  "@metaService": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
+  "metaService": "Service: {serviceId}",
+  "navFrontPage": "头版",
+  "navLatest": "最新的",
+  "navSections": "部分",
+  "navAbout": "关于",
+  "navApps": "应用程序",
+  "navProductsMenuHint": "探索平台",
+  "frontPageTopStories": "热门故事",
+  "frontPageLatest": "最新的",
+  "frontPageMore": "更多来自新闻编辑室",
+  "@frontPageSectionStories": {
+    "placeholders": {
+      "section": {
+        "type": "String"
+      }
+    }
+  },
+  "frontPageSectionStories": "More in {section}",
+  "sectionMarkets": "市场",
+  "sectionSecurity": "安全",
+  "sectionDevelopers": "开发商",
+  "sectionCommunity": "社区",
+  "sectionEcosystem": "生态系统",
+  "sectionEmptyTitle": "这里还什么都没有",
+  "sectionEmptyMessage": "本节尚未归档任何故事。请尽快回来查看。",
+  "bylineNewsroom": "新闻编辑室",
+  "bylineMarketsDesk": "市场服务台",
+  "bylineChainDesk": "链上服务台",
+  "@articleByline": {
+    "placeholders": {
+      "desk": {
+        "type": "String"
+      }
+    }
+  },
+  "articleByline": "By {desk}",
+  "@articleReadingTime": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "articleReadingTime": "{count} min read",
+  "articleRelatedTitle": "相关故事",
+  "articleShare": "分享",
+  "articleLinkCopied": "链接已复制到剪贴板",
+  "footerTagline": "独立、自动化地覆盖 Algorand 生态系统。",
+  "footerSectionsHeading": "部分",
+  "footerAboutHeading": "关于",
+  "@footerRights": {
+    "placeholders": {
+      "year": {
+        "type": "String"
+      }
+    }
+  },
+  "footerRights": "© {year} PXke Algorand. Independent coverage of the Algorand ecosystem.",
+  "aboutTitle": "关于 PXke Algorand",
+  "aboutLead": "PXke Algorand 是一家独立的新闻编辑室，涵盖 Algorand 区块链——其市场、协议、治理以及基于其的项目。",
+  "aboutHowHeading": "我们如何发布",
+  "aboutHowBody": "我们的报道是根据链上事件、预定市场数据和监控的社区来源自动组装的，然后通过我们的编辑渠道组织成多个部分。每个故事都有出处，因此您可以追踪它的来源。",
+  "aboutAiHeading": "用人工智能编写",
+  "aboutAiBody": "PXke Algorand 出版人工智能辅助新闻。我们的文章是由人工智能语言模型根据上述链上事件、市场数据和社区来源起草的，并经过自动编辑审查——它们是机器生成的，而不是由人类记者撰写的。我们链接到每个故事的原始来源，以便您可以验证每个声明，并且组织（而不是个人署名）是记录的作者。",
+  "aboutProvenanceHeading": "来源和透明度",
+  "aboutProvenanceBody": "链上故事由可验证的交易触发，并链接回 Algorand 浏览器。市场故事借鉴了 CoinGecko 数据。赞助广告位始终贴有这样的标签，并与社论明确分开。",
+  "aboutStandardsHeading": "编辑标准",
+  "aboutStandardsBody": "我们的目标是准确性和清晰的归属。本出版物不构成投资建议。发现错误了吗？通过任何故事的来源链接进行联系。",
+  "seedsTitle": "种子",
+  "seedsSubtitle": "手动配置爬虫的起点。通过发现批准的域位于“域”选项卡中。",
+  "sourcesAdd": "添加来源",
+  "sourcesEdit": "编辑",
+  "sourcesEditTitle": "编辑来源",
+  "sourcesAddTitle": "添加来源",
+  "sourcesDeleteTitle": "删除源吗？",
+  "@sourcesDeleteBody": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
+  "sourcesDeleteBody": "\"{serviceId}\" will stop being crawled. Articles already published stay.",
+  "sourcesDelete": "删除",
+  "sourcesSave": "节省",
+  "sourcesAddAction": "添加",
+  "sourcesRequiredFields": "Service id, name and URL are required.",
+  "sourcesChangesNextPoll": "更改将应用​​于下一次爬网程序轮询。",
+  "sourcesMerge": "合并",
+  "sourcesMergeTitle": "合并服务",
+  "sourcesMergeIntro": "将多项服务合二为一。 The chosen services' sources and domains move to the target; the emptied services are disabled.当一种产品跨越多个域（例如 algorand.co + algorand.com）时使用此选项。",
+  "sourcesMergeTarget": "保持为目标",
+  "sourcesMergeFold": "折叠（将被禁用）",
+  "sourcesMergeAction": "合并",
+  "sourcesMergeNeedsTwo": "选择一个目标和至少一项要纳入的服务。",
+  "@sourcesMergeDone": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "target": {
+        "type": "String"
+      }
+    }
+  },
+  "sourcesMergeDone": "Merged {count} service(s) into {target}.",
+  "sourcesFieldServiceId": "服务编号",
+  "sourcesFieldServiceIdHint": "烤肉串盒，例如algorand 基金会博客",
+  "sourcesFieldDisplayName": "显示名称",
+  "sourcesFieldScrapeUrl": "抓取网址",
+  "sourcesFieldScrapeUrlHint": "https://…、reddit://r/…、discord://channel/…",
+  "sourcesFieldMatchKind": "匹配种类",
+  "sourcesFieldMatchKindHint": "地址 / app_id / asset_id",
+  "sourcesFieldMatchValue": "匹配值",
+  "sourcesFieldMatchValueHint": "例如钱包地址或应用程序ID",
+  "sourcesMatchRuleHelp": "匹配规则将此源链接到链上活动：当链爬虫看到发送者/接收者地址（种类“address”）、应用程序 ID（“app_id”）或资产 id（“asset_id”）等于匹配值的主网交易时，它将事件归因于该源并可以触发文章。对于网络或 Reddit 来源，它纯粹是信息性的 - 使用诸如域名或 subreddit 之类的描述性内容。",
+  "sourcesEnabled": "启用",
+  "actionCancel": "取消",
+  "actionRefresh": "刷新",
+  "adminTabSeeds": "种子",
+  "adminTabArticles": "文章",
+  "adminTabWriterBriefs": "作家简介",
+  "adminTabClassifier": "分类器",
+  "adminTabDomains": "域名",
+  "adminTabToolInsights": "工具见解",
+  "adminTabSessions": "会议",
+  "adminTabSystem": "系统",
+  "domainsIntro": "爬行前沿：链接爬行器所遇到的域。永远不会探索死胡同 - 通过相关性评分和您的评论判断自动设置，或在此处手动设置。",
+  "domainsFilterAll": "全部",
+  "@domainsFilterAllCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "domainsFilterAllCount": "All ({count})",
+  "domainsFilterPending": "待审核",
+  "@domainsFilterPendingCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "domainsFilterPendingCount": "Pending review ({count})",
+  "domainsFilterDeadEnds": "死胡同",
+  "@domainsFilterDeadEndsCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "domainsFilterDeadEndsCount": "Dead ends ({count})",
+  "domainsEmptyTitle": "还没有域名",
+  "domainsEmptyMessage": "爬虫会记录在跟踪链接时遇到的每个域。",
+  "@domainsOpenInNewTab": {
+    "placeholders": {
+      "domain": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsOpenInNewTab": "Open {domain} in a new tab",
+  "@domainsKeywords": {
+    "placeholders": {
+      "keywords": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsKeywords": "keywords: {keywords}",
+  "@domainsLinkedAs": {
+    "placeholders": {
+      "text": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsLinkedAs": "linked as \"{text}\"",
+  "@domainsPredictedInterest": {
+    "placeholders": {
+      "score": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsPredictedInterest": "predicted interest {score}",
+  "@domainsFoundOn": {
+    "placeholders": {
+      "url": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsFoundOn": "found on {url}",
+  "@domainsScore": {
+    "placeholders": {
+      "score": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsScore": "score {score}",
+  "@domainsCrawled": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsCrawled": "crawled {date}",
+  "@domainsPagesCrawled": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "domainsPagesCrawled": "{count} pages",
+  "domainsDeadEnd": "死胡同",
+  "domainsApproveExplore": "批准并探索",
+  "domainsMarkDeadEnd": "标记死胡同",
+  "domainsRevive": "复活",
+  "@domainsApprovedSnack": {
+    "placeholders": {
+      "domain": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsApprovedSnack": "{domain} approved — the crawler may explore it",
+  "@domainsDeadEndSnack": {
+    "placeholders": {
+      "domain": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsDeadEndSnack": "{domain} marked as dead end",
+  "domainsWalletNotConnected": "钱包未连接"
+}

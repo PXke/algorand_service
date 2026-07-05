@@ -184,6 +184,35 @@ class AppLocalizationsFr extends AppLocalizations {
   String get walletDone => 'Done';
 
   @override
+  String get walletErrorTitle => 'Échec de la connexion';
+
+  @override
+  String get walletErrorTimeout =>
+      'La demande de connexion a expiré. Ouvrez votre portefeuille et réessayez.';
+
+  @override
+  String get walletErrorRejected =>
+      'La demande a été refusée dans le portefeuille.';
+
+  @override
+  String get walletErrorGeneric =>
+      'Impossible de finaliser la connexion. Vérifiez votre réseau et réessayez.';
+
+  @override
+  String get walletRetry => 'Réessayer';
+
+  @override
+  String get walletShowQr => 'Afficher le code QR';
+
+  @override
+  String get walletMobileHint =>
+      'Touchez le bouton ci-dessous pour ouvrir votre portefeuille Algorand, approuvez la connexion, puis revenez ici.';
+
+  @override
+  String get walletSignExplainer =>
+      'Votre portefeuille vous demandera de signer un message de connexion (les anciens portefeuilles affichent une transaction de 0 ALGO). La signature est gratuite et rien n\'est envoyé au réseau — elle prouve seulement que l\'adresse vous appartient.';
+
+  @override
   String get newsFeedTitle => 'Derniers articles';
 
   @override

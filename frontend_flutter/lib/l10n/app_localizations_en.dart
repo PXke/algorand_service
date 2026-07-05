@@ -184,6 +184,34 @@ class AppLocalizationsEn extends AppLocalizations {
   String get walletDone => 'Done';
 
   @override
+  String get walletErrorTitle => 'Sign-in failed';
+
+  @override
+  String get walletErrorTimeout =>
+      'The sign-in request timed out. Open your wallet app and try again.';
+
+  @override
+  String get walletErrorRejected => 'The request was declined in the wallet.';
+
+  @override
+  String get walletErrorGeneric =>
+      'Could not complete the sign-in. Check your connection and try again.';
+
+  @override
+  String get walletRetry => 'Try again';
+
+  @override
+  String get walletShowQr => 'Show QR code';
+
+  @override
+  String get walletMobileHint =>
+      'Tap the button below to open your Algorand wallet, approve the connection, then return here.';
+
+  @override
+  String get walletSignExplainer =>
+      'Your wallet will ask you to sign a sign-in message (older wallets show a 0-ALGO transaction instead). Signing is free and nothing is sent to the network — it only proves you own the address.';
+
+  @override
   String get newsFeedTitle => 'Latest articles';
 
   @override
