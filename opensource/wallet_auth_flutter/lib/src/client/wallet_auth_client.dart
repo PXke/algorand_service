@@ -49,7 +49,10 @@ class WalletAuthClient {
     }
   }
 
+  bool _cancelRequested = false;
+
   Future<void> connectAndSignIn({void Function(String wcUri)? onDisplayUri}) async {
+    _cancelRequested = false;
     state.value = state.value.copyWith(isLoading: true, clearError: true);
     try {
       final connection = await _wallet
@@ -57,10 +60,14 @@ class WalletAuthClient {
           .timeout(const Duration(minutes: 3));
       final nonce = await _authApi.requestNonce(connection.walletAddress);
 
-      final proof = await _wallet.signLoginProof(
-        walletAddress: connection.walletAddress,
-        nonce: nonce,
-      );
+      // Without a timeout an ignored/never-answered sign request leaves the
+      // client loading forever — the wallet side has no failure signal.
+      final proof = await _wallet
+          .signLoginProof(
+            walletAddress: connection.walletAddress,
+            nonce: nonce,
+          )
+          .timeout(const Duration(minutes: 3));
 
       final session = await _authApi.verifyLogin(
         walletAddress: connection.walletAddress,
@@ -78,12 +85,22 @@ class WalletAuthClient {
       if (kDebugMode) {
         debugPrint('WalletAuthClient.connectAndSignIn failed: $e\n$st');
       }
-      state.value = state.value.copyWith(isLoading: false, error: e);
+      // Tear down any half-open pairing: a paired-but-unsigned session would
+      // make the next createSession throw, so retry must start clean.
+      try {
+        await _wallet.disconnect();
+      } catch (_) {}
+      state.value = _cancelRequested
+          ? state.value.copyWith(isLoading: false, clearError: true)
+          : state.value.copyWith(isLoading: false, error: e);
     }
   }
 
-  /// Abort an in-flight WalletConnect session (e.g. user closed the pairing dialog).
+  /// Abort an in-flight WalletConnect session (e.g. user closed the pairing
+  /// dialog). The abort makes the pending connect/sign future throw; the
+  /// [_cancelRequested] flag keeps that expected failure out of [state].error.
   Future<void> cancelPendingConnect() async {
+    _cancelRequested = true;
     try {
       await _wallet.disconnect();
     } catch (_) {}

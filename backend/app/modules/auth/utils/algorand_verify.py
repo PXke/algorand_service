@@ -15,3 +15,18 @@ def verify_wallet_signature(wallet_address: str, message: str, signature_b64: st
         return True
     except Exception:
         return False
+
+
+def verify_signed_bytes(wallet_address: str, message: str, signature_b64: str) -> bool:
+    """algosdk signBytes/verifyBytes convention: the wallet signs b"MX" + data.
+
+    This is what Pera's `signData` produces (and what SIWA verifies against),
+    as opposed to `verify_wallet_signature`'s raw-message signature.
+    """
+    try:
+        public_key = decode_address(wallet_address)
+        signature = base64.b64decode(signature_b64)
+        VerifyKey(public_key).verify(b"MX" + message.encode("utf-8"), signature)
+        return True
+    except Exception:
+        return False

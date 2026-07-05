@@ -26,6 +26,8 @@ WalletAuthConfig walletAuthConfigFromApp(AppConfig app) {
     walletConnectChainId: app.walletConnectChainId,
     dappName: 'PXke Algorand',
     dappDescription: 'Independent coverage of the Algorand ecosystem',
+    // Shown by the wallet next to the sign-in request (algo_signData message).
+    signInPrompt: 'Sign in to PXke Algorand',
     dappUrl: dappUrl,
     dappIcons: [dappIconUrlFromDappUrl(dappUrl)],
   );

@@ -6,9 +6,24 @@ import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/theme/app_theme_extension.dart';
 import '../providers/auth_providers.dart';
 import 'wallet_connect_dialog.dart';
+import 'wallet_error_text.dart';
 
 class WalletAuthPanel extends ConsumerWidget {
   const WalletAuthPanel({super.key});
+
+  Future<void> _startSignIn(BuildContext context, WalletAuthClient client) {
+    return client.connectAndSignIn(
+      onDisplayUri: (uri) {
+        showWalletConnectUriDialog(
+          context,
+          uri,
+          onCancel: client.cancelPendingConnect,
+          onRetry: () => _startSignIn(context, client),
+          authState: client.state,
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -46,7 +61,7 @@ class WalletAuthPanel extends ConsumerWidget {
           );
         }
 
-        final errorText = auth.error?.toString();
+        final error = auth.error;
 
         return _Panel(
           child: Column(
@@ -55,10 +70,10 @@ class WalletAuthPanel extends ConsumerWidget {
               Text(l10n.walletSignInTitle, style: theme.textTheme.titleSmall),
               const SizedBox(height: 8),
               Text(l10n.walletSignInBody, style: theme.textTheme.bodySmall),
-              if (errorText != null && errorText.isNotEmpty) ...[
+              if (error != null) ...[
                 const SizedBox(height: 12),
                 Text(
-                  l10n.walletConnectFailed,
+                  walletErrorText(l10n, error),
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.error,
                   ),
@@ -66,20 +81,7 @@ class WalletAuthPanel extends ConsumerWidget {
               ],
               const SizedBox(height: 16),
               FilledButton.icon(
-                onPressed: auth.isLoading
-                    ? null
-                    : () async {
-                        await client.connectAndSignIn(
-                          onDisplayUri: (uri) {
-                            showWalletConnectUriDialog(
-                              context,
-                              uri,
-                              onCancel: client.cancelPendingConnect,
-                              authState: client.state,
-                            );
-                          },
-                        );
-                      },
+                onPressed: auth.isLoading ? null : () => _startSignIn(context, client),
                 icon: auth.isLoading
                     ? const SizedBox(
                         width: 18,

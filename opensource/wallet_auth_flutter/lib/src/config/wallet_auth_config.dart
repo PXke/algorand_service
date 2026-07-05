@@ -16,6 +16,7 @@ class WalletAuthConfig {
     this.sessionStorageKey = 'wallet_auth_session_token',
     this.signInPrompt = 'Sign in with your Algorand wallet',
     this.enableArc0060 = false,
+    this.enableSignData = true,
   });
 
   final String apiBaseUrl;
@@ -37,4 +38,12 @@ class WalletAuthConfig {
   /// arbitrary-data format that is not an ARC-0060 response, so the attempt
   /// can only ever add an extra wallet prompt.
   final bool enableArc0060;
+
+  /// Try Pera-dialect `algo_signData` (arbitrary-data signing) before the
+  /// ARC-0025 0-ALGO txn fallback. Unlike [enableArc0060]'s spec-shaped
+  /// request, this sends the exact param shape @perawallet/connect (v1.5.2)
+  /// uses — `[{data, message, signer, chainId}]` — which Pera renders as a
+  /// proper sign-in prompt and answers with an algosdk signBytes signature
+  /// (over b"MX" + data): the `signed_bytes` proof method server-side.
+  final bool enableSignData;
 }

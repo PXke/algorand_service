@@ -53,6 +53,8 @@ class HttpAuthApi implements AuthApi {
         body['signed_txn_b64'] = proof.signedTxnBase64;
       case AuthProofMethod.legacyMessage:
         body['signature_b64'] = proof.signedTxnBase64;
+      case AuthProofMethod.signedBytes:
+        body['signature_b64'] = proof.signatureBase64;
     }
 
     final json = await _post('/api/v1/auth/verify-wallet-signature', body: body);

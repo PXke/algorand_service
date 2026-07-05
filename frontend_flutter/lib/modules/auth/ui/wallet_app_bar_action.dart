@@ -5,6 +5,7 @@ import 'package:wallet_auth_flutter/wallet_auth_flutter.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../providers/auth_providers.dart';
 import 'wallet_connect_dialog.dart';
+import 'wallet_error_text.dart';
 
 /// Compact wallet control for the top app bar.
 class WalletAppBarAction extends ConsumerWidget {
@@ -13,6 +14,32 @@ class WalletAppBarAction extends ConsumerWidget {
   static String _shortAddress(String address) {
     if (address.length <= 12) return address;
     return '${address.substring(0, 4)}…${address.substring(address.length - 4)}';
+  }
+
+  /// Runs the full login flow. The pairing dialog owns error display once it
+  /// is up (and re-enters here through its retry button); a snackbar covers
+  /// failures that happen before pairing ever starts (bridge unreachable),
+  /// where previously the spinner just stopped with no explanation.
+  Future<void> _startSignIn(BuildContext context, WalletAuthClient client) async {
+    var dialogShown = false;
+    await client.connectAndSignIn(
+      onDisplayUri: (uri) {
+        dialogShown = true;
+        showWalletConnectUriDialog(
+          context,
+          uri,
+          onCancel: client.cancelPendingConnect,
+          onRetry: () => _startSignIn(context, client),
+          authState: client.state,
+        );
+      },
+    );
+    final error = client.state.value.error;
+    if (error != null && !dialogShown && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(walletErrorText(context.l10n, error))),
+      );
+    }
   }
 
   @override
@@ -106,20 +133,7 @@ class WalletAppBarAction extends ConsumerWidget {
         if (compact) {
           return IconButton(
             tooltip: l10n.walletConnect,
-            onPressed: auth.isLoading
-                ? null
-                : () async {
-                    await client.connectAndSignIn(
-                      onDisplayUri: (uri) {
-                        showWalletConnectUriDialog(
-                          context,
-                          uri,
-                          onCancel: client.cancelPendingConnect,
-                          authState: client.state,
-                        );
-                      },
-                    );
-                  },
+            onPressed: auth.isLoading ? null : () => _startSignIn(context, client),
             icon: auth.isLoading
                 ? const SizedBox(
                     width: 16,
@@ -132,20 +146,7 @@ class WalletAppBarAction extends ConsumerWidget {
         return Padding(
           padding: const EdgeInsets.only(right: 8),
           child: FilledButton.tonalIcon(
-            onPressed: auth.isLoading
-                ? null
-                : () async {
-                    await client.connectAndSignIn(
-                      onDisplayUri: (uri) {
-                        showWalletConnectUriDialog(
-                          context,
-                          uri,
-                          onCancel: client.cancelPendingConnect,
-                          authState: client.state,
-                        );
-                      },
-                    );
-                  },
+            onPressed: auth.isLoading ? null : () => _startSignIn(context, client),
             icon: auth.isLoading
                 ? const SizedBox(
                     width: 16,

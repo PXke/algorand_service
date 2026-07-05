@@ -5,7 +5,11 @@ import '../caip122/caip122_message.dart';
 enum AuthProofMethod {
   arc0060('arc0060'),
   arc0025Txn('arc0025_txn'),
-  legacyMessage('legacy_message');
+  legacyMessage('legacy_message'),
+
+  /// algosdk signBytes convention (signature over b"MX" + message) — what
+  /// Pera's `algo_signData` produces.
+  signedBytes('signed_bytes');
 
   const AuthProofMethod(this.apiValue);
   final String apiValue;
@@ -72,7 +76,12 @@ class WalletConnection {
 
 /// Wallet-produced login proof returned to the backend.
 class WalletAuthProof {
-  const WalletAuthProof._(this.method, {this.signedTxnBase64, this.arc0060});
+  const WalletAuthProof._(
+    this.method, {
+    this.signedTxnBase64,
+    this.arc0060,
+    this.signatureBase64,
+  });
 
   factory WalletAuthProof.arc0060(Arc0060Proof proof) =>
       WalletAuthProof._(AuthProofMethod.arc0060, arc0060: proof);
@@ -80,7 +89,11 @@ class WalletAuthProof {
   factory WalletAuthProof.arc0025Txn(String signedTxnBase64) =>
       WalletAuthProof._(AuthProofMethod.arc0025Txn, signedTxnBase64: signedTxnBase64);
 
+  factory WalletAuthProof.signedBytes(String signatureBase64) =>
+      WalletAuthProof._(AuthProofMethod.signedBytes, signatureBase64: signatureBase64);
+
   final AuthProofMethod method;
   final String? signedTxnBase64;
   final Arc0060Proof? arc0060;
+  final String? signatureBase64;
 }

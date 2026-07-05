@@ -21,7 +21,11 @@ class _DeferredWalletAppBarActionState extends State<DeferredWalletAppBarAction>
   void initState() {
     super.initState();
     if (authChunkReady.value) {
-      _ready = true;
+      // The chunk is fetched, but THIS import prefix still needs its own
+      // loadLibrary() before auth.* can be built — dart2wasm tracks deferred
+      // loads per import site (dart2js is laxer, which masked this on the
+      // JS build).
+      _load();
     } else {
       authChunkReady.addListener(_onChunkReady);
     }
@@ -35,7 +39,7 @@ class _DeferredWalletAppBarActionState extends State<DeferredWalletAppBarAction>
 
   void _onChunkReady() {
     if (authChunkReady.value && mounted && !_ready) {
-      setState(() => _ready = true);
+      _load();
     }
   }
 

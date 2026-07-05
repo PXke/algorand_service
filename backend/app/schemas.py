@@ -105,7 +105,7 @@ class Arc0060Proof(msgspec.Struct, kw_only=True):
 class VerifyRequest(msgspec.Struct, kw_only=True):
     wallet_address: WalletAddress
     nonce: str
-    proof_method: Literal["arc0025_txn", "arc0060", "legacy_message"] = "arc0060"
+    proof_method: Literal["arc0025_txn", "arc0060", "legacy_message", "signed_bytes"] = "arc0060"
     signature_b64: str | None = None
     signed_txn_b64: str | None = None
     arc0060: Arc0060Proof | None = None
@@ -116,8 +116,8 @@ class VerifyRequest(msgspec.Struct, kw_only=True):
                 raise ValueError("arc0060 proof is required when proof_method is arc0060")
         elif self.proof_method == "arc0025_txn" and not self.signed_txn_b64:
             raise ValueError("signed_txn_b64 is required when proof_method is arc0025_txn")
-        elif self.proof_method == "legacy_message" and not self.signature_b64:
-            raise ValueError("signature_b64 is required when proof_method is legacy_message")
+        elif self.proof_method in ("legacy_message", "signed_bytes") and not self.signature_b64:
+            raise ValueError(f"signature_b64 is required when proof_method is {self.proof_method}")
 
 
 class VerifyResponse(msgspec.Struct, kw_only=True):

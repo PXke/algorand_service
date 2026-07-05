@@ -10,7 +10,7 @@ from app.core.errors import PlatformError
 from app.modules.auth.models.schemas import Arc0060Proof, Caip122Payload, SessionInfo
 from app.modules.auth.services.session_store import SessionStore
 from app.modules.auth.utils.algorand_txn_verify import verify_auth_transaction
-from app.modules.auth.utils.algorand_verify import verify_wallet_signature
+from app.modules.auth.utils.algorand_verify import verify_signed_bytes, verify_wallet_signature
 from app.modules.auth.utils.arc0060_verify import verify_arc0060_auth
 from app.modules.auth.utils.caip122 import Caip122Message
 from app.modules.auth.utils.signing_message import AuthChallenge, build_auth_challenge
@@ -80,6 +80,9 @@ class AuthService:
             verified = verify_auth_transaction(wallet_address, signing_message, signed_txn_b64)
         elif proof_method == "legacy_message" and signature_b64:
             verified = verify_wallet_signature(wallet_address, signing_message, signature_b64)
+        elif proof_method == "signed_bytes" and signature_b64:
+            # Pera signData / algosdk signBytes: signature covers b"MX" + message.
+            verified = verify_signed_bytes(wallet_address, signing_message, signature_b64)
 
         if not verified:
             return None

@@ -62,6 +62,13 @@ class WalletConnectAlgorandConnector implements WalletConnector {
     required String walletAddress,
     required AuthNonce nonce,
   }) async {
+    if (_config.enableSignData) {
+      final signature = await _trySignDataPera(walletAddress: walletAddress, nonce: nonce);
+      if (signature != null) {
+        return WalletAuthProof.signedBytes(signature);
+      }
+    }
+
     if (_config.enableArc0060) {
       final arc0060 = await _trySignArc0060(walletAddress: walletAddress, nonce: nonce);
       if (arc0060 != null) {
@@ -74,6 +81,43 @@ class WalletConnectAlgorandConnector implements WalletConnector {
       signingMessage: nonce.signingMessage,
     );
     return WalletAuthProof.arc0025Txn(signedTxn);
+  }
+
+  /// Pera-dialect arbitrary-data signing: one request item per datum, each
+  /// carrying `{data: <b64>, message, signer, chainId}` (the shape
+  /// @perawallet/connect v1.5.2 sends). Pera answers with an algosdk
+  /// signBytes signature — ed25519 over b"MX" + data — as base64 or bytes.
+  /// Returns null (falling back to the 0-ALGO txn) on any error, e.g. a
+  /// wallet that does not implement the method.
+  Future<String?> _trySignDataPera({
+    required String walletAddress,
+    required AuthNonce nonce,
+  }) async {
+    if (_session == null) return null;
+    try {
+      final result = await _connector.sendCustomRequest(
+        method: 'algo_signData',
+        params: [
+          {
+            'data': base64Encode(utf8.encode(nonce.signingMessage)),
+            'message': _config.signInPrompt,
+            'signer': walletAddress,
+            'chainId': _config.walletConnectChainId,
+          },
+        ],
+      );
+      if (result is List && result.isNotEmpty) {
+        final first = result.first;
+        if (first is String && first.isNotEmpty) return first;
+        if (first is List) return base64Encode(List<int>.from(first));
+      }
+      return null;
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('algo_signData failed, falling back to auth txn: $e\n$st');
+      }
+      return null;
+    }
   }
 
   Future<Arc0060Proof?> _trySignArc0060({
