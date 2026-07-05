@@ -216,15 +216,20 @@ class MistralClient:
         # JSON in prose/fences or drifts entirely (seen on review_draft calls).
         # One corrective retry with the bad reply in context fixes most cases —
         # cheaper than failing the whole compose/revision step.
-        retry_messages = [
-            *messages,
-            {"role": "assistant", "content": raw[:4000]},
-            {
-                "role": "user",
-                "content": "Your previous reply was not a valid JSON object. "
-                "Reply again with ONLY the JSON object — no prose, no fences.",
-            },
-        ]
+        if raw.strip():
+            retry_messages = [
+                *messages,
+                {"role": "assistant", "content": raw[:4000]},
+                {
+                    "role": "user",
+                    "content": "Your previous reply was not a valid JSON object. "
+                    "Reply again with ONLY the JSON object — no prose, no fences.",
+                },
+            ]
+        else:
+            # An empty reply can't be echoed back: Mistral 400s on assistant
+            # messages with neither content nor tool_calls. Plain re-send.
+            retry_messages = messages
         raw = self.chat_completion(
             retry_messages,
             max_tokens=max_tokens,
