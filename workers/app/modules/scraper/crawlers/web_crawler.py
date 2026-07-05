@@ -39,6 +39,22 @@ def _browser_might_help(exc: Exception) -> bool:
     return True
 
 
+def needs_spa_fallback(text: str, raw_html: str = "") -> bool:
+    """Whether HTTP-fetched text is too thin (or an SPA shell) to trust, and a
+    Playwright render should be tried instead. Shared by the crawler pipeline
+    and any other caller (e.g. the writer's fetch_url tool) that fetches
+    arbitrary pages over plain HTTP first."""
+    from app.core.config import SPA_FALLBACK_ENABLED
+
+    if not SPA_FALLBACK_ENABLED:
+        return False
+    if len(text) < _MIN_HTTP_TEXT:
+        return True
+    raw = raw_html.lower()
+    has_spa_root = any(marker in raw for marker in _SPA_ROOT_MARKERS)
+    return has_spa_root and len(text) < _SPA_TEXT_SUFFICIENT
+
+
 class WebCrawlerDriver:
     """Generic web: HTTP first, Playwright fallback for thin or SPA pages."""
 
@@ -54,17 +70,6 @@ class WebCrawlerDriver:
         # every lane (publish pipeline included) benefits from the fallback.
         return _SmartWebScraper(self)
 
-    def _needs_spa_fallback(self, text: str, raw_html: str = "") -> bool:
-        from app.core.config import SPA_FALLBACK_ENABLED
-
-        if not SPA_FALLBACK_ENABLED:
-            return False
-        if len(text) < _MIN_HTTP_TEXT:
-            return True
-        raw = raw_html.lower()
-        has_spa_root = any(marker in raw for marker in _SPA_ROOT_MARKERS)
-        return has_spa_root and len(text) < _SPA_TEXT_SUFFICIENT
-
     def scrape_with_fallback(self, scrape_url: str, source_id: str) -> ScrapeResult:
         http = HttpScraper()
         try:
@@ -74,7 +79,7 @@ class WebCrawlerDriver:
                 return BrowserScraper().scrape(scrape_url, source_id)
             raise
 
-        if self._needs_spa_fallback(result.text, raw_html=result.raw_html) and is_web_spa_enabled():
+        if needs_spa_fallback(result.text, raw_html=result.raw_html) and is_web_spa_enabled():
             return BrowserScraper().scrape(scrape_url, source_id)
         return result
 

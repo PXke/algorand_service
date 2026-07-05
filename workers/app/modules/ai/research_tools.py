@@ -439,8 +439,29 @@ def _tool_fetch_url(url: str, max_chars: int = 6000) -> dict[str, Any]:
                 if len(links) < 40:
                     links.append({"text": label[:120], "url": absurl})
         text = html_to_plain_text(str(soup), keep_links=True)
+        plain_text = html_to_plain_text(resp.text)
     except Exception:
-        text = html_to_plain_text(resp.text)
+        text = plain_text = html_to_plain_text(resp.text)
+
+    # Thin / SPA-shaped response (React/Vue/Next shell, or a "please enable
+    # JavaScript" fallback page) — same signal the web crawler uses to decide a
+    # page needs its Playwright fallback. Retry rendered before reporting a
+    # near-empty page as the page's real content.
+    from app.modules.scraper.crawler_registry import is_web_spa_enabled
+    from app.modules.scraper.crawlers.web_crawler import needs_spa_fallback
+
+    if is_web_spa_enabled() and needs_spa_fallback(plain_text, raw_html=resp.text):
+        try:
+            from app.modules.scraper.core.browser_scraper import BrowserScraper
+
+            rendered = BrowserScraper().scrape(base, "research-fetch_url")
+            title = rendered.title or title
+            text = rendered.text or text
+            links = rendered.links or links
+            base = rendered.url or base
+        except Exception:
+            pass  # keep the HTTP result — a failed render beats no result at all
+
     cap = max(500, min(int(max_chars), 12000))
     return {
         "url": base,

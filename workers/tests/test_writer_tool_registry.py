@@ -8,7 +8,7 @@
 - github_activity given a bare owner/org must list repos, not error.
 """
 
-from app.modules.ai.research_tools import _fetch_failure_hint, _tool_github_activity
+from app.modules.ai.research_tools import _fetch_failure_hint, _tool_fetch_url, _tool_github_activity
 from app.modules.ai.writer_tools import all_tools
 
 
@@ -94,3 +94,47 @@ def test_github_activity_bare_owner_lists_repos(monkeypatch) -> None:
     assert seen["url"].endswith("/users/AlgoNode/repos")
     assert out["repos"][0]["repo"] == "AlgoNode/nodely-docs"
     assert "owner/name" in out["hint"]
+
+
+def test_fetch_url_escalates_to_browser_on_thin_spa_shell(monkeypatch) -> None:
+    """A React/Vue shell (or a 'please enable JavaScript' fallback page) reads
+    as ~empty over plain HTTP — the tool must retry with the Playwright
+    renderer instead of reporting the shell as the page's real content."""
+    import app.modules.ai.research_tools as rt
+    from app.modules.scraper.core.base import ScrapeResult
+
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "text/html"}
+        url = "https://example.com/play"
+        text = '<html><body><div id="root"></div><script src="app.js"></script></body></html>'
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    monkeypatch.setattr(rt, "_guarded_get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(
+        "app.modules.scraper.crawler_registry.is_web_spa_enabled", lambda: True
+    )
+
+    rendered = ScrapeResult(
+        source_id="research-fetch_url",
+        url="https://example.com/play",
+        title="Rendered Title",
+        text="Full rendered article body.",
+        content_hash="x",
+        links=[{"text": "a link", "url": "https://example.com/a"}],
+    )
+
+    class _FakeBrowserScraper:
+        def scrape(self, url, source_id):
+            return rendered
+
+    monkeypatch.setattr(
+        "app.modules.scraper.core.browser_scraper.BrowserScraper", _FakeBrowserScraper
+    )
+
+    out = _tool_fetch_url("https://example.com/play")
+    assert out["title"] == "Rendered Title"
+    assert out["text"] == "Full rendered article body."
