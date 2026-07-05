@@ -91,9 +91,9 @@ def _quality_floor_fails(heuristic_grade: dict | None) -> bool:
     """Second quality veto on the auto-publish path: the writer's own two-stage
     grade/revise pass (article_grader.grade_article_draft, same score
     review_draft reports) falls below WRITER_QUALITY_FLOOR. Honors
-    WRITER_QUALITY_GATE_ENABLED — default off, so this returns False (no
-    behaviour change) until validated. A missing/errored grade never diverts
-    (fails open, matching _gate_enforces_review's failure-tolerant design)."""
+    WRITER_QUALITY_GATE_ENABLED (default on). A missing/errored grade never
+    diverts (fails open, matching _gate_enforces_review's failure-tolerant
+    design)."""
     from app.core import config
 
     if not config.WRITER_QUALITY_GATE_ENABLED or not heuristic_grade:

@@ -505,10 +505,11 @@ GATEKEEPER_ENFORCE = env_bool("GATEKEEPER_ENFORCE", False)
 # Lightweight heuristic-grader floor (article_grader.grade_article_draft, the
 # same score review_draft/_review_and_revise already compute during compose).
 # Below this, a would-be direct-publish draft is diverted to human review
-# instead — same shadow-first pattern as GATEKEEPER_ENFORCE above. Ship OFF
-# until validated against live sessions, since 3+ recent auto-published drafts
-# scored right at this line (recency=0 not currently gated at all).
-WRITER_QUALITY_GATE_ENABLED = env_bool("WRITER_QUALITY_GATE_ENABLED", False)
+# instead — this floor was never actually enforced before 2026-07-05 (grade was
+# computed and discarded), and 3+ recent auto-published drafts scored right at
+# this line, so it defaults ON (unlike GATEKEEPER_ENFORCE above, which is still
+# unvalidated ML output).
+WRITER_QUALITY_GATE_ENABLED = env_bool("WRITER_QUALITY_GATE_ENABLED", True)
 WRITER_QUALITY_FLOOR = env_float("WRITER_QUALITY_FLOOR", 6.0)
 # Article is flagged when the grounded fraction of its numeric claims falls below
 # this (too many figures with no anchor in the tool trace).
