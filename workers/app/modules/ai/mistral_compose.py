@@ -36,6 +36,12 @@ class MistralArticleFields:
     body: str
     tags: tuple[str, ...] = ()
     prompt_version: str = PROMPT_VERSION
+    # Deterministic grade from the two-stage compose's grade/revise pass (Stage
+    # 3+4 in _review_and_revise) — the post-revision grade when a revision ran,
+    # else the initial one. None when WRITER_REVIEW_ENABLED is off or grading
+    # itself failed. Lets a caller (e.g. the publish gate) act on the SAME grade
+    # the writer saw, instead of recomputing it blind.
+    heuristic_grade: dict | None = None
 
 
 # The single hardest accuracy rule. The small model, told to write full-depth,
@@ -329,6 +335,10 @@ def _review_and_revise(
     grade_args = {"title": title, "words": len(body.split())}
     trace.append({"tool": "review_draft", "arguments": grade_args, "result": review})
     _debug_tool_turn(debug, "review_draft", grade_args, review)
+    # Attach to the payload dict now (mutated in place) so every `return payload`
+    # below carries this grade even when no revision is attempted — the caller
+    # (publish gate) reads it via MistralArticleFields.heuristic_grade.
+    payload["_heuristic_grade"] = review
 
     issues = review.get("issues") or []
     # A tool-less rewrite can only RESTRUCTURE or TRIM — it cannot add facts or do
@@ -397,12 +407,16 @@ def _review_and_revise(
         return payload
 
     # Record the post-revision grade for telemetry. No further revision pass.
+    # Default to the pre-revision grade if the regrade itself fails, so the
+    # floor-gate downstream never sees revision as erasing a known grade.
+    revised["_heuristic_grade"] = review
     try:
         revised_body = str(revised.get("body", "") or "")
         regrade = grade_article_draft(
             title=str(revised.get("title", "") or ""),
             body=revised_body,
         )
+        revised["_heuristic_grade"] = regrade
         recheck_args = {
             "title": revised.get("title", ""),
             "words": len(revised_body.split()),
@@ -732,7 +746,13 @@ def _parse_article_fields(payload: dict[str, Any]) -> MistralArticleFields:
             slug = "".join(ch for ch in slug if ch.isalnum() or ch == "-").strip("-")
             if slug and slug not in tags:
                 tags.append(slug)
-    return MistralArticleFields(title=title, summary=summary, body=body, tags=tuple(tags[:6]))
+    return MistralArticleFields(
+        title=title,
+        summary=summary,
+        body=body,
+        tags=tuple(tags[:6]),
+        heuristic_grade=payload.get("_heuristic_grade"),
+    )
 
 
 def compose_scrape_article_mistral(

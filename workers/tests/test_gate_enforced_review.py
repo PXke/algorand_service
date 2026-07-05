@@ -2,7 +2,7 @@
 human review only when GATEKEEPER_ENFORCE is on (default off = shadow)."""
 
 from app.modules.gatekeeper.live import DeterministicGate
-from app.modules.newspaper.tasks.publish_tasks import _gate_enforces_review
+from app.modules.newspaper.tasks.publish_tasks import _gate_enforces_review, _quality_floor_fails
 
 _FAIL = DeterministicGate(factuality_score=0.1, completeness_passed=False, passed=False)
 _PASS = DeterministicGate(factuality_score=0.9, completeness_passed=True, passed=True)
@@ -54,3 +54,26 @@ def test_low_confidence_already_reviews_not_double_gated(monkeypatch):
         lambda **_: (_ for _ in ()).throw(AssertionError("should not run")),
     )
     assert _gate_enforces_review(clf_decision=None, **_args()) is False
+
+
+def test_quality_floor_no_divert_when_disabled(monkeypatch):
+    monkeypatch.setattr("app.core.config.WRITER_QUALITY_GATE_ENABLED", False, raising=False)
+    monkeypatch.setattr("app.core.config.WRITER_QUALITY_FLOOR", 6.0, raising=False)
+    assert _quality_floor_fails({"grade": 2.0}) is False
+
+
+def test_quality_floor_diverts_below_floor_when_enabled(monkeypatch):
+    monkeypatch.setattr("app.core.config.WRITER_QUALITY_GATE_ENABLED", True, raising=False)
+    monkeypatch.setattr("app.core.config.WRITER_QUALITY_FLOOR", 6.0, raising=False)
+    assert _quality_floor_fails({"grade": 5.9}) is True
+    assert _quality_floor_fails({"grade": 6.0}) is False
+    assert _quality_floor_fails({"grade": 8.1}) is False
+
+
+def test_quality_floor_fails_open_on_missing_or_bad_grade(monkeypatch):
+    monkeypatch.setattr("app.core.config.WRITER_QUALITY_GATE_ENABLED", True, raising=False)
+    monkeypatch.setattr("app.core.config.WRITER_QUALITY_FLOOR", 6.0, raising=False)
+    assert _quality_floor_fails(None) is False
+    assert _quality_floor_fails({}) is False
+    assert _quality_floor_fails({"grade": None}) is False
+    assert _quality_floor_fails({"grade": "not-a-number"}) is False

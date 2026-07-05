@@ -87,6 +87,26 @@ def _gate_enforces_review(
     return gate is not None and not gate.passed
 
 
+def _quality_floor_fails(heuristic_grade: dict | None) -> bool:
+    """Second quality veto on the auto-publish path: the writer's own two-stage
+    grade/revise pass (article_grader.grade_article_draft, same score
+    review_draft reports) falls below WRITER_QUALITY_FLOOR. Honors
+    WRITER_QUALITY_GATE_ENABLED — default off, so this returns False (no
+    behaviour change) until validated. A missing/errored grade never diverts
+    (fails open, matching _gate_enforces_review's failure-tolerant design)."""
+    from app.core import config
+
+    if not config.WRITER_QUALITY_GATE_ENABLED or not heuristic_grade:
+        return False
+    grade = heuristic_grade.get("grade")
+    if grade is None:
+        return False
+    try:
+        return float(grade) < config.WRITER_QUALITY_FLOOR
+    except (TypeError, ValueError):
+        return False
+
+
 @single_flight(lambda *_a, **_kw: "compose:article", ttl=1860)
 @single_flight(lambda row, **_kw: f"compose:{row.queue_id}", ttl=1800)
 def publish_from_queued_row(
@@ -239,7 +259,7 @@ def publish_from_queued_row(
         body=composed.body,
         page_text=page_text_for_clf,
         source_url=row.scrape_url,
-    )
+    ) or _quality_floor_fails(getattr(composed, "heuristic_grade", None))
 
     # Resolve a hero/brand image when the upstream payload carried none, so both
     # the feed tile and the social/OG card show real artwork (best-effort). A

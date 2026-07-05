@@ -4,7 +4,7 @@ The warm generation pass has no tools, so the model can't call review_draft
 itself — `_review_and_revise` must run the grader for it and revise once.
 """
 
-from app.modules.ai.mistral_compose import _review_and_revise
+from app.modules.ai.mistral_compose import _parse_article_fields, _review_and_revise
 
 
 class _FakeMistral:
@@ -37,6 +37,8 @@ def test_low_grade_triggers_one_revision(monkeypatch) -> None:
     assert out["body"] == "a much longer grounded body"
     reviews = [e for e in trace if e["tool"] == "review_draft"]
     assert len(reviews) == 2  # initial grade + recheck both recorded
+    # The floor-gate downstream reads the POST-revision grade, not the stale one.
+    assert out["_heuristic_grade"]["grade"] == 8.0
 
 
 def test_high_grade_keeps_draft_untouched(monkeypatch) -> None:
@@ -53,6 +55,8 @@ def test_high_grade_keeps_draft_untouched(monkeypatch) -> None:
     assert fake.calls == 0  # no revision when grade clears the bar with no issues
     assert out is payload
     assert len([e for e in trace if e["tool"] == "review_draft"]) == 1
+    # No fixable issues -> early return, but the grade must still be attached.
+    assert out["_heuristic_grade"]["grade"] == 9.0
 
 
 def test_review_turns_land_in_debug_transcript(monkeypatch) -> None:
@@ -106,6 +110,24 @@ def test_failed_revision_is_surfaced_not_silent(monkeypatch) -> None:
     failures = [e for e in trace if e.get("arguments", {}).get("revision") == "failed"]
     assert len(failures) == 1
     assert "429" in failures[0]["result"]["error"]
+    # A failed revision must not lose the grade the floor-gate depends on.
+    assert out["_heuristic_grade"]["grade"] == 4.0
+
+
+def test_parse_article_fields_threads_heuristic_grade() -> None:
+    # publish_tasks._quality_floor_fails reads composed.heuristic_grade — the
+    # grade must survive from the payload dict onto the dataclass.
+    payload = {
+        "title": "T", "summary": "S", "body": "B",
+        "_heuristic_grade": {"grade": 5.5, "issues": ["stale"]},
+    }
+    fields = _parse_article_fields(payload)
+    assert fields.heuristic_grade == {"grade": 5.5, "issues": ["stale"]}
+
+
+def test_parse_article_fields_grade_defaults_none() -> None:
+    fields = _parse_article_fields({"title": "T", "summary": "S", "body": "B"})
+    assert fields.heuristic_grade is None
 
 
 def test_disabled_skips_review(monkeypatch) -> None:

@@ -502,6 +502,14 @@ SEARXNG_URL = env_str("SEARXNG_URL", "").rstrip("/")
 #              the signals are trusted on real drafts.
 GATEKEEPER_ENABLED = env_bool("GATEKEEPER_ENABLED", True)
 GATEKEEPER_ENFORCE = env_bool("GATEKEEPER_ENFORCE", False)
+# Lightweight heuristic-grader floor (article_grader.grade_article_draft, the
+# same score review_draft/_review_and_revise already compute during compose).
+# Below this, a would-be direct-publish draft is diverted to human review
+# instead — same shadow-first pattern as GATEKEEPER_ENFORCE above. Ship OFF
+# until validated against live sessions, since 3+ recent auto-published drafts
+# scored right at this line (recency=0 not currently gated at all).
+WRITER_QUALITY_GATE_ENABLED = env_bool("WRITER_QUALITY_GATE_ENABLED", False)
+WRITER_QUALITY_FLOOR = env_float("WRITER_QUALITY_FLOOR", 6.0)
 # Article is flagged when the grounded fraction of its numeric claims falls below
 # this (too many figures with no anchor in the tool trace).
 GATEKEEPER_FACT_MIN = env_float("GATEKEEPER_FACT_MIN", 0.80)
