@@ -339,12 +339,15 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
     return out
 
 
-def _fetch_failure_hint(url: str, error: str) -> str:
-    """Steer the writer to the dedicated tool for hosts that block direct fetches.
+def _fetch_failure_hint(url: str, error: str, *, status_code: int | None = None) -> str:
+    """Steer the writer to the dedicated tool (or a different strategy) for
+    fetches that failed in a known way.
 
     Prod transcripts show the model repeatedly fetch_url-ing medium.com (403) and
     reddit.com (403) while the purpose-built tools sit unused — a hint inside the
-    error result is followed far more reliably than a schema description."""
+    error result is followed far more reliably than a schema description. The
+    status_code checks come first since they're precise (host checks below are
+    best-effort text matching that a 401/403/429/5xx would otherwise fall through)."""
     from urllib.parse import urlsplit
 
     host = urlsplit(url).netloc.lower()
@@ -363,7 +366,23 @@ def _fetch_failure_hint(url: str, error: str) -> str:
             "for GitHub use github_activity (repo metadata/releases/commits) or "
             "github_repository_contents (read files) instead of fetching the page"
         )
-    if "404" in error or "410" in error:
+    if status_code in (401, 403) or "401" in error or "403" in error:
+        return (
+            "the site refused this request (login-walled or bot-blocked), not "
+            "necessarily unavailable — try fetch_archive_text for a cached copy "
+            "instead of treating this as the page being gone"
+        )
+    if status_code == 429 or "429" in error:
+        return (
+            "rate-limited — do not retry this URL again this session; try "
+            "fetch_archive_text or search_web for other sources instead"
+        )
+    if status_code in (500, 502, 503, 504) or any(c in error for c in ("500", "502", "503", "504")):
+        return (
+            "the site errored (likely transient) — one retry may help, "
+            "otherwise fall back to fetch_archive_text or search_web"
+        )
+    if status_code in (404, 410) or "404" in error or "410" in error:
         return (
             "the page is gone — fetch_archive_text can read a Wayback Machine "
             "snapshot of it if the historical content matters"
@@ -374,6 +393,8 @@ def _fetch_failure_hint(url: str, error: str) -> str:
 def _tool_fetch_url(url: str, max_chars: int = 6000) -> dict[str, Any]:
     """Fetch a web page and return its cleaned main text — the full article a
     search_web snippet only teased. SSRF-guarded; HTML/text only."""
+    import httpx
+
     u = (url or "").strip()
     if not u:
         return {"error": "url required"}
@@ -382,8 +403,15 @@ def _tool_fetch_url(url: str, max_chars: int = 6000) -> dict[str, Any]:
     try:
         resp = _guarded_get(u, headers={"Accept": "text/html,application/xhtml+xml"}, timeout=15.0)
         resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        out: dict[str, Any] = {"url": u, "error": str(exc)[:200], "status_code": status}
+        hint = _fetch_failure_hint(u, out["error"], status_code=status)
+        if hint:
+            out["hint"] = hint
+        return out
     except Exception as exc:
-        out: dict[str, Any] = {"url": u, "error": str(exc)[:200]}
+        out = {"url": u, "error": str(exc)[:200]}
         hint = _fetch_failure_hint(u, out["error"])
         if hint:
             out["hint"] = hint

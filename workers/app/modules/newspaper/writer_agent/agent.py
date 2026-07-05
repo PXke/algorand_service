@@ -28,7 +28,7 @@ class WriterAgentPlan:
         WriterToolSpec("get_editorial_brief", "Load admin suggestion-box brief"),
         WriterToolSpec("get_enrichment_bundle", "Writer enrichment + scam context"),
     )
-    max_tool_rounds: int = 10  # matches MISTRAL_MAX_TOOL_ROUNDS default
+    max_tool_rounds: int = 14  # matches MISTRAL_MAX_TOOL_ROUNDS default
 
     def as_markdown(self) -> str:
         lines = [

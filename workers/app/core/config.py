@@ -221,10 +221,15 @@ MISTRAL_MAX_SOURCE_CHARS = env_int("MISTRAL_MAX_SOURCE_CHARS", 48_000)
 # updates. Heavy (scrapes every source), so keep it infrequent — it is the writer's
 # main background churn. 1h; lower only if you need faster update detection.
 MISTRAL_DIFF_POLL_SECONDS = env_int("MISTRAL_DIFF_POLL_SECONDS", 3600)
-# Agentic writer tool-round cap. 10 is plenty for genuine research; higher just
-# lets a confused model loop (it was re-calling the same price/market tools 15-20x
-# per article). The loop also dedupes identical (tool+args) calls as a backstop.
-MISTRAL_MAX_TOOL_ROUNDS = env_int("MISTRAL_MAX_TOOL_ROUNDS", 10)
+# Agentic writer tool-round cap. Originally 10 to stop a confused model looping
+# (it was re-calling the same price/market tools 15-20x per article) — the loop's
+# (tool+args) dedup now guards against that specific failure mode independently,
+# and a prod session audit (2026-07-05) found 65% of composes still hit the old
+# cap of 10 mid-research (many distinct tool calls, not repeats) and got forced
+# into "write now" with an incomplete picture. Raised to 14; each round costs one
+# more throttled Mistral call (MISTRAL_MIN_REQUEST_INTERVAL_SECONDS apart), so
+# +4 rounds is ~+60s worst case — cheap against the ~30min task time limit.
+MISTRAL_MAX_TOOL_ROUNDS = env_int("MISTRAL_MAX_TOOL_ROUNDS", 14)
 # Two-stage compose: a cold research pass (tools, low temp for deterministic tool
 # calls) followed by a warm generation pass (tools removed, prompt swapped, higher
 # temp to break AI-speak). Off = legacy single agentic loop at the write temp.
