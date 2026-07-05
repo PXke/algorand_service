@@ -37,7 +37,8 @@ class _Stmt:
 class ArticleStmts:
     GET_BY_ID = _Stmt(
         "SELECT article_id, service_id, title, summary, body, "
-        "trigger_txid, trigger_round, source_url, published_at, prompt_version "
+        "trigger_txid, trigger_round, source_url, published_at, prompt_version, "
+        "translations "
         "FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
     EXISTS = _Stmt("SELECT article_id FROM algorand_platform.articles_by_id WHERE article_id = ?")

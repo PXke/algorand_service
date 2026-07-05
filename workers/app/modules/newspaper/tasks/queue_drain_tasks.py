@@ -419,6 +419,11 @@ def drain_approved_feed_queue() -> dict[str, object]:
             )
             published += 1
             record_feed_release()
+            from app.modules.newspaper.tasks.publish_tasks import (
+                enqueue_article_translations,
+            )
+
+            enqueue_article_translations(str(art.article_id))
         session.execute(
             PendingFeedStmts.DELETE,
             (r.bucket, r.interest_score, r.approved_at, r.article_id),

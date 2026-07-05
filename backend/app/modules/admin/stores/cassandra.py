@@ -862,6 +862,28 @@ class AdminCassandraStore:
         return True
 
     @staticmethod
+    def _enqueue_article_translations(article_id: str) -> None:
+        """Fan out worker translate_article tasks now that the article is feed-
+        visible. Translation happens at publish time only — held drafts are not
+        translated (see workers publish_tasks.enqueue_article_translations, the
+        other half of this seam). The task fetches current text by id and skips
+        already-stored languages, so this is safe to fire more than once."""
+        try:
+            from celery import Celery
+
+            from app.core.config import settings
+
+            app = Celery(broker=settings.celery_broker_url)
+            for lang in ("zh", "hi", "es", "fr", "ar"):
+                app.send_task(
+                    "app.tasks.newspaper.translate_article",
+                    args=[str(article_id), lang],
+                    queue="pipeline",
+                )
+        except Exception:
+            logger.warning("failed to enqueue translation tasks", exc_info=True)
+
+    @staticmethod
     def _trigger_compose_next() -> None:
         try:
             from celery import Celery
@@ -968,7 +990,8 @@ class AdminCassandraStore:
         # Publish now only if under the daily cap AND ≥1h since the last feed
         # release — otherwise queue, so the feed gets a steady drip not a dump.
         if self._feed_count_today(session, bucket) < cap and self._feed_release_due():
-            self._publish_article_to_feed(article_id)
+            if self._publish_article_to_feed(article_id):
+                self._enqueue_article_translations(article_id)
             self._record_feed_release()
             return "published"
         try:
