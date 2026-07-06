@@ -497,12 +497,19 @@ def ensure_monitored_service(domain: str, *, scrape_url: str = "") -> bool:
     never produce a publish candidate. Never overwrites an existing row (the
     admin may have customised it), and never spawns a service for a domain some
     service already owns (e.g. after an admin merge). Returns True when a new
-    service was created."""
+    service was created.
+
+    Never claims bsky.app: it's a shared platform host (every monitored
+    Bluesky account resolves to the same registrable domain), so a random
+    backlink to someone's profile discovered by the frontier must not spawn or
+    silently repoint a "bsky.app" service — that already happened once (the
+    NFDomains account got auto-approved as a generic domain named "bsky.app"
+    before the dedicated Bluesky lane existed)."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ServiceRegistryStmts
     from app.modules.newspaper.service_sources import add_web_source, service_for_domain
 
-    if not domain:
+    if not domain or domain == "bsky.app":
         return False
     owner = service_for_domain(domain)
     if owner:
