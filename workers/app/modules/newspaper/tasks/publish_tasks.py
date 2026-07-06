@@ -432,6 +432,10 @@ def publish_from_queued_row(
             from app.modules.crawler.domain_tracker import record_domain_compose
 
             record_domain_compose(compose_domain)
+        if row.service_id:
+            from app.modules.crawler.domain_tracker import record_service_compose
+
+            record_service_compose(row.service_id)
         if payload.get("source_kind") == "editorial_assignment":
             from app.modules.newspaper.editorial_assignment import mark_brief_run
 
@@ -549,6 +553,10 @@ def publish_from_queued_row(
         from app.modules.crawler.domain_tracker import record_domain_compose
 
         record_domain_compose(compose_domain)
+    if row.service_id:
+        from app.modules.crawler.domain_tracker import record_service_compose
+
+        record_service_compose(row.service_id)
 
     if payload.get("source_kind") == "editorial_assignment":
         from app.modules.newspaper.editorial_assignment import mark_brief_run

@@ -326,6 +326,11 @@ COMPOSE_DAILY_TTL = env_int("COMPOSE_DAILY_TTL", 86400)
 # same project being published twice in a short window (the "two Pera Wallet
 # articles in 24h" case) even when both are under the daily count. 0 disables.
 COMPOSE_DOMAIN_COOLDOWN_HOURS = env_int("COMPOSE_DOMAIN_COOLDOWN_HOURS", 168)
+# Same spacing, keyed on the canonical service_id instead of the registrable
+# domain — a project spread across domains that don't share an eTLD+1 (e.g. a
+# Medium blog + its own site) would otherwise dodge the cooldown above by
+# publishing from its OTHER domain. 0 disables.
+COMPOSE_SERVICE_COOLDOWN_HOURS = env_int("COMPOSE_SERVICE_COOLDOWN_HOURS", 168)
 
 # After an admin rejects a review, suppress re-enqueueing that exact URL for
 # this long (seconds). Stops a rejected page re-entering the candidate queue the

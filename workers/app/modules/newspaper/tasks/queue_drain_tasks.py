@@ -70,6 +70,16 @@ def _domain_in_cooldown(row) -> bool:
     return bool(dom and domain_in_cooldown(dom))
 
 
+def _service_in_cooldown(row) -> bool:
+    """True when this SERVICE (across all its domains) published/composed within
+    its diversity cooldown. Complements _domain_in_cooldown for a project whose
+    domains don't share a registrable domain, so the per-domain check alone
+    can't see the repeat (e.g. a project's own site + a separate Medium blog)."""
+    from app.modules.crawler.domain_tracker import service_in_cooldown
+
+    return bool(row.service_id and service_in_cooldown(row.service_id))
+
+
 def _novelty_collapsed(row) -> bool:
     """Fresh novelty at drain time. The enqueue-time novelty is a snapshot; a
     story on the same subject may have PUBLISHED after this row entered the
@@ -238,6 +248,10 @@ def drain_standard_publish_queue() -> dict[str, object]:
             # review branch, which otherwise composes + continues past this check.
             if _domain_in_cooldown(row):
                 results.append({"queue_id": row.queue_id, "status": "domain_cooldown"})
+                continue
+
+            if _service_in_cooldown(row):
+                results.append({"queue_id": row.queue_id, "status": "service_cooldown"})
                 continue
 
             # Duplicate cut: the story may have been covered since this row was
@@ -457,7 +471,7 @@ def ensure_review_ready() -> dict[str, object]:
         # registrable domain is over its daily cap or inside its multi-day cooldown.
         # Without this, the review slot surfaces a just-covered (duplicate) domain
         # even though drain_standard_publish_queue would have skipped it.
-        if _domain_capped(row) or _domain_in_cooldown(row):
+        if _domain_capped(row) or _domain_in_cooldown(row) or _service_in_cooldown(row):
             continue
         outcome = _compose_review_row(row)
         if outcome.get("status") == "review":

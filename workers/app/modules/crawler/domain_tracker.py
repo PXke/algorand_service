@@ -125,6 +125,46 @@ def domain_in_cooldown(domain: str) -> bool:
         return False
 
 
+def _service_cooldown_key(service_id: str) -> str:
+    return f"algorand:compose:service_cooldown:{service_id}"
+
+
+def record_service_compose(service_id: str) -> None:
+    """Stamp a per-service cooldown alongside the per-domain one (see
+    record_domain_compose) — this is the key that still catches a repeat when
+    the project's two domains don't collapse to one registrable domain."""
+    if not service_id:
+        return
+    from app.core.config import COMPOSE_SERVICE_COOLDOWN_HOURS
+
+    if COMPOSE_SERVICE_COOLDOWN_HOURS <= 0:
+        return
+    try:
+        _crawl_budget_client().set(
+            _service_cooldown_key(service_id), "1", ex=COMPOSE_SERVICE_COOLDOWN_HOURS * 3600
+        )
+    except Exception:
+        return
+
+
+def service_in_cooldown(service_id: str) -> bool:
+    """True when this SERVICE (any of its domains) published/composed within
+    COMPOSE_SERVICE_COOLDOWN_HOURS. Complements domain_in_cooldown for a project
+    whose domains don't share a registrable domain (e.g. a Medium blog plus its
+    own site) — the per-domain cooldown can't see across those on its own.
+    Fails open (Redis down -> not in cooldown)."""
+    if not service_id:
+        return False
+    from app.core.config import COMPOSE_SERVICE_COOLDOWN_HOURS
+
+    if COMPOSE_SERVICE_COOLDOWN_HOURS <= 0:
+        return False
+    try:
+        return _crawl_budget_client().get(_service_cooldown_key(service_id)) is not None
+    except Exception:
+        return False
+
+
 def domain_compose_cap_reached(domain: str) -> bool:
     """True when a domain already composed its daily quota — skip re-composing.
     Fails open (Redis down → not capped) so an outage never blocks publishing."""
