@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
+from app.modules.pipeline.core.diffing import normalize_text
+
 
 @dataclass(frozen=True)
 class ContextPage:
@@ -122,7 +124,12 @@ def _fair_share_by_host(
 
 
 def _section(page: ContextPage, *, per_page_chars: int) -> str:
-    body = " ".join((page.body or "").split())[:per_page_chars]
+    # Preserve line breaks (only collapse horizontal whitespace) — the diff
+    # this feeds is line-based (pipeline.core.diffing), so flattening a
+    # multi-paragraph page to one line makes it diff as "everything removed"
+    # against any historical multi-line snapshot (the Algopay false-diff
+    # incident, 2026-07-06).
+    body = normalize_text(page.body or "")[:per_page_chars]
     title = " ".join((page.title or "").split())[:200]
     return f"## PAGE: {page.url}\n### {title}\n{body}\n"
 
