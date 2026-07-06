@@ -56,7 +56,6 @@ _SCAM_PHRASES = (
     "phishing",
     "fraud alert",
     "rug pull",
-    "exploit",
     "do not send",
     "do not interact",
     "do not connect",
@@ -66,15 +65,41 @@ _SCAM_PHRASES = (
     "impersonat",
     "fake airdrop",
     "wallet drainer",
-    "rekey",
-    "rekeyed",
-    "transaction requests",
-    "scam warning",
-    "credible reports",
-    "asset optin",
+    ":warning:",
+    "🚨",
+)
+
+# These read as ordinary Algorand vocabulary on their own (opting in to hold an
+# asset, rekeying an account, a routine "fixed an exploit" changelog line) —
+# they only signal a scam ALONGSIDE actual alarm language, never bare. Firing
+# on the bare word produced false positives: a wallet's opt-in help text, an
+# NFT collection's "opt-in to $TOKEN" copy, a rekey-import FAQ entry. Real scam
+# posts (e.g. the AlgoBlow $BLOW rekey-drainer) already carry a hard phrase
+# above ("scam warning") too, so this is a safety net, not the primary catch.
+_SCAM_CONTEXT_PHRASES = (
     "opt-in",
     "optin",
-    ":warning:",
+    "asset optin",
+    "rekey",
+    "rekeyed",
+    "exploit",
+    "transaction requests",
+    "credible reports",
+)
+_SCAM_ALARM_WORDS = (
+    "scam",
+    "phishing",
+    "fraud",
+    "malicious",
+    "fake",
+    "impersonat",
+    "warning",
+    "beware",
+    "suspicious",
+    "caution",
+    "stolen",
+    "compromised",
+    "drainer",
     "🚨",
 )
 
@@ -227,7 +252,9 @@ def classify_publish_topic(
         combined = f"{page_text}\n{diff}"
 
     lower = combined.lower()
-    if _contains_any(lower, _SCAM_PHRASES):
+    if _contains_any(lower, _SCAM_PHRASES) or (
+        _contains_any(lower, _SCAM_CONTEXT_PHRASES) and _contains_any(lower, _SCAM_ALARM_WORDS)
+    ):
         return PublishTopic.SCAM_ALERT
     if _contains_any(lower, _BREAKING_PHRASES) and _contains_any(
         lower, ("down", "outage", "halt", "lost", "stolen", "scam", "exploit")

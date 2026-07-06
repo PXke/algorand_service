@@ -96,6 +96,45 @@ def test_classify_foundation_discord_warning_as_scam_breaking() -> None:
     assert tier == PublishTier.BREAKING
 
 
+def test_opt_in_mention_alone_is_not_scam_alert() -> None:
+    """Regression: routine ASA opt-in copy (wallet help text, NFT collection
+    page, a privacy-policy caching feature) is ordinary Algorand vocabulary,
+    not a scam signal, unless real alarm language is also present."""
+    texts = [
+        "This website offers an opt-in caching feature using IndexedDB.",
+        "Bulk asset manager: consolidated opt-in, opt-out, and destroy manager for Algorand assets.",
+        "NFD vaults: finding a happy medium with opt-ins.",
+        "The community token of the AlgOctopus NFT collection. Opt-in to $BLOP, learn more.",
+    ]
+    for text in texts:
+        topic = classify_publish_topic(
+            page_text=text, diff=None, publish_kind=PublishKind.CONTENT_UPDATE
+        )
+        assert topic != PublishTopic.SCAM_ALERT, text
+
+
+def test_rekey_mention_alone_is_not_scam_alert() -> None:
+    text = (
+        "Add another Algorand Virtual Machine (AVM) wallet. To get started, add "
+        "an account to your wallet. Rekeyed accounts will import automatically "
+        "as sub-accounts under the address they are rekeyed to."
+    )
+    topic = classify_publish_topic(
+        page_text=text, diff=None, publish_kind=PublishKind.CONTENT_UPDATE
+    )
+    assert topic != PublishTopic.SCAM_ALERT
+
+
+def test_rekey_with_alarm_language_is_still_scam_alert() -> None:
+    """The soft context terms (rekey, opt-in, exploit, ...) must still catch a
+    real scam that uses different wording than the existing hard phrases."""
+    text = "Warning: suspicious rekey activity detected on several accounts today."
+    topic = classify_publish_topic(
+        page_text=text, diff=None, publish_kind=PublishKind.CONTENT_UPDATE
+    )
+    assert topic == PublishTopic.SCAM_ALERT
+
+
 def test_classify_sdk_release_topic() -> None:
     topic = classify_publish_topic(
         page_text="We shipped SDK v2.1.0 — see release notes on GitHub",
