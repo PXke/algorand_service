@@ -18,13 +18,25 @@ from app.modules.search.tasks.index_tasks import index_article, index_crawled_pa
 logger = logging.getLogger(__name__)
 
 
-def _with_hero_image(body: str, og_image: str, alt: str) -> str:
+def _with_hero_image(body: str, og_image: str, alt: str, source_url: str = "") -> str:
     """Prepend the source's share image as a hero, if present and not already
     embedded. Real image from the page, never AI-generated."""
     if not og_image or og_image in body:
         return body
     if not og_image.lower().startswith(("http://", "https://")):
         return body
+    if source_url:
+        from app.modules.crawler.domain_tracker import domain_from_url
+
+        image_domain = domain_from_url(og_image)
+        site_domain = domain_from_url(source_url)
+        if image_domain and site_domain and image_domain != site_domain:
+            logger.warning(
+                "dropping hero image from mismatched domain %s (source %s)",
+                image_domain,
+                site_domain,
+            )
+            return body
     safe_alt = (alt or "").replace("]", "").replace("[", "")
     return f"![{safe_alt}]({og_image})\n\n{body}"
 
@@ -373,7 +385,9 @@ def publish_from_queued_row(
             service_id=row.service_id,
             title=held_title,
             summary=held_summary,
-            body=_with_hero_image(sanitize_body(composed.body), hero_image, held_title),
+            body=_with_hero_image(
+                sanitize_body(composed.body), hero_image, held_title, source_url=row.scrape_url
+            ),
             trigger_txid=str(payload.get("txid", "")),
             trigger_round=int(payload.get("round_num", 0)),
             source_url=row.scrape_url,
@@ -475,7 +489,7 @@ def publish_from_queued_row(
         return {"status": "rate_limited", "reason": str(exc), "tier": tier.value}
 
     title, summary, body = composed.title, composed.summary, sanitize_body(composed.body)
-    body = _with_hero_image(body, hero_image, title)
+    body = _with_hero_image(body, hero_image, title, source_url=row.scrape_url)
     if tier == PublishTier.BREAKING and not title.lower().startswith("breaking"):
         title = f"Breaking: {title}"
         summary = f"**Breaking news.** {summary}"
@@ -873,7 +887,9 @@ def recompose_review(review_id: str) -> dict[str, str]:
         service_id=service_id,
         title=composed.title,
         summary=composed.summary,
-        body=_with_hero_image(sanitize_body(composed.body), og_image, composed.title),
+        body=_with_hero_image(
+            sanitize_body(composed.body), og_image, composed.title, source_url=url
+        ),
         trigger_txid=f"recompose-{review_id[:12]}",
         trigger_round=0,
         source_url=url,
