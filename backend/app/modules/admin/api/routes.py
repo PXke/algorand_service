@@ -427,9 +427,12 @@ def register_admin_routes(app) -> None:
         )
         # Service layer: record the web source + claim the domain so future
         # discovery of the same registrable domain attaches here instead of
-        # spawning a parallel service.
+        # spawning a parallel service. Skip bsky.app profile URLs — every
+        # monitored Bluesky account shares that one host, so claiming it would
+        # just have each new account overwrite the last one's domain ownership.
         url = payload.scrape_url.strip()
-        if url.lower().startswith(("http://", "https://")):
+        is_bluesky = "bsky.app/profile/" in url.lower()
+        if url.lower().startswith(("http://", "https://")) and not is_bluesky:
             from app.modules.registry.sources import add_web_source, domain_from_url
 
             domain = domain_from_url(url)

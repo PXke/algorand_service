@@ -82,7 +82,16 @@ def _auto_merge_redirect(*, original_url: str, final_url: str, service_id: str) 
 
 def _compose_domain_for_row(row: QueuedPublishRow) -> str:
     """Registrable domain to count against the per-website daily article cap.
-    Only web sources are capped (social pollers have their own pacing)."""
+    Only web sources are capped (social pollers have their own pacing).
+
+    Bluesky posts are ingested as a plain https://bsky.app/profile/.../post/...
+    URL, which _source_kind_from_url can't tell apart from a real website — it
+    would misclassify every monitored Bluesky account as sharing ONE "bsky.app"
+    domain cap/cooldown (COMPOSE_MAX_PER_DOMAIN_PER_DAY / _HOURS), throttling
+    unrelated accounts against each other. The stored payload source_kind is
+    set once at ingest and is reliable, so check it first."""
+    if row.payload.get("source_kind") == "bluesky":
+        return ""
     if _source_kind_from_url(row.scrape_url) != "web":
         return ""
     from app.modules.crawler.domain_tracker import domain_from_url
