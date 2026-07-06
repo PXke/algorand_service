@@ -416,12 +416,24 @@ def evaluate_enqueue(
     kind: PublishKind,
     *,
     diff: str | None = None,
+    source_kind: str | None = None,
 ) -> PublishDecision:
-    """Whether a crawl change should enter the publish queue (no daily cap)."""
+    """Whether a crawl change should enter the publish queue (no daily cap).
+
+    The diff-size floor assumes a page with a real "previous version" to
+    compare against — meaningless for a standalone social post (diffed
+    against an empty previous, so a short single-paragraph post rarely
+    reaches NEWS_MIN_DIFF_LINES). The post's existence is the signal, same as
+    discovery; source_kind="bluesky" is exempt.
+    """
     if kind == PublishKind.WEEKLY_DIGEST:
         return PublishDecision(kind=kind, allowed=False, reason="weekly_not_queued")
 
-    if kind == PublishKind.CONTENT_UPDATE and not is_significant_diff(diff):
+    if (
+        kind == PublishKind.CONTENT_UPDATE
+        and source_kind != "bluesky"
+        and not is_significant_diff(diff)
+    ):
         return PublishDecision(
             kind=kind,
             allowed=False,
@@ -436,9 +448,10 @@ def evaluate_standard_publish(
     *,
     diff: str | None = None,
     when: datetime | None = None,
+    source_kind: str | None = None,
 ) -> PublishDecision:
     """Standard queue drain: cap + ~3h spacing between posts."""
-    enqueue_decision = evaluate_enqueue(kind, diff=diff)
+    enqueue_decision = evaluate_enqueue(kind, diff=diff, source_kind=source_kind)
     if not enqueue_decision.allowed:
         return enqueue_decision
 
@@ -463,9 +476,10 @@ def evaluate_breaking_publish(
     *,
     diff: str | None = None,
     when: datetime | None = None,
+    source_kind: str | None = None,
 ) -> PublishDecision:
     """Breaking drain: separate cap, no interval — publish when credible."""
-    enqueue_decision = evaluate_enqueue(kind, diff=diff)
+    enqueue_decision = evaluate_enqueue(kind, diff=diff, source_kind=source_kind)
     if not enqueue_decision.allowed:
         return enqueue_decision
 

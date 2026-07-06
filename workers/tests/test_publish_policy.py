@@ -60,6 +60,18 @@ def test_evaluate_blocks_small_diff() -> None:
     assert decision.reason == "diff_too_small"
 
 
+def test_evaluate_exempts_bluesky_from_small_diff_rejection() -> None:
+    # A single-paragraph post diffed against an empty "previous" rarely
+    # reaches NEWS_MIN_DIFF_LINES — the post's existence is the signal, not
+    # its line count, so bluesky is exempt from this floor.
+    decision = evaluate_enqueue(
+        PublishKind.CONTENT_UPDATE,
+        diff="+a\n",
+        source_kind="bluesky",
+    )
+    assert decision.allowed
+
+
 def test_evaluate_allows_editorial_assignment_with_no_diff() -> None:
     # Assignments/refreshes have no diff — must NOT hit the CONTENT_UPDATE
     # small-diff rejection, which is why they get their own PublishKind.

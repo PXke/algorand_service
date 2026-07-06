@@ -64,6 +64,12 @@ def poll_bluesky_sources() -> dict[str, object]:
                 match_value=post.rkey,
                 txid=f"bluesky-{post.rkey}",
                 published_at=post.created_at,
+                # service_id is per-post (one snapshot key per rkey), so
+                # "previous is None" is always true here — the account itself
+                # is already a known, monitored service, never a fresh
+                # discovery. Without this override every post misclassifies
+                # as SERVICE_DISCOVERY/new_service.
+                is_first_override=False,
             )
             if outcome.get("status") == "enqueued":
                 new_posts += 1

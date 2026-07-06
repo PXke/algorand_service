@@ -144,7 +144,9 @@ def drain_breaking_publish_queue() -> dict[str, object]:
                 break
             kind = PublishKind(row.publish_kind)
             diff = row.payload.get("diff")
-            decision = evaluate_breaking_publish(kind, diff=diff)
+            decision = evaluate_breaking_publish(
+                kind, diff=diff, source_kind=row.payload.get("source_kind")
+            )
             if not decision.allowed:
                 results.append(
                     {"queue_id": row.queue_id, "status": "skipped", "reason": decision.reason}
@@ -281,7 +283,9 @@ def drain_standard_publish_queue() -> dict[str, object]:
                 break
             kind = PublishKind(row.publish_kind)
             diff = row.payload.get("diff")
-            decision = evaluate_standard_publish(kind, diff=diff)
+            decision = evaluate_standard_publish(
+                kind, diff=diff, source_kind=row.payload.get("source_kind")
+            )
             if not decision.allowed:
                 return {
                     "status": "skipped",

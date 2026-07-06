@@ -69,10 +69,19 @@ def ingest_publish_signal(
     og_image: str = "",
     published_at: str = "",
     inner_links: list[dict[str, str]] | None = None,
+    is_first_override: bool | None = None,
 ) -> dict[str, str]:
     """
     Shared enqueue path for crawl, mail, and other lanes after content is fetched.
     Updates snapshot, service profile, and publish queue.
+
+    ``is_first_override``: for lanes whose ``service_id`` is a synthetic
+    per-item key (e.g. Bluesky's ``{account}:{post_rkey}``, one per post),
+    ``previous is None`` is ALWAYS true — every post is "first" under its own
+    key — which would misclassify every post as SERVICE_DISCOVERY. Such
+    callers already know the underlying account is an established, already-
+    monitored service (never a genuine discovery) and pass ``False`` here to
+    say so.
     """
     from app.modules.ai.content_signals import compute_content_signals
     from app.modules.crawler.domain_tracker import url_recently_rejected
@@ -98,7 +107,7 @@ def ingest_publish_signal(
     snapshot_source_id = source_id_for_service(service_id)
     previous = get_latest_snapshot(snapshot_source_id)
     previous_body = previous[2] if previous else ""
-    is_first = previous is None
+    is_first = (previous is None) if is_first_override is None else is_first_override
 
     if previous and previous[0] == content_hash:
         _record_event()
@@ -158,7 +167,7 @@ def ingest_publish_signal(
         classifier_publish=signals.publish_decision,
         classifier_confidence=signals.confidence,
     )
-    enqueue_decision = evaluate_enqueue(intent.kind, diff=diff)
+    enqueue_decision = evaluate_enqueue(intent.kind, diff=diff, source_kind=source_kind)
     if not enqueue_decision.allowed:
         return _skip(enqueue_decision.reason)
 
