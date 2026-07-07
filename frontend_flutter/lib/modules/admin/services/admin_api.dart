@@ -56,6 +56,29 @@ class AdminApi {
     return items.whereType<Map<String, dynamic>>().toList();
   }
 
+  Future<List<Map<String, dynamic>>> listPublishQueue({
+    required String walletAddress,
+    int limit = 200,
+  }) async {
+    final body = await _client.getJson(
+      '/api/v1/admin/publish-queue?limit=$limit',
+      headers: _adminHeaders(walletAddress),
+    );
+    final items = body['items'];
+    if (items is! List) return const [];
+    return items.whereType<Map<String, dynamic>>().toList();
+  }
+
+  Future<Map<String, dynamic>> publishQueueBreakdown({
+    required String walletAddress,
+    required String queueId,
+  }) async {
+    return _client.getJson(
+      '/api/v1/admin/publish-queue/$queueId/breakdown',
+      headers: _adminHeaders(walletAddress),
+    );
+  }
+
   Future<List<Map<String, dynamic>>> listClassifierReviews({
     required String walletAddress,
   }) async {

@@ -19,6 +19,7 @@ import 'compose_sessions_page.dart';
 import 'domains_page.dart';
 import 'gatekeeper_page.dart';
 import 'inbox_page.dart';
+import 'publish_queue_page.dart';
 import 'tool_insights_page.dart';
 import 'training_page.dart';
 
@@ -51,7 +52,7 @@ class _AdminHubPageState extends ConsumerState<AdminHubPage>
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 12, vsync: this);
+    _tabs = TabController(length: 13, vsync: this);
   }
 
   @override
@@ -138,6 +139,7 @@ class _AdminHubPageState extends ConsumerState<AdminHubPage>
                       _adminHubTab(l10n.adminTabArticles, Icons.article_outlined),
                       _adminHubTab(l10n.adminTabWriterBriefs, Icons.lightbulb_outline),
                       _adminHubTab(l10n.adminTabClassifier, Icons.rate_review_outlined),
+                      _adminHubTab('Queue', Icons.pending_actions_outlined),
                       _adminHubTab('Training', Icons.model_training_outlined),
                       _adminHubTab('Gatekeeper', Icons.verified_outlined),
                       _adminHubTab(l10n.adminTabDomains, Icons.travel_explore_outlined),
@@ -161,6 +163,7 @@ class _AdminHubPageState extends ConsumerState<AdminHubPage>
               _AdminArticlesTab(),
               _AdminBriefsTab(),
               ClassifierFeedbackTab(),
+              PublishQueueTab(),
               TrainingTab(),
               GatekeeperTab(),
               DomainsTab(),
