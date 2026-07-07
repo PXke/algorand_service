@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from robyn import Robyn
+from robyn import Request, Response, Robyn
 
 from app.core.config import settings
 from app.core.cors import register_cors
@@ -56,6 +56,13 @@ if settings.suggestions_enabled:
 # Registered last so nothing shadows the JSON API under /api/*; nginx decides
 # which paths reach these vs. the static Flutter build.
 register_seo_routes(app)
+
+
+@app.after_request()
+def add_robots_tag(request: Request, response: Response) -> Response:
+    if request.url.path.startswith("/api/"):
+        response.headers["X-Robots-Tag"] = "noindex"
+    return response
 
 
 if __name__ == "__main__":

@@ -22,7 +22,6 @@ def robots_txt() -> str:
         "Disallow: /admin",
         "Disallow: /search",
         "Disallow: /suggestions",
-        "Disallow: /api/",
         "",
         f"Sitemap: {site_url()}/sitemap.xml",
     ]
