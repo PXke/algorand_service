@@ -166,12 +166,15 @@ _SSR_LOADING = (
     "<script>document.getElementById('ssr-loading').style.display='block';</script>"
 )
 # Flutter's engine dispatches `flutter-first-frame` on window once the real UI
-# has painted; drop the SSR content then so it never duplicates the app for
-# users or screen readers. If Flutter fails to boot, the content stays — a
-# working degraded page instead of a blank one.
+# has painted; hide the SSR content then so it never duplicates the app for
+# users or screen readers. We use display:none rather than removing it from
+# the DOM so that Googlebot (which executes JS) still indexes the content.
+# If Flutter fails to boot, the content stays visible — a working degraded page.
 _SSR_REMOVE_SCRIPT = (
     "<script>window.addEventListener('flutter-first-frame',function(){"
-    "var e=document.getElementById('ssr-body');e&&e.remove();});</script>"
+    "var e=document.getElementById('ssr-body');if(e){"
+    "e.style.display='none';e.setAttribute('aria-hidden','true');"
+    "}});</script>"
 )
 
 
