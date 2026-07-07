@@ -80,6 +80,11 @@ ARTICLE_EDIT_WINDOW_HOURS = env_int("ARTICLE_EDIT_WINDOW_HOURS", 24)
 BREAKING_INLINE_DRAIN = env_bool("BREAKING_INLINE_DRAIN", False)
 NEWS_STANDARD_INTERVAL_HOURS = env_int("NEWS_STANDARD_INTERVAL_HOURS", 3)
 NEWS_MIN_DIFF_LINES = env_int("NEWS_MIN_DIFF_LINES", 3)
+# CONTENT_UPDATE-specific relevance floor: a service-diff item below this is
+# never enqueued at all, regardless of diff size. Kept separate from (and
+# stricter than) FRONTIER_CONTENT_REJECT_SCORE below, which governs initial
+# domain discovery and is deliberately lenient on a page's first crawl.
+CONTENT_UPDATE_RELEVANCE_FLOOR = env_float("CONTENT_UPDATE_RELEVANCE_FLOOR", 0.35)
 PUBLISH_IMMEDIATE_PRIORITY = env_int("PUBLISH_IMMEDIATE_PRIORITY", 95)
 PUBLISH_QUEUE_DRAIN_SECONDS = env_int("PUBLISH_QUEUE_DRAIN_SECONDS", 900)
 PUBLISH_BREAKING_DRAIN_SECONDS = env_int("PUBLISH_BREAKING_DRAIN_SECONDS", 120)
@@ -377,10 +382,6 @@ RECENCY_PRIORITY_WEIGHT = env_int("RECENCY_PRIORITY_WEIGHT", 80)
 # relevance+diff alone. Kept soft (not a gate): weekly service updates always
 # resemble the service's previous article somewhat.
 NOVELTY_SUPPRESSION_FLOOR = env_float("NOVELTY_SUPPRESSION_FLOOR", 0.3)
-# Drain-time duplicate cut: novelty is recomputed just before composing; at or
-# below this floor the row is resolved as a duplicate (something on the same
-# story published after it was enqueued) instead of burning a compose.
-NOVELTY_DUPLICATE_FLOOR = env_float("NOVELTY_DUPLICATE_FLOOR", 0.1)
 DIFF_PRIORITY_WEIGHT = env_int("DIFF_PRIORITY_WEIGHT", 80)
 DIFF_SIGNIFICANCE_NORM_LINES = env_int("DIFF_SIGNIFICANCE_NORM_LINES", 40)
 DISCOVERY_PRIORITY_WEIGHT = env_int("DISCOVERY_PRIORITY_WEIGHT", 60)
@@ -462,6 +463,10 @@ FRONTIER_PREVIEW_MIN_SCORE = env_float("FRONTIER_PREVIEW_MIN_SCORE", 1.0)
 # whose CRAWLED page text scores below this is clearly off-topic. Used only when
 # that task is invoked with auto_reject=True (validate the scores first).
 FRONTIER_CONTENT_REJECT_SCORE = env_float("FRONTIER_CONTENT_REJECT_SCORE", 0.2)
+# CONTENT_UPDATE-specific compose-time quality floor: stricter backstop than
+# FRONTIER_CONTENT_REJECT_SCORE (which stays lenient for first-crawl discovery)
+# in case relevance drifts between ingest-time scoring and compose time.
+CONTENT_UPDATE_QUALITY_FLOOR = env_float("CONTENT_UPDATE_QUALITY_FLOOR", 0.35)
 # Score-gated frontier auto-approve: when enabled, a newly discovered unknown
 # domain whose landing-page preview score (0-10 keyword+classifier scale, same as
 # FRONTIER_PREVIEW_MIN_SCORE) is at least FRONTIER_AUTO_APPROVE_SCORE — or whose

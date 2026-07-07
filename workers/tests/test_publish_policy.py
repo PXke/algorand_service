@@ -72,6 +72,46 @@ def test_evaluate_exempts_bluesky_from_small_diff_rejection() -> None:
     assert decision.allowed
 
 
+def test_evaluate_blocks_low_relevance_content_update(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.modules.newspaper.publish_policy.config.CONTENT_UPDATE_RELEVANCE_FLOOR",
+        0.35,
+        raising=False,
+    )
+    # zk-colorsort case: a real diff (clears is_significant_diff) on a
+    # barely-relevant service (0.31) must never reach the queue at all.
+    decision = evaluate_enqueue(
+        PublishKind.CONTENT_UPDATE,
+        diff="+++ file\n+ a\n+ b\n+ c\n",
+        relevance=0.31,
+    )
+    assert not decision.allowed
+    assert decision.reason == "relevance_too_low"
+
+
+def test_evaluate_allows_relevant_content_update(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.modules.newspaper.publish_policy.config.CONTENT_UPDATE_RELEVANCE_FLOOR",
+        0.35,
+        raising=False,
+    )
+    decision = evaluate_enqueue(
+        PublishKind.CONTENT_UPDATE,
+        diff="+++ file\n+ a\n+ b\n+ c\n",
+        relevance=0.9,
+    )
+    assert decision.allowed
+
+
+def test_evaluate_skips_relevance_check_when_not_provided() -> None:
+    # Callers that don't pass relevance (e.g. bluesky) must not be gated.
+    decision = evaluate_enqueue(
+        PublishKind.CONTENT_UPDATE,
+        diff="+++ file\n+ a\n+ b\n+ c\n",
+    )
+    assert decision.allowed
+
+
 def test_evaluate_allows_editorial_assignment_with_no_diff() -> None:
     # Assignments/refreshes have no diff — must NOT hit the CONTENT_UPDATE
     # small-diff rejection, which is why they get their own PublishKind.

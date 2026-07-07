@@ -19,7 +19,6 @@ FEATURE_ORDER = (
     "relevance",
     "recency",
     "length",
-    "specificity",
     "structure",
 )
 

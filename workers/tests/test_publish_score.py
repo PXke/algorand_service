@@ -39,9 +39,9 @@ def test_relevant_page_outranks_offtopic() -> None:
 
 
 def test_priority_components_sum_for_updates() -> None:
-    # For content updates the total is the sum of the ranked components —
-    # heuristic sub-scores (topic_base/trust/service_weight) are reported but
-    # not ranked.
+    # For content updates the total is the sum of the ranked components, minus
+    # the (now live) thin-content noise penalty — heuristic sub-scores
+    # (topic_base/trust/service_weight/urgency) are reported but not ranked.
     b = compute_priority(
         topic=PublishTopic.SDK_RELEASE,
         publish_kind=PublishKind.CONTENT_UPDATE,
@@ -56,11 +56,63 @@ def test_priority_components_sum_for_updates() -> None:
         b.relevance_bonus + b.novelty_bonus + b.timeliness_bonus
         + b.diff_bonus + b.announce_bonus
     )
-    # Novelty then scales the whole sum (repetition suppression).
-    assert b.total == round(components * b.novelty_factor)
+    # 3 added lines (<5) + short page_text (<200 chars) both trip the noise
+    # penalty here, so it must be nonzero and actually subtracted.
+    assert b.noise_penalty > 0
+    # Novelty then scales the whole (noise-reduced) sum (repetition suppression).
+    assert b.total == round(max(0, components - b.noise_penalty) * b.novelty_factor)
     assert b.novelty_factor == 0.3 + 0.7 * 0.4
     assert b.diff_bonus > 0  # 3 added lines earn partial diff credit
     assert b.topic_base > 0  # still computed for observability
+
+
+def test_noise_penalty_actually_lowers_total() -> None:
+    # The zk-colorsort case: a barely-there page and a thin diff must actually
+    # cost points, not just display a "noise_penalty" number that does nothing.
+    kwargs = dict(
+        topic=PublishTopic.CONTENT_UPDATE,
+        publish_kind=PublishKind.CONTENT_UPDATE,
+        page_title="Update",
+        source_kind="web",
+        relevance=0.31,
+        novelty=1.0,
+        timeliness=1.0,
+    )
+    thin = compute_priority(
+        **kwargs,
+        page_text="Last updated: July 6, 2026.",
+        diff="+++ a\n+ x\n+ y\n+ z",
+    )
+    substantial = compute_priority(
+        **kwargs,
+        page_text="Algorand ecosystem update with real detail. " * 10,
+        diff="+++ a\n" + "\n".join(f"+ line {i}" for i in range(10)),
+    )
+    assert thin.noise_penalty > 0
+    assert substantial.noise_penalty == 0
+    assert thin.total < substantial.total
+
+
+def test_confident_classifier_reject_crushes_total_near_zero() -> None:
+    # A confident "don't publish" verdict must be able to sink a candidate
+    # below real competitors, not just halve it.
+    kwargs = dict(
+        topic=PublishTopic.CONTENT_UPDATE,
+        publish_kind=PublishKind.CONTENT_UPDATE,
+        page_title="Update",
+        page_text="Algorand mainnet update with substantive real content here.",
+        diff="+++ a\n" + "\n".join(f"+ line {i}" for i in range(10)),
+        source_kind="web",
+        relevance=0.9,
+        novelty=1.0,
+        timeliness=1.0,
+    )
+    neutral = compute_priority(**kwargs)
+    demoted = compute_priority(
+        **kwargs, classifier_publish=False, classifier_confidence=1.0
+    )
+    # Full confidence must crush toward zero, not merely halve the total.
+    assert demoted.total <= round(neutral.total * 0.1)
 
 
 def test_zero_novelty_suppresses_high_relevance_repeat() -> None:

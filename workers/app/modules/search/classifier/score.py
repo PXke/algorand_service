@@ -17,6 +17,8 @@ KNOWN_DOMAINS: frozenset[str] = frozenset(
         "tinyman.org",
         "folks.finance",
         "github.com/algorand",
+        "txnlab.dev",
+        "deflex.fi",
     }
 )
 
@@ -35,6 +37,16 @@ POSITIVE_KEYWORDS: tuple[str, ...] = (
     "indexer",
     "pure proof of stake",
     "ppos",
+    # Ecosystem proper nouns — a story can be entirely Algorand-relevant
+    # without repeating the word "algorand" (e.g. a TxnLab/Haystack Router
+    # or Tinyman/Folks Finance piece named after the project, not the chain).
+    "txnlab",
+    "haystack router",
+    "deflex",
+    "tinyman",
+    "folks finance",
+    "nfdomains",
+    "algokit",
 )
 
 REJECT_PATTERNS: tuple[re.Pattern[str], ...] = (

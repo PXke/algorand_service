@@ -2,6 +2,7 @@
 human review only when GATEKEEPER_ENFORCE is on (default off = shadow)."""
 
 from app.modules.gatekeeper.live import DeterministicGate
+from app.modules.newspaper.publish_policy import PublishKind
 from app.modules.newspaper.tasks.publish_tasks import (
     _content_quality_fails,
     _gate_enforces_review,
@@ -88,3 +89,15 @@ def test_content_quality_fails_below_reject_threshold(monkeypatch):
     assert _content_quality_fails(0.1) is True
     assert _content_quality_fails(0.2) is False
     assert _content_quality_fails(0.9) is False
+
+
+def test_content_quality_fails_uses_stricter_floor_for_content_update(monkeypatch):
+    monkeypatch.setattr("app.core.config.FRONTIER_CONTENT_REJECT_SCORE", 0.2, raising=False)
+    monkeypatch.setattr("app.core.config.CONTENT_UPDATE_QUALITY_FLOOR", 0.35, raising=False)
+    # A relevance of 0.31 clears the lenient discovery floor (0.2) but must
+    # fail the stricter CONTENT_UPDATE-specific floor (0.35) — this is the
+    # zk-colorsort case: a low-relevance service diff that used to slip through.
+    assert _content_quality_fails(0.31) is False
+    assert _content_quality_fails(0.31, PublishKind.CONTENT_UPDATE) is True
+    assert _content_quality_fails(0.36, PublishKind.CONTENT_UPDATE) is False
+    assert _content_quality_fails(0.1, PublishKind.SERVICE_DISCOVERY) is True

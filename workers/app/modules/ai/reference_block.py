@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 # Research tools whose results represent a page the model actually retrieved.
 _FETCH_TOOLS = {"fetch_url", "fetch_url_safe"}
-_SOURCES_HEADING_RE = re.compile(r"(?im)^#{1,6}\s*(sources|references)\b")
+_SOURCES_HEADING_RE = re.compile(r"(?im)^#{1,6}\s*(sources?|references?)\b")
 _MAX_SOURCES = 12
 
 

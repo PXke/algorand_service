@@ -48,8 +48,9 @@ def compute_priority(
     classifier_confidence: float = 0.0,
     today: date | None = None,
 ) -> PriorityBreakdown:
-    # Sub-scores kept for observability on the admin/debug view, but they no
-    # longer decide selection — see `total` below.
+    # topic_base/trust/service_weight/urgency are kept for observability on the
+    # admin/debug view only — they do NOT decide selection (see `total` below).
+    # `noise` is the one exception: it's subtracted from `total` further down.
     topic_base = priority_for_topic(topic)
     trust = source_trust_bonus(
         source_kind=source_kind,
@@ -142,14 +143,23 @@ def compute_priority(
             + ANNOUNCE_PRIORITY_BONUS
         )
 
+    # Thin-content penalty is LIVE (unlike topic_base/trust/service_weight/
+    # urgency below, which stay observability-only): a short diff or a barely-
+    # there page must actually lose points, not just display a number that
+    # looks like it did.
+    total = max(0, total - noise)
+
     # Learned signal: a confident classifier verdict nudges the heuristic rank.
     # None (training mode / low confidence) leaves the total untouched, so this
     # activates gradually as the model earns confidence from review feedback.
+    # A confident reject can crush the total toward zero (not just halve it) —
+    # otherwise even a maximally-confident "don't publish" verdict lets a
+    # high-scoring candidate survive with half its points and still win a drain.
     classifier_adjust = 0
     if classifier_publish is True:
         classifier_adjust = round(classifier_confidence * CLASSIFIER_PRIORITY_WEIGHT)
     elif classifier_publish is False:
-        classifier_adjust = -round(total * 0.5 * max(0.0, min(1.0, classifier_confidence)))
+        classifier_adjust = -round(total * max(0.0, min(1.0, classifier_confidence)))
     total = max(0, min(max_total + CLASSIFIER_PRIORITY_WEIGHT, total + classifier_adjust))
 
     # Repetition suppression: novelty scales the WHOLE score. The additive

@@ -417,6 +417,7 @@ def evaluate_enqueue(
     *,
     diff: str | None = None,
     source_kind: str | None = None,
+    relevance: float | None = None,
 ) -> PublishDecision:
     """Whether a crawl change should enter the publish queue (no daily cap).
 
@@ -425,20 +426,30 @@ def evaluate_enqueue(
     against an empty previous, so a short single-paragraph post rarely
     reaches NEWS_MIN_DIFF_LINES). The post's existence is the signal, same as
     discovery; source_kind="bluesky" is exempt.
+
+    The relevance floor only applies to CONTENT_UPDATE: a service is already
+    vetted (as a domain, not per-diff) at discovery, so a low-relevance diff
+    would otherwise sail into the queue on relevance alone — priority scoring
+    scales by relevance but never gates on it, so a barely-relevant service
+    can still win a drain slot simply by being the best (or only) candidate
+    ready at that moment.
     """
     if kind == PublishKind.WEEKLY_DIGEST:
         return PublishDecision(kind=kind, allowed=False, reason="weekly_not_queued")
 
-    if (
-        kind == PublishKind.CONTENT_UPDATE
-        and source_kind != "bluesky"
-        and not is_significant_diff(diff)
-    ):
-        return PublishDecision(
-            kind=kind,
-            allowed=False,
-            reason="diff_too_small",
-        )
+    if kind == PublishKind.CONTENT_UPDATE and source_kind != "bluesky":
+        if not is_significant_diff(diff):
+            return PublishDecision(
+                kind=kind,
+                allowed=False,
+                reason="diff_too_small",
+            )
+        if relevance is not None and relevance < config.CONTENT_UPDATE_RELEVANCE_FLOOR:
+            return PublishDecision(
+                kind=kind,
+                allowed=False,
+                reason="relevance_too_low",
+            )
 
     return PublishDecision(kind=kind, allowed=True, reason="ok")
 

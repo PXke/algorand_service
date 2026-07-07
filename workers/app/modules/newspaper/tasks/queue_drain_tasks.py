@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
+
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.celery_app import celery_app
@@ -87,7 +90,13 @@ def _novelty_collapsed(row) -> bool:
     the stored priority silently overstates it. Recompute against articles
     published NOW and cut the row when novelty has collapsed — one cheap
     Typesense query beats a six-minute duplicate compose. Fails open (0.0
-    similarity → not collapsed) when Typesense is unavailable."""
+    similarity → not collapsed) when Typesense is unavailable.
+
+    Uses the SAME boundary as the compose-time duplicate check
+    (NOVELTY_MAX_SIMILARITY, publish_tasks.py) rather than the old, more
+    lenient NOVELTY_DUPLICATE_FLOOR — a row in between the two used to survive
+    this drain-time check only to be discarded as a duplicate mid-compose,
+    wasting a full Mistral call."""
     from app.modules.newspaper.article_grader import (
         recent_content_similarity,
         recent_title_similarity,
@@ -97,8 +106,46 @@ def _novelty_collapsed(row) -> bool:
     text = str(row.payload.get("page_text", ""))
     title_sim, _ = recent_title_similarity(title)
     content_sim, _ = recent_content_similarity(title, text)
-    novelty = 1.0 - max(title_sim, content_sim)
-    return novelty <= config.NOVELTY_DUPLICATE_FLOOR
+    closest_sim = max(title_sim, content_sim)
+    return closest_sim >= config.NOVELTY_MAX_SIMILARITY
+
+
+@dataclass(frozen=True)
+class _DrainGate:
+    """One pre-compose veto in the standard drain: ``check(row)`` True means the
+    row is skipped this run with ``name`` as its reported status. ``mark_status``
+    moves the row out of the pending lane (``deferred``/``expired``); None leaves
+    it pending to retry next beat (right for short-lived cooldowns)."""
+
+    name: str
+    check: Callable[..., bool]
+    mark_status: str | None = None
+
+
+# Evaluated in order, first match wins. The order is load-bearing:
+# cooldown checks MUST run before the review branch in the drain loop (a
+# review draft still re-covers the same project), and novelty runs last so a
+# capped/cooling row doesn't spend a Typesense query.
+_PRE_COMPOSE_GATES: tuple[_DrainGate, ...] = (
+    _DrainGate("domain_capped", _domain_capped, mark_status="deferred"),
+    _DrainGate("domain_cooldown", _domain_in_cooldown),
+    _DrainGate("service_cooldown", _service_in_cooldown),
+    _DrainGate("novelty_collapsed", _novelty_collapsed, mark_status="expired"),
+)
+
+
+def _run_pre_compose_gates(row) -> _DrainGate | None:
+    """First gate that vetoes this row, or None when all pass.
+
+    Checks are resolved through the module namespace at call time (not the
+    reference frozen into the tuple at import) so monkeypatching e.g.
+    ``queue_drain_tasks._domain_in_cooldown`` keeps working — that seam is how
+    the existing drain tests fake cooldown/cap state."""
+    for gate in _PRE_COMPOSE_GATES:
+        check = globals().get(gate.check.__name__, gate.check)
+        if check(row):
+            return gate
+    return None
 
 
 def _resolve(row, outcome: dict) -> str:
@@ -235,35 +282,15 @@ def drain_standard_publish_queue() -> dict[str, object]:
     reviews_composed = 0
     try:
         for row in pending:
-            # Per-website daily article cap: defer surplus candidates so they
-            # leave the pending lane (otherwise the same capped row stays at the
-            # head and is re-served as the "top topic" every run).
-            if _domain_capped(row):
-                mark_queue_status(row.queue_id, "deferred")
-                results.append({"queue_id": row.queue_id, "status": "domain_capped"})
-                continue
-
-            # Diversity spacing: a domain in its multi-day cooldown must not be
-            # composed at all this run — neither published NOR sent to review (a
-            # review draft still re-covers the same project). Keep it pending (not
-            # deferred) so it retries once the cooldown clears. MUST run BEFORE the
-            # review branch, which otherwise composes + continues past this check.
-            if _domain_in_cooldown(row):
-                results.append({"queue_id": row.queue_id, "status": "domain_cooldown"})
-                continue
-
-            if _service_in_cooldown(row):
-                results.append({"queue_id": row.queue_id, "status": "service_cooldown"})
-                continue
-
-            # Duplicate cut: the story may have been covered since this row was
-            # enqueued — recompute novelty NOW and expire collapsed rows before
-            # any compose (review-bound ones included; a review draft still
-            # re-covers the same story). Standard tier only: breaking has its
-            # own credibility path and must never be suppressed as a repeat.
-            if _novelty_collapsed(row):
-                mark_queue_status(row.queue_id, "expired")
-                results.append({"queue_id": row.queue_id, "status": "novelty_collapsed"})
+            # Pre-compose vetoes (_PRE_COMPOSE_GATES): per-website daily cap,
+            # domain/service diversity cooldowns, and the drain-time duplicate
+            # cut, in that order. All run BEFORE the review branch below (a
+            # review draft still re-covers the same project/story).
+            fired = _run_pre_compose_gates(row)
+            if fired is not None:
+                if fired.mark_status:
+                    mark_queue_status(row.queue_id, fired.mark_status)
+                results.append({"queue_id": row.queue_id, "status": fired.name})
                 continue
 
             if _row_needs_review(row):

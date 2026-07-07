@@ -132,7 +132,7 @@ _TOOLS_GUIDANCE = (
     "review_draft at least once before you finish; do NOT output the final JSON "
     "until you have. When the draft is complete, call review_draft with your "
     "title and full body. It returns a 0-10 grade, "
-    "per-dimension subscores (novelty, relevance, recency, length, specificity, "
+    "per-dimension subscores (novelty, relevance, recency, length, "
     "structure) and a list of concrete issues. If the grade is below ~7 or any "
     "issues are listed, REVISE the draft to fix them — work toward the target "
     "length the review reports (a well-developed piece, not a short stub) WITHOUT "

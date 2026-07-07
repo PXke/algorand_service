@@ -133,14 +133,23 @@ def _gate_enforces_review(
     return gate is not None and not gate.passed
 
 
-def _content_quality_fails(relevance: float) -> bool:
+def _content_quality_fails(relevance: float, kind: PublishKind | None = None) -> bool:
     """Pre-compose veto: judge the actual context about to be handed to Mistral
     (page_text relevance, same 0-1 score_page scorer classify_pending_domains
-    uses) so a poor-quality source never even reaches the writer. Shares
-    FRONTIER_CONTENT_REJECT_SCORE with the domain classifier — one floor, so a
-    domain-level and a per-compose verdict can't drift apart."""
+    uses) so a poor-quality source never even reaches the writer.
+
+    CONTENT_UPDATE gets its own, stricter CONTENT_UPDATE_QUALITY_FLOOR: a
+    service is vetted once as a domain at discovery (lenient, first-crawl
+    signal) but never re-checked per diff, so relevance can drift low over
+    time without ever failing FRONTIER_CONTENT_REJECT_SCORE. This is a
+    backstop behind the CONTENT_UPDATE_RELEVANCE_FLOOR enqueue-time gate
+    (evaluate_enqueue), in case relevance shifts between ingest-time scoring
+    and compose time. Other kinds keep sharing FRONTIER_CONTENT_REJECT_SCORE
+    with the domain classifier."""
     from app.core import config
 
+    if kind == PublishKind.CONTENT_UPDATE:
+        return relevance < config.CONTENT_UPDATE_QUALITY_FLOOR
     return relevance < config.FRONTIER_CONTENT_REJECT_SCORE
 
 
@@ -283,7 +292,7 @@ def publish_from_queued_row(
     clf_decision, clf_confidence = signals.publish_decision, signals.confidence
 
     # Content-quality veto: judge the context BEFORE spending a Mistral call on it.
-    if _content_quality_fails(signals.relevance):
+    if _content_quality_fails(signals.relevance, publish_kind):
         return {
             "status": "skipped",
             "reason": "poor_quality_content",

@@ -26,12 +26,22 @@ from app.modules.newspaper.snapshot_store import (
 from app.modules.pipeline.core.diffing import build_text_diff
 
 # Volatile tokens that change on a page without the story changing: numbers,
-# money amounts, percentages, clock times, and "N minutes/hours ago" phrasing.
-# Stripped before hashing so a live price/counter tick is not seen as a content
-# change (which would otherwise re-enqueue the same page every poll).
+# money amounts, percentages, clock times, "N minutes/hours ago" phrasing, and
+# calendar dates (e.g. a "last updated" stamp ticking forward). Stripped before
+# hashing so a live price/counter/date tick is not seen as a content change
+# (which would otherwise re-enqueue the same page every poll). The full-date
+# pattern must run before the generic digit-strip below, or its day/year digits
+# are gone by the time it would match, leaving the month name behind as a
+# false diff.
+_MONTHS = (
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+)
 _VOLATILE_PATTERNS = (
     re.compile(r"\d+\s*(?:seconds?|minutes?|mins?|hours?|days?)\s+ago", re.IGNORECASE),
     re.compile(r"\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?", re.IGNORECASE),
+    re.compile(rf"\b(?:{_MONTHS})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s*(?:\d{{4}})?\b", re.IGNORECASE),
+    re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
     re.compile(r"[$€£]\s?\d[\d,]*(?:\.\d+)?"),
     re.compile(r"\d[\d,]*(?:\.\d+)?\s*%"),
     re.compile(r"\d[\d,]*(?:\.\d+)?"),
@@ -167,7 +177,9 @@ def ingest_publish_signal(
         classifier_publish=signals.publish_decision,
         classifier_confidence=signals.confidence,
     )
-    enqueue_decision = evaluate_enqueue(intent.kind, diff=diff, source_kind=source_kind)
+    enqueue_decision = evaluate_enqueue(
+        intent.kind, diff=diff, source_kind=source_kind, relevance=signals.relevance
+    )
     if not enqueue_decision.allowed:
         return _skip(enqueue_decision.reason)
 
