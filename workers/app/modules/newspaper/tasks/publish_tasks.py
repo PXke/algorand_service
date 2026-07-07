@@ -3,6 +3,11 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.modules.ai.content_signals import ContentSignals
 
 from app.celery_app import celery_app
 from app.core.redis_lock import single_flight
@@ -173,6 +178,84 @@ def _quality_floor_fails(heuristic_grade: dict | None) -> bool:
         return False
 
 
+@dataclass(frozen=True)
+class _ComposeVetoCtx:
+    """Everything the pre-compose vetoes need beyond the row itself."""
+
+    row: QueuedPublishRow
+    publish_kind: PublishKind
+    compose_domain: str
+    enforce_domain_cap: bool
+    signals: ContentSignals
+
+
+def _domain_cap_veto(ctx: _ComposeVetoCtx) -> dict | None:
+    """Per-website daily article cap (COMPOSE_MAX_PER_DOMAIN_PER_DAY). Breaking
+    alerts pass enforce_domain_cap=False so a critical warning is never held."""
+    if not (ctx.enforce_domain_cap and ctx.compose_domain):
+        return None
+    from app.modules.crawler.domain_tracker import domain_compose_cap_reached
+
+    if domain_compose_cap_reached(ctx.compose_domain):
+        return {"status": "domain_capped", "service_id": ctx.row.service_id}
+    return None
+
+
+def _novelty_duplicate_veto(ctx: _ComposeVetoCtx) -> dict | None:
+    """Near-duplicate guard: a very similar headline published recently means
+    this compose would be spent on a repeat. Runs HERE (composition) not at
+    enqueue, because more articles may have published since this was queued.
+    "duplicate" is a terminal outcome, so the drain dequeues the row."""
+    from app.core import config as worker_config
+
+    if not worker_config.NOVELTY_GATE_ENABLED:
+        return None
+    from app.modules.newspaper.article_grader import recent_title_similarity
+
+    sim, closest = recent_title_similarity(str(ctx.row.payload.get("page_title", "")))
+    if sim >= worker_config.NOVELTY_MAX_SIMILARITY:
+        return {
+            "status": "duplicate",
+            "reason": "too_similar_to_recent",
+            "service_id": ctx.row.service_id,
+            "closest_title": closest,
+            "similarity": round(sim, 2),
+        }
+    return None
+
+
+def _content_quality_veto(ctx: _ComposeVetoCtx) -> dict | None:
+    """Content-quality veto: judge the context BEFORE spending a Mistral call."""
+    if _content_quality_fails(ctx.signals.relevance, ctx.publish_kind):
+        return {
+            "status": "skipped",
+            "reason": "poor_quality_content",
+            "service_id": ctx.row.service_id,
+            "relevance": round(ctx.signals.relevance, 3),
+        }
+    return None
+
+
+# Evaluated in order, first non-None outcome wins. Same shape as the standard
+# drain's _PRE_COMPOSE_GATES (queue_drain_tasks.py), but these vetoes return
+# their full outcome dict — each carries different extra fields (similarity,
+# relevance, ...) that the drain reports per row.
+_PRE_COMPOSE_VETOES = (
+    _domain_cap_veto,
+    _novelty_duplicate_veto,
+    _content_quality_veto,
+)
+
+
+def _run_pre_compose_vetoes(ctx: _ComposeVetoCtx) -> dict | None:
+    """First veto outcome for this compose, or None when all pass."""
+    for veto in _PRE_COMPOSE_VETOES:
+        outcome = veto(ctx)
+        if outcome is not None:
+            return outcome
+    return None
+
+
 @single_flight(lambda *_a, **_kw: "compose:article", ttl=1860)
 @single_flight(lambda row, **_kw: f"compose:{row.queue_id}", ttl=1800)
 def publish_from_queued_row(
@@ -217,39 +300,42 @@ def publish_from_queued_row(
 
         return run_article_edit(row)
 
-    # Per-website daily cap + 7-day diversity cooldown, both keyed on the
-    # REGISTRABLE domain (domain_from_url collapses forum.folks.finance and
-    # folks.finance -> folks.finance), so subdomains of one project share the cap
-    # and cooldown. We ALWAYS resolve the domain so the compose is RECORDED below
-    # (stamping the cooldown that spaces out the next article); enforce_domain_cap
-    # only governs whether this row may be BLOCKED. Breaking alerts pass it False
-    # so a critical warning is never held — but they must still stamp the cooldown,
-    # otherwise the next same-domain story slips through the 7-day window.
+    # We ALWAYS resolve the compose domain (registrable: domain_from_url
+    # collapses forum.folks.finance -> folks.finance, so subdomains of one
+    # project share the cap/cooldown) so the compose is RECORDED below —
+    # stamping the cooldown that spaces out the next article — even when
+    # enforce_domain_cap is False and the cap veto itself is skipped.
     compose_domain = _compose_domain_for_row(row)
-    if enforce_domain_cap and compose_domain:
-        from app.modules.crawler.domain_tracker import domain_compose_cap_reached
 
-        if domain_compose_cap_reached(compose_domain):
-            return {"status": "domain_capped", "service_id": row.service_id}
+    # Classifier signals for the ACTUAL context about to be handed to Mistral
+    # (page_text, same bundle compose_scrape_article receives — for web/service
+    # sources this is the aggregated service_context, not just the raw page).
+    # Computed once at ingest and carried on the payload; recompute only for
+    # rows queued before signals existed. Read BEFORE the vetoes so the
+    # content-quality one can skip the Mistral call entirely, not just the feed.
+    from app.modules.ai.content_signals import ContentSignals, compute_content_signals
 
-    # Near-duplicate guard: if a very similar headline was published recently,
-    # don't spend a Mistral compose on it. Runs HERE (composition) not at
-    # enqueue, because more articles may have published since this was queued.
-    from app.core import config as worker_config
+    page_text_for_clf = str(payload.get("page_text", ""))
+    signals = ContentSignals.from_payload(payload.get("signals")) or compute_content_signals(
+        page_text_for_clf, row.scrape_url
+    )
+    clf_category = signals.category
+    clf_decision, clf_confidence = signals.publish_decision, signals.confidence
 
-    if worker_config.NOVELTY_GATE_ENABLED:
-        from app.modules.newspaper.article_grader import recent_title_similarity
-
-        sim, closest = recent_title_similarity(str(payload.get("page_title", "")))
-        if sim >= worker_config.NOVELTY_MAX_SIMILARITY:
-            # "duplicate" is a terminal outcome, so the drain dequeues the row.
-            return {
-                "status": "duplicate",
-                "reason": "too_similar_to_recent",
-                "service_id": row.service_id,
-                "closest_title": closest,
-                "similarity": round(sim, 2),
-            }
+    # Pre-compose vetoes (_PRE_COMPOSE_VETOES): per-website daily cap,
+    # near-duplicate headline, content quality — in that order, before any
+    # enrichment gathering or Mistral spend.
+    veto_outcome = _run_pre_compose_vetoes(
+        _ComposeVetoCtx(
+            row=row,
+            publish_kind=publish_kind,
+            compose_domain=compose_domain,
+            enforce_domain_cap=enforce_domain_cap,
+            signals=signals,
+        )
+    )
+    if veto_outcome is not None:
+        return veto_outcome
 
     enrichment_block = ""
     try:
@@ -275,30 +361,6 @@ def publish_from_queued_row(
             enrichment_block = format_enrichment_for_writer(bundle)
     except Exception:
         enrichment_block = ""
-
-    # Classifier signals for the ACTUAL context about to be handed to Mistral
-    # (page_text, same bundle compose_scrape_article receives — for web/service
-    # sources this is the aggregated service_context, not just the raw page).
-    # Computed once at ingest and carried on the payload; recompute only for
-    # rows queued before signals existed. Read BEFORE composing so the content-
-    # quality veto below can skip the Mistral call entirely, not just the feed.
-    from app.modules.ai.content_signals import ContentSignals, compute_content_signals
-
-    page_text_for_clf = str(payload.get("page_text", ""))
-    signals = ContentSignals.from_payload(payload.get("signals")) or compute_content_signals(
-        page_text_for_clf, row.scrape_url
-    )
-    clf_category = signals.category
-    clf_decision, clf_confidence = signals.publish_decision, signals.confidence
-
-    # Content-quality veto: judge the context BEFORE spending a Mistral call on it.
-    if _content_quality_fails(signals.relevance, publish_kind):
-        return {
-            "status": "skipped",
-            "reason": "poor_quality_content",
-            "service_id": row.service_id,
-            "relevance": round(signals.relevance, 3),
-        }
 
     try:
         composed = compose_scrape_article(
