@@ -165,7 +165,12 @@ class PublishQueueStmts:
         "FROM algorand_platform.publish_queue WHERE queue_id = ?"
     )
     UPDATE_STATUS = _Stmt(
-        "UPDATE algorand_platform.publish_queue SET status = ?, updated_at = ? WHERE queue_id = ?"
+        "UPDATE algorand_platform.publish_queue "
+        "SET status = ?, last_reason = ?, updated_at = ? WHERE queue_id = ?"
+    )
+    UPDATE_REASON = _Stmt(
+        "UPDATE algorand_platform.publish_queue "
+        "SET last_reason = ?, updated_at = ? WHERE queue_id = ?"
     )
     DELETE_PENDING = _Stmt(
         "DELETE FROM algorand_platform.publish_queue_pending "

@@ -256,6 +256,35 @@ def register_admin_routes(app) -> None:
         items = await asyncio.to_thread(store.list_classifier_reviews)
         return {"items": items}
 
+    @app.get("/api/v1/admin/publish-queue")
+    async def admin_list_publish_queue(request: Request) -> Response | dict:
+        """Queue rows with status + last drain/compose decision (last_reason) —
+        the persisted answer to "why was this row skipped/held/resolved" that
+        previously vanished with the Celery task return."""
+        denied = require_admin_wallet(request)
+        if denied is not None:
+            return denied
+        import asyncio
+
+        limit_param = request.query_params.get("limit", "")
+        limit = max(1, min(int(limit_param) if limit_param.isdigit() else 200, 1000))
+        items = await asyncio.to_thread(store.list_publish_queue, limit=limit)
+        return {"items": items}
+
+    @app.get("/api/v1/admin/publish-queue/:queue_id/breakdown")
+    async def admin_publish_queue_breakdown(request: Request) -> Response | dict:
+        """One row's enqueue-time priority_breakdown + content signals."""
+        denied = require_admin_wallet(request)
+        if denied is not None:
+            return denied
+        import asyncio
+
+        queue_id = request.path_params.get("queue_id", "")
+        detail = await asyncio.to_thread(store.publish_queue_breakdown, queue_id)
+        if detail is None:
+            return json_error_response(404, "not_found", "unknown queue_id")
+        return detail
+
     @app.get("/api/v1/admin/training-stats")
     async def admin_training_stats(request: Request) -> Response:
         """Labelled-data volume + balance + grader readiness for the Training tab."""

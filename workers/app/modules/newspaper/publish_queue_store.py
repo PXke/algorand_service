@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import random
 import uuid
@@ -216,14 +217,17 @@ def count_pending_queue() -> int:
     return int(row.n) if row is not None else 0
 
 
-def mark_queue_done(queue_id: str) -> None:
-    mark_queue_status(queue_id, "done")
+def mark_queue_done(queue_id: str, *, reason: str = "") -> None:
+    mark_queue_status(queue_id, "done", reason=reason)
 
 
-def mark_queue_status(queue_id: str, status: str) -> None:
+def mark_queue_status(queue_id: str, status: str, *, reason: str = "") -> None:
     """
     Move a queue item out of the pending lane into a terminal status:
-    done, deferred, indexed_only, or expired.
+    done, deferred, indexed_only, or expired. ``reason`` (the gate name or
+    outcome reason that resolved the row) persists on the row so the admin
+    queue view can answer "why" — it defaults to the status itself so a
+    resolved row is never left with a stale reason from an earlier skip.
     """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import PublishQueueStmts
@@ -239,7 +243,7 @@ def mark_queue_status(queue_id: str, status: str) -> None:
         return
 
     now = datetime.now(tz=UTC)
-    session.execute(PublishQueueStmts.UPDATE_STATUS, (status, now, qid))
+    session.execute(PublishQueueStmts.UPDATE_STATUS, (status, reason or status, now, qid))
     if row.status == "pending" and row.created_at is not None:
         session.execute(
             PublishQueueStmts.DELETE_PENDING,
@@ -247,3 +251,21 @@ def mark_queue_status(queue_id: str, status: str) -> None:
         )
     if row.dedupe_key:
         session.execute(PublishQueueStmts.DELETE_DEDUPE, (row.dedupe_key,))
+
+
+def record_queue_reason(queue_id: str, reason: str) -> None:
+    """Persist why a row was skipped THIS run while it stays pending (cooldown,
+    review slot full, not credible, ...) — the status doesn't change, so this is
+    the only trace the decision leaves. Best-effort: a miss here only loses
+    observability, never correctness."""
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PublishQueueStmts
+
+    try:
+        qid = UUID(queue_id)
+    except ValueError:
+        return
+    with contextlib.suppress(Exception):
+        get_cassandra_session().execute(
+            PublishQueueStmts.UPDATE_REASON, (reason, datetime.now(tz=UTC), qid)
+        )

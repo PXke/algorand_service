@@ -352,6 +352,24 @@ class ClassifierReviewStmts:
 
 
 # --------------------------------------------------------------------------- #
+# publish_queue (admin observability — the workers own the write path)
+# --------------------------------------------------------------------------- #
+class PublishQueueStmts:
+    # Unfiltered scan is deliberate: queue_id is the sole partition key, so
+    # there is no status/time index to page by, and the table stays small (one
+    # pending row per service, resolved rows pruned by admin resets). Excludes
+    # payload — it carries the full page text (up to ~48k chars per row).
+    LIST_RECENT = _Stmt(
+        "SELECT queue_id, status, last_reason, priority, topic, publish_kind, "
+        "service_id, display_name, scrape_url, created_at, updated_at "
+        "FROM algorand_platform.publish_queue LIMIT ?"
+    )
+    GET_PAYLOAD = _Stmt(
+        "SELECT payload FROM algorand_platform.publish_queue WHERE queue_id = ?"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # pending_feed_queue
 # --------------------------------------------------------------------------- #
 class PendingFeedStmts:

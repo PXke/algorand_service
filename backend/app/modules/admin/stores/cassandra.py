@@ -1149,3 +1149,64 @@ class AdminCassandraStore:
                 }
             )
         return _rank_reviews(items, limit=limit)
+
+    def list_publish_queue(self, *, limit: int = 200) -> list[dict]:
+        """Publish-queue rows with their status and last drain/compose decision
+        (last_reason), newest first. Payload deliberately excluded — it carries
+        the full page text; use publish_queue_breakdown for one row's score."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import PublishQueueStmts
+
+        session = get_cassandra_session()
+        try:
+            rows = session.execute(PublishQueueStmts.LIST_RECENT, (max(1, limit),))
+        except Exception:
+            return []
+        items = [
+            {
+                "queue_id": str(row.queue_id),
+                "status": row.status or "",
+                "last_reason": getattr(row, "last_reason", None) or "",
+                "priority": int(row.priority or 0),
+                "topic": row.topic or "",
+                "publish_kind": row.publish_kind or "",
+                "service_id": row.service_id or "",
+                "display_name": row.display_name or "",
+                "scrape_url": row.scrape_url or "",
+                "created_at": row.created_at.isoformat() if row.created_at else "",
+                "updated_at": row.updated_at.isoformat() if row.updated_at else "",
+            }
+            for row in rows
+        ]
+        items.sort(key=lambda it: it["updated_at"], reverse=True)
+        return items
+
+    def publish_queue_breakdown(self, queue_id: str) -> dict | None:
+        """One row's priority_breakdown (computed at enqueue, stored on the
+        payload) plus content signals — the "why this score" companion to
+        list_publish_queue. None when the row is missing/unreadable."""
+        import json
+
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import PublishQueueStmts
+
+        try:
+            qid = UUID(queue_id)
+        except ValueError:
+            return None
+        session = get_cassandra_session()
+        row = session.execute(PublishQueueStmts.GET_PAYLOAD, (qid,)).one()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row.payload or "{}")
+        except json.JSONDecodeError:
+            return None
+        return {
+            "queue_id": queue_id,
+            "priority_breakdown": payload.get("priority_breakdown") or "",
+            "signals": payload.get("signals") or {},
+            "tier": payload.get("tier") or "",
+            "page_title": str(payload.get("page_title", "")),
+            "diff_preview": str(payload.get("diff") or "")[:2000],
+        }

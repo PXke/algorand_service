@@ -26,6 +26,7 @@ from app.modules.newspaper.publish_queue_store import (
     mark_queue_done,
     mark_queue_status,
     queue_row_tier,
+    record_queue_reason,
 )
 from app.modules.newspaper.publish_schedule import record_standard_publish
 from app.modules.newspaper.tasks.publish_tasks import publish_from_queued_row
@@ -155,10 +156,16 @@ def _resolve(row, outcome: dict) -> str:
     """Mark the queue row done when its compose outcome resolved it (published /
     review / duplicate); leave it pending otherwise. Returns the status string.
     Single source of truth for which outcomes dequeue a row — a status missing
-    from TERMINAL_OUTCOMES is the bug class behind 'the same topic reappears'."""
+    from TERMINAL_OUTCOMES is the bug class behind 'the same topic reappears'.
+    Either way the outcome is persisted as the row's last_reason, so the admin
+    queue view can answer "why is/was this row here"."""
+    status = str(outcome.get("status", ""))
+    reason = str(outcome.get("reason", "") or status)
     if is_terminal_outcome(outcome):
-        mark_queue_done(row.queue_id)
-    return str(outcome.get("status", ""))
+        mark_queue_done(row.queue_id, reason=reason)
+    elif status:
+        record_queue_reason(row.queue_id, reason)
+    return status
 
 
 def _compose_review_row(row) -> dict:
@@ -266,6 +273,7 @@ def drain_breaking_publish_queue() -> dict[str, object]:
             ctx = _BreakingVetoCtx(row=row, review_full=review_full)
             veto_outcome = _run_breaking_vetoes(ctx)
             if veto_outcome is not None:
+                record_queue_reason(row.queue_id, str(veto_outcome.get("reason", "skipped")))
                 results.append({"queue_id": row.queue_id, **veto_outcome})
                 continue
 
@@ -340,7 +348,9 @@ def drain_standard_publish_queue() -> dict[str, object]:
             fired = _run_pre_compose_gates(row)
             if fired is not None:
                 if fired.mark_status:
-                    mark_queue_status(row.queue_id, fired.mark_status)
+                    mark_queue_status(row.queue_id, fired.mark_status, reason=fired.name)
+                else:
+                    record_queue_reason(row.queue_id, fired.name)
                 results.append({"queue_id": row.queue_id, "status": fired.name})
                 continue
 
@@ -440,7 +450,7 @@ def expire_stale_queue_items() -> dict[str, object]:
         event_phase = str(row.payload.get("event_phase", ""))
 
         if event_phase == "announce" and age > announce_max_age:
-            mark_queue_status(row.queue_id, "expired")
+            mark_queue_status(row.queue_id, "expired", reason="announce_event_passed")
             expired += 1
             continue
 
@@ -453,10 +463,10 @@ def expire_stale_queue_items() -> dict[str, object]:
                     text=page_text,
                     service_id=row.service_id,
                 )
-                mark_queue_status(row.queue_id, "indexed_only")
+                mark_queue_status(row.queue_id, "indexed_only", reason="stale_low_priority")
                 indexed_only += 1
             else:
-                mark_queue_status(row.queue_id, "deferred")
+                mark_queue_status(row.queue_id, "deferred", reason="stale_low_priority")
                 deferred += 1
 
     return {
