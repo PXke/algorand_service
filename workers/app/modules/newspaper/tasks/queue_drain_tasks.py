@@ -8,7 +8,10 @@ from celery.exceptions import SoftTimeLimitExceeded
 from app.celery_app import celery_app
 from app.core import config
 from app.core.feed_bucket import feed_month as _feed_month
-from app.modules.newspaper.breaking_credibility import assess_breaking_credibility
+from app.modules.newspaper.breaking_credibility import (
+    BreakingAssessment,
+    assess_breaking_credibility,
+)
 from app.modules.newspaper.publish_policy import (
     PublishKind,
     PublishTier,
@@ -166,6 +169,75 @@ def _compose_review_row(row) -> dict:
     return outcome
 
 
+@dataclass
+class _BreakingVetoCtx:
+    """Loop state the breaking vetoes need beyond the row: whether the single
+    review slot is occupied this run, and the credibility assessment — set by
+    the credibility veto (last gate) and reused by the drain to tag the
+    SUCCESS outcome with its method, so it's only computed once and only for
+    rows that reach that gate. Mutable on purpose (unlike _DrainGate rows)."""
+
+    row: object
+    review_full: bool
+    assessment: BreakingAssessment | None = None
+
+
+def _breaking_policy_veto(ctx: _BreakingVetoCtx) -> dict | None:
+    """Schedule/kind/diff policy (daily cap, weekly-not-queued, small diff)."""
+    decision = evaluate_breaking_publish(
+        PublishKind(ctx.row.publish_kind),
+        diff=ctx.row.payload.get("diff"),
+        source_kind=ctx.row.payload.get("source_kind"),
+    )
+    if not decision.allowed:
+        return {"status": "skipped", "reason": decision.reason}
+    return None
+
+
+def _breaking_review_slot_veto(ctx: _BreakingVetoCtx) -> dict | None:
+    """Composing a review-bound item into a full review queue just returns
+    "review_queue_full" — a status the drain does NOT mark done, so the row
+    would recompose every beat, burning a full Mistral loop each time. Leave
+    it pending until the admin clears the review queue."""
+    if ctx.review_full and _row_needs_review(ctx.row):
+        return {"status": "skipped", "reason": "review_queue_full"}
+    return None
+
+
+def _breaking_credibility_veto(ctx: _BreakingVetoCtx) -> dict | None:
+    """Breaking must be corroborated (alert keywords + evidence), or it waits."""
+    ctx.assessment = assess_breaking_credibility(
+        page_text=str(ctx.row.payload.get("page_text", "")),
+        source_url=ctx.row.scrape_url,
+        topic=ctx.row.topic,
+    )
+    if not ctx.assessment.credible:
+        return {
+            "status": "skipped",
+            "reason": f"not_credible:{ctx.assessment.reason}",
+            "method": ctx.assessment.method,
+        }
+    return None
+
+
+# Evaluated in order, first non-None outcome wins — same pattern as the
+# standard drain's _PRE_COMPOSE_GATES and compose-side _PRE_COMPOSE_VETOES.
+_BREAKING_VETOES = (
+    _breaking_policy_veto,
+    _breaking_review_slot_veto,
+    _breaking_credibility_veto,
+)
+
+
+def _run_breaking_vetoes(ctx: _BreakingVetoCtx) -> dict | None:
+    """First veto outcome for this breaking row, or None when all pass."""
+    for veto in _BREAKING_VETOES:
+        outcome = veto(ctx)
+        if outcome is not None:
+            return outcome
+    return None
+
+
 @celery_app.task(name="app.tasks.newspaper.drain_breaking_publish_queue")
 def drain_breaking_publish_queue() -> dict[str, object]:
     """Publish breaking-tier items immediately up to the separate daily cap."""
@@ -189,37 +261,12 @@ def drain_breaking_publish_queue() -> dict[str, object]:
         for row in pending:
             if published >= slots:
                 break
-            kind = PublishKind(row.publish_kind)
-            diff = row.payload.get("diff")
-            decision = evaluate_breaking_publish(
-                kind, diff=diff, source_kind=row.payload.get("source_kind")
-            )
-            if not decision.allowed:
-                results.append(
-                    {"queue_id": row.queue_id, "status": "skipped", "reason": decision.reason}
-                )
-                continue
-
-            if review_full and _row_needs_review(row):
-                results.append(
-                    {"queue_id": row.queue_id, "status": "skipped", "reason": "review_queue_full"}
-                )
-                continue
-
-            assessment = assess_breaking_credibility(
-                page_text=str(row.payload.get("page_text", "")),
-                source_url=row.scrape_url,
-                topic=row.topic,
-            )
-            if not assessment.credible:
-                results.append(
-                    {
-                        "queue_id": row.queue_id,
-                        "status": "skipped",
-                        "reason": f"not_credible:{assessment.reason}",
-                        "method": assessment.method,
-                    }
-                )
+            # Per-row vetoes (_BREAKING_VETOES): publish policy, review-slot
+            # availability, credibility — in that order.
+            ctx = _BreakingVetoCtx(row=row, review_full=review_full)
+            veto_outcome = _run_breaking_vetoes(ctx)
+            if veto_outcome is not None:
+                results.append({"queue_id": row.queue_id, **veto_outcome})
                 continue
 
             # Breaking news (scams/incidents) is urgent and rare — exempt from
@@ -240,7 +287,11 @@ def drain_breaking_publish_queue() -> dict[str, object]:
                     "published": published,
                     "results": results,
                 }
-            results.append({"queue_id": row.queue_id, **outcome, "credibility": assessment.method})
+            # ctx.assessment is guaranteed set: the credibility veto (last
+            # gate) ran and passed for any row that reaches a compose.
+            results.append(
+                {"queue_id": row.queue_id, **outcome, "credibility": ctx.assessment.method}
+            )
     except SoftTimeLimitExceeded:
         # Killed mid-compose: the in-flight row was never marked done, so it
         # stays pending. Return partial progress instead of crashing.
