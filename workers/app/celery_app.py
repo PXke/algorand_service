@@ -123,6 +123,10 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.newspaper.drain_approved_feed_queue",
         "schedule": float(os.getenv("APPROVED_FEED_DRAIN_SECONDS", "3600")),
     }
+    schedule["sync-ecosystem-directories"] = {
+        "task": "app.tasks.crawler.sync_ecosystem_directories",
+        "schedule": float(os.getenv("ECOSYSTEM_SYNC_SECONDS", "86400")),
+    }
     schedule["drain-standard-publish-queue"] = {
         "task": "app.tasks.newspaper.drain_standard_publish_queue",
         "schedule": float(os.getenv("PUBLISH_QUEUE_DRAIN_SECONDS", "3600")),

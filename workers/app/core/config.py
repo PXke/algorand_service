@@ -502,6 +502,20 @@ FRONTIER_PREVIEW_MAX_PER_PAGE = env_int("FRONTIER_PREVIEW_MAX_PER_PAGE", 8)
 # in case they became relevant. Admin rejects are permanent regardless.
 FRONTIER_RECRAWL_DAYS_IRRELEVANT = env_int("FRONTIER_RECRAWL_DAYS_IRRELEVANT", 7)
 
+# Curated ecosystem directories (comma-separated URLs). Each listed domain is
+# approved + monitored and gets a relevance anchor in score_page — the fix for
+# chain-silent services (HesabPay/Lofty class) that link-following discovery
+# and homepage keyword scoring structurally miss. Admin rejects always win.
+ECOSYSTEM_SYNC_ENABLED = env_bool("ECOSYSTEM_SYNC_ENABLED", True)
+ECOSYSTEM_DIRECTORY_URLS = [
+    u.strip()
+    for u in env_str(
+        "ECOSYSTEM_DIRECTORY_URLS",
+        "https://raw.githubusercontent.com/awesome-algorand/awesome-algorand/main/README.md",
+    ).split(",")
+    if u.strip()
+]
+
 # Hard cap on items waiting in the admin classifier queue. Once reached, the
 # pipeline stops composing/holding new reviews until the admin clears some.
 MAX_PENDING_REVIEWS = env_int("MAX_PENDING_REVIEWS", 1)

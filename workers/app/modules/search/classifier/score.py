@@ -63,6 +63,17 @@ POSITIVE_KEYWORDS: tuple[str, ...] = (
     "hesabpay",
 )
 
+def _ecosystem_listed() -> frozenset[str]:
+    """Directory-listed domains from the crawler's sync (cached there); the
+    classifier must keep working with no DB, so failures mean 'no extras'."""
+    try:
+        from app.modules.crawler.ecosystem_sync import ecosystem_listed_domains
+
+        return ecosystem_listed_domains()
+    except Exception:
+        return frozenset()
+
+
 REJECT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\balgorithm\b", re.IGNORECASE),
     re.compile(r"\balgebra\b", re.IGNORECASE),
@@ -144,6 +155,18 @@ def score_page(*, url: str, text: str, threshold: float = DEFAULT_THRESHOLD) -> 
                 score += 0.45
                 reasons.append(f"known_domain:{domain}")
                 break
+        else:
+            # Curated ecosystem-directory listings (synced into domain_tracking
+            # by ecosystem_sync) anchor exactly like KNOWN_DOMAINS — a listing
+            # is a stronger relevance signal than the page's own text, which
+            # for chain-silent services (HesabPay/Lofty class) contains no
+            # Algorand mention at all. Best-effort: empty set if DB is away.
+            listed = _ecosystem_listed()
+            for domain in listed:
+                if host == domain or host.endswith(f".{domain}"):
+                    score += 0.45
+                    reasons.append(f"ecosystem_domain:{domain}")
+                    break
 
     keyword_hits = sum(1 for kw in POSITIVE_KEYWORDS if kw in lowered)
     if keyword_hits:
