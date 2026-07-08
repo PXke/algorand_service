@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from datetime import UTC, datetime
 
 import msgspec
@@ -163,6 +164,27 @@ def _image_for(image_url: str | None) -> tuple[str, bool]:
     return absolute(settings.seo_default_image), True
 
 
+# The workers store a brand-icon FALLBACK in image_url when a source has no
+# real share image ("a brand logo populates image_url only — it's not a body
+# banner", publish_tasks.py). That distinction doesn't survive into the
+# article row, so detect icon-shaped URLs here: never stretch them into a
+# body hero, and never emit them as og:image (SVG/ICO aren't valid share-card
+# formats anyway — the site default wins a card, a favicon forfeits it).
+# Word-boundary matched so "algorand_logo_mark.png" is an icon but
+# "silicon.png" is not.
+_ICON_NAME_RE = re.compile(r"(^|[-_.])(favicon|icon|logo|apple-touch)s?([-_.]|\d|$)")
+
+
+def _is_icon_like(image_url: str) -> bool:
+    from urllib.parse import urlparse
+
+    path = (urlparse(image_url).path or "").lower()
+    if path.endswith((".svg", ".ico")):
+        return True
+    name = path.rsplit("/", 1)[-1]
+    return bool(_ICON_NAME_RE.search(name)) or "/icons/" in path
+
+
 def article_path(article_id: str) -> str:
     return f"/news/articles/{article_id}"
 
@@ -247,6 +269,11 @@ def _section_for(tags: list[str]) -> Section | None:
 def render_article(article: ArticleDetail) -> tuple[str, str]:
     canonical = absolute(article_path(article.article_id))
     image, is_default = _image_for(article.image_url)
+    # A brand-icon fallback (favicon/logo) is tile art, not a share image or
+    # banner — use the site default for metas and skip the body hero below.
+    icon_like = bool(article.image_url) and _is_icon_like(image)
+    if icon_like:
+        image, is_default = absolute(settings.seo_default_image), True
     body_text = md_to_text(article.body)
     description = truncate(article.summary or body_text, 160)
     published_iso = _iso(article.published_at_epoch)
@@ -292,7 +319,7 @@ def render_article(article: ArticleDetail) -> tuple[str, str]:
     # embed the same image (writers often lead the markdown with the OG image,
     # which rendered the hero twice back-to-back at the top of the document).
     img_html = ""
-    if article.image_url and _attr(image) not in body_html:
+    if article.image_url and not icon_like and _attr(image) not in body_html:
         img_html = f'<img src="{_attr(image)}" alt="{_attr(article.title)}">'
     source = (
         f'<p>Source: <a href="{_attr(article.source_url)}" rel="noopener nofollow">'

@@ -395,3 +395,41 @@ def test_first_frame_script_keeps_content_visible() -> None:
     _, body = render.render_article(_article())
     assert "aria-hidden" in body
     assert "display='none'" not in body and "e.remove()" not in body
+
+
+# --- icon-like image_url must not become a hero or share image -----------------
+
+
+def test_favicon_image_url_never_becomes_hero_or_og_image() -> None:
+    head, body = render.render_article(
+        _article(image_url="https://brain-chain.app/favicon.svg")
+    )
+    assert "favicon.svg" not in head and "favicon.svg" not in body
+    # Metas fall back to the site default share image instead.
+    assert 'property="og:image" content="https://algorand.pxke.me/icons/' in head
+    # No stretched-icon hero in the SSR body.
+    assert "<img" not in body
+
+
+def test_icon_named_png_also_treated_as_icon() -> None:
+    head, body = render.render_article(
+        _article(image_url="https://example.com/logo-dark.png")
+    )
+    assert "logo-dark.png" not in head and "<img" not in body
+
+
+def test_real_share_image_still_renders_hero() -> None:
+    head, body = render.render_article(_article())
+    assert "img.io/hero.png" in head
+    assert '<img src="https://img.io/hero.png"' in body
+
+
+def test_icon_word_boundary_matching() -> None:
+    from app.modules.seo.render import _is_icon_like
+
+    assert _is_icon_like("https://x.io/algorand_logo_mark_black-Feb.png")
+    assert _is_icon_like("https://x.io/valar-solutions-full-logo-preview.png")
+    assert _is_icon_like("https://x.io/apple-touch-icon.png")
+    assert _is_icon_like("https://x.io/anything.svg")
+    assert not _is_icon_like("https://x.io/silicon.png")
+    assert not _is_icon_like("https://x.io/features/hero-image.jpg")
