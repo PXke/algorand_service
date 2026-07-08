@@ -84,6 +84,10 @@ def test_content_quality_veto_outcome(monkeypatch):
     assert outcome == {
         "status": "skipped",
         "reason": "poor_quality_content",
+        # Retires the row: a sub-floor snapshot can't improve until re-crawl,
+        # and a squatting pending row blocks that re-crawl's signal (the
+        # one-pending-per-service dedupe).
+        "queue_status": "expired",
         "service_id": "svc",
         "relevance": 0.31,
     }

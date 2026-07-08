@@ -55,3 +55,37 @@ def test_resolve_non_terminal_records_reason_and_stays_pending(monkeypatch):
     status = qdt._resolve(_row(), {"status": "mistral_failed", "reason": ""})
     assert status == "mistral_failed"
     assert calls["reason"] == "mistral_failed"
+
+
+def test_resolve_queue_status_retires_row_without_terminal(monkeypatch):
+    """An outcome carrying queue_status (content-quality veto -> "expired")
+    must retire the row under that status — NOT leave it pending. A pending
+    sub-floor row recycles through every drain AND blocks the service's next
+    signal via the one-pending-per-service dedupe (prod 2026-07-08: 10 such
+    rows made 'Pull Top topic' compose nothing)."""
+    calls = {}
+    monkeypatch.setattr(
+        qdt,
+        "mark_queue_done",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("not a terminal outcome")),
+    )
+    monkeypatch.setattr(
+        qdt,
+        "record_queue_reason",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("must mark status, not just reason")),
+    )
+    monkeypatch.setattr(
+        qdt,
+        "mark_queue_status",
+        lambda qid, status, *, reason="": calls.update(qid=qid, status=status, reason=reason),
+    )
+    status = qdt._resolve(
+        _row(),
+        {"status": "skipped", "reason": "poor_quality_content", "queue_status": "expired"},
+    )
+    assert status == "skipped"
+    assert calls == {
+        "qid": "11111111-1111-1111-1111-111111111111",
+        "status": "expired",
+        "reason": "poor_quality_content",
+    }

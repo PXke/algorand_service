@@ -157,12 +157,17 @@ def _resolve(row, outcome: dict) -> str:
     review / duplicate); leave it pending otherwise. Returns the status string.
     Single source of truth for which outcomes dequeue a row — a status missing
     from TERMINAL_OUTCOMES is the bug class behind 'the same topic reappears'.
-    Either way the outcome is persisted as the row's last_reason, so the admin
-    queue view can answer "why is/was this row here"."""
+    An outcome may also carry ``queue_status`` (e.g. the content-quality veto's
+    "expired") to retire the row under that status without counting as a
+    successful resolution. Either way the outcome is persisted as the row's
+    last_reason, so the admin queue view can answer "why is/was this row here"."""
     status = str(outcome.get("status", ""))
     reason = str(outcome.get("reason", "") or status)
+    queue_status = str(outcome.get("queue_status", ""))
     if is_terminal_outcome(outcome):
         mark_queue_done(row.queue_id, reason=reason)
+    elif queue_status:
+        mark_queue_status(row.queue_id, queue_status, reason=reason)
     elif status:
         record_queue_reason(row.queue_id, reason)
     return status

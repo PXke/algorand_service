@@ -241,11 +241,18 @@ def _novelty_duplicate_veto(ctx: _ComposeVetoCtx) -> dict | None:
 
 
 def _content_quality_veto(ctx: _ComposeVetoCtx) -> dict | None:
-    """Content-quality veto: judge the context BEFORE spending a Mistral call."""
+    """Content-quality veto: judge the context BEFORE spending a Mistral call.
+
+    queue_status "expired" retires the row: this snapshot's relevance can't
+    improve until the next crawl, and the one-pending-per-service dedupe means
+    a squatting sub-floor row would block that crawl's fresh signal from ever
+    enqueueing (prod 2026-07-08: 10 rows from 07-03 recycling through every
+    drain, so 'Pull Top topic' composed nothing)."""
     if _content_quality_fails(ctx.signals.relevance, ctx.publish_kind):
         return {
             "status": "skipped",
             "reason": "poor_quality_content",
+            "queue_status": "expired",
             "service_id": ctx.row.service_id,
             "relevance": round(ctx.signals.relevance, 3),
         }
