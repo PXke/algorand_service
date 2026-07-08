@@ -35,14 +35,26 @@ _cache: dict[str, object] = {"path": None, "mtime": 0.0, "html": None}
 
 # Without hints the engine critical path is discovered serially. A dual --wasm
 # build ships dart2wasm+skwasm AND dart2js+canvaskit; preloading BOTH stacks
-# wastes ~2MB on every visit. Mirror flutter_bootstrap.js: WasmGC-capable
-# browsers preload the skwasm path only, everyone else gets canvaskit.
+# wastes ~2MB on every visit. Mirror flutter_bootstrap.js's ACTUAL build
+# selector, not just WasmGC: skwasm requires supportsWasmGC AND webGL AND the
+# per-engine wasm allowlist, whose default is {blink: true, everything else:
+# false} — so Firefox (gecko, WasmGC-capable!) still runs dart2js+canvaskit,
+# and a WasmGC-only check preloads megabytes of wasm it never executes
+# (observed in Firefox devtools as "preloaded but not used" warnings).
 def _resource_hints() -> str:
     hints = (
         "<script>(function(){"
+        "var cr=false;"
+        "if(navigator.userAgentData&&navigator.userAgentData.brands){"
+        "for(var i=0;i<navigator.userAgentData.brands.length;i++){"
+        "if(navigator.userAgentData.brands[i].brand==='Chromium'){cr=true;break;}}}"
+        "else if(/Chrom(e|ium)/.test(navigator.userAgent)){cr=true;}"
         "var gc=false;"
         "try{gc=WebAssembly.validate(new Uint8Array("
         "[0,97,115,109,1,0,0,0,1,5,1,95,1,120,0]));}catch(e){}"
+        "var gl=false;"
+        "try{var cv=document.createElement('canvas');"
+        "gl=!!(cv.getContext('webgl2')||cv.getContext('webgl'));}catch(e){}"
         "function ps(h){var l=document.createElement('link');"
         "l.rel='preload';l.href=h;l.as='script';document.head.appendChild(l);}"
         "function pw(h){var l=document.createElement('link');"
@@ -50,16 +62,12 @@ def _resource_hints() -> str:
         "l.crossOrigin='anonymous';document.head.appendChild(l);}"
         "function pm(h){var l=document.createElement('link');"
         "l.rel='modulepreload';l.href=h;document.head.appendChild(l);}"
-        "if(gc){"
+        "if(cr&&gc&&gl){"
         "pm('/main.dart.mjs');pw('/main.dart.wasm');"
         "ps('/canvaskit/skwasm.js');pw('/canvaskit/skwasm.wasm');"
         "}else{"
         "ps('/main.dart.js');"
-        "var v='';"
-        "if(navigator.userAgentData&&navigator.userAgentData.brands){"
-        "for(var i=0;i<navigator.userAgentData.brands.length;i++){"
-        "if(navigator.userAgentData.brands[i].brand==='Chromium'){v='chromium/';break;}}}"
-        "else if(/Chrom(e|ium)/.test(navigator.userAgent)){v='chromium/';}"
+        "var v=cr?'chromium/':'';"
         "ps('/canvaskit/'+v+'canvaskit.js');"
         "pw('/canvaskit/'+v+'canvaskit.wasm');"
         "}"

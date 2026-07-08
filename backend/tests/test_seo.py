@@ -402,9 +402,13 @@ def test_shell_injection_adds_engine_preloads(monkeypatch, tmp_path) -> None:
     head, body = render.render_home(_feed(1))
     doc = shell.render_document(head, body)
     assert doc is not None
-    # Renderer preloads are injected by a WasmGC-aware inline script (one stack
-    # per browser — skwasm OR canvaskit, never both).
+    # Renderer preloads are injected by an inline script mirroring
+    # flutter_bootstrap.js's build selector (one stack per browser — skwasm OR
+    # canvaskit, never both). The wasm branch must gate on all three of the
+    # selector's conditions: Chromium/Blink (Flutter's default wasm allowlist
+    # is blink-only — Firefox has WasmGC yet runs dart2js), WasmGC, and WebGL.
     assert "WebAssembly.validate" in doc
+    assert "cr&&gc&&gl" in doc
     assert "main.dart.mjs" in doc
     assert "skwasm.wasm" in doc
     assert "canvaskit.wasm" in doc
