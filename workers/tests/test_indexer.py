@@ -44,3 +44,20 @@ def test_page_index_skips_when_classifier_rejects(monkeypatch) -> None:
     )
     assert outcome["status"] == "skipped"
     assert outcome["reason"] == "classifier_rejected"
+
+
+def test_classifier_anchors_chain_silent_ecosystem_domains() -> None:
+    """HesabPay/Sealed: real Algorand-ecosystem services whose own sites never
+    say 'Algorand' (hesab.com has zero chain mentions). Without a KNOWN_DOMAINS
+    anchor they score 0 relevance, so their discovery rows drained at priority
+    ~0 and every future diff would fail CONTENT_UPDATE_RELEVANCE_FLOOR (0.35)."""
+    hesab = score_page(
+        url="https://hesab.com/",
+        text="HesabPay - Digital Wallet. Send Money, Pay Bills, Top-Up Mobile.",
+    )
+    assert hesab.score >= 0.35
+    sealed = score_page(
+        url="https://www.sealed.channel/",
+        text="Sealed - Fully Anonymous Multi-Chain Messenger built on blockchain.",
+    )
+    assert sealed.score >= 0.35

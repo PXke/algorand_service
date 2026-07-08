@@ -19,6 +19,15 @@ KNOWN_DOMAINS: frozenset[str] = frozenset(
         "github.com/algorand",
         "txnlab.dev",
         "deflex.fi",
+        # Ecosystem services whose own sites never mention Algorand: HesabPay
+        # (Afghanistan payments, runs on Algorand — its wallet marketing page
+        # has ZERO chain mentions) and Sealed (multi-chain messenger, seeded
+        # deliberately). Without a domain anchor their relevance scores 0, so
+        # their one-shot discovery rows died at priority ~0 and every future
+        # content-update diff would fail CONTENT_UPDATE_RELEVANCE_FLOOR.
+        "hesab.com",
+        "hesab.af",
+        "sealed.channel",
     }
 )
 
@@ -47,6 +56,7 @@ POSITIVE_KEYWORDS: tuple[str, ...] = (
     "folks finance",
     "nfdomains",
     "algokit",
+    "hesabpay",
 )
 
 REJECT_PATTERNS: tuple[re.Pattern[str], ...] = (
