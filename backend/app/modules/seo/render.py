@@ -71,6 +71,11 @@ def _publisher() -> dict:
     return org
 
 
+# Bing/most audit tools warn above ~65 display chars; Google truncates by
+# pixel width around the same point.
+_TITLE_MAX_CHARS = 65
+
+
 def _meta_block(
     *,
     title: str,
@@ -86,7 +91,22 @@ def _meta_block(
     image_dims: tuple[int, int] | None = None,
     json_ld: list[dict] | None = None,
 ) -> str:
-    full_title = title if title.endswith(settings.site_name) else f"{title} — {settings.site_name}"
+    # <title> length budget (~65 chars before SERPs truncate and audit tools
+    # warn): brand-suffix the title only when the result still fits; a long
+    # article headline stands alone (brand already rides in og:site_name), and
+    # a headline that is itself over budget is word-boundary clamped. Only the
+    # <title> tag is clamped — og:/twitter:/JSON-LD keep the full headline.
+    suffixed = title if title.endswith(settings.site_name) else f"{title} — {settings.site_name}"
+    if len(suffixed) <= _TITLE_MAX_CHARS:
+        full_title = suffixed
+    elif len(title) <= _TITLE_MAX_CHARS:
+        full_title = title
+    else:
+        cut = title[: _TITLE_MAX_CHARS - 1]
+        space = cut.rfind(" ")
+        if space > _TITLE_MAX_CHARS // 2:
+            cut = cut[:space]
+        full_title = cut.rstrip(" ,;:—-") + "…"
     parts = [
         f"<title>{html.escape(full_title)}</title>",
         f'<meta name="description" content="{_attr(description)}">',
@@ -166,15 +186,19 @@ _SSR_LOADING = (
     "<script>document.getElementById('ssr-loading').style.display='block';</script>"
 )
 # Flutter's engine dispatches `flutter-first-frame` on window once the real UI
-# has painted; hide the SSR content then so it never duplicates the app for
-# users or screen readers. We use display:none rather than removing it from
-# the DOM so that Googlebot (which executes JS) still indexes the content.
-# If Flutter fails to boot, the content stays visible — a working degraded page.
+# has painted. At that point the engine has already made the SSR content
+# invisible to users mechanically — it sets position:fixed/inset:0/
+# overflow:hidden on <body> and overlays a full-viewport canvas — so the only
+# thing left to deduplicate is assistive tech: aria-hidden keeps screen
+# readers on the Flutter semantics tree. Deliberately NO display:none and no
+# DOM removal: search engines render the page, first-frame fires in their
+# renderer (verified via Search Console, 2026-07-08), and CSS-hidden main
+# content is devalued in the rendered snapshot — covered-but-visible content
+# is not. If Flutter fails to boot, the content stays — a working degraded page.
 _SSR_REMOVE_SCRIPT = (
     "<script>window.addEventListener('flutter-first-frame',function(){"
-    "var e=document.getElementById('ssr-body');if(e){"
-    "e.style.display='none';e.setAttribute('aria-hidden','true');"
-    "}});</script>"
+    "var e=document.getElementById('ssr-body');"
+    "e&&e.setAttribute('aria-hidden','true');});</script>"
 )
 
 

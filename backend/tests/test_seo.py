@@ -356,3 +356,42 @@ def test_shell_injection_adds_engine_preloads(monkeypatch, tmp_path) -> None:
     assert "canvaskit.wasm" in doc
     # API preconnect removed: feed/markets/auth are deferred; early preconnect
     # triggered Lighthouse "unused preconnect" and competed with WASM on boot.
+
+
+# --- title length budget + SSR visibility -------------------------------------
+
+
+def test_short_title_keeps_brand_suffix() -> None:
+    head, _ = render.render_article(_article(title="Short headline"))
+    assert "<title>Short headline — " in head
+
+
+def test_long_title_drops_brand_suffix_but_stays_whole() -> None:
+    t = "Algorand Foundation Restructures Leadership For The Coming Years"  # 65 chars
+    head, _ = render.render_article(_article(title=t))
+    assert f"<title>{t}</title>" in head
+
+
+def test_overlong_title_clamped_at_word_boundary() -> None:
+    t = (
+        "Algorand Foundation Restructures Leadership to Accelerate "
+        "AI-Driven On-Chain Activity Across the Entire Ecosystem"
+    )
+    head, _ = render.render_article(_article(title=t))
+    import re
+
+    m = re.search(r"<title>(.*?)</title>", head)
+    assert m is not None
+    assert len(m.group(1)) <= 66  # 65 + ellipsis
+    assert m.group(1).endswith("…")
+    # Full headline still rides in og:title untouched.
+    assert f'property="og:title" content="{t}"' in head
+
+
+def test_first_frame_script_keeps_content_visible() -> None:
+    # aria-hidden only: search engines' renderers reach flutter-first-frame,
+    # and display:none'd main content is devalued in the rendered snapshot.
+    # The engine's own full-viewport canvas already covers the SSR body.
+    _, body = render.render_article(_article())
+    assert "aria-hidden" in body
+    assert "display='none'" not in body and "e.remove()" not in body
