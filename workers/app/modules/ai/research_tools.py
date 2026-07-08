@@ -14,6 +14,7 @@ aborts the article.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 _UA = "algorand-platform-newspaper/1.0 (+https://algorand.pxke.me)"
@@ -599,11 +600,14 @@ def _tool_get_node_stats() -> dict[str, Any]:
     return result
 
 
-def _tool_discourse_forum(forum_url: str, limit: int = 10) -> dict[str, Any]:
+def _tool_discourse_forum(forum_url: str, limit: int = 10, query: str = "") -> dict[str, Any]:
     """Live activity from a Discourse community forum (most crypto project forums,
     incl. Folks Finance) via its public JSON API — site stats, top categories, and
-    recent topics with reply/view counts. Read this instead of a static page
-    snapshot to gauge what the community is actually discussing right now."""
+    recent topics with reply/view counts. Pass ``query`` to search the forum's
+    public /search.json instead of listing latest topics (prod writers kept
+    wanting 'search the Algorand forum for <project>', which latest-topics can't
+    answer). Read this instead of a static page snapshot to gauge what the
+    community is actually discussing right now."""
     from urllib.parse import urlsplit
 
     raw = (forum_url or "").strip()
@@ -645,6 +649,42 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10) -> dict[str, Any]:
     except Exception as exc:
         # A non-Discourse site (or one with the API disabled) — say so plainly.
         return {"forum": base, "error": f"not reachable as a Discourse forum: {str(exc)[:140]}"}
+
+    q = (query or "").strip()
+    if q:
+        out["query"] = q
+        try:
+            data = (
+                _guarded_get(f"{base}/search.json", headers=hdr, params={"q": q[:200]}).json()
+                or {}
+            )
+            topics_by_id = {
+                t.get("id"): t for t in data.get("topics", []) or [] if isinstance(t, dict)
+            }
+            results = []
+            for p in (data.get("posts", []) or [])[:n]:
+                if not isinstance(p, dict):
+                    continue
+                topic = topics_by_id.get(p.get("topic_id"), {})
+                results.append(
+                    {
+                        "topic": topic.get("title") or "",
+                        "excerpt": (p.get("blurb") or "")[:300],
+                        "author": p.get("username"),
+                        "date": (p.get("created_at") or "")[:10],
+                        "replies": topic.get("posts_count"),
+                        "url": (
+                            f"{base}/t/{topic.get('slug')}/{topic.get('id')}"
+                            if topic.get("slug") and topic.get("id")
+                            else ""
+                        ),
+                    }
+                )
+            out["results"] = results
+            out["count"] = len(results)
+        except Exception as exc:
+            out["error"] = f"search failed: {str(exc)[:160]}"
+        return out
 
     cat_names: dict[Any, str] = {}
     try:
@@ -901,6 +941,106 @@ def _tool_reddit_history(user: str, kind: str = "submitted", limit: int = 15) ->
     return {"user": u, "kind": k, "count": len(items), "items": items}
 
 
+_XGOV_RAW = "https://raw.githubusercontent.com/algorandfoundation/xGov/main"
+_XGOV_API = "https://api.github.com/repos/algorandfoundation/xGov/contents"
+
+
+def _xgov_frontmatter(md: str) -> dict[str, str]:
+    """The `--- key: value ---` header every xGov proposal file starts with.
+    Flat string values only — no YAML dependency needed."""
+    lines = (md or "").splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    fields: dict[str, str] = {}
+    for line in lines[1:60]:
+        if line.strip() == "---":
+            break
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        fields[key.strip().lower()] = value.strip()
+    return fields
+
+
+def _xgov_abstract(md: str) -> str:
+    m = re.search(r"(?im)^##\s*abstract\s*$([\s\S]*?)(?=^#|\Z)", md or "")
+    return " ".join(m.group(1).split())[:400] if m else ""
+
+
+def _tool_xgov_proposal(proposal_id: int = 0, limit: int = 8) -> dict[str, Any]:
+    """Status of Algorand xGov grant proposals from the canonical
+    algorandfoundation/xGov repo: frontmatter (title, author, amount_requested,
+    category, status Draft/Final/Approved/Rejected/Withdrawn, forum link) plus an
+    abstract snippet. With proposal_id, one proposal in full; without, the
+    newest proposals' summaries."""
+    import os
+
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    def _fetch_one(pid: int, with_abstract: bool) -> dict[str, Any] | None:
+        try:
+            resp = _guarded_get(f"{_XGOV_RAW}/Proposals/xgov-{pid}.md")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+        except Exception as exc:
+            return {"id": pid, "error": str(exc)[:160]}
+        fm = _xgov_frontmatter(resp.text)
+        if not fm:
+            return {"id": pid, "error": "no frontmatter in proposal file"}
+        entry: dict[str, Any] = {
+            "id": pid,
+            "title": fm.get("title", ""),
+            "status": fm.get("status", ""),
+            "author": fm.get("author", ""),
+            "amount_requested_algo": fm.get("amount_requested", ""),
+            "category": fm.get("category", ""),
+            "period": fm.get("period", ""),
+            "discussion": fm.get("discussions-to", ""),
+            "url": f"https://github.com/algorandfoundation/xGov/blob/main/Proposals/xgov-{pid}.md",
+        }
+        if with_abstract:
+            entry["abstract"] = _xgov_abstract(resp.text)
+        return entry
+
+    if proposal_id:
+        entry = _fetch_one(int(proposal_id), with_abstract=True)
+        if entry is None:
+            return {
+                "id": int(proposal_id),
+                "error": "no such proposal in the xGov repo — note proposal ids are "
+                "the repo's small sequential numbers (e.g. 100), not on-chain "
+                "app/asset ids; for live on-chain vote tallies use "
+                "lookup_application on the voting app instead",
+            }
+        return entry
+
+    n = max(1, min(int(limit), 10))
+    try:
+        resp = _guarded_get(f"{_XGOV_API}/Proposals", headers=headers)
+        resp.raise_for_status()
+        listing = resp.json() or []
+    except Exception as exc:
+        return {"error": f"could not list proposals: {str(exc)[:160]}"}
+    ids: list[int] = []
+    for item in listing:
+        m = re.fullmatch(r"xgov-(\d+)\.md", str(item.get("name", "")))
+        if m:
+            ids.append(int(m.group(1)))
+    ids.sort(reverse=True)
+    proposals = [p for pid in ids[:n] if (p := _fetch_one(pid, with_abstract=False))]
+    return {
+        "source": "github.com/algorandfoundation/xGov",
+        "total_proposals": len(ids),
+        "count": len(proposals),
+        "proposals": proposals,
+        "note": "pass proposal_id for full detail incl. abstract",
+    }
+
+
 _GITHUB_SCHEMA = {
     "type": "function",
     "function": {
@@ -981,10 +1121,11 @@ _DISCOURSE_SCHEMA = {
             "Live activity from a Discourse community forum (most crypto project "
             "forums, including Folks Finance) via its public JSON API: site stats "
             "(topic/post/user counts, last-day activity), top categories, and recent "
-            "topics with reply/view counts. Use to gauge what the community is "
-            "discussing NOW instead of a stale page snapshot. Pass the forum's base "
-            "URL, e.g. https://forum.folks.finance — the official Algorand forum "
-            "is https://forum.algorand.org."
+            "topics with reply/view counts. Pass `query` to SEARCH the forum's "
+            "discussions for a project/term instead of listing latest topics. Use to "
+            "gauge what the community is discussing NOW instead of a stale page "
+            "snapshot. Pass the forum's base URL, e.g. https://forum.folks.finance — "
+            "the official Algorand forum is https://forum.algorand.org."
         ),
         "parameters": {
             "type": "object",
@@ -993,7 +1134,14 @@ _DISCOURSE_SCHEMA = {
                     "type": "string",
                     "description": "forum base URL, e.g. https://forum.folks.finance",
                 },
-                "limit": {"type": "integer", "description": "1-25 recent topics, default 10"},
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "optional search term (project name, topic) — searches the "
+                        "forum instead of listing latest topics"
+                    ),
+                },
+                "limit": {"type": "integer", "description": "1-25 results, default 10"},
             },
             "required": ["forum_url"],
         },
@@ -1084,15 +1232,42 @@ _REDDIT_SCHEMA = {
     },
 }
 
+_XGOV_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "xgov_proposal_status",
+        "description": (
+            "Status of Algorand xGov grant proposals from the canonical "
+            "algorandfoundation/xGov GitHub repo: title, author, ALGO amount "
+            "requested, category, forum discussion link and status (Draft/Final/"
+            "Approved/Rejected/Withdrawn). Pass proposal_id (the small xGov "
+            "number, e.g. 100 — NOT an on-chain app/asset id) for one proposal "
+            "with its abstract; omit it to list the newest proposals. For live "
+            "on-chain vote tallies use lookup_application on the voting app."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "proposal_id": {
+                    "type": "integer",
+                    "description": "xGov proposal number (e.g. 100); omit to list newest",
+                },
+                "limit": {"type": "integer", "description": "1-10 proposals when listing, default 8"},
+            },
+            "required": [],
+        },
+    },
+}
+
 
 def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Enabled external research tools as (schemas, handlers).
 
     search_web needs SEARXNG_URL and search_bluesky needs an app-password, so they
     register only when usable. github_activity, github_repository_contents,
-    fetch_url, get_defi_tvl, discourse_forum, get_node_stats, medium_api_article_list
-    and reddit_api_post_history hit free public APIs and are always available
-    (GITHUB_TOKEN optional).
+    fetch_url, get_defi_tvl, discourse_forum, get_node_stats,
+    medium_api_article_list, reddit_api_post_history and xgov_proposal_status hit
+    free public APIs and are always available (GITHUB_TOKEN optional).
     """
     import os
 
@@ -1107,6 +1282,7 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         _NODE_STATS_SCHEMA,
         _MEDIUM_SCHEMA,
         _REDDIT_SCHEMA,
+        _XGOV_SCHEMA,
     ]
     handlers: dict[str, Any] = {
         "github_activity": _tool_github_activity,
@@ -1117,6 +1293,7 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         "get_node_stats": _tool_get_node_stats,
         "medium_api_article_list": _tool_medium_articles,
         "reddit_api_post_history": _tool_reddit_history,
+        "xgov_proposal_status": _tool_xgov_proposal,
     }
     if SEARXNG_URL:
         schemas.append(_WEB_SCHEMA)

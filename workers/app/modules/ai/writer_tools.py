@@ -8,6 +8,7 @@ never aborts the article.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -271,9 +272,11 @@ SUGGEST_TOOL_SCHEMA: dict[str, Any] = {
             "github_repository_contents to READ contract source, search_leak_databases "
             "for offshore leaks and screen_sanctions_and_pep for people (present on "
             "investigative stories), discourse_forum "
-            "for forum activity, search_bluesky for community sentiment (use this "
+            "for forum activity AND forum search (query param), search_bluesky for "
+            "community sentiment (use this "
             "instead of X/Twitter), medium_api_article_list for a blog's article list, "
-            "reddit_api_post_history for a user's Reddit history, fetch_archive_text to "
+            "reddit_api_post_history for a user's Reddit history, xgov_proposal_status "
+            "for xGov grant proposal status, fetch_archive_text to "
             "read a deleted/edited page from the Wayback Machine. ONLY when nothing "
             "existing fits, record the genuine gap (e.g. Telegram search, an NFT "
             "collection's floor price, a historical TVL time-series). Do NOT suggest a "
@@ -303,12 +306,91 @@ SUGGEST_TOOL_SCHEMA: dict[str, Any] = {
 }
 
 
-def _make_suggest_tool_handler(context: dict[str, Any] | None):
+# Tokens too generic to identify a capability on their own — "api", "search",
+# "lookup" etc. appear in half the suggestions and would match everything.
+_GENERIC_TOKENS = frozenset(
+    {
+        "api",
+        "tool",
+        "search",
+        "lookup",
+        "get",
+        "fetch",
+        "data",
+        "status",
+        "history",
+        "list",
+        "full",
+        "text",
+        "machine",
+        "check",
+        "tracker",
+        "documentation",
+        "algo",
+        "algorand",
+        "onchain",
+    }
+)
+
+# Suggested-name vocabulary → the registered tool that covers it, for cases
+# token overlap can't catch (prod suggestions asked for "wayback_machine_*"
+# while the tool family is named fetch_archive_*).
+_CAPABILITY_ALIASES = {
+    "wayback": "fetch_archive_text",
+    "archive": "fetch_archive_text",
+    "twitter": "search_bluesky",
+    "x": "search_bluesky",
+}
+
+
+def _match_existing_tool(capability: str, known_tools: set[str]) -> str | None:
+    """Best-effort map of a suggested capability onto an already-registered tool.
+
+    The writer keeps suggesting tools it already has (~30 schemas in context and
+    it loses track — prod asked for reddit_api_post_history, discourse_forum and
+    medium_api_article_list, all long since registered). Conservative on
+    purpose: exact name, alias vocabulary, or a shared non-generic token."""
+    tokens = [t for t in re.split(r"[^a-z0-9]+", (capability or "").lower()) if t]
+    if not tokens:
+        return None
+    name = "_".join(tokens)
+    if name in known_tools:
+        return name
+    for tok in tokens:
+        alias = _CAPABILITY_ALIASES.get(tok)
+        if alias and alias in known_tools:
+            return alias
+    significant = {t for t in tokens if t not in _GENERIC_TOKENS}
+    best: tuple[int, str] | None = None
+    for tool in known_tools:
+        overlap = significant & {
+            t for t in tool.lower().split("_") if t not in _GENERIC_TOKENS
+        }
+        if overlap and (best is None or len(overlap) > best[0]):
+            best = (len(overlap), tool)
+    return best[1] if best else None
+
+
+def _make_suggest_tool_handler(
+    context: dict[str, Any] | None, known_tools: set[str] | None = None
+):
     ctx = context or {}
+    known = known_tools or set()
 
     def _handler(capability: str = "", reason: str = "") -> dict[str, Any]:
         from app.modules.ai.tool_insights_store import record_tool_suggestion
 
+        existing = _match_existing_tool(capability, known)
+        if existing and existing != "suggest_tool":
+            # Nudge instead of record: the correction reaches the model while it
+            # can still act on it this session, and the insights table stays
+            # free of already-covered asks.
+            return {
+                "ok": False,
+                "already_available": existing,
+                "hint": f"you already have this capability — call {existing} now "
+                "instead of suggesting it",
+            }
         record_tool_suggestion(
             capability,
             reason,
@@ -528,7 +610,6 @@ def all_tools(
     schemas = list(TOOL_SCHEMAS)
     handlers = dict(TOOL_HANDLERS)
     schemas.append(SUGGEST_TOOL_SCHEMA)
-    handlers["suggest_tool"] = _make_suggest_tool_handler(context)
     try:
         from app.core.config import INVESTIGATIVE_TOOLS_ENABLED
 
@@ -558,4 +639,7 @@ def all_tools(
         handlers.update(chain_handlers)
     except Exception:
         logger.warning("failed to load chain tools", exc_info=True)
+    # Registered last, once every toolset is merged, so the already-have-it
+    # check sees the FULL tool registry for this compose.
+    handlers["suggest_tool"] = _make_suggest_tool_handler(context, set(handlers))
     return schemas, handlers
