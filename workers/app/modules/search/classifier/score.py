@@ -28,6 +28,10 @@ KNOWN_DOMAINS: frozenset[str] = frozenset(
         "hesab.com",
         "hesab.af",
         "sealed.channel",
+        # Lofty (fractional real estate on Algorand): homepage is a JS shell
+        # with zero chain mentions in the served HTML — preview-scored 0 and
+        # sat in the pending frontier pool.
+        "lofty.ai",
     }
 )
 
