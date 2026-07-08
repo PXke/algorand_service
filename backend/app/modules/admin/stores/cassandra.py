@@ -1150,36 +1150,70 @@ class AdminCassandraStore:
             )
         return _rank_reviews(items, limit=limit)
 
+    @staticmethod
+    def _queue_row_dict(row) -> dict:
+        return {
+            "queue_id": str(row.queue_id),
+            "status": row.status or "",
+            "last_reason": getattr(row, "last_reason", None) or "",
+            "priority": int(row.priority or 0),
+            "topic": row.topic or "",
+            "publish_kind": row.publish_kind or "",
+            "service_id": row.service_id or "",
+            "display_name": row.display_name or "",
+            "scrape_url": row.scrape_url or "",
+            "created_at": row.created_at.isoformat() if row.created_at else "",
+            "updated_at": row.updated_at.isoformat() if row.updated_at else "",
+        }
+
     def list_publish_queue(self, *, limit: int = 200) -> list[dict]:
         """Publish-queue rows with their status and last drain/compose decision
-        (last_reason), newest first. Payload deliberately excluded — it carries
-        the full page text; use publish_queue_breakdown for one row's score."""
-        from app.core.cassandra import get_cassandra_session
+        (last_reason). EVERY truly-pending row is always included (read from the
+        same publish_queue_pending index the drain uses — a plain LIMIT scan of
+        the main table returns token-order samples and silently under-reports
+        pending); resolved history fills the remainder up to ``limit``, newest
+        first. Payload deliberately excluded — it carries the full page text;
+        use publish_queue_breakdown for one row's score."""
+        from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
         from app.core.statements import PublishQueueStmts
 
         session = get_cassandra_session()
+
+        pending: list[dict] = []
+        pending_ids: set[str] = set()
         try:
-            rows = session.execute(PublishQueueStmts.LIST_RECENT, (max(1, limit),))
+            id_rows = list(
+                session.execute(PublishQueueStmts.LIST_PENDING_IDS, ("pending", 2000))
+            )
+            for ok, res in execute_parallel_with_args(
+                PublishQueueStmts.GET_ROW,
+                [(row.queue_id,) for row in id_rows],
+                concurrency=64,
+                raise_on_error=False,
+            ):
+                detail = res.one() if ok else None
+                if detail is None:
+                    continue
+                item = self._queue_row_dict(detail)
+                pending.append(item)
+                pending_ids.add(item["queue_id"])
         except Exception:
-            return []
-        items = [
-            {
-                "queue_id": str(row.queue_id),
-                "status": row.status or "",
-                "last_reason": getattr(row, "last_reason", None) or "",
-                "priority": int(row.priority or 0),
-                "topic": row.topic or "",
-                "publish_kind": row.publish_kind or "",
-                "service_id": row.service_id or "",
-                "display_name": row.display_name or "",
-                "scrape_url": row.scrape_url or "",
-                "created_at": row.created_at.isoformat() if row.created_at else "",
-                "updated_at": row.updated_at.isoformat() if row.updated_at else "",
-            }
-            for row in rows
-        ]
-        items.sort(key=lambda it: it["updated_at"], reverse=True)
-        return items
+            pending = []
+
+        resolved: list[dict] = []
+        try:
+            scan_limit = max(limit * 5, 1000)
+            for row in session.execute(PublishQueueStmts.LIST_RECENT, (scan_limit,)):
+                item = self._queue_row_dict(row)
+                if item["queue_id"] not in pending_ids and item["status"] != "pending":
+                    resolved.append(item)
+        except Exception:
+            resolved = []
+
+        pending.sort(key=lambda it: it["updated_at"], reverse=True)
+        resolved.sort(key=lambda it: it["updated_at"], reverse=True)
+        room = max(0, limit - len(pending))
+        return pending + resolved[:room]
 
     def publish_queue_breakdown(self, queue_id: str) -> dict | None:
         """One row's priority_breakdown (computed at enqueue, stored on the
