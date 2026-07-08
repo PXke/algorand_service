@@ -833,9 +833,11 @@ def compose_scrape_article_mistral(
     elif SOURCE_TYPE_ROUTER_ENABLED and is_static_landing_page(source_url):
         system = system + _PROFILE_GUIDANCE
 
-    if is_evolution:
-        # Foreground the change: the diff is the assignment, the aggregate is context.
-        user = f"""Write the article now. This is an UPDATE on a service we already
+    def _build_user(source_limit: int) -> str:
+        if is_evolution:
+            # Foreground the change: the diff is the assignment, the aggregate
+            # is context.
+            return f"""Write the article now. This is an UPDATE on a service we already
 track — report on WHAT CHANGED, using the diff as your primary assignment.
 
 Today (UTC): {today}
@@ -852,11 +854,10 @@ WHAT CHANGED since we last looked (this is the story — unified diff):
 
 Full service aggregate (BACKGROUND ONLY — explain the change, don't re-report this):
 ```
-{_clip(page_text)}
+{_clip(page_text, source_limit)}
 ```
 {_clip(enrichment_block, 5000) if enrichment_block else ""}"""
-    else:
-        user = f"""Write the article now from the material below.
+        return f"""Write the article now from the material below.
 
 Today (UTC): {today}
 Publisher / monitor: {service_name}
@@ -868,15 +869,28 @@ On-chain context (background only): round {round_num}, tx {txid}
 
 Source material (may be days or years old — judge figures against today's date):
 ```
-{_clip(page_text)}
+{_clip(page_text, source_limit)}
 ```
 {links_block}
 {diff_block}
 {_clip(enrichment_block, 5000) if enrichment_block else ""}"""
 
+    from app.core.config import MISTRAL_RESEARCH_SOURCE_CHARS
+
+    user = _build_user(MISTRAL_MAX_SOURCE_CHARS)
+    # Research rounds re-send the whole prompt every round — give them a
+    # smaller source clip (they decide what to verify, they don't write from
+    # it); the full clip rides only in the single stage-2 generation call.
+    research_user = (
+        _build_user(MISTRAL_RESEARCH_SOURCE_CHARS)
+        if len(page_text) > MISTRAL_RESEARCH_SOURCE_CHARS
+        else user
+    )
+
     return _compose_via_writer_tools(
         system=system,
         user=user,
+        research_user=research_user,
         source_url=source_url,
         mistral=mistral,
         topic=publish_topic,
@@ -890,12 +904,18 @@ def _compose_via_writer_tools(
     source_url: str,
     mistral: MistralClient,
     topic: str = "",
+    research_user: str | None = None,
 ) -> MistralArticleFields:
     """Shared research -> write -> grade/revise loop behind every writer-tools
     compose path. Only depends on the system/user prompt pair and a label
     (``source_url``) used for tool scoping and session/investigation bookkeeping
     — it doesn't assume the source material was a real scraped page, so callers
-    can feed it a from-scratch topic assignment just as well as a scrape diff."""
+    can feed it a from-scratch topic assignment just as well as a scrape diff.
+
+    ``research_user``: optional slimmer variant of ``user`` (smaller source
+    clip) for the stage-1 research rounds, which re-send the whole prompt on
+    every tool round; stage-2 generation always uses the full ``user``.
+    Defaults to ``user``."""
     from app.core.config import WRITER_TOOLS_ENABLED
 
     messages = [
@@ -953,7 +973,10 @@ def _compose_via_writer_tools(
                 _checkpoint("researching")
                 # Stage 1 — cold research: tools available (minus review_draft, no
                 # draft yet), low temp for deterministic tool selection. We keep the
-                # trace; the model's prose here is discarded.
+                # trace; the model's prose here is discarded. Research rounds
+                # re-send the whole conversation every round, so they get the
+                # slimmer research_user when the caller provided one.
+                stage1_user = research_user or user
                 research_schemas = [
                     s
                     for s in tool_schemas
@@ -963,7 +986,7 @@ def _compose_via_writer_tools(
                 mistral.chat_with_tools(
                     [
                         {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
-                        {"role": "user", "content": user},
+                        {"role": "user", "content": stage1_user},
                     ],
                     tools=research_schemas,
                     handlers=research_handlers,
@@ -992,7 +1015,7 @@ def _compose_via_writer_tools(
                         mistral.chat_with_tools(
                             [
                                 {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
-                                {"role": "user", "content": user + nudge},
+                                {"role": "user", "content": stage1_user + nudge},
                             ],
                             tools=research_schemas,
                             handlers=research_handlers,
@@ -1462,8 +1485,12 @@ def translate_article_mistral(
     target_language: str,
     client: MistralClient | None = None,
 ) -> dict[str, str]:
-    """Translate an English article to the target language via Mistral."""
-    mistral = client or get_mistral_client()
+    """Translate an English article to the target language via Mistral. Runs on
+    the Small tier (MISTRAL_MODEL_TRANSLATE) — localization needs no research or
+    editorial judgment, and this fires 5x (languages) per published article."""
+    from app.core.config import MISTRAL_MODEL_TRANSLATE
+
+    mistral = client or get_mistral_client(model=MISTRAL_MODEL_TRANSLATE)
     
     language_map = {
         "zh": "Chinese (Simplified)",

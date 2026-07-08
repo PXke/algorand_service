@@ -192,6 +192,10 @@ MISTRAL_MODEL = env_str("MISTRAL_MODEL", "mistral-small-latest")
 MISTRAL_MODEL_WRITER = env_str("MISTRAL_MODEL_WRITER", "mistral-medium-latest")
 MISTRAL_MODEL_DIGEST = env_str("MISTRAL_MODEL_DIGEST", MISTRAL_MODEL)
 MISTRAL_MODEL_PREMIUM = env_str("MISTRAL_MODEL_PREMIUM", "mistral-small-latest")
+# Translations are mechanical localization of an already-written article — no
+# research, no tools, no editorial judgment — and fire 5x per published article
+# (one per language), so they don't need (or justify) the writer's Medium tier.
+MISTRAL_MODEL_TRANSLATE = env_str("MISTRAL_MODEL_TRANSLATE", "mistral-small-latest")
 # Mistral Small 4 is a HYBRID reasoning model: the reasoning_effort param toggles
 # between fast instruct ("none", ~Small 3.2 chat) and deep step-by-step reasoning
 # ("high", ~Magistral verbosity). We run composition at "high". Set to "" to omit
@@ -222,6 +226,13 @@ MISTRAL_FALLBACK_TEMPLATE = env_bool("MISTRAL_FALLBACK_TEMPLATE", True)
 # The original intent was 12k tokens; an earlier reading as 12k CHARS silently
 # quartered the composer's context.
 MISTRAL_MAX_SOURCE_CHARS = env_int("MISTRAL_MAX_SOURCE_CHARS", 48_000)
+# Stage-1 RESEARCH sees a smaller source clip. The research pass only decides
+# what to look up — it doesn't write from the source — yet its user prompt is
+# re-sent on EVERY tool round (up to MISTRAL_MAX_TOOL_ROUNDS, plus the research
+# floor's extra pass), so full-size source there multiplies input tokens ~14x
+# per article for no research benefit. Stage-2 generation (a single call)
+# always gets the full MISTRAL_MAX_SOURCE_CHARS clip.
+MISTRAL_RESEARCH_SOURCE_CHARS = env_int("MISTRAL_RESEARCH_SOURCE_CHARS", 16_000)
 # Periodic re-scrape of ALL monitored sources to detect content diffs and compose
 # updates. Heavy (scrapes every source), so keep it infrequent — it is the writer's
 # main background churn. 1h; lower only if you need faster update detection.
