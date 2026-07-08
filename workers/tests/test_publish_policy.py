@@ -200,3 +200,53 @@ def test_trim_digest_length() -> None:
     long = "word " * 500
     trimmed = trim_text_to_chars(long, 100)
     assert len(trimmed) <= 101
+
+
+def test_reformat_diff_is_vetoed(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.modules.newspaper.publish_policy.config.NEWS_REFORMAT_SIMILARITY",
+        0.85,
+        raising=False,
+    )
+    # Same sentences reshuffled into a new layout (the Tinyman/Blockshake
+    # "cosmetic redesign" shape): plenty of added lines, no new words.
+    sentences = [
+        "Blockshake is a software engineering company mastering complexity",
+        "Our core expertise is cryptographic protocols and data security",
+        "From protocol design to seamless UX we build full stack solutions",
+        "Defly Wallet is our flagship product for the Algorand ecosystem",
+    ]
+    removed = "\n".join(f"-{s}" for s in sentences)
+    added = "\n".join(f"+## {s}" for s in reversed(sentences))
+    diff = f"+++ a\n--- b\n{removed}\n{added}\n"
+    decision = evaluate_enqueue(PublishKind.CONTENT_UPDATE, diff=diff, relevance=0.9)
+    assert not decision.allowed
+    assert decision.reason == "diff_reformat_only"
+
+
+def test_genuinely_new_content_is_not_a_reformat(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.modules.newspaper.publish_policy.config.NEWS_REFORMAT_SIMILARITY",
+        0.85,
+        raising=False,
+    )
+    removed = "\n".join(
+        f"-old sentence number {i} about the previous state of the service page"
+        for i in range(4)
+    )
+    added = (
+        "+Blockshake today announced a brand new zero knowledge proving system\n"
+        "+The launch introduces staking rewards and a validator marketplace\n"
+        "+Pricing starts at ten dollars per month for the developer tier\n"
+        "+A partnership with the Algorand Foundation funds the rollout\n"
+    )
+    diff = f"+++ a\n{removed}\n{added}"
+    decision = evaluate_enqueue(PublishKind.CONTENT_UPDATE, diff=diff, relevance=0.9)
+    assert decision.allowed
+
+
+def test_pure_additions_never_count_as_reformat() -> None:
+    diff = "+++ a\n" + "\n".join(f"+ new line {i} with fresh content words" for i in range(10))
+    from app.modules.newspaper.publish_policy import diff_is_reformat
+
+    assert diff_is_reformat(diff) is False

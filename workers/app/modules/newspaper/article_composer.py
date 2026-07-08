@@ -56,6 +56,7 @@ def compose_scrape_article(
     source_links: list[dict[str, str]] | None = None,
     keywords: str = "",
     brief_id: str = "",
+    first_coverage: bool = False,
 ) -> ArticleComposeResult:
     """Compose by publish kind (discovery vs update) with optional Mistral."""
     topic = publish_topic or PublishTopic.GENERIC
@@ -117,6 +118,7 @@ def compose_scrape_article(
                 enrichment_block=enrichment_block,
                 source_links=source_links,
                 publish_topic=topic.value,
+                first_coverage=first_coverage,
             )
             return ArticleComposeResult(
                 title=fields.title,
@@ -201,6 +203,7 @@ def compose_scrape_article(
             enrichment_block=enrichment_block,
             source_links=source_links,
             publish_topic=topic.value,
+            first_coverage=first_coverage,
         )
         return ArticleComposeResult(
             title=fields.title,

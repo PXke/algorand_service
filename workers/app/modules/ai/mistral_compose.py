@@ -656,6 +656,18 @@ _SERVICE_WATCH_NOTE = (
 
 # Evolution-story mode: a content update fires because the service's aggregate
 # CHANGED week-over-week. The diff is the news; the aggregate is background.
+_FIRST_COVERAGE_GUIDANCE = (
+    "\n\nFIRST COVERAGE MODE: we have NEVER published anything about this service "
+    "before — readers do not know it exists. Do NOT write a 'what changed' update: "
+    "an update on a service nobody was introduced to is meaningless, and a cosmetic "
+    "change is not a story at all. Write an INTRODUCTION/PROFILE of the service — "
+    "what it is, what problem it solves, who is behind it, how it fits the Algorand "
+    "ecosystem — in timeless present tense, using your research tools to verify. "
+    "The recent page change may be mentioned as a closing note at most; if the "
+    "change itself is the only material and the service is not worth introducing, "
+    "keep the piece short and factual rather than inflating it."
+)
+
 _EVOLUTION_GUIDANCE = (
     "\n\nEVOLUTION STORY MODE: this is an UPDATE on a service we already track — it "
     "was triggered because its web presence CHANGED since we last looked. The unified "
@@ -768,9 +780,15 @@ def compose_scrape_article_mistral(
     enrichment_block: str = "",
     source_links: list[dict[str, str]] | None = None,
     publish_topic: str = "",
+    first_coverage: bool = False,
     client: MistralClient | None = None,
 ) -> MistralArticleFields:
-    """Generate newspaper article fields from scrape context via Mistral."""
+    """Generate newspaper article fields from scrape context via Mistral.
+
+    ``first_coverage``: the service has never had a published article (e.g. its
+    one-shot discovery row expired unpublished), so a diff-driven update would
+    reference a service readers have never met — write an introduction/profile
+    instead, with the recent change as a secondary note."""
     mistral = client or get_mistral_client()
     today = _today_utc()
     source_domain = (urlparse(source_url).netloc or "").lower()
@@ -827,8 +845,12 @@ def compose_scrape_article_mistral(
         system = system + _SERVICE_WATCH_NOTE
     # An update WITH a diff is an evolution story — the change leads. A first
     # snapshot (or a static landing page) stays intro/profile-shaped instead.
-    is_evolution = bool(diff) and not is_first_snapshot
-    if is_evolution:
+    # first_coverage overrides evolution: never lead with "what changed" on a
+    # service the readership has never been introduced to.
+    is_evolution = bool(diff) and not is_first_snapshot and not first_coverage
+    if first_coverage:
+        system = system + _FIRST_COVERAGE_GUIDANCE
+    elif is_evolution:
         system = system + _EVOLUTION_GUIDANCE
     elif SOURCE_TYPE_ROUTER_ENABLED and is_static_landing_page(source_url):
         system = system + _PROFILE_GUIDANCE

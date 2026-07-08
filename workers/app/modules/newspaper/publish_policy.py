@@ -412,6 +412,34 @@ def is_significant_diff(diff: str | None, *, min_lines: int | None = None) -> bo
     return added >= threshold
 
 
+def diff_is_reformat(diff: str | None) -> bool:
+    """True when the diff's added text is mostly the SAME WORDS as its removed
+    text — a page redesign/reflow, not new information. Line counting can't
+    see this (a reformat trivially clears NEWS_MIN_DIFF_LINES), so compare the
+    two sides' token sets: high overlap = reshuffled content, no story.
+
+    Conservative by construction: pure additions (nothing removed) are never a
+    reformat, and a small removed side (< 20 distinct tokens) is too little
+    evidence to veto on."""
+    threshold = config.NEWS_REFORMAT_SIMILARITY
+    if threshold <= 0 or not diff:
+        return False
+    added_tokens: set[str] = set()
+    removed_tokens: set[str] = set()
+    for line in diff.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added_tokens.update(line[1:].lower().split())
+        elif line.startswith("-"):
+            removed_tokens.update(line[1:].lower().split())
+    if len(removed_tokens) < 20 or not added_tokens:
+        return False
+    union = added_tokens | removed_tokens
+    overlap = len(added_tokens & removed_tokens) / len(union)
+    return overlap >= threshold
+
+
 def evaluate_enqueue(
     kind: PublishKind,
     *,
@@ -443,6 +471,12 @@ def evaluate_enqueue(
                 kind=kind,
                 allowed=False,
                 reason="diff_too_small",
+            )
+        if diff_is_reformat(diff):
+            return PublishDecision(
+                kind=kind,
+                allowed=False,
+                reason="diff_reformat_only",
             )
         if relevance is not None and relevance < config.CONTENT_UPDATE_RELEVANCE_FLOOR:
             return PublishDecision(

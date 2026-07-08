@@ -85,6 +85,12 @@ NEWS_MIN_DIFF_LINES = env_int("NEWS_MIN_DIFF_LINES", 3)
 # stricter than) FRONTIER_CONTENT_REJECT_SCORE below, which governs initial
 # domain discovery and is deliberately lenient on a page's first crawl.
 CONTENT_UPDATE_RELEVANCE_FLOOR = env_float("CONTENT_UPDATE_RELEVANCE_FLOOR", 0.35)
+# Reformat/reshuffle diff veto: when the diff's ADDED text is mostly the same
+# words as its REMOVED text (token-overlap ratio at/above this), the page was
+# redesigned/reflowed, not updated — no new information, no story. Three real
+# "nothing happened" articles motivated this (Tinyman Medium reformat,
+# zk-colorsort date tick, Blockshake redesign). 0 disables.
+NEWS_REFORMAT_SIMILARITY = env_float("NEWS_REFORMAT_SIMILARITY", 0.85)
 PUBLISH_IMMEDIATE_PRIORITY = env_int("PUBLISH_IMMEDIATE_PRIORITY", 95)
 PUBLISH_QUEUE_DRAIN_SECONDS = env_int("PUBLISH_QUEUE_DRAIN_SECONDS", 900)
 PUBLISH_BREAKING_DRAIN_SECONDS = env_int("PUBLISH_BREAKING_DRAIN_SECONDS", 120)

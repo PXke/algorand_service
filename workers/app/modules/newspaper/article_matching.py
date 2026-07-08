@@ -77,6 +77,28 @@ def edit_window_closes_at(*, from_time: datetime | None = None) -> datetime:
     return start + timedelta(hours=hours)
 
 
+def service_has_article(service_id: str) -> bool:
+    """Whether this service has EVER had a real published article. Match keys
+    are registered only on the publish and edit paths (never for held/review
+    drafts) and are deleted with the article, so a hit here means readers have
+    genuinely been introduced to the service. Fails open (True) on store
+    errors: the safe default is the normal update framing, not re-introducing
+    a service we may already have covered."""
+    sid = (service_id or "").strip().lower()
+    if not sid:
+        return True
+    try:
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ArticleMatchStmts
+
+        row = get_cassandra_session().execute(
+            ArticleMatchStmts.FIND_BY_KEY, ("service_id", sid)
+        ).one()
+        return row is not None
+    except Exception:
+        return True
+
+
 def find_article_for_followup(
     keys: list[tuple[str, str]],
     *,

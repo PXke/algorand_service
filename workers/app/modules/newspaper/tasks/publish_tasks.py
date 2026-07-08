@@ -362,6 +362,17 @@ def publish_from_queued_row(
     except Exception:
         enrichment_block = ""
 
+    # A CONTENT_UPDATE for a service with no published article would report
+    # "what changed" on a service readers have never met (its one-shot
+    # discovery row may have expired unpublished) — compose an introduction
+    # instead. Checked at compose time, not enqueue, so it adds zero enqueue
+    # dynamics (the old prior==0 discovery re-fire caused a queue flood).
+    first_coverage = False
+    if publish_kind == PublishKind.CONTENT_UPDATE:
+        from app.modules.newspaper.article_matching import service_has_article
+
+        first_coverage = not service_has_article(row.service_id)
+
     try:
         composed = compose_scrape_article(
             service_name=row.display_name,
@@ -380,6 +391,7 @@ def publish_from_queued_row(
             transcript_text=str(payload.get("transcript_text", "")),
             keywords=str(payload.get("keywords", "")),
             brief_id=str(payload.get("brief_id", "")),
+            first_coverage=first_coverage,
         )
     except MistralError as exc:
         return {

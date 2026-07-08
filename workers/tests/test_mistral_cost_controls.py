@@ -92,3 +92,54 @@ def test_small_source_reuses_full_prompt_for_research(monkeypatch):
         client=SimpleNamespace(),
     )
     assert captured["research_user"] is captured["user"]
+
+
+def test_first_coverage_forces_introduction_framing(monkeypatch):
+    """A diff-driven update on a never-published service must compose as an
+    introduction (FIRST COVERAGE MODE), not an evolution/what-changed story."""
+    captured = {}
+
+    def _fake_via_tools(**kwargs):
+        captured.update(kwargs)
+        return mc.MistralArticleFields(title="t", summary="s", body="b")
+
+    monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
+    mc.compose_scrape_article_mistral(
+        service_name="Blockshake",
+        source_url="http://blockshake.io/",
+        page_title="blockshake.io",
+        page_text="Algorand tooling company page " * 30,
+        txid="tx",
+        round_num=1,
+        diff="+++ a\n+ x\n+ y\n+ z\n",
+        is_first_snapshot=False,
+        first_coverage=True,
+        client=SimpleNamespace(),
+    )
+    assert "FIRST COVERAGE MODE" in captured["system"]
+    # Evolution framing must be suppressed even though a diff exists.
+    assert "WHAT CHANGED since we last looked" not in captured["user"]
+
+
+def test_known_service_keeps_evolution_framing(monkeypatch):
+    captured = {}
+
+    def _fake_via_tools(**kwargs):
+        captured.update(kwargs)
+        return mc.MistralArticleFields(title="t", summary="s", body="b")
+
+    monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
+    mc.compose_scrape_article_mistral(
+        service_name="Tinyman",
+        source_url="https://tinyman.org/",
+        page_title="tinyman",
+        page_text="Algorand AMM " * 30,
+        txid="tx",
+        round_num=1,
+        diff="+++ a\n+ x\n+ y\n+ z\n",
+        is_first_snapshot=False,
+        first_coverage=False,
+        client=SimpleNamespace(),
+    )
+    assert "FIRST COVERAGE MODE" not in captured["system"]
+    assert "WHAT CHANGED since we last looked" in captured["user"]
