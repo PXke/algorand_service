@@ -540,6 +540,14 @@ def drain_approved_feed_queue() -> dict[str, object]:
             )
 
             enqueue_article_translations(str(art.article_id))
+            # The article just became publicly visible — same IndexNow ping the
+            # direct-publish path sends. Best-effort, never blocks the release.
+            try:
+                from app.modules.newspaper.indexnow import article_url, ping
+
+                ping([article_url(str(art.article_id))])
+            except Exception:
+                pass
         session.execute(
             PendingFeedStmts.DELETE,
             (r.bucket, r.interest_score, r.approved_at, r.article_id),

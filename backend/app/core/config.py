@@ -44,6 +44,10 @@ class Settings(msgspec.Struct, kw_only=True):
     # Harmless until accepted into Google News Publisher Center (nothing reads it
     # before then); kept on so it's ready the day we apply. Set false to hide it.
     seo_news_sitemap_enabled: bool = True
+    # IndexNow key — same key the workers use (INDEXNOW_KEY there; the key file
+    # is served at /{key}.txt by the deploy). The backend pings on the admin
+    # paths that change a public URL: approve-to-feed, patch, delete.
+    indexnow_key: str = "63e7ffa13f3ca734700ca375c0581b41"
     # Comma-separated IPs/hosts excluded from first-party analytics — the server's
     # own public IP, office/VPN IPs, etc. Their requests aren't counted and they
     # never appear as referrers. Loopback + private ranges are always excluded.

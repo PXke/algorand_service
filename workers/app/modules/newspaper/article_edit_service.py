@@ -125,6 +125,15 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
         published_at_epoch=existing.published_at_epoch or int(time.time()),
     )
 
+    # The article changed at its existing URL — tell IndexNow (Bing guideline:
+    # notify on update, not just add). Best-effort, never blocks the edit.
+    try:
+        from app.modules.newspaper.indexnow import article_url, ping
+
+        ping([article_url(linked_id)])
+    except Exception:
+        pass
+
     from app.modules.newspaper.article_matching import build_match_keys, register_article_match_keys
 
     keys = payload.get("match_keys")

@@ -70,6 +70,13 @@ class AdminCassandraStore:
         self._save_version_snapshot(current, editor=editor)
         self._write_article(current, new_title, new_summary, new_body, tag_extra="updated")
         updated = self.get_article(article_id)
+        if updated is not None:
+            # Content changed at its existing URL — notify IndexNow (Bing asks
+            # for update pings, not just adds). Best-effort, never blocks.
+            with contextlib.suppress(Exception):
+                from app.modules.seo.indexnow import article_url, ping
+
+                ping([article_url(article_id)])
         return updated
 
     def _save_version_snapshot(self, article: StoredArticle, *, editor: str) -> None:
@@ -202,6 +209,13 @@ class AdminCassandraStore:
             logger.warning("failed to delete version rows for article %s", aid, exc_info=True)
 
         session.execute(ArticleStmts.DELETE, (aid,))
+        # Bing's guidelines: notify IndexNow on REMOVAL too — the submitted URL
+        # gets recrawled, hits the 410 tombstone above, and drops out of the
+        # index instead of lingering. Best-effort, never blocks the delete.
+        with contextlib.suppress(Exception):
+            from app.modules.seo.indexnow import article_url, ping
+
+            ping([article_url(article_id)])
         return True
 
     def list_versions(self, article_id: str, *, limit: int = 20) -> list[dict]:
@@ -859,6 +873,12 @@ class AdminCassandraStore:
                 row.title, row.summary or "", tags, row.image_url, row.source_url,
             ),
         )
+        # The article just became publicly visible — notify IndexNow, same as
+        # the workers' direct-publish path does. Best-effort, never blocks.
+        with contextlib.suppress(Exception):
+            from app.modules.seo.indexnow import article_url, ping
+
+            ping([article_url(article_id)])
         return True
 
     @staticmethod
