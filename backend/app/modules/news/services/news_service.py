@@ -49,6 +49,26 @@ class NewsService:
         articles = [a for a in articles if a.service_id and a.title]
         return [self._to_feed_item(a, lang) for a in articles], next_cursor
 
+    def translation_langs_for(self, article_id: str) -> list[str]:
+        article = self._store.get(article_id)
+        if article is None or not article.translations:
+            return []
+        return sorted(article.translations.keys())
+
+    def list_feed_for_sitemap(
+        self, *, limit: int
+    ) -> tuple[list[ArticleFeedItem], dict[str, list[str]]]:
+        """Feed rows plus translation language codes for multilingual sitemaps."""
+        articles, _ = self._store.list_feed_page(limit=limit)
+        articles = [a for a in articles if a.service_id and a.title]
+        items = [self._to_feed_item(a) for a in articles]
+        translations = {
+            a.article_id: sorted(a.translations.keys())
+            for a in articles
+            if a.translations
+        }
+        return items, translations
+
     def get_article(self, article_id: str, lang: str | None = None) -> ArticleDetail | None:
         article = self._store.get(article_id)
         if article is None:

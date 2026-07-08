@@ -873,6 +873,27 @@ class AdminCassandraStore:
                 row.title, row.summary or "", tags, row.image_url, row.source_url,
             ),
         )
+        # Register the service_id match key: the workers only register match
+        # keys on their direct-publish path, so review-approved articles were
+        # invisible to service_has_article() — the first-coverage reframing
+        # then re-introduced already-covered services (the BasketbAlgo
+        # duplicate). 24h edit window, mirroring the workers' semantics.
+        with contextlib.suppress(Exception):
+            from datetime import timedelta
+
+            from app.core.statements import ArticleMatchStmts
+
+            sid = (row.service_id or "").strip().lower()
+            if sid:
+                now = datetime.now(tz=UTC)
+                session.execute(
+                    ArticleMatchStmts.INSERT_KEY,
+                    ("service_id", sid, aid, now, now + timedelta(hours=24)),
+                )
+                session.execute(
+                    ArticleMatchStmts.INSERT_KEY_BY_ARTICLE,
+                    (aid, "service_id", sid, now),
+                )
         # The article just became publicly visible — notify IndexNow, same as
         # the workers' direct-publish path does. Best-effort, never blocks.
         with contextlib.suppress(Exception):
@@ -891,10 +912,11 @@ class AdminCassandraStore:
         try:
             from celery import Celery
 
+            from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
             from app.core.config import settings
 
             app = Celery(broker=settings.celery_broker_url)
-            for lang in ("zh", "hi", "es", "fr", "ar"):
+            for lang in ARTICLE_TRANSLATION_LANGS:
                 app.send_task(
                     "app.tasks.newspaper.translate_article",
                     args=[str(article_id), lang],

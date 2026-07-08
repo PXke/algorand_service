@@ -92,6 +92,20 @@ def test_render_article_head_has_core_tags() -> None:
     assert "flutter-first-frame" in body
 
 
+def test_render_article_hreflang_for_translations() -> None:
+    head, _ = render.render_article(
+        _article(),
+        lang="fa",
+        translation_langs=["fa", "ar"],
+    )
+    assert 'rel="alternate" hreflang="x-default"' in head
+    assert 'hreflang="fa-AF"' in head
+    assert 'hreflang="ar"' in head
+    assert "?lang=fa" in head
+    assert 'property="og:locale" content="fa_AF"' in head
+    assert 'rel="canonical" href="https://algorand.pxke.me/news/articles/abc123?lang=fa"' in head
+
+
 def test_render_article_jsonld_is_valid_newsarticle() -> None:
     head, _ = render.render_article(_article())
     m = re.search(r'<script type="application/ld\+json">(.*?)</script>', head, re.DOTALL)
@@ -217,6 +231,45 @@ def test_sitemap_xml_includes_articles_and_sections() -> None:
     assert "https://algorand.pxke.me/section/markets" in xml
 
 
+def test_sitemap_article_hreflang_and_translations() -> None:
+    items = _feed(1)
+    translations = {"id0": ["fa", "ar"]}
+    xml = sitemap.sitemap_xml(items, translations)
+    assert 'xmlns:xhtml="http://www.w3.org/1999/xhtml"' in xml
+    assert 'hreflang="fa-AF"' in xml
+    assert 'hreflang="ar"' in xml
+    assert "?lang=fa" in xml
+    assert "?lang=ar" in xml
+    assert 'hreflang="x-default"' in xml
+
+
+def test_sitemap_splits_into_index_when_large(monkeypatch) -> None:
+    monkeypatch.setattr(sitemap, "MAX_URLS_PER_SITEMAP", 4)
+    items = _feed(3)
+    translations = {f"id{i}": ["fa"] for i in range(3)}
+    build = sitemap.build_sitemaps(items, translations)
+    assert build.is_index
+    assert "<sitemapindex" in build.root_xml
+    assert "sitemap-pages.xml" in build.root_xml
+    assert "sitemap-articles-1.xml" in build.root_xml
+    assert "sitemap-pages.xml" in build.parts
+    assert "sitemap-articles-1.xml" in build.parts
+    pages = build.parts["sitemap-pages.xml"]
+    assert "/section/markets" in pages
+    assert "?lang=fa" not in pages
+    articles = build.parts["sitemap-articles-1.xml"]
+    assert "?lang=fa" in articles
+    assert 'hreflang="fa-AF"' in articles
+
+
+def test_sitemap_single_file_when_under_limit() -> None:
+    build = sitemap.build_sitemaps(_feed(2), {})
+    assert not build.is_index
+    assert "<urlset" in build.root_xml
+    assert "<sitemapindex" not in build.root_xml
+    assert build.parts == {}
+
+
 def test_news_sitemap_windows_recent_only() -> None:
     import time
 
@@ -246,9 +299,10 @@ def test_shell_injection_dedups_and_keeps_bootstrap(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(shell.settings, "frontend_dist_dir", str(tmp_path))
     shell._cache["html"] = None  # bust the module cache
 
-    head, body = render.render_article(_article())
-    doc = shell.render_document(head, body)
+    head, body = render.render_article(_article(), lang="fa", translation_langs=["fa"])
+    doc = shell.render_document(head, body, html_lang="fa-AF")
     assert doc is not None
+    assert '<html lang="fa-AF">' in doc
     assert doc.count("<title>") == 1
     assert "Old Title" not in doc
     assert doc.count('property="og:title"') == 1

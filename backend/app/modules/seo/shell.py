@@ -8,6 +8,7 @@ User-Agent cloaking.
 
 from __future__ import annotations
 
+import html
 import re
 from pathlib import Path
 
@@ -26,6 +27,9 @@ _RSS_RE = re.compile(
 )
 _HEAD_CLOSE_RE = re.compile(r"</head>", re.IGNORECASE)
 _BODY_OPEN_RE = re.compile(r"<body[^>]*>", re.IGNORECASE)
+_HTML_LANG_RE = re.compile(
+    r'(<html[^>]*\s)lang=["\'][^"\']*["\']', re.IGNORECASE
+)
 
 _cache: dict[str, object] = {"path": None, "mtime": 0.0, "html": None}
 
@@ -122,14 +126,19 @@ def ssr_track_snippet(path: str) -> str:
     )
 
 
-def render_document(head_html: str, body_html: str) -> str | None:
+def render_document(head_html: str, body_html: str, *, html_lang: str = "en") -> str | None:
     """Inject `head_html` (title/meta/JSON-LD) before </head> and `body_html`
     (the crawlable `#ssr-body` content) right after <body>. Strips the static
     title/description so ours win."""
     template = load_template()
     if template is None:
         return None
-    doc = _TITLE_RE.sub("", template, count=1)
+    doc = _HTML_LANG_RE.sub(
+        lambda m: f'{m.group(1)}lang="{html.escape(html_lang, quote=True)}"',
+        template,
+        count=1,
+    )
+    doc = _TITLE_RE.sub("", doc, count=1)
     doc = _DESC_RE.sub("", doc, count=1)
     doc = _OG_RE.sub("", doc)
     doc = _TW_RE.sub("", doc)

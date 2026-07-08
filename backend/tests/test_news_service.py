@@ -79,3 +79,35 @@ def test_get_article_detail() -> None:
     assert detail is not None
     assert detail.body == "Full body"
     assert detail.trigger_round == 42
+
+
+def test_get_article_applies_translation_overlay() -> None:
+    import json
+
+    store = InMemoryArticleStore()
+    store.insert(
+        StoredArticle(
+            article_id="id-fa",
+            service_id="svc",
+            title="English title",
+            summary="English summary",
+            body="English body",
+            published_at_epoch=1,
+            translations={
+                "fa": json.dumps(
+                    {
+                        "title": "عنوان دری",
+                        "summary": "خلاصه",
+                        "body": "متن",
+                    },
+                    ensure_ascii=False,
+                )
+            },
+        )
+    )
+    svc = NewsService(store=store)
+    detail = svc.get_article("id-fa", lang="fa")
+    assert detail is not None
+    assert detail.title == "عنوان دری"
+    assert detail.body == "متن"
+    assert svc.translation_langs_for("id-fa") == ["fa"]

@@ -8,12 +8,14 @@ Static assets keep being served from disk by nginx.
 
 from __future__ import annotations
 
+import html
 import logging
 from uuid import UUID
 
 from robyn import Request, Response
 
 from app.core import serialization
+from app.core.article_translation_langs import html_lang_for
 from app.core.config import settings
 from app.core.http_errors import json_error_response
 from app.modules.news.services.news_service import NewsService
@@ -41,17 +43,18 @@ def _doc_response(
     status: int = 200,
     *,
     tracked_path: str | None = None,
+    html_lang: str = "en",
 ) -> Response:
     head, body = parts
     if tracked_path:
         body = shell.ssr_track_snippet(tracked_path) + body
-    html = shell.render_document(head, body)
+    html = shell.render_document(head, body, html_lang=html_lang)
     if html is None:
         # Shell template not found — still return valid HTML AND boot Flutter
         # (the bootstrap script must be present or the app renders a blank page).
         track = shell.ssr_track_snippet(tracked_path) if tracked_path else ""
         html = (
-            '<!DOCTYPE html><html lang="en"><head><base href="/">'
+            f'<!DOCTYPE html><html lang="{html.escape(html_lang, quote=True)}"><head><base href="/">'
             f"{head}</head><body>{track}{body}"
             '<script src="/flutter_bootstrap.js" async></script>'
             "</body></html>"
@@ -151,6 +154,25 @@ def _text_response(body: str, content_type: str, cache: str) -> Response:
     )
 
 
+def _response_for_head(response: Response) -> Response:
+    """Robyn does not auto-register HEAD for GET routes; crawlers (Yandex
+    sitemap analyzer, etc.) probe with HEAD and treat non-200 as failure."""
+    headers = dict(response.headers) if response.headers else {}
+    return Response(
+        status_code=response.status_code,
+        headers=headers,
+        description="",
+    )
+
+
+def _mirror_head(app, path: str, get_handler) -> None:
+    """Register HEAD on `path` with the same status/headers as GET, no body."""
+
+    @app.head(path)
+    async def _head(request: Request) -> Response:
+        return _response_for_head(await get_handler(request))
+
+
 def register_seo_routes(app) -> None:
     news = NewsService()
 
@@ -171,7 +193,11 @@ def register_seo_routes(app) -> None:
     @app.get("/news/articles/:article_id")
     async def article(request: Request) -> Response:
         article_id = request.path_params.get("article_id", "")
-        detail = news.get_article(article_id) if article_id else None
+        qp = _query_params(request)
+        lang = (qp.get("lang") or "").strip() or None
+        if lang == "en":
+            lang = None
+        detail = news.get_article(article_id, lang=lang) if article_id else None
         if detail is None:
             _record_notfound(request, f"/news/articles/{article_id}")
             # 410 Gone for tombstoned (deliberately deleted) articles: their
@@ -187,12 +213,14 @@ def register_seo_routes(app) -> None:
             return _doc_response(
                 render.render_noindex("Article not found"), "public, max-age=60", status=404
             )
+        translation_langs = news.translation_langs_for(article_id)
         path = f"/news/articles/{article_id}"
         _record(request, path)
         return _doc_response(
-            render.render_article(detail),
+            render.render_article(detail, lang=lang, translation_langs=translation_langs),
             "public, max-age=300, stale-while-revalidate=600",
             tracked_path=path,
+            html_lang=html_lang_for(lang),
         )
 
     @app.get("/section/:slug")
@@ -289,12 +317,58 @@ def register_seo_routes(app) -> None:
         )
 
     @app.get("/sitemap.xml")
-    async def sitemap_index(request: Request) -> Response:
+    async def sitemap_root(request: Request) -> Response:
         _ = request
-        items = news.list_feed(limit=_SITEMAP_LIMIT)
+        items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
+        build = sitemap.build_sitemaps(items, translations)
         return _text_response(
-            sitemap.sitemap_xml(items), "application/xml; charset=utf-8", "public, max-age=900"
+            build.root_xml, "application/xml; charset=utf-8", "public, max-age=900"
         )
+
+    @app.get("/sitemap-pages.xml")
+    async def sitemap_pages(request: Request) -> Response:
+        _ = request
+        items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
+        build = sitemap.build_sitemaps(items, translations)
+        xml = build.parts.get("sitemap-pages.xml")
+        if xml is None:
+            return Response(
+                status_code=404,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+                description="Not found",
+            )
+        return _text_response(xml, "application/xml; charset=utf-8", "public, max-age=900")
+
+    @app.get("/sitemap-articles-:part")
+    async def sitemap_articles_part(request: Request) -> Response:
+        _ = request
+        part = request.path_params.get("part", "")
+        if part.endswith(".xml"):
+            part = part[: -len(".xml")]
+        try:
+            chunk = int(part)
+        except ValueError:
+            return Response(
+                status_code=404,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+                description="Not found",
+            )
+        if chunk < 1:
+            return Response(
+                status_code=404,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+                description="Not found",
+            )
+        items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
+        build = sitemap.build_sitemaps(items, translations)
+        xml = build.parts.get(f"sitemap-articles-{chunk}.xml")
+        if xml is None:
+            return Response(
+                status_code=404,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+                description="Not found",
+            )
+        return _text_response(xml, "application/xml; charset=utf-8", "public, max-age=900")
 
     @app.get("/sitemap-news.xml")
     async def sitemap_news(request: Request) -> Response:
@@ -312,5 +386,26 @@ def register_seo_routes(app) -> None:
             "application/xml; charset=utf-8",
             "public, max-age=900",
         )
+
+    # Mirror HEAD for every GET document/feed route (see _response_for_head).
+    for path, handler in (
+        ("/", home),
+        ("/news", news_index),
+        ("/news/articles/:article_id", article),
+        ("/section/:slug", section),
+        ("/about", about),
+        ("/contact", contact),
+        ("/search", search),
+        ("/suggestions", suggestions),
+        ("/admin", admin),
+        ("/robots.txt", robots),
+        ("/feed.xml", rss_feed),
+        ("/llms.txt", llms_txt),
+        ("/sitemap.xml", sitemap_root),
+        ("/sitemap-pages.xml", sitemap_pages),
+        ("/sitemap-articles-:part", sitemap_articles_part),
+        ("/sitemap-news.xml", sitemap_news),
+    ):
+        _mirror_head(app, path, handler)
 
     _ = SECTIONS  # referenced for completeness; routes resolve sections per-request

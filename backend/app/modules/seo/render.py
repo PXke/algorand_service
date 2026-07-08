@@ -17,6 +17,11 @@ from datetime import UTC, datetime
 
 import msgspec
 
+from app.core.article_translation_langs import (
+    SEO_HREFLANG_LOCALES,
+    html_lang_for,
+    og_locale_for,
+)
 from app.core.config import settings
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
@@ -91,6 +96,9 @@ def _meta_block(
     image_alt: str = "",
     image_dims: tuple[int, int] | None = None,
     json_ld: list[dict] | None = None,
+    og_locale: str = "en_US",
+    og_locale_alternates: list[str] | None = None,
+    hreflang_links: list[tuple[str, str]] | None = None,
 ) -> str:
     # <title> length budget (~65 chars before SERPs truncate and audit tools
     # warn): brand-suffix the title only when the result still fits; a long
@@ -127,8 +135,14 @@ def _meta_block(
         f'<meta property="og:description" content="{_attr(description)}">',
         f'<meta property="og:url" content="{_attr(canonical)}">',
         f'<meta property="og:image" content="{_attr(image)}">',
-        '<meta property="og:locale" content="en_US">',
+        f'<meta property="og:locale" content="{_attr(og_locale)}">',
     ]
+    for alt in og_locale_alternates or []:
+        parts.append(f'<meta property="og:locale:alternate" content="{_attr(alt)}">')
+    for hreflang, url in hreflang_links or []:
+        parts.append(
+            f'<link rel="alternate" hreflang="{_attr(hreflang)}" href="{_attr(url)}">'
+        )
     if image_alt:
         parts.append(f'<meta property="og:image:alt" content="{_attr(image_alt)}">')
     if image_dims:
@@ -187,6 +201,36 @@ def _is_icon_like(image_url: str) -> bool:
 
 def article_path(article_id: str) -> str:
     return f"/news/articles/{article_id}"
+
+
+def article_url(article_id: str, lang: str | None = None) -> str:
+    """Absolute article URL; non-English locales use ?lang= (matches the API)."""
+    base = absolute(article_path(article_id))
+    code = (lang or "").strip()
+    if code and code != "en":
+        return f"{base}?lang={code}"
+    return base
+
+
+def article_hreflang_links(
+    article_id: str, translation_langs: list[str] | None
+) -> list[tuple[str, str]]:
+    """(hreflang BCP-47 tag, absolute URL) pairs including x-default."""
+    base = article_url(article_id)
+    links: list[tuple[str, str]] = [
+        ("x-default", base),
+        (SEO_HREFLANG_LOCALES["en"], base),
+    ]
+    seen = {"en", "x-default"}
+    for code in translation_langs or []:
+        if code in seen:
+            continue
+        hreflang = SEO_HREFLANG_LOCALES.get(code)
+        if not hreflang:
+            continue
+        links.append((hreflang, article_url(article_id, code)))
+        seen.add(code)
+    return links
 
 
 # Readable fallback styling for the pre-boot paint (and no-JS readers); the
@@ -266,8 +310,16 @@ def _section_for(tags: list[str]) -> Section | None:
     return next((s for s in SECTIONS if matches_section(s, tags)), None)
 
 
-def render_article(article: ArticleDetail) -> tuple[str, str]:
-    canonical = absolute(article_path(article.article_id))
+def render_article(
+    article: ArticleDetail,
+    *,
+    lang: str | None = None,
+    translation_langs: list[str] | None = None,
+) -> tuple[str, str]:
+    lang_code = (lang or "").strip() or None
+    if lang_code == "en":
+        lang_code = None
+    canonical = article_url(article.article_id, lang_code)
     image, is_default = _image_for(article.image_url)
     # A brand-icon fallback (favicon/logo) is tile art, not a share image or
     # banner — use the site default for metas and skip the body hero below.
@@ -300,6 +352,19 @@ def render_article(article: ArticleDetail) -> tuple[str, str]:
         "keywords": ", ".join(article.tags or []),
         "isAccessibleForFree": True,
     }
+    if lang_code:
+        news_article["inLanguage"] = html_lang_for(lang_code)
+
+    hreflang_links = article_hreflang_links(article.article_id, translation_langs)
+    current_og = og_locale_for(lang_code)
+    og_alternates = sorted(
+        {
+            og_locale_for(code)
+            for code in (["en", *(translation_langs or [])])
+            if og_locale_for(code) != current_og
+        }
+    )
+
     head = _meta_block(
         title=article.title,
         description=description,
@@ -312,6 +377,9 @@ def render_article(article: ArticleDetail) -> tuple[str, str]:
         image_alt=article.title,
         image_dims=_DEFAULT_IMAGE_DIMS if is_default else None,
         json_ld=[news_article, _breadcrumb(trail)],
+        og_locale=current_og,
+        og_locale_alternates=og_alternates,
+        hreflang_links=hreflang_links,
     )
 
     body_html = md_to_html(article.body)

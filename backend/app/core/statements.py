@@ -125,6 +125,16 @@ class ArticleMatchStmts:
         "SELECT key_type, key_value FROM algorand_platform.article_match_keys_by_article "
         "WHERE article_id = ?"
     )
+    INSERT_KEY = _Stmt(
+        "INSERT INTO algorand_platform.article_match_keys ("
+        "key_type, key_value, article_id, linked_at, edit_window_closes_at"
+        ") VALUES (?, ?, ?, ?, ?)"
+    )
+    INSERT_KEY_BY_ARTICLE = _Stmt(
+        "INSERT INTO algorand_platform.article_match_keys_by_article ("
+        "article_id, key_type, key_value, linked_at"
+        ") VALUES (?, ?, ?, ?)"
+    )
     DELETE_KEY = _Stmt(
         "DELETE FROM algorand_platform.article_match_keys "
         "WHERE key_type = ? AND key_value = ? AND article_id = ?"
@@ -409,12 +419,13 @@ class NewsStmts:
     )
     FEED_PAGE = _Stmt(
         "SELECT article_id, service_id, title, summary, published_at, tags, "
-        "image_url, source_url FROM algorand_platform.articles_feed "
+        "image_url, source_url, translations FROM algorand_platform.articles_feed "
         "WHERE bucket = ? AND published_at < ? LIMIT ?"
     )
     GET_FULL = _Stmt(
         "SELECT article_id, service_id, title, summary, body, "
-        "trigger_txid, trigger_round, source_url, published_at, tags, image_url "
+        "trigger_txid, trigger_round, source_url, published_at, tags, image_url, "
+        "translations "
         "FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
 

@@ -1096,6 +1096,38 @@ def register_admin_routes(app) -> None:
             return json_error_response(502, "broker_unavailable", str(exc))
         return {"triggered": True, "review_id": review_id}
 
+    @app.post("/api/v1/admin/translations/backfill")
+    async def admin_backfill_translations(request: Request) -> Response:
+        """Queue missing article translations (fa/ps/ru/…) for feed-visible stories."""
+        denied = require_admin_wallet(request)
+        if denied is not None:
+            return denied
+        import json as _json
+
+        try:
+            body = _json.loads(request.body or "{}")
+        except Exception:
+            body = {}
+        limit = body.get("limit", 500)
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            return json_error_response(400, "invalid_request", "limit must be an integer")
+        limit = max(1, min(limit, 2000))
+        try:
+            from celery import Celery
+
+            from app.core.config import settings
+
+            Celery(broker=settings.celery_broker_url).send_task(
+                "app.tasks.newspaper.backfill_article_translations",
+                kwargs={"limit": limit},
+                queue="pipeline",
+            )
+        except Exception as exc:
+            return json_error_response(502, "broker_unavailable", str(exc))
+        return {"triggered": True, "limit": limit}
+
     @app.get("/api/v1/admin/investigations")
     async def admin_investigation_findings(request: Request) -> Response:
         """Evidence trail: tool calls the investigative agent made for a source
