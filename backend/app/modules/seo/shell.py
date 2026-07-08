@@ -63,8 +63,12 @@ def _resource_hints() -> str:
         "function pm(h){var l=document.createElement('link');"
         "l.rel='modulepreload';l.href=h;document.head.appendChild(l);}"
         "if(cr&&gc&&gl){"
+        # skwasm.js is a dynamic import() (ES module) — a classic as='script'
+        # preload has a different credentials mode and never matches, so the
+        # browser double-downloads it. modulepreload matches; main.dart.mjs
+        # already uses it for the same reason.
         "pm('/main.dart.mjs');pw('/main.dart.wasm');"
-        "ps('/canvaskit/skwasm.js');pw('/canvaskit/skwasm.wasm');"
+        "pm('/canvaskit/skwasm.js');pw('/canvaskit/skwasm.wasm');"
         "}else{"
         "ps('/main.dart.js');"
         "var v=cr?'chromium/':'';"
