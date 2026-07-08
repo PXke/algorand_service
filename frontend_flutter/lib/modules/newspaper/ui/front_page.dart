@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import '../../../core/api/api_errors.dart';
 import '../../../core/util/ssr_feed_payload.dart';
 import '../../../core/l10n/l10n_extensions.dart';
+import '../../../core/l10n/locale_provider.dart';
 import '../../../core/providers/api_providers.dart';
 import '../../../core/theme/app_theme_extension.dart';
 import '../../../core/ui/error_banner.dart';
@@ -83,7 +84,7 @@ class _FrontPageState extends ConsumerState<FrontPage> {
       });
     }
     try {
-      final lang = Localizations.localeOf(context).languageCode;
+      final lang = contentLanguageCode(ref, context);
       final client = ref.read(apiClientProvider);
       final page = await NewsApi(client).fetchFeedPage(limit: 30, lang: lang);
       if (!mounted) return;
@@ -110,6 +111,9 @@ class _FrontPageState extends ConsumerState<FrontPage> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(localeProvider, (previous, next) {
+      if (previous != next) _load();
+    });
     return FooterScaffold(
       onRefresh: _load,
       content: Padding(

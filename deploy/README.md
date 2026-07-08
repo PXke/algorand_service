@@ -18,6 +18,35 @@ Two SSH users are involved:
 - `SERVICE_USER` (e.g. `guillaume`) — owns `TARGET_PATH`, runs the services,
   performs uploads/unpacks/venv/migrations. No sudo required.
 
+## Smart deploy (default)
+
+`deploy.sh` compares your working tree to the **last successful deploy**
+(`git_sha` in `releases/current/BUILD_INFO.txt` on the server, or
+`deploy/build/.last-deploy-sha` locally) and only does the work that changed:
+
+| If git diff touches… | Action |
+|---|---|
+| `frontend_flutter/` | Flutter build + precompress + rsync web assets |
+| `backend/` | Ship backend + restart API |
+| `workers/` | Ship workers + restart Celery |
+| `schema/` or `conduit/schema/` | Run CQL migrations |
+| `*/pyproject.toml` | Refresh `requirements.lock.txt` + restart Python services |
+| `frontend_flutter/pubspec.yaml` | `flutter pub upgrade` + rebuild |
+| `deploy/nginx/` or `deploy/systemd/` | Reinstall nginx/systemd units |
+
+Frontend-only deploys **do not restart** backend or Celery. The script prints a
+scope plan before packaging.
+
+```bash
+DEPLOY_CONFIRM=1 ./deploy/deploy.sh deploy
+```
+
+Escape hatch — ignore git diff and deploy everything:
+
+```bash
+DEPLOY_FORCE_FULL=1 DEPLOY_CONFIRM=1 ./deploy/deploy.sh deploy
+```
+
 ## What `provision` does (idempotent)
 
 1. apt: python3, venv, build tools, rsync, curl.
@@ -31,18 +60,19 @@ Two SSH users are involved:
 
 ## What `deploy` does
 
-1. `package.sh`: builds Flutter web (skippable with `SKIP_FRONTEND_BUILD=1`)
-   and tars `backend workers schema conduit/schema deploy frontend_web/`.
-2. rsync upload + sha256 verification.
-3. Backs up `releases/current` → `releases/previous`, unpacks the new release.
-4. Shared venv at `TARGET_PATH/venv` with the union of backend+workers deps.
-5. Bootstraps `TARGET_PATH/shared/{backend,workers}.env` from
+1. `detect_changes.sh`: infer scope from git diff since last deploy.
+2. `sync_deps.sh`: refresh locks only when `pubspec.yaml` or `pyproject.toml` changed.
+3. `package.sh`: assemble `deploy/build/stage/` (Flutter/fonts skipped when unchanged).
+4. rsync the stage tree to the host (incremental via `--link-dest`).
+5. Backs up `releases/current` → `releases/previous`, activates the new tree.
+6. Shared venv at `TARGET_PATH/venv` with the union of backend+workers deps.
+7. Bootstraps `TARGET_PATH/shared/{backend,workers}.env` from
    `deploy/env/*.env.example` on first deploy (chmod 600, `INGEST_API_KEY`
    generated) and symlinks them into the release. Later deploys never
    overwrite them — edit on the host, then restart units.
-6. Applies CQL migrations with the credentials from `shared/backend.env`.
-7. Installs/updates systemd units + nginx site, restarts, waits for
-   `/health/ready`.
+8. Applies CQL migrations when schema changed.
+9. Restarts only the systemd units that need it; reinstalls nginx/systemd when
+   deploy config changed; waits for `/health/ready` when services restart.
 
 ## Cassandra role (one-time admin setup)
 
@@ -75,9 +105,10 @@ and `deploy/scripts/seed_service_registry.py` all honour these variables.
 | `SITE_DOMAIN` / `API_DOMAIN` | algorand.pxke.me / algorand-api.pxke.me | DNS must point at `TARGET_HOST` |
 | `APP_PORT` | `9080` | 8080 is taken by algod on the prod host |
 | `DEPLOY_CQL_TIER` | `all` | use `prod` to skip dev-tier tables |
-| `DEPLOY_SKIP_MIGRATE` | `0` | |
+| `DEPLOY_FORCE_FULL` | `0` | `1` = full deploy, ignore git diff |
 | `DEPLOY_HEALTH_URL` | `http://127.0.0.1:$APP_PORT/health/ready` | checked from the host |
 | `DEPLOY_CONFIRM` | `0` | must be `1` for provision/deploy/rollback |
+| `PACKAGE_OUTPUT` | `stage` | `archive` for CI tarballs |
 
 ## Migration ledger
 
@@ -87,3 +118,21 @@ python deploy/scripts/cql_migrate.py apply --tier prod
 ```
 
 See [docs/architecture/cql-migrations.md](../docs/architecture/cql-migrations.md).
+
+## Flutter web build (`package.sh`)
+
+Production builds use:
+
+```bash
+flutter build web --release --wasm --no-web-resources-cdn \
+  --pwa-strategy=none -O4 --no-source-maps \
+  [--no-pub] \
+  --dart-define-from-file=deploy/build/flutter_defines.json
+```
+
+- **`deploy/scripts/write_flutter_defines.sh`** — writes `flutter_defines.json` from
+  `FRONTEND_*` env vars (set by `deploy.sh` / `deploy.conf`).
+- **`--no-pub`** — skipped when `pubspec.lock` is unchanged since the last build.
+- **Fingerprint skip** — entire Flutter compile is skipped when sources + defines are
+  unchanged (`deploy/build/.frontend-build.sha256`).
+- **Post-build prune** — removes unused canvaskit variants, source maps, and symbols.

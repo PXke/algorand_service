@@ -1509,19 +1509,14 @@ def translate_article_mistral(
 ) -> dict[str, str]:
     """Translate an English article to the target language via Mistral. Runs on
     the Small tier (MISTRAL_MODEL_TRANSLATE) — localization needs no research or
-    editorial judgment, and this fires 5x (languages) per published article."""
+    editorial judgment, and this fires once per target language per published article."""
     from app.core.config import MISTRAL_MODEL_TRANSLATE
 
+    from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANG_NAMES
+
     mistral = client or get_mistral_client(model=MISTRAL_MODEL_TRANSLATE)
-    
-    language_map = {
-        "zh": "Chinese (Simplified)",
-        "hi": "Hindi",
-        "es": "Spanish (Castilian)",
-        "fr": "French",
-        "ar": "Arabic",
-    }
-    lang_name = language_map.get(target_language, target_language)
+
+    lang_name = ARTICLE_TRANSLATION_LANG_NAMES.get(target_language, target_language)
 
     system = (
         f"You are a professional journalist localizing an Algorand news article into {lang_name}. "

@@ -30,7 +30,16 @@ DEPLOY_CQL_TIER="${DEPLOY_CQL_TIER:-all}"
 DEPLOY_SKIP_MIGRATE="${DEPLOY_SKIP_MIGRATE:-0}"
 DEPLOY_HEALTH_URL="${DEPLOY_HEALTH_URL:-http://127.0.0.1:${APP_PORT}/health/ready}"
 DEPLOY_HEALTH_TIMEOUT_SEC="${DEPLOY_HEALTH_TIMEOUT_SEC:-120}"
+DEPLOY_HEALTH_POLL_SEC="${DEPLOY_HEALTH_POLL_SEC:-1}"
 DEPLOY_CONFIRM="${DEPLOY_CONFIRM:-0}"
+# brotli -q 11 takes ~77s on the prod host for frontend_web; -q 6 is ~4s with
+# negligible size difference on precompressed WASM/JS.
+DEPLOY_BROTLI_QUALITY="${DEPLOY_BROTLI_QUALITY:-6}"
+PACKAGE_PRECOMPRESS_JOBS="${PACKAGE_PRECOMPRESS_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+export DEPLOY_BROTLI_QUALITY PACKAGE_PRECOMPRESS_JOBS
+# Escape hatch: ignore git diff and deploy everything.
+DEPLOY_FORCE_FULL="${DEPLOY_FORCE_FULL:-0}"
+PACKAGE_OUTPUT="${PACKAGE_OUTPUT:-stage}"
 # Algorand network: mainnet or testnet. Drives the frontend dart-defines
 # (wallet login chain id, algod API, explorer). Backend/workers follow via
 # ALGOD_URL in the shared env files on the host.
@@ -180,24 +189,51 @@ EOF
 cmd_deploy() {
   confirm_gate
 
-  echo ">>> Packaging release"
-  ARCHIVE=$("$SCRIPT_DIR/package.sh")
-  CHECKSUM="${ARCHIVE}.sha256"
-  [[ -f "$CHECKSUM" ]] || die "missing checksum file ${CHECKSUM}"
-  # The .sha256 references the archive by basename — verify from its directory.
-  (cd "$(dirname "$ARCHIVE")" && sha256sum -c "$(basename "$CHECKSUM")")
+  eval "$(REPO_ROOT="$REPO_ROOT" SSH_SVC="$SSH_SVC" TARGET_PATH="$TARGET_PATH" \
+    DEPLOY_FORCE_FULL="$DEPLOY_FORCE_FULL" bash "$SCRIPT_DIR/scripts/detect_changes.sh")"
+  export SKIP_FRONTEND_BUILD PACKAGE_PRECOMPRESS DEPLOY_SKIP_MIGRATE
+  export DEPLOY_SYNC_FLUTTER DEPLOY_SYNC_PYTHON
+  export DEPLOY_RESTART_BACKEND DEPLOY_RESTART_WORKERS DEPLOY_CHANGED_DEPLOY_CONFIG
 
-  ARCHIVE_NAME=$(basename "$ARCHIVE")
+  bash "$SCRIPT_DIR/scripts/sync_deps.sh"
+  if [[ "${DEPLOY_SYNC_FLUTTER:-0}" == "1" ]]; then
+    export SKIP_FRONTEND_BUILD=0 PACKAGE_PRECOMPRESS=1 DEPLOY_CHANGED_FRONTEND=1
+  fi
+  if [[ "${DEPLOY_SYNC_PYTHON:-0}" == "1" ]]; then
+    export DEPLOY_RESTART_BACKEND=1 DEPLOY_RESTART_WORKERS=1
+  fi
+
+  echo ">>> Packaging release"
+  PACKAGE_RESULT=$("$SCRIPT_DIR/package.sh")
+  STAGE_LOCAL=""
+  CLEANUP_STAGE=0
+  if [[ -d "$PACKAGE_RESULT" ]]; then
+    STAGE_LOCAL="$PACKAGE_RESULT"
+  else
+    [[ -f "$PACKAGE_RESULT" ]] || die "package.sh returned neither a stage dir nor archive: ${PACKAGE_RESULT}"
+    CHECKSUM="${PACKAGE_RESULT}.sha256"
+    [[ -f "$CHECKSUM" ]] || die "missing checksum file ${CHECKSUM}"
+    (cd "$(dirname "$PACKAGE_RESULT")" && sha256sum -c "$(basename "$CHECKSUM")")
+    STAGE_LOCAL=$(mktemp -d)
+    CLEANUP_STAGE=1
+    echo ">>> Extracting archive locally"
+    tar -xaf "$PACKAGE_RESULT" -C "$STAGE_LOCAL"
+  fi
+  if [[ "$CLEANUP_STAGE" == 1 ]]; then
+    trap 'rm -rf "$STAGE_LOCAL"' EXIT
+  fi
+  if [[ -f "$STAGE_LOCAL/BUILD_INFO.txt" ]]; then
+    _stamp=$(grep '^stamp=' "$STAGE_LOCAL/BUILD_INFO.txt" | cut -d= -f2)
+    _sha=$(grep '^git_sha=' "$STAGE_LOCAL/BUILD_INFO.txt" | cut -d= -f2)
+    ARCHIVE_NAME="algorand-platform-${_stamp}-${_sha}"
+  else
+    ARCHIVE_NAME=$(basename "$PACKAGE_RESULT")
+  fi
   RELEASES="${TARGET_PATH}/releases"
   CURRENT="${RELEASES}/current"
   PREVIOUS="${RELEASES}/previous"
   SHARED="${TARGET_PATH}/shared"
   VENV="${TARGET_PATH}/venv"
-
-  echo ">>> Staging release locally"
-  STAGE_LOCAL=$(mktemp -d)
-  trap 'rm -rf "$STAGE_LOCAL"' EXIT
-  tar -xaf "$ARCHIVE" -C "$STAGE_LOCAL"
 
   echo ">>> [${SERVICE_USER}] Syncing release (incremental — only changed files cross the wire)"
   # rsync the unpacked tree against the previous release (--link-dest): unchanged
@@ -209,7 +245,7 @@ cmd_deploy() {
   # mktemp dir (mode 0700) and -a would otherwise propagate that to the release
   # root, leaving nginx (www-data) unable to stat() the files → 404s.
   attempt=0
-  until rsync --archive --delete --partial --progress --chmod=D755 \
+  until rsync --archive --delete --partial --chmod=D755 \
       --link-dest="$CURRENT" \
       "$STAGE_LOCAL/" "${SSH_SVC}:${RELEASES}/staging/"; do
     attempt=$((attempt + 1))
@@ -232,18 +268,55 @@ rm -rf '${PREVIOUS}'
 mv '${RELEASES}/staging' '${CURRENT}'
 
 # Precompress web assets so nginx serves .br/.gz siblings (brotli_static/
-# gzip_static) instead of compressing multi-MB WASM/JS per request — the win
-# for visitors on slow links. Done here (not in the archive) to keep the
-# transfer small. brotli is optional; gzip always runs.
-have_brotli=0; command -v brotli >/dev/null 2>&1 && have_brotli=1
-find '${CURRENT}/frontend_web' -type f \
-  \( -name '*.js' -o -name '*.wasm' -o -name '*.json' -o -name '*.html' \
-     -o -name '*.css' -o -name '*.svg' -o -name '*.otf' -o -name '*.ttf' \) \
-  -size +1k -print0 \
-| while IFS= read -r -d '' f; do
-    gzip -9 -kf "\$f"
-    if [[ "\$have_brotli" == 1 ]]; then brotli -q 11 -f "\$f" -o "\$f.br"; fi
-  done
+# gzip_static). Normally done on the build machine (package.sh); this block is
+# a fallback when .precompress.sha256 is missing or stale.
+_stamp='${CURRENT}/frontend_web/.precompress.sha256'
+_skip_precompress=0
+if [[ -f "\$_stamp" ]]; then
+  _fp=\$(find '${CURRENT}/frontend_web' -type f ! -name '*.gz' ! -name '*.br' ! -name '.precompress.sha256' -print0 \
+    | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
+  _stamp_fp=\$(grep '^fingerprint=' "\$_stamp" | cut -d= -f2)
+  _stamp_q=\$(grep '^brotli_q=' "\$_stamp" | cut -d= -f2)
+  if [[ "\$_fp" == "\$_stamp_fp" && "\$_stamp_q" == "${DEPLOY_BROTLI_QUALITY}" ]]; then
+    echo "frontend_web precompressed at build time — skipping remote gzip/brotli"
+    _skip_precompress=1
+  fi
+fi
+# Drop .gz/.br siblings older than their source (or orphaned). Stale gzip for
+# deferred .part.js breaks dart2js ("Success callback … part not loaded").
+find '${CURRENT}/frontend_web' -type f \( -name '*.gz' -o -name '*.br' \) -print0 \
+  | while IFS= read -r -d '' f; do
+      src="\${f%.gz}"; src="\${src%.br}"
+      if [[ ! -f "\$src" ]] || [[ "\$f" -ot "\$src" ]]; then rm -f "\$f"; fi
+    done
+
+if [[ "\$_skip_precompress" != 1 ]]; then
+  echo ">>> Remote precompress fallback (no valid .precompress.sha256)"
+  have_brotli=0; command -v brotli >/dev/null 2>&1 && have_brotli=1
+  _jobs=\$(nproc 2>/dev/null || echo 2)
+  export have_brotli
+  find '${CURRENT}/frontend_web' -type f \
+    \( -name '*.js' -o -name '*.wasm' -o -name '*.json' -o -name '*.html' \
+       -o -name '*.css' -o -name '*.svg' -o -name '*.otf' -o -name '*.ttf' \) \
+    -size +200c -print0 \
+  | xargs -0 -P"\$_jobs" -I{} bash -c '
+      f="\$1"; q="${DEPLOY_BROTLI_QUALITY}"; hb="\${have_brotli:-0}"
+      gzip -9 -kf "\$f"
+      [[ "\$hb" == 1 ]] && brotli -q "\$q" -f "\$f" -o "\$f.br"
+    ' _ {}
+  _fp=\$(find '${CURRENT}/frontend_web' -type f ! -name '*.gz' ! -name '*.br' ! -name '.precompress.sha256' -print0 \
+    | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
+  {
+    echo "fingerprint=\$_fp"
+    echo "brotli_q=${DEPLOY_BROTLI_QUALITY}"
+    echo "built_at_utc=\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "\$_stamp"
+fi
+# Legacy shared hash (backend-only fast path still uses this when frontend tree
+# is hardlink-identical and stamp absent).
+FRONTEND_HASH=\$(find '${CURRENT}/frontend_web' -type f ! -name '*.gz' ! -name '*.br' ! -name '.precompress.sha256' -print0 \
+  | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
+echo "\$FRONTEND_HASH" > '${SHARED}/.frontend_web.sha256'
 
 # Python venv shared across releases; deps are the pinned union of backend +
 # workers (requirements.lock.txt, regenerated via deploy/scripts/lock_requirements.sh
@@ -258,16 +331,11 @@ else
   '${VENV}/bin/pip' install --quiet --upgrade pip setuptools wheel
   '${VENV}/bin/pip' install --quiet -r '${CURRENT}/requirements.lock.txt'
   echo "\$REQ_HASH" > '${SHARED}/.requirements.sha256'
-fi
-
-# Playwright's browser lives in ~/.cache/ms-playwright and is versioned to the
-# playwright package, so a lock-file bump silently strands the old binary and
-# every SPA-fallback scrape starts erroring (only visible as per-source errors
-# in the diff-beat results). Idempotent + ~1s when already installed. Fail-soft:
-# HTTP scraping still works without it, so a download hiccup must not abort the
-# deploy — but say so loudly.
-if ! '${VENV}/bin/python' -m playwright install chromium; then
-  echo "WARN: playwright browser install FAILED — SPA scraping degraded until fixed"
+  # Playwright browser is versioned to the playwright package — only refresh
+  # when the lock file (and thus pip install) changes.
+  if ! '${VENV}/bin/python' -m playwright install chromium; then
+    echo "WARN: playwright browser install FAILED — SPA scraping degraded until fixed"
+  fi
 fi
 
 # Shared env files survive releases; bootstrap from templates on first deploy
@@ -323,37 +391,64 @@ cd '${CURRENT}'
 '${VENV}/bin/python' deploy/scripts/cql_migrate.py apply --tier '${DEPLOY_CQL_TIER}'
 EOF
   else
-    echo ">>> Skipping CQL migrations (DEPLOY_SKIP_MIGRATE=1)"
+    echo ">>> Skipping CQL migrations (no schema changes since last deploy)"
   fi
 
-  echo ">>> [root] Installing systemd units + nginx site, restarting services"
-  for unit in "${UNITS[@]}"; do
-    render "$SCRIPT_DIR/systemd/${unit}.service" \
-      | ssh "$SSH_ROOT" "cat > /etc/systemd/system/${unit}.service"
-  done
-  install_nginx_site
-  ssh "$SSH_ROOT" "systemctl daemon-reload && systemctl enable ${UNITS[*]} && systemctl restart ${UNITS[*]}"
+  RESTART_UNITS=()
+  [[ "${DEPLOY_RESTART_BACKEND:-1}" == "1" ]] && RESTART_UNITS+=(algorand-platform-backend)
+  [[ "${DEPLOY_RESTART_WORKERS:-1}" == "1" ]] && RESTART_UNITS+=(algorand-platform-celery algorand-platform-celery-beat)
 
-  echo ">>> Checking units are active"
-  for unit in "${UNITS[@]}"; do
-    ssh "$SSH_SVC" "systemctl is-active --quiet ${unit}.service" \
-      || die "${unit} is not active (logs: ssh ${SSH_ROOT} journalctl -u ${unit} -n 50)"
-  done
+  if [[ "${DEPLOY_CHANGED_DEPLOY_CONFIG:-0}" == "1" ]]; then
+    echo ">>> [root] Installing systemd units + nginx site"
+    for unit in "${UNITS[@]}"; do
+      render "$SCRIPT_DIR/systemd/${unit}.service" \
+        | ssh "$SSH_ROOT" "cat > /etc/systemd/system/${unit}.service"
+    done
+    install_nginx_site
+    ssh "$SSH_ROOT" "systemctl daemon-reload && systemctl enable ${UNITS[*]}"
+  fi
 
-  echo ">>> Waiting for readiness (${DEPLOY_HEALTH_URL})"
-  deadline=$((SECONDS + DEPLOY_HEALTH_TIMEOUT_SEC))
-  until ssh "$SSH_SVC" "curl -fsS '${DEPLOY_HEALTH_URL}' >/dev/null"; do
-    if (( SECONDS >= deadline )); then
-      echo "error: readiness check timed out after ${DEPLOY_HEALTH_TIMEOUT_SEC}s"
-      echo "hint: rollback with DEPLOY_CONFIRM=1 ./deploy/rollback.sh"
-      exit 1
-    fi
-    sleep 2
-  done
-  ssh "$SSH_SVC" "curl -fsS '${DEPLOY_HEALTH_URL}'" && echo
+  if [[ ${#RESTART_UNITS[@]} -eq 0 ]]; then
+    echo ">>> No service restart required (frontend/static-only deploy)"
+  else
+    echo ">>> [root] Restarting: ${RESTART_UNITS[*]}"
+    ssh "$SSH_ROOT" "systemctl restart ${RESTART_UNITS[*]}"
+  fi
 
-  echo ">>> Recent backend logs"
-  ssh "$SSH_ROOT" "journalctl -u algorand-platform-backend.service -n 20 --no-pager" || true
+  if [[ ${#RESTART_UNITS[@]} -gt 0 ]]; then
+    echo ">>> Checking units are active"
+    for unit in "${RESTART_UNITS[@]}"; do
+      ssh "$SSH_SVC" "systemctl is-active --quiet ${unit}.service" \
+        || die "${unit} is not active (logs: ssh ${SSH_ROOT} journalctl -u ${unit} -n 50)"
+    done
+
+    echo ">>> Waiting for readiness (${DEPLOY_HEALTH_URL})"
+    _live_url="http://127.0.0.1:${APP_PORT}/health"
+    deadline=$((SECONDS + DEPLOY_HEALTH_TIMEOUT_SEC))
+    until ssh "$SSH_SVC" "curl -fsS '${_live_url}' >/dev/null 2>&1"; do
+      if (( SECONDS >= deadline )); then
+        echo "error: liveness check timed out after ${DEPLOY_HEALTH_TIMEOUT_SEC}s"
+        echo "hint: rollback with DEPLOY_CONFIRM=1 ./deploy/rollback.sh"
+        exit 1
+      fi
+      sleep "${DEPLOY_HEALTH_POLL_SEC}"
+    done
+    until ssh "$SSH_SVC" "curl -fsS '${DEPLOY_HEALTH_URL}' >/dev/null"; do
+      if (( SECONDS >= deadline )); then
+        echo "error: readiness check timed out after ${DEPLOY_HEALTH_TIMEOUT_SEC}s"
+        echo "hint: rollback with DEPLOY_CONFIRM=1 ./deploy/rollback.sh"
+        exit 1
+      fi
+      sleep "${DEPLOY_HEALTH_POLL_SEC}"
+    done
+    ssh "$SSH_SVC" "curl -fsS '${DEPLOY_HEALTH_URL}'" && echo
+
+    echo ">>> Recent backend logs"
+    ssh "$SSH_ROOT" "journalctl -u algorand-platform-backend.service -n 20 --no-pager" || true
+  fi
+
+  mkdir -p "$REPO_ROOT/deploy/build"
+  git -C "$REPO_ROOT" rev-parse HEAD >"$REPO_ROOT/deploy/build/.last-deploy-sha"
 
   echo "Done — deployed ${ARCHIVE_NAME} → http://${TARGET_HOST}/"
 }

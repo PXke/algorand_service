@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/deferred/deferred_load_pool.dart';
 import '../auth_chunk_ready.dart';
 import '../../auth/auth_entry.dart' deferred as auth;
 
@@ -44,7 +45,7 @@ class _DeferredWalletAppBarActionState extends State<DeferredWalletAppBarAction>
   }
 
   Future<void> _load() async {
-    _library ??= auth.loadLibrary();
+    _library ??= serializeDeferredLoad(() => auth.loadLibrary());
     await _library;
     authChunkReady.value = true;
     if (mounted) setState(() => _ready = true);

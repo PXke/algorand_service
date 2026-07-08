@@ -128,6 +128,15 @@ class AppLocalizationsAr extends AppLocalizations {
   String get localeHindi => 'الهندية';
 
   @override
+  String get localeRussian => 'Русский';
+
+  @override
+  String get localeDari => 'دری';
+
+  @override
+  String get localePashto => 'پښتو';
+
+  @override
   String get navLanguage => 'اللغة';
 
   @override

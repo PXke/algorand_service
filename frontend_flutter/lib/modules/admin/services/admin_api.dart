@@ -344,6 +344,17 @@ class AdminApi {
     );
   }
 
+  Future<Map<String, dynamic>> backfillArticleTranslations({
+    required String walletAddress,
+    int limit = 500,
+  }) async {
+    return _client.postJson(
+      '/api/v1/admin/translations/backfill',
+      body: {'limit': limit},
+      headers: _adminHeaders(walletAddress),
+    );
+  }
+
   Future<Map<String, dynamic>> clearClassifierReviews({
     required String walletAddress,
   }) async {

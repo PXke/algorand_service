@@ -33,6 +33,16 @@ class LocaleNotifier extends Notifier<Locale?> {
   }
 }
 
+/// Language code for news API content (`?lang=`). Uses the explicit picker
+/// choice when set, otherwise the active Material locale (system language).
+String contentLanguageCode(WidgetRef ref, BuildContext context) {
+  final picked = ref.read(localeProvider);
+  if (picked != null && picked.languageCode.isNotEmpty) {
+    return picked.languageCode;
+  }
+  return Localizations.localeOf(context).languageCode;
+}
+
 /// Native language name for the locale picker (always in the target script).
 String localeOptionLabel(AppLocalizations l10n, AppLocaleOption option) {
   if (option.code.isEmpty) return l10n.localeSystem;
@@ -43,6 +53,9 @@ String localeOptionLabel(AppLocalizations l10n, AppLocaleOption option) {
     'es' => l10n.localeSpanish,
     'fr' => l10n.localeFrench,
     'ar' => l10n.localeArabic,
+    'ru' => l10n.localeRussian,
+    'fa' => l10n.localeDari,
+    'ps' => l10n.localePashto,
     _ => option.nativeLabel,
   };
 }

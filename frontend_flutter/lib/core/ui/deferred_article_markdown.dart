@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../core/deferred/deferred_load_pool.dart';
 import '../../shared/widgets/deferred_widget.dart';
 import 'markdown_entry.dart' deferred as md;
 
@@ -20,7 +21,7 @@ class DeferredArticleMarkdown extends StatelessWidget {
       return const SizedBox.shrink();
     }
     return DeferredWidget(
-      md.loadLibrary,
+      () => loadDeferredWithRetry(() => md.loadLibrary()),
       () => md.ArticleMarkdown(data: data, selectable: selectable),
       placeholder: _BodyPlaceholder(data: data),
     );

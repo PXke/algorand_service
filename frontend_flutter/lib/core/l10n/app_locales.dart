@@ -10,16 +10,19 @@ class AppLocaleOption {
   Locale? get locale => code.isEmpty ? null : Locale(code);
 }
 
-/// The six most-spoken languages we ship, plus “system”.
+/// Languages we ship, with corridor locales (HesabPay / UNDP regions) near the top.
 /// Native labels are always shown in their own script (not translated).
 const List<AppLocaleOption> kAppLocaleOptions = [
   AppLocaleOption('', ''), // label comes from l10n.localeSystem
   AppLocaleOption('en', 'English'),
+  AppLocaleOption('fa', 'دری'),
+  AppLocaleOption('ps', 'پښتو'),
+  AppLocaleOption('ar', 'العربية'),
+  AppLocaleOption('ru', 'Русский'),
   AppLocaleOption('zh', '中文'),
   AppLocaleOption('hi', 'हिन्दी'),
   AppLocaleOption('es', 'Español'),
   AppLocaleOption('fr', 'Français'),
-  AppLocaleOption('ar', 'العربية'),
 ];
 
 Locale? localeFromCode(String? code) {

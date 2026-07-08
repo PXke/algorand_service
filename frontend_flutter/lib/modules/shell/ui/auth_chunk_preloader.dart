@@ -1,9 +1,11 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../auth/auth_entry.dart' deferred as auth;
+import '../../../core/deferred/deferred_load_pool.dart';
 import '../auth_chunk_ready.dart';
 
 /// Loads the wallet-auth deferred chunk after first paint so returning visitors
@@ -21,9 +23,10 @@ class _AuthChunkPreloaderState extends ConsumerState<AuthChunkPreloader> {
   @override
   void initState() {
     super.initState();
+    // On web, concurrent deferred chunk downloads race dart2js's multi-loader
+    // (DeferredLoadException: Success callback…). Wallet loads on demand instead.
+    if (kIsWeb) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      // Brief delay keeps auth JS off Lighthouse's TBT window while still
-      // loading in time for anyone who taps Connect within a few seconds.
       unawaited(
         Future<void>.delayed(const Duration(seconds: 5), _warmAuthChunk),
       );
@@ -33,7 +36,7 @@ class _AuthChunkPreloaderState extends ConsumerState<AuthChunkPreloader> {
   Future<void> _warmAuthChunk() async {
     if (!mounted) return;
     try {
-      await auth.loadLibrary();
+      await serializeDeferredLoad(() => auth.loadLibrary());
       authChunkReady.value = true;
       if (mounted) ref.read(auth.walletAuthClientProvider);
     } catch (_) {

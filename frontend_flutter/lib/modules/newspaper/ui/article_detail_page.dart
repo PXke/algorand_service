@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/api/api_errors.dart';
 import '../../../core/l10n/l10n_extensions.dart';
+import '../../../core/l10n/locale_provider.dart';
 import '../../../core/providers/api_providers.dart';
 import '../../../core/ui/deferred_article_markdown.dart';
 import '../../../core/ui/error_banner.dart';
@@ -60,7 +61,7 @@ class _ArticleDetailPageState extends ConsumerState<ArticleDetailPage> {
       _related = const [];
     });
     try {
-      final lang = Localizations.localeOf(context).languageCode;
+      final lang = contentLanguageCode(ref, context);
       final article = await NewsApi(ref.read(apiClientProvider)).fetchArticle(widget.articleId, lang: lang);
       if (!mounted) return;
       setState(() {
@@ -157,6 +158,9 @@ class _ArticleDetailPageState extends ConsumerState<ArticleDetailPage> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(localeProvider, (previous, next) {
+      if (previous != next) _load();
+    });
     final l10n = context.l10n;
     final article = _article;
     final theme = Theme.of(context);

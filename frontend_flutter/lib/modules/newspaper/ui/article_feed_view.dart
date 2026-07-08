@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/api/api_errors.dart';
+import '../../../core/l10n/locale_provider.dart';
 import '../../../core/providers/api_providers.dart';
 import '../../../core/ui/empty_state.dart';
 import '../../../core/ui/error_banner.dart';
@@ -93,7 +94,7 @@ class _ArticleFeedViewState extends ConsumerState<ArticleFeedView> {
       _error = null;
     });
     try {
-      final lang = Localizations.localeOf(context).languageCode;
+      final lang = contentLanguageCode(ref, context);
       final client = ref.read(apiClientProvider);
       final feedPage =
           await _newsApi().fetchFeedPage(limit: 50, serviceId: widget.serviceId, lang: lang);
@@ -124,7 +125,7 @@ class _ArticleFeedViewState extends ConsumerState<ArticleFeedView> {
     if (cursor == null) return;
     setState(() => _loadingMore = true);
     try {
-      final lang = Localizations.localeOf(context).languageCode;
+      final lang = contentLanguageCode(ref, context);
       final page = await _newsApi()
           .fetchFeedPage(limit: 50, cursor: cursor, serviceId: widget.serviceId, lang: lang);
       if (!mounted) return;
@@ -147,6 +148,9 @@ class _ArticleFeedViewState extends ConsumerState<ArticleFeedView> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(localeProvider, (previous, next) {
+      if (previous != next) _load();
+    });
     final visible = _filter(_items);
 
     return PageScroll(

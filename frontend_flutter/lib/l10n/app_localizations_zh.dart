@@ -123,6 +123,15 @@ class AppLocalizationsZh extends AppLocalizations {
   String get localeHindi => 'हिन्दी';
 
   @override
+  String get localeRussian => 'Русский';
+
+  @override
+  String get localeDari => 'دری';
+
+  @override
+  String get localePashto => 'پښتو';
+
+  @override
   String get navLanguage => '语言';
 
   @override

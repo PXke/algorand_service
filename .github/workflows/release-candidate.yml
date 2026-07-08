@@ -20,7 +20,7 @@ jobs:
           cd backend && PYTHONPATH=. pytest tests/ -q
       - name: Package
         run: |
-          ARCHIVE=$(./deploy/package.sh)
+          ARCHIVE=$(PACKAGE_OUTPUT=archive ./deploy/package.sh)
           test -f "$ARCHIVE"
           test -f "${ARCHIVE}.sha256"
           cat "${ARCHIVE}.sha256"

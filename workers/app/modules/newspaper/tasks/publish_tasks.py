@@ -54,22 +54,38 @@ def _merge_tags(base: list[str], extra) -> list[str]:
     return out[:10]
 
 
-TRANSLATION_LANGS = ["zh", "hi", "es", "fr", "ar"]
+from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
+
+
+def enqueue_missing_article_translations(article_id: str) -> int:
+    """Enqueue translate_article only for langs not yet stored. Returns count queued."""
+    try:
+        from app.celery_app import celery_app
+        from app.modules.newspaper.article_store import get_article
+
+        article = get_article(article_id)
+        if article is None or not (article.body or "").strip():
+            return 0
+        existing = set((article.translations or {}).keys())
+        missing = [lang for lang in ARTICLE_TRANSLATION_LANGS if lang not in existing]
+        for lang in missing:
+            celery_app.send_task(
+                "app.tasks.newspaper.translate_article", args=[str(article_id), lang]
+            )
+        return len(missing)
+    except Exception:
+        logger.warning(
+            "Failed to enqueue translation tasks for %s", article_id, exc_info=True
+        )
+        return 0
 
 
 def enqueue_article_translations(article_id: str) -> None:
     """Fan out translate_article tasks for an article that just became feed-
     visible. Publish-time only: most held drafts never pass review, so
-    translating at held/recompose time burns 5 Mistral calls per dead draft."""
-    try:
-        from app.celery_app import celery_app
-
-        for lang in TRANSLATION_LANGS:
-            celery_app.send_task(
-                "app.tasks.newspaper.translate_article", args=[str(article_id), lang]
-            )
-    except Exception:
-        logger.warning("Failed to enqueue translation tasks", exc_info=True)
+    translating at held/recompose time burns one Mistral call per target lang
+    per dead draft."""
+    enqueue_missing_article_translations(article_id)
 
 
 def _auto_merge_redirect(*, original_url: str, final_url: str, service_id: str) -> None:
@@ -1099,3 +1115,22 @@ def translate_article_task(
     except Exception as e:
         logger.error(f"Failed to translate article {article_id} to {lang}: {e}")
         return {"status": "error", "reason": str(e)}
+
+
+@celery_app.task(name="app.tasks.newspaper.backfill_article_translations")
+def backfill_article_translations_task(limit: int = 500) -> dict:
+    """Queue missing translations for feed-visible articles (e.g. after adding fa/ps)."""
+    from app.modules.newspaper.article_store import list_feed_articles
+
+    articles_touched = 0
+    tasks_queued = 0
+    for row in list_feed_articles(limit=limit):
+        n = enqueue_missing_article_translations(str(row.article_id))
+        if n:
+            articles_touched += 1
+            tasks_queued += n
+    return {
+        "limit": limit,
+        "articles": articles_touched,
+        "tasks_queued": tasks_queued,
+    }

@@ -1026,6 +1026,35 @@ class _AdminSystemTabState extends ConsumerState<_AdminSystemTab> {
   }
 
   bool _clearingDomains = false;
+  bool _backfillingTranslations = false;
+
+  Future<void> _backfillTranslations() async {
+    final wallet = ref.read(sessionStateProvider).walletAddress;
+    if (wallet == null) return;
+    setState(() => _backfillingTranslations = true);
+    try {
+      final result = await ref
+          .read(adminApiProvider)
+          .backfillArticleTranslations(walletAddress: wallet, limit: 500);
+      if (!mounted) return;
+      final limit = result['limit']?.toString() ?? '500';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Translation backfill queued (up to $limit articles) — '
+            'missing Dari, Pashto, Russian, etc. will fill in over the next few minutes.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Backfill failed: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _backfillingTranslations = false);
+    }
+  }
 
   Future<void> _clearDomains() async {
     final wallet = ref.read(sessionStateProvider).walletAddress;
@@ -1228,6 +1257,28 @@ class _AdminSystemTabState extends ConsumerState<_AdminSystemTab> {
             }).toList(),
           ),
         ],
+        const SizedBox(height: AppLayout.sectionGap),
+        Row(
+          children: [
+            Expanded(child: Text('Content localization', style: theme.textTheme.titleSmall)),
+            FilledButton.tonalIcon(
+              onPressed: _backfillingTranslations ? null : _backfillTranslations,
+              icon: _backfillingTranslations
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.translate, size: 18),
+              label: const Text('Backfill translations'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Queue missing article translations (دری, پښتو, العربية, Русский, …) for stories already on the feed.',
+          style: theme.textTheme.bodySmall?.copyWith(color: colors.muted),
+        ),
         const SizedBox(height: AppLayout.sectionGap),
         Row(
           children: [

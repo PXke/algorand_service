@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
 
 /// Loads a deferred library on demand, then builds its widget once the chunk
-/// is downloaded — showing a lightweight placeholder meanwhile. This keeps
-/// heavy, rarely-visited screens (e.g. admin) out of the initial main.dart.js
-/// so the front page paints sooner on slow connections.
+/// is downloaded — showing a lightweight placeholder meanwhile.
 class DeferredWidget extends StatefulWidget {
   const DeferredWidget(
     this.libraryLoader,
@@ -12,11 +10,9 @@ class DeferredWidget extends StatefulWidget {
     this.placeholder,
   });
 
-  /// The `loadLibrary` tear-off of a `deferred as` import.
+  /// Returns a future that loads the deferred library (optionally retried).
   final Future<void> Function() libraryLoader;
 
-  /// Builds the widget from the now-loaded library. Cannot be `const` because
-  /// the type isn't available until the library finishes loading.
   final Widget Function() createWidget;
 
   final Widget? placeholder;

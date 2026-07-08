@@ -8,8 +8,11 @@ import 'package:intl/intl.dart' as intl;
 import 'app_localizations_ar.dart';
 import 'app_localizations_en.dart';
 import 'app_localizations_es.dart';
+import 'app_localizations_fa.dart';
 import 'app_localizations_fr.dart';
 import 'app_localizations_hi.dart';
+import 'app_localizations_ps.dart';
+import 'app_localizations_ru.dart';
 import 'app_localizations_zh.dart';
 
 // ignore_for_file: type=lint
@@ -101,8 +104,11 @@ abstract class AppLocalizations {
     Locale('ar'),
     Locale('en'),
     Locale('es'),
+    Locale('fa'),
     Locale('fr'),
     Locale('hi'),
+    Locale('ps'),
+    Locale('ru'),
     Locale('zh'),
   ];
 
@@ -333,6 +339,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'हिन्दी'**
   String get localeHindi;
+
+  /// No description provided for @localeRussian.
+  ///
+  /// In en, this message translates to:
+  /// **'Русский'**
+  String get localeRussian;
+
+  /// No description provided for @localeDari.
+  ///
+  /// In en, this message translates to:
+  /// **'دری'**
+  String get localeDari;
+
+  /// No description provided for @localePashto.
+  ///
+  /// In en, this message translates to:
+  /// **'پښتو'**
+  String get localePashto;
 
   /// No description provided for @navLanguage.
   ///
@@ -1735,8 +1759,11 @@ class _AppLocalizationsDelegate
     'ar',
     'en',
     'es',
+    'fa',
     'fr',
     'hi',
+    'ps',
+    'ru',
     'zh',
   ].contains(locale.languageCode);
 
@@ -1753,10 +1780,16 @@ AppLocalizations lookupAppLocalizations(Locale locale) {
       return AppLocalizationsEn();
     case 'es':
       return AppLocalizationsEs();
+    case 'fa':
+      return AppLocalizationsFa();
     case 'fr':
       return AppLocalizationsFr();
     case 'hi':
       return AppLocalizationsHi();
+    case 'ps':
+      return AppLocalizationsPs();
+    case 'ru':
+      return AppLocalizationsRu();
     case 'zh':
       return AppLocalizationsZh();
   }

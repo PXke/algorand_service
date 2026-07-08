@@ -1,4 +1,4 @@
-/// Deferred newspaper routes (everything except the front page).
+/// Deferred newspaper chunk: feed, sections, article detail (not front page).
 library;
 
 export 'ui/article_detail_page.dart';

@@ -3,12 +3,13 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../config/app_config.dart';
+import '../../core/deferred/deferred_load_pool.dart';
+import '../../modules/admin/admin_entry.dart' deferred as admin;
 import '../../modules/misc/misc_pages_entry.dart' deferred as misc;
-import '../../modules/newspaper/newspaper_entry.dart' deferred as newspaper;
-import '../../modules/admin/ui/admin_page.dart' deferred as admin;
-import '../../shared/widgets/deferred_widget.dart';
+import '../../modules/newspaper/newspaper_deferred_gate.dart';
 import '../../modules/newspaper/ui/front_page.dart';
 import '../../modules/shell/ui/app_shell.dart';
+import '../../shared/widgets/deferred_widget.dart';
 import 'pageview_beacon.dart';
 
 /// Gentle fade-and-rise transition between products (native only; web is instant).
@@ -54,7 +55,10 @@ GoRouter createAppRouter() {
             path: '/news',
             pageBuilder: (context, state) => _page(
               state,
-              DeferredWidget(newspaper.loadLibrary, () => newspaper.NewsPage()),
+              DeferredWidget(
+                () => loadDeferredWithRetry(loadNewspaperModule),
+                buildNewsPage,
+              ),
             ),
             routes: [
               GoRoute(
@@ -62,8 +66,8 @@ GoRouter createAppRouter() {
                 pageBuilder: (context, state) => _page(
                   state,
                   DeferredWidget(
-                    newspaper.loadLibrary,
-                    () => newspaper.ArticleDetailPage(
+                    () => loadDeferredWithRetry(loadNewspaperModule),
+                    () => buildArticleDetailPage(
                       articleId: state.pathParameters['articleId'] ?? '',
                     ),
                   ),
@@ -76,8 +80,8 @@ GoRouter createAppRouter() {
             pageBuilder: (context, state) => _page(
               state,
               DeferredWidget(
-                newspaper.loadLibrary,
-                () => newspaper.SectionPage(slug: state.pathParameters['slug'] ?? ''),
+                () => loadDeferredWithRetry(loadNewspaperModule),
+                () => buildSectionPage(slug: state.pathParameters['slug'] ?? ''),
               ),
             ),
           ),
@@ -85,14 +89,20 @@ GoRouter createAppRouter() {
             path: '/about',
             pageBuilder: (context, state) => _page(
               state,
-              DeferredWidget(misc.loadLibrary, () => misc.AboutPage()),
+              DeferredWidget(
+                () => loadDeferredWithRetry(() => misc.loadLibrary()),
+                () => misc.AboutPage(),
+              ),
             ),
           ),
           GoRoute(
             path: '/contact',
             pageBuilder: (context, state) => _page(
               state,
-              DeferredWidget(misc.loadLibrary, () => misc.ContactPage()),
+              DeferredWidget(
+                () => loadDeferredWithRetry(() => misc.loadLibrary()),
+                () => misc.ContactPage(),
+              ),
             ),
           ),
           GoRoute(
@@ -101,7 +111,10 @@ GoRouter createAppRouter() {
                 AppConfig.instance.suggestionsEnabled ? null : '/',
             pageBuilder: (context, state) => _page(
               state,
-              DeferredWidget(misc.loadLibrary, () => misc.SuggestionsPage()),
+              DeferredWidget(
+                () => loadDeferredWithRetry(() => misc.loadLibrary()),
+                () => misc.SuggestionsPage(),
+              ),
             ),
           ),
           GoRoute(
@@ -112,14 +125,20 @@ GoRouter createAppRouter() {
             path: '/search',
             pageBuilder: (context, state) => _page(
               state,
-              DeferredWidget(misc.loadLibrary, () => misc.SearchPage()),
+              DeferredWidget(
+                () => loadDeferredWithRetry(() => misc.loadLibrary()),
+                () => misc.SearchPage(),
+              ),
             ),
           ),
           GoRoute(
             path: '/admin',
             pageBuilder: (context, state) => _page(
               state,
-              DeferredWidget(admin.loadLibrary, () => admin.AdminPage()),
+              DeferredWidget(
+                () => loadDeferredWithRetry(() => admin.loadLibrary()),
+                () => admin.AdminPage(),
+              ),
             ),
           ),
         ],

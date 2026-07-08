@@ -1,0 +1,557 @@
+{
+  "@@locale": "ru",
+  "appTitle": "PXke Algorand",
+  "appTagline": "Независимое освещение экосистемы Algorand",
+  "navHome": "Главная",
+  "navNews": "Новости",
+  "navSources": "Источники",
+  "navSuggestions": "Предложения",
+  "navSearch": "Поиск",
+  "navAdmin": "Админ",
+  "navProducts": "ПРОДУКТЫ",
+  "navWallet": "Кошелёк",
+  "navAppearance": "ОФОРМЛЕНИЕ",
+  "pageTitleHome": "PXke Algorand Projects",
+  "pageTitleArticle": "Статья",
+  "pageTitleNews": "Новости",
+  "pageTitleSources": "Источники новостей",
+  "pageTitleSuggestions": "Предложения",
+  "pageTitleSearch": "Поиск",
+  "pageTitleAdmin": "Админ",
+  "backToFeed": "Назад к ленте",
+  "homeWelcome": "Платформа экосистемы PXke Algorand",
+  "homeTagline": "Подборка новостей из on-chain-триггеров и обходимых источников, предложения сообщества и поиск.",
+  "homeNewsDescription": "Подборка статей, публикуемых при изменении отслеживаемых источников или событий в сети.",
+  "homeSourcesDescription": "Зарегистрированные краулеры Discord, Reddit и веб-источников, питающие новостной конвейер.",
+  "homeSuggestionsDescription": "Отправляйте и голосуйте за идеи сообщества с аутентификацией через кошелёк.",
+  "homeSearchDescription": "Полнотекстовый поиск по опубликованным статьям.",
+  "homeOpenProduct": "Открыть",
+  "themeLight": "Светлая",
+  "themeDark": "Тёмная",
+  "themeSystem": "Системная",
+  "themeSwitchToLight": "Переключить на светлую тему",
+  "themeSwitchToDark": "Переключить на тёмную тему",
+  "localeSystem": "Язык системы",
+  "localeEnglish": "English",
+  "localeSpanish": "Español",
+  "localeFrench": "Français",
+  "localeArabic": "العربية",
+  "localeChinese": "中文",
+  "localeHindi": "हिन्दी",
+  "localeRussian": "Русский",
+  "localeDari": "دری",
+  "localePashto": "پښتو",
+  "navLanguage": "ЯЗЫК",
+  "walletConnected": "Подключён",
+  "walletDisconnect": "Отключить",
+  "walletSignInTitle": "Войти через кошелёк",
+  "walletSignInBody": "Подключите кошелёк Algorand с поддержкой WalletConnect, чтобы отправлять предложения и голоса.",
+  "walletConnect": "Подключить кошелёк",
+  "walletConnectFailed": "Не удалось подключиться. Попробуйте снова или сначала отмените диалог сопряжения.",
+  "walletDialogTitle": "Подключите кошелёк",
+  "walletDialogBody": "Отсканируйте QR-код кошельком Algorand с WalletConnect (Pera, Defly и др.) или скопируйте/откройте ссылку на телефоне.",
+  "walletAwaitingApproval": "Кошелёк подключён. Вернитесь в приложение кошелька, чтобы подтвердить запрос на вход, затем вернитесь сюда.",
+  "walletAwaitingApprovalTitle": "Почти готово",
+  "walletCopyUri": "Копировать URI",
+  "walletUriCopied": "URI WalletConnect скопирован",
+  "walletOpenWallet": "Открыть кошелёк",
+  "walletOpenFailed": "Не удалось открыть кошелёк — скопируйте URI и вставьте в Pera или Defly",
+  "walletCancel": "Отмена",
+  "walletDone": "Готово",
+  "walletErrorTitle": "Ошибка входа",
+  "walletErrorTimeout": "Время ожидания запроса на вход истекло. Откройте кошелёк и попробуйте снова.",
+  "walletErrorRejected": "Запрос отклонён в кошельке.",
+  "walletErrorGeneric": "Не удалось завершить вход. Проверьте подключение и попробуйте снова.",
+  "walletRetry": "Повторить",
+  "walletShowQr": "Показать QR-код",
+  "walletMobileHint": "Нажмите кнопку ниже, чтобы открыть кошелёк Algorand, подтвердите подключение и вернитесь сюда.",
+  "walletSignExplainer": "Кошелёк попросит подписать сообщение для входа (в старых кошельках вместо этого показывается транзакция на 0 ALGO). Подпись бесплатна и ничего не отправляется в сеть — она лишь подтверждает владение адресом.",
+  "newsFeedTitle": "Последние статьи",
+  "newsSubtitleDefault": "On-chain-триггеры и обходимые источники публикуют здесь при изменении контента.",
+  "articlePublicationDetailsHint": "Издатель, дата и ссылка на источник",
+  "newsPriceUnavailable": "Цена ALGO недоступна — запустите сбор ценовых метрик",
+  "newsArticleCount": "{count} статей в подборке",
+  "@newsArticleCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "newsEmptyFilteredTitle": "Пока нет статей",
+  "newsEmptyTitle": "Лента пуста",
+  "newsSponsoredLabel": "Реклама",
+  "newsSponsoredBy": "Реклама · {sponsor}",
+  "@newsSponsoredBy": {
+    "placeholders": {
+      "sponsor": {
+        "type": "String"
+      }
+    }
+  },
+  "newsEmptyFilteredMessage": "Этот источник ещё не опубликовал статей. Убедитесь, что воркеры опрашивают источник и контент изменился.",
+  "newsEmptyMessage": "Запустите Conduit, воркеры Celery и заполните service_registry, чтобы наполнить ленту.",
+  "newsFilterShowing": "Статьи из {serviceId}",
+  "@newsFilterShowing": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
+  "clearFilter": "Сбросить",
+  "articleUntitled": "Без названия",
+  "articleSectionTitle": "Статья",
+  "articlePublicationDetails": "Сведения о публикации",
+  "articleMetaService": "Сервис",
+  "articleMetaPublisher": "Издатель",
+  "articleMetaDataSource": "Источник данных",
+  "articleMetaCoinGecko": "Рыночные данные CoinGecko",
+  "articleMetaPublished": "Опубликовано",
+  "articleMetaRound": "Раунд",
+  "articleMetaTriggerTx": "Триггерная tx",
+  "articleMetaSourceUrl": "URL источника",
+  "articleOpenInBrowser": "Открыть в браузере",
+  "articleViewOnExplorer": "Смотреть в обозревателе Algorand",
+  "articleMoreFrom": "Ещё от {serviceId}",
+  "@articleMoreFrom": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
+  "articleViewSource": "Смотреть источник",
+  "adminTitle": "Администрирование источников",
+  "adminSubtitle": "Зарегистрированные краулеры и фиды (видны только админ-кошелькам).",
+  "adminViewFeedArticles": "Смотреть ленту этого источника",
+  "adminAccessDenied": "Подключите админ-кошелёк для управления источниками. Укажите ADMIN_WALLET_ADDRESSES при сборке.",
+  "sourcesTitle": "Источники новостей",
+  "sourcesSubtitle": "Зарегистрированные сервисы, обходимые воркерами. Discord и Reddit опрашиваются по расписанию; совпадения on-chain публикуются при изменении отслеживаемого контента.",
+  "sourcesEmptyTitle": "Источники не настроены",
+  "sourcesEmptyMessage": "Заполните service_registry TOML-файлами Discord и Reddit, затем выполните миграции. Источники появятся здесь после регистрации в Cassandra.",
+  "sourcesMetaServiceId": "ID сервиса",
+  "sourcesMetaScrapeUrl": "URL для обхода",
+  "sourcesMetaMatchRule": "Правило совпадения",
+  "sourcesViewArticles": "Смотреть статьи",
+  "sourcesDisabled": "Отключён",
+  "filterAll": "Все ({count})",
+  "@filterAll": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "filterDiscord": "Discord ({count})",
+  "@filterDiscord": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "filterReddit": "Reddit ({count})",
+  "@filterReddit": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "filterWeb": "Веб ({count})",
+  "@filterWeb": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "matchRuleValue": "{kind} = {value}",
+  "@matchRuleValue": {
+    "placeholders": {
+      "kind": {
+        "type": "String"
+      },
+      "value": {
+        "type": "String"
+      }
+    }
+  },
+  "sourceKindDiscord": "Discord",
+  "sourceKindReddit": "Reddit",
+  "sourceKindWeb": "Веб",
+  "sourceKindOnChain": "On-chain",
+  "sourceKindUnknown": "Источник",
+  "navContact": "Контакты",
+  "contactTitle": "Контакты",
+  "contactSubtitle": "Исправления, подсказки или отзывы — напишите в редакцию.",
+  "contactNameLabel": "Ваше имя (необязательно)",
+  "contactEmailLabel": "Email (необязательно, если хотите ответ)",
+  "contactMessageLabel": "Сообщение",
+  "contactMessageHint": "Исправления, подсказки, отзывы…",
+  "contactSend": "Отправить сообщение",
+  "contactSent": "Сообщение отправлено — спасибо, что написали нам.",
+  "contactTooShort": "Напишите чуть подробнее (минимум 10 символов).",
+  "searchTitle": "Поиск",
+  "searchSubtitle": "Поиск по всем опубликованным статьям.",
+  "searchQueryLabel": "Поисковый запрос",
+  "searchQueryHint": "Ключевые слова, заголовки, описания…",
+  "searchAction": "Искать",
+  "searchEngine": "Движок: {name}",
+  "@searchEngine": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "searchEmptyTitle": "Ничего не найдено",
+  "searchEmptyMessage": "Попробуйте другие ключевые слова или проверьте, что статьи проиндексированы.",
+  "searchErrorBackend": "Поиск временно недоступен. Проверьте, что API и база данных запущены.",
+  "suggestionsTitle": "Предложения",
+  "suggestionsSubtitle": "Отправляйте после перевода не менее 0,01 ALGO в казну платформы. Голоса используют off-chain-подпись кошелька.",
+  "suggestionsNewTitle": "Новое предложение",
+  "suggestionsFieldTitle": "Заголовок",
+  "suggestionsFieldBody": "Текст",
+  "suggestionsFieldTxid": "ID транзакции отправки",
+  "suggestionsSubmit": "Отправить предложение",
+  "suggestionsUpvoteTitle": "Голос",
+  "suggestionsSignatureLabel": "Подпись (base64)",
+  "suggestionsSignatureHint": "После подписи подготовленного сообщения в кошельке",
+  "suggestionsSubmitUpvote": "Отправить голос",
+  "suggestionsPrepareUpvote": "Подготовить голос",
+  "suggestionsUpvoteDialogTitle": "Подписать сообщение для голоса",
+  "suggestionsCopyMessage": "Копировать сообщение",
+  "suggestionsMessageCopied": "Сообщение для подписи скопировано в буфер обмена",
+  "suggestionsTreasuryHelp": "Перед отправкой переведите не менее {minAlgo} ALGO в казну платформы:\n{address}",
+  "@suggestionsTreasuryHelp": {
+    "placeholders": {
+      "minAlgo": {
+        "type": "String"
+      },
+      "address": {
+        "type": "String"
+      }
+    }
+  },
+  "suggestionsUpvoteCount": "{count, plural, =0{Пока нет голосов} =1{1 голос} few{{count} голоса} many{{count} голосов} other{{count} голосов}}",
+  "@suggestionsUpvoteCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "close": "Закрыть",
+  "suggestionsTxShort": "Tx {txid}",
+  "@suggestionsTxShort": {
+    "placeholders": {
+      "txid": {
+        "type": "String"
+      }
+    }
+  },
+  "snackConnectWallet": "Сначала подключите кошелёк",
+  "snackSuggestionSubmitted": "Предложение отправлено",
+  "snackUpvoteRecorded": "Голос учтён",
+  "snackChooseSuggestionUpvote": "Сначала выберите предложение для голосования",
+  "metaPublishedEpoch": "Опубликовано: {epoch}",
+  "@metaPublishedEpoch": {
+    "placeholders": {
+      "epoch": {
+        "type": "String"
+      }
+    }
+  },
+  "metaPublishedRelative": "Опубликовано: {when}",
+  "@metaPublishedRelative": {
+    "placeholders": {
+      "when": {
+        "type": "String"
+      }
+    }
+  },
+  "timeJustNow": "только что",
+  "timeMinutesAgo": "{count} мин назад",
+  "@timeMinutesAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "timeHoursAgo": "{count} ч назад",
+  "@timeHoursAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "timeDaysAgo": "{count} дн назад",
+  "@timeDaysAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "metaRound": "Раунд: {round}",
+  "@metaRound": {
+    "placeholders": {
+      "round": {
+        "type": "String"
+      }
+    }
+  },
+  "metaService": "Сервис: {serviceId}",
+  "@metaService": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
+  "navFrontPage": "Главная страница",
+  "navLatest": "Последние",
+  "navSections": "РАЗДЕЛЫ",
+  "navAbout": "О нас",
+  "navApps": "Приложения",
+  "navProductsMenuHint": "Изучить платформу",
+  "frontPageTopStories": "Главные новости",
+  "frontPageLatest": "Последние",
+  "frontPageMore": "Ещё из редакции",
+  "frontPageSectionStories": "Ещё в разделе «{section}»",
+  "@frontPageSectionStories": {
+    "placeholders": {
+      "section": {
+        "type": "String"
+      }
+    }
+  },
+  "sectionMarkets": "Рынки",
+  "sectionSecurity": "Безопасность",
+  "sectionDevelopers": "Разработчики",
+  "sectionCommunity": "Сообщество",
+  "sectionEcosystem": "Экосистема",
+  "sectionEmptyTitle": "Пока здесь пусто",
+  "sectionEmptyMessage": "В этом разделе ещё нет материалов. Загляните позже.",
+  "bylineNewsroom": "Редакция",
+  "bylineMarketsDesk": "Рынки",
+  "bylineChainDesk": "On-chain",
+  "articleByline": "Автор: {desk}",
+  "@articleByline": {
+    "placeholders": {
+      "desk": {
+        "type": "String"
+      }
+    }
+  },
+  "articleReadingTime": "{count} мин чтения",
+  "@articleReadingTime": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "articleRelatedTitle": "Похожие материалы",
+  "articleShare": "Поделиться",
+  "articleLinkCopied": "Ссылка скопирована в буфер обмена",
+  "footerTagline": "Независимое автоматизированное освещение экосистемы Algorand.",
+  "footerSectionsHeading": "Разделы",
+  "footerAboutHeading": "О нас",
+  "footerRights": "© {year} PXke Algorand. Независимое освещение экосистемы Algorand.",
+  "@footerRights": {
+    "placeholders": {
+      "year": {
+        "type": "String"
+      }
+    }
+  },
+  "aboutTitle": "О PXke Algorand",
+  "aboutLead": "PXke Algorand — независимая редакция, освещающая блокчейн Algorand: рынки, протокол, управление и проекты, строящиеся на нём.",
+  "aboutHowHeading": "Как мы публикуем",
+  "aboutHowBody": "Наши материалы собираются автоматически из on-chain-событий, запланированных рыночных данных и отслеживаемых источников сообщества, затем распределяются по разделам редакционным конвейером. У каждой статьи есть строка происхождения, чтобы вы могли проследить источник.",
+  "aboutAiHeading": "Написано с помощью ИИ",
+  "aboutAiBody": "PXke Algorand публикует журналистику с участием ИИ. Статьи создаются языковыми моделями на основе on-chain-событий, рыночных данных и источников сообщества под автоматической редакционной проверкой — они генерируются машиной, а не пишутся человеком-репортёром. Мы ссылаемся на оригинальные источники в каждой статье, чтобы вы могли проверить утверждения; автором записи выступает организация, а не отдельный журналист.",
+  "aboutProvenanceHeading": "Происхождение и прозрачность",
+  "aboutProvenanceBody": "On-chain-материалы запускаются проверяемыми транзакциями и ссылаются на обозреватель Algorand. Рыночные материалы используют данные CoinGecko. Рекламные размещения всегда помечаются и чётко отделены от редакционного контента.",
+  "aboutStandardsHeading": "Редакционные стандарты",
+  "aboutStandardsBody": "Мы стремимся к точности и ясной атрибуции. Это издание не является инвестиционной рекомендацией. Нашли ошибку? Свяжитесь с нами через ссылки на источники в любой статье.",
+  "seedsTitle": "Сиды",
+  "seedsSubtitle": "Вручную настроенные стартовые точки для краулера. Домены, одобренные при обнаружении, находятся на вкладке «Домены».",
+  "sourcesAdd": "Добавить источник",
+  "sourcesEdit": "Изменить",
+  "sourcesEditTitle": "Изменить источник",
+  "sourcesAddTitle": "Добавить источник",
+  "sourcesDeleteTitle": "Удалить источник?",
+  "sourcesDeleteBody": "«{serviceId}» перестанет обходиться. Уже опубликованные статьи останутся.",
+  "@sourcesDeleteBody": {
+    "placeholders": {
+      "serviceId": {
+        "type": "String"
+      }
+    }
+  },
+  "sourcesDelete": "Удалить",
+  "sourcesSave": "Сохранить",
+  "sourcesAddAction": "Добавить",
+  "sourcesRequiredFields": "Обязательны ID сервиса, имя и URL.",
+  "sourcesChangesNextPoll": "Изменения применятся при следующем опросе краулера.",
+  "sourcesMerge": "Объединить",
+  "sourcesMergeTitle": "Объединить сервисы",
+  "sourcesMergeIntro": "Сведите несколько сервисов в один. Источники и домены выбранных сервисов переходят к целевому; опустошённые сервисы отключаются. Используйте, когда один продукт охватывает несколько доменов (например, algorand.co + algorand.com).",
+  "sourcesMergeTarget": "Оставить целевым",
+  "sourcesMergeFold": "Включить (будет отключён)",
+  "sourcesMergeAction": "Объединить",
+  "sourcesMergeNeedsTwo": "Выберите целевой сервис и хотя бы один для включения.",
+  "sourcesMergeDone": "Объединено сервисов: {count} в {target}.",
+  "@sourcesMergeDone": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "target": {
+        "type": "String"
+      }
+    }
+  },
+  "sourcesFieldServiceId": "ID сервиса",
+  "sourcesFieldServiceIdHint": "kebab-case, напр. algorand-foundation-blog",
+  "sourcesFieldDisplayName": "Отображаемое имя",
+  "sourcesFieldScrapeUrl": "URL для обхода",
+  "sourcesFieldScrapeUrlHint": "https://…, reddit://r/…, discord://channel/…",
+  "sourcesFieldMatchKind": "Тип совпадения",
+  "sourcesFieldMatchKindHint": "address / app_id / asset_id",
+  "sourcesFieldMatchValue": "Значение совпадения",
+  "sourcesFieldMatchValueHint": "напр. адрес кошелька или ID приложения",
+  "sourcesMatchRuleHelp": "Правило совпадения связывает этот источник с on-chain-активностью: когда краулер сети видит транзакцию в MainNet, у которой адрес отправителя/получателя (тип «address»), ID приложения («app_id») или ID актива («asset_id») совпадает со значением, он относит событие к этому источнику и может опубликовать статью. Для веб- или Reddit-источников это только справочно — укажите что-то описательное, например домен или сабреддит.",
+  "sourcesEnabled": "Включён",
+  "actionCancel": "Отмена",
+  "actionRefresh": "Обновить",
+  "adminTabSeeds": "Сиды",
+  "adminTabArticles": "Статьи",
+  "adminTabWriterBriefs": "Брифы автора",
+  "adminTabClassifier": "Классификатор",
+  "adminTabDomains": "Домены",
+  "adminTabToolInsights": "Инструменты",
+  "adminTabSessions": "Сессии",
+  "adminTabSystem": "Система",
+  "domainsIntro": "Граница обхода: домены, которые встретил краулер ссылок. Тупики никогда не исследуются — отмечаются автоматически по релевантности и вашим вердиктам или вручную здесь.",
+  "domainsFilterAll": "Все",
+  "domainsFilterAllCount": "Все ({count})",
+  "@domainsFilterAllCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "domainsFilterPending": "На проверке",
+  "domainsFilterPendingCount": "На проверке ({count})",
+  "@domainsFilterPendingCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "domainsFilterDeadEnds": "Тупики",
+  "domainsFilterDeadEndsCount": "Тупики ({count})",
+  "@domainsFilterDeadEndsCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "domainsEmptyTitle": "Пока нет доменов",
+  "domainsEmptyMessage": "Краулер записывает каждый домен, который встречает при переходе по ссылкам.",
+  "domainsOpenInNewTab": "Открыть {domain} в новой вкладке",
+  "@domainsOpenInNewTab": {
+    "placeholders": {
+      "domain": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsKeywords": "ключевые слова: {keywords}",
+  "@domainsKeywords": {
+    "placeholders": {
+      "keywords": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsLinkedAs": "ссылка с текстом «{text}»",
+  "@domainsLinkedAs": {
+    "placeholders": {
+      "text": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsPredictedInterest": "прогноз интереса {score}",
+  "@domainsPredictedInterest": {
+    "placeholders": {
+      "score": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsFoundOn": "найден на {url}",
+  "@domainsFoundOn": {
+    "placeholders": {
+      "url": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsScore": "оценка {score}",
+  "@domainsScore": {
+    "placeholders": {
+      "score": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsCrawled": "обход {date}",
+  "@domainsCrawled": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsPagesCrawled": "{count} страниц",
+  "@domainsPagesCrawled": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "domainsDeadEnd": "Тупик",
+  "domainsApproveExplore": "Одобрить и исследовать",
+  "domainsMarkDeadEnd": "Отметить как тупик",
+  "domainsRevive": "Восстановить",
+  "domainsApprovedSnack": "{domain} одобрен — краулер может его исследовать",
+  "@domainsApprovedSnack": {
+    "placeholders": {
+      "domain": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsDeadEndSnack": "{domain} отмечен как тупик",
+  "@domainsDeadEndSnack": {
+    "placeholders": {
+      "domain": {
+        "type": "String"
+      }
+    }
+  },
+  "domainsWalletNotConnected": "Кошелёк не подключён"
+}
