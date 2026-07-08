@@ -44,11 +44,11 @@ _cache: dict[str, object] = {"path": None, "mtime": 0.0, "html": None}
 def _resource_hints() -> str:
     hints = (
         "<script>(function(){"
-        "var cr=false;"
-        "if(navigator.userAgentData&&navigator.userAgentData.brands){"
-        "for(var i=0;i<navigator.userAgentData.brands.length;i++){"
-        "if(navigator.userAgentData.brands[i].brand==='Chromium'){cr=true;break;}}}"
-        "else if(/Chrom(e|ium)/.test(navigator.userAgent)){cr=true;}"
+        # Blink detection MUST match flutter_bootstrap.js's own browserEngine
+        # probe (navigator.vendor), not UA brands: headless Chrome reports no
+        # 'Chromium' brand yet Flutter still classes it blink and runs wasm —
+        # a brands-based check inverts the hints exactly there.
+        "var cr=navigator.vendor==='Google Inc.';"
         "var gc=false;"
         "try{gc=WebAssembly.validate(new Uint8Array("
         "[0,97,115,109,1,0,0,0,1,5,1,95,1,120,0]));}catch(e){}"
