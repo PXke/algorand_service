@@ -84,28 +84,37 @@ class ArticleCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: kindColor.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(_kickerIcon(), size: 12, color: kindColor),
-                    const SizedBox(width: 5),
-                    Text(
-                      _kicker(context),
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: kindColor,
-                        letterSpacing: 0.9,
-                        fontWeight: FontWeight.w700,
+              // Flexible + ellipsis: long localized section labels must shrink
+              // the chip, not overflow the row on narrow cards.
+              Flexible(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: kindColor.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(_kickerIcon(), size: 12, color: kindColor),
+                      const SizedBox(width: 5),
+                      Flexible(
+                        child: Text(
+                          _kicker(context),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: kindColor,
+                            letterSpacing: 0.9,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
+              const SizedBox(width: 8),
               const Spacer(),
               Text(
                 formatRelativeEpoch(context, epoch),
@@ -156,15 +165,26 @@ class ArticleCard extends StatelessWidget {
     );
 
     final sourceUrl = item['source_url']?.toString();
-    // Either the real hero image, or the source-logo / monogram fallback.
+    // Three shapes: a real hero photo (cover-cropped), a brand logo stored as
+    // the article image (contained on a tinted wash — cover would blow a small
+    // square icon into a cropped, pixelated strip), or no image at all
+    // (source-logo / monogram fallback).
     Widget buildImage(double h) => hasImage
-        ? _CardImage(
-            url: imageUrl,
-            height: h,
-            kindColor: kindColor,
-            sourceUrl: sourceUrl,
-            serviceId: serviceId,
-          )
+        ? (_looksLikeLogo(imageUrl)
+            ? _LogoFallback(
+                height: h,
+                kindColor: kindColor,
+                sourceUrl: sourceUrl,
+                serviceId: serviceId,
+                logoUrl: imageUrl,
+              )
+            : _CardImage(
+                url: imageUrl,
+                height: h,
+                kindColor: kindColor,
+                sourceUrl: sourceUrl,
+                serviceId: serviceId,
+              ))
         : _LogoFallback(
             height: h,
             kindColor: kindColor,
@@ -194,6 +214,17 @@ class ArticleCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// True when an article's stored image is a brand mark rather than a photo:
+/// the backend stores the source's icon in image_url when a story has no real
+/// share image, and icon files are unmistakable by path. These must be
+/// CONTAINED like a logo, never cover-cropped like a hero photo.
+bool _looksLikeLogo(String url) {
+  final path = (Uri.tryParse(url)?.path ?? url).toLowerCase();
+  if (path.endsWith('.svg') || path.endsWith('.ico')) return true;
+  return RegExp(r'favicon|apple-touch|/icons?[/._-]|[/._-]icons?[._-]|logo')
+      .hasMatch(path);
 }
 
 /// Feed preview image; fetches lazily so proxied hero art stays off boot.
@@ -244,6 +275,7 @@ class _LogoFallback extends StatelessWidget {
     required this.kindColor,
     this.sourceUrl,
     this.serviceId,
+    this.logoUrl,
   });
 
   final double height;
@@ -251,9 +283,14 @@ class _LogoFallback extends StatelessWidget {
   final String? sourceUrl;
   final String? serviceId;
 
+  /// When the article's own image_url IS the logo, use it directly instead of
+  /// deriving one from the source host.
+  final String? logoUrl;
+
   @override
   Widget build(BuildContext context) {
-    final logo = articleLogoUrl(sourceUrl: sourceUrl, serviceId: serviceId);
+    final logo =
+        logoUrl ?? articleLogoUrl(sourceUrl: sourceUrl, serviceId: serviceId);
     final monogram = BrandMark(size: (height * 0.34).clamp(40.0, 92.0));
 
     return Container(
