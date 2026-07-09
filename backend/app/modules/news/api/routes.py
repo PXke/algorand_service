@@ -8,6 +8,7 @@ from robyn import Request, Response
 from app.core import serialization
 from app.core.config import settings
 from app.core.http_errors import json_error_response
+from app.core.query_params import query_param
 from app.modules.news.services.news_service import NewsService
 
 
@@ -24,13 +25,12 @@ def register_news_routes(app) -> None:
 
     @app.get("/api/v1/news/feed")
     async def feed(request: Request) -> Response:
-        limit_param = request.query_params.get("limit", "")
+        limit_param = query_param(request.query_params.get("limit", ""))
         limit = int(limit_param) if limit_param.isdigit() else None
-        service_id = request.query_params.get("service_id", "") or None
-        cursor_param = request.query_params.get("cursor", "")
+        service_id = query_param(request.query_params.get("service_id", "")) or None
+        cursor_param = query_param(request.query_params.get("cursor", ""))
         cursor = int(cursor_param) if cursor_param.isdigit() else None
-        lang = request.query_params.get("lang", "") or None
-        
+        lang = query_param(request.query_params.get("lang", "")) or None
         items, next_cursor = news_service.list_feed_page(
             limit=limit, service_id=service_id, cursor_epoch_ms=cursor, lang=lang
         )
@@ -65,7 +65,7 @@ def register_news_routes(app) -> None:
         if not article_id:
             return json_error_response(400, "invalid_request", "article_id required")
             
-        lang = request.query_params.get("lang", "") or None
+        lang = query_param(request.query_params.get("lang", "")) or None
         detail = news_service.get_article(article_id, lang=lang)
         if detail is None:
             return json_error_response(404, "not_found", "Article not found")

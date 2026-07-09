@@ -11,6 +11,8 @@ import logging
 import re
 from typing import Any
 
+from app.modules.ai.chart_tools import CHART_DATA_SCHEMA, _tool_chart_data
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,24 +44,17 @@ def _tool_get_chain_head() -> dict[str, Any]:
 
 
 def _tool_get_price_history(days: int = 7) -> dict[str, Any]:
-    """Daily-ish ALGO price series for charting (x=dates, y=USD price)."""
-    from app.modules.metrics.price_metrics_store import list_recent_samples
+    """Daily-ish ALGO price series (x=dates, y=USD price).
 
-    d = max(1, min(int(days), 30))
-    samples = list_recent_samples(asset_id="algorand", lookback_days=d, limit=400)
-    pts = sorted(
-        ((row.collected_at, float(row.price_usd)) for row in samples),
-        key=lambda t: t[0],
-    )
-    # Down-sample to at most ~14 points so the chart stays readable.
-    if len(pts) > 14:
-        step = len(pts) // 14
-        pts = pts[::step]
-    return {
-        "x": [t[0].strftime("%m-%d") for t in pts],
-        "y": [round(t[1], 5) for t in pts],
-        "points": len(pts),
-    }
+    Prefer ``chart_data(dataset='algo_price')`` when you need a ```chart block
+    for the article — this returns raw x/y for inline prose only."""
+    from app.modules.ai.chart_tools import algo_price_series
+
+    pts = algo_price_series(days=days)
+    if not pts:
+        return {"error": "no price samples available", "x": [], "y": [], "points": 0}
+    labels, prices = zip(*pts, strict=True)
+    return {"x": list(labels), "y": list(prices), "points": len(labels)}
 
 
 def _tool_recent_articles(limit: int = 5) -> dict[str, Any]:
@@ -247,13 +242,14 @@ def _tool_source_history(source: str, limit: int = 8) -> dict[str, Any]:
 
 
 def _tool_review_draft(title: str, body: str) -> dict[str, Any]:
-    """Self-assessment for the writer: grade its own draft 0-10 with subscores
-    (novelty/relevance/recency/length/structure) + issues, so it can fix
-    problems once before finishing."""
+    """Self-assessment: schema heuristic + LLM rubric (narrative/depth)."""
     from app.modules.newspaper.article_grader import grade_article_draft
+    from app.modules.newspaper.article_quality_llm import grade_article_quality_llm
 
     try:
-        return grade_article_draft(title=title, body=body)
+        review = grade_article_draft(title=title, body=body)
+        review["quality"] = grade_article_quality_llm(title=title, body=body)
+        return review
     except Exception as exc:
         return {"error": str(exc)[:200], "grade": None}
 
@@ -305,6 +301,64 @@ SUGGEST_TOOL_SCHEMA: dict[str, Any] = {
     },
 }
 
+REPORT_COMPOSE_ISSUE_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "report_compose_issue",
+        "description": (
+            "Surface a problem with the compose pipeline so engineers can improve it — "
+            "confusing or contradictory PROMPT instructions, thin/stale/misleading "
+            "SOURCE DATA you were handed, an existing TOOL that misbehaved or returned "
+            "unusable results, or broader PIPELINE friction (two-stage handoff, digest "
+            "quality, missing context). Use this for operational feedback about what "
+            "you already have; if you need a capability that does not exist at all, "
+            "call suggest_tool instead. Returns no story data — call when you hit real "
+            "friction, then keep researching or writing."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["prompt", "source_data", "tool", "pipeline", "other"],
+                    "description": (
+                        "prompt = instructions confusing/contradictory; "
+                        "source_data = scraped/handoff material bad; "
+                        "tool = registered tool misbehaved; "
+                        "pipeline = process/handoff issue; other = none of the above"
+                    ),
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "One-line headline of the issue (specific, actionable)",
+                },
+                "detail": {
+                    "type": "string",
+                    "description": (
+                        "What happened, what you expected, and how it blocked or "
+                        "degraded this story (concrete examples help)"
+                    ),
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "description": (
+                        "high = could not verify a key claim or nearly wrote fiction; "
+                        "medium = meaningful workaround needed; low = minor annoyance"
+                    ),
+                },
+                "related_tool": {
+                    "type": "string",
+                    "description": (
+                        "When category is tool, the tool name involved (e.g. fetch_url)"
+                    ),
+                },
+            },
+            "required": ["category", "summary"],
+        },
+    },
+}
+
 
 # Tokens too generic to identify a capability on their own — "api", "search",
 # "lookup" etc. appear in half the suggestions and would match everything.
@@ -340,6 +394,8 @@ _CAPABILITY_ALIASES = {
     "archive": "fetch_archive_text",
     "twitter": "search_bluesky",
     "x": "search_bluesky",
+    "chart": "chart_data",
+    "plot": "chart_data",
 }
 
 
@@ -403,6 +459,49 @@ def _make_suggest_tool_handler(
     return _handler
 
 
+def _make_report_compose_issue_handler(context: dict[str, Any] | None):
+    ctx = context or {}
+
+    def _handler(
+        category: str = "",
+        summary: str = "",
+        detail: str = "",
+        severity: str = "medium",
+        related_tool: str = "",
+    ) -> dict[str, Any]:
+        from app.modules.ai.tool_insights_store import record_compose_feedback
+
+        cat = (category or "").strip().lower()
+        headline = (summary or "").strip()
+        if not headline:
+            return {"ok": False, "error": "summary required"}
+        if cat not in {"prompt", "source_data", "tool", "pipeline", "other"}:
+            return {
+                "ok": False,
+                "error": "invalid category — use prompt, source_data, tool, pipeline, or other",
+            }
+        saved = record_compose_feedback(
+            category=cat,
+            summary=headline,
+            detail=detail,
+            severity=severity,
+            related_tool=related_tool,
+            service_id=str(ctx.get("service_id", "")),
+            source_url=str(ctx.get("source_url", "")),
+            model=str(ctx.get("model", "")),
+        )
+        if not saved:
+            return {"ok": False, "error": "could not record feedback"}
+        return {
+            "ok": True,
+            "noted": headline[:120],
+            "category": cat,
+            "hint": "continue researching or writing — this report does not block you",
+        }
+
+    return _handler
+
+
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -433,7 +532,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "get_price_history",
             "description": (
-                "ALGO daily price series (x=dates, y=USD) for plotting a line or bar chart."
+                "ALGO daily price series (x=dates, y=USD) as raw arrays. For an "
+                "article chart, call chart_data(dataset='algo_price') instead — it "
+                "returns the validated ```chart fence."
             ),
             "parameters": {
                 "type": "object",
@@ -577,10 +678,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
 ]
 
+TOOL_SCHEMAS.append(CHART_DATA_SCHEMA)
+
 TOOL_HANDLERS: dict[str, Any] = {
     "get_algo_market": _tool_get_algo_market,
     "get_chain_head": _tool_get_chain_head,
     "get_price_history": _tool_get_price_history,
+    "chart_data": _tool_chart_data,
     "recent_articles": _tool_recent_articles,
     "search_platform": _tool_search_platform,
     "search_crawled_pages": _tool_search_crawled_pages,
@@ -609,6 +713,7 @@ def all_tools(
     investigative stories; empty means ungated."""
     schemas = list(TOOL_SCHEMAS)
     handlers = dict(TOOL_HANDLERS)
+    schemas.append(REPORT_COMPOSE_ISSUE_SCHEMA)
     schemas.append(SUGGEST_TOOL_SCHEMA)
     try:
         from app.core.config import INVESTIGATIVE_TOOLS_ENABLED
@@ -641,5 +746,77 @@ def all_tools(
         logger.warning("failed to load chain tools", exc_info=True)
     # Registered last, once every toolset is merged, so the already-have-it
     # check sees the FULL tool registry for this compose.
+    handlers["report_compose_issue"] = _make_report_compose_issue_handler(context)
     handlers["suggest_tool"] = _make_suggest_tool_handler(context, set(handlers))
+    if "fetch_url" in handlers:
+        handlers["fetch_url"] = _wrap_fetch_url_enqueue(
+            _wrap_fetch_url_scroll(handlers["fetch_url"], context),
+            context,
+        )
     return schemas, handlers
+
+
+def _canonical_fetch_url(url: str) -> str:
+    u = (url or "").strip()
+    if not u:
+        return ""
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u
+    return u
+
+
+def _wrap_fetch_url_scroll(handler: Any, context: dict[str, Any] | None):
+    """Track per-compose scroll position so the model only passes continue_reading."""
+    ctx = context or {}
+    offsets: dict[str, int] = ctx.setdefault("_fetch_url_offsets", {})
+    window_caps: dict[str, int] = ctx.setdefault("_fetch_url_window_caps", {})
+
+    def _wrapped(**kwargs: Any) -> dict[str, Any]:
+        from app.modules.ai.research_tools import _fetch_url_internal, _publicize_fetch_result
+
+        url = _canonical_fetch_url(str(kwargs.get("url") or ""))
+        if not url:
+            return {"error": "url required"}
+        continue_reading = bool(kwargs.get("continue_reading"))
+        max_chars = kwargs.get("max_chars") or 6000
+        if continue_reading:
+            offset = offsets.get(url, 0)
+            max_chars = window_caps.get(url, max_chars)
+        else:
+            offset = 0
+            offsets.pop(url, None)
+            window_caps[url] = max(500, min(int(max_chars), 12000))
+        raw = _fetch_url_internal(url, max_chars=max_chars, offset=offset)
+        if raw.get("error"):
+            return raw
+        next_offset = raw.get("_next_offset")
+        if raw.get("has_more") and next_offset is not None:
+            offsets[url] = int(next_offset)
+        else:
+            offsets.pop(url, None)
+            window_caps.pop(url, None)
+        return _publicize_fetch_result(raw)
+
+    return _wrapped
+
+
+def _wrap_fetch_url_enqueue(handler: Any, context: dict[str, Any] | None):
+    """After fetch_url returns, queue the canonical URL for a full crawl."""
+    ctx = context or {}
+
+    def _wrapped(**kwargs: Any) -> dict[str, Any]:
+        result = handler(**kwargs)
+        try:
+            from app.modules.crawler.writer_fetch_enqueue import maybe_enqueue_writer_fetched_url
+
+            maybe_enqueue_writer_fetched_url(
+                result,
+                is_continuation=bool(kwargs.get("continue_reading")),
+                compose_source=str(ctx.get("source_url", "")),
+                service_id=str(ctx.get("service_id", "")),
+            )
+        except Exception:
+            logger.debug("writer fetch enqueue hook failed", exc_info=True)
+        return result
+
+    return _wrapped

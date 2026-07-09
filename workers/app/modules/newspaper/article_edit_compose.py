@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from app.core.config import MISTRAL_FALLBACK_TEMPLATE, mistral_configured
 from app.modules.ai.mistral_client import MistralError
 from app.modules.newspaper.article_store import ArticleDetail
+from app.modules.newspaper.compose_lock import ComposeBusyError
 from app.modules.newspaper.content_update_compose import _summarize_diff_lines
 
 
@@ -96,6 +97,8 @@ def compose_article_edit(
             enrichment_block=enrichment_block,
         )
         return fields.title, fields.summary, fields.body, "mistral"
+    except ComposeBusyError:
+        raise
     except MistralError:
         if MISTRAL_FALLBACK_TEMPLATE:
             return (*template, "template")

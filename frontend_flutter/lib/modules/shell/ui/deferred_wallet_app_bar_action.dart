@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../core/deferred/deferred_load_pool.dart';
 import '../auth_chunk_ready.dart';
-import '../../auth/auth_entry.dart' deferred as auth;
+import '../../auth/auth_deferred_gate.dart';
 
 /// Wallet connect control — loads the auth chunk only when tapped (or when
 /// [AuthChunkPreloader] warms it in the background for returning visitors).
@@ -22,10 +22,6 @@ class _DeferredWalletAppBarActionState extends State<DeferredWalletAppBarAction>
   void initState() {
     super.initState();
     if (authChunkReady.value) {
-      // The chunk is fetched, but THIS import prefix still needs its own
-      // loadLibrary() before auth.* can be built — dart2wasm tracks deferred
-      // loads per import site (dart2js is laxer, which masked this on the
-      // JS build).
       _load();
     } else {
       authChunkReady.addListener(_onChunkReady);
@@ -45,7 +41,9 @@ class _DeferredWalletAppBarActionState extends State<DeferredWalletAppBarAction>
   }
 
   Future<void> _load() async {
-    _library ??= serializeDeferredLoad(() => auth.loadLibrary());
+    // One auth deferred-import site ([loadAuthModule]); still serialize so we
+    // do not race other chunks on the global queue.
+    _library ??= serializeDeferredLoad(loadAuthModule);
     await _library;
     authChunkReady.value = true;
     if (mounted) setState(() => _ready = true);
@@ -54,7 +52,7 @@ class _DeferredWalletAppBarActionState extends State<DeferredWalletAppBarAction>
   @override
   Widget build(BuildContext context) {
     if (_ready) {
-      return auth.WalletAppBarAction();
+      return buildWalletAppBarAction();
     }
     return IconButton(
       tooltip: 'Wallet',

@@ -60,6 +60,31 @@ def extract_page_links(
     return same, external
 
 
+def _expected_preview_failure(exc: BaseException) -> bool:
+    """Routine fetch failures on the frontier — dead DNS, blocked hosts, timeouts."""
+    import httpx
+
+    from app.modules.scraper.core.scrape_cooldown import is_permanent_failure
+
+    if is_permanent_failure(exc):
+        return True
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {
+        401,
+        403,
+        404,
+        410,
+        429,
+        500,
+        502,
+        503,
+        504,
+    }:
+        return True
+    return False
+
+
 def fetch_domain_preview(url: str) -> dict[str, str]:
     """Lightweight peek at a candidate domain: title + meta description +
     keywords only. One GET, no link-following, no storage, no Mistral — just
@@ -95,8 +120,13 @@ def fetch_domain_preview(url: str) -> dict[str, str]:
             (out["preview_title"], out["preview_description"], out["preview_keywords"])
         )
         out["preview_score"] = f"{score_content_for_storage(blob, url):.1f}"
-    except Exception:
-        logger.warning("failed to fetch domain preview for %s", url, exc_info=True)
+    except Exception as exc:
+        if _expected_preview_failure(exc):
+            logger.info("domain preview unavailable for %s: %s", url, exc)
+        else:
+            logger.warning(
+                "failed to fetch domain preview for %s: %s", url, exc, exc_info=True
+            )
     return out
 
 

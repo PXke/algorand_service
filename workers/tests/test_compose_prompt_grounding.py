@@ -34,16 +34,12 @@ def test_narrative_guidance_carries_grounding_to_stage_two():
     assert "GROUNDING RULES" in mc._NARRATIVE_GUIDANCE
     assert "competitor products" in mc._NARRATIVE_GUIDANCE
     assert "undocumented" in mc._NARRATIVE_GUIDANCE
-    # The problem->solution frame must not demand mechanics the research
-    # didn't return.
-    assert "borrowed from similar products" in mc._NARRATIVE_GUIDANCE
+    assert "transplanted onto the story's subject" in mc._NARRATIVE_GUIDANCE
 
 
-def test_stakes_rule_no_longer_forces_a_rationale(monkeypatch):
-    """'Establish the Stakes' used to read 'never announce ... without
-    immediately explaining ...', which forced an explanation to exist even
-    when no source documented one. Both system prompts must now carry the
-    verified-material bound instead."""
+def test_stakes_rule_allows_algorand_expert_knowledge(monkeypatch):
+    """Thin sources must not block layer-1 explanation — use protocol expertise,
+    not invented partnerships or quotes."""
     captured = {}
 
     def _fake_via_tools(**kwargs):
@@ -62,8 +58,10 @@ def test_stakes_rule_no_longer_forces_a_rationale(monkeypatch):
         is_first_snapshot=True,
         client=SimpleNamespace(),
     )
-    assert "never construct a" in captured["system"]
-    assert "never announce a technical upgrade" not in captured["system"]
+    system = captured["system"]
+    assert "expert knowledge of Algorand" in system
+    assert "Do not invent false quotes" in system
+    assert "never announce a technical upgrade" not in system
 
 
 def test_first_coverage_allows_honest_doc_gaps(monkeypatch):
@@ -90,3 +88,73 @@ def test_first_coverage_allows_honest_doc_gaps(monkeypatch):
     )
     assert "FIRST COVERAGE MODE" in captured["system"]
     assert "reconstructing how it must work" in captured["system"]
+
+
+def test_writer_prompt_bans_pr_fluff_and_narrative_bullets(monkeypatch):
+    captured = {}
+
+    def _fake_via_tools(**kwargs):
+        captured.update(kwargs)
+        return mc.MistralArticleFields(title="t", summary="s", body="b")
+
+    monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
+    mc.compose_scrape_article_mistral(
+        service_name="Example",
+        source_url="https://example.com/",
+        page_title="example",
+        page_text="Algorand tooling page " * 30,
+        txid="tx",
+        round_num=1,
+        diff=None,
+        is_first_snapshot=True,
+        client=SimpleNamespace(),
+    )
+    system = captured["system"]
+    assert "BANNED PHRASES" in system
+    assert "groundbreaking" in system
+    assert "strictly prohibited from using bulleted lists" in system
+    assert "Concept' and the 'Real-World Implication'" in system
+    assert "JSON SAFETY" in system
+    assert "comma-separated sentences" in system
+
+
+def test_narrative_guidance_anchors_length_to_facts():
+    assert "Scale the word count strictly to the volume of verified facts" in mc._NARRATIVE_GUIDANCE
+    assert "400-600" not in mc._NARRATIVE_GUIDANCE
+
+
+def test_research_digest_synthesis_schema():
+    assert "Verified Facts" in mc._RESEARCH_DIGEST_SYNTHESIS
+    assert "Verbatim Quotes" in mc._RESEARCH_DIGEST_SYNTHESIS
+    assert "READY" not in mc._RESEARCH_PHASE_GUIDANCE
+
+
+def test_research_phase_truncation_discipline():
+    assert "TRUNCATION DISCIPLINE" in mc._RESEARCH_PHASE_GUIDANCE
+    assert "continue_reading=true" in mc._RESEARCH_PHASE_GUIDANCE
+    assert "start_char" not in mc._RESEARCH_PHASE_GUIDANCE
+
+
+def test_stage2_digest_only_no_tools():
+    assert "NO tools" in mc._STAGE2_GENERATION_GUIDANCE
+    assert "Research Digest" in mc._STAGE2_GENERATION_GUIDANCE
+
+
+def test_technical_stakes_bridges_algorand_layer1():
+    guidelines = mc._writing_guidelines("2026-07-09")
+    assert "layer-1 architecture" in guidelines
+    assert "legacy friction" in guidelines
+    assert "Pure Proof-of-Stake" in guidelines
+
+
+def test_narrative_guidance_requires_data_table():
+    assert "DATA PRESENTATION" in mc._NARRATIVE_GUIDANCE
+    assert "Concept' and 'Real-World Implication'" in mc._NARRATIVE_GUIDANCE
+    assert "expert knowledge of Algorand layer-1" in mc._NARRATIVE_GUIDANCE
+
+
+def test_build_stage2_user_omits_tool_trace():
+    user = mc._build_stage2_user(user="base", digest="## Verified Facts\n- fact")
+    assert "Research Digest" in user
+    assert "cannot call tools" in user
+    assert "fact" in user

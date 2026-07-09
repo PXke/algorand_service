@@ -76,12 +76,10 @@ def _structure_score(body: str) -> float:
     text = body or ""
     paragraphs = [p for p in re.split(r"\n\s*\n", text) if p.strip()]
     has_heading = bool(re.search(r"(^|\n)\s*(#{1,4}\s+\S|\*\*[^\n*]+\*\*\s*$)", text, re.MULTILINE))
-    has_list = bool(re.search(r"(^|\n)\s*([-*+]\s+\S|\d+\.\s+\S)", text))
     has_table = bool(re.search(r"(^|\n)\s*\|.*\|.*\|", text))  # a 3+ cell markdown row
     # Structure means *scannable* structure, not length. A wall of raw text —
-    # paragraphs but no heading, list, or table — tops out low no matter how
-    # many blank lines it has; real structure needs a heading and at least one
-    # heading/list/table element.
+    # paragraphs but no heading or table — tops out low no matter how many blank
+    # lines it has; real structure needs a heading and/or a data table.
     score = 0.0
     if len(paragraphs) >= 2:
         score += 0.25
@@ -89,7 +87,7 @@ def _structure_score(body: str) -> float:
         score += 0.10
     if has_heading:
         score += 0.35
-    if has_list or has_table:
+    if has_table:
         score += 0.30
     return min(1.0, score)
 
@@ -252,6 +250,60 @@ def recent_content_similarity(title: str, text: str = "") -> tuple[float, str]:
     return best_sim, best_title
 
 
+def grade_article_schema(
+    *,
+    title: str,
+    summary: str,
+    body: str,
+) -> dict:
+    """Deterministic schema/structure checks only — not qualitative journalism."""
+    from app.core.config import LENGTH_OK_MAX_WORDS, LENGTH_OK_MIN_WORDS
+    from app.modules.gatekeeper.structure import evaluate_structure
+
+    words = len((body or "").split())
+    length_score = _length_score(words)
+    struct = evaluate_structure(body)
+    structure_score = (sum(h.passed for h in struct) / len(struct)) if struct else 1.0
+    has_heading = bool(re.search(r"(^|\n)\s*#{1,4}\s+\S", body or "", re.MULTILINE))
+    has_table = bool(re.search(r"(^|\n)\s*\|.*\|.*\|", body or ""))
+
+    issues: list[str] = []
+    if len(title or "") > 120:
+        issues.append("schema — title exceeds 120 characters")
+    if len(summary or "") > 280:
+        issues.append("schema — summary exceeds 280 characters")
+    if words < LENGTH_OK_MIN_WORDS:
+        issues.append(f"short ({words} words) — fine only if the source is genuinely thin")
+    if words > LENGTH_OK_MAX_WORDS:
+        issues.append(f"too long ({words} words) — over {LENGTH_OK_MAX_WORDS}; cut padding/filler")
+    if not has_heading:
+        issues.append("schema — body needs at least one ## section header")
+    issues.extend(f"structure — {h.name}: {h.observed}" for h in struct if not h.passed)
+
+    # Multi-item comma dumps without a table (light heuristic).
+    if not has_table and re.search(
+        r"(?:,\s+\w+){4,}", " ".join((body or "").splitlines()[:40])
+    ):
+        issues.append(
+            "schema — multi-item data buried in comma-separated prose; use a "
+            "Markdown table with Concept and Real-World Implication columns"
+        )
+
+    grade = round(10.0 * (structure_score * 0.55 + length_score * 0.45), 1)
+    return {
+        "grade": grade,
+        "model": "schema_heuristic",
+        "subscores": {
+            "structure": round(structure_score, 2),
+            "length": round(length_score, 2),
+        },
+        "issues": issues,
+        "word_count": words,
+        "has_table": has_table,
+        "has_heading": has_heading,
+    }
+
+
 def grade_article_draft(
     *,
     title: str,
@@ -259,32 +311,19 @@ def grade_article_draft(
     source_url: str = "",
     published_at: str = "",
     tags: tuple[str, ...] = (),
+    summary: str = "",
 ) -> dict:
-    """Grade a draft 0-10 with subscores and concrete issues for the reviewer/writer.
+    """Grade a draft: schema heuristic (grade/issues) plus informational signals.
 
-    Quality = STRUCTURE only. Length is LAX (any piece in [250, 2000] words is
-    fine, never a target); research depth is enforced mechanically in Stage 1's
-    research floor; and specificity was dropped — it's an opaque metric that just
-    confused the model. So the grade only judges what a rewrite can actually fix."""
-    from app.core.config import (
-        LENGTH_OK_MAX_WORDS,
-        LENGTH_OK_MIN_WORDS,
-        PAGE_STALE_MAX_AGE_DAYS,
-    )
+    The headline ``grade`` is schema/structure only. Qualitative journalism
+    (narrative synthesis, Algorand technical depth) is scored separately via
+    ``grade_article_quality_llm`` during compose revision."""
+    schema = grade_article_schema(title=title, summary=summary, body=body)
+
+    # Informational signals for telemetry / human review — NOT fused into grade.
+    from app.core.config import PAGE_STALE_MAX_AGE_DAYS
     from app.modules.gatekeeper.fact_align import content_recency_score
-    from app.modules.gatekeeper.structure import evaluate_structure
 
-    words = len(body.split())
-    length_score = _length_score(words)
-
-    # Structure: deterministic Markdown heuristics (headings/tables/lists +
-    # citation density). The pass-fraction is the structure subscore; individual
-    # failures are surfaced as issues.
-    struct = evaluate_structure(body)
-    structure_score = (sum(h.passed for h in struct) / len(struct)) if struct else 1.0
-
-    # --- separate signals: gates + selection ranking handle these, so they are
-    # NOT fused into the grade (that would double-count them). ------------------
     try:
         from app.modules.search.classifier.score import score_page
 
@@ -292,81 +331,43 @@ def grade_article_draft(
     except Exception:
         relevance_score = 0.5
 
-    # Recency from the most recent DATE mentioned in the text vs today
-    # (deterministic), not the publish timestamp — catches freshly-published
-    # rehashes of old events.
     recency_score = content_recency_score(
         f"{title}\n{body}", stale_days=max(1, PAGE_STALE_MAX_AGE_DAYS)
     )
     if recency_score is None:
-        recency_score = 0.75  # neutral when the text names no parseable date
+        recency_score = 0.75
 
-    # Novelty: deterministic similarity vs recent articles (corpus comparison).
     try:
         recent = _recent_articles()
     except Exception:
         recent = []
-    closest_sim, _closest_title = _closest_similarity(_tokens(title), recent)
+    closest_sim, closest_title = _closest_similarity(_tokens(title), recent)
     novelty_score = max(0.0, 1.0 - closest_sim)
 
-    subscores = {
-        "novelty": round(novelty_score, 2),
-        "relevance": round(relevance_score, 2),
-        "recency": round(recency_score, 2),
-        "length": round(length_score, 2),
-        "structure": round(structure_score, 2),
-    }
-    # GRADE = structure + length(band) + recency (chosen 2026-06-22). Length is a
-    # LAX band (1.0 across 250-2000, only extremes hurt) so there's still no target
-    # to pad toward. Specificity stays dropped (opaque, confused the model); novelty
-    # and relevance stay excluded (gates + publish ranking, avoid double-counting);
-    # research depth is enforced in Stage 1, not graded.
-    quality_weights = {"structure": 0.50, "length": 0.25, "recency": 0.25}
-    vals = {
-        "structure": structure_score,
-        "length": length_score,
-        "recency": recency_score,
-    }
-    model_kind = "heuristic"
-    proba = None
-    try:
-        from app.modules.gatekeeper.live import quality_proba
-
-        proba = quality_proba(title=title, body=body, source_url=source_url)
-        if proba is not None:
-            model_kind = "gatekeeper"
-    except Exception:
-        proba = None
-    if proba is not None:
-        grade = round(10.0 * proba, 1)
-    else:
-        grade = round(10.0 * sum(vals[k] * w for k, w in quality_weights.items()), 1)
-
-    issues: list[str] = []
-    # Length is lax: only the extremes matter. "too short" is informational (a
-    # thin source legitimately yields a short piece); "too long" is a fixable
-    # padding signal the revision can trim.
-    if words < LENGTH_OK_MIN_WORDS:
-        issues.append(f"short ({words} words) — fine only if the source is genuinely thin")
-    if words > LENGTH_OK_MAX_WORDS:
-        issues.append(f"too long ({words} words) — over {LENGTH_OK_MAX_WORDS}; cut padding/filler")
+    issues = list(schema["issues"])
+    signals: list[str] = []
     if novelty_score < 0.5:
-        issues.append("low novelty — very close to a recent article; add a fresh angle or skip")
+        signals.append("low novelty — very close to a recent article; add a fresh angle or skip")
     if recency_score < 0.4:
-        issues.append(
+        signals.append(
             "stale — source/event is old with no current-month hook; frame as a "
-            "status update (not breaking news), avoid future-tense for the current "
-            "year, and anchor with live chain metrics (TVL, node counts) you fetched"
+            "status update (not breaking news)"
         )
     if relevance_score < 0.4:
-        issues.append("weak Algorand relevance — tie it more directly to Algorand")
-    issues.extend(f"structure — {h.name}: {h.observed}" for h in struct if not h.passed)
+        signals.append("weak Algorand relevance — tie it more directly to Algorand")
 
     return {
-        "grade": grade,
-        "model": model_kind,
-        "subscores": subscores,
+        "grade": schema["grade"],
+        "model": schema["model"],
+        "subscores": {
+            **schema["subscores"],
+            "novelty": round(novelty_score, 2),
+            "relevance": round(relevance_score, 2),
+            "recency": round(recency_score, 2),
+        },
         "issues": issues,
-        "word_count": words,
+        "signals": signals,
+        "word_count": schema["word_count"],
         "closest_similarity": round(closest_sim, 2),
+        "closest_title": closest_title,
     }

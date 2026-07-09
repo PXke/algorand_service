@@ -26,6 +26,12 @@ _MESSAGE_OVERHEAD_TOKENS = 4
 
 _ELIDED = json.dumps({"note": "[earlier tool result elided to fit the context window]"})
 
+_SERIALIZER_TRUNCATION_BANNER = (
+    "\n\n[... TEXT TRUNCATED BY SERIALIZER TO FIT CONTEXT BUDGET. "
+    "{omitted:,} CHARACTERS OMITTED. USE TARGETED SEARCHES, fetch_url WITH "
+    "continue_reading=true, OR SPECIFIC SUB-LINKS TO ACCESS OMITTED SECTIONS ...]"
+)
+
 
 def estimate_tokens(text: str) -> int:
     """Rough token count for a string (no tokenizer dep). See _CHARS_PER_TOKEN."""
@@ -64,11 +70,26 @@ def serialize_tool_result(result: Any, max_chars: int) -> str:
         if str_fields:
             biggest = max(str_fields, key=lambda k: len(result[k]))
             overflow = len(blob) - max_chars
-            keep = max(0, len(result[biggest]) - overflow - 80)
+            # Reserve space for the explicit truncation banner inside the field.
+            banner_reserve = 220
+            keep = max(0, len(result[biggest]) - overflow - banner_reserve)
+            omitted = len(result[biggest]) - keep
+            banner = _SERIALIZER_TRUNCATION_BANNER.format(omitted=max(0, omitted))
             trimmed = dict(result)
-            trimmed[biggest] = result[biggest][:keep] + "…[truncated to fit context]"
+            trimmed[biggest] = result[biggest][:keep] + banner
+            trimmed["_serializer_truncated"] = True
+            trimmed["_truncated_chars_omitted"] = max(0, omitted)
             trimmed["_truncated"] = True
             blob2 = json.dumps(trimmed)
+            if len(blob2) > max_chars:
+                # Shrink the text slice until the full JSON fits.
+                while keep > 0 and len(blob2) > max_chars:
+                    keep = max(0, keep - 500)
+                    omitted = len(result[biggest]) - keep
+                    banner = _SERIALIZER_TRUNCATION_BANNER.format(omitted=max(0, omitted))
+                    trimmed[biggest] = result[biggest][:keep] + banner
+                    trimmed["_truncated_chars_omitted"] = max(0, omitted)
+                    blob2 = json.dumps(trimmed)
             if len(blob2) <= max_chars:
                 return blob2
             blob = blob2

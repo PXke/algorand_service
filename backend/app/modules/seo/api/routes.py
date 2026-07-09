@@ -18,6 +18,7 @@ from app.core import serialization
 from app.core.article_translation_langs import html_lang_for
 from app.core.config import settings
 from app.core.http_errors import json_error_response
+from app.core.query_params import query_param
 from app.modules.news.services.news_service import NewsService
 from app.modules.seo import analytics_store, feeds, render, shell, sitemap
 from app.modules.seo.markdown import md_to_html
@@ -48,12 +49,12 @@ def _doc_response(
     head, body = parts
     if tracked_path:
         body = shell.ssr_track_snippet(tracked_path) + body
-    html = shell.render_document(head, body, html_lang=html_lang)
-    if html is None:
+    document = shell.render_document(head, body, html_lang=html_lang)
+    if document is None:
         # Shell template not found — still return valid HTML AND boot Flutter
         # (the bootstrap script must be present or the app renders a blank page).
         track = shell.ssr_track_snippet(tracked_path) if tracked_path else ""
-        html = (
+        document = (
             f'<!DOCTYPE html><html lang="{html.escape(html_lang, quote=True)}"><head><base href="/">'
             f"{head}</head><body>{track}{body}"
             '<script src="/flutter_bootstrap.js" async></script>'
@@ -62,7 +63,7 @@ def _doc_response(
     return Response(
         status_code=status,
         headers={"Content-Type": "text/html; charset=utf-8", "Cache-Control": cache},
-        description=html,
+        description=document,
     )
 
 
@@ -194,7 +195,7 @@ def register_seo_routes(app) -> None:
     async def article(request: Request) -> Response:
         article_id = request.path_params.get("article_id", "")
         qp = _query_params(request)
-        lang = (qp.get("lang") or "").strip() or None
+        lang = query_param(qp.get("lang")) or None
         if lang == "en":
             lang = None
         detail = news.get_article(article_id, lang=lang) if article_id else None

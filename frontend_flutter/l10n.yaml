@@ -2,3 +2,6 @@ arb-dir: lib/l10n
 template-arb-file: app_en.arb
 output-localization-file: app_localizations.dart
 nullable-getter: false
+# Web only: each locale becomes a deferred import so visitors download one
+# language instead of all nine in main.dart.js.
+use-deferred-loading: true

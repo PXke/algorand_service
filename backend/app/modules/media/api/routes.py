@@ -23,11 +23,17 @@ _CACHE_TTL = 86_400  # 24h: serve the same image from Redis instead of re-fetchi
 _UA = "algorand-platform-image-proxy/1.0 (+https://algorand.pxke.me)"
 # Optimisation caps: article heroes/cards never render wider than ~1200 CSS px,
 # but sources ship multi-MB OG PNGs (one page weighed 10MB of images). Resize
-# down + re-encode WebP before caching; pass through SVG/GIF and tiny files.
+# down + re-encode WebP before caching; pass through GIFs and tiny files.
 _MAX_DIM = 1200
 _WEBP_QUALITY = 80
 _OPTIMIZE_MIN_BYTES = 30_000
-# 1×1 transparent WebP returned when upstream has no image (favicon misses,
+# CanvasKit (Flutter web) cannot decode SVG or ICO, so those are ALWAYS
+# converted: SVG rasterized to PNG via resvg, ICO re-encoded via Pillow —
+# regardless of size. 512px is plenty for card logos, the largest way these
+# render.
+_SVG_RASTER_DIM = 512
+_ICO_TYPES = frozenset({"image/x-icon", "image/vnd.microsoft.icon", "image/ico", "image/icon"})
+# 1x1 transparent WebP returned when upstream has no image (favicon misses,
 # broken OG URLs). Keeps Lighthouse console clean and lets Image.network paint
 # without a failed XHR.
 _PLACEHOLDER_WEBP = (
@@ -38,9 +44,9 @@ _PLACEHOLDER_WEBP = (
 
 
 def _cache_key(url: str) -> str:
-    # v2: cache holds the OPTIMIZED copy — new prefix so pre-optimisation fat
-    # entries age out instead of being served for another TTL.
-    return f"imgproxy2:{hashlib.sha256(url.encode()).hexdigest()}"
+    # v3: SVG/ICO now rasterized — new prefix so cached raw SVG/ICO entries
+    # age out instead of being served (blank tiles) for another TTL.
+    return f"imgproxy3:{hashlib.sha256(url.encode()).hexdigest()}"
 
 
 def _redis():
@@ -115,11 +121,31 @@ def _fetch_image(url: str) -> httpx.Response | None:
     return None
 
 
+def _rasterize_svg(data: bytes) -> tuple[str, bytes] | None:
+    """SVG → PNG via resvg. None when the SVG can't be parsed."""
+    try:
+        import resvg_py
+
+        svg = data.decode("utf-8", errors="replace")
+        # width-only render keeps the aspect ratio.
+        return "image/png", bytes(resvg_py.svg_to_bytes(svg_string=svg, width=_SVG_RASTER_DIM))
+    except Exception:
+        return None
+
+
 def _optimize(ctype: str, data: bytes) -> tuple[str, bytes]:
-    """Downscale to <=_MAX_DIM px and re-encode as WebP. Pass through SVGs
-    (not raster), GIFs (animation), tiny files, and anything Pillow can't
-    read; keep the original whenever it is already smaller. Never upscales."""
-    if ctype in ("image/svg+xml", "image/gif") or len(data) < _OPTIMIZE_MIN_BYTES:
+    """Downscale to <=_MAX_DIM px and re-encode as WebP. SVG and ICO are always
+    converted to raster formats CanvasKit can decode (a passed-through SVG
+    renders as a blank/monogram tile in Flutter web). GIFs (animation), tiny
+    raster files, and anything Pillow can't read pass through; the original is
+    kept whenever it is already smaller. Never upscales."""
+    if ctype.startswith("image/svg"):
+        return _rasterize_svg(data) or (ctype, data)
+    if ctype == "image/gif":
+        return ctype, data
+    # ICO must be converted even when tiny; other small rasters pass through.
+    force_convert = ctype in _ICO_TYPES
+    if not force_convert and len(data) < _OPTIMIZE_MIN_BYTES:
         return ctype, data
     try:
         from io import BytesIO
@@ -127,6 +153,9 @@ def _optimize(ctype: str, data: bytes) -> tuple[str, bytes]:
         from PIL import Image
 
         img = Image.open(BytesIO(data))
+        if force_convert and img.format == "ICO":
+            # Pillow opens the first frame; ask for the largest embedded size.
+            img.size = max(img.info.get("sizes") or {img.size})
         img.load()
         if max(img.size) > _MAX_DIM:
             img.thumbnail((_MAX_DIM, _MAX_DIM), Image.LANCZOS)
@@ -136,7 +165,7 @@ def _optimize(ctype: str, data: bytes) -> tuple[str, bytes]:
         out = BytesIO()
         img.save(out, format="WEBP", quality=_WEBP_QUALITY, method=4)
         optimized = out.getvalue()
-        if len(optimized) < len(data):
+        if force_convert or len(optimized) < len(data):
             return "image/webp", optimized
         return ctype, data
     except Exception:

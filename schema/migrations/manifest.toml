@@ -461,3 +461,11 @@ file = "backend/schema/migrations/app/049_publish_queue_reason.cql"
 tier = "prod"
 status = "active"
 description = "publish_queue: last_reason column so drain/compose skip and resolve reasons persist for the admin queue view instead of vanishing with the Celery task return"
+
+[[migrations]]
+stream = "app"
+version = "050"
+file = "backend/schema/migrations/app/050_compose_feedback.cql"
+tier = "prod"
+status = "active"
+description = "compose_feedback: writer-reported prompt/data/tool/pipeline issues (report_compose_issue)"

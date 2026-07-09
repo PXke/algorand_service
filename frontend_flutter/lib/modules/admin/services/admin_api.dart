@@ -295,6 +295,18 @@ class AdminApi {
     return items.whereType<Map<String, dynamic>>().toList();
   }
 
+  Future<List<Map<String, dynamic>>> listComposeFeedback({
+    required String walletAddress,
+  }) async {
+    final body = await _client.getJson(
+      '/api/v1/admin/compose-feedback',
+      headers: _adminHeaders(walletAddress),
+    );
+    final items = body['items'];
+    if (items is! List) return const [];
+    return items.whereType<Map<String, dynamic>>().toList();
+  }
+
   /// Summary only (status/timing) — no messages/final_output. Cheap enough to
   /// poll; fetch a transcript on demand via [getComposeSessionDetail].
   Future<List<Map<String, dynamic>>> listComposeSessions({

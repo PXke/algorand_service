@@ -468,6 +468,12 @@ class ToolInsightStmts:
         "service_id, source_url, model, resolved"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
+    INSERT_COMPOSE_FEEDBACK = _Stmt(
+        "INSERT INTO algorand_platform.compose_feedback ("
+        "bucket, created_at, feedback_id, category, severity, summary, detail, "
+        "related_tool, service_id, source_url, model"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
     INSERT_COMPOSE_SESSION = _Stmt(
         "INSERT INTO algorand_platform.compose_sessions ("
         "bucket, created_at, session_id, service_id, source_url, model, "

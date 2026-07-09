@@ -593,6 +593,7 @@ def register_admin_routes(app) -> None:
             "service_events",
             # Writer introspection — orphaned once articles are wiped, so reset too.
             "tool_suggestions",
+            "compose_feedback",
             "investigation_findings",
             "compose_sessions",
         )
@@ -765,6 +766,39 @@ def register_admin_routes(app) -> None:
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                     "capability": r.capability or "",
                     "reason": r.reason or "",
+                    "service_id": r.service_id or "",
+                    "source_url": r.source_url or "",
+                    "model": r.model or "",
+                }
+                for r in rows
+            ]
+            return {"items": items}
+
+        import asyncio
+
+        return await asyncio.to_thread(_compute)
+
+    @app.get("/api/v1/admin/compose-feedback")
+    async def admin_list_compose_feedback(request: Request) -> Response:
+        """Writer-reported prompt/data/tool/pipeline issues (report_compose_issue)."""
+        denied = require_admin_wallet(request)
+        if denied is not None:
+            return denied
+
+        def _compute() -> dict:
+            from app.core.cassandra import get_cassandra_session
+            from app.core.statements import ToolInsightStmts
+
+            session = get_cassandra_session()
+            rows = session.execute(ToolInsightStmts.LIST_COMPOSE_FEEDBACK, ("all",))
+            items = [
+                {
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "category": r.category or "",
+                    "severity": r.severity or "",
+                    "summary": r.summary or "",
+                    "detail": r.detail or "",
+                    "related_tool": r.related_tool or "",
                     "service_id": r.service_id or "",
                     "source_url": r.source_url or "",
                     "model": r.model or "",

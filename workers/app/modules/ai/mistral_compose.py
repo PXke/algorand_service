@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import logging
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from app.modules.ai.mistral_client import (
     MistralError,
     get_mistral_client,
     get_mistral_digest_client,
+    get_mistral_research_client,
 )
 from app.modules.ai.reference_block import append_reference_block
 from app.modules.metrics.price_metrics_store import load_mistral_context
@@ -26,7 +28,7 @@ logger = logging.getLogger(__name__)
 # guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
 # every stored article so analytics can correlate a prompt edit with a shift in
 # grades/engagement instead of guessing from deploy timestamps.
-PROMPT_VERSION = "2026-07-02"
+PROMPT_VERSION = "2026-07-10d"
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,92 @@ _STRICT_QUOTE_GROUNDING = (
     "verbatim quote, describe the action in objective third-person prose instead. A "
     "fabricated quote is the single most damaging error you can make.\n"
 )
+
+_BANNED_LEXICON = (
+    "\nBANNED PHRASES: Do not use: groundbreaking, revolutionize, game-changer, "
+    "seamless, unleashes, paves the way, cutting-edge, innovative (when used as "
+    "empty filler), exciting, thrilled to announce. State what the technology does "
+    "objectively.\n"
+)
+
+
+def _writing_guidelines(today: str) -> str:
+    """Core editorial contract shared by scrape and assignment compose paths."""
+    return (
+        "WRITING GUIDELINES:\n"
+        "- Tone: Professional, objective, and dense with information. Strictly avoid "
+        "sensationalism, marketing speak, and fluffy language. The writing must sound "
+        "distinctly human and authoritative.\n"
+        "- Narrative Synthesis: Identify the connective tissue between your research "
+        "findings. Weave distinct developments into a unified, flowing narrative. "
+        "You are strictly prohibited from using bulleted lists to summarize events, "
+        "features, or updates.\n"
+        "- Technical Stakes & Depth: Ground abstract announcements in specific "
+        "architecture. You must explicitly bridge the announcement to the underlying "
+        "layer-1 architecture. If the verified material mentions a partnership or "
+        "deployment, identify the specific legacy friction being eliminated AND "
+        "explain why Algorand's specific infrastructure (e.g., throughput, Pure "
+        "Proof-of-Stake finality, ASA tokenization, state proofs) is the logical "
+        "solution — do not just name-drop the foundation. If the source material "
+        "lacks technical depth, you MUST use your expert knowledge of Algorand's "
+        "layer-1 infrastructure to explain the theoretical mechanisms that solve "
+        "the identified real-world friction. Do not invent false quotes, "
+        "partnerships, or numbers, but DO explain the underlying technology.\n"
+        "- Concrete Scenarios: Translate abstract blockchain concepts into concrete "
+        "operational scenarios to make the implications vivid for the reader.\n"
+        "- Audience: Intelligent general readers who are NOT crypto specialists. "
+        "Briefly explain blockchain/DeFi/Algorand jargon in plain language on first "
+        "use, spell out acronyms once, and never assume prior crypto knowledge.\n"
+        f"- Recency & Temporal Anchoring: Today is {today} (UTC). Source pages often "
+        "contain outdated figures. Never present a number, price, ranking, TVL/volume, "
+        "or 'current' claim as present-day unless the source clearly dates it to "
+        "recently. If source material is several months old, DO NOT write as if the "
+        "announcement just happened. For figures that should reflect the present "
+        "(ALGO price, market data, chain stats), prefer live tools over stale page "
+        "numbers.\n"
+        "- Accuracy: Use only facts from the source material; never invent quotes, "
+        "numbers, or on-chain events. Never put raw transaction IDs, round numbers, "
+        "or 'Service:' labels in the body.\n"
+        "- STRICT QUOTE GROUNDING: Never include a quotation unless that exact "
+        "word-for-word text is visible in a tool result.\n"
+    )
+
+
+def _writer_system_lead(*, assignment: bool = False) -> str:
+    if assignment:
+        return (
+            "You are an expert journalist and technical writer for a premier "
+            "Algorand-focused media outlet. You have been assigned an original story "
+            "by an editor — it has NOT been pre-researched, so your job is to "
+            "investigate it yourself with your tools and then write a dense, "
+            "high-signal article from what you verify.\n\n"
+        )
+    return (
+        "You are an expert journalist and technical writer for a premier "
+        "Algorand-focused media outlet. Your goal is to synthesize verified research "
+        "into captivating, high-signal, and highly professional news articles based "
+        "on provided source material.\n\n"
+    )
+
+
+def _writer_system_prompt(today: str, *, assignment: bool = False) -> str:
+    assignment_extra = ""
+    if assignment:
+        assignment_extra = (
+            "- Editorial briefs are starting pointers, NOT verified fact — confirm "
+            "everything via your tools this session before relying on them. If your "
+            "research cannot substantiate the assigned topic, say so plainly rather "
+            "than inventing content.\n"
+        )
+    return (
+        _writer_system_lead(assignment=assignment)
+        + _writing_guidelines(today)
+        + assignment_extra
+        + _BANNED_LEXICON
+        + _ARTICLE_FORMAT_RULES
+        + "\n"
+        + _JSON_ONLY
+    )
 
 # Shared guidance appended to the system prompt when the agentic tool loop is on.
 # The ALGO PRICE/MARKET RULE is deliberate: the small model used to fetch the
@@ -143,6 +231,11 @@ _TOOLS_GUIDANCE = (
     "hard walls: a fact you worked around with a weaker source, or could verify less "
     "than you wanted, counts too. suggest_tool returns no data and never blocks the "
     "article — naming these gaps is part of the job, not an exception.\n"
+    "PIPELINE FEEDBACK: when instructions, source material, an existing tool, or "
+    "the research→write handoff genuinely blocked or degraded your work, call "
+    "report_compose_issue with a specific category and summary (use suggest_tool "
+    "only for capabilities that do not exist yet). This feeds engineering — report "
+    "real friction, not nitpicks, then continue.\n"
     "SELF-REVIEW (MANDATORY — every article, no exceptions): you MUST call "
     "review_draft at least once before you finish; do NOT output the final JSON "
     "until you have. When the draft is complete, call review_draft with your "
@@ -151,8 +244,9 @@ _TOOLS_GUIDANCE = (
     "structure) and a list of concrete issues. If the grade is below ~7 or any "
     "issues are listed, REVISE the draft to fix them — work toward the target "
     "length the review reports (a well-developed piece, not a short stub) WITHOUT "
-    "inventing facts to pad it, and give it scannable structure (a heading plus at "
-    "least one list or table). If you cannot reach the length on real material, "
+    "inventing facts to pad it, and give it scannable structure (section headings plus "
+    "a Markdown table when comparative data is present — never narrative bullet lists). "
+    "If you cannot reach the length on real material, "
     "leave it shorter. "
     "You may call review_draft at most twice (initial check, then one re-check "
     "after revising). Then output the final JSON article."
@@ -178,10 +272,16 @@ _RESEARCH_PHASE_GUIDANCE = (
     "integrations, partnerships or comparisons; a market/on-chain tool for live "
     "metrics when the story is financial. Finding an existing profile is a reason to "
     "look for what is NEW since it, not a reason to stop. If after genuine digging "
-    "the tools surface no fresh facts, that is acceptable — reply READY anyway, but "
-    "the article must then be a tight summary, not padded to length.\n"
-    "Only once you genuinely have enough, reply with the single word READY "
-    "and nothing else; the article is written in a separate step."
+    "the tools surface no fresh facts, that is acceptable — stop calling tools; a "
+    "structured Research Digest handoff follows in a separate step.\n"
+    "TRUNCATION DISCIPLINE: If a tool result contains truncated: true or "
+    "has_more: true, assume critical technical data may be buried in the unread "
+    "portion. If the first window does not definitively answer the research brief, "
+    "you are strictly required to scroll the same URL: call fetch_url again with "
+    "the SAME url and continue_reading=true. If scrolling still leaves gaps, follow "
+    "specific sub-links or tighten search terms.\n"
+    "When your research is adequate, stop calling tools. Do not write the article "
+    "yet — synthesis will produce the handoff digest.\n"
 )
 
 
@@ -210,9 +310,10 @@ def _format_research_digest(trace: list[dict]) -> str:
 # already found (high-signal), never padding or invention.
 _NARRATIVE_GUIDANCE = (
     "\n\nWRITE IT AS JOURNALISM, NOT A SPEC SHEET — develop the verified findings "
-    "into cohesive prose (aim for a polished ~400-600 words when the facts support "
-    "it; otherwise length is flexible 250-2000 — let the facts decide, never pad). "
-    "Three rules:\n"
+    "into cohesive narrative prose. Scale the word count strictly to the volume of "
+    "verified facts in the Research Digest — never pad with speculation, generic "
+    "industry background, or marketing filler to hit a length target. If the "
+    "verified material is brief, write a dense, brief article. Three rules:\n"
     "1. TRANSLATE TECHNICAL FINDINGS: when a finding is technical (an SDK, a token "
     "standard, a protocol like x402, smart-contract/escrow mechanics), don't just "
     "name it — spend 1-2 sentences on what it ENABLES and why it matters to a "
@@ -220,17 +321,21 @@ _NARRATIVE_GUIDANCE = (
     "2. PROBLEM -> SOLUTION FRAME: ground the opening in the real-world friction "
     "the project addresses — contrast the legacy pain (e.g. multi-day settlement, "
     "intermediary fees) with the specific chain mechanics that resolve it (e.g. "
-    "~4s finality, sub-cent fees), using the concrete figures you actually found. "
-    "This frame only reaches as far as your verified findings: if the research "
-    "did not document the mechanics, state the problem and what the project "
-    "claims, note that the details are not yet documented, and move on — do NOT "
-    "complete the frame with mechanics borrowed from similar products or "
-    "invented guarantees.\n"
+    "~4s finality, sub-cent fees). When verified findings document the mechanics, "
+    "use them; when sources are thin, you MUST still complete the frame using your "
+    "expert knowledge of Algorand layer-1 infrastructure — never invent quotes, "
+    "partnerships, or product-specific guarantees, but DO explain why Algorand's "
+    "protocol mechanics address the friction.\n"
     "3. CONNECT THE DISCOVERIES: smooth transitions so it reads as ONE story — link "
     "the user-facing product to the underlying tech you uncovered (e.g. how the web "
     "app sits on the open-source library / escrow contracts).\n"
-    "This is EXPANSION BY EXPLANATION of real findings only — still never invent "
-    "facts, and still no generic filler.\n"
+    "4. DATA PRESENTATION: You are strictly prohibited from using bulleted lists. "
+    "When presenting multi-item data (curriculum pillars, comparative metrics, "
+    "feature sets), you MUST isolate it into a Markdown table with explicit columns "
+    "for 'Concept' and 'Real-World Implication' — never bury multi-item data in "
+    "dictionary-style paragraphs or comma-separated sentences.\n"
+    "This is EXPANSION BY EXPLANATION — never invent external facts, quotes, or "
+    "partnerships, and still no generic filler.\n"
     "GROUNDING RULES for the findings block: each finding belongs to the "
     "product/domain in its URL — search results often include SIMILAR or "
     "competitor products, and their features/guarantees must never be "
@@ -238,9 +343,83 @@ _NARRATIVE_GUIDANCE = (
     "works. A project's claims about itself (its own site/forum posts) are "
     "attributed statements ('according to the project'), not established facts "
     "— and for speculative or token-launch subjects, include the risk context "
-    "a fair journalist would. Where the findings leave a mechanism "
-    "undocumented, say so plainly rather than reconstructing it."
+    "a fair journalist would. Where a *product-specific* mechanism is "
+    "undocumented, say so plainly — but you may still explain Algorand's "
+    "general layer-1 mechanics when bridging why the story matters on-chain."
 )
+
+
+_STAGE2_GENERATION_GUIDANCE = (
+    "\n\nSTAGE 2 — WRITE FROM RESEARCH DIGEST ONLY:\n"
+    "You have NO tools in this phase. Do not fetch URLs or run searches. Verified "
+    "external facts (quotes, partnerships, numbers, dates) must come from the "
+    "Research Digest and source material — never invent those. You MAY use your "
+    "expert knowledge of Algorand layer-1 mechanics to explain why the story "
+    "matters when sources are thin.\n"
+)
+
+
+def _build_stage2_user(*, user: str, digest: str) -> str:
+    """Stage-2 user prompt: digest-only ground truth (no raw tool trace)."""
+    if digest.strip():
+        return (
+            user
+            + "\n\n## Research Digest (PRIMARY AND ONLY ground truth for external facts):\n"
+            f"{digest}\n\n"
+            "Write the article strictly from this digest plus any source material above. "
+            "You cannot call tools or fetch additional pages.\n"
+            + _NARRATIVE_GUIDANCE
+            + " Write it now."
+        )
+    return user + _NARRATIVE_GUIDANCE + " Write it now."
+
+
+_RESEARCH_DIGEST_SYNTHESIS = (
+    "Research phase complete. Synthesize everything you learned into a structured "
+    "handoff. Output Markdown ONLY (no JSON), exactly these sections:\n\n"
+    "## Research Digest\n\n"
+    "### Verified Facts\n"
+    "- One bullet per discrete verified fact. Each bullet MUST cite its source "
+    "(URL, tool name, or on-chain lookup). No speculation.\n\n"
+    "### Verbatim Quotes\n"
+    "- Only word-for-word quotes visible in tool results, each with its source. "
+    "If none exist, write exactly: None\n\n"
+    "Do not write the article."
+)
+
+
+def _synthesize_research_digest(
+    *,
+    trace: list[dict],
+    research_context: str,
+) -> str:
+    """Stage 1→2 handoff: model-synthesized digest instead of raw tool JSON."""
+    raw_trace = _format_research_digest(trace)
+    if not raw_trace.strip():
+        return ""
+    try:
+        from app.core.config import MISTRAL_TEMP_RESEARCH
+
+        digest_client = get_mistral_digest_client()
+        digest = digest_client.chat_completion(
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        f"{research_context}\n\n"
+                        "Raw tool trace (reference — synthesize, do not dump verbatim):\n"
+                        f"{raw_trace}\n\n{_RESEARCH_DIGEST_SYNTHESIS}"
+                    ),
+                },
+            ],
+            json_object=False,
+            temperature=MISTRAL_TEMP_RESEARCH,
+        )
+        text = (digest or "").strip()
+        return text if text else raw_trace
+    except Exception:
+        logger.warning("research digest synthesis failed; using raw trace", exc_info=True)
+        return raw_trace
 
 
 def _urls_from_result(result: Any) -> list[str]:
@@ -304,9 +483,9 @@ def _research_floor_nudge(have: int, need: int, digest: str) -> str:
         "Now dig deeper with DIFFERENT tools and arguments than above — e.g. "
         "search_bluesky for current community sentiment, search_web for recent "
         "integrations/partnerships/comparisons, or a market/on-chain tool for live "
-        "metrics. Do NOT repeat calls you already made. Reply READY only once you "
+        "metrics. Do NOT repeat calls you already made. Stop calling tools once you "
         "have genuinely gathered more — or, if the tools truly surface nothing new, "
-        "reply READY and the article will be a tight summary."
+        "stop and synthesis will produce a tight Research Digest handoff."
     )
 
 
@@ -345,20 +524,34 @@ def _review_and_revise(
     with the concrete issues fed back. Both gradings are recorded in the trace
     like review_draft tool calls so telemetry/insights see them.
     """
-    from app.core.config import MISTRAL_TEMP_WRITE, WRITER_REVIEW_ENABLED
+    from app.core.config import (
+        MISTRAL_TEMP_WRITE,
+        WRITER_QUALITY_LLM_MIN_SCORE,
+        WRITER_REVIEW_ENABLED,
+    )
     from app.modules.newspaper.article_grader import grade_article_draft
+    from app.modules.newspaper.article_quality_llm import (
+        grade_article_quality_llm,
+        quality_needs_revision,
+    )
 
     if not WRITER_REVIEW_ENABLED:
         return payload
     title = str(payload.get("title", "") or "")
     body = str(payload.get("body", "") or "")
+    summary = str(payload.get("summary", "") or "")
     if not body:
         return payload
 
     try:
-        review = grade_article_draft(title=title, body=body)
+        review = grade_article_draft(title=title, summary=summary, body=body)
     except Exception as exc:
         review = {"error": str(exc)[:200], "grade": None}
+    try:
+        quality = grade_article_quality_llm(title=title, body=body, client=mistral)
+    except Exception as exc:
+        quality = {"model": "llm_rubric_error", "error": str(exc)[:200], "issues": []}
+    review["quality"] = quality
     # The grader reads the FULL title+body; we record only a compact label in the
     # trace (title + word count) to avoid dumping the whole body into the trace.
     grade_args = {"title": title, "words": len(body.split())}
@@ -369,17 +562,22 @@ def _review_and_revise(
     # (publish gate) reads it via MistralArticleFields.heuristic_grade.
     payload["_heuristic_grade"] = review
 
-    issues = review.get("issues") or []
-    # A tool-less rewrite can only RESTRUCTURE or TRIM — it cannot add facts or do
-    # more research. So revise ONLY for those fixable problems; never revise for
-    # "short" / "shallow research" / "vague" (they need real fetching, and a
-    # revision asked to fix them would just hallucinate filler).
-    fixable = [i for i in issues if i.startswith(("too long", "structure"))]
+    issues = list(review.get("issues") or [])
+    schema_fixable = [
+        i
+        for i in issues
+        if i.startswith(("too long", "structure", "schema"))
+    ]
+    quality_fixable: list[str] = []
+    if quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE):
+        quality_fixable = list(quality.get("issues") or [])
+    fixable = schema_fixable + quality_fixable
     if not fixable:
         return payload
 
-    issues_block = "\n".join(f"- {i}" for i in fixable[:8])
+    issues_block = "\n".join(f"- {i}" for i in fixable[:10])
     too_long = any(i.startswith("too long") for i in fixable)
+    needs_depth = quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE)
     # The reviser is judged by the 75% word-count guard below; give it that
     # constraint as a CONCRETE number — "keep roughly the same length" alone
     # still lost >25% of the words in ~10% of prod revisions, wasting the call.
@@ -388,18 +586,33 @@ def _review_and_revise(
     length_rule = (
         "Trim padding/filler to bring it under the limit, but keep every real fact."
         if too_long
-        else "PRESERVE every fact AND keep the same length — only REORGANIZE "
-        "the existing prose into headings, short paragraphs and at least one list or "
-        "table. Do NOT drop information, summarize away detail, or shorten the article: "
-        f"the draft is {draft_words} words and your revision MUST stay above "
-        f"{min_words} words or it will be rejected."
+        else (
+            "Improve narrative synthesis and Algorand technical depth — use verified "
+            "facts from the Research Digest and, where sources are thin, your expert "
+            "knowledge of Algorand layer-1 mechanics to explain legacy friction vs "
+            "protocol solutions. Move multi-item data into a Markdown table (Concept / "
+            "Real-World Implication). PRESERVE every verified fact. Do NOT invent "
+            "quotes, partnerships, or numbers. "
+            if needs_depth
+            else "PRESERVE every fact AND keep the same length — only REORGANIZE "
+            "the existing prose into section headings and short paragraphs; move "
+            "comparative data into a Markdown table if needed. Do NOT use narrative "
+            "bullet lists. Do NOT drop information, summarize away detail, or shorten "
+            "the article: "
+        )
     )
+    if not too_long and not needs_depth:
+        length_rule += (
+            f"the draft is {draft_words} words and your revision MUST stay above "
+            f"{min_words} words or it will be rejected."
+        )
     revise_user = (
-        gen_user + f"\n\nA reviewer flagged these formatting/length problems:\n{issues_block}\n\n"
+        gen_user + f"\n\nA reviewer flagged these problems:\n{issues_block}\n\n"
         f"{length_rule} Do NOT add, invent, or restate facts beyond the research "
-        "findings above, and do not pad with new filler. Return the full revised "
+        "digest above, and do not pad with new filler. Return the full revised "
         "article as the same JSON object."
     )
+    gen_system = system + _STAGE2_GENERATION_GUIDANCE
 
     def _note_revision_failure(reason: str) -> None:
         # Surface WHY the revision didn't happen instead of silently keeping the
@@ -413,7 +626,7 @@ def _review_and_revise(
     try:
         revised = mistral.chat_json_object(
             [
-                {"role": "system", "content": system},
+                {"role": "system", "content": gen_system},
                 {"role": "user", "content": revise_user},
             ],
             temperature=MISTRAL_TEMP_WRITE,
@@ -443,7 +656,13 @@ def _review_and_revise(
         revised_body = str(revised.get("body", "") or "")
         regrade = grade_article_draft(
             title=str(revised.get("title", "") or ""),
+            summary=str(revised.get("summary", "") or ""),
             body=revised_body,
+        )
+        regrade["quality"] = grade_article_quality_llm(
+            title=str(revised.get("title", "") or ""),
+            body=revised_body,
+            client=mistral,
         )
         revised["_heuristic_grade"] = regrade
         recheck_args = {
@@ -571,35 +790,44 @@ _GOOD_EXAMPLE = (
 # stable across every call, so they belong in the SYSTEM message rather than
 # being interleaved with the source material in the USER message.
 _ARTICLE_FORMAT_RULES = (
+    "\nFORMAT RULES:\n"
     "Write the article as a single JSON object adhering exactly to this schema:\n"
     '{"title": "string", "summary": "string", "body": "string", "tags": ["string"]}\n\n'
-    "Field constraints:\n"
-    "- title: a captivating, professional headline, max 120 chars; do NOT use "
+    "- title: A captivating, professional headline, max 120 chars; do NOT use "
     '"Service: Page title" format\n'
-    "- summary: a concise deck for feed cards; STRICT MAXIMUM of 280 characters; "
+    "- summary: A concise deck for feed cards; STRICT MAXIMUM of 280 characters; "
     "describe the story, not the pipeline\n"
-    "- body: the full article in Markdown, length scaled to the substance (a short "
-    "update can be a few hundred words; a meaty story can run long) — never pad a thin "
-    "story to hit a length. Write like a skilled human journalist and format it however "
-    "best serves THIS story: YOU decide on sections, lists, tables or pure prose. Avoid "
-    "robotic, templated phrasing.\n"
-    "  - SCANNABILITY: break up the text with descriptive Markdown headers (## and ###). "
-    "Do NOT write more than three consecutive paragraphs without introducing a new section "
-    "header. (Very short updates of only a paragraph or two are exempt.)\n"
-    "  - DATA PRESENTATION: never bury multiple metrics, pricing tiers, dates or feature "
-    "lists in a single dense paragraph. Extract dense numerical or itemized data into a "
-    "clean Markdown table or a bulleted list so the reader can scan it.\n"
+    "- body: The full article in Markdown, length scaled strictly to verified substance "
+    "— never pad a thin story to hit a length target.\n"
+    "  - SCANNABILITY: Break up the text with descriptive Markdown headers (## and ###). "
+    "Do NOT write more than three consecutive paragraphs without introducing a new "
+    "section header. (Very short updates of only a paragraph or two are exempt.)\n"
+    "  - NARRATIVE PROSE: Events, features, partnerships, and updates MUST be woven "
+    "into flowing paragraphs. DO NOT use bulleted or numbered lists for narrative "
+    "storytelling anywhere in the body (a ## Source link list at the end is the only "
+    "exception).\n"
+    "  - DATA PRESENTATION: You are strictly prohibited from using bulleted lists. "
+    "When presenting multi-item data (e.g., curriculum pillars, comparative metrics, "
+    "feature sets), you MUST isolate it into a Markdown table with explicit columns "
+    "explaining the 'Concept' and the 'Real-World Implication'. Do not bury "
+    "multi-item concepts in standard paragraph prose or comma-separated sentences.\n"
+    "  - JSON SAFETY: The body is embedded in a JSON string. Use single quotes "
+    "('like this') for direct quotations in the markdown body, or escape double "
+    'quotes as \\" — never emit unescaped double quotes inside the body string.\n'
     "  - IGNORE navigation menus, cookie/consent banners, footers, share/subscribe/login "
     "prompts and other page boilerplate in the source — extract the actual story. If the "
     "source carries no real news, write a brief honest note rather than padding\n"
     "  - a chart is OPTIONAL: include ONE only if this article itself has a trend or "
     "comparison worth visualizing, and chart that subject's own data — never ALGO "
-    "price/market metrics by default (see the ALGO PRICE/MARKET RULE). Fenced format:\n"
+    "price/market metrics by default (see the ALGO PRICE/MARKET RULE). Call the "
+    "`chart_data` tool to build the fence — it returns `markdown_fence` ready to "
+    "paste into the body (do not hand-author chart JSON). Fenced format:\n"
     "    ```chart\n"
     f"    {_CHART_EXAMPLE}\n"
     "    ```\n"
     '    Use "line" for trends over time, "bar" for category comparisons. Only chart '
-    "REAL data you fetched via tools; never invent numbers.\n"
+    "REAL data you fetched via tools (chart_data validates custom series; "
+    "algo_price fetches live ALGO history); never invent numbers.\n"
     "  - cite sources clearly within the text where relevant, and end with ## Source "
     "linking the URL\n"
     "  - when you first mention a notable project, protocol, company or person, link its "
@@ -608,8 +836,8 @@ _ARTICLE_FORMAT_RULES = (
     "returned) — do not over-link or invent URLs\n"
     "- tags: 2–5 lowercase topical tags drawn from the content (e.g. defi, governance, "
     "tokenization, wallet, nft, sdk, partnership) — specific, not generic\n"
-    "- On-chain context (the round and tx given in the payload) is background only — do "
-    "not list it in the body"
+    "- On-chain context (the round and tx given in the payload) is background only — "
+    "do not list it in the body\n"
     f"{_GOOD_EXAMPLE}"
 )
 
@@ -830,45 +1058,7 @@ def compose_scrape_article_mistral(
     elif not is_first_snapshot:
         diff_block = "\n\n(Content hash changed but no textual diff was produced.)"
 
-    system = (
-        "You are an expert journalist and news writer for a premier Algorand-focused "
-        "media outlet. Your goal is to write captivating, optimistic, and highly "
-        "professional news articles based on provided source material.\n\n"
-        "Writing guidelines:\n"
-        "- Tone: professional, objective, and positive. Strictly avoid sensationalism, "
-        "marketing speak, and fluffy language. The writing must be high-signal and "
-        "sound distinctly human.\n"
-        "- Establish the Stakes: when announcing a technical upgrade or new feature, "
-        "explain the real-world friction it eliminates or the threat it defends "
-        "against — but only as far as your verified material goes. If the sources "
-        "don't establish the stakes, report what is known plainly; never construct a "
-        "rationale or mechanism to make a story feel consequential.\n"
-        "- Narrative Synthesis: identify the connective tissue between your research "
-        "findings. Weave distinct developments into a unified narrative rather than "
-        "presenting them as isolated bullet points.\n"
-        "- Concrete Scenarios: translate abstract blockchain concepts into concrete "
-        "operational scenarios to make the implications vivid for the reader.\n"
-        "- Depth: develop the story to the full depth your verified research supports. "
-        "Don't be terse when you have the material — explain how it works, who it "
-        "affects, and why it matters, and draw out the implications. Thorough writing "
-        "built on real, cited findings is the goal; brevity is for when the verified "
-        "material genuinely runs out, not a default.\n"
-        "- Audience: intelligent general readers who are NOT crypto specialists. Briefly "
-        "explain blockchain/DeFi/Algorand jargon in plain language on first use (e.g. "
-        "what an ASA, validator, or TVL is), spell out acronyms once, and never assume "
-        "prior crypto knowledge — without dumbing the story down or over-explaining basics.\n"
-        "- Expertise: seamlessly integrate your deep knowledge of the Algorand ecosystem.\n"
-        "- Adaptability: tailor the depth and focus to the source material (technical "
-        "analysis for price or market updates; accessible, generalist coverage for "
-        "broader announcements).\n"
-        f"{_recency_rule(today)}"
-        "- Accuracy: use only facts from the source material; never invent quotes, "
-        "numbers, or on-chain events. Never put raw transaction IDs, round numbers, "
-        "or 'Service:' labels in the body.\n"
-        f"- {_STRICT_QUOTE_GROUNDING}\n"
-        f"{_ARTICLE_FORMAT_RULES}\n\n"
-        f"{_JSON_ONLY}"
-    )
+    system = _writer_system_prompt(today)
     # Source-type router: a static landing page (root domain) becomes an evergreen
     # profile, not breaking news — prevents chronological context collapse upstream.
     from app.core.config import SOURCE_TYPE_ROUTER_ENABLED
@@ -942,13 +1132,29 @@ Source material (may be days or years old — judge figures against today's date
         else user
     )
 
-    return _compose_via_writer_tools(
+    return _call_compose_via_writer_tools(
         system=system,
         user=user,
         research_user=research_user,
         source_url=source_url,
         mistral=mistral,
         topic=publish_topic,
+    )
+
+
+def _call_compose_via_writer_tools(**kwargs: Any) -> MistralArticleFields:
+    """Invoke the shared compose loop, omitting kwargs older workers may lack.
+
+    Rolling deploys can briefly load a ``compose_scrape_article_mistral`` that
+    passes ``research_user`` while the worker process still holds a pre-clip
+    ``_compose_via_writer_tools`` definition — filter to the live signature so
+    publish drains do not crash mid-deploy.
+    """
+    allowed = inspect.signature(_compose_via_writer_tools).parameters
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in allowed.values()):
+        return _compose_via_writer_tools(**kwargs)
+    return _compose_via_writer_tools(
+        **{k: v for k, v in kwargs.items() if k in allowed}
     )
 
 
@@ -971,6 +1177,28 @@ def _compose_via_writer_tools(
     clip) for the stage-1 research rounds, which re-send the whole prompt on
     every tool round; stage-2 generation always uses the full ``user``.
     Defaults to ``user``."""
+    from app.modules.newspaper.compose_lock import compose_lock
+
+    with compose_lock():
+        return _compose_via_writer_tools_locked(
+            system=system,
+            user=user,
+            source_url=source_url,
+            mistral=mistral,
+            topic=topic,
+            research_user=research_user,
+        )
+
+
+def _compose_via_writer_tools_locked(
+    *,
+    system: str,
+    user: str,
+    source_url: str,
+    mistral: MistralClient,
+    topic: str = "",
+    research_user: str | None = None,
+) -> MistralArticleFields:
     from app.core.config import WRITER_TOOLS_ENABLED
 
     messages = [
@@ -979,13 +1207,21 @@ def _compose_via_writer_tools(
     ]
     if WRITER_TOOLS_ENABLED:
         try:
-            from app.core.config import MISTRAL_MODEL_WRITER
+            from app.core.config import (
+                MISTRAL_MODEL_RESEARCH,
+                MISTRAL_MODEL_WRITER,
+                MISTRAL_RESEARCH_CONTEXT_TOKENS,
+                MISTRAL_TEMP_RESEARCH,
+                MISTRAL_TEMP_WRITE,
+                WRITER_TWO_STAGE,
+            )
             from app.modules.ai.writer_tools import all_tools
 
+            research_mistral = get_mistral_research_client()
             tool_context = {
                 "service_id": source_url,
                 "source_url": source_url,
-                "model": MISTRAL_MODEL_WRITER,
+                "model": MISTRAL_MODEL_RESEARCH,
             }
             tool_schemas, tool_handlers = all_tools(context=tool_context, topic=topic)
             trace: list = []
@@ -994,11 +1230,6 @@ def _compose_via_writer_tools(
             import time as _time
 
             _t0 = _time.monotonic()
-            from app.core.config import (
-                MISTRAL_TEMP_RESEARCH,
-                MISTRAL_TEMP_WRITE,
-                WRITER_TWO_STAGE,
-            )
 
             # Progress checkpoints: one stable session row, upserted at each stage,
             # so the admin Sessions view shows live progress (research -> writing
@@ -1017,7 +1248,11 @@ def _compose_via_writer_tools(
                         trace=trace,
                         service_id=source_url,
                         source_url=source_url,
-                        model=MISTRAL_MODEL_WRITER,
+                        model=(
+                            MISTRAL_MODEL_RESEARCH
+                            if stage_status == "researching"
+                            else MISTRAL_MODEL_WRITER
+                        ),
                         status=stage_status,
                         duration_ms=int((_time.monotonic() - _t0) * 1000),
                         session_id=_sid,
@@ -1026,11 +1261,14 @@ def _compose_via_writer_tools(
 
             if WRITER_TWO_STAGE:
                 _checkpoint("researching")
+                if isinstance(debug, dict):
+                    debug["research_model"] = MISTRAL_MODEL_RESEARCH
                 # Stage 1 — cold research: tools available (minus review_draft, no
                 # draft yet), low temp for deterministic tool selection. We keep the
                 # trace; the model's prose here is discarded. Research rounds
                 # re-send the whole conversation every round, so they get the
-                # slimmer research_user when the caller provided one.
+                # slimmer research_user when the caller provided one. Runs on the
+                # Small research tier — better tool-calling, cheaper per round.
                 stage1_user = research_user or user
                 research_schemas = [
                     s
@@ -1038,7 +1276,7 @@ def _compose_via_writer_tools(
                     if (s.get("function") or {}).get("name") != "review_draft"
                 ]
                 research_handlers = {k: v for k, v in tool_handlers.items() if k != "review_draft"}
-                mistral.chat_with_tools(
+                research_mistral.chat_with_tools(
                     [
                         {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
                         {"role": "user", "content": stage1_user},
@@ -1049,6 +1287,7 @@ def _compose_via_writer_tools(
                     debug=debug,
                     temperature=MISTRAL_TEMP_RESEARCH,
                     require_tool=None,
+                    context_tokens=MISTRAL_RESEARCH_CONTEXT_TOKENS,
                 )
                 # Research FLOOR: if it stopped too early (the exact failure where
                 # it reads an existing profile and quits), send it back to dig
@@ -1067,7 +1306,7 @@ def _compose_via_writer_tools(
                         nudge = _research_floor_nudge(
                             have, RESEARCH_MIN_TOOL_CALLS, _format_research_digest(trace)
                         )
-                        mistral.chat_with_tools(
+                        research_mistral.chat_with_tools(
                             [
                                 {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
                                 {"role": "user", "content": stage1_user + nudge},
@@ -1078,26 +1317,19 @@ def _compose_via_writer_tools(
                             debug=debug,
                             temperature=MISTRAL_TEMP_RESEARCH,
                             require_tool=None,
+                            context_tokens=MISTRAL_RESEARCH_CONTEXT_TOKENS,
                         )
                 _checkpoint("writing")  # research done, now generating
-                # Stage 2 — warm generation: tools removed, prompt swapped back to
-                # the plain article contract, higher temp, JSON mode. The research
-                # findings ride in as ground truth.
-                digest = _format_research_digest(trace)
-                gen_user = user + (
-                    "\n\nVerified research findings (from tools — these outrank the "
-                    "raw source material where they differ; treat them as ground "
-                    "truth and do not contradict or invent beyond them):\n"
-                    f"{digest}\n\n"
-                    "Build the article around these findings."
-                    + _NARRATIVE_GUIDANCE
-                    + " Write it now."
-                    if digest
-                    else ""
+                # Stage 1b — synthesize a structured Research Digest handoff so Stage 2
+                # grounds on high-signal facts, not raw tool JSON.
+                digest = _synthesize_research_digest(
+                    trace=trace, research_context=stage1_user
                 )
+                gen_user = _build_stage2_user(user=user, digest=digest)
+                gen_system = system + _STAGE2_GENERATION_GUIDANCE
                 payload = mistral.chat_json_object(
                     [
-                        {"role": "system", "content": system},
+                        {"role": "system", "content": gen_system},
                         {"role": "user", "content": gen_user},
                     ],
                     temperature=MISTRAL_TEMP_WRITE,
@@ -1160,7 +1392,7 @@ def _compose_via_writer_tools(
                     trace,
                     service_id=source_url,
                     source_url=source_url,
-                    model=MISTRAL_MODEL_WRITER,
+                    model=MISTRAL_MODEL_RESEARCH if WRITER_TWO_STAGE else MISTRAL_MODEL_WRITER,
                 )
                 record_tool_usage_from_trace(trace)
                 record_compose_session(
@@ -1213,46 +1445,7 @@ def compose_assignment_article_mistral(
     mistral = client or get_mistral_client()
     today = _today_utc()
 
-    system = (
-        "You are an expert journalist and news writer for a premier Algorand-focused "
-        "media outlet. You have been assigned an original story by an editor — it has "
-        "NOT been pre-researched, so your job is to investigate it yourself with your "
-        "tools and then write a captivating, optimistic, and highly professional "
-        "article from what you verify.\n\n"
-        "Writing guidelines:\n"
-        "- Tone: professional, objective, and positive. Strictly avoid sensationalism, "
-        "marketing speak, and fluffy language. The writing must be high-signal and "
-        "sound distinctly human.\n"
-        "- Establish the Stakes: when announcing a technical upgrade or new feature, "
-        "explain the real-world friction it eliminates or the threat it defends "
-        "against — but only as far as your verified material goes. If the sources "
-        "don't establish the stakes, report what is known plainly; never construct a "
-        "rationale or mechanism to make a story feel consequential.\n"
-        "- Narrative Synthesis: identify the connective tissue between your research "
-        "findings. Weave distinct developments into a unified narrative rather than "
-        "presenting them as isolated bullet points.\n"
-        "- Concrete Scenarios: translate abstract blockchain concepts into concrete "
-        "operational scenarios to make the implications vivid for the reader.\n"
-        "- Depth: develop the story to the full depth your verified research supports. "
-        "Don't be terse when you have the material — explain how it works, who it "
-        "affects, and why it matters, and draw out the implications. Thorough writing "
-        "built on real, cited findings is the goal; brevity is for when the verified "
-        "material genuinely runs out, not a default.\n"
-        "- Audience: intelligent general readers who are NOT crypto specialists. Briefly "
-        "explain blockchain/DeFi/Algorand jargon in plain language on first use (e.g. "
-        "what an ASA, validator, or TVL is), spell out acronyms once, and never assume "
-        "prior crypto knowledge — without dumbing the story down or over-explaining basics.\n"
-        "- Expertise: seamlessly integrate your deep knowledge of the Algorand ecosystem.\n"
-        f"{_recency_rule(today)}"
-        "- Accuracy: the editorial pointers below are a starting brief, NOT verified "
-        "fact — confirm everything via your tools this session before relying on it. "
-        "Use only facts you have verified; never invent quotes, numbers, or on-chain "
-        "events. If your research cannot substantiate enough of the assigned topic, "
-        "say so plainly in the article rather than inventing content.\n"
-        f"- {_STRICT_QUOTE_GROUNDING}\n"
-        f"{_ARTICLE_FORMAT_RULES}\n\n"
-        f"{_JSON_ONLY}"
-    )
+    system = _writer_system_prompt(today, assignment=True)
     user = f"""Write the article now on the assigned topic below.
 
 Today (UTC): {today}
@@ -1271,7 +1464,7 @@ This is a from-scratch research assignment. Use your tools extensively (official
 sites, GitHub, on-chain data, market data, etc. as relevant) to gather current,
 verifiable facts before writing."""
 
-    return _compose_via_writer_tools(
+    return _call_compose_via_writer_tools(
         system=system,
         user=user,
         source_url=f"editorial://brief/{brief_id}",
@@ -1344,15 +1537,21 @@ New reporting to integrate:
     if WRITER_TOOLS_ENABLED:
         try:
             from app.modules.ai.writer_tools import all_tools
+            from app.modules.newspaper.compose_lock import compose_lock
 
-            tool_schemas, tool_handlers = all_tools()
-            tool_system = system + _TOOLS_GUIDANCE
-            raw = mistral.chat_with_tools(
-                [{"role": "system", "content": tool_system}, {"role": "user", "content": user}],
-                tools=tool_schemas,
-                handlers=tool_handlers,
-                require_tool="review_draft",
-            )
+            tool_context = {
+                "service_id": source_url,
+                "source_url": source_url,
+            }
+            with compose_lock():
+                tool_schemas, tool_handlers = all_tools(context=tool_context)
+                tool_system = system + _TOOLS_GUIDANCE
+                raw = mistral.chat_with_tools(
+                    [{"role": "system", "content": tool_system}, {"role": "user", "content": user}],
+                    tools=tool_schemas,
+                    handlers=tool_handlers,
+                    require_tool="review_draft",
+                )
             import json as _json
 
             payload = _json.loads(raw)

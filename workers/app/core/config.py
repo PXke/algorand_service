@@ -190,13 +190,15 @@ MISTRAL_MODEL = env_str("MISTRAL_MODEL", "mistral-small-latest")
 # 70%. Trade-off of "-latest": aliases can be throttled to a lower TPM tier than a
 # dated pin — if that bites, pin a date (e.g. MISTRAL_MODEL_WRITER=mistral-small-2603).
 # Moved to Medium (2026-06-19): better instruction-following / long-context
-# adherence than Small, which reduces attention drift on the recency/temporal
-# constraints (the chronological-collapse failures). NOTE: the ToolCall-15
-# benchmark had Small ahead on raw tool-calling — if Stage-1 research tool
-# reliability regresses, consider per-stage models (Small for research tools,
-# Medium for Stage-2 generation) or re-pin Small here.
+# adherence than Small for final prose. Stage-1 research + digest synthesis run
+# on MISTRAL_MODEL_RESEARCH (Small by default) — better tool-calling per the
+# ToolCall-15 benchmark and much cheaper across ~14 re-sent rounds.
 MISTRAL_MODEL_WRITER = env_str("MISTRAL_MODEL_WRITER", "mistral-medium-latest")
-MISTRAL_MODEL_DIGEST = env_str("MISTRAL_MODEL_DIGEST", MISTRAL_MODEL)
+# Agentic research tool loop + research-floor nudges. Small 4 leads on tool
+# selection and error recovery; research does not need Medium's prose fidelity.
+MISTRAL_MODEL_RESEARCH = env_str("MISTRAL_MODEL_RESEARCH", "mistral-small-latest")
+# Research Digest synthesis (Stage 1→2 handoff). Defaults to the research tier.
+MISTRAL_MODEL_DIGEST = env_str("MISTRAL_MODEL_DIGEST", MISTRAL_MODEL_RESEARCH)
 MISTRAL_MODEL_PREMIUM = env_str("MISTRAL_MODEL_PREMIUM", "mistral-small-latest")
 # Translations are mechanical localization of an already-written article — no
 # research, no tools, no editorial judgment — and fire 5x per published article
@@ -218,6 +220,9 @@ MISTRAL_MAX_TOKENS = env_int("MISTRAL_MAX_TOKENS", 12000)
 # model down); cost is not the constraint here, so tool results stay generous and
 # we only elide the OLDEST ones when the whole conversation nears this limit.
 MISTRAL_CONTEXT_TOKENS = env_int("MISTRAL_CONTEXT_TOKENS", 256000)
+# Stage-1 research runs on MISTRAL_MODEL_RESEARCH (Small, ~128k window). Keep a
+# separate budget so fit_messages_to_budget trims before the API rejects.
+MISTRAL_RESEARCH_CONTEXT_TOKENS = env_int("MISTRAL_RESEARCH_CONTEXT_TOKENS", 128000)
 # Per-tool-result character cap (structure-preserving — see token_budget). Large
 # enough to carry a full article body; ~24k chars ≈ a long page.
 MISTRAL_TOOL_RESULT_MAX_CHARS = env_int("MISTRAL_TOOL_RESULT_MAX_CHARS", 24000)
@@ -270,6 +275,9 @@ MISTRAL_TEMP_WRITE = env_float("MISTRAL_TEMP_WRITE", 0.6)
 # graded below this triggers exactly one revision pass with the issues fed back.
 WRITER_REVIEW_ENABLED = env_bool("WRITER_REVIEW_ENABLED", True)
 WRITER_REVIEW_MIN_GRADE = env_float("WRITER_REVIEW_MIN_GRADE", 7.0)
+# Stage 3 qualitative rubric (Small tier): narrative synthesis + technical depth.
+WRITER_QUALITY_LLM_ENABLED = env_bool("WRITER_QUALITY_LLM_ENABLED", True)
+WRITER_QUALITY_LLM_MIN_SCORE = env_int("WRITER_QUALITY_LLM_MIN_SCORE", 3)
 # Length is LAX: any article in [LENGTH_OK_MIN, LENGTH_OK_MAX] words is fine —
 # length is not a graded dimension and not a target. Research DEPTH drives the
 # grade instead, so the model fetches context rather than padding to a word count.
@@ -324,6 +332,11 @@ URL_QUEUE_DRAIN_SECONDS = env_int("URL_QUEUE_DRAIN_SECONDS", 60)
 # How many URLs the drain crawls per tick. One per tick (paced by the beat
 # interval) keeps requests gentle — ~1 page / 10s with URL_QUEUE_DRAIN_SECONDS=10.
 URL_QUEUE_DRAIN_BATCH = env_int("URL_QUEUE_DRAIN_BATCH", 1)
+# When the writer's fetch_url tool successfully reads a page during compose,
+# enqueue it for a full harvest (crawled_pages + Typesense) — high-signal URLs
+# the model explicitly chose to investigate.
+WRITER_FETCH_ENQUEUE_ENABLED = env_bool("WRITER_FETCH_ENQUEUE_ENABLED", True)
+WRITER_FETCH_ENQUEUE_PRIORITY = env_int("WRITER_FETCH_ENQUEUE_PRIORITY", 45)
 # A newly approved domain harvests its first N pages at high priority (jumping
 # the frontier queue), then its remaining pages fall back to normal priority.
 CRAWL_INITIAL_HARVEST_TARGET = env_int("CRAWL_INITIAL_HARVEST_TARGET", 20)

@@ -83,6 +83,21 @@ def _resource_hints() -> str:
 _PRELOADS = _resource_hints()
 
 
+def _safe_cwd_roots() -> list[Path]:
+    """Return cwd / parent when getcwd works.
+
+    During a rolling deploy the systemd WorkingDirectory (an old release path)
+    can be deleted while the process is still alive; Path.cwd() then raises
+    FileNotFoundError and every SSR document route 500s. Prefer __file__-based
+    roots; treat a missing cwd as empty.
+    """
+    try:
+        cwd = Path.cwd()
+    except FileNotFoundError:
+        return []
+    return [cwd, cwd.parent]
+
+
 def _candidate_dirs() -> list[Path]:
     if settings.frontend_dist_dir:
         return [Path(settings.frontend_dist_dir)]
@@ -96,7 +111,7 @@ def _candidate_dirs() -> list[Path]:
     for depth in (4, 3, 5):
         if depth < len(here.parents):
             roots.append(here.parents[depth])
-    roots += [Path.cwd(), Path.cwd().parent]
+    roots += _safe_cwd_roots()
     dirs: list[Path] = []
     seen: set[Path] = set()
     for root in roots:

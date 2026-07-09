@@ -9,9 +9,11 @@ import '../../../core/theme/app_theme_extension.dart';
 import '../../../core/util/analytics_opt_out.dart';
 import '../../../core/ui/ambient_background.dart';
 import '../../../core/ui/brand_mark.dart';
+import '../../../core/deferred/deferred_load_pool.dart';
+import '../../../shared/widgets/deferred_widget.dart';
 import 'deferred_wallet_app_bar_action.dart';
+import '../../newspaper/markets_deferred_gate.dart';
 import '../../newspaper/sections.dart';
-import '../../newspaper/ui/markets_bar.dart';
 import '../products.dart';
 import 'app_switcher.dart';
 import 'locale_toggle.dart';
@@ -127,7 +129,12 @@ class AppShell extends ConsumerWidget {
             ),
       body: Column(
         children: [
-          if (_showMarketsBar(location)) const MarketsBar(),
+          if (_showMarketsBar(location))
+            DeferredWidget(
+              () => loadDeferredWithRetry(loadMarketsModule),
+              buildMarketsBar,
+              placeholder: const SizedBox(height: 34),
+            ),
           Expanded(child: AmbientBackground(child: child)),
         ],
       ),

@@ -170,7 +170,7 @@ class ArticleCard extends StatelessWidget {
     // square icon into a cropped, pixelated strip), or no image at all
     // (source-logo / monogram fallback).
     Widget buildImage(double h) => hasImage
-        ? (_looksLikeLogo(imageUrl)
+        ? (looksLikeLogoUrl(imageUrl)
             ? _LogoFallback(
                 height: h,
                 kindColor: kindColor,
@@ -216,11 +216,12 @@ class ArticleCard extends StatelessWidget {
   }
 }
 
-/// True when an article's stored image is a brand mark rather than a photo:
+/// True when a stored image is a brand mark rather than a photo:
 /// the backend stores the source's icon in image_url when a story has no real
 /// share image, and icon files are unmistakable by path. These must be
 /// CONTAINED like a logo, never cover-cropped like a hero photo.
-bool _looksLikeLogo(String url) {
+/// Shared with [FeedPlacementCard], which has the same failure mode.
+bool looksLikeLogoUrl(String url) {
   final path = (Uri.tryParse(url)?.path ?? url).toLowerCase();
   if (path.endsWith('.svg') || path.endsWith('.ico')) return true;
   return RegExp(r'favicon|apple-touch|/icons?[/._-]|[/._-]icons?[._-]|logo')

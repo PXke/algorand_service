@@ -4,6 +4,8 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../core/ui/lazy_network_image.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/theme/app_theme_extension.dart';
+import 'article_card.dart' show looksLikeLogoUrl;
+
 class FeedPlacementCard extends StatelessWidget {
   const FeedPlacementCard({super.key, required this.placement});
 
@@ -86,13 +88,27 @@ class FeedPlacementCard extends StatelessWidget {
                 const SizedBox(height: 12),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(8),
-                  child: LazyNetworkImage(
-                    url: imageUrl,
-                    height: 120,
-                    width: double.infinity,
-                    fit: BoxFit.cover,
-                    error: const SizedBox.shrink(),
-                  ),
+                  // Same logo-vs-photo split as ArticleCard: a sponsor's brand
+                  // icon must be contained, not cover-cropped into a strip.
+                  child: looksLikeLogoUrl(imageUrl)
+                      ? Container(
+                          height: 120,
+                          width: double.infinity,
+                          color: const Color(0xFFD97706).withValues(alpha: 0.08),
+                          padding: const EdgeInsets.symmetric(vertical: 24),
+                          child: LazyNetworkImage(
+                            url: imageUrl,
+                            fit: BoxFit.contain,
+                            error: const SizedBox.shrink(),
+                          ),
+                        )
+                      : LazyNetworkImage(
+                          url: imageUrl,
+                          height: 120,
+                          width: double.infinity,
+                          fit: BoxFit.cover,
+                          error: const SizedBox.shrink(),
+                        ),
                 ),
               ],
               if (body.isNotEmpty) ...[

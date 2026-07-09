@@ -313,6 +313,16 @@ def test_shell_injection_dedups_and_keeps_bootstrap(monkeypatch, tmp_path) -> No
     assert 'id="ssr-body"' in doc
 
 
+def test_candidate_dirs_survives_deleted_cwd(monkeypatch) -> None:
+    """Rolling deploy can delete the process WorkingDirectory; Path.cwd() then
+    raises FileNotFoundError — must not take down every SSR route."""
+    monkeypatch.setattr(shell.settings, "frontend_dist_dir", None)
+    monkeypatch.setattr(shell, "_safe_cwd_roots", lambda: [])
+    dirs = shell._candidate_dirs()
+    assert dirs  # __file__-relative roots still present
+    assert all("frontend_web" in str(d) or "frontend_flutter" in str(d) for d in dirs)
+
+
 def test_shell_injection_preserves_jsonld_escapes(monkeypatch, tmp_path) -> None:
     """The head must be injected verbatim: re.sub replacement-string escape
     processing turned the \\n sequences inside the JSON-LD articleBody into raw

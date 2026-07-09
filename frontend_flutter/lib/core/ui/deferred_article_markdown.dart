@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/deferred/deferred_load_pool.dart';
 import '../../shared/widgets/deferred_widget.dart';
-import 'markdown_entry.dart' deferred as md;
+import 'markdown_deferred_gate.dart';
 
 /// Article body renderer that loads the markdown chunk on demand.
 class DeferredArticleMarkdown extends StatelessWidget {
@@ -21,8 +21,8 @@ class DeferredArticleMarkdown extends StatelessWidget {
       return const SizedBox.shrink();
     }
     return DeferredWidget(
-      () => loadDeferredWithRetry(() => md.loadLibrary()),
-      () => md.ArticleMarkdown(data: data, selectable: selectable),
+      () => loadDeferredWithRetry(loadMarkdownModule),
+      () => buildArticleMarkdown(data: data, selectable: selectable),
       placeholder: _BodyPlaceholder(data: data),
     );
   }

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from app.core import config
 from app.core.config import MISTRAL_FALLBACK_TEMPLATE, mistral_configured
 from app.modules.ai.mistral_client import MistralError
+from app.modules.newspaper.compose_lock import ComposeBusyError
 from app.modules.ai.mistral_compose import (
     compose_assignment_article_mistral,
     compose_recap_from_transcript_mistral,
@@ -129,6 +130,8 @@ def compose_scrape_article(
                 extra_tags=getattr(fields, "tags", ()),
                 prompt_version=getattr(fields, "prompt_version", ""),
             )
+        except ComposeBusyError:
+            raise
         except MistralError:
             if MISTRAL_FALLBACK_TEMPLATE:
                 logger.warning("mistral_only failed; using template fallback")
@@ -214,6 +217,8 @@ def compose_scrape_article(
             extra_tags=getattr(fields, "tags", ()),
             prompt_version=getattr(fields, "prompt_version", ""),
         )
+    except ComposeBusyError:
+        raise
     except MistralError as exc:
         logger.warning(
             "Mistral scrape compose failed, fallback=%s: %s",

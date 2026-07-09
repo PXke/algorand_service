@@ -6,6 +6,7 @@ from app.modules.newspaper.article_edit_compose import compose_article_edit
 from app.modules.newspaper.article_store import get_article, update_article
 from app.modules.newspaper.article_tags import derive_article_tags
 from app.modules.newspaper.article_version_store import save_article_version
+from app.modules.newspaper.compose_lock import ComposeBusyError
 from app.modules.newspaper.publish_policy import PublishTopic
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow
 from app.modules.newspaper.security import sanitize_body
@@ -71,6 +72,8 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
             enrichment_block=enrichment_block,
             service_name=row.display_name,
         )
+    except ComposeBusyError:
+        raise
     except MistralError as exc:
         return {
             "status": "mistral_failed",

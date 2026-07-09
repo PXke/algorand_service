@@ -16,7 +16,8 @@ def test_structure_score_penalises_raw_text() -> None:
     raw = ("Algorand had a busy week across the ecosystem. " * 20).strip()
     structured = (
         "# Headline\n\nIntro paragraph with detail.\n\n"
-        "- point one\n- point two\n\nMore analysis in a closing paragraph."
+        "| Metric | Value |\n| -- | -- |\n| TPS | 9400 |\n\n"
+        "More analysis in a closing paragraph."
     )
     assert _structure_score(raw) < 0.5
     assert _structure_score(structured) > _structure_score(raw)

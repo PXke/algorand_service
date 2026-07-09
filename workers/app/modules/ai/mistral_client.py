@@ -19,6 +19,7 @@ from app.core.config import (
     MISTRAL_MAX_TOOL_ROUNDS,
     MISTRAL_MODEL,
     MISTRAL_MODEL_DIGEST,
+    MISTRAL_MODEL_RESEARCH,
     MISTRAL_MODEL_WRITER,
     MISTRAL_REASONING_EFFORT,
     MISTRAL_TIMEOUT_SECONDS,
@@ -34,23 +35,88 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
+def _strip_markdown_json_fence(raw: str) -> str:
+    """Drop ```json / ``` wrappers the model adds despite json_object mode."""
+    s = raw.strip()
+    if not s.startswith("```"):
+        return s
+    first_nl = s.find("\n")
+    if first_nl == -1:
+        return s
+    body = s[first_nl + 1 :]
+    if body.rstrip().endswith("```"):
+        body = body.rstrip()[:-3].rstrip()
+    return body
+
+
+def _balanced_object_span(raw: str) -> str | None:
+    """First top-level `{...}` span, respecting strings — safer than rfind('}')."""
+    start = raw.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[start : i + 1]
+    return None
+
+
 def _parse_json_object(raw: str) -> dict[str, Any] | None:
-    """Parse a model reply as a JSON object, salvaging the common failure
-    shapes (markdown fences, prose around the object) by parsing the first
-    '{' through the last '}'. None when nothing object-like parses."""
-    try:
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else None
-    except json.JSONDecodeError:
-        pass
-    start, end = raw.find("{"), raw.rfind("}")
-    if start == -1 or end <= start:
-        return None
-    try:
-        parsed = json.loads(raw[start : end + 1])
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    """Parse a model reply as a JSON object, salvaging fences and prose wrappers.
+
+    None when nothing object-like parses."""
+    candidates: list[str] = []
+    stripped = raw.strip()
+    if stripped:
+        candidates.append(stripped)
+    unfenced = _strip_markdown_json_fence(stripped)
+    if unfenced and unfenced not in candidates:
+        candidates.append(unfenced)
+    for blob in list(candidates):
+        span = _balanced_object_span(blob)
+        if span and span not in candidates:
+            candidates.append(span)
+    span = _balanced_object_span(stripped)
+    if span and span not in candidates:
+        candidates.append(span)
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    # Scores often survive when issue strings break JSON (unescaped quotes).
+    import re
+
+    narrative_m = re.search(r'"narrative_synthesis"\s*:\s*(\d+)', stripped)
+    technical_m = re.search(r'"technical_depth"\s*:\s*(\d+)', stripped)
+    if narrative_m or technical_m:
+        out: dict[str, Any] = {"issues": []}
+        if narrative_m:
+            out["narrative_synthesis"] = int(narrative_m.group(1))
+        if technical_m:
+            out["technical_depth"] = int(technical_m.group(1))
+        return out
+    return None
 
 
 def _message_text(message: dict[str, Any]) -> str:
@@ -253,6 +319,7 @@ class MistralClient:
         trace: list[dict[str, Any]] | None = None,
         debug: dict[str, Any] | None = None,
         require_tool: str | None = None,
+        context_tokens: int | None = None,
     ) -> str:
         """Agentic loop: let the model call the provided tools, execute them,
         feed results back, and return the final assistant message content.
@@ -280,7 +347,8 @@ class MistralClient:
         required_nudged = False
         response_reserve = max_tokens if max_tokens is not None else MISTRAL_MAX_TOKENS
         # Leave room for the model's reply plus a safety pad below the window.
-        convo_budget = MISTRAL_CONTEXT_TOKENS - response_reserve - MISTRAL_CONTEXT_SAFETY_TOKENS
+        window = context_tokens if context_tokens is not None else MISTRAL_CONTEXT_TOKENS
+        convo_budget = window - response_reserve - MISTRAL_CONTEXT_SAFETY_TOKENS
         for round_idx in range(rounds):
             # Token-aware trim: keep tool results generous, but if many rounds have
             # accumulated and the conversation nears the context window, elide the
@@ -346,14 +414,18 @@ class MistralClient:
                 if sig in seen_calls and name != "suggest_tool":
                     # Identical call already executed this session — don't re-run
                     # the handler or resend the (unchanged) data; nudge to write.
-                    result = {
-                        "note": (
-                            "You already called this tool with these exact arguments "
-                            "this session; its data has not changed. Do NOT call it "
-                            "again — use the result you already have and write the "
-                            "article now."
+                    note = (
+                        "You already called this tool with these exact arguments "
+                        "this session; its data has not changed. Do NOT call it "
+                        "again — use the result you already have and write the "
+                        "article now."
+                    )
+                    if name == "fetch_url" and not args.get("continue_reading"):
+                        note += (
+                            " If you meant to read more of a long page, call fetch_url "
+                            "again with the same url and continue_reading=true."
                         )
-                    }
+                    result = {"note": note}
                 else:
                     seen_calls.add(sig)
                     handler = handlers.get(name)
@@ -434,6 +506,10 @@ def _retry_after_seconds(resp: httpx.Response) -> float | None:
 
 def get_mistral_client(*, model: str | None = None) -> MistralClient:
     return MistralClient(model=model or MISTRAL_MODEL_WRITER)
+
+
+def get_mistral_research_client() -> MistralClient:
+    return MistralClient(model=MISTRAL_MODEL_RESEARCH)
 
 
 def get_mistral_digest_client() -> MistralClient:

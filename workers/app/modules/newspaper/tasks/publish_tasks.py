@@ -13,6 +13,7 @@ from app.celery_app import celery_app
 from app.core.redis_lock import single_flight
 from app.modules.newspaper.article_composer import compose_scrape_article
 from app.modules.newspaper.article_store import insert_article
+from app.modules.newspaper.compose_lock import COMPOSE_LOCK_KEY, ComposeBusyError
 from app.modules.newspaper.article_tags import derive_article_tags
 from app.modules.newspaper.ingest_signal import ingest_publish_signal
 from app.modules.newspaper.publish_policy import PublishKind, PublishTier, PublishTopic
@@ -313,7 +314,6 @@ def _run_pre_compose_vetoes(ctx: _ComposeVetoCtx) -> dict | None:
     return None
 
 
-@single_flight(lambda *_a, **_kw: "compose:article", ttl=1860)
 @single_flight(lambda row, **_kw: f"compose:{row.queue_id}", ttl=1800)
 def publish_from_queued_row(
     row: QueuedPublishRow,
@@ -324,16 +324,15 @@ def publish_from_queued_row(
     """Compose and insert one queue item (caller marks queue done).
 
     Two stacked single_flight locks:
-    - ``compose:article`` (global): only ONE article composition runs across all
-      workers at a time. The Mistral writer is an expensive agentic loop and
-      several drains (breaking beat, standard drain on admin-accept, ensure-review)
-      can fire at once; without this gate --concurrency=4 produces 4 full articles
-      in parallel — "a lot in a very short time". A concurrent caller gets
-      ``already_running`` and leaves its row pending for the next beat.
     - ``compose:{queue_id}`` (per-row): a row is never composed twice at once.
 
-    The global ttl (1860s) matches the task hard time limit so a crashed compose
-    frees the slot exactly when the worker would have been killed."""
+    The global ``compose:article`` mutex is acquired inside the Mistral writer
+    entry points (``_compose_via_writer_tools``, edit compose) so every path —
+    queue drain, admin recompose, editorial assignment — shares one gate.
+
+    A concurrent caller gets ``already_running`` and leaves its row pending for
+    the next beat.
+    """
     from app.modules.ai.mistral_client import MistralError
     from app.modules.newspaper.security import sanitize_body
 
@@ -355,7 +354,10 @@ def publish_from_queued_row(
     if publish_mode == "edit" and linked_article_id:
         from app.modules.newspaper.article_edit_service import run_article_edit
 
-        return run_article_edit(row)
+        try:
+            return run_article_edit(row)
+        except ComposeBusyError:
+            return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
 
     # We ALWAYS resolve the compose domain (registrable: domain_from_url
     # collapses forum.folks.finance -> folks.finance, so subdomains of one
@@ -450,6 +452,8 @@ def publish_from_queued_row(
             brief_id=str(payload.get("brief_id", "")),
             first_coverage=first_coverage,
         )
+    except ComposeBusyError:
+        return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
     except MistralError as exc:
         return {
             "status": "mistral_failed",
@@ -1006,6 +1010,20 @@ def recompose_review(review_id: str) -> dict[str, str]:
             publish_kind=PublishKind.SERVICE_DISCOVERY,
             publish_topic=PublishTopic.GENERIC,
         )
+    except ComposeBusyError:
+        enqueue_classifier_review(
+            url=url,
+            page_text=page_text,
+            page_title=page_title,
+            category=category,
+            storage_score=storage_score,
+            metadata={
+                "article_id": old_article_id,
+                "source": kind or "web",
+                "recompose_busy": True,
+            },
+        )
+        return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
     except MistralError as exc:
         # Compose failed — restore the original proposal so the review isn't lost.
         enqueue_classifier_review(

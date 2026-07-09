@@ -144,6 +144,8 @@ redis==8.0.1
     #   algorand-platform-workers (workers/pyproject.toml)
 requests==2.34.2
     # via geoip2
+resvg-py==0.3.3
+    # via algorand-platform-backend (backend/pyproject.toml)
 robyn==0.88.0
     # via algorand-platform-backend (backend/pyproject.toml)
 rustimport==1.3.4

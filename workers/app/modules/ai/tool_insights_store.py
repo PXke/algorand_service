@@ -3,6 +3,8 @@
   - tool_suggestions (Cassandra): capabilities the model wished it had (via the
     suggest_tool tool), reviewed in the admin "Tool insights" tab so we can add
     tools over time.
+  - compose_feedback (Cassandra): operational friction the model hit — bad prompts,
+    source data, tool behavior, pipeline issues — via report_compose_issue.
   - tool errors → Bugsnag: tool calls that errored are reported to Bugsnag (the
     ops dashboard) rather than a bespoke table, grouped by tool name.
 """
@@ -50,6 +52,62 @@ def record_tool_suggestion(
                 (source_url or "")[:512],
                 (model or "")[:64],
                 False,
+            ),
+        )
+        return True
+    except Exception:
+        return False
+
+
+_COMPOSE_FEEDBACK_CATEGORIES = frozenset(
+    {"prompt", "source_data", "tool", "pipeline", "other"}
+)
+_COMPOSE_FEEDBACK_SEVERITIES = frozenset({"low", "medium", "high"})
+
+
+def record_compose_feedback(
+    *,
+    category: str,
+    summary: str,
+    detail: str = "",
+    severity: str = "medium",
+    related_tool: str = "",
+    service_id: str = "",
+    source_url: str = "",
+    model: str = "",
+) -> bool:
+    """Persist one writer-reported pipeline issue (report_compose_issue)."""
+    cat = (category or "").strip().lower()
+    if cat not in _COMPOSE_FEEDBACK_CATEGORIES:
+        return False
+    headline = (summary or "").strip()
+    if not headline:
+        return False
+    sev = (severity or "medium").strip().lower()
+    if sev not in _COMPOSE_FEEDBACK_SEVERITIES:
+        sev = "medium"
+    try:
+        from cassandra.util import uuid_from_time
+
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ToolInsightStmts
+
+        session = get_cassandra_session()
+        now = datetime.now(tz=UTC)
+        session.execute(
+            ToolInsightStmts.INSERT_COMPOSE_FEEDBACK,
+            (
+                _BUCKET,
+                now,
+                uuid_from_time(now),
+                cat[:32],
+                sev[:16],
+                headline[:300],
+                (detail or "")[:4000],
+                (related_tool or "")[:64],
+                (service_id or "")[:256],
+                (source_url or "")[:512],
+                (model or "")[:64],
             ),
         )
         return True
@@ -241,6 +299,8 @@ def report_tool_errors_from_trace(
         for entry in trace[:50]:
             tool = str(entry.get("tool", ""))
             if tool == "suggest_tool":
+                continue
+            if tool == "report_compose_issue":
                 continue
             result = entry.get("result")
             if not (isinstance(result, dict) and "error" in result):

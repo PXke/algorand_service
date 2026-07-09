@@ -39,6 +39,9 @@ def test_serialize_big_result_trims_text_but_keeps_links() -> None:
     assert parsed["title"] == "XBTO expands"
     assert parsed["links"] == [{"text": "gov", "url": "https://algorand.foundation/gov"}]
     assert parsed["_truncated"] is True
+    assert parsed["_serializer_truncated"] is True
+    assert parsed["_truncated_chars_omitted"] > 0
+    assert "TEXT TRUNCATED BY SERIALIZER" in parsed["text"]
     assert len(parsed["text"]) < 50_000
 
 

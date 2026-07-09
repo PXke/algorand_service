@@ -14,6 +14,7 @@ class LazyNetworkImage extends StatefulWidget {
     this.fit = BoxFit.cover,
     this.placeholder,
     this.error,
+    this.semanticLabel,
   });
 
   final String url;
@@ -22,6 +23,7 @@ class LazyNetworkImage extends StatefulWidget {
   final BoxFit fit;
   final Widget? placeholder;
   final Widget? error;
+  final String? semanticLabel;
 
   @override
   State<LazyNetworkImage> createState() => _LazyNetworkImageState();
@@ -58,6 +60,18 @@ class _LazyNetworkImageState extends State<LazyNetworkImage> {
       width: widget.width,
       fit: widget.fit,
       gaplessPlayback: true,
+      semanticLabel: widget.semanticLabel,
+      // Fade in on first paint instead of popping; synchronously-available
+      // (cached) images render immediately.
+      frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+        if (wasSynchronouslyLoaded) return child;
+        return AnimatedOpacity(
+          opacity: frame == null ? 0 : 1,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+          child: child,
+        );
+      },
       errorBuilder: (context, error, stack) =>
           widget.error ?? const SizedBox.shrink(),
     );

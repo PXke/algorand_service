@@ -282,6 +282,11 @@ class ToolInsightStmts:
         "SELECT created_at, capability, reason, service_id, source_url, model "
         "FROM algorand_platform.tool_suggestions WHERE bucket = ? LIMIT 300"
     )
+    LIST_COMPOSE_FEEDBACK = _Stmt(
+        "SELECT created_at, category, severity, summary, detail, related_tool, "
+        "service_id, source_url, model "
+        "FROM algorand_platform.compose_feedback WHERE bucket = ? LIMIT 300"
+    )
     LIST_COMPOSE_SESSIONS = _Stmt(
         "SELECT created_at, session_id, service_id, source_url, model, status, "
         "rounds, tool_calls, duration_ms, messages, final_output "

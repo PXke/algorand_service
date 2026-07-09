@@ -19,12 +19,16 @@ class _FakeMistral:
 
 def test_low_grade_triggers_one_revision(monkeypatch) -> None:
     grades = iter([
-        {"grade": 5.0, "issues": ["structure — Formatting Deserts: 6 prose blocks"]},  # initial
-        {"grade": 8.0, "issues": []},             # post-revision recheck
+        {"grade": 5.0, "issues": ["structure — Formatting Deserts: 6 prose blocks"]},
+        {"grade": 8.0, "issues": []},
     ])
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
         lambda **kw: next(grades),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
     )
     trace: list[dict] = []
     fake = _FakeMistral({"title": "T2", "body": "a much longer grounded body", "summary": "s"})
@@ -45,6 +49,10 @@ def test_high_grade_keeps_draft_untouched(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
         lambda **kw: {"grade": 9.0, "issues": []},
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
     )
     trace: list[dict] = []
     fake = _FakeMistral({"title": "X", "body": "Y"})
@@ -69,6 +77,10 @@ def test_review_turns_land_in_debug_transcript(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
         lambda **kw: next(grades),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
     )
     debug: dict = {"messages": []}
     trace: list[dict] = []
@@ -99,6 +111,10 @@ def test_failed_revision_is_surfaced_not_silent(monkeypatch) -> None:
         "app.modules.newspaper.article_grader.grade_article_draft",
         lambda **kw: {"grade": 4.0, "issues": ["too long (3000 words) — cut padding"]},
     )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+    )
     trace: list[dict] = []
     payload = {"title": "T", "body": "short draft"}
 
@@ -128,6 +144,31 @@ def test_parse_article_fields_threads_heuristic_grade() -> None:
 def test_parse_article_fields_grade_defaults_none() -> None:
     fields = _parse_article_fields({"title": "T", "summary": "S", "body": "B"})
     assert fields.heuristic_grade is None
+
+
+def test_low_quality_llm_triggers_revision(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **kw: {"grade": 10.0, "issues": []},
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **kw: {
+            "narrative_synthesis": 2,
+            "technical_depth": 2,
+            "issues": ["technical depth scored 2/5 — explain layer-1 mechanics"],
+        },
+    )
+    trace: list[dict] = []
+    fake = _FakeMistral({"title": "T2", "body": "deeper revised body with more detail"})
+
+    out = _review_and_revise(
+        fake, {"title": "T", "body": "short generic press release body"},
+        system="sys", gen_user="u", trace=trace,
+    )
+
+    assert fake.calls == 1
+    assert out["body"] == "deeper revised body with more detail"
 
 
 def test_disabled_skips_review(monkeypatch) -> None:

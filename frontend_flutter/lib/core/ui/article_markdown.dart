@@ -3,6 +3,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../theme/app_theme_extension.dart';
+import 'article_chart.dart';
 import 'glossary.dart';
 import 'lazy_network_image.dart';
 
@@ -125,13 +126,30 @@ class ArticleMarkdown extends StatelessWidget {
       // dotted underline + hover/long-press definition tooltip. A fresh syntax
       // instance per build resets the "first occurrence only" tracking.
       inlineSyntaxes: [GlossaryInlineSyntax()],
-      builders: {'glossary': GlossaryElementBuilder(accent: colors.accent)},
+      builders: {
+        'glossary': GlossaryElementBuilder(accent: colors.accent),
+        'pre': ChartPreElementBuilder(),
+      },
       // Route body images (hero + inline) through the same-origin proxy so
       // CanvasKit can render cross-origin sources that omit CORS headers.
-      imageBuilder: (uri, title, alt) => LazyNetworkImage(
-        url: uri.toString(),
-        fit: BoxFit.cover,
-        error: const SizedBox.shrink(),
+      // Height-capped so a tall image can't dominate the page; alt text flows
+      // through as the semantic label for screen readers. Explicit dimensions
+      // from markdown size syntax (![alt](url =WxH)) win over the defaults.
+      sizedImageBuilder: (config) => ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 480),
+          child: LazyNetworkImage(
+            url: config.uri.toString(),
+            width: config.width ?? double.infinity,
+            height: config.height,
+            fit: BoxFit.cover,
+            semanticLabel: (config.alt == null || config.alt!.isEmpty)
+                ? null
+                : config.alt,
+            error: const SizedBox.shrink(),
+          ),
+        ),
       ),
       onTapLink: (text, href, title) {
         final url = href ?? text;

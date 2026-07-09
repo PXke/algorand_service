@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -51,9 +52,12 @@ class _FrontPageState extends ConsumerState<FrontPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadPlacementsDeferred());
   }
 
+  // Idle-priority task instead of a fixed timer: fetch placements as soon as
+  // the scheduler has spare time after first paint, not on an arbitrary delay.
   void _loadPlacementsDeferred() {
-    unawaited(
-      Future<void>.delayed(const Duration(seconds: 8), _loadPlacements),
+    SchedulerBinding.instance.scheduleTask(
+      () => unawaited(_loadPlacements()),
+      Priority.idle,
     );
   }
 

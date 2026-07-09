@@ -90,3 +90,24 @@ def test_parse_json_object_salvages_fences_and_prose() -> None:
     }
     assert _parse_json_object("no json here") is None
     assert _parse_json_object('[1, 2]') is None  # root must be an object
+
+
+def test_parse_json_object_salvages_json_label_fence() -> None:
+    raw = (
+        "JSON\n\n"
+        '```json\n{"narrative_synthesis": 4, "technical_depth": 5, "issues": []}\n```'
+    )
+    assert _parse_json_object(raw) == {
+        "narrative_synthesis": 4,
+        "technical_depth": 5,
+        "issues": [],
+    }
+
+
+def test_parse_json_object_salvages_scores_from_broken_issue_strings() -> None:
+    raw = '{"narrative_synthesis": 4, "technical_depth": 2, "issues": ["bad "quote" here"]}'
+    assert _parse_json_object(raw) == {
+        "narrative_synthesis": 4,
+        "technical_depth": 2,
+        "issues": [],
+    }

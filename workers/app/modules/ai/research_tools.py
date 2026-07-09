@@ -391,11 +391,74 @@ def _fetch_failure_hint(url: str, error: str, *, status_code: int | None = None)
     return ""
 
 
-def _tool_fetch_url(url: str, max_chars: int = 6000) -> dict[str, Any]:
-    """Fetch a web page and return its cleaned main text — the full article a
-    search_web snippet only teased. SSRF-guarded; HTML/text only."""
+def _slice_document_text(
+    text: str,
+    *,
+    url: str,
+    title: str,
+    links: list[dict[str, str]],
+    max_chars: int,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Return one window of extracted page text with scroll navigation metadata."""
+    cap = max(500, min(int(max_chars), 12000))
+    offset = max(0, int(offset))
+    total = len(text)
+    if offset >= total:
+        return {
+            "url": url,
+            "title": title,
+            "text": "",
+            "links": [],
+            "chars": total,
+            "chunk_chars": 0,
+            "truncated": False,
+            "has_more": False,
+            "_next_offset": None,
+            "hint": "no more content in this document",
+        }
+    end = min(offset + cap, total)
+    chunk = text[offset:end]
+    has_more = end < total
+    return {
+        "url": url,
+        "title": title,
+        "text": chunk,
+        # Links only on the first window — repeating them on scroll rounds wastes tokens.
+        "links": links if offset == 0 else [],
+        "chars": total,
+        "chunk_chars": len(chunk),
+        "truncated": has_more,
+        "has_more": has_more,
+        "_next_offset": end if has_more else None,
+    }
+
+
+def _publicize_fetch_result(raw: dict[str, Any]) -> dict[str, Any]:
+    """Strip internal scroll offsets; expose a model-friendly continue_reading hint."""
+    out = dict(raw)
+    out.pop("_next_offset", None)
+    if out.get("has_more"):
+        out["scroll"] = {
+            "url": out.get("url"),
+            "continue_reading": True,
+            "instruction": (
+                "More content remains. Call fetch_url again with the same url and "
+                "continue_reading=true."
+            ),
+        }
+    return out
+
+
+def _fetch_url_internal(
+    url: str,
+    max_chars: int = 6000,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Fetch and slice a URL; returns raw dict (may include ``_next_offset``)."""
     import httpx
 
+    cap = max(500, min(int(max_chars), 12000))
     u = (url or "").strip()
     if not u:
         return {"error": "url required"}
@@ -433,15 +496,14 @@ def _tool_fetch_url(url: str, max_chars: int = 6000) -> dict[str, Any]:
             text = "\n".join((pg.extract_text() or "") for pg in reader.pages[:40]).strip()
         except Exception as exc:
             return {"url": base, "error": f"pdf parse failed: {str(exc)[:160]}"}
-        cap = max(500, min(int(max_chars), 12000))
-        return {
-            "url": base,
-            "title": title,
-            "text": text[:cap],
-            "links": [],
-            "chars": len(text),
-            "truncated": len(text) > cap,
-        }
+        return _slice_document_text(
+            text,
+            url=base,
+            title=title,
+            links=[],
+            max_chars=cap,
+            offset=offset,
+        )
     if "html" not in ctype and "text" not in ctype:
         return {"url": u, "error": f"unsupported content-type: {ctype[:60]}"}
     from urllib.parse import urljoin
@@ -491,15 +553,26 @@ def _tool_fetch_url(url: str, max_chars: int = 6000) -> dict[str, Any]:
         except Exception:
             pass  # keep the HTTP result — a failed render beats no result at all
 
-    cap = max(500, min(int(max_chars), 12000))
-    return {
-        "url": base,
-        "title": title,
-        "text": text[:cap],
-        "links": links,
-        "chars": len(text),
-        "truncated": len(text) > cap,
-    }
+    return _slice_document_text(
+        text,
+        url=base,
+        title=title,
+        links=links,
+        max_chars=cap,
+        offset=offset,
+    )
+
+
+def _tool_fetch_url(
+    url: str,
+    max_chars: int = 6000,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Fetch a web page and return its cleaned main text (public tool result)."""
+    raw = _fetch_url_internal(url, max_chars=max_chars, offset=offset)
+    if raw.get("error"):
+        return raw
+    return _publicize_fetch_result(raw)
 
 
 def _tool_get_defi_tvl(protocol: str = "") -> dict[str, Any]:
@@ -1071,11 +1144,12 @@ _FETCH_SCHEMA = {
     "function": {
         "name": "fetch_url",
         "description": (
-            "Fetch a web page and return its full cleaned text — the actual article "
-            "or blog post behind a search_web snippet. Use this to READ a source "
-            "before writing about it, instead of relying on a one-line snippet. "
-            "In-content links are kept inline as 'label (url)' and also returned as "
-            "a `links` array of {text,url}, so you can pick what to fetch next."
+            "Fetch a web page and return its cleaned text — the actual article "
+            "or blog post behind a search_web snippet. Long pages return one "
+            "window at a time. When has_more is true, call fetch_url AGAIN with "
+            "the SAME url and continue_reading=true to read the next section. "
+            "In-content links are kept inline as 'label (url)' and, on the first "
+            "window only, returned as a `links` array of {text,url}."
         ),
         "parameters": {
             "type": "object",
@@ -1083,7 +1157,15 @@ _FETCH_SCHEMA = {
                 "url": {"type": "string"},
                 "max_chars": {
                     "type": "integer",
-                    "description": "cap on returned text, default 6000",
+                    "description": "Characters per window, default 6000 (max 12000)",
+                },
+                "continue_reading": {
+                    "type": "boolean",
+                    "description": (
+                        "false (default) = read from the start of the page. "
+                        "true = continue the same url from where the previous "
+                        "fetch_url left off when has_more was true."
+                    ),
                 },
             },
             "required": ["url"],

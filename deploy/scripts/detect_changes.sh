@@ -124,9 +124,12 @@ main() {
   fi
   [[ "$ch_schema" == 1 || "$full" == 1 ]] && skip_migrate=0 || skip_migrate=1
 
-  local restart_backend=0 restart_workers=0
-  [[ "$ch_back" == 1 || "$ch_pylock" == 1 || "$full" == 1 ]] && restart_backend=1
-  [[ "$ch_workers" == 1 || "$ch_pylock" == 1 || "$full" == 1 ]] && restart_workers=1
+  # Release install always does current→previous→rm previous. systemd units
+  # use WorkingDirectory=…/releases/current/…; after a swap the live process cwd
+  # follows the rename into previous, then the *next* deploy deletes previous
+  # and Path.cwd() raises FileNotFoundError (SSR 500s). Always bounce units
+  # that pin that path whenever we ship a release.
+  local restart_backend=1 restart_workers=1
 
   # Show plan
   _yn() { [[ "$1" == 1 ]] && echo yes || echo skip; }
@@ -142,15 +145,13 @@ main() {
       log "  ${#files[@]} paths changed"
     fi
     log "  frontend:  $(_yn "$ch_front") (flutter build + precompress)"
-    log "  backend:   $(_yn "$ch_back") (ship$([[ "$restart_backend" == 1 ]] && echo ' + restart' || true))"
-    log "  workers:   $(_yn "$ch_workers") (ship$([[ "$restart_workers" == 1 ]] && echo ' + restart' || true))"
+    log "  backend:   $(_yn "$ch_back") (code ship; always restart)"
+    log "  workers:   $(_yn "$ch_workers") (code ship; always restart)"
     log "  schema:    $([[ "$skip_migrate" == 1 ]] && echo skip || echo migrate)"
     log "  nginx:     $(_yn "$ch_deploy")"
     if [[ "$sync_flutter" == 1 ]]; then log "  deps:      flutter pub upgrade (pubspec.yaml changed)"; fi
     if [[ "$sync_python" == 1 ]]; then log "  deps:      refresh requirements.lock.txt (pyproject changed)"; fi
-    if [[ "$ch_front" == 1 && "$restart_backend" != 1 && "$restart_workers" != 1 ]]; then
-      log "  restart:   none (static web only)"
-    fi
+    log "  restart:   backend + workers (release cwd hygiene)"
   fi
 
   _export DEPLOY_BASELINE_SHA "${base:-}"

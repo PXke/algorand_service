@@ -10,7 +10,7 @@ import '../../../core/ui/loading_strip.dart';
 import '../../../core/ui/page_content.dart';
 import '../../../core/providers/session_providers.dart';
 import '../models/classifier_labels.dart';
-import '../../../core/ui/article_markdown.dart';
+import '../../../core/ui/deferred_article_markdown.dart';
 import '../../newspaper/services/news_api.dart';
 
 /// Admin tab: approve/reject classifier review queue items with category + quality.
@@ -667,7 +667,7 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
                       ),
                       padding: const EdgeInsets.all(14),
                       child: SingleChildScrollView(
-                        child: ArticleMarkdown(data: _topBody!),
+                        child: DeferredArticleMarkdown(data: _topBody!),
                       ),
                     ),
                   ],

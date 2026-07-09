@@ -149,6 +149,45 @@ _prune_web_build() {
   fi
   find "$web" -name '*.map' -delete 2>/dev/null || true
   find "$web" -name '*.symbols' -delete 2>/dev/null || true
+  _prune_orphan_deferred_parts "$web"
+}
+
+# Drop main.dart.js_N.part.js files (and .gz/.br siblings) that are not listed
+# in dart2js's deferredPartUris. Flutter rebuilds leave stale / unused hunks on
+# disk across compiles; nginx would otherwise precompress and ship them.
+_prune_orphan_deferred_parts() {
+  local web="$1"
+  local main="$web/main.dart.js"
+  [[ -f "$main" ]] || return 0
+
+  local -A live=()
+  local name
+  while IFS= read -r name; do
+    [[ -n "$name" ]] && live["$name"]=1
+  done < <(
+    python3 - "$main" <<'PY'
+import re, sys
+text = open(sys.argv[1], errors="ignore").read()
+m = re.search(r"deferredPartUris:\[(.*?)\]", text)
+if not m:
+    sys.exit(0)
+for name in re.findall(r"(main\.dart\.js_\d+\.part\.js)", m.group(1)):
+    print(name)
+PY
+  )
+
+  local f base removed=0
+  for f in "$web"/main.dart.js_*.part.js; do
+    [[ -f "$f" ]] || continue
+    base=$(basename "$f")
+    if [[ -z "${live[$base]:-}" ]]; then
+      rm -f "$f" "$f.gz" "$f.br"
+      removed=$((removed + 1))
+    fi
+  done
+  if (( removed > 0 )); then
+    echo ">>> Pruned $removed orphan deferred .part.js hunk(s)" >&2
+  fi
 }
 
 _web_tree_fingerprint() {
