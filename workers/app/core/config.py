@@ -516,6 +516,20 @@ ECOSYSTEM_DIRECTORY_URLS = [
     if u.strip()
 ]
 
+# Paginated case-study indexes (comma-separated). Each detail page's external
+# links yield the subject org's domain — the discovery path for the
+# institutional/impact class (Mercy Corps/UNDP/SEWA style) whose sites are
+# huge and chain-silent, so keyword scoring marks them irrelevant even though
+# a Foundation case study is the strongest relevance signal there is.
+ECOSYSTEM_CASE_STUDY_INDEXES = [
+    u.strip()
+    for u in env_str(
+        "ECOSYSTEM_CASE_STUDY_INDEXES",
+        "https://algorand.co/case-studies",
+    ).split(",")
+    if u.strip()
+]
+
 # Hard cap on items waiting in the admin classifier queue. Once reached, the
 # pipeline stops composing/holding new reviews until the admin clears some.
 MAX_PENDING_REVIEWS = env_int("MAX_PENDING_REVIEWS", 1)

@@ -65,6 +65,15 @@ _SKIP_HOSTS: frozenset[str] = frozenset(
         "pages.dev",
         "netlify.app",
         "amazonaws.com",
+        # Press-release wires / marketing plumbing that case-study pages link.
+        "prnewswire.com",
+        "businesswire.com",
+        "globenewswire.com",
+        "hsforms.com",
+        "hubspot.com",
+        "apple.com",
+        "play.google.com",
+        "google.com",
     }
 )
 
@@ -105,17 +114,67 @@ def _reachable(domain: str) -> bool:
         return False
 
 
-def sync_ecosystem_directories() -> dict[str, Any]:
-    """Ingest each configured directory URL; approve + monitor newly listed
-    domains. Idempotent: already-monitored domains are counted and skipped."""
-    from app.core import config
-    from app.core.net_guard import guarded_get
+def _ingest_domain(domain: str, source_url: str, stats: dict[str, Any]) -> None:
+    """Approve + monitor one curated-listed domain (shared by the directory and
+    case-study paths). Admin rejects stay sovereign; already-monitored domains
+    just get the anchor flag stamped."""
     from app.modules.crawler.domain_tracker import (
         ensure_monitored_service,
         get_domain_status,
         update_domain_status,
     )
     from app.modules.newspaper.service_sources import service_for_domain
+
+    stats["domains"] += 1
+    try:
+        status = get_domain_status(domain) or {}
+        meta = status.get("metadata") or {}
+        # An explicit admin reject is permanent — a curated listing
+        # never overrides it.
+        if not status.get("is_relevant", True) and (
+            meta.get("frontier_set_by_admin") == "true"
+            or status.get("frontier_status") == "dead_end"
+            or meta.get("frontier_status") == "dead_end"
+        ):
+            stats["skipped_admin"] += 1
+            return
+        if service_for_domain(domain):
+            # Already monitored — just make sure the anchor flag is set.
+            if meta.get("ecosystem_listed") != "true":
+                update_domain_status(
+                    domain,
+                    relevance_score=float(status.get("relevance_score") or 0.45),
+                    metadata={"ecosystem_listed": "true",
+                              "ecosystem_source": source_url},
+                )
+            stats["skipped_existing"] += 1
+            return
+        if not _reachable(domain):
+            stats["skipped_unreachable"] += 1
+            return
+        update_domain_status(
+            domain,
+            relevance_score=0.45,
+            category="service",
+            is_relevant=True,
+            frontier_status_override="approved",
+            metadata={"ecosystem_listed": "true",
+                      "ecosystem_source": source_url},
+        )
+        if ensure_monitored_service(domain, scrape_url=f"https://{domain}/"):
+            stats["created"] += 1
+        else:
+            stats["skipped_existing"] += 1
+    except Exception:
+        logger.warning("ecosystem sync: failed on %s", domain, exc_info=True)
+        stats["errors"] += 1
+
+
+def sync_ecosystem_directories() -> dict[str, Any]:
+    """Ingest each configured directory URL; approve + monitor newly listed
+    domains. Idempotent: already-monitored domains are counted and skipped."""
+    from app.core import config
+    from app.core.net_guard import guarded_get
 
     stats = {"directories": 0, "domains": 0, "created": 0, "skipped_admin": 0,
              "skipped_existing": 0, "skipped_unreachable": 0, "errors": 0}
@@ -131,51 +190,109 @@ def sync_ecosystem_directories() -> dict[str, Any]:
         stats["directories"] += 1
 
         for domain in sorted(extract_directory_domains(resp.text)):
-            stats["domains"] += 1
-            try:
-                status = get_domain_status(domain) or {}
-                meta = status.get("metadata") or {}
-                # An explicit admin reject is permanent — a directory listing
-                # never overrides it.
-                if not status.get("is_relevant", True) and (
-                    meta.get("frontier_set_by_admin") == "true"
-                    or status.get("frontier_status") == "dead_end"
-                    or meta.get("frontier_status") == "dead_end"
-                ):
-                    stats["skipped_admin"] += 1
-                    continue
-                if service_for_domain(domain):
-                    # Already monitored — just make sure the anchor flag is set.
-                    if meta.get("ecosystem_listed") != "true":
-                        update_domain_status(
-                            domain,
-                            relevance_score=float(status.get("relevance_score") or 0.45),
-                            metadata={"ecosystem_listed": "true",
-                                      "ecosystem_source": directory_url},
-                        )
-                    stats["skipped_existing"] += 1
-                    continue
-                if not _reachable(domain):
-                    stats["skipped_unreachable"] += 1
-                    continue
-                update_domain_status(
-                    domain,
-                    relevance_score=0.45,
-                    category="service",
-                    is_relevant=True,
-                    frontier_status_override="approved",
-                    metadata={"ecosystem_listed": "true",
-                              "ecosystem_source": directory_url},
-                )
-                if ensure_monitored_service(domain, scrape_url=f"https://{domain}/"):
-                    stats["created"] += 1
-                else:
-                    stats["skipped_existing"] += 1
-            except Exception:
-                logger.warning("ecosystem sync: failed on %s", domain, exc_info=True)
-                stats["errors"] += 1
+            _ingest_domain(domain, directory_url, stats)
 
     _ecosystem_cache["at"] = 0.0  # new listings visible to score_page promptly
+    return stats
+
+
+# --------------------------------------------------------------------------- #
+# Case-study indexes (algorand.co/case-studies): the discovery path for the
+# institutional/impact class. These orgs' sites are huge and chain-silent
+# (mercycorpsventures.com and aid.technology were both crawled and marked
+# IRRELEVANT by keyword scoring), but a Foundation case study is the strongest
+# relevance signal there is — every subject org linked from a case-study page
+# gets the same anchor + watch as a directory listing.
+
+_HREF_RE = re.compile(r'href="(https?://[^"#]+)"')
+_CASE_INDEX_PAGE_CAP = 10
+
+
+def case_study_detail_links(html: str, index_url: str) -> set[str]:
+    """Same-site, single-segment detail-page URLs under the index path
+    (tag/pagination/feed links excluded)."""
+    prefix = index_url.rstrip("/") + "/"
+    out: set[str] = set()
+    for href in _HREF_RE.findall(html or ""):
+        clean = href.split("?")[0].rstrip("/")
+        if not clean.startswith(prefix):
+            continue
+        tail = clean[len(prefix):]
+        if not tail or "/" in tail or tail.endswith(".xml"):
+            continue
+        out.add(clean)
+    return out
+
+
+def extract_case_study_domains(pages: dict[str, str]) -> dict[str, str]:
+    """domain -> the detail URL it appeared on. Domains present on ~every
+    detail page are site furniture (liquidauth.com lives in algorand.co's
+    footer), not case-study subjects, and are dropped."""
+    from collections import Counter
+
+    per_page = {url: extract_directory_domains(html) for url, html in pages.items()}
+    counts = Counter(d for doms in per_page.values() for d in doms)
+    n = len(per_page)
+    boilerplate_cutoff = max(3, int(n * 0.4)) if n >= 3 else n + 1
+    result: dict[str, str] = {}
+    for url in sorted(per_page):
+        for domain in sorted(per_page[url]):
+            if counts[domain] >= boilerplate_cutoff:
+                continue
+            result.setdefault(domain, url)
+    return result
+
+
+def sync_ecosystem_case_studies() -> dict[str, Any]:
+    """Ingest each configured case-study index: walk its pagination, fetch each
+    detail page, and anchor + monitor every subject org domain found."""
+    from app.core import config
+    from app.core.net_guard import guarded_get
+
+    stats = {"indexes": 0, "case_studies": 0, "domains": 0, "created": 0,
+             "skipped_admin": 0, "skipped_existing": 0,
+             "skipped_unreachable": 0, "errors": 0}
+
+    for index_url in config.ECOSYSTEM_CASE_STUDY_INDEXES:
+        details: set[str] = set()
+        for page_no in range(1, _CASE_INDEX_PAGE_CAP + 1):
+            page_url = (
+                index_url if page_no == 1
+                else f"{index_url.rstrip('/')}/page/{page_no}"
+            )
+            try:
+                resp = guarded_get(page_url, timeout=20.0)
+                resp.raise_for_status()
+            except Exception:
+                if page_no == 1:
+                    logger.warning(
+                        "case-study sync: failed to fetch %s", page_url, exc_info=True
+                    )
+                    stats["errors"] += 1
+                break
+            found = case_study_detail_links(resp.text, index_url)
+            if not (found - details):
+                break  # pagination exhausted (page repeats or is empty)
+            details |= found
+        if not details:
+            continue
+        stats["indexes"] += 1
+
+        pages: dict[str, str] = {}
+        for detail_url in sorted(details):
+            try:
+                resp = guarded_get(detail_url, timeout=20.0)
+                resp.raise_for_status()
+                pages[detail_url] = resp.text
+            except Exception:
+                logger.warning("case-study sync: failed on %s", detail_url, exc_info=True)
+                stats["errors"] += 1
+        stats["case_studies"] += len(pages)
+
+        for domain, source_url in sorted(extract_case_study_domains(pages).items()):
+            _ingest_domain(domain, source_url, stats)
+
+    _ecosystem_cache["at"] = 0.0
     return stats
 
 

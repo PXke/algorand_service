@@ -430,6 +430,18 @@ def reap_stale_compose_sessions() -> dict[str, int]:
     return _reap()
 
 
+def _curated_discovery(scrape_url: str) -> bool:
+    """True when the row's domain came from a curated listing (ecosystem
+    directory or case-study sync) — best-effort, False on any failure."""
+    try:
+        from app.modules.crawler.domain_tracker import domain_from_url
+        from app.modules.crawler.ecosystem_sync import ecosystem_listed_domains
+
+        return domain_from_url(scrape_url) in ecosystem_listed_domains()
+    except Exception:
+        return False
+
+
 @celery_app.task(name="app.tasks.newspaper.expire_stale_queue_items")
 def expire_stale_queue_items() -> dict[str, object]:
     """
@@ -460,6 +472,14 @@ def expire_stale_queue_items() -> dict[str, object]:
             continue
 
         if row.priority < config.PUBLISH_DEFER_PRIORITY_THRESHOLD and age > defer_after:
+            if row.publish_kind == "service_discovery" and _curated_discovery(row.scrape_url):
+                # Curated once-ever introductions (ecosystem directory /
+                # Foundation case-study subjects) are chain-silent by nature,
+                # so their keyword-driven priority is structurally low (~27 =
+                # 0.45 anchor × discovery weight, under the 45 threshold).
+                # They're latency-tolerant by design: leave them pending until
+                # a quiet drain slot picks them up instead of parking them.
+                continue
             page_text = str(row.payload.get("page_text", ""))
             if page_text:
                 index_crawled_page.delay(

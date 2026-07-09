@@ -129,11 +129,18 @@ def retrain_publish_classifier_task() -> dict[str, object]:
 @celery_app.task(name="app.tasks.crawler.sync_ecosystem_directories")
 def sync_ecosystem_directories_task() -> dict[str, object]:
     """Daily beat: ingest curated ecosystem directories (awesome-algorand etc.)
-    and approve+monitor listed domains — the discovery path for chain-silent
-    services whose own homepages score 0 relevance. See ecosystem_sync."""
+    and case-study indexes (algorand.co/case-studies), approving + monitoring
+    listed/subject domains — the discovery path for chain-silent services and
+    institutional users whose own sites score 0 relevance. See ecosystem_sync."""
     from app.core.config import ECOSYSTEM_SYNC_ENABLED
-    from app.modules.crawler.ecosystem_sync import sync_ecosystem_directories
+    from app.modules.crawler.ecosystem_sync import (
+        sync_ecosystem_case_studies,
+        sync_ecosystem_directories,
+    )
 
     if not ECOSYSTEM_SYNC_ENABLED:
         return {"status": "skipped", "reason": "ecosystem_sync_disabled"}
-    return sync_ecosystem_directories()
+    return {
+        "directories": sync_ecosystem_directories(),
+        "case_studies": sync_ecosystem_case_studies(),
+    }
