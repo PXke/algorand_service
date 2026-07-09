@@ -23,6 +23,45 @@ from app.modules.search.tasks.index_tasks import index_article, index_crawled_pa
 logger = logging.getLogger(__name__)
 
 
+# Host fragments that mark a third-party og:image as CDN/media hosting rather
+# than another site's content. Share images hosted off-domain are the NORM
+# (cloudinary, cloudfront, discourse-cdn, ipfs gateways…) — only a third-party
+# host that looks like a different *website* (the cryptonews.net page serving a
+# cnews24.ru stock photo) should sink the hero.
+_IMAGE_CDN_HINTS: tuple[str, ...] = (
+    "cdn",
+    "img",
+    "image",
+    "static",
+    "media",
+    "assets",
+    "ipfs",
+    "cloudfront",
+    "cloudinary",
+    "imgix",
+    "akamai",
+    "fastly",
+    "amazonaws",
+    "googleusercontent",
+    "twimg",
+)
+
+
+def _plausible_image_host(og_image: str, source_url: str) -> bool:
+    """True when the og:image host plausibly belongs to the source: same
+    registrable domain, or a recognizable CDN/media host."""
+    from urllib.parse import urlparse
+
+    from app.modules.crawler.domain_tracker import domain_from_url
+
+    image_domain = domain_from_url(og_image)
+    site_domain = domain_from_url(source_url)
+    if not image_domain or not site_domain or image_domain == site_domain:
+        return True
+    host = (urlparse(og_image).hostname or "").lower()
+    return any(hint in host for hint in _IMAGE_CDN_HINTS)
+
+
 def _with_hero_image(body: str, og_image: str, alt: str, source_url: str = "") -> str:
     """Prepend the source's share image as a hero, if present and not already
     embedded. Real image from the page, never AI-generated."""
@@ -30,18 +69,13 @@ def _with_hero_image(body: str, og_image: str, alt: str, source_url: str = "") -
         return body
     if not og_image.lower().startswith(("http://", "https://")):
         return body
-    if source_url:
-        from app.modules.crawler.domain_tracker import domain_from_url
-
-        image_domain = domain_from_url(og_image)
-        site_domain = domain_from_url(source_url)
-        if image_domain and site_domain and image_domain != site_domain:
-            logger.warning(
-                "dropping hero image from mismatched domain %s (source %s)",
-                image_domain,
-                site_domain,
-            )
-            return body
+    if source_url and not _plausible_image_host(og_image, source_url):
+        logger.warning(
+            "dropping hero image from implausible host %s (source %s)",
+            og_image,
+            source_url,
+        )
+        return body
     safe_alt = (alt or "").replace("]", "").replace("[", "")
     return f"![{safe_alt}]({og_image})\n\n{body}"
 
@@ -447,10 +481,15 @@ def publish_from_queued_row(
     image_field = _payload_og
     if not _payload_og:
         try:
-            from app.modules.newspaper.source_image import resolve_source_images
+            from app.modules.newspaper.source_image import resolve_article_images
 
-            _og, _logo = resolve_source_images(
-                source_url=row.scrape_url, service_id=row.service_id
+            # body-sources fallback covers lanes with no fetchable source_url
+            # (editorial://brief/…, mail://message/…): the writer's own cited
+            # research links are the only place a real image can come from.
+            _og, _logo = resolve_article_images(
+                source_url=row.scrape_url,
+                service_id=row.service_id,
+                body=composed.body,
             )
             hero_image = _og
             image_field = _og or _logo
@@ -552,6 +591,10 @@ def publish_from_queued_row(
                 "confidence": f"{clf_confidence:.3f}",
                 "categories": ",".join(signals.categories),
                 "diverted_by": "gatekeeper" if gate_enforced_review else "classifier",
+                # recompose_review carries these forward — without og_image
+                # here, every recomposed article silently lost its image.
+                "og_image": image_field,
+                "service_id": row.service_id,
                 **grade_meta,
             },
         )
@@ -978,6 +1021,22 @@ def recompose_review(review_id: str) -> dict[str, str]:
             },
         )
         return {"status": "mistral_failed", "detail": str(exc)[:200]}
+    image_field = og_image
+    if not og_image:
+        # Older reviews (and any path that never resolved one) carry no image —
+        # resolve it now from the source page / the article's own cited links.
+        # A true share image also becomes the body hero; a brand logo only
+        # populates image_url (same split as publish_from_queued_row).
+        try:
+            from app.modules.newspaper.source_image import resolve_article_images
+
+            _og, _logo = resolve_article_images(
+                source_url=url, service_id=service_id, body=composed.body
+            )
+            og_image = _og
+            image_field = _og or _logo
+        except Exception:
+            logger.warning("failed to resolve source images for %s", url, exc_info=True)
     tags = _merge_tags(
         derive_article_tags(
             service_id=service_id,
@@ -1000,7 +1059,7 @@ def recompose_review(review_id: str) -> dict[str, str]:
         trigger_round=0,
         source_url=url,
         publish_to_feed=False,
-        image_url=og_image,
+        image_url=image_field,
         tags=tags,
         prompt_version=getattr(composed, "prompt_version", ""),
     )
@@ -1046,6 +1105,8 @@ def recompose_review(review_id: str) -> dict[str, str]:
             "article_id": article_id,
             "source": kind or "web",
             "recomposed_from": review_id,
+            "og_image": image_field,
+            "service_id": service_id,
             **grade_meta,
         },
     )

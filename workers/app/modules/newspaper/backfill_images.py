@@ -16,8 +16,8 @@ import logging
 import sys
 from uuid import UUID
 
-from app.modules.newspaper.article_store import list_feed_articles, update_article_image
-from app.modules.newspaper.source_image import resolve_source_images
+from app.modules.newspaper.article_store import get_article, list_feed_articles, update_article_image
+from app.modules.newspaper.source_image import resolve_article_images
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +39,14 @@ def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
         if (meta.image_url or "").strip():
             skipped += 1
             continue
-        og, logo = resolve_source_images(
-            source_url=meta.source_url, service_id=meta.service_id
+        # Body needed for the cited-links fallback (editorial://, mail://
+        # sources aren't fetchable, so their image comes from the article's
+        # own Sources block).
+        detail = get_article(aid)
+        og, logo = resolve_article_images(
+            source_url=meta.source_url,
+            service_id=meta.service_id,
+            body=detail.body if detail else "",
         )
         image = og or logo
         if not image:

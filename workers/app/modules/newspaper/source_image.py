@@ -10,8 +10,30 @@ from __future__ import annotations
 
 import logging
 import re
+from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
+
+# Links that never carry a representative share image for the story subject:
+# social/chat profiles. Content hosts (medium, youtube, news sites) stay in —
+# their og:image is at least topical artwork.
+_BODY_LINK_SKIP_HOSTS: frozenset[str] = frozenset(
+    {
+        "twitter.com",
+        "x.com",
+        "t.me",
+        "discord.gg",
+        "discord.com",
+        "facebook.com",
+        "instagram.com",
+        "linkedin.com",
+        "reddit.com",
+        "bsky.app",
+    }
+)
+
+_MD_LINK_RE = re.compile(r"\]\((https?://[^)\s]+)\)")
+_SOURCES_HEADING_RE = re.compile(r"(?im)^#{1,6}\s*(sources?|references?)\b")
 
 
 def homepage_from_service_id(service_id: str | None) -> str:
@@ -60,5 +82,49 @@ def resolve_source_images(*, source_url: str | None, service_id: str | None) -> 
         og = og or page_og
         logo = logo or page_logo
         if og:  # a real share image is the best result — stop early
+            break
+    return og, logo
+
+
+def source_urls_from_body(body: str, limit: int = 4) -> list[str]:
+    """Cited http(s) links from the article's Sources/References section (the
+    writer appends every fetched research URL there — reference_block.py),
+    falling back to all body links when no such section exists. This is the
+    image path for lanes whose source_url isn't fetchable (editorial://brief/…,
+    mail://message/…) and whose service_id isn't a domain slug."""
+    text = body or ""
+    heading = _SOURCES_HEADING_RE.search(text)
+    if heading:
+        text = text[heading.end() :]
+    urls: list[str] = []
+    seen: set[str] = set()
+    for url in _MD_LINK_RE.findall(text):
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+        if not host or host in _BODY_LINK_SKIP_HOSTS or url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def resolve_article_images(
+    *, source_url: str | None, service_id: str | None, body: str = ""
+) -> tuple[str, str]:
+    """resolve_source_images, then fall back to the article's own cited links.
+    Best-effort — returns ("", "") when nothing anywhere advertises an image."""
+    og, logo = resolve_source_images(source_url=source_url, service_id=service_id)
+    if og:
+        return og, logo
+    for url in source_urls_from_body(body):
+        try:
+            page_og, page_logo = _images_from_url(url)
+        except Exception as exc:
+            log.info("source image fetch failed for %s: %s", url, exc)
+            continue
+        og = og or page_og
+        logo = logo or page_logo
+        if og:
             break
     return og, logo
