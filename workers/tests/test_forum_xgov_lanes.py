@@ -20,7 +20,10 @@ def _b64(s: bytes) -> str:
     return base64.b64encode(s).decode()
 
 
-def _state(status: int, title: str = "Test Proposal") -> list[dict]:
+def _state(status: int, title: str = "Test Proposal", *, age_days: float = 1.0) -> list[dict]:
+    import time
+
+    ts = int(time.time() - age_days * 86400)
     return [
         {"key": _b64(b"status"), "value": {"type": 2, "uint": status}},
         {"key": _b64(b"title"), "value": {"type": 1, "bytes": _b64(title.encode())}},
@@ -29,6 +32,9 @@ def _state(status: int, title: str = "Test Proposal") -> list[dict]:
         {"key": _b64(b"rejections"), "value": {"type": 2, "uint": 709}},
         {"key": _b64(b"proposer"), "value": {"type": 1, "bytes": _b64(b"\x01" * 32)}},
         {"key": _b64(b"funding_category"), "value": {"type": 2, "uint": 10}},
+        {"key": _b64(b"submission_timestamp"), "value": {"type": 2, "uint": ts}},
+        {"key": _b64(b"vote_opening_timestamp"), "value": {"type": 2, "uint": ts}},
+        {"key": _b64(b"voting_duration"), "value": {"type": 2, "uint": 3600}},
     ]
 
 
@@ -55,6 +61,10 @@ def test_poll_signals_new_phases_and_skips_drafts_and_seen(monkeypatch) -> None:
         {"id": 102, "params": {"global-state": _state(10, "Still a draft")}},
         {"id": 103, "params": {"global-state": _state(30, "Approved one")}},
         {"id": 104, "params": {"global-state": _state(45, "Reviewed internal")}},
+        # First-run backfill guard: a proposal that finished months ago must
+        # never signal as news.
+        {"id": 105, "params": {"global-state": _state(30, "Ancient history",
+                                                      age_days=120)}},
     ]}
     monkeypatch.setattr("app.modules.ai.chain_tools._algod_get", lambda path: account)
     # 103's approved phase already signaled.
@@ -72,6 +82,7 @@ def test_poll_signals_new_phases_and_skips_drafts_and_seen(monkeypatch) -> None:
     )
     out = xw.poll_xgov_proposals()
     assert out["new_signals"] == 1
+    assert out["stale_skipped"] == 1
     assert [s["service_id"] for s in signals] == ["xgov-proposal:101:voting"]
     assert signals[0]["source_kind"] == "xgov"
     assert signals[0]["is_first_override"] is False

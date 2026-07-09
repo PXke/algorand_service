@@ -558,6 +558,9 @@ FORUM_MIN_LIKES = env_int("FORUM_MIN_LIKES", 10)
 # funded / blocked.
 XGOV_POLL_ENABLED = env_bool("XGOV_POLL_ENABLED", True)
 XGOV_REGISTRY_APP_ID = env_int("XGOV_REGISTRY_APP_ID", 3147789458)
+# Phases older than this never signal — prevents the first poll from
+# backfilling every historical proposal as "news".
+XGOV_MAX_PHASE_AGE_DAYS = env_int("XGOV_MAX_PHASE_AGE_DAYS", 14)
 
 # Pending-pool retro-pass: refresh content scores for pending frontier domains
 # and PROMOTE those whose crawled-content relevance clears the bar. Promotion

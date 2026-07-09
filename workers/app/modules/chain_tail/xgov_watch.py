@@ -117,9 +117,36 @@ def proposal_facts(app_id: int, state: dict[str, Any]) -> dict[str, str]:
     return {"phase": phase, "title": _utf8(state.get("title")), "text": "\n".join(lines)}
 
 
+def _phase_age_days(phase: str, state: dict[str, Any]) -> float | None:
+    """Approximate age of the CURRENT phase. Terminal phases have no on-chain
+    timestamp of their own — voting close (open + duration) approximates them.
+    None = no usable timestamp (treated as stale, never fresh)."""
+    from datetime import datetime
+
+    epoch = None
+    if phase == "submitted":
+        epoch = state.get("submission_timestamp")
+    elif phase == "voting":
+        epoch = state.get("vote_opening_timestamp")
+    else:
+        opened = int(state.get("vote_opening_timestamp") or 0)
+        if opened:
+            epoch = opened + int(state.get("voting_duration") or 0)
+    try:
+        then = datetime.fromtimestamp(int(epoch), tz=UTC)
+    except (TypeError, ValueError, OSError):
+        return None
+    return (datetime.now(tz=UTC) - then).total_seconds() / 86400.0
+
+
 def poll_xgov_proposals() -> dict[str, Any]:
     """Enumerate proposals via the registry escrow's created apps and emit one
-    publish signal per (proposal, phase) not yet seen."""
+    publish signal per (proposal, phase) not yet seen.
+
+    Phases older than XGOV_MAX_PHASE_AGE_DAYS are skipped, not seeded: without
+    this the FIRST run backfills every historical proposal's current phase
+    (~60 stale queue rows at once). Skipping by age is idempotent and cheap —
+    old proposals are re-examined and re-skipped each poll."""
     from app.core import config
     from app.modules.ai.chain_tools import _algod_get
     from app.modules.newspaper.ingest_signal import ingest_publish_signal
@@ -132,6 +159,7 @@ def poll_xgov_proposals() -> dict[str, Any]:
 
     proposals = account.get("created-apps") or []
     new_signals = 0
+    stale = 0
     results: list[dict[str, object]] = []
     for app in proposals:
         app_id = int(app.get("id") or 0)
@@ -141,6 +169,10 @@ def poll_xgov_proposals() -> dict[str, Any]:
         facts = proposal_facts(app_id, state)
         phase, title = facts["phase"], facts["title"]
         if not phase or phase in _SILENT_PHASES or not title:
+            continue
+        age = _phase_age_days(phase, state)
+        if age is None or age > config.XGOV_MAX_PHASE_AGE_DAYS:
+            stale += 1
             continue
         service_id = f"xgov-proposal:{app_id}:{phase}"
         if get_latest_snapshot(source_id_for_service(service_id)) is not None:
@@ -170,5 +202,6 @@ def poll_xgov_proposals() -> dict[str, Any]:
         "status": "ok",
         "proposals": len(proposals),
         "new_signals": new_signals,
+        "stale_skipped": stale,
         "results": results[:40],
     }
