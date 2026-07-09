@@ -22,10 +22,32 @@ class BlueskyPost:
     created_at: str  # ISO8601 from the record, "" when absent
     is_repost: bool
     is_reply: bool
+    links: tuple[str, ...] = ()  # full URLs from facets/embed (text truncates them)
 
     @property
     def web_url(self) -> str:
         return f"https://bsky.app/profile/{self.handle}/post/{self.rkey}"
+
+
+def _record_links(record: dict) -> tuple[str, ...]:
+    """Full link URLs from a post record: link facets + the external embed.
+    The display text truncates URLs ("example.com/pa..."), so these fields are
+    the only reliable source of what a post actually links to."""
+    links: list[str] = []
+    embed = record.get("embed") or {}
+    external = embed.get("external") or {}
+    uri = str(external.get("uri") or "")
+    if uri.startswith(("http://", "https://")):
+        links.append(uri)
+    for facet in record.get("facets") or []:
+        for feature in (facet or {}).get("features") or []:
+            if not isinstance(feature, dict):
+                continue
+            if str(feature.get("$type") or "").endswith("#link"):
+                u = str(feature.get("uri") or "")
+                if u.startswith(("http://", "https://")):
+                    links.append(u)
+    return tuple(dict.fromkeys(links))
 
 
 def normalize_handle(actor: str) -> str:
@@ -86,6 +108,7 @@ def fetch_author_posts(actor: str, *, limit: int = 20) -> tuple[str, list[Bluesk
                 created_at=str(record.get("createdAt") or ""),
                 is_repost=item.get("reason") is not None,
                 is_reply=record.get("reply") is not None,
+                links=_record_links(record),
             )
         )
     return display_name, posts

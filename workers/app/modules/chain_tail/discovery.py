@@ -18,6 +18,45 @@ _REKEY_PROXY_HINTS: dict[str, str] = {
     "service-proxy": "https://service-proxy.com",
 }
 
+# Asset URLs that are content pointers, not service websites: NFT media on
+# ipfs/arweave gateways and pinning services. A real service's asset url binds
+# a DOMAIN to the asset (HAFN carries hesab.af) — that's the signal we want.
+_ASSET_URL_SKIP_HINTS: tuple[str, ...] = (
+    "ipfs",
+    "arweave",
+    "pinata",
+    "nft.storage",
+    "filebase",
+)
+
+
+def _urls_from_asset_config(txn_json: str | None) -> list[str]:
+    """The asset-config `apar.au` field — the creator's own on-chain website
+    declaration. This is the one discovery signal that cannot miss a
+    chain-active service: chain-silent sites (HesabPay/Lofty class) never say
+    "Algorand" on the web, but their ASA declares their domain on-chain."""
+    if not txn_json:
+        return []
+    try:
+        data = json.loads(txn_json)
+    except json.JSONDecodeError:
+        return []
+    txn = data.get("txn") if isinstance(data, dict) else None
+    if not isinstance(txn, dict) or str(txn.get("type", "")).lower() != "acfg":
+        return []
+    apar = txn.get("apar")
+    if not isinstance(apar, dict):
+        return []
+    url = str(apar.get("au") or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return []  # ipfs://, template-ipfs, ar://, bare CIDs
+    host = (urlparse(url).hostname or "").lower()
+    if not host or "." not in host:
+        return []
+    if any(hint in host for hint in _ASSET_URL_SKIP_HINTS):
+        return []
+    return [url]
+
 
 def _urls_from_note(txn_json: str | None) -> list[str]:
     if not txn_json:
@@ -79,6 +118,7 @@ def extract_urls_from_tx(tx: RoundTransaction) -> list[str]:
         addresses.add(tx.receiver)
 
     urls: list[str] = []
+    urls.extend(_urls_from_asset_config(tx.txn_json))
     urls.extend(_urls_from_note(tx.txn_json))
     urls.extend(_urls_from_rekey(tx.txn_json))
     urls.extend(_urls_from_clawback(tx.txn_json, addresses))

@@ -12,6 +12,25 @@ from app.modules.scraper.crawler_registry import is_crawler_enabled
 from app.modules.scraper.crawler_types import CrawlerType
 
 
+def _enqueue_post_links(post) -> None:
+    """Mention-based discovery: a monitored account linking a site is a lead —
+    feed it to the crawl frontier (unknown domains land pending as usual).
+    Best-effort; never blocks the post ingest."""
+    from urllib.parse import urlparse
+
+    from app.modules.crawler.ecosystem_sync import _skippable
+    from app.modules.crawler.url_queue import enqueue_url
+
+    for url in getattr(post, "links", ()) or ():
+        try:
+            host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+            if not host or "." not in host or host == "bsky.app" or _skippable(host):
+                continue
+            enqueue_url(url, source="bluesky-mention", priority=30)
+        except Exception:
+            continue
+
+
 @celery_app.task(name="app.tasks.scrape.poll_bluesky_sources")
 def poll_bluesky_sources() -> dict[str, object]:
     """Per-post ingest of Bluesky accounts registered as services (scrape_url is
@@ -53,6 +72,7 @@ def poll_bluesky_sources() -> dict[str, object]:
             if get_latest_snapshot(source_id_for_service(service_id)) is not None:
                 results.append({"rkey": post.rkey, "status": "unchanged"})
                 continue
+            _enqueue_post_links(post)
             outcome = ingest_publish_signal(
                 service_id=service_id,
                 display_name=entry.display_name or display_name,

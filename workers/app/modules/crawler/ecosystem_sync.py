@@ -74,6 +74,10 @@ _SKIP_HOSTS: frozenset[str] = frozenset(
         "apple.com",
         "play.google.com",
         "google.com",
+        # Docs/paper hosting and feed plumbing seen in mention sources.
+        "readthedocs.io",
+        "doi.org",
+        "superfeedr.com",
     }
 )
 
@@ -291,6 +295,102 @@ def sync_ecosystem_case_studies() -> dict[str, Any]:
 
         for domain, source_url in sorted(extract_case_study_domains(pages).items()):
             _ingest_domain(domain, source_url, stats)
+
+    _ecosystem_cache["at"] = 0.0
+    return stats
+
+
+# --------------------------------------------------------------------------- #
+# Machine-readable API sources: DefiLlama's protocol registry and Pera's
+# verified-asset list. Both are third-party-vetted ("has real TVL on Algorand"
+# / "passed Pera verification"), so they qualify for the same anchor + watch
+# as a curated directory listing.
+
+
+def _domains_from_defillama() -> dict[str, str]:
+    """domain -> attribution for protocols deployed on Algorand. CEX listings
+    are skipped: Binance 'supporting' ALGO custody is not an Algorand service."""
+    from app.core.net_guard import guarded_get
+
+    resp = guarded_get("https://api.llama.fi/protocols", timeout=30.0)
+    resp.raise_for_status()
+    out: dict[str, str] = {}
+    for proto in resp.json():
+        if not isinstance(proto, dict):
+            continue
+        if "Algorand" not in (proto.get("chains") or []):
+            continue
+        if str(proto.get("category") or "").upper() == "CEX":
+            continue
+        url = str(proto.get("url") or "").strip()
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+        if host and "." in host and not _skippable(host):
+            out.setdefault(host, f"defillama:{proto.get('slug') or proto.get('name')}")
+    return out
+
+
+def _domains_from_pera_verified(*, asset_cap: int) -> dict[str, str]:
+    """domain -> attribution for Pera-verified ASAs, resolved through each
+    asset's on-chain `url` param (algod lookup, same connector the writer's
+    chain tools use). Content-pointer URLs (ipfs/arweave) are skipped."""
+    from app.core.net_guard import guarded_get
+    from app.modules.ai.chain_tools import _tool_lookup_asset
+    from app.modules.chain_tail.discovery import _ASSET_URL_SKIP_HINTS
+
+    resp = guarded_get(
+        "https://mainnet.api.perawallet.app/v1/public/verified-assets/",
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    results = (resp.json() or {}).get("results") or []
+    asset_ids = [
+        int(a["asset_id"])
+        for a in results
+        if isinstance(a, dict) and str(a.get("verification_tier")) == "verified"
+        and a.get("asset_id")
+    ][:asset_cap]
+
+    out: dict[str, str] = {}
+    for asset_id in asset_ids:
+        try:
+            info = _tool_lookup_asset(asset_id)
+        except Exception:
+            continue
+        url = str((info or {}).get("url") or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+        if not host or "." not in host or _skippable(host):
+            continue
+        if any(hint in host for hint in _ASSET_URL_SKIP_HINTS):
+            continue
+        out.setdefault(host, f"pera-verified:{asset_id}")
+    return out
+
+
+def sync_ecosystem_apis() -> dict[str, Any]:
+    """Ingest the machine-readable ecosystem registries. Each source fails
+    independently — one API being down never blocks the others."""
+    from app.core import config
+
+    stats = {"sources": 0, "domains": 0, "created": 0, "skipped_admin": 0,
+             "skipped_existing": 0, "skipped_unreachable": 0, "errors": 0}
+
+    fetchers = [
+        ("defillama", _domains_from_defillama),
+        ("pera-verified", lambda: _domains_from_pera_verified(
+            asset_cap=config.PERA_VERIFIED_ASSET_CAP)),
+    ]
+    for name, fetch in fetchers:
+        try:
+            domains = fetch()
+        except Exception:
+            logger.warning("ecosystem api sync: %s failed", name, exc_info=True)
+            stats["errors"] += 1
+            continue
+        stats["sources"] += 1
+        for domain in sorted(domains):
+            _ingest_domain(domain, domains[domain], stats)
 
     _ecosystem_cache["at"] = 0.0
     return stats

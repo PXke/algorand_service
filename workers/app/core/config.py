@@ -530,6 +530,26 @@ ECOSYSTEM_CASE_STUDY_INDEXES = [
     if u.strip()
 ]
 
+# Machine-readable ecosystem registries (DefiLlama protocols, Pera verified
+# assets) ingested by the same daily sync. PERA_VERIFIED_ASSET_CAP bounds the
+# per-run algod lookups that resolve each verified ASA's on-chain url param.
+ECOSYSTEM_API_SOURCES_ENABLED = env_bool("ECOSYSTEM_API_SOURCES_ENABLED", True)
+PERA_VERIFIED_ASSET_CAP = env_int("PERA_VERIFIED_ASSET_CAP", 400)
+
+# Mention-based discovery (GitHub topic:algorand repos' homepage fields, the
+# Medium algorand tag feed, Bluesky post links): leads for the crawl frontier,
+# NOT curated listings — discovered domains land pending and earn approval
+# through the normal preview/content scoring.
+MENTION_DISCOVERY_ENABLED = env_bool("MENTION_DISCOVERY_ENABLED", True)
+MENTION_GITHUB_REPO_CAP = env_int("MENTION_GITHUB_REPO_CAP", 50)
+
+# Pending-pool retro-pass: refresh content scores for pending frontier domains
+# and PROMOTE those whose crawled-content relevance clears the bar. Promotion
+# only — auto-reject stays off (2026-06-22 hard lesson: judge on content, and
+# never let the system permanently bury a domain a human hasn't seen).
+FRONTIER_RETRO_PROMOTE_ENABLED = env_bool("FRONTIER_RETRO_PROMOTE_ENABLED", True)
+FRONTIER_CONTENT_PROMOTE_SCORE = env_float("FRONTIER_CONTENT_PROMOTE_SCORE", 0.5)
+
 # Hard cap on items waiting in the admin classifier queue. Once reached, the
 # pipeline stops composing/holding new reviews until the admin clears some.
 MAX_PENDING_REVIEWS = env_int("MAX_PENDING_REVIEWS", 1)
