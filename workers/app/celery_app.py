@@ -131,6 +131,14 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.crawler.discover_from_mentions",
         "schedule": float(os.getenv("MENTION_DISCOVERY_SECONDS", "86400")),
     }
+    schedule["poll-forum-topics"] = {
+        "task": "app.tasks.scrape.poll_forum_topics",
+        "schedule": float(os.getenv("FORUM_POLL_SECONDS", "1800")),
+    }
+    schedule["poll-xgov-proposals"] = {
+        "task": "app.tasks.chain_tail.poll_xgov_proposals",
+        "schedule": float(os.getenv("XGOV_POLL_SECONDS", "3600")),
+    }
     schedule["reevaluate-pending-domains"] = {
         "task": "app.tasks.crawler.reevaluate_pending_domains",
         "schedule": float(os.getenv("PENDING_REEVALUATE_SECONDS", "86400")),

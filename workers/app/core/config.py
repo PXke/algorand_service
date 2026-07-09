@@ -543,6 +543,22 @@ PERA_VERIFIED_ASSET_CAP = env_int("PERA_VERIFIED_ASSET_CAP", 400)
 MENTION_DISCOVERY_ENABLED = env_bool("MENTION_DISCOVERY_ENABLED", True)
 MENTION_GITHUB_REPO_CAP = env_int("MENTION_GITHUB_REPO_CAP", 50)
 
+# Forum hot-topic lane: threads on forum.algorand.co crossing the engagement
+# thresholds become publish signals (one per topic, snapshot-deduped). Cheap:
+# one JSON GET per poll, so the cadence can be tight — output volume is still
+# governed by the publish pipeline's own caps.
+FORUM_POLL_ENABLED = env_bool("FORUM_POLL_ENABLED", True)
+FORUM_BASE_URL = env_str("FORUM_BASE_URL", "https://forum.algorand.co")
+FORUM_MIN_POSTS = env_int("FORUM_MIN_POSTS", 8)
+FORUM_MIN_LIKES = env_int("FORUM_MIN_LIKES", 10)
+
+# xGov proposal watch: proposals are apps created by the registry's escrow
+# account (registry id from algorandfoundation/xgov-beta-sc README), one
+# signal per (proposal, phase) — submitted / voting / approved / rejected /
+# funded / blocked.
+XGOV_POLL_ENABLED = env_bool("XGOV_POLL_ENABLED", True)
+XGOV_REGISTRY_APP_ID = env_int("XGOV_REGISTRY_APP_ID", 3147789458)
+
 # Pending-pool retro-pass: refresh content scores for pending frontier domains
 # and PROMOTE those whose crawled-content relevance clears the bar. Promotion
 # only — auto-reject stays off (2026-06-22 hard lesson: judge on content, and
