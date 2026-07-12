@@ -61,3 +61,66 @@ def test_require_tool_nudges_only_once(monkeypatch) -> None:
     )
     assert out == "STUBBORN"
     assert calls["n"] == 2  # initial + one nudge, then accept
+
+
+def test_debug_transcript_accumulates_across_multiple_chat_with_tools_calls(
+    monkeypatch,
+) -> None:
+    """Two-stage compose invokes chat_with_tools more than once against the
+    SAME debug dict (initial research, then a RESEARCH_FLOOR nudge pass or a
+    digest gap-fill pass). The second call must not silently overwrite the
+    first round's tool calls out of the persisted/audited transcript — this
+    was a real bug: `debug["messages"]` got reassigned to a fresh 2-message
+    list every invocation, dropping earlier rounds even though `trace`
+    (mutated by reference) kept accumulating correctly underneath it."""
+    client = MistralClient(api_key="test-key")
+
+    def make_seq(marker: str):
+        return [
+            _msg(
+                tool_calls=[
+                    {"id": "1", "function": {"name": "fetch_url", "arguments": f'{{"url":"{marker}"}}'}}
+                ]
+            ),
+            _msg(content=f"done-{marker}"),
+        ]
+
+    round1 = make_seq("round1")
+    round2 = make_seq("round2")
+    calls = {"n": 0}
+    combined = round1 + round2
+
+    def fake_post(payload):
+        i = calls["n"]
+        calls["n"] += 1
+        return combined[i]
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    trace: list = []
+    debug: dict = {}
+
+    client.chat_with_tools(
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "round1 prompt"}],
+        tools=[],
+        handlers={"fetch_url": lambda **k: {"ok": True}},
+        trace=trace,
+        debug=debug,
+    )
+    first_round_messages = list(debug["messages"])
+    assert any("round1 prompt" in str(m.get("content", "")) for m in first_round_messages)
+
+    client.chat_with_tools(
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "round2 prompt"}],
+        tools=[],
+        handlers={"fetch_url": lambda **k: {"ok": True}},
+        trace=trace,
+        debug=debug,
+    )
+
+    # Both rounds' prompts must survive in the persisted transcript.
+    all_content = " ".join(str(m.get("content", "")) for m in debug["messages"])
+    assert "round1 prompt" in all_content
+    assert "round2 prompt" in all_content
+    # trace already accumulated correctly by reference — the real bug was
+    # only in the debug transcript, but assert it here too as a sanity check.
+    assert len(trace) == 2

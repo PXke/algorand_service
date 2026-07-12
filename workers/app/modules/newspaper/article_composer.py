@@ -37,6 +37,7 @@ class ArticleComposeResult:
     publish_kind: str = ""
     extra_tags: tuple[str, ...] = ()
     prompt_version: str = ""
+    heuristic_grade: dict | None = None
 
 
 def compose_scrape_article(
@@ -78,6 +79,7 @@ def compose_scrape_article(
                 publish_kind=publish_kind.value,
                 extra_tags=getattr(fields, "tags", ()),
                 prompt_version=getattr(fields, "prompt_version", ""),
+                heuristic_grade=getattr(fields, "heuristic_grade", None),
             )
         except MistralError as exc:
             logger.warning("Editorial assignment compose failed: %s", exc)
@@ -99,6 +101,7 @@ def compose_scrape_article(
                 publish_kind=publish_kind.value,
                 extra_tags=getattr(fields, "tags", ()),
                 prompt_version=getattr(fields, "prompt_version", ""),
+                heuristic_grade=getattr(fields, "heuristic_grade", None),
             )
         except MistralError as exc:
             logger.warning("Transcript recap compose failed, using fallback: %s", exc)
@@ -129,6 +132,7 @@ def compose_scrape_article(
                 publish_kind=publish_kind.value,
                 extra_tags=getattr(fields, "tags", ()),
                 prompt_version=getattr(fields, "prompt_version", ""),
+                heuristic_grade=getattr(fields, "heuristic_grade", None),
             )
         except ComposeBusyError:
             raise
@@ -216,6 +220,7 @@ def compose_scrape_article(
             publish_kind=publish_kind.value,
             extra_tags=getattr(fields, "tags", ()),
             prompt_version=getattr(fields, "prompt_version", ""),
+            heuristic_grade=getattr(fields, "heuristic_grade", None),
         )
     except ComposeBusyError:
         raise

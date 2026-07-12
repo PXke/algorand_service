@@ -1,33 +1,37 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/api/api_errors.dart';
+import '../../../core/util/ssr_feed_payload.dart';
 import '../../../core/l10n/locale_provider.dart';
 import '../../../core/providers/api_providers.dart';
+import '../../../core/theme/app_theme_extension.dart';
 import '../../../core/ui/empty_state.dart';
 import '../../../core/ui/error_banner.dart';
 import '../../../core/ui/fade_in.dart';
 import '../../../core/ui/layout.dart';
 import '../../../core/ui/loading_strip.dart';
 import '../../../core/ui/page_content.dart';
-import '../sections.dart';
 import '../services/news_api.dart';
 import '../services/placements_api.dart';
 import 'article_card.dart';
+import 'story_row.dart';
 import 'feed_placement_card.dart';
 
 /// Shared, paginated story feed with the front-page layout (lead story spans
 /// the column, the rest flow two-up on wide screens). Placements are spread
 /// through the feed and always span full width.
 ///
-/// Pass [serviceId] to filter server-side by publisher, or [section] to filter
-/// client-side by editorial section.
+/// Pass [serviceId] to filter server-side by publisher, or [tag] to filter
+/// server-side by writer tag.
 class ArticleFeedView extends ConsumerStatefulWidget {
   const ArticleFeedView({
     super.key,
     this.serviceId,
-    this.section,
+    this.tag,
     this.header,
     this.emptyTitle,
     this.emptyMessage,
@@ -35,7 +39,7 @@ class ArticleFeedView extends ConsumerStatefulWidget {
   });
 
   final String? serviceId;
-  final NewsSection? section;
+  final String? tag;
   final Widget? header;
   final String? emptyTitle;
   final String? emptyMessage;
@@ -46,8 +50,6 @@ class ArticleFeedView extends ConsumerStatefulWidget {
 }
 
 class _ArticleFeedViewState extends ConsumerState<ArticleFeedView> {
-  static const int _placementEveryNArticles = 5;
-
   List<Map<String, dynamic>> _items = const [];
   List<Map<String, dynamic>> _placements = const [];
   String? _error;
@@ -62,7 +64,32 @@ class _ArticleFeedViewState extends ConsumerState<ArticleFeedView> {
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
-    _load();
+    final boot = (widget.serviceId == null || widget.serviceId!.isEmpty)
+        ? readSsrFeedItems()
+        : null;
+    if (boot != null && boot.isNotEmpty) {
+      _items = boot;
+      _loading = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _refreshInBackground());
+    } else {
+      _load();
+    }
+  }
+
+  Future<void> _refreshInBackground() async {
+    try {
+      final page = await _newsApi().fetchFeedPage(
+        limit: 30,
+        tag: widget.tag,
+        serviceId: widget.serviceId,
+        lang: contentLanguageCode(ref, context),
+      );
+      if (!mounted) return;
+      setState(() {
+        _items = page.items;
+        _nextCursor = page.nextCursor;
+      });
+    } catch (_) {}
   }
 
   @override
@@ -82,12 +109,6 @@ class _ArticleFeedViewState extends ConsumerState<ArticleFeedView> {
     }
   }
 
-  List<Map<String, dynamic>> _filter(List<Map<String, dynamic>> items) {
-    final section = widget.section;
-    if (section == null) return items;
-    return items.where((item) => sectionMatches(section, tagsOf(item))).toList();
-  }
-
   Future<void> _load() async {
     setState(() {
       _loading = true;
@@ -96,8 +117,8 @@ class _ArticleFeedViewState extends ConsumerState<ArticleFeedView> {
     try {
       final lang = contentLanguageCode(ref, context);
       final client = ref.read(apiClientProvider);
-      final feedPage =
-          await _newsApi().fetchFeedPage(limit: 50, serviceId: widget.serviceId, lang: lang);
+      final feedPage = await _newsApi().fetchFeedPage(
+          limit: 50, serviceId: widget.serviceId, tag: widget.tag, lang: lang);
       List<Map<String, dynamic>> placements = const [];
       if (widget.showPlacements) {
         try {
@@ -126,8 +147,12 @@ class _ArticleFeedViewState extends ConsumerState<ArticleFeedView> {
     setState(() => _loadingMore = true);
     try {
       final lang = contentLanguageCode(ref, context);
-      final page = await _newsApi()
-          .fetchFeedPage(limit: 50, cursor: cursor, serviceId: widget.serviceId, lang: lang);
+      final page = await _newsApi().fetchFeedPage(
+          limit: 50,
+          cursor: cursor,
+          serviceId: widget.serviceId,
+          tag: widget.tag,
+          lang: lang);
       if (!mounted) return;
       setState(() {
         _items = [..._items, ...page.items];
@@ -151,7 +176,7 @@ class _ArticleFeedViewState extends ConsumerState<ArticleFeedView> {
     ref.listen(localeProvider, (previous, next) {
       if (previous != next) _load();
     });
-    final visible = _filter(_items);
+    final visible = _items;
 
     return PageScroll(
       controller: _scrollController,
@@ -184,78 +209,47 @@ class _ArticleFeedViewState extends ConsumerState<ArticleFeedView> {
     );
   }
 
+  /// Lead package + the flat story file, with placements between chunks.
+  /// Same visual system as the front page: hairline-separated [StoryRow]s in
+  /// two balanced columns — no card tiles.
   List<Widget> _buildFeedEntries(
     List<Map<String, dynamic>> articles, {
     required bool twoCol,
   }) {
-    final entries = <Widget>[];
+    if (articles.isEmpty) return const [];
+    final entries = <Widget>[
+      FadeIn(
+        child: ArticleCard(
+          item: articles.first,
+          hero: true,
+          onTap: () => _openArticle(articles.first),
+        ),
+      ),
+    ];
+    final rest = articles.sublist(1);
     var placementIdx = 0;
-    final pendingRow = <Widget>[];
-
-    void flushRow() {
-      if (pendingRow.isEmpty) return;
+    const chunkSize = 8;
+    for (var start = 0; start < rest.length; start += chunkSize) {
+      final end =
+          (start + chunkSize < rest.length) ? start + chunkSize : rest.length;
+      final chunk = rest.sublist(start, end);
+      entries.add(const SizedBox(height: AppLayout.itemGap));
+      entries.add(Divider(height: 1, color: context.appColors.border));
       entries.add(
         FadeIn(
-          delay: staggerDelay(entries.length),
-          child: Padding(
-            padding: const EdgeInsets.only(bottom: 16),
-            child: IntrinsicHeight(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expanded(child: pendingRow[0]),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: pendingRow.length > 1
-                        ? pendingRow[1]
-                        : const SizedBox.shrink(),
-                  ),
-                ],
-              ),
-            ),
-          ),
+          delay: staggerDelay(start ~/ chunkSize),
+          child: StoryRowGrid(items: chunk, twoCol: twoCol, onOpen: _openArticle),
         ),
       );
-      pendingRow.clear();
-    }
-
-    for (var i = 0; i < articles.length; i++) {
-      final item = articles[i];
-      final card = ArticleCard(
-        item: item,
-        hero: i == 0,
-        compact: twoCol && i > 0,
-        onTap: () => _openArticle(item),
-      );
-      if (i == 0 || !twoCol) {
-        entries.add(
-          FadeIn(
-            delay: staggerDelay(entries.length),
-            child: Padding(padding: const EdgeInsets.only(bottom: 16), child: card),
-          ),
-        );
-      } else {
-        pendingRow.add(card);
-        if (pendingRow.length == 2) flushRow();
-      }
-      final shouldPlaceAd =
-          (i + 1) % _placementEveryNArticles == 0 && _placements.isNotEmpty;
-      if (shouldPlaceAd) {
-        flushRow();
+      if (_placements.isNotEmpty && end < rest.length) {
         final placement = _placements[placementIdx % _placements.length];
         placementIdx++;
+        entries.add(const SizedBox(height: AppLayout.itemGap));
         entries.add(
-          FadeIn(
-            delay: staggerDelay(entries.length),
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 16),
-              child: FeedPlacementCard(placement: placement),
-            ),
-          ),
+          FadeIn(child: FeedPlacementCard(placement: placement)),
         );
       }
     }
-    flushRow();
     return entries;
   }
 }

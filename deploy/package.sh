@@ -268,6 +268,8 @@ _maybe_build_frontend
 if [[ -n "${INDEXNOW_KEY:-}" ]]; then
   printf '%s' "$INDEXNOW_KEY" >"$REPO_ROOT/frontend_flutter/build/web/${INDEXNOW_KEY}.txt"
   echo ">>> Wrote IndexNow key file: ${INDEXNOW_KEY}.txt" >&2
+else
+  echo ">>> warning: INDEXNOW_KEY unset — skipping IndexNow key file" >&2
 fi
 
 _prune_web_build

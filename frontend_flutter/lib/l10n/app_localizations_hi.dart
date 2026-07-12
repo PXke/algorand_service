@@ -617,6 +617,41 @@ class AppLocalizationsHi extends AppLocalizations {
   }
 
   @override
+  String get navHot => 'लोकप्रिय';
+
+  @override
+  String get navTopics => 'विषय';
+
+  @override
+  String get hotTitle => 'सबसे ज़्यादा पढ़े गए';
+
+  @override
+  String get hotLead => 'वे ख़बरें जिन्हें पाठक अभी सबसे ज़्यादा पढ़ रहे हैं।';
+
+  @override
+  String get topicsTitle => 'विषय';
+
+  @override
+  String get topicsLead =>
+      'न्यूज़रूम द्वारा हाल में इस्तेमाल किए गए सभी टैग — आकार कवरेज से, रंग पढ़े जाने से।';
+
+  @override
+  String topicSubtitle(String tag) {
+    return '“$tag” टैग वाली ख़बरें';
+  }
+
+  @override
+  String readsCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count बार पढ़ा गया',
+      one: '1 बार पढ़ा गया',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String get sectionMarkets => 'बाज़ार';
 
   @override
@@ -952,4 +987,33 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get domainsWalletNotConnected => 'वॉलेट कनेक्ट नहीं है';
+
+  @override
+  String get frontPageMoreNews => 'और ख़बरें';
+
+  @override
+  String storiesCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count ख़बरें',
+      one: '1 ख़बर',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get byTheNumbersRange => 'पिछले 7 दिन';
+
+  @override
+  String get byTheNumbersMarketCap => 'बाज़ार पूंजी';
+
+  @override
+  String get byTheNumbersVolume => '24 घंटे का वॉल्यूम';
+
+  @override
+  String get hotTabHot => 'अभी लोकप्रिय';
+
+  @override
+  String get hotTabAllTime => 'सर्वकालिक';
 }

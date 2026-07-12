@@ -617,6 +617,41 @@ class AppLocalizationsPs extends AppLocalizations {
   }
 
   @override
+  String get navHot => 'مشهور';
+
+  @override
+  String get navTopics => 'موضوعات';
+
+  @override
+  String get hotTitle => 'تر ټولو ډېر لوستل شوي';
+
+  @override
+  String get hotLead =>
+      'هغه کیسې چې لوستونکي یې همدا اوس تر ټولو ډېرې پرانیزي.';
+
+  @override
+  String get topicsTitle => 'موضوعات';
+
+  @override
+  String get topicsLead =>
+      'ټول هغه ټاګونه چې خبري څانګې پدې وروستیو کې کارولي — کچه یې د پوښښ او رنګ یې د لوستلو له مخې ده.';
+
+  @override
+  String topicSubtitle(String tag) {
+    return 'هغه کیسې چې د «$tag» ټاګ لري';
+  }
+
+  @override
+  String readsCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count لوستنې',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String get sectionMarkets => 'بازارونه';
 
   @override
@@ -951,4 +986,32 @@ class AppLocalizationsPs extends AppLocalizations {
 
   @override
   String get domainsWalletNotConnected => 'بټۍ وصل نه ده';
+
+  @override
+  String get frontPageMoreNews => 'نور خبرونه';
+
+  @override
+  String storiesCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count کیسې',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get byTheNumbersRange => 'تېرې ۷ ورځې';
+
+  @override
+  String get byTheNumbersMarketCap => 'بازاري ارزښت';
+
+  @override
+  String get byTheNumbersVolume => 'د ۲۴ ساعتونو حجم';
+
+  @override
+  String get hotTabHot => 'اوس مهال ګرم';
+
+  @override
+  String get hotTabAllTime => 'ټول وختونه';
 }

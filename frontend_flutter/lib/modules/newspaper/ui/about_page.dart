@@ -29,6 +29,10 @@ class AboutPage extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                    // Same header anatomy as every other page: accent slug
+                    // under a serif title, then the lead paragraph.
+                    Container(width: 34, height: 3, color: colors.accent),
+                    const SizedBox(height: 14),
                     Text(
                       l10n.aboutTitle,
                       style: theme.textTheme.headlineLarge?.copyWith(fontSize: 34),

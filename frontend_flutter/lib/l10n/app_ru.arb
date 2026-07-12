@@ -553,5 +553,20 @@
       }
     }
   },
-  "domainsWalletNotConnected": "Кошелёк не подключён"
+  "domainsWalletNotConnected": "Кошелёк не подключён",
+  "navHot": "Популярное",
+  "navTopics": "Темы",
+  "hotTitle": "Самое читаемое",
+  "hotLead": "Материалы, которые читатели открывают чаще всего прямо сейчас.",
+  "topicsTitle": "Темы",
+  "topicsLead": "Все теги редакции за последнее время — размер отражает охват, цвет — чтения.",
+  "topicSubtitle": "Материалы с тегом «{tag}»",
+  "readsCount": "{count, plural, =1{1 прочтение} few{{count} прочтения} other{{count} прочтений}}",
+  "frontPageMoreNews": "Ещё новости",
+  "storiesCount": "{count, plural, =1{1 материал} few{{count} материала} other{{count} материалов}}",
+  "byTheNumbersRange": "За 7 дней",
+  "byTheNumbersMarketCap": "Капитализация",
+  "byTheNumbersVolume": "Объём за 24ч",
+  "hotTabHot": "Сейчас в тренде",
+  "hotTabAllTime": "За всё время"
 }

@@ -194,6 +194,59 @@ def _guarded_get(
     return guarded_get(url, headers=h, params=params, timeout=timeout)
 
 
+_FETCH_MAX_ATTEMPTS = 5
+_FETCH_BACKOFF_BASE_SECONDS = 2.0
+_FETCH_BACKOFF_MAX_SECONDS = 60.0
+_FETCH_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def _fetch_backoff_seconds(attempt: int, resp: Any = None) -> float:
+    """Backoff before retrying after `attempt` (0-based) fails. A 429 means the
+    server is actively throttling us, so it honors Retry-After when sent and
+    otherwise backs off harder than the plain exponential schedule used for
+    transient network errors / 5xx."""
+    if resp is not None and getattr(resp, "status_code", None) == 429:
+        from app.modules.ai.mistral_client import _retry_after_seconds
+
+        retry_after = _retry_after_seconds(resp)
+        if retry_after is not None:
+            return min(_FETCH_BACKOFF_MAX_SECONDS, retry_after)
+        return min(_FETCH_BACKOFF_MAX_SECONDS, _FETCH_BACKOFF_BASE_SECONDS * (3**attempt))
+    return min(_FETCH_BACKOFF_MAX_SECONDS, _FETCH_BACKOFF_BASE_SECONDS * (2**attempt))
+
+
+def _guarded_get_with_retry(url: str, *, headers: dict | None = None, timeout: float = 12.0):
+    """`_guarded_get` with retry: transient network errors and 429/5xx responses
+    get up to 5 attempts with exponential backoff, capped at 60s per wait (429
+    backs off harder, honoring Retry-After when the server sends one). SSRF
+    rejections and real 4xx responses are permanent, so they fail immediately."""
+    import time
+
+    from app.core.net_guard import UnsafeUrlError
+
+    resp = None
+    last_exc: Exception | None = None
+    for attempt in range(_FETCH_MAX_ATTEMPTS):
+        try:
+            resp = _guarded_get(url, headers=headers, timeout=timeout)
+        except UnsafeUrlError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            resp = None
+            if attempt == _FETCH_MAX_ATTEMPTS - 1:
+                raise
+            time.sleep(_fetch_backoff_seconds(attempt))
+            continue
+        if resp.status_code in _FETCH_RETRYABLE_STATUS and attempt < _FETCH_MAX_ATTEMPTS - 1:
+            time.sleep(_fetch_backoff_seconds(attempt, resp))
+            continue
+        return resp
+    if resp is not None:
+        return resp
+    raise last_exc  # pragma: no cover - unreachable, loop always returns or raises
+
+
 def _guarded_post(
     url: str, *, json: Any = None, headers: dict | None = None, timeout: float = 12.0
 ):
@@ -465,7 +518,9 @@ def _fetch_url_internal(
     if not u.startswith(("http://", "https://")):
         u = "https://" + u
     try:
-        resp = _guarded_get(u, headers={"Accept": "text/html,application/xhtml+xml"}, timeout=15.0)
+        resp = _guarded_get_with_retry(
+            u, headers={"Accept": "text/html,application/xhtml+xml"}, timeout=15.0
+        )
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code

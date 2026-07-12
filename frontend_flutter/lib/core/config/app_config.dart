@@ -88,6 +88,17 @@ class AppConfig {
 /// (CanvasKit) renders Image.network by fetching via XHR, which needs CORS
 /// headers most external hosts omit — so external article images fail without
 /// this. Relative / data / already-same-origin URLs pass through unchanged.
+/// True when a stored image is a brand mark rather than a photo:
+/// the backend stores the source's icon in image_url (and as the body's lead
+/// image) when a story has no real share image, and icon files are
+/// unmistakable by path. These must never be blown up into a hero/cover crop.
+bool looksLikeLogoUrl(String url) {
+  final path = (Uri.tryParse(url)?.path ?? url).toLowerCase();
+  if (path.endsWith('.svg') || path.endsWith('.ico')) return true;
+  return RegExp(r'favicon|apple-touch|/icons?[/._-]|[/._-]icons?[._-]|logo')
+      .hasMatch(path);
+}
+
 String proxiedImageUrl(String url) {
   if (url.isEmpty || !url.startsWith('http')) return url;
   final base = AppConfig.instance.apiBaseUrl;

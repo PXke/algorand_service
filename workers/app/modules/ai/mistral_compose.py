@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from app.core.config import MISTRAL_MAX_SOURCE_CHARS
 from app.modules.ai.mistral_client import (
     MistralClient,
+    MistralCreditError,
     MistralError,
     get_mistral_client,
     get_mistral_digest_client,
@@ -196,10 +197,43 @@ _TOOLS_GUIDANCE = (
     "partnerships, governance procedure, NFTs and general news where such numbers add "
     "nothing, omit them — do not append a metrics table or a price line to prove the "
     "piece is current. When in doubt, leave it out.\n"
+    "NUMERIC SKEPTICISM: read every number in context before using it — a figure is "
+    "only worth including if it means something. A $4,000 TVL, a dozen holders, or a "
+    "few hundred dollars of daily volume is NOT traction; say so plainly ('negligible', "
+    "'effectively no liquidity') rather than reporting a trivial figure neutrally as if "
+    "it were a notable data point. When two sources give materially different numbers "
+    "for the SAME metric on the SAME asset (e.g. a price aggregator vs. the actual "
+    "DEX/on-chain figure), that is a contradiction, not two facts — prefer the figure "
+    "you can verify on-chain/on the actual DEX over a third-party aggregator, and never "
+    "print both side by side as if they agree. If you cannot tell which is right, drop "
+    "the one you cannot verify rather than including both.\n"
+    "LIVENESS CHECK: weigh whether the project is actually ALIVE before choosing a "
+    "tense and frame. Signals of dormancy: the primary site times out or errors on "
+    "every fetch attempt, on-chain accounts show 'Offline' status with only dust "
+    "balances, the newest content you can find is old, or there is no verifiable "
+    "recent activity (trades, commits, posts) at all. If dormancy signals stack up, "
+    "you MUST NOT write the piece as a current, thriving, forward-looking project — "
+    "write it as a historical retrospective instead ('X was an initiative that...', "
+    "'development appears to have stalled...'), state plainly what you could not "
+    "verify as current, and never write promotional future-tense framing "
+    "('is positioned to', 'is building toward') for a subject you could not confirm "
+    "is still active.\n"
     "JOURNALISM RULES: only state facts a tool actually returned; cite the "
     "tool/source in the text; never assert wrongdoing about a named person or "
     "company unless a tool returned concrete evidence; when a SPECIFIC claim is "
-    "unverified, hedge or drop THAT claim — not the rest of the story.\n"
+    "unverified, hedge or drop THAT claim — not the rest of the story. The Source "
+    "list is the same rule applied to citations: a URL you fetched and that errored "
+    "or timed out was NEVER READ — do not list it as a source. Only cite pages you "
+    "successfully read, or attribute the fact to where it actually came from (a "
+    "search result snippet, an on-chain lookup, an archived copy).\n"
+    "MEMORY IS NOT A SOURCE: a specific fact you recognize — a real product name, "
+    "a transaction, a price, a date — is not verified just because it feels "
+    "familiar from training. If it did not appear in an actual tool result THIS "
+    "session, it is unverified even when it turns out to be true; never cite it "
+    "as coming from a page or tool you did not actually see it in. Either call "
+    "the tool that would confirm it now, or leave it out — a plausible-sounding "
+    "recollection presented as a live citation is exactly what erodes trust when "
+    "a reader checks it against the source and it does not match.\n"
     "ONE PRODUCT, ONE SOURCE: search results routinely surface SIMILAR or "
     "competitor products (same category, other chains). A fact belongs ONLY to "
     "the product whose page/domain returned it — check the result's URL before "
@@ -335,7 +369,11 @@ _NARRATIVE_GUIDANCE = (
     "for 'Concept' and 'Real-World Implication' — never bury multi-item data in "
     "dictionary-style paragraphs or comma-separated sentences.\n"
     "This is EXPANSION BY EXPLANATION — never invent external facts, quotes, or "
-    "partnerships, and still no generic filler.\n"
+    "partnerships, and still no generic filler. This includes specific data points "
+    "— a named transaction, a price, a date — that are not already in the Research "
+    "Digest above: the Digest is your complete source of truth for facts. Anything "
+    "more specific than what it contains, however plausible or familiar it feels, "
+    "is fabrication, not expansion.\n"
     "GROUNDING RULES for the findings block: each finding belongs to the "
     "product/domain in its URL — search results often include SIMILAR or "
     "competitor products, and their features/guarantees must never be "
@@ -345,7 +383,13 @@ _NARRATIVE_GUIDANCE = (
     "— and for speculative or token-launch subjects, include the risk context "
     "a fair journalist would. Where a *product-specific* mechanism is "
     "undocumented, say so plainly — but you may still explain Algorand's "
-    "general layer-1 mechanics when bridging why the story matters on-chain."
+    "general layer-1 mechanics when bridging why the story matters on-chain.\n"
+    "NUMERIC HONESTY: a small number is still a fact — report it as small (a "
+    "$4,000 TVL or a handful of holders is negligible, not a headline metric). "
+    "Never state two conflicting figures for the same metric on the same asset "
+    "(e.g. a price aggregator vs. the actual DEX price) as if they agree — that's "
+    "a sign they refer to different things; verify against the Research Digest "
+    "and keep only the figure it actually supports, dropping the other."
 )
 
 
@@ -380,10 +424,48 @@ _RESEARCH_DIGEST_SYNTHESIS = (
     "## Research Digest\n\n"
     "### Verified Facts\n"
     "- One bullet per discrete verified fact. Each bullet MUST cite its source "
-    "(URL, tool name, or on-chain lookup). No speculation.\n\n"
+    "(URL, tool name, or on-chain lookup). No speculation.\n"
+    "- The citation must point to a line that actually appears in the raw tool "
+    "trace above. A specific fact (a name, price, date, transaction) that you "
+    "recognize but that is NOT backed by a line in that trace does not belong "
+    "here — recalling something from training is not the same as verifying it "
+    "this session, no matter how plausible or confident it feels. Leave it out.\n"
+    "- If two tool results give conflicting numbers for the same metric on the same "
+    "asset (e.g. two different prices for what should be one token), do not list "
+    "both as if they agree — flag the conflict explicitly, or keep only the more "
+    "verifiable (on-chain/DEX) figure and drop the other.\n\n"
     "### Verbatim Quotes\n"
     "- Only word-for-word quotes visible in tool results, each with its source. "
     "If none exist, write exactly: None\n\n"
+    "### Liveness Signals\n"
+    "- Note anything that speaks to whether the subject is currently active: fetch "
+    "attempts that errored/timed out (name which URLs), on-chain accounts showing "
+    "'Offline' status or dust balances, how recent the newest verifiable content is, "
+    "or confirmation that things ARE current/active if that's what you found. Do not "
+    "omit this section just because nothing alarming turned up — say so explicitly "
+    "('primary site loaded fine, no dormancy signals') so Stage 2 knows the check "
+    "was actually done. Report ONLY dates/timestamps a tool result actually returned "
+    "— if you found exactly one dated reference, report that ONE date and stop; do "
+    "NOT invent a second, third, or 'most recent' date to make the section sound "
+    "more thorough than the research actually was. 'Only one dated reference found "
+    "(X)' is a complete, honest answer.\n\n"
+    "### Numeric Conversions\n"
+    "- An ASA's on-chain `total` is a RAW INTEGER, not a token count — the real "
+    "supply is `total / 10^decimals`. State the CONVERTED figure (e.g. total=100000000000 "
+    "with decimals=2 is 1,000,000,000 tokens, not 100,000,000,000) and show your "
+    "division so Stage 2 doesn't have to re-derive it and doesn't repeat the raw "
+    "integer as if it were the token count.\n\n"
+    "### Unresolved Gaps\n"
+    "- List up to 3 SPECIFIC, answerable questions that materially matter to "
+    "this story and that a further tool call could plausibly resolve (e.g. "
+    "'a real recent sale/transaction figure for this marketplace', 'the "
+    "on-chain app ID for the registry contract', 'whether the project has "
+    "posted anything in the last month'). Each gap must name the missing fact "
+    "and what kind of tool call might find it — not a vague 'more detail' or "
+    "'more sources'. This is your chance to ask for one more look before the "
+    "writer has to work with what you found; do not save a gap you could "
+    "have just gone and checked. If your research already covers the story "
+    "adequately, write exactly: None\n\n"
     "Do not write the article."
 )
 
@@ -420,6 +502,43 @@ def _synthesize_research_digest(
     except Exception:
         logger.warning("research digest synthesis failed; using raw trace", exc_info=True)
         return raw_trace
+
+
+def _extract_unresolved_gaps(digest: str) -> str:
+    """Pull the '### Unresolved Gaps' section out of a synthesized digest.
+    Empty string when the section is absent or explicitly says None — the
+    signal that tells the compose loop whether a bounded gap-fill research
+    pass is worth running before handing off to the writer."""
+    marker = "### Unresolved Gaps"
+    idx = digest.find(marker)
+    if idx == -1:
+        return ""
+    section = digest[idx + len(marker) :]
+    next_heading = section.find("\n### ")
+    if next_heading != -1:
+        section = section[:next_heading]
+    section = section.strip().strip("-").strip()
+    if not section or section.lower().rstrip(".") == "none":
+        return ""
+    return section
+
+
+def _gap_fill_nudge(gaps: str) -> str:
+    """One bounded extra research pass targeting specific gaps the digest
+    synthesis flagged as unresolved but material — giving the model a real
+    chance to find the missing fact instead of the writer stage inventing (or
+    recalling from training) something to fill it, as happened when a piece
+    invented specific marketplace sales for a page with no real sales data."""
+    return (
+        "\n\nSTOP — before handing off to the writer, make one real attempt at "
+        f"resolving these specific gaps:\n{gaps}\n\n"
+        "Call whichever tools could plausibly answer them. If a tool call does "
+        "not turn up the answer, that is a legitimate, acceptable outcome — do "
+        "NOT guess or recall the answer from memory/training instead. Stop once "
+        "you have made a genuine attempt at each gap; a gap that stays "
+        "unresolved after an honest attempt should be reported as unresolved "
+        "in the digest, not invented."
+    )
 
 
 def _urls_from_result(result: Any) -> list[str]:
@@ -563,10 +682,13 @@ def _review_and_revise(
     payload["_heuristic_grade"] = review
 
     issues = list(review.get("issues") or [])
+    # "headline" issues are the structural enforcement of the house headline
+    # style: the prompt states the rules, but only this deterministic check +
+    # forced revision makes them invariants (prompts drift; regexes don't).
     schema_fixable = [
         i
         for i in issues
-        if i.startswith(("too long", "structure", "schema"))
+        if i.startswith(("too long", "structure", "schema", "headline"))
     ]
     quality_fixable: list[str] = []
     if quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE):
@@ -700,7 +822,11 @@ _CHART_EXAMPLE = (
 # appends automatically after generation (that's not the model's own output,
 # so including it here would teach a duplicate Sources section).
 _GOOD_EXAMPLE_ARTICLE = {
-    "title": "Nodely: The Global Backbone for Algorand’s Developer Ecosystem",
+    # NOTE: the example title must model the claim-style headline rule — a
+    # few-shot example teaches format harder than any prohibition, which is
+    # exactly how an earlier colon-label example title ("Nodely: The Global
+    # Backbone…") made every published headline a colon label.
+    "title": "Nodely’s free tier now carries 115M Algorand API calls a day",
     "summary": (
         "Nodely provides free, low-latency node and indexer infrastructure for "
         "Algorand and AVM chains, serving 115M+ daily requests across 20+ "
@@ -793,8 +919,14 @@ _ARTICLE_FORMAT_RULES = (
     "\nFORMAT RULES:\n"
     "Write the article as a single JSON object adhering exactly to this schema:\n"
     '{"title": "string", "summary": "string", "body": "string", "tags": ["string"]}\n\n'
-    "- title: A captivating, professional headline, max 120 chars; do NOT use "
-    '"Service: Page title" format\n'
+    "- title: a HEADLINE, not a label. State this story's single most newsworthy "
+    "concrete development in active voice — someone shipped, launched, hit, broke or "
+    "changed something — and prefer a specific verified number or stake from the "
+    "story. Max 90 chars. BANNED: the '<Name>: <description>' colon-label template "
+    "(any headline shaped like 'X: what X is'), vague marketing verbs (unveils, "
+    "empowers, elevates, revolutionizes), and evergreen headlines that would have "
+    "been equally true a month ago — a good headline is only true because of what "
+    "happened in THIS story\n"
     "- summary: A concise deck for feed cards; STRICT MAXIMUM of 280 characters; "
     "describe the story, not the pipeline\n"
     "- body: The full article in Markdown, length scaled strictly to verified substance "
@@ -1241,8 +1373,21 @@ def _compose_via_writer_tools_locked(
 
             _sid, _screated = new_session_ref()
 
+            def _usage_so_far() -> dict[str, int]:
+                """Combined token usage across both clients used in this session
+                (research_mistral for stage 1, mistral for stage 2/revise) — each
+                is a fresh instance per compose, so its counter is this session's
+                total, not a lifetime one."""
+                research_usage = research_mistral.usage_totals()
+                write_usage = mistral.usage_totals()
+                return {
+                    key: research_usage[key] + write_usage[key]
+                    for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                }
+
             def _checkpoint(stage_status: str) -> None:
                 with contextlib.suppress(Exception):
+                    usage = _usage_so_far()
                     record_compose_session(
                         debug=debug,
                         trace=trace,
@@ -1257,6 +1402,9 @@ def _compose_via_writer_tools_locked(
                         duration_ms=int((_time.monotonic() - _t0) * 1000),
                         session_id=_sid,
                         created_at=_screated,
+                        prompt_tokens=usage["prompt_tokens"],
+                        completion_tokens=usage["completion_tokens"],
+                        total_tokens=usage["total_tokens"],
                     )
 
             if WRITER_TWO_STAGE:
@@ -1319,12 +1467,41 @@ def _compose_via_writer_tools_locked(
                             require_tool=None,
                             context_tokens=MISTRAL_RESEARCH_CONTEXT_TOKENS,
                         )
-                _checkpoint("writing")  # research done, now generating
                 # Stage 1b — synthesize a structured Research Digest handoff so Stage 2
                 # grounds on high-signal facts, not raw tool JSON.
                 digest = _synthesize_research_digest(
                     trace=trace, research_context=stage1_user
                 )
+                # Gap-fill: the digest may flag specific unresolved-but-material
+                # gaps. Give the model ONE bounded extra research pass targeting
+                # exactly those before handing off to the tool-less writer, which
+                # otherwise either omits the gap (fine) or invents/recalls
+                # something to fill it. Re-synthesize afterward so the writer
+                # sees whatever was actually found (or an honest "still
+                # unresolved") rather than the pre-gap-fill digest.
+                from app.core.config import DIGEST_GAP_FILL_ENABLED, DIGEST_GAP_FILL_MAX_ROUNDS
+
+                if DIGEST_GAP_FILL_ENABLED:
+                    gaps = _extract_unresolved_gaps(digest)
+                    if gaps:
+                        research_mistral.chat_with_tools(
+                            [
+                                {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
+                                {"role": "user", "content": stage1_user + _gap_fill_nudge(gaps)},
+                            ],
+                            tools=research_schemas,
+                            handlers=research_handlers,
+                            trace=trace,
+                            debug=debug,
+                            temperature=MISTRAL_TEMP_RESEARCH,
+                            require_tool=None,
+                            context_tokens=MISTRAL_RESEARCH_CONTEXT_TOKENS,
+                            max_rounds=DIGEST_GAP_FILL_MAX_ROUNDS,
+                        )
+                        digest = _synthesize_research_digest(
+                            trace=trace, research_context=stage1_user
+                        )
+                _checkpoint("writing")  # research (+ gap-fill) done, now generating
                 gen_user = _build_stage2_user(user=user, digest=digest)
                 gen_system = system + _STAGE2_GENERATION_GUIDANCE
                 payload = mistral.chat_json_object(
@@ -1335,12 +1512,22 @@ def _compose_via_writer_tools_locked(
                     temperature=MISTRAL_TEMP_WRITE,
                 )
                 # The warm pass runs outside the tool loop, so its turn isn't in
-                # the debug transcript — add it so Sessions shows the draft.
+                # the debug transcript — add it so Sessions shows the draft. Store
+                # the ACTUAL digest text (not a placeholder): it's the only place
+                # to audit whether the research→write handoff (small-model
+                # synthesis) preserved or lost/garbled facts from the raw trace —
+                # previously this turn was a stub and the digest was never
+                # visible anywhere, so a bad handoff was undiagnosable after the
+                # fact.
                 if isinstance(debug.get("messages"), list):
                     debug["messages"].append(
                         {
                             "role": "user",
-                            "content": "[stage 2] generate the article from research findings",
+                            "content": (
+                                "[stage 2 handoff] Research Digest:\n" + digest
+                                if digest.strip()
+                                else "[stage 2] generate the article from research findings"
+                            ),
                         }
                     )
                     debug["messages"].append(
@@ -1395,6 +1582,7 @@ def _compose_via_writer_tools_locked(
                     model=MISTRAL_MODEL_RESEARCH if WRITER_TWO_STAGE else MISTRAL_MODEL_WRITER,
                 )
                 record_tool_usage_from_trace(trace)
+                _final_usage = _usage_so_far()
                 record_compose_session(
                     debug=debug,
                     trace=trace,
@@ -1406,10 +1594,21 @@ def _compose_via_writer_tools_locked(
                     duration_ms=_duration_ms,
                     session_id=_sid,
                     created_at=_screated,
+                    prompt_tokens=_final_usage["prompt_tokens"],
+                    completion_tokens=_final_usage["completion_tokens"],
+                    total_tokens=_final_usage["total_tokens"],
                 )
             except Exception:
                 logger.warning("failed to record tool-insights session", exc_info=True)
             return _parse_article_fields(payload)
+        except MistralCreditError:
+            # 401/402 — no retry will help (bad key or credit exhausted), so
+            # tag it distinctly from a generic API error: the admin Sessions
+            # view and the queue's last_reason should say WHY at a glance
+            # instead of a plain "error" that looks the same as any other fault.
+            with contextlib.suppress(Exception):
+                _checkpoint("credit_insufficient")
+            raise
         except MistralError:
             # A real API error (rate limit, etc.) — already retried with backoff
             # inside the client. Don't burn another call on a single-shot retry
@@ -1502,7 +1701,8 @@ def compose_article_edit_mistral(
         f"{_recency_rule(today)}\n"
         "Write the updated article as a single JSON object with this schema:\n"
         '{"title": "string", "summary": "string", "body": "string"}\n'
-        "- title: may tweak slightly\n"
+        "- title: lead with the NEW development as a concrete active-voice claim "
+        "(max 90 chars); never keep or write a '<Name>: <description>' colon label\n"
         "- summary: mention the update\n"
         "- body: full markdown including a ## Updated section with the UTC date\n\n"
         f"{_JSON_ONLY}"

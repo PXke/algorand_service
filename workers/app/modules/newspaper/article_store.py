@@ -32,6 +32,7 @@ class ArticleDetail:
     source_url: str
     prompt_version: str = ""
     translations: dict[str, str] | None = None
+    tags: tuple[str, ...] = ()
 
 
 def get_article(article_id: str) -> ArticleDetail | None:
@@ -60,6 +61,7 @@ def get_article(article_id: str) -> ArticleDetail | None:
         source_url=row.source_url or "",
         prompt_version=getattr(row, "prompt_version", "") or "",
         translations=getattr(row, "translations", None),
+        tags=tuple(row.tags or []),
     )
 
 
@@ -260,7 +262,13 @@ def update_article(
     body: str,
     tags: list[str] | None = None,
 ) -> bool:
-    """Update article in place; refresh feed row at original published_at."""
+    """Update article in place; refresh feed row at original published_at.
+
+    The feed PK's published_at is FULL (ms) precision — read the raw timestamp
+    from articles_by_id and reuse it verbatim (see update_article_image). This
+    function used to reconstruct it from the seconds-truncated epoch, which
+    upserts a phantom feed row with null service_id/title that 500s the feed.
+    Also stamps updated_at so the revision surfaces as dateModified."""
     from app.core.cassandra import get_cassandra_session
 
     existing = get_article(article_id)
@@ -274,18 +282,22 @@ def update_article(
 
     from app.core.statements import ArticleStmts, FeedStmts
 
-    published_at = datetime.fromtimestamp(existing.published_at_epoch, tz=UTC)
+    session = get_cassandra_session()
+    pub_row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
+    if pub_row is None or pub_row.published_at is None:
+        return False
+    published_at = pub_row.published_at  # full precision, matches the feed PK
     tag_list = list(tags) if tags is not None else None
     if tag_list is None:
-        from app.core.cassandra import get_cassandra_session as gcs
-
-        row = gcs().execute(ArticleStmts.GET_TAGS, (aid,)).one()
+        row = session.execute(ArticleStmts.GET_TAGS, (aid,)).one()
         tag_list = list(row.tags or []) if row else []
     if "updated" not in {t.lower() for t in tag_list}:
         tag_list = [*tag_list, "updated"]
 
-    session = get_cassandra_session()
-    session.execute(ArticleStmts.UPDATE, (title, summary, body, tag_list, aid))
+    updated_at = datetime.now(tz=UTC)
+    session.execute(
+        ArticleStmts.UPDATE, (title, summary, body, tag_list, updated_at, aid)
+    )
     session.execute(
         FeedStmts.INSERT_BASIC,
         (
@@ -296,8 +308,56 @@ def update_article(
             title,
             summary,
             tag_list,
+            updated_at,
         ),
     )
+    return True
+
+
+def replace_article_content(
+    *,
+    article_id: str,
+    title: str,
+    summary: str,
+    body: str,
+    tags: list[str],
+    image_url: str,
+) -> bool:
+    """Swap a published article's content in place (approved recompose): same
+    article_id, same URL, same published_at — new prose, tags and art, with
+    updated_at stamped and stale translations cleared (the translation of the
+    OLD prose must not keep serving; re-enqueue after this).
+
+    Feed PK precision rule as update_article_image: reuse the raw published_at
+    verbatim, never reconstruct from an epoch."""
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts, FeedStmts
+
+    try:
+        aid = UUID(article_id)
+    except ValueError:
+        return False
+    session = get_cassandra_session()
+    row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
+    if row is None or row.published_at is None:
+        return False
+    published_at = row.published_at
+    existing = get_article(article_id)
+    if existing is None:
+        return False
+    updated_at = datetime.now(tz=UTC)
+    image = image_url or None
+    session.execute(
+        ArticleStmts.UPDATE_CONTENT_FULL,
+        (title, summary, body, tags, image, updated_at, aid),
+    )
+    session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (aid,))
+    bucket = feed_month(published_at)
+    session.execute(
+        FeedStmts.UPDATE_CONTENT_FULL,
+        (title, summary, tags, image, updated_at, bucket, published_at, aid),
+    )
+    session.execute(FeedStmts.CLEAR_TRANSLATIONS, (bucket, published_at, aid))
     return True
 
 

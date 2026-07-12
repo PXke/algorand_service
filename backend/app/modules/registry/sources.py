@@ -80,8 +80,10 @@ def merge_services(*, target_service_id: str, source_service_ids: list[str]) -> 
     registry (not deleted — audit trail + snapshots keep their history). The
     target service's next weekly poll then aggregates across all moved domains.
     """
+    import contextlib
+
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ServiceRegistryStmts, ServiceSourceStmts
+    from app.core.statements import ServiceRegistryStmts, ServiceSourceStmts, SnapshotStmts
 
     session = get_cassandra_session()
     now = datetime.now(tz=UTC)
@@ -89,6 +91,23 @@ def merge_services(*, target_service_id: str, source_service_ids: list[str]) -> 
     for source_service in source_service_ids:
         if not source_service or source_service == target_service_id:
             continue
+        # Carry over the merged-away service's poll history — otherwise the
+        # canonical id's snapshot lineage starts empty and its next poll looks
+        # like the first time this content has ever been seen, mistakenly
+        # re-firing as a brand-new discovery for a service already covered
+        # under its pre-merge id. Only backfills when the target has no
+        # snapshot of its own yet — never clobber fresher canonical history.
+        with contextlib.suppress(Exception):
+            src_snap = session.execute(
+                SnapshotStmts.GET_LATEST, (f"svc:{source_service}",)
+            ).one()
+            if src_snap is not None:
+                tgt_source_id = f"svc:{target_service_id}"
+                if session.execute(SnapshotStmts.GET_LATEST, (tgt_source_id,)).one() is None:
+                    session.execute(
+                        SnapshotStmts.INSERT,
+                        (tgt_source_id, now, src_snap.content_hash, src_snap.title, src_snap.body),
+                    )
         rows = list(
             session.execute(ServiceSourceStmts.LIST_FOR_SERVICE, (source_service,))
         )

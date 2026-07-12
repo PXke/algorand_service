@@ -553,5 +553,20 @@
     }
   },
   "domainsDeadEndSnack": "تم تعليم {domain} كمسار مسدود",
-  "domainsWalletNotConnected": "المحفظة غير متصلة"
+  "domainsWalletNotConnected": "المحفظة غير متصلة",
+  "navHot": "الرائج",
+  "navTopics": "المواضيع",
+  "hotTitle": "الأكثر قراءة",
+  "hotLead": "القصص التي يفتحها القراء أكثر من غيرها الآن.",
+  "topicsTitle": "المواضيع",
+  "topicsLead": "كل وسم استخدمته غرفة الأخبار مؤخراً — الحجم حسب التغطية واللون حسب القراءات.",
+  "topicSubtitle": "قصص موسومة بـ “{tag}”",
+  "readsCount": "{count, plural, =1{قراءة واحدة} other{{count} قراءات}}",
+  "frontPageMoreNews": "المزيد من الأخبار",
+  "storiesCount": "{count, plural, =1{قصة واحدة} other{{count} قصص}}",
+  "byTheNumbersRange": "آخر 7 أيام",
+  "byTheNumbersMarketCap": "القيمة السوقية",
+  "byTheNumbersVolume": "حجم التداول 24س",
+  "hotTabHot": "الرائج الآن",
+  "hotTabAllTime": "كل الأوقات"
 }

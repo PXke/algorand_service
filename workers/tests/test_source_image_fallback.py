@@ -11,7 +11,11 @@ from app.modules.newspaper.source_image import (
     resolve_article_images,
     source_urls_from_body,
 )
-from app.modules.newspaper.tasks.publish_tasks import _plausible_image_host, _with_hero_image
+from app.modules.newspaper.tasks.publish_tasks import (
+    _plausible_image_host,
+    _validated_hero,
+    _with_hero_image,
+)
 
 _BODY = """HesabPay runs on Algorand.
 
@@ -113,3 +117,30 @@ def test_hero_same_domain_still_passes() -> None:
         "body", "https://vestige.fi/og-image.png", "t", source_url="https://vestige.fi"
     )
     assert out.startswith("![t](https://vestige.fi/og-image.png)")
+
+
+def test_validated_hero_drops_implausible_image_url_too() -> None:
+    # The 2026-07-10 bug: _plausible_image_host already kept a foreign
+    # og:image out of the BODY, but image_url (feed tile + OG card) used the
+    # raw value unchecked — a template site's stale, unrelated og:image (here,
+    # scottgerrard.com literally serving readvertising.org's share image)
+    # still became the article's thumbnail/social card every time.
+    assert (
+        _validated_hero(
+            "https://www.readvertising.org/og-image.png", "https://www.scottgerrard.com"
+        )
+        == ""
+    )
+
+
+def test_validated_hero_keeps_plausible_image_url() -> None:
+    assert (
+        _validated_hero("https://vestige.fi/og-image.png", "https://vestige.fi")
+        == "https://vestige.fi/og-image.png"
+    )
+    assert (
+        _validated_hero(
+            "https://res.cloudinary.com/noahapp/image/upload/x.png", "https://noah.com"
+        )
+        == "https://res.cloudinary.com/noahapp/image/upload/x.png"
+    )

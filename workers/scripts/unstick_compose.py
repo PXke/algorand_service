@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 _GLOBAL_LOCK = "lock:compose:article"
 _LOCK_PATTERN = "lock:compose:*"
 # Statuses that mean the compose is DONE (researching/writing are in-progress).
-_TERMINAL = {"ok", "error", "fallback"}
+_TERMINAL = {"ok", "error", "fallback", "credit_insufficient"}
 
 
 def _redis():

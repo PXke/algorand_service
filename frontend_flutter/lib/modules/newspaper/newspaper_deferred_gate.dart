@@ -14,5 +14,8 @@ Widget buildNewsPage() => newspaper.NewsPage();
 Widget buildArticleDetailPage({required String articleId}) =>
     newspaper.ArticleDetailPage(articleId: articleId);
 
-Widget buildSectionPage({required String slug}) =>
-    newspaper.SectionPage(slug: slug);
+Widget buildHotPage() => newspaper.HotPage();
+
+Widget buildTopicsPage() => newspaper.TopicsPage();
+
+Widget buildTopicPage({required String tag}) => newspaper.TopicPage(tag: tag);

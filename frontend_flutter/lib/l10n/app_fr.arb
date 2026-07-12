@@ -553,5 +553,20 @@
     }
   },
   "domainsDeadEndSnack": "{domain} marqué comme impasse",
-  "domainsWalletNotConnected": "Portefeuille non connecté"
+  "domainsWalletNotConnected": "Portefeuille non connecté",
+  "navHot": "Populaire",
+  "navTopics": "Sujets",
+  "hotTitle": "Les plus lus",
+  "hotLead": "Les articles que les lecteurs ouvrent le plus en ce moment.",
+  "topicsTitle": "Sujets",
+  "topicsLead": "Chaque étiquette utilisée récemment par la rédaction — la taille reflète la couverture, la couleur les lectures.",
+  "topicSubtitle": "Articles étiquetés « {tag} »",
+  "readsCount": "{count, plural, =1{1 lecture} other{{count} lectures}}",
+  "frontPageMoreNews": "Plus d'actualités",
+  "storiesCount": "{count, plural, =1{1 article} other{{count} articles}}",
+  "byTheNumbersRange": "7 derniers jours",
+  "byTheNumbersMarketCap": "Capitalisation",
+  "byTheNumbersVolume": "Volume 24h",
+  "hotTabHot": "Tendances",
+  "hotTabAllTime": "Depuis toujours"
 }

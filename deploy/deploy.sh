@@ -443,6 +443,13 @@ EOF
     done
     ssh "$SSH_SVC" "curl -fsS '${DEPLOY_HEALTH_URL}'" && echo
 
+    if [[ -n "${INDEXNOW_KEY:-}" ]]; then
+      echo ">>> Verifying IndexNow key file (https://${SITE_DOMAIN}/${INDEXNOW_KEY}.txt)"
+      ssh "$SSH_SVC" \
+        "curl -fsS 'https://${SITE_DOMAIN}/${INDEXNOW_KEY}.txt' | grep -qxF '${INDEXNOW_KEY}'" \
+        || die "IndexNow key file missing or wrong at https://${SITE_DOMAIN}/${INDEXNOW_KEY}.txt"
+    fi
+
     echo ">>> Recent backend logs"
     ssh "$SSH_ROOT" "journalctl -u algorand-platform-backend.service -n 20 --no-pager" || true
   fi

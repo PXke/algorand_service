@@ -170,23 +170,31 @@ def test_known_service_keeps_evolution_framing(monkeypatch):
     assert "WHAT CHANGED since we last looked" in captured["user"]
 
 
-def test_research_and_digest_clients_default_to_small_tier():
-    from app.core.config import MISTRAL_MODEL_DIGEST, MISTRAL_MODEL_RESEARCH, MISTRAL_MODEL_WRITER
+def test_model_tier_split_large_writes_small_does_mechanics():
+    """Owner policy (2026-07-12): Large writes reader-facing prose (writer,
+    digest); Small does the mechanical work (tool-loop research, translate)."""
+    from app.core.config import (
+        MISTRAL_MODEL_DIGEST,
+        MISTRAL_MODEL_RESEARCH,
+        MISTRAL_MODEL_TRANSLATE,
+        MISTRAL_MODEL_WRITER,
+    )
     from app.modules.ai.mistral_client import (
         get_mistral_digest_client,
         get_mistral_research_client,
     )
 
     assert "small" in MISTRAL_MODEL_RESEARCH
-    assert MISTRAL_MODEL_DIGEST == MISTRAL_MODEL_RESEARCH
-    assert "medium" in MISTRAL_MODEL_WRITER
+    assert "small" in MISTRAL_MODEL_TRANSLATE
+    assert "large" in MISTRAL_MODEL_WRITER
+    assert "large" in MISTRAL_MODEL_DIGEST
     assert get_mistral_research_client()._model == MISTRAL_MODEL_RESEARCH
     assert get_mistral_digest_client()._model == MISTRAL_MODEL_DIGEST
 
 
 def test_two_stage_compose_routes_research_to_small_tier(monkeypatch):
     """Stage-1 tool loop + digest synthesis use the research client; generation
-    stays on the writer (Medium) client."""
+    stays on the writer (Large) client."""
     calls: list[tuple[str, str]] = []
 
     class _FakeClient:
@@ -241,3 +249,131 @@ def test_two_stage_compose_routes_research_to_small_tier(monkeypatch):
     assert ("completion", "research") in calls
     assert ("json", "writer") in calls
     assert ("tools", "writer") not in calls
+
+
+def test_digest_gap_triggers_one_bounded_research_pass(monkeypatch):
+    """When digest synthesis flags an Unresolved Gap, one extra bounded
+    research pass runs (capped via DIGEST_GAP_FILL_MAX_ROUNDS) before the
+    digest is re-synthesized and handed to the writer — the fix for the
+    nf.domains incident, where the writer invented sales data instead of the
+    model getting a real second chance to look for it."""
+    calls: list[tuple[str, str, dict]] = []
+    digest_calls = {"n": 0}
+
+    class _FakeClient:
+        def __init__(self, tier: str, model: str):
+            self._tier = tier
+            self._model = model
+
+        def chat_with_tools(self, *_a, **kw):
+            calls.append(("tools", self._tier, kw))
+            return '{"title":"t","summary":"s","body":"b","tags":["algo"]}'
+
+        def chat_json_object(self, *_a, **_kw):
+            calls.append(("json", self._tier, {}))
+            return {"title": "t", "summary": "s", "body": "b", "tags": ["algo"]}
+
+        def chat_completion(self, *_a, **_kw):
+            digest_calls["n"] += 1
+            calls.append(("completion", self._tier, {}))
+            if digest_calls["n"] == 1:
+                return (
+                    "## Research Digest\n\n### Verified Facts\n- fact [src](https://x)\n\n"
+                    "### Unresolved Gaps\n- no real recent sale price found; try the "
+                    "marketplace's sales-history page\n"
+                )
+            return "## Research Digest\n\n### Verified Facts\n- fact [src](https://x)\n"
+
+    writer = _FakeClient("writer", "mistral-medium-latest")
+    research = _FakeClient("research", "mistral-small-latest")
+
+    monkeypatch.setattr(mc, "get_mistral_research_client", lambda: research)
+    monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: research)
+    monkeypatch.setattr("app.core.config.WRITER_TOOLS_ENABLED", True, raising=False)
+    monkeypatch.setattr("app.core.config.WRITER_TWO_STAGE", True, raising=False)
+    monkeypatch.setattr("app.core.config.RESEARCH_FLOOR_ENABLED", False, raising=False)
+    monkeypatch.setattr("app.core.config.WRITER_REVIEW_ENABLED", False, raising=False)
+    monkeypatch.setattr("app.core.config.DIGEST_GAP_FILL_ENABLED", True, raising=False)
+    monkeypatch.setattr("app.core.config.DIGEST_GAP_FILL_MAX_ROUNDS", 3, raising=False)
+    monkeypatch.setattr(
+        "app.modules.ai.writer_tools.all_tools",
+        lambda **_kw: ([], {}),
+    )
+    monkeypatch.setattr(
+        "app.modules.ai.tool_insights_store.new_session_ref",
+        lambda: ("sid", 0.0),
+    )
+    monkeypatch.setattr(
+        "app.modules.ai.tool_insights_store.record_compose_session",
+        lambda **_kw: None,
+    )
+    monkeypatch.setattr(mc, "_format_research_digest", lambda _t: "- fetch_url -> {}")
+
+    mc._compose_via_writer_tools(
+        system="sys",
+        user="user prompt",
+        source_url="https://example.com/",
+        mistral=writer,
+    )
+
+    tool_calls = [c for c in calls if c[0] == "tools"]
+    completion_calls = [c for c in calls if c[0] == "completion"]
+    # Initial research round + one gap-fill round.
+    assert len(tool_calls) == 2
+    assert len(completion_calls) == 2  # initial digest + re-synthesis after gap-fill
+    gap_fill_kwargs = tool_calls[1][2]
+    assert gap_fill_kwargs.get("max_rounds") == 3
+
+
+def test_digest_with_no_gaps_skips_extra_research_pass(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    class _FakeClient:
+        def __init__(self, tier: str):
+            self._tier = tier
+
+        def chat_with_tools(self, *_a, **_kw):
+            calls.append(("tools", self._tier))
+            return '{"title":"t","summary":"s","body":"b","tags":["algo"]}'
+
+        def chat_json_object(self, *_a, **_kw):
+            calls.append(("json", self._tier))
+            return {"title": "t", "summary": "s", "body": "b", "tags": ["algo"]}
+
+        def chat_completion(self, *_a, **_kw):
+            calls.append(("completion", self._tier))
+            return "## Research Digest\n\n### Verified Facts\n- fact\n\n### Unresolved Gaps\n- None\n"
+
+    writer = _FakeClient("writer")
+    research = _FakeClient("research")
+
+    monkeypatch.setattr(mc, "get_mistral_research_client", lambda: research)
+    monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: research)
+    monkeypatch.setattr("app.core.config.WRITER_TOOLS_ENABLED", True, raising=False)
+    monkeypatch.setattr("app.core.config.WRITER_TWO_STAGE", True, raising=False)
+    monkeypatch.setattr("app.core.config.RESEARCH_FLOOR_ENABLED", False, raising=False)
+    monkeypatch.setattr("app.core.config.WRITER_REVIEW_ENABLED", False, raising=False)
+    monkeypatch.setattr("app.core.config.DIGEST_GAP_FILL_ENABLED", True, raising=False)
+    monkeypatch.setattr(
+        "app.modules.ai.writer_tools.all_tools",
+        lambda **_kw: ([], {}),
+    )
+    monkeypatch.setattr(
+        "app.modules.ai.tool_insights_store.new_session_ref",
+        lambda: ("sid", 0.0),
+    )
+    monkeypatch.setattr(
+        "app.modules.ai.tool_insights_store.record_compose_session",
+        lambda **_kw: None,
+    )
+    monkeypatch.setattr(mc, "_format_research_digest", lambda _t: "- fetch_url -> {}")
+
+    mc._compose_via_writer_tools(
+        system="sys",
+        user="user prompt",
+        source_url="https://example.com/",
+        mistral=writer,
+    )
+
+    assert len([c for c in calls if c[0] == "tools"]) == 1
+    assert len([c for c in calls if c[0] == "completion"]) == 1

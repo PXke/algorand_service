@@ -838,6 +838,9 @@ def register_admin_routes(app) -> None:
                     "rounds": r.rounds or 0,
                     "tool_calls": r.tool_calls or 0,
                     "duration_ms": r.duration_ms or 0,
+                    "prompt_tokens": r.prompt_tokens or 0,
+                    "completion_tokens": r.completion_tokens or 0,
+                    "total_tokens": r.total_tokens or 0,
                 }
                 for r in rows
             ]

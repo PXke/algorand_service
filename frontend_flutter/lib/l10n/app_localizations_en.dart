@@ -619,6 +619,41 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
+  String get navHot => 'Hot';
+
+  @override
+  String get navTopics => 'Topics';
+
+  @override
+  String get hotTitle => 'Most read';
+
+  @override
+  String get hotLead => 'The stories readers are opening most right now.';
+
+  @override
+  String get topicsTitle => 'Topics';
+
+  @override
+  String get topicsLead =>
+      'Every tag the newsroom used recently — sized by coverage, warmed by reads.';
+
+  @override
+  String topicSubtitle(String tag) {
+    return 'Stories tagged “$tag”';
+  }
+
+  @override
+  String readsCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count reads',
+      one: '1 read',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String get sectionMarkets => 'Markets';
 
   @override
@@ -954,4 +989,33 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get domainsWalletNotConnected => 'Wallet not connected';
+
+  @override
+  String get frontPageMoreNews => 'More news';
+
+  @override
+  String storiesCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count stories',
+      one: '1 story',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get byTheNumbersRange => 'Past 7 days';
+
+  @override
+  String get byTheNumbersMarketCap => 'Market cap';
+
+  @override
+  String get byTheNumbersVolume => '24h volume';
+
+  @override
+  String get hotTabHot => 'Hot right now';
+
+  @override
+  String get hotTabAllTime => 'All-time';
 }

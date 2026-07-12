@@ -1,9 +1,10 @@
 """Loads the built Flutter `index.html` and injects per-route SEO markup.
 
 Humans still boot Flutter normally (the bootstrap script is untouched); crawlers
-read the injected `<head>` tags, JSON-LD and the visible `#ssr-body` content,
-which removes itself once Flutter paints. Same bytes go to everyone — no
-User-Agent cloaking.
+read the injected `<head>` tags, JSON-LD and the visible `#ssr-body` content in
+the initial HTML. After Flutter paints, a first-frame script removes `#ssr-body`
+so browser find does not match text hidden under the canvas. Same bytes go to
+everyone — no User-Agent cloaking.
 """
 
 from __future__ import annotations

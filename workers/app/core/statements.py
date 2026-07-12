@@ -38,7 +38,7 @@ class ArticleStmts:
     GET_BY_ID = _Stmt(
         "SELECT article_id, service_id, title, summary, body, "
         "trigger_txid, trigger_round, source_url, published_at, prompt_version, "
-        "translations "
+        "translations, tags "
         "FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
     EXISTS = _Stmt("SELECT article_id FROM algorand_platform.articles_by_id WHERE article_id = ?")
@@ -64,8 +64,17 @@ class ArticleStmts:
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     UPDATE = _Stmt(
-        "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ? "
-        "WHERE article_id = ?"
+        "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ?, "
+        "updated_at = ? WHERE article_id = ?"
+    )
+    # Content swap for an approved recompose of a PUBLISHED article: replaces
+    # prose + art on the SAME article_id (URL and published_at survive).
+    UPDATE_CONTENT_FULL = _Stmt(
+        "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ?, "
+        "image_url = ?, updated_at = ? WHERE article_id = ?"
+    )
+    CLEAR_TRANSLATIONS = _Stmt(
+        "DELETE translations FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
     UPDATE_IMAGE = _Stmt(
         "UPDATE algorand_platform.articles_by_id SET image_url = ? "
@@ -97,8 +106,17 @@ class FeedStmts:
     )
     INSERT_BASIC = _Stmt(
         "INSERT INTO algorand_platform.articles_feed ("
-        "bucket, published_at, article_id, service_id, title, summary, tags"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "bucket, published_at, article_id, service_id, title, summary, tags, updated_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    UPDATE_CONTENT_FULL = _Stmt(
+        "UPDATE algorand_platform.articles_feed SET title = ?, summary = ?, tags = ?, "
+        "image_url = ?, updated_at = ? "
+        "WHERE bucket = ? AND published_at = ? AND article_id = ?"
+    )
+    CLEAR_TRANSLATIONS = _Stmt(
+        "DELETE translations FROM algorand_platform.articles_feed "
+        "WHERE bucket = ? AND published_at = ? AND article_id = ?"
     )
     UPDATE_IMAGE = _Stmt(
         "UPDATE algorand_platform.articles_feed SET image_url = ? "
@@ -250,10 +268,6 @@ class ClassifierReviewStmts:
     GET_FULL = _Stmt(
         "SELECT review_id, url, page_text, page_title, category, storage_score, "
         "status, created_at, metadata "
-        "FROM algorand_platform.classifier_review_queue WHERE review_id = ?"
-    )
-    GET_FOR_PUBLISH = _Stmt(
-        "SELECT url, page_text, page_title, category, storage_score, metadata "
         "FROM algorand_platform.classifier_review_queue WHERE review_id = ?"
     )
     DELETE_PENDING = _Stmt(
@@ -477,8 +491,9 @@ class ToolInsightStmts:
     INSERT_COMPOSE_SESSION = _Stmt(
         "INSERT INTO algorand_platform.compose_sessions ("
         "bucket, created_at, session_id, service_id, source_url, model, "
-        "status, rounds, tool_calls, duration_ms, messages, final_output"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "status, rounds, tool_calls, duration_ms, messages, final_output, "
+        "prompt_tokens, completion_tokens, total_tokens"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     BUMP_USAGE = _Stmt(
         "UPDATE algorand_platform.tool_usage_stats SET calls = calls + ?, errors = errors + ? "

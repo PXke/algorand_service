@@ -616,6 +616,40 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
+  String get navHot => 'پربازدید';
+
+  @override
+  String get navTopics => 'موضوع‌ها';
+
+  @override
+  String get hotTitle => 'پربازدیدترین‌ها';
+
+  @override
+  String get hotLead => 'گزارش‌هایی که خوانندگان اکنون بیش از همه باز می‌کنند.';
+
+  @override
+  String get topicsTitle => 'موضوع‌ها';
+
+  @override
+  String get topicsLead =>
+      'همهٔ برچسب‌هایی که تحریریه اخیراً به کار برده — اندازه بر اساس پوشش و رنگ بر اساس بازدید.';
+
+  @override
+  String topicSubtitle(String tag) {
+    return 'گزارش‌های دارای برچسب «$tag»';
+  }
+
+  @override
+  String readsCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count بازدید',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String get sectionMarkets => 'بازارها';
 
   @override
@@ -950,4 +984,32 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get domainsWalletNotConnected => 'کیف پول وصل نیست';
+
+  @override
+  String get frontPageMoreNews => 'خبرهای بیشتر';
+
+  @override
+  String storiesCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count گزارش',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get byTheNumbersRange => '۷ روز گذشته';
+
+  @override
+  String get byTheNumbersMarketCap => 'ارزش بازار';
+
+  @override
+  String get byTheNumbersVolume => 'حجم ۲۴ ساعته';
+
+  @override
+  String get hotTabHot => 'داغ در حال حاضر';
+
+  @override
+  String get hotTabAllTime => 'همه دوران';
 }

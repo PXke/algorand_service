@@ -5,8 +5,9 @@ The SSR body is a REAL visible `<div id="ssr-body">`, not `<noscript>`:
 Googlebot renders JS, ignores noscript, and Flutter paints to canvas — so
 noscript-only content is invisible to exactly the crawler that matters most.
 The div is served identically to everyone (no user-agent cloaking), doubles as
-a fast first paint while Flutter boots, and removes itself on the engine's
-`flutter-first-frame` event."""
+a fast first paint while Flutter boots, and is removed from the DOM on the
+engine's `flutter-first-frame` event so browser find does not match hidden text.
+"""
 
 from __future__ import annotations
 
@@ -18,14 +19,16 @@ from datetime import UTC, datetime
 import msgspec
 
 from app.core.article_translation_langs import (
+    ARTICLE_TRANSLATION_LANG_NAMES,
     SEO_HREFLANG_LOCALES,
     html_lang_for,
     og_locale_for,
 )
 from app.core.config import settings
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
+from app.modules.seo.chrome import SSR_CHROME_STYLE, ssr_page
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
-from app.modules.seo.sections import SECTIONS, Section, matches_section
+from app.modules.seo.topics import primary_tag, topic_feed_path
 
 
 def site_url() -> str:
@@ -42,13 +45,24 @@ def _iso(epoch: int) -> str:
     return datetime.fromtimestamp(epoch, tz=UTC).isoformat()
 
 
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\w+", text, flags=re.UNICODE))
+
+
+def _speakable_jsonld() -> dict:
+    return {
+        "@type": "SpeakableSpecification",
+        "cssSelector": [".ssr-main article h1", ".ssr-main article p"],
+    }
+
+
 def _attr(value: str) -> str:
     return html.escape(value or "", quote=True)
 
 
 def _ssr_feed_script(items: list[ArticleFeedItem]) -> str:
-    """Embed the home feed as JSON so Flutter can paint immediately without
-    waiting on /api/v1/news/feed (SSR HTML is removed on first frame)."""
+    """Embed feed rows as JSON so Flutter can paint immediately without waiting
+    on the API (SSR HTML is removed on first frame). Used on /, /news and /hot."""
     rows = [msgspec.structs.asdict(i) for i in items]
     payload = json.dumps({"items": rows}, separators=(",", ":"), ensure_ascii=False)
     payload = payload.replace("</", "<\\/")
@@ -99,6 +113,7 @@ def _meta_block(
     og_locale: str = "en_US",
     og_locale_alternates: list[str] | None = None,
     hreflang_links: list[tuple[str, str]] | None = None,
+    og_section: str | None = None,
 ) -> str:
     # <title> length budget (~65 chars before SERPs truncate and audit tools
     # warn): brand-suffix the title only when the result still fits; a long
@@ -152,6 +167,8 @@ def _meta_block(
         parts.append(f'<meta property="article:published_time" content="{_attr(published_iso)}">')
     if modified_iso:
         parts.append(f'<meta property="article:modified_time" content="{_attr(modified_iso)}">')
+    if og_section:
+        parts.append(f'<meta property="article:section" content="{_attr(og_section)}">')
     for tag in tags or []:
         parts.append(f'<meta property="article:tag" content="{_attr(tag)}">')
     # Twitter
@@ -237,39 +254,132 @@ def article_hreflang_links(
 # Flutter app replaces it on first frame. Kept tiny and inline so the SSR body
 # needs no extra request.
 _SSR_STYLE = (
-    "<style>#ssr-body{max-width:720px;margin:0 auto;padding:24px;"
-    "font:17px/1.6 Georgia,'Times New Roman',serif;color:#1a1a1a}"
-    "#ssr-body img{max-width:100%;height:auto}"
-    "#ssr-body a{color:#0b57d0}"
+    "<style>"
+    + SSR_CHROME_STYLE
     # The loading notice only exists for humans watching the app boot, so it is
     # hidden from the reading flow's start: JS reveals it, and it dies with the
     # div on first frame. No-JS readers and crawlers never see it.
-    "#ssr-loading{display:none;font:13px/1.4 system-ui,sans-serif;color:#666;"
-    "border-bottom:1px solid #ddd;padding-bottom:10px;margin-bottom:18px}</style>"
+    + "#ssr-loading{display:none;font:13px/1.4 system-ui,sans-serif;color:#666;"
+    "border-bottom:1px solid #ddd;padding-bottom:10px;margin-bottom:18px}"
+    "</style>"
 )
 _SSR_LOADING = (
     '<p id="ssr-loading">Loading the interactive edition…</p>'
     "<script>document.getElementById('ssr-loading').style.display='block';</script>"
 )
-# Flutter's engine dispatches `flutter-first-frame` on window once the real UI
-# has painted. At that point the engine has already made the SSR content
-# invisible to users mechanically — it sets position:fixed/inset:0/
-# overflow:hidden on <body> and overlays a full-viewport canvas — so the only
-# thing left to deduplicate is assistive tech: aria-hidden keeps screen
-# readers on the Flutter semantics tree. Deliberately NO display:none and no
-# DOM removal: search engines render the page, first-frame fires in their
-# renderer (verified via Search Console, 2026-07-08), and CSS-hidden main
-# content is devalued in the rendered snapshot — covered-but-visible content
-# is not. If Flutter fails to boot, the content stays — a working degraded page.
+# Flutter's engine dispatches `flutter-first-frame` once the real UI has painted.
+# Until then #ssr-body is the fast first paint (and no-JS fallback). After that
+# the full-viewport canvas covers it, but the text stays in the DOM — so Ctrl+F
+# highlights invisible duplicate matches. Remove the SSR shell and the embedded
+# feed JSON once Flutter owns the page; crawlers still get the full HTML in the
+# initial response and JSON-LD in <head>.
 _SSR_REMOVE_SCRIPT = (
     "<script>window.addEventListener('flutter-first-frame',function(){"
-    "var e=document.getElementById('ssr-body');"
-    "e&&e.setAttribute('aria-hidden','true');});</script>"
+    "var b=document.getElementById('ssr-body');b&&b.remove();"
+    "var f=document.getElementById('pxke-ssr-feed');f&&f.remove();});</script>"
 )
 
 
-def ssr_container(inner_html: str) -> str:
-    return f'{_SSR_STYLE}<div id="ssr-body">{_SSR_LOADING}{inner_html}</div>{_SSR_REMOVE_SCRIPT}'
+def ssr_container(
+    inner_html: str,
+    *,
+    active: str | None = None,
+    breadcrumbs: list[tuple[str, str]] | None = None,
+    topic_links: list[tuple[str, int]] | None = None,
+) -> str:
+    page = ssr_page(
+        inner_html,
+        active=active,
+        breadcrumbs=breadcrumbs,
+        topic_links=topic_links,
+    )
+    return f'{_SSR_STYLE}<div id="ssr-body">{_SSR_LOADING}{page}</div>{_SSR_REMOVE_SCRIPT}'
+
+
+def pick_related_articles(
+    article: ArticleDetail,
+    feed: list[ArticleFeedItem],
+    *,
+    limit: int = 5,
+) -> list[ArticleFeedItem]:
+    """Stories sharing a tag with this article (mirrors the Flutter detail page)."""
+    tags = {t.strip().lower() for t in (article.tags or []) if t.strip()}
+    if not tags:
+        return []
+    related: list[ArticleFeedItem] = []
+    for item in feed:
+        if item.article_id == article.article_id:
+            continue
+        item_tags = {t.strip().lower() for t in (item.tags or []) if t.strip()}
+        if tags & item_tags:
+            related.append(item)
+        if len(related) >= limit:
+            break
+    return related
+
+
+def _tag_links_html(tags: list[str] | None) -> str:
+    if not tags:
+        return ""
+    links = []
+    for raw in tags:
+        tag = raw.strip()
+        if not tag:
+            continue
+        slug = tag.lower()
+        links.append(
+            f'<a href="{_attr(f"/topic/{slug}")}" rel="tag">{html.escape(tag)}</a>'
+        )
+    if not links:
+        return ""
+    return f'<p class="ssr-tags">{" · ".join(links)}</p>'
+
+
+_LANG_LABELS: dict[str, str] = {
+    "en": "English",
+    **{code: name.split(" (")[0] for code, name in ARTICLE_TRANSLATION_LANG_NAMES.items()},
+}
+
+
+def _translation_links_html(
+    article_id: str,
+    current_lang: str | None,
+    translation_langs: list[str] | None,
+) -> str:
+    langs = ["en", *(c for c in (translation_langs or []) if c != "en")]
+    if len(langs) <= 1:
+        return ""
+    current = (current_lang or "en").strip() or "en"
+    parts = []
+    for code in langs:
+        path = article_path(article_id) if code == "en" else f"{article_path(article_id)}?lang={code}"
+        label = _LANG_LABELS.get(code, code)
+        hreflang = SEO_HREFLANG_LOCALES.get(code, code)
+        if code == current:
+            parts.append(f'<span aria-current="true">{html.escape(label)}</span>')
+        else:
+            parts.append(
+                f'<a href="{_attr(path)}" hreflang="{_attr(hreflang)}">'
+                f"{html.escape(label)}</a>"
+            )
+    return (
+        f'<nav class="ssr-langs" aria-label="Translations">'
+        f'<p>Read in: {" · ".join(parts)}</p></nav>'
+    )
+
+
+def _related_stories_html(items: list[ArticleFeedItem]) -> str:
+    if not items:
+        return ""
+    links = "".join(
+        f'<li><a href="{_attr(article_path(item.article_id))}">'
+        f"{html.escape(item.title)}</a></li>"
+        for item in items
+    )
+    return (
+        f'<aside class="ssr-related" aria-labelledby="ssr-related-h">'
+        f'<h2 id="ssr-related-h">Related stories</h2><ul>{links}</ul></aside>'
+    )
 
 
 def _breadcrumb(trail: list[tuple[str, str]]) -> dict:
@@ -306,15 +416,13 @@ def _website_jsonld() -> dict:
 # --- Page builders: each returns (head_html, body_html) -----------------------
 
 
-def _section_for(tags: list[str]) -> Section | None:
-    return next((s for s in SECTIONS if matches_section(s, tags)), None)
-
-
 def render_article(
     article: ArticleDetail,
     *,
     lang: str | None = None,
     translation_langs: list[str] | None = None,
+    topic_links: list[tuple[str, int]] | None = None,
+    related: list[ArticleFeedItem] | None = None,
 ) -> tuple[str, str]:
     lang_code = (lang or "").strip() or None
     if lang_code == "en":
@@ -329,11 +437,22 @@ def render_article(
     body_text = md_to_text(article.body)
     description = truncate(article.summary or body_text, 160)
     published_iso = _iso(article.published_at_epoch)
+    # dateModified reflects the last edit/recompose; equals datePublished for
+    # never-revised articles (crawlers treat a fresher dateModified as a
+    # recrawl signal — the long-standing Bing-audit gap).
+    updated_epoch = getattr(article, "updated_at_epoch", None) or 0
+    modified_iso = (
+        _iso(updated_epoch)
+        if updated_epoch > article.published_at_epoch
+        else published_iso
+    )
 
     trail = [("Home", site_url() + "/")]
-    section = _section_for(article.tags or [])
-    if section:
-        trail.append((section.label, absolute(f"/section/{section.slug}")))
+    # Breadcrumb through the story's primary writer tag — the paper's real
+    # taxonomy (the fixed human sections were retired).
+    primary = primary_tag(article.tags)
+    if primary:
+        trail.append((primary, absolute(f"/topic/{primary}")))
     trail.append((truncate(article.title, 80), canonical))
 
     news_article = {
@@ -342,16 +461,20 @@ def render_article(
         "headline": truncate(article.title, 110),
         "description": description,
         "datePublished": published_iso,
-        "dateModified": published_iso,
+        "dateModified": modified_iso,
         "url": canonical,
         "mainEntityOfPage": {"@type": "WebPage", "@id": canonical},
         "image": [image],
         "articleBody": body_text,
+        "wordCount": _word_count(body_text),
         "publisher": _publisher(),
         "author": _publisher(),
         "keywords": ", ".join(article.tags or []),
         "isAccessibleForFree": True,
+        "speakable": _speakable_jsonld(),
     }
+    if primary:
+        news_article["articleSection"] = primary
     if lang_code:
         news_article["inLanguage"] = html_lang_for(lang_code)
 
@@ -372,7 +495,7 @@ def render_article(
         image=image,
         og_type="article",
         published_iso=published_iso,
-        modified_iso=published_iso,
+        modified_iso=modified_iso,
         tags=article.tags,
         image_alt=article.title,
         image_dims=_DEFAULT_IMAGE_DIMS if is_default else None,
@@ -380,6 +503,7 @@ def render_article(
         og_locale=current_og,
         og_locale_alternates=og_alternates,
         hreflang_links=hreflang_links,
+        og_section=primary,
     )
 
     body_html = md_to_html(article.body)
@@ -395,10 +519,17 @@ def render_article(
         if article.source_url
         else ""
     )
+    tags_html = _tag_links_html(article.tags)
+    langs_html = _translation_links_html(article.article_id, lang_code, translation_langs)
+    related_html = _related_stories_html(related or [])
     body = ssr_container(
+        f'<p class="ssr-back"><a href="/news">← Latest stories</a></p>'
         f"<article><h1>{html.escape(article.title)}</h1>"
         f'<p><time datetime="{_attr(published_iso)}">{published_iso[:10]}</time></p>'
-        f"{img_html}{body_html}{source}</article>"
+        f"{tags_html}{img_html}{body_html}{source}{langs_html}</article>"
+        f"{related_html}",
+        breadcrumbs=trail,
+        topic_links=topic_links,
     )
     return head, body
 
@@ -425,52 +556,326 @@ def _feed_list_jsonld(items: list[ArticleFeedItem], canonical: str, name: str) -
     }
 
 
-def _feed_ssr(items: list[ArticleFeedItem], heading: str) -> str:
+def _topics_index_jsonld(
+    tags: list[tuple[str, int]], canonical: str, title: str
+) -> dict:
+    return {
+        "@context": "https://schema.org",
+        "@type": "CollectionPage",
+        "name": title,
+        "url": canonical,
+        "publisher": _publisher(),
+        "mainEntity": {
+            "@type": "ItemList",
+            "itemListElement": [
+                {
+                    "@type": "ListItem",
+                    "position": i + 1,
+                    "url": absolute(f"/topic/{tag}"),
+                    "name": tag,
+                }
+                for i, (tag, _count) in enumerate(tags)
+            ],
+        },
+    }
+
+
+def _story_li(item: ArticleFeedItem, *, rank: int | None = None) -> str:
+    prefix = f"{rank}. " if rank is not None else ""
+    return (
+        f"<li>{prefix}<a href=\"{_attr(article_path(item.article_id))}\">"
+        f"{html.escape(item.title)}</a> — {html.escape(truncate(item.summary, 140))}</li>"
+    )
+
+
+def _lead_index(items: list[ArticleFeedItem]) -> int:
+    """Prefer the newest story with a real photograph as the front-page lead."""
+    window = min(5, len(items))
+    for i in range(window):
+        url = items[i].image_url
+        if url and not _is_icon_like(absolute(url)):
+            return i
+    return 0
+
+
+def _lead_html(item: ArticleFeedItem) -> str:
+    img = ""
+    if item.image_url and not _is_icon_like(absolute(item.image_url)):
+        img = (
+            f'<img src="{_attr(absolute(item.image_url))}" '
+            f'alt="{_attr(item.title)}">'
+        )
+    path = _attr(article_path(item.article_id))
+    return (
+        f'<article class="ssr-lead">'
+        f'<h1><a href="{path}">{html.escape(item.title)}</a></h1>'
+        f"{img}"
+        f"<p>{html.escape(truncate(item.summary or '', 220))}</p>"
+        f"</article>"
+    )
+
+
+def _feed_ssr(
+    items: list[ArticleFeedItem],
+    heading: str,
+    *,
+    active: str | None = None,
+    breadcrumbs: list[tuple[str, str]] | None = None,
+    topic_links: list[tuple[str, int]] | None = None,
+    intro_html: str = "",
+) -> str:
     """Crawlable (and pre-boot visible) feed listing — these are the only real
     internal links Google's renderer ever sees, since the Flutter app is canvas."""
-    links = "".join(
-        f'<li><a href="{_attr(article_path(item.article_id))}">'
-        f"{html.escape(item.title)}</a> — {html.escape(truncate(item.summary, 140))}</li>"
-        for item in items
+    links = "".join(_story_li(item) for item in items)
+    return ssr_container(
+        f"<h1>{html.escape(heading)}</h1>{intro_html}<ul>{links}</ul>",
+        active=active,
+        breadcrumbs=breadcrumbs,
+        topic_links=topic_links,
     )
-    return ssr_container(f"<h1>{html.escape(heading)}</h1><ul>{links}</ul>")
 
 
-def render_home(items: list[ArticleFeedItem]) -> tuple[str, str]:
+def render_front(
+    items: list[ArticleFeedItem],
+    hot: list[ArticleFeedItem],
+    *,
+    topic_links: list[tuple[str, int]] | None = None,
+) -> tuple[str, str]:
+    """Editorial front page at / — mirrors the Flutter FrontPage layout."""
     canonical = site_url() + "/"
-    description = settings.site_tagline
+    if not items:
+        head = _meta_block(
+            title=settings.site_name,
+            description=settings.site_tagline,
+            canonical=canonical,
+            image=absolute(settings.seo_default_image),
+            image_alt=settings.site_name,
+            image_dims=_DEFAULT_IMAGE_DIMS,
+            json_ld=[_website_jsonld(), {"@context": "https://schema.org", **_publisher(), "url": canonical}],
+        )
+        body = ssr_container(
+            f"<h1>{html.escape(settings.site_name)}</h1>"
+            f"<p>{html.escape(settings.site_tagline)}</p>",
+            breadcrumbs=[("Home", canonical)],
+            topic_links=topic_links,
+        )
+        return head, body
+
+    lead_idx = _lead_index(items)
+    lead = items[lead_idx]
+    others = [item for i, item in enumerate(items) if i != lead_idx]
+    secondary = others[:4]
+    rest = others[4:]
+
+    sections: list[str] = [
+        '<div class="ssr-front">',
+        f"<section aria-labelledby=\"ssr-lead-h\">{_lead_html(lead)}</section>",
+    ]
+    if secondary:
+        sec_links = "".join(_story_li(item) for item in secondary)
+        sections.append(
+            f'<section aria-labelledby="ssr-top-h">'
+            f'<h2 id="ssr-top-h">Top stories</h2><ul>{sec_links}</ul></section>'
+        )
+    if hot:
+        hot_links = "".join(_story_li(item, rank=i + 1) for i, item in enumerate(hot))
+        sections.append(
+            f'<section aria-labelledby="ssr-hot-h">'
+            f'<h2 id="ssr-hot-h"><a href="/hot">Most read</a></h2>'
+            f"<ol>{hot_links}</ol></section>"
+        )
+    if rest:
+        rest_links = "".join(_story_li(item) for item in rest)
+        sections.append(
+            f'<section aria-labelledby="ssr-more-h">'
+            f'<h2 id="ssr-more-h">More news</h2><ul>{rest_links}</ul></section>'
+        )
+    sections.append(
+        '<p class="ssr-more-feed"><a href="/news">Full chronological feed →</a></p>'
+        "</div>"
+    )
+    main_html = "".join(sections)
+
     head = _meta_block(
         title=settings.site_name,
-        description=description,
+        description=settings.site_tagline,
+        canonical=canonical,
+        image=absolute(lead.image_url) if lead.image_url and not _is_icon_like(absolute(lead.image_url)) else absolute(settings.seo_default_image),
+        image_alt=lead.title,
+        image_dims=_DEFAULT_IMAGE_DIMS,
+        json_ld=[
+            _website_jsonld(),
+            {"@context": "https://schema.org", **_publisher(), "url": canonical},
+            _feed_list_jsonld(items, canonical, f"{settings.site_name} — Front page"),
+        ],
+    )
+    head = f"{head}\n{_ssr_feed_script(items)}"
+    body = ssr_container(
+        main_html,
+        breadcrumbs=[("Home", canonical)],
+        topic_links=topic_links,
+    )
+    return head, body
+
+
+def render_news_feed(
+    items: list[ArticleFeedItem],
+    *,
+    topic_links: list[tuple[str, int]] | None = None,
+    total_count: int | None = None,
+) -> tuple[str, str]:
+    """Chronological file at /news."""
+    canonical = absolute("/news")
+    breadcrumbs = [("Home", site_url() + "/"), ("Latest", canonical)]
+    heading = f"{settings.site_name} — Latest"
+    intro = ""
+    if total_count is not None and total_count > len(items):
+        intro = (
+            f'<p class="ssr-muted">Showing the {len(items)} newest of {total_count} '
+            f'recent stories in the archive. '
+            f'<a href="/feed.xml">Subscribe via RSS</a> for the full syndicated feed.</p>'
+        )
+    head = _meta_block(
+        title="Latest",
+        description=settings.site_tagline,
         canonical=canonical,
         image=absolute(settings.seo_default_image),
         image_alt=settings.site_name,
         image_dims=_DEFAULT_IMAGE_DIMS,
         json_ld=[
-            _website_jsonld(),
-            {"@context": "https://schema.org", **_publisher(), "url": site_url() + "/"},
-            _feed_list_jsonld(items, canonical, f"{settings.site_name} — Latest"),
+            _feed_list_jsonld(items, canonical, heading),
+            _breadcrumb(breadcrumbs),
         ],
     )
     head = f"{head}\n{_ssr_feed_script(items)}"
-    body = _feed_ssr(items, f"{settings.site_name} — Latest Algorand news")
+    body = _feed_ssr(
+        items,
+        heading,
+        active="/news",
+        breadcrumbs=breadcrumbs,
+        topic_links=topic_links,
+        intro_html=intro,
+    )
     return head, body
 
 
-def render_section(section: Section, items: list[ArticleFeedItem]) -> tuple[str, str]:
-    canonical = absolute(f"/section/{section.slug}")
-    title = f"{section.label} — Algorand news"
-    trail = [("Home", site_url() + "/"), (section.label, canonical)]
+def render_home(
+    items: list[ArticleFeedItem],
+    *,
+    canonical_path: str = "/news",
+    topic_links: list[tuple[str, int]] | None = None,
+) -> tuple[str, str]:
+    """Backward-compatible alias for the /news feed renderer."""
+    _ = canonical_path  # only /news is supported; / uses render_front
+    return render_news_feed(items, topic_links=topic_links)
+
+
+def render_hot(
+    items: list[ArticleFeedItem],
+    *,
+    topic_links: list[tuple[str, int]] | None = None,
+) -> tuple[str, str]:
+    """Most-read ledger: the feed ranked by read tally."""
+    canonical = absolute("/hot")
+    title = f"Most read — {settings.site_name}"
+    trail = [("Home", site_url() + "/"), ("Most read", canonical)]
     head = _meta_block(
-        title=title,
-        description=section.description,
+        title="Most read",
+        description=f"The {settings.site_name} stories readers are opening most right now.",
         canonical=canonical,
         image=absolute(settings.seo_default_image),
         image_alt=settings.site_name,
         image_dims=_DEFAULT_IMAGE_DIMS,
         json_ld=[_feed_list_jsonld(items, canonical, title), _breadcrumb(trail)],
     )
-    body = _feed_ssr(items, section.label)
+    head = f"{head}\n{_ssr_feed_script(items)}"
+    body = _feed_ssr(
+        items,
+        "Most read",
+        active="/hot",
+        breadcrumbs=trail,
+        topic_links=topic_links,
+    )
+    return head, body
+
+
+def render_topic(
+    tag: str,
+    items: list[ArticleFeedItem],
+    *,
+    topic_links: list[tuple[str, int]] | None = None,
+    total_count: int | None = None,
+) -> tuple[str, str]:
+    """Topic landing page: the feed filtered to one writer tag."""
+    canonical = absolute(f"/topic/{tag}")
+    title = f"{tag} — Algorand news"
+    description = f"Algorand stories tagged “{tag}” from {settings.site_name}."
+    trail = [("Home", site_url() + "/"), ("Topics", absolute("/topics")), (tag, canonical)]
+    feed_path = topic_feed_path(tag)
+    head = _meta_block(
+        title=title,
+        description=description,
+        canonical=canonical,
+        image=absolute(settings.seo_default_image),
+        image_alt=settings.site_name,
+        image_dims=_DEFAULT_IMAGE_DIMS,
+        json_ld=[_feed_list_jsonld(items, canonical, title), _breadcrumb(trail)],
+    )
+    head += (
+        f'\n<link rel="alternate" type="application/rss+xml" '
+        f'title="{_attr(f"{tag} — {settings.site_name}")}" '
+        f'href="{_attr(absolute(feed_path))}">'
+    )
+    head = f"{head}\n{_ssr_feed_script(items)}"
+    intro = (
+        f'<p class="ssr-muted"><a href="{_attr(feed_path)}">Subscribe to this topic (RSS)</a></p>'
+    )
+    if total_count is not None and total_count > len(items):
+        intro += (
+            f'<p class="ssr-muted">Showing {len(items)} of {total_count} stories '
+            f'tagged “{html.escape(tag)}”.</p>'
+        )
+    body = _feed_ssr(
+        items,
+        tag,
+        active="/topics",
+        breadcrumbs=trail,
+        topic_links=topic_links,
+        intro_html=intro,
+    )
+    return head, body
+
+
+def render_topics(tags: list[tuple[str, int]]) -> tuple[str, str]:
+    """Topics index: crawlable links to every reliable topic page."""
+    canonical = absolute("/topics")
+    title = f"Topics — {settings.site_name}"
+    description = f"Every topic {settings.site_name} covers, ranked by coverage."
+    trail = [("Home", site_url() + "/"), ("Topics", canonical)]
+    head = _meta_block(
+        title="Topics",
+        description=description,
+        canonical=canonical,
+        image=absolute(settings.seo_default_image),
+        image_alt=settings.site_name,
+        image_dims=_DEFAULT_IMAGE_DIMS,
+        json_ld=[
+            _topics_index_jsonld(tags, canonical, title),
+            _breadcrumb(trail),
+        ],
+    )
+    links = "".join(
+        f'<li><a href="{_attr(absolute(f"/topic/{tag}"))}">{html.escape(tag)}</a>'
+        f" — {count} stories "
+        f'(<a href="{_attr(topic_feed_path(tag))}">RSS</a>)</li>'
+        for tag, count in tags
+    )
+    body = ssr_container(
+        f"<h1>{html.escape(title)}</h1><ul>{links}</ul>",
+        active="/topics",
+        breadcrumbs=trail,
+        topic_links=tags,
+    )
     return head, body
 
 
@@ -503,7 +908,9 @@ def render_about() -> tuple[str, str]:
     body = ssr_container(
         f"<h1>About {html.escape(settings.site_name)}</h1>"
         f"<p>{html.escape(settings.site_tagline)}</p>"
-        f"<h2>Written with AI</h2><p>{html.escape(disclosure)}</p>"
+        f"<h2>Written with AI</h2><p>{html.escape(disclosure)}</p>",
+        active="/about",
+        breadcrumbs=[("Home", site_url() + "/"), ("About", canonical)],
     )
     return head, body
 
@@ -532,12 +939,14 @@ def render_contact() -> tuple[str, str]:
         f"<h1>Contact {html.escape(settings.site_name)}</h1>"
         "<p>Spotted an error, have a tip, or want to reach the newsroom? "
         "Send us a message with the form on this page — corrections and "
-        "feedback go straight to the editors.</p>"
+        "feedback go straight to the editors.</p>",
+        active="/contact",
+        breadcrumbs=[("Home", site_url() + "/"), ("Contact", canonical)],
     )
     return head, body
 
 
-def render_noindex(title: str) -> tuple[str, str]:
+def render_noindex(title: str, *, active: str | None = None) -> tuple[str, str]:
     """Minimal shell for utility routes (admin/search/suggestions) — keep them
     out of the index but still serve the app."""
     head = _meta_block(
@@ -549,4 +958,9 @@ def render_noindex(title: str) -> tuple[str, str]:
         image_dims=_DEFAULT_IMAGE_DIMS,
         robots="noindex, follow",
     )
-    return head, ""
+    body = ssr_container(
+        f"<h1>{html.escape(title)}</h1>",
+        active=active,
+        breadcrumbs=[("Home", site_url() + "/"), (title, site_url() + "/")],
+    )
+    return head, body

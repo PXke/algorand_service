@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../l10n/l10n_extensions.dart';
 import '../theme/app_theme_extension.dart';
-import '../../modules/newspaper/sections.dart';
 import 'brand_mark.dart';
 import 'page_content.dart';
 
@@ -54,14 +54,30 @@ class SiteFooter extends StatelessWidget {
     );
 
     final sectionsColumn = _FooterColumn(
-      heading: l10n.footerSectionsHeading,
+      heading: l10n.navNews.toUpperCase(),
       columns: wide ? 2 : 1,
       links: [
-        for (final s in kNewsSections)
-          _FooterLink(
-            label: s.label(context),
-            onTap: () => context.go('/section/${s.slug}'),
+        _FooterLink(
+          label: l10n.navLatest,
+          onTap: () => context.go('/news'),
+        ),
+        _FooterLink(
+          label: l10n.hotTitle,
+          onTap: () => context.go('/hot'),
+        ),
+        _FooterLink(
+          label: l10n.navTopics,
+          onTap: () => context.go('/topics'),
+        ),
+        // "RSS" is a universal mark; the full-text feed is a reader-retention
+        // channel, not chrome — it earns a place in the standing footer.
+        _FooterLink(
+          label: 'RSS',
+          onTap: () => launchUrl(
+            Uri.parse('${Uri.base.origin}/feed.xml'),
+            mode: LaunchMode.externalApplication,
           ),
+        ),
       ],
     );
 
@@ -71,10 +87,6 @@ class SiteFooter extends StatelessWidget {
         _FooterLink(
           label: l10n.navAbout,
           onTap: () => context.go('/about'),
-        ),
-        _FooterLink(
-          label: l10n.navLatest,
-          onTap: () => context.go('/news'),
         ),
         _FooterLink(
           label: l10n.navSearch,

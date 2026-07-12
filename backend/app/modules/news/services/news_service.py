@@ -32,14 +32,24 @@ class NewsService:
         *,
         limit: int | None = None,
         service_id: str | None = None,
+        tag: str | None = None,
         cursor_epoch_ms: int | None = None,
         lang: str | None = None,
     ) -> tuple[list[ArticleFeedItem], int | None]:
         cap = limit if limit is not None else settings.news_feed_limit
-        if service_id:
+        if service_id or tag:
             # Filtered view: over-fetch and filter (no cross-partition cursor).
             articles = self._store.list_feed(limit=max(cap * 4, 100))
-            articles = [a for a in articles if a.service_id == service_id][:cap]
+            if service_id:
+                articles = [a for a in articles if a.service_id == service_id]
+            if tag:
+                wanted = tag.strip().lower()
+                articles = [
+                    a
+                    for a in articles
+                    if any(t.strip().lower() == wanted for t in (a.tags or []))
+                ]
+            articles = articles[:cap]
             return [self._to_feed_item(a, lang) for a in articles], None
         articles, next_cursor = self._store.list_feed_page(
             limit=cap, cursor_epoch_ms=cursor_epoch_ms
@@ -48,6 +58,78 @@ class NewsService:
         # left service_id/title null) so one bad row can't 500 the whole feed.
         articles = [a for a in articles if a.service_id and a.title]
         return [self._to_feed_item(a, lang) for a in articles], next_cursor
+
+    # ── Engagement views (tag cloud + most-read) ─────────────────────────────
+    #
+    # Both scan the recent feed (bounded) and join the per-article read
+    # counters. At current corpus size this is a few hundred rows; callers
+    # cache the result (see routes) so the scan runs at most every few minutes.
+
+    _ENGAGEMENT_SCAN_LIMIT = 500
+
+    def _recent_with_views(self, lang: str | None = None) -> list[tuple[ArticleFeedItem, int]]:
+        from app.modules.news.stores.view_counts import get_views_bulk
+
+        articles = self._store.list_feed(limit=self._ENGAGEMENT_SCAN_LIMIT)
+        articles = [a for a in articles if a.service_id and a.title]
+        views = get_views_bulk([a.article_id for a in articles])
+        return [
+            (self._to_feed_item(a, lang), views.get(a.article_id, 0)) for a in articles
+        ]
+
+    def hot_feed(
+        self, *, limit: int = 20, lang: str | None = None, rank: str = "hot"
+    ) -> list[ArticleFeedItem]:
+        """Reader-engagement ranking over the recent feed.
+
+        rank="hot": read VELOCITY — views divided by days since publication —
+        so a fresh story earning reads fast beats an old story coasting on its
+        lifetime total (raw-total ranking visibly ossified: the module showed
+        the same six mid-June stories for weeks). Age is floored at 6h so a
+        just-published story needs real traction, not two lucky clicks.
+        rank="top": lifetime totals — the all-time most-read ledger.
+        Ties break newest-first either way."""
+        import time as _time
+
+        now = _time.time()
+
+        def velocity(pair: tuple[ArticleFeedItem, int]) -> float:
+            item, views = pair
+            age_days = max((now - item.published_at_epoch) / 86400.0, 0.25)
+            return views / age_days
+
+        key = (
+            (lambda pair: (velocity(pair), pair[0].published_at_epoch))
+            if rank == "hot"
+            else (lambda pair: (pair[1], pair[0].published_at_epoch))
+        )
+        ranked = sorted(self._recent_with_views(lang), key=key, reverse=True)
+        items: list[ArticleFeedItem] = []
+        for item, views in ranked[:limit]:
+            item.views = views
+            items.append(item)
+        return items
+
+    def tag_stats(self) -> dict:
+        """Per-tag coverage and readership over the recent feed: how often the
+        newsroom tagged a topic, how many reads those stories drew, and when
+        the topic last appeared. Tags are the writer's own labels, so this is
+        the paper's real taxonomy (richer than the fixed sections)."""
+        stats: dict[str, dict] = {}
+        pairs = self._recent_with_views()
+        for item, views in pairs:
+            for raw in item.tags or []:
+                tag = raw.strip().lower()
+                if not tag:
+                    continue
+                entry = stats.setdefault(
+                    tag, {"tag": tag, "count": 0, "views": 0, "last_epoch": 0}
+                )
+                entry["count"] += 1
+                entry["views"] += views
+                entry["last_epoch"] = max(entry["last_epoch"], item.published_at_epoch)
+        ordered = sorted(stats.values(), key=lambda e: (-e["count"], -e["views"]))
+        return {"article_count": len(pairs), "tags": ordered}
 
     def translation_langs_for(self, article_id: str) -> list[str]:
         article = self._store.get(article_id)
@@ -111,6 +193,7 @@ class NewsService:
             ),
             views=get_views(article.article_id),
             image_url=article.image_url,
+            updated_at_epoch=getattr(article, "updated_at_epoch", None),
         )
 
     @staticmethod
@@ -145,4 +228,5 @@ class NewsService:
             ),
             image_url=getattr(article, "image_url", None),
             source_url=getattr(article, "source_url", None),
+            updated_at_epoch=getattr(article, "updated_at_epoch", None),
         )

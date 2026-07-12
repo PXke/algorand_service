@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/config/app_config.dart' show looksLikeLogoUrl;
 import '../../../core/ui/lazy_network_image.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/theme/app_theme_extension.dart';
-import 'article_card.dart' show looksLikeLogoUrl;
 
 class FeedPlacementCard extends StatelessWidget {
   const FeedPlacementCard({super.key, required this.placement});

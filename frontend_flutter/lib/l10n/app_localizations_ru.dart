@@ -622,6 +622,43 @@ class AppLocalizationsRu extends AppLocalizations {
   }
 
   @override
+  String get navHot => 'Популярное';
+
+  @override
+  String get navTopics => 'Темы';
+
+  @override
+  String get hotTitle => 'Самое читаемое';
+
+  @override
+  String get hotLead =>
+      'Материалы, которые читатели открывают чаще всего прямо сейчас.';
+
+  @override
+  String get topicsTitle => 'Темы';
+
+  @override
+  String get topicsLead =>
+      'Все теги редакции за последнее время — размер отражает охват, цвет — чтения.';
+
+  @override
+  String topicSubtitle(String tag) {
+    return 'Материалы с тегом «$tag»';
+  }
+
+  @override
+  String readsCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count прочтений',
+      few: '$count прочтения',
+      one: '1 прочтение',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String get sectionMarkets => 'Рынки';
 
   @override
@@ -958,4 +995,34 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get domainsWalletNotConnected => 'Кошелёк не подключён';
+
+  @override
+  String get frontPageMoreNews => 'Ещё новости';
+
+  @override
+  String storiesCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count материалов',
+      few: '$count материала',
+      one: '1 материал',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get byTheNumbersRange => 'За 7 дней';
+
+  @override
+  String get byTheNumbersMarketCap => 'Капитализация';
+
+  @override
+  String get byTheNumbersVolume => 'Объём за 24ч';
+
+  @override
+  String get hotTabHot => 'Сейчас в тренде';
+
+  @override
+  String get hotTabAllTime => 'За всё время';
 }

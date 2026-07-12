@@ -20,7 +20,7 @@ import '../../../core/ui/page_content.dart';
 import '../../../core/ui/publication_details_panel.dart';
 import '../sections.dart';
 import '../services/news_api.dart';
-import 'article_card.dart';
+import 'story_row.dart';
 
 class ArticleDetailPage extends ConsumerStatefulWidget {
   const ArticleDetailPage({super.key, required this.articleId});
@@ -184,28 +184,23 @@ class _ArticleDetailPageState extends ConsumerState<ArticleDetailPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Kicker: section glyph + label in small caps, accented.
+                    // Kicker: accent slug + the story's primary writer tag in
+                    // small caps — the same department mark the front page uses.
                     if (tags.isNotEmpty) ...[
-                      Row(
-                        children: [
-                          Icon(
-                            sectionForTags(tags)?.icon ?? Icons.label_outline,
-                            size: 15,
-                            color: colors.accent,
-                          ),
-                          const SizedBox(width: 7),
-                          Flexible(
-                            child: Text(
-                              (sectionForTags(tags)?.label(context) ?? tags.first)
-                                  .toUpperCase(),
-                              style: theme.textTheme.labelSmall?.copyWith(
-                                color: colors.accent,
-                                letterSpacing: 1.4,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                        ],
+                      Align(
+                        alignment: AlignmentDirectional.centerStart,
+                        child: Container(width: 34, height: 3, color: colors.accent),
+                      ),
+                      const SizedBox(height: 14),
+                      Text(
+                        displayTagLabel(primaryTag(tags) ?? tags.first).toUpperCase(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: colors.accent,
+                          letterSpacing: 1.4,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
                       const SizedBox(height: 14),
                     ],
@@ -284,8 +279,11 @@ class _ArticleDetailPageState extends ConsumerState<ArticleDetailPage> {
                     if (tags.length > 1) ...[
                       const SizedBox(height: 14),
                       ArticleTagRow(
-                        tags: tags.sublist(1).take(4).toList(),
+                        tags: (List.of(tags)..remove(primaryTag(tags) ?? tags.first))
+                            .take(4)
+                            .toList(),
                         compact: true,
+                        linkToTopic: true,
                       ),
                     ],
                     const SizedBox(height: 30),
@@ -332,17 +330,17 @@ class _ArticleDetailPageState extends ConsumerState<ArticleDetailPage> {
                           Expanded(child: Divider(height: 1, color: colors.border)),
                         ],
                       ),
-                      const SizedBox(height: AppLayout.itemGap),
-                      for (final item in _related)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: ArticleCard(
-                            item: item,
-                            onTap: () {
-                              final id = item['article_id']?.toString() ?? '';
-                              if (id.isNotEmpty) context.go('/news/articles/$id');
-                            },
-                          ),
+                      for (var i = 0; i < _related.length; i++)
+                        StoryRow(
+                          item: _related[i],
+                          first: i == 0,
+                          onTap: () {
+                            final id =
+                                _related[i]['article_id']?.toString() ?? '';
+                            if (id.isNotEmpty) {
+                              context.go('/news/articles/$id');
+                            }
+                          },
                         ),
                     ],
                   ],

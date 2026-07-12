@@ -620,6 +620,42 @@ class AppLocalizationsFr extends AppLocalizations {
   }
 
   @override
+  String get navHot => 'Populaire';
+
+  @override
+  String get navTopics => 'Sujets';
+
+  @override
+  String get hotTitle => 'Les plus lus';
+
+  @override
+  String get hotLead =>
+      'Les articles que les lecteurs ouvrent le plus en ce moment.';
+
+  @override
+  String get topicsTitle => 'Sujets';
+
+  @override
+  String get topicsLead =>
+      'Chaque étiquette utilisée récemment par la rédaction — la taille reflète la couverture, la couleur les lectures.';
+
+  @override
+  String topicSubtitle(String tag) {
+    return 'Articles étiquetés « $tag »';
+  }
+
+  @override
+  String readsCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count lectures',
+      one: '1 lecture',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String get sectionMarkets => 'Marchés';
 
   @override
@@ -957,4 +993,33 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get domainsWalletNotConnected => 'Portefeuille non connecté';
+
+  @override
+  String get frontPageMoreNews => 'Plus d\'actualités';
+
+  @override
+  String storiesCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count articles',
+      one: '1 article',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get byTheNumbersRange => '7 derniers jours';
+
+  @override
+  String get byTheNumbersMarketCap => 'Capitalisation';
+
+  @override
+  String get byTheNumbersVolume => 'Volume 24h';
+
+  @override
+  String get hotTabHot => 'Tendances';
+
+  @override
+  String get hotTabAllTime => 'Depuis toujours';
 }

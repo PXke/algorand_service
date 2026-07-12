@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../config/app_config.dart' show looksLikeLogoUrl;
 import '../theme/app_theme_extension.dart';
 import 'article_chart.dart';
 import 'glossary.dart';
@@ -19,6 +20,16 @@ class ArticleMarkdown extends StatelessWidget {
 
   final String data;
   final bool selectable;
+
+  /// Body markdown minus icon-shaped lead images. The pipeline stores the
+  /// source favicon as the body's first image when a story has no real share
+  /// image; rendering it would blow a 32px icon up to the column width, and
+  /// even an empty placeholder leaves a paragraph-sized hole — so the line is
+  /// removed before parsing.
+  String get _cleanData => data.replaceAllMapped(
+        RegExp(r'^!\[[^\]]*\]\((\S+?)(?:\s+"[^"]*")?\)\s*$', multiLine: true),
+        (m) => looksLikeLogoUrl(m[1]!) ? '' : m[0]!,
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -117,7 +128,7 @@ class ArticleMarkdown extends StatelessWidget {
     );
 
     final markdown = MarkdownBody(
-      data: data,
+      data: _cleanData,
       // Selection is handled by the SelectionArea below, not MarkdownBody's own
       // SelectableText path — that path is unreliable on Flutter web (CanvasKit).
       selectable: false,
@@ -135,7 +146,12 @@ class ArticleMarkdown extends StatelessWidget {
       // Height-capped so a tall image can't dominate the page; alt text flows
       // through as the semantic label for screen readers. Explicit dimensions
       // from markdown size syntax (![alt](url =WxH)) win over the defaults.
-      sizedImageBuilder: (config) => ClipRRect(
+      // Icon-shaped URLs are dropped entirely: the pipeline stores the source
+      // favicon as the body's lead image when a story has no real share image,
+      // and a favicon cover-cropped to the column width reads as a giant blur.
+      sizedImageBuilder: (config) => looksLikeLogoUrl(config.uri.toString())
+          ? const SizedBox.shrink()
+          : ClipRRect(
         borderRadius: BorderRadius.circular(12),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxHeight: 480),

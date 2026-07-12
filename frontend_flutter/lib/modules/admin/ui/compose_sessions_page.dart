@@ -212,6 +212,7 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
     final rounds = s['rounds']?.toString() ?? '0';
     final toolCalls = s['tool_calls']?.toString() ?? '0';
     final durationMs = (s['duration_ms'] as num?)?.toInt() ?? 0;
+    final totalTokens = (s['total_tokens'] as num?)?.toInt() ?? 0;
     final date = createdAt.replaceFirst('T', ' ').split('.').first;
 
     return Container(
@@ -243,7 +244,9 @@ class _ComposeSessionsTabState extends ConsumerState<ComposeSessionsTab> {
             style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
           ),
           subtitle: Text(
-            '$date · $model · ${rounds}r · $toolCalls tools · ${(durationMs / 1000).toStringAsFixed(1)}s · $status',
+            '$date · $model · ${rounds}r · $toolCalls tools · '
+            '${(durationMs / 1000).toStringAsFixed(1)}s'
+            '${totalTokens > 0 ? ' · ${totalTokens}tok' : ''} · $status',
             style: theme.textTheme.labelSmall?.copyWith(color: colors.subtle),
           ),
           children: [_sessionDetail(theme, colors, sessionId)],

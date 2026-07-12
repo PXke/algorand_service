@@ -22,6 +22,27 @@ class StoredPriceBrief:
     sample_count_24h: int
 
 
+def load_price_history(asset_id: str, *, limit: int = 200) -> list[tuple[int, float]]:
+    """(epoch_seconds, price_usd) points, oldest first, for sparklines.
+    Best-effort: any failure reads as no history, never an error."""
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PriceMetricsStmts
+
+    try:
+        rows = get_cassandra_session().execute(
+            PriceMetricsStmts.PRICE_HISTORY, (asset_id.strip().lower(), limit)
+        )
+    except Exception:
+        return []
+    points = [
+        (int(row.collected_at.timestamp()), float(row.price_usd))
+        for row in rows
+        if row.collected_at is not None and row.price_usd is not None
+    ]
+    points.sort()
+    return points
+
+
 def load_price_brief(asset_id: str) -> StoredPriceBrief | None:
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import PriceMetricsStmts

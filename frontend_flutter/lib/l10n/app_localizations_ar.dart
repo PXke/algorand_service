@@ -617,6 +617,41 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
+  String get navHot => 'الرائج';
+
+  @override
+  String get navTopics => 'المواضيع';
+
+  @override
+  String get hotTitle => 'الأكثر قراءة';
+
+  @override
+  String get hotLead => 'القصص التي يفتحها القراء أكثر من غيرها الآن.';
+
+  @override
+  String get topicsTitle => 'المواضيع';
+
+  @override
+  String get topicsLead =>
+      'كل وسم استخدمته غرفة الأخبار مؤخراً — الحجم حسب التغطية واللون حسب القراءات.';
+
+  @override
+  String topicSubtitle(String tag) {
+    return 'قصص موسومة بـ “$tag”';
+  }
+
+  @override
+  String readsCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count قراءات',
+      one: 'قراءة واحدة',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String get sectionMarkets => 'الأسواق';
 
   @override
@@ -949,4 +984,33 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get domainsWalletNotConnected => 'المحفظة غير متصلة';
+
+  @override
+  String get frontPageMoreNews => 'المزيد من الأخبار';
+
+  @override
+  String storiesCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count قصص',
+      one: 'قصة واحدة',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get byTheNumbersRange => 'آخر 7 أيام';
+
+  @override
+  String get byTheNumbersMarketCap => 'القيمة السوقية';
+
+  @override
+  String get byTheNumbersVolume => 'حجم التداول 24س';
+
+  @override
+  String get hotTabHot => 'الرائج الآن';
+
+  @override
+  String get hotTabAllTime => 'كل الأوقات';
 }

@@ -111,3 +111,71 @@ def test_get_article_applies_translation_overlay() -> None:
     assert detail.title == "عنوان دری"
     assert detail.body == "متن"
     assert svc.translation_langs_for("id-fa") == ["fa"]
+
+def _story(article_id: str, epoch: int, tags: list[str]) -> StoredArticle:
+    return StoredArticle(
+        article_id=article_id,
+        service_id="svc",
+        title=f"T-{article_id}",
+        summary="s",
+        body="b",
+        published_at_epoch=epoch,
+        tags=tags,
+    )
+
+
+def test_news_feed_filters_by_tag_case_insensitive() -> None:
+    store = InMemoryArticleStore()
+    store.insert(_story("a1", 100, ["NFT", "algorand"]))
+    store.insert(_story("a2", 200, ["defi"]))
+    store.insert(_story("a3", 300, ["nft "]))
+    service = NewsService(store=store)
+    items, next_cursor = service.list_feed_page(tag="nft")
+    assert [item.article_id for item in items] == ["a3", "a1"]
+    assert next_cursor is None
+
+
+def test_hot_feed_ranks_by_views_then_recency() -> None:
+    store = InMemoryArticleStore()
+    store.insert(_story("a1", 100, []))
+    store.insert(_story("a2", 200, []))
+    store.insert(_story("a3", 300, []))
+    service = NewsService(store=store)
+    # Memory store has no view counters -> all zero; recency breaks the tie.
+    items = service.hot_feed(limit=2)
+    assert [item.article_id for item in items] == ["a3", "a2"]
+    assert all(item.views == 0 for item in items)
+
+
+def test_tag_stats_aggregates_counts_and_last_epoch() -> None:
+    store = InMemoryArticleStore()
+    store.insert(_story("a1", 100, ["nft", "Algorand"]))
+    store.insert(_story("a2", 200, ["NFT"]))
+    store.insert(_story("a3", 300, ["defi", "algorand"]))
+    stats = NewsService(store=store).tag_stats()
+    assert stats["article_count"] == 3
+    by_tag = {entry["tag"]: entry for entry in stats["tags"]}
+    assert by_tag["nft"]["count"] == 2
+    assert by_tag["nft"]["last_epoch"] == 200
+    assert by_tag["algorand"]["count"] == 2
+    assert by_tag["defi"]["count"] == 1
+
+
+def test_hot_feed_velocity_vs_alltime(monkeypatch) -> None:
+    import time
+
+    from app.modules.news.stores import view_counts
+
+    now = int(time.time())
+    store = InMemoryArticleStore()
+    store.insert(_story("old", now - 10 * 86400, []))   # 100 views / 10d = 10/d
+    store.insert(_story("new", now - 1 * 86400, []))    # 30 views / 1d = 30/d
+    monkeypatch.setattr(
+        view_counts, "get_views_bulk", lambda ids: {"old": 100, "new": 30}
+    )
+    service = NewsService(store=store)
+    hot = service.hot_feed(rank="hot")
+    assert [i.article_id for i in hot] == ["new", "old"]
+    top = service.hot_feed(rank="top")
+    assert [i.article_id for i in top] == ["old", "new"]
+    assert top[0].views == 100

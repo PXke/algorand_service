@@ -63,6 +63,18 @@ def _plausible_image_host(og_image: str, source_url: str) -> bool:
     return any(hint in host for hint in _IMAGE_CDN_HINTS)
 
 
+def _validated_hero(image: str, source_url: str) -> str:
+    """Gate a candidate share image the same way _with_hero_image gates the
+    body embed — previously only the body used this check, so a template
+    site's stale/foreign og:image (e.g. copy-pasted from an unrelated
+    project) could still become the article's image_url/feed-tile/OG-card
+    even though it was correctly kept out of the body text."""
+    if image and source_url and not _plausible_image_host(image, source_url):
+        logger.warning("dropping implausible og:image %s for %s", image, source_url)
+        return ""
+    return image
+
+
 def _with_hero_image(body: str, og_image: str, alt: str, source_url: str = "") -> str:
     """Prepend the source's share image as a hero, if present and not already
     embedded. Real image from the page, never AI-generated."""
@@ -275,6 +287,22 @@ def _novelty_duplicate_veto(ctx: _ComposeVetoCtx) -> dict | None:
     return None
 
 
+def _pending_review_veto(ctx: _ComposeVetoCtx) -> dict | None:
+    """A pending review already covers this exact URL — skip BEFORE paying for
+    a Mistral compose, not after. This used to be a post-compose check only
+    (still kept below as a safety net for the race window during a multi-
+    minute compose), which meant a highly dynamic page — bank.testnet.
+    algorand.network's wallet-connect/session chrome makes it register as
+    "changed" on nearly every poll — could burn a full ~4min compose 5x in
+    one day only to have every result but the first silently discarded with
+    no article stored and no review ever updated (2026-07-10)."""
+    from app.modules.crawler.classifier_review_store import has_pending_review_for_url
+
+    if has_pending_review_for_url(ctx.row.scrape_url):
+        return {"status": "duplicate_review_pending", "service_id": ctx.row.service_id}
+    return None
+
+
 def _content_quality_veto(ctx: _ComposeVetoCtx) -> dict | None:
     """Content-quality veto: judge the context BEFORE spending a Mistral call.
 
@@ -299,6 +327,7 @@ def _content_quality_veto(ctx: _ComposeVetoCtx) -> dict | None:
 # their full outcome dict — each carries different extra fields (similarity,
 # relevance, ...) that the drain reports per row.
 _PRE_COMPOSE_VETOES = (
+    _pending_review_veto,
     _domain_cap_veto,
     _novelty_duplicate_veto,
     _content_quality_veto,
@@ -333,7 +362,7 @@ def publish_from_queued_row(
     A concurrent caller gets ``already_running`` and leaves its row pending for
     the next beat.
     """
-    from app.modules.ai.mistral_client import MistralError
+    from app.modules.ai.mistral_client import MistralCreditError, MistralError
     from app.modules.newspaper.security import sanitize_body
 
     payload = row.payload
@@ -380,10 +409,27 @@ def publish_from_queued_row(
     )
     clf_category = signals.category
     clf_decision, clf_confidence = signals.publish_decision, signals.confidence
+    # A null decision frozen into the payload at INGEST time holds the article
+    # for review forever — even after the config that caused it changed (rows
+    # enqueued under training mode's sampling=1.0 all carry null) and even
+    # after the nightly retrain improves the model. Re-ask the classifier at
+    # compose time with today's model and thresholds; only a fresh None (a
+    # genuinely low-confidence call) still routes to human review.
+    if clf_decision is None:
+        try:
+            from app.modules.ai.publish_classifier import predict_publish
 
-    # Pre-compose vetoes (_PRE_COMPOSE_VETOES): per-website daily cap,
-    # near-duplicate headline, content quality — in that order, before any
-    # enrichment gathering or Mistral spend.
+            clf_decision, clf_confidence = predict_publish(
+                page_text_for_clf, row.scrape_url, clf_category
+            )
+        except Exception:
+            logger.warning(
+                "compose-time classifier refresh failed for %s", row.scrape_url, exc_info=True
+            )
+
+    # Pre-compose vetoes (_PRE_COMPOSE_VETOES): pending review already covers
+    # this URL, per-website daily cap, near-duplicate headline, content
+    # quality — in that order, before any enrichment gathering or Mistral spend.
     veto_outcome = _run_pre_compose_vetoes(
         _ComposeVetoCtx(
             row=row,
@@ -455,8 +501,13 @@ def publish_from_queued_row(
     except ComposeBusyError:
         return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
     except MistralError as exc:
+        credit_issue = isinstance(exc, MistralCreditError)
+        status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
+        logger.error(
+            "Mistral compose failed for %s (%s): %s", row.service_id, row.scrape_url, exc
+        )
         return {
-            "status": "mistral_failed",
+            "status": status,
             "service_id": row.service_id,
             "detail": str(exc),
         }
@@ -480,7 +531,7 @@ def publish_from_queued_row(
     # the feed tile and the social/OG card show real artwork (best-effort). A
     # true share image (og/twitter) is also embedded in the body; a brand logo
     # populates image_url only (it's not a body banner).
-    _payload_og = str(payload.get("og_image", "")).strip()
+    _payload_og = _validated_hero(str(payload.get("og_image", "")).strip(), row.scrape_url)
     hero_image = _payload_og
     image_field = _payload_og
     if not _payload_og:
@@ -495,6 +546,7 @@ def publish_from_queued_row(
                 service_id=row.service_id,
                 body=composed.body,
             )
+            _og = _validated_hero(_og, row.scrape_url)
             hero_image = _og
             image_field = _og or _logo
         except Exception:
@@ -619,8 +671,8 @@ def publish_from_queued_row(
                 mark_brief_run(
                     brief_id=str(payload.get("brief_id", "")), article_id=held_article_id
                 )
-    return {
-        "status": "review",
+        return {
+            "status": "review",
             "service_id": row.service_id,
             "article_id": held_article_id,
             "review_id": review_id,
@@ -684,9 +736,9 @@ def publish_from_queued_row(
     # Notify IndexNow (Bing/Ecosia/DuckDuckGo, Yandex, Seznam, Naver) so the new
     # story gets crawled in minutes. Best-effort — never let it block a publish.
     try:
-        from app.modules.newspaper.indexnow import article_url, ping
+        from app.modules.newspaper.indexnow import ping_article
 
-        ping([article_url(article_id)])
+        ping_article(article_id)
     except Exception:
         logger.warning("IndexNow ping failed for article %s", article_id, exc_info=True)
     page_text = str(payload.get("page_text", ""))
@@ -954,7 +1006,7 @@ def recompose_review(review_id: str) -> dict[str, str]:
     from uuid import UUID
 
     from app.core.cassandra import get_cassandra_session
-    from app.modules.ai.mistral_client import MistralError
+    from app.modules.ai.mistral_client import MistralCreditError, MistralError
     from app.modules.crawler.classifier_review_store import (
         complete_classifier_review,
         enqueue_classifier_review,
@@ -970,9 +1022,22 @@ def recompose_review(review_id: str) -> dict[str, str]:
     from app.core.statements import ClassifierReviewStmts
 
     session = get_cassandra_session()
-    row = session.execute(ClassifierReviewStmts.GET_FOR_PUBLISH, (rid,)).one()
+    row = session.execute(ClassifierReviewStmts.GET_FULL, (rid,)).one()
     if row is None:
         return {"status": "error", "reason": "review_not_found"}
+    # This review_id must still be the LIVE, undecided one. Recompose never
+    # checked status before — any stale trigger on an already-resolved review
+    # (a UI tab that wasn't refreshed after approving/rejecting, a duplicate
+    # click, an old review_id from before an earlier recompose) silently
+    # yanked an approved-and-queued article back into "pending" and minted
+    # yet another review row, even though nothing was actually wrong with it
+    # (2026-07-10: KryptoNurd kept "coming back into the classifier" after
+    # being approved). Only a genuinely pending review may be recomposed.
+    if (row.status or "").strip().lower() != "pending":
+        return {
+            "status": "error",
+            "reason": f"review already resolved (status={row.status!r}) — recompose refused",
+        }
 
     url = row.url or ""
     page_text = row.page_text or ""
@@ -1025,6 +1090,9 @@ def recompose_review(review_id: str) -> dict[str, str]:
         )
         return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
     except MistralError as exc:
+        credit_issue = isinstance(exc, MistralCreditError)
+        status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
+        logger.error("Mistral recompose failed for review %s (%s): %s", review_id, url, exc)
         # Compose failed — restore the original proposal so the review isn't lost.
         enqueue_classifier_review(
             url=url,
@@ -1038,7 +1106,12 @@ def recompose_review(review_id: str) -> dict[str, str]:
                 "recompose_failed": str(exc)[:200],
             },
         )
-        return {"status": "mistral_failed", "detail": str(exc)[:200]}
+        return {"status": status, "detail": str(exc)[:200]}
+    # Re-validate even a carried-forward og_image from prior review metadata —
+    # a bad image (foreign/stale template artwork) would otherwise survive
+    # every subsequent recompose unchanged, since it's never empty and this
+    # function only re-resolves when it IS empty.
+    og_image = _validated_hero(og_image, url)
     image_field = og_image
     if not og_image:
         # Older reviews (and any path that never resolved one) carry no image —
@@ -1051,6 +1124,7 @@ def recompose_review(review_id: str) -> dict[str, str]:
             _og, _logo = resolve_article_images(
                 source_url=url, service_id=service_id, body=composed.body
             )
+            _og = _validated_hero(_og, url)
             og_image = _og
             image_field = _og or _logo
         except Exception:
@@ -1066,6 +1140,15 @@ def recompose_review(review_id: str) -> dict[str, str]:
         ),
         getattr(composed, "extra_tags", ()),
     )
+    # Reuse the previous draft's article_id so a recompose overwrites the same
+    # unlisted row in place instead of minting a new one and orphaning the old
+    # one — every prior draft never gets deleted, just silently superseded, so
+    # each Recompose click otherwise leaves a dangling articles_by_id row that
+    # was never in the feed/sitemap but is still directly reachable by URL.
+    try:
+        reuse_article_id = UUID(old_article_id) if old_article_id else None
+    except ValueError:
+        reuse_article_id = None
     article_id, _ = insert_stored_article(
         service_id=service_id,
         title=composed.title,
@@ -1077,6 +1160,7 @@ def recompose_review(review_id: str) -> dict[str, str]:
         trigger_round=0,
         source_url=url,
         publish_to_feed=False,
+        article_id=reuse_article_id,
         image_url=image_field,
         tags=tags,
         prompt_version=getattr(composed, "prompt_version", ""),
@@ -1197,6 +1281,14 @@ def translate_article_task(
         translations = {lang: json.dumps(translated, ensure_ascii=False)}
 
         update_article_translations(article_id, translations)
+        try:
+            from app.modules.newspaper.indexnow import ping_translation
+
+            ping_translation(article_id, lang)
+        except Exception:
+            logger.warning(
+                "IndexNow ping failed for translation %s/%s", article_id, lang, exc_info=True
+            )
         return {"status": "ok", "article_id": article_id, "lang": lang}
     except Exception as e:
         logger.error(f"Failed to translate article {article_id} to {lang}: {e}")
@@ -1220,3 +1312,229 @@ def backfill_article_translations_task(limit: int = 500) -> dict:
         "articles": articles_touched,
         "tasks_queued": tasks_queued,
     }
+
+
+@celery_app.task(name="app.tasks.newspaper.recompose_published", bind=True, max_retries=20)
+def recompose_published(self, article_id: str) -> dict[str, str]:
+    """Archive refresh: re-compose a PUBLISHED article into a NEW unlisted
+    draft and hold it in the review queue. The live article is untouched until
+    the admin approves, at which point apply_recomposed_article swaps the new
+    content onto the SAME article_id (URL and published_at survive; updated_at
+    is stamped so the revision surfaces as dateModified).
+
+    recompose_review cannot serve this case: it reuses the article_id at
+    compose time, which would replace the live page before any human approval
+    — and approving it would double-publish the feed row."""
+    import json as _json
+
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts
+    from app.modules.ai.mistral_client import MistralCreditError, MistralError
+    from app.modules.crawler.classifier_review_store import enqueue_classifier_review
+    from app.modules.newspaper.article_store import get_article, insert_stored_article
+    from app.modules.newspaper.security import sanitize_body
+    from uuid import UUID as _UUID
+
+    existing = get_article(article_id)
+    if existing is None:
+        return {"status": "error", "reason": "article_not_found"}
+    service_id = existing.service_id or ""
+    source_url = (existing.source_url or "").strip()
+
+    # Fresh source when the article has a real page behind it; the article's
+    # own prose otherwise (editorial briefs, chain triggers) — the two-stage
+    # writer re-researches with tools either way, so this is a starting point,
+    # not the ceiling.
+    page_text = existing.body or ""
+    page_title = existing.title or ""
+    scraped_og = ""
+    if source_url.lower().startswith(("http://", "https://", "browser://")):
+        try:
+            result = get_scraper_for_url(source_url).scrape(
+                url=source_url, source_id=service_id or source_url
+            )
+            if (result.text or "").strip():
+                page_text = result.text
+                page_title = result.title or page_title
+                scraped_og = getattr(result, "og_image", "") or ""
+        except Exception:
+            logger.warning(
+                "recompose_published: fresh scrape failed for %s — composing from stored body",
+                source_url,
+                exc_info=True,
+            )
+
+    try:
+        composed = compose_scrape_article(
+            service_name=service_id or source_url or "archive",
+            source_url=source_url or f"article:{article_id}",
+            page_title=page_title,
+            page_text=page_text,
+            txid=f"recompose-{article_id[:12]}",
+            round_num=0,
+            diff=None,
+            is_first_snapshot=True,
+            publish_kind=PublishKind.SERVICE_DISCOVERY,
+            publish_topic=PublishTopic.GENERIC,
+        )
+    except ComposeBusyError as exc:
+        # The global compose lock is held (a drain compose, or a sibling
+        # archive-refresh task — the worker runs concurrency=4, so batched
+        # recomposes DO collide). A plain return here silently dropped the
+        # whole recompose; retry with backoff instead until the lock frees.
+        raise self.retry(exc=exc, countdown=180)
+    except MistralError as exc:
+        credit_issue = isinstance(exc, MistralCreditError)
+        status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
+        logger.error("recompose_published failed for %s: %s", article_id, exc)
+        return {"status": status, "detail": str(exc)[:200]}
+
+    # Hero: fresh og when the re-scrape produced one, else the live article's
+    # current art (never downgrade a working hero to nothing).
+    og_image = _validated_hero(scraped_og, source_url)
+    image_field = og_image
+    if not image_field:
+        try:
+            row = (
+                get_cassandra_session()
+                .execute(ArticleStmts.GET_IMAGE, (_UUID(article_id),))
+                .one()
+            )
+            image_field = (row.image_url or "") if row else ""
+        except Exception:
+            image_field = ""
+
+    kind = _source_kind_from_url(source_url) if source_url else None
+    tags = _merge_tags(
+        derive_article_tags(
+            service_id=service_id,
+            source_kind=kind,
+            title=composed.title,
+            publish_kind=composed.publish_kind or PublishKind.SERVICE_DISCOVERY.value,
+            publish_topic=PublishTopic.GENERIC.value,
+            publish_tier=PublishTier.STANDARD.value,
+        ),
+        getattr(composed, "extra_tags", ()),
+    )
+    draft_id, _ = insert_stored_article(
+        service_id=service_id,
+        title=composed.title,
+        summary=composed.summary,
+        body=_with_hero_image(
+            sanitize_body(composed.body), og_image, composed.title, source_url=source_url
+        ),
+        trigger_txid=f"recompose-{article_id[:12]}",
+        trigger_round=0,
+        source_url=source_url,
+        publish_to_feed=False,
+        image_url=image_field,
+        tags=tags,
+        prompt_version=getattr(composed, "prompt_version", ""),
+    )
+
+    grade_meta: dict[str, str] = {}
+    try:
+        from app.modules.newspaper.article_grader import grade_article_draft
+
+        grade = grade_article_draft(
+            title=composed.title, body=composed.body, source_url=source_url
+        )
+        grade_meta = {
+            "grade": str(grade["grade"]),
+            "grade_detail": _json.dumps(
+                {"subscores": grade["subscores"], "issues": grade["issues"]},
+                separators=(",", ":"),
+            ),
+        }
+    except Exception:
+        grade_meta = {}
+
+    review_id = enqueue_classifier_review(
+        url=source_url or f"article:{article_id}",
+        page_text=page_text,
+        page_title=page_title or composed.title,
+        category="",
+        storage_score=0.0,
+        metadata={
+            "article_id": draft_id,
+            "replaces_article_id": article_id,
+            "og_image": image_field,
+            "service_id": service_id,
+            "source": "recompose_published",
+            **grade_meta,
+        },
+    )
+    return {"status": "ok", "review_id": review_id, "draft_article_id": draft_id}
+
+
+@celery_app.task(name="app.tasks.newspaper.apply_recomposed_article")
+def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dict[str, str]:
+    """Approved recompose of a published article: swap the draft's content
+    onto the live article_id (same URL, same published_at, updated_at stamped),
+    version both states, re-index, re-translate, ping IndexNow. The unlisted
+    draft row is left behind (same convention as recompose_review's superseded
+    drafts — never in the feed or sitemap)."""
+    import time as _time
+    from uuid import UUID as _UUID
+
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts
+    from app.modules.newspaper.article_store import get_article, replace_article_content
+    from app.modules.newspaper.article_version_store import save_article_version
+
+    draft = get_article(draft_article_id)
+    live = get_article(live_article_id)
+    if draft is None or live is None:
+        return {"status": "error", "reason": "draft_or_live_missing"}
+
+    session = get_cassandra_session()
+    tags_row = session.execute(ArticleStmts.GET_TAGS, (_UUID(draft_article_id),)).one()
+    tags = list(tags_row.tags or []) if tags_row else []
+    if "updated" not in {t.lower() for t in tags}:
+        tags = [*tags, "updated"]
+    image_row = session.execute(ArticleStmts.GET_IMAGE, (_UUID(draft_article_id),)).one()
+    image_url = (image_row.image_url or "") if image_row else ""
+
+    save_article_version(
+        article_id=live_article_id,
+        title=live.title,
+        summary=live.summary,
+        body=live.body,
+        edit_reason="before_recompose_published",
+        editor="system",
+    )
+    if not replace_article_content(
+        article_id=live_article_id,
+        title=draft.title,
+        summary=draft.summary,
+        body=draft.body,
+        tags=tags,
+        image_url=image_url,
+    ):
+        return {"status": "error", "reason": "replace_failed"}
+    save_article_version(
+        article_id=live_article_id,
+        title=draft.title,
+        summary=draft.summary,
+        body=draft.body,
+        edit_reason=f"recompose_published:{draft_article_id[:12]}",
+        editor="recompose",
+    )
+
+    index_article.delay(
+        article_id=live_article_id,
+        title=draft.title,
+        summary=draft.summary,
+        body=draft.body,
+        service_id=live.service_id,
+        published_at_epoch=live.published_at_epoch or int(_time.time()),
+    )
+    # Translations were cleared with the old prose; re-enqueue all languages.
+    enqueue_article_translations(live_article_id)
+    try:
+        from app.modules.newspaper.indexnow import ping_article
+
+        ping_article(live_article_id, translation_langs=[])
+    except Exception:
+        pass
+    return {"status": "ok", "article_id": live_article_id}

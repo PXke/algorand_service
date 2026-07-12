@@ -11,9 +11,12 @@ import '../../../core/ui/page_content.dart';
 import '../../../core/providers/session_providers.dart';
 import '../models/classifier_labels.dart';
 import '../../../core/ui/deferred_article_markdown.dart';
+import '../../newspaper/sections.dart';
 import '../../newspaper/services/news_api.dart';
 
-/// Admin tab: approve/reject classifier review queue items with category + quality.
+/// Admin tab: approve/reject classifier review queue items with quality and
+/// per-dimension score corrections. Machine categories are read-only (classifier
+/// training). Reader-facing tags come from the composed draft only.
 class ClassifierFeedbackTab extends ConsumerStatefulWidget {
   const ClassifierFeedbackTab({super.key});
 
@@ -40,9 +43,8 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
   final Map<String, bool> _anchorFactFail = {};
   final Map<String, bool> _anchorToneFail = {};
   final Map<String, Set<String>> _anchorTypes = {};
-  String? _topBody;
-  List<String> _topTags = const [];
-  String? _topBodyForId;
+  final Map<String, _ArticlePreview> _articleById = {};
+  final Set<String> _articleLoads = {};
 
   @override
   void initState() {
@@ -64,7 +66,10 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
             .toSet();
         if (fromApi.isNotEmpty) return fromApi;
       }
-      final predicted = (item['category'] as String? ?? 'generic').toLowerCase();
+      final predicted = (item['predicted_category'] as String? ??
+              item['category'] as String? ??
+              'generic')
+          .toLowerCase();
       return {classifierCategories.contains(predicted) ? predicted : 'generic'};
     });
   }
@@ -101,7 +106,9 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
         _editedScores.clear();
         _loading = false;
       });
-      await _loadTopBody();
+      if (_items.isNotEmpty) {
+        await _loadArticleFor(_items.first);
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -215,38 +222,29 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
     }
   }
 
-  Future<void> _loadTopBody() async {
-    if (_items.isEmpty) {
-      setState(() {
-        _topBody = null;
-        _topBodyForId = null;
-      });
-      return;
-    }
-    final articleId = _items.first['article_id']?.toString() ?? '';
-    if (articleId.isEmpty) {
-      setState(() {
-        _topBody = null;
-        _topBodyForId = null;
-      });
-      return;
-    }
-    if (_topBodyForId == articleId) return;
+  Future<void> _loadArticleFor(Map<String, dynamic> item) async {
+    final articleId = item['article_id']?.toString() ?? '';
+    if (articleId.isEmpty) return;
+    if (_articleById.containsKey(articleId) || _articleLoads.contains(articleId)) return;
+    _articleLoads.add(articleId);
     try {
       final article = await NewsApi(ref.read(apiClientProvider)).fetchArticle(articleId);
       if (!mounted) return;
       final rawTags = article['tags'];
+      final tags = rawTags is List ? rawTags.map((e) => e.toString()).toList() : const <String>[];
       setState(() {
-        _topBody = article['body']?.toString() ?? '';
-        _topTags = rawTags is List ? rawTags.map((e) => e.toString()).toList() : const [];
-        _topBodyForId = articleId;
+        _articleById[articleId] = _ArticlePreview(
+          body: article['body']?.toString() ?? '',
+          tags: tags,
+        );
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
-        _topBody = null;
-        _topBodyForId = articleId;
+        _articleById[articleId] = const _ArticlePreview(body: '', tags: []);
       });
+    } finally {
+      _articleLoads.remove(articleId);
     }
   }
 
@@ -260,7 +258,10 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
     setState(() => _pending.add(key));
     try {
       final api = ref.read(adminApiProvider);
-      final predictedCategory = (item['category'] as String? ?? 'generic').toLowerCase();
+      final predictedCategory = (item['predicted_category'] as String? ??
+              item['category'] as String? ??
+              'generic')
+          .toLowerCase();
       final cats = _categoriesFor(item).toList()..sort();
       // Send only dimensions the reviewer actually changed (vs the auto-score).
       final detail = item['grade_detail'];
@@ -559,9 +560,17 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
   }
 
   Widget _reviewCard(ThemeData theme, dynamic colors, Map<String, dynamic> item) {
+    final articleId = item['article_id']?.toString() ?? '';
+    if (articleId.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadArticleFor(item));
+    }
+    final articlePreview = _articleById[articleId];
     final title = item['page_title'] as String? ?? item['url'] as String? ?? '';
     final url = item['url'] as String? ?? '';
-    final predictedCategory = (item['category'] as String? ?? 'generic').toLowerCase();
+    final predictedCategory = (item['predicted_category'] as String? ??
+            item['category'] as String? ??
+            'generic')
+        .toLowerCase();
     final predictedCategories = () {
       final raw = item['categories'];
       if (raw is List && raw.isNotEmpty) {
@@ -574,7 +583,6 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
     final preview = item['page_text_preview'] as String? ?? '';
     final key = _itemKey(item);
     final busy = _pending.contains(key);
-    final selectedCategories = _categoriesFor(item);
     final selectedQuality = _qualityFor(item);
     final sourceRelevant = _sourceRelevantFor(item);
 
@@ -632,13 +640,12 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
                       style: theme.textTheme.bodySmall?.copyWith(color: colors.muted, height: 1.4),
                     ),
                   ],
-                  if (_topTags.isNotEmpty &&
-                      _topBodyForId == (item['article_id']?.toString() ?? '')) ...[
+                  if ((articlePreview?.tags ?? const []).isNotEmpty) ...[
                     const SizedBox(height: 10),
                     Wrap(
                       spacing: 6,
                       runSpacing: 6,
-                      children: _topTags
+                      children: articlePreview!.tags
                           .map((t) => Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                 decoration: BoxDecoration(
@@ -646,7 +653,7 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
                                   borderRadius: BorderRadius.circular(6),
                                 ),
                                 child: Text(
-                                  '#$t',
+                                  '#${displayTagLabel(t)}',
                                   style: theme.textTheme.labelSmall
                                       ?.copyWith(color: theme.colorScheme.primary),
                                 ),
@@ -654,9 +661,7 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
                           .toList(),
                     ),
                   ],
-                  if (_topBody != null &&
-                      _topBodyForId == (item['article_id']?.toString() ?? '') &&
-                      _topBody!.isNotEmpty) ...[
+                  if (articlePreview != null && articlePreview.body.isNotEmpty) ...[
                     const SizedBox(height: 12),
                     Container(
                       constraints: const BoxConstraints(maxHeight: 380),
@@ -667,7 +672,7 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
                       ),
                       padding: const EdgeInsets.all(14),
                       child: SingleChildScrollView(
-                        child: DeferredArticleMarkdown(data: _topBody!),
+                        child: DeferredArticleMarkdown(data: articlePreview.body),
                       ),
                     ),
                   ],
@@ -705,31 +710,6 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
                 ),
               ),
             ],
-          ),
-          const SizedBox(height: 14),
-          Text('Categories (pick all that apply)', style: theme.textTheme.labelMedium),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: classifierCategories.map((cat) {
-              final on = selectedCategories.contains(cat);
-              return FilterChip(
-                label: Text(classifierCategoryLabel(cat)),
-                selected: on,
-                showCheckmark: true,
-                onSelected: busy
-                    ? null
-                    : (v) => setState(() {
-                          final set = _categoriesFor(item);
-                          if (v) {
-                            set.add(cat);
-                          } else if (set.length > 1) {
-                            set.remove(cat);
-                          }
-                        }),
-              );
-            }).toList(),
           ),
           const SizedBox(height: 14),
           Container(
@@ -815,6 +795,13 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
       ),
     );
   }
+}
+
+
+class _ArticlePreview {
+  const _ArticlePreview({required this.body, required this.tags});
+  final String body;
+  final List<String> tags;
 }
 
 

@@ -8,12 +8,12 @@ import '../../../core/providers/admin_provider.dart';
 import '../../../core/theme/app_theme_extension.dart';
 import '../../../core/util/analytics_opt_out.dart';
 import '../../../core/ui/ambient_background.dart';
+import '../../../core/ui/find_shortcut_scope.dart';
 import '../../../core/ui/brand_mark.dart';
 import '../../../core/deferred/deferred_load_pool.dart';
 import '../../../shared/widgets/deferred_widget.dart';
 import 'deferred_wallet_app_bar_action.dart';
 import '../../newspaper/markets_deferred_gate.dart';
-import '../../newspaper/sections.dart';
 import '../products.dart';
 import 'app_switcher.dart';
 import 'locale_toggle.dart';
@@ -115,7 +115,7 @@ class AppShell extends ConsumerWidget {
                       ),
                     const SizedBox(height: 8),
                     Divider(height: 1, color: colors.border),
-                    _DrawerGroupLabel(l10n.navSections),
+                    _DrawerGroupLabel(l10n.navNews.toUpperCase()),
                     for (final item in navItems)
                       _NavTile(item: item, selected: _isSelected(location, item)),
                     const SizedBox(height: 8),
@@ -135,7 +135,11 @@ class AppShell extends ConsumerWidget {
               buildMarketsBar,
               placeholder: const SizedBox(height: 34),
             ),
-          Expanded(child: AmbientBackground(child: child)),
+          Expanded(
+            child: FindShortcutScope(
+              child: AmbientBackground(child: child),
+            ),
+          ),
         ],
       ),
     );
@@ -152,12 +156,21 @@ class AppShell extends ConsumerWidget {
         icon: Icons.bolt_outlined,
         exact: true,
       ),
-      for (final section in kNewsSections)
-        _NavItem(
-          label: section.label(context),
-          path: '/section/${section.slug}',
-          icon: section.icon,
-        ),
+      _NavItem(
+        label: l10n.navHot,
+        path: '/hot',
+        icon: Icons.local_fire_department_outlined,
+      ),
+      // /topics is the cloud; /topic/:tag pages keep the same tab lit.
+      _NavItem(
+        label: l10n.navTopics,
+        path: '/topics',
+        icon: Icons.tag,
+        matchPrefix: '/topic',
+      ),
+      // Search is content-finding, not a separate product — a news site
+      // reader expects it in the news nav (the app-bar icon stays too).
+      _NavItem(label: l10n.navSearch, path: '/search', icon: Icons.search),
       _NavItem(label: l10n.navAbout, path: '/about', icon: Icons.info_outline),
       _NavItem(label: l10n.navContact, path: '/contact', icon: Icons.mail_outline),
     ];
@@ -165,14 +178,16 @@ class AppShell extends ConsumerWidget {
 
   static bool _isSelected(String location, _NavItem item) {
     if (item.exact) return location == item.path;
-    return location.startsWith(item.path);
+    return location.startsWith(item.matchPrefix ?? item.path);
   }
 
   /// Markets API is deferred; only mount the bar on newspaper feed routes.
   static bool _showMarketsBar(String location) {
     return location == '/' ||
         location == '/news' ||
-        location.startsWith('/section/');
+        location == '/hot' ||
+        location == '/topics' ||
+        location.startsWith('/topic/');
   }
 }
 
@@ -210,9 +225,9 @@ class _Nameplate extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: -0.3,
-                      fontSize: compact ? 19 : 23,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.4,
+                      fontSize: compact ? 20 : 25,
                     ),
                   ),
                   if (showDate)
@@ -395,12 +410,17 @@ class _NavItem {
     required this.path,
     required this.icon,
     this.exact = false,
+    this.matchPrefix,
   });
 
   final String label;
   final String path;
   final IconData icon;
   final bool exact;
+
+  /// Highlight prefix when it differs from [path] (e.g. the Topics tab lives
+  /// at /topics but should stay lit on /topic/:tag pages).
+  final String? matchPrefix;
 }
 
 class _DrawerGroupLabel extends StatelessWidget {

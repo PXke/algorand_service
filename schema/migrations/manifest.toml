@@ -469,3 +469,19 @@ file = "backend/schema/migrations/app/050_compose_feedback.cql"
 tier = "prod"
 status = "active"
 description = "compose_feedback: writer-reported prompt/data/tool/pipeline issues (report_compose_issue)"
+
+[[migrations]]
+stream = "app"
+version = "051"
+file = "backend/schema/migrations/app/051_compose_session_tokens.cql"
+tier = "prod"
+status = "active"
+description = "compose_sessions: prompt_tokens/completion_tokens/total_tokens columns for per-session Mistral usage"
+
+[[migrations]]
+stream = "app"
+version = "052"
+file = "backend/schema/migrations/app/052_article_updated_at.cql"
+tier = "prod"
+status = "active"
+description = "articles_by_id + articles_feed: updated_at timestamp so edits/recomposes surface as dateModified (JSON-LD, meta, sitemap lastmod)"

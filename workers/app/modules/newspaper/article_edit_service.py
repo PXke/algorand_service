@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 
 from app.modules.newspaper.article_edit_compose import compose_article_edit
@@ -12,13 +13,15 @@ from app.modules.newspaper.publish_queue_store import QueuedPublishRow
 from app.modules.newspaper.security import sanitize_body
 from app.modules.search.tasks.index_tasks import index_article
 
+logger = logging.getLogger(__name__)
+
 
 def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
     """
     Apply follow-up ingest to an existing article (within edit window).
     Saves prior body to article_versions, then updates live article.
     """
-    from app.modules.ai.mistral_client import MistralError
+    from app.modules.ai.mistral_client import MistralCreditError, MistralError
 
     payload = row.payload
     linked_id = str(payload.get("linked_article_id", "")).strip()
@@ -75,8 +78,11 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
     except ComposeBusyError:
         raise
     except MistralError as exc:
+        credit_issue = isinstance(exc, MistralCreditError)
+        status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
+        logger.error("Mistral article-edit compose failed for %s: %s", linked_id, exc)
         return {
-            "status": "mistral_failed",
+            "status": status,
             "linked_article_id": linked_id,
             "detail": str(exc),
         }
@@ -131,9 +137,12 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
     # The article changed at its existing URL — tell IndexNow (Bing guideline:
     # notify on update, not just add). Best-effort, never blocks the edit.
     try:
-        from app.modules.newspaper.indexnow import article_url, ping
+        from app.modules.newspaper.indexnow import ping_article, translation_lang_codes
 
-        ping([article_url(linked_id)])
+        ping_article(
+            linked_id,
+            translation_langs=translation_lang_codes(existing.translations),
+        )
     except Exception:
         pass
 

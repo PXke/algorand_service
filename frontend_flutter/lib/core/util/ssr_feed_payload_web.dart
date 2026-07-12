@@ -13,6 +13,8 @@ List<Map<String, dynamic>>? readSsrFeedItems() {
     final body = jsonDecode(text) as Map<String, dynamic>;
     final raw = body['items'];
     if (raw is! List) return null;
+    // Drop the script so Ctrl+F does not match invisible JSON duplicates.
+    el.remove();
     return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
   } catch (_) {
     return null;

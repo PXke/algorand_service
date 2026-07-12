@@ -553,5 +553,20 @@
       }
     }
   },
-  "domainsWalletNotConnected": "کیف پول وصل نیست"
+  "domainsWalletNotConnected": "کیف پول وصل نیست",
+  "navHot": "پربازدید",
+  "navTopics": "موضوع‌ها",
+  "hotTitle": "پربازدیدترین‌ها",
+  "hotLead": "گزارش‌هایی که خوانندگان اکنون بیش از همه باز می‌کنند.",
+  "topicsTitle": "موضوع‌ها",
+  "topicsLead": "همهٔ برچسب‌هایی که تحریریه اخیراً به کار برده — اندازه بر اساس پوشش و رنگ بر اساس بازدید.",
+  "topicSubtitle": "گزارش‌های دارای برچسب «{tag}»",
+  "readsCount": "{count, plural, other{{count} بازدید}}",
+  "frontPageMoreNews": "خبرهای بیشتر",
+  "storiesCount": "{count, plural, other{{count} گزارش}}",
+  "byTheNumbersRange": "۷ روز گذشته",
+  "byTheNumbersMarketCap": "ارزش بازار",
+  "byTheNumbersVolume": "حجم ۲۴ ساعته",
+  "hotTabHot": "داغ در حال حاضر",
+  "hotTabAllTime": "همه دوران"
 }

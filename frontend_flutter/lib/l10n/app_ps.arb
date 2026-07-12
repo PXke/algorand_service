@@ -553,5 +553,20 @@
       }
     }
   },
-  "domainsWalletNotConnected": "بټۍ وصل نه ده"
+  "domainsWalletNotConnected": "بټۍ وصل نه ده",
+  "navHot": "مشهور",
+  "navTopics": "موضوعات",
+  "hotTitle": "تر ټولو ډېر لوستل شوي",
+  "hotLead": "هغه کیسې چې لوستونکي یې همدا اوس تر ټولو ډېرې پرانیزي.",
+  "topicsTitle": "موضوعات",
+  "topicsLead": "ټول هغه ټاګونه چې خبري څانګې پدې وروستیو کې کارولي — کچه یې د پوښښ او رنګ یې د لوستلو له مخې ده.",
+  "topicSubtitle": "هغه کیسې چې د «{tag}» ټاګ لري",
+  "readsCount": "{count, plural, other{{count} لوستنې}}",
+  "frontPageMoreNews": "نور خبرونه",
+  "storiesCount": "{count, plural, other{{count} کیسې}}",
+  "byTheNumbersRange": "تېرې ۷ ورځې",
+  "byTheNumbersMarketCap": "بازاري ارزښت",
+  "byTheNumbersVolume": "د ۲۴ ساعتونو حجم",
+  "hotTabHot": "اوس مهال ګرم",
+  "hotTabAllTime": "ټول وختونه"
 }

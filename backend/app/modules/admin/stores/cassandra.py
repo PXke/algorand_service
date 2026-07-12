@@ -8,7 +8,11 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from app.core.feed_bucket import feed_month
-from app.modules.admin.classifier_constants import CONTENT_CATEGORIES
+from app.modules.admin.classifier_constants import (
+    CONTENT_CATEGORIES,
+    is_content_category,
+    normalize_content_category,
+)
 from app.modules.news.stores.base import StoredArticle
 
 logger = logging.getLogger(__name__)
@@ -74,9 +78,12 @@ class AdminCassandraStore:
             # Content changed at its existing URL — notify IndexNow (Bing asks
             # for update pings, not just adds). Best-effort, never blocks.
             with contextlib.suppress(Exception):
-                from app.modules.seo.indexnow import article_url, ping
+                from app.modules.seo.indexnow import ping_article, translation_lang_codes
 
-                ping([article_url(article_id)])
+                ping_article(
+                    article_id,
+                    translation_langs=translation_lang_codes(updated.translations),
+                )
         return updated
 
     def _save_version_snapshot(self, article: StoredArticle, *, editor: str) -> None:
@@ -178,6 +185,10 @@ class AdminCassandraStore:
             DeletedArticleStmts.INSERT,
             (aid, datetime.now(tz=UTC), (current.title or "")[:300]),
         )
+        with contextlib.suppress(Exception):
+            from app.modules.seo.sitemap import bust_tombstone_cache
+
+            bust_tombstone_cache()
 
         # Exact stored timestamp -> its month bucket -> precise feed-row delete.
         ts_row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
@@ -213,9 +224,12 @@ class AdminCassandraStore:
         # gets recrawled, hits the 410 tombstone above, and drops out of the
         # index instead of lingering. Best-effort, never blocks the delete.
         with contextlib.suppress(Exception):
-            from app.modules.seo.indexnow import article_url, ping
+            from app.modules.seo.indexnow import ping_article, translation_lang_codes
 
-            ping([article_url(article_id)])
+            ping_article(
+                article_id,
+                translation_langs=translation_lang_codes(current.translations),
+            )
         return True
 
     def list_versions(self, article_id: str, *, limit: int = 20) -> list[dict]:
@@ -584,8 +598,6 @@ class AdminCassandraStore:
             approved=approved,
             source_relevant=source_relevant,
         )
-        if article_id and cats:
-            self._apply_article_categories(article_id, cats)
         if review_id:
             resolution = "approved" if approved else "rejected"
             self._complete_classifier_review(review_id, resolution=resolution)
@@ -596,7 +608,14 @@ class AdminCassandraStore:
         # Training mode records the label (above) but never publishes — the
         # bootstrap sprint's low-quality articles must not reach the live feed.
         if approved and article_id and not training_only:
-            self._publish_or_queue_article(article_id)
+            # Archive-refresh reviews (recompose_published) don't publish the
+            # draft as a NEW article: the draft's content replaces the live
+            # article in place (same URL/published_at, updated_at stamped).
+            replaces = self._review_replaces_article_id(review_id) if review_id else ""
+            if replaces:
+                self._trigger_apply_recompose(article_id, replaces)
+            else:
+                self._publish_or_queue_article(article_id)
         # A review slot just freed — generate the next-highest-interest
         # candidate now instead of waiting for the next scheduled drain.
         self._trigger_compose_next()
@@ -897,9 +916,9 @@ class AdminCassandraStore:
         # The article just became publicly visible — notify IndexNow, same as
         # the workers' direct-publish path does. Best-effort, never blocks.
         with contextlib.suppress(Exception):
-            from app.modules.seo.indexnow import article_url, ping
+            from app.modules.seo.indexnow import ping_article
 
-            ping([article_url(article_id)])
+            ping_article(article_id)
         return True
 
     @staticmethod
@@ -924,6 +943,45 @@ class AdminCassandraStore:
                 )
         except Exception:
             logger.warning("failed to enqueue translation tasks", exc_info=True)
+
+    def _review_replaces_article_id(self, review_id: str) -> str:
+        """The published article this review's draft would replace on approval
+        (recompose_published flow), or "" for normal reviews. Fail-open to ""
+        so a metadata read error degrades to the normal publish path."""
+        import json
+
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ClassifierReviewStmts
+
+        try:
+            row = (
+                get_cassandra_session()
+                .execute(ClassifierReviewStmts.GET_METADATA, (UUID(review_id),))
+                .one()
+            )
+            raw = dict(row.metadata or {}).get("raw") if row else None
+            if raw:
+                return str(json.loads(raw).get("replaces_article_id") or "")
+        except Exception:
+            logger.warning(
+                "failed to read replaces_article_id for review %s", review_id, exc_info=True
+            )
+        return ""
+
+    @staticmethod
+    def _trigger_apply_recompose(draft_article_id: str, live_article_id: str) -> None:
+        try:
+            from celery import Celery
+
+            from app.core.config import settings
+
+            Celery(broker=settings.celery_broker_url).send_task(
+                "app.tasks.newspaper.apply_recomposed_article",
+                args=[draft_article_id, live_article_id],
+                queue="pipeline",
+            )
+        except Exception:
+            logger.warning("failed to trigger apply_recomposed_article", exc_info=True)
 
     @staticmethod
     def _trigger_compose_next() -> None:
@@ -1049,27 +1107,6 @@ class AdminCassandraStore:
         )
         return "queued_daily_cap"
 
-    def _apply_article_categories(self, article_id: str, categories: list[str]) -> None:
-        """Store multiple categories/keywords on the article as tags."""
-        from uuid import UUID
-
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ArticleStmts
-
-        try:
-            aid = UUID(article_id)
-        except ValueError:
-            return
-        session = get_cassandra_session()
-        row = session.execute(ArticleStmts.GET_TAGS, (aid,)).one()
-        if row is None:
-            return
-        tags = list(row.tags or [])
-        for c in categories:
-            if c and c not in tags:
-                tags.append(c)
-        session.execute(ArticleStmts.UPDATE_TAGS, (tags[:12], aid))
-
     def list_classifier_reviews(self, *, limit: int = 50, scan_limit: int = 500) -> list[dict]:
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ArticleStmts, ClassifierReviewStmts
@@ -1148,6 +1185,13 @@ class AdminCassandraStore:
                 categories = [str(c).strip().lower() for c in cats_raw if c]
             if not categories and detail.category:
                 categories = [str(detail.category).strip().lower()]
+            categories = [
+                normalize_content_category(c, default="")
+                for c in categories
+                if is_content_category(c)
+            ]
+            if not categories and is_content_category(detail.category):
+                categories = [normalize_content_category(detail.category)]
             parsed_rows.append((detail, article_id, confidence, grade, grade_detail, categories))
 
         # Phase 2: batch-fetch the referenced articles concurrently (was a second
@@ -1178,7 +1222,8 @@ class AdminCassandraStore:
                     "url": detail.url,
                     "page_title": detail.page_title or "",
                     "page_text_preview": (detail.page_text or "")[:500],
-                    "category": detail.category or (categories[0] if categories else ""),
+                    "category": categories[0] if categories else "generic",
+                    "predicted_category": (detail.category or "").strip().lower() or None,
                     "categories": categories,
                     "storage_score": float(detail.storage_score or 0),
                     "article_id": article_id,

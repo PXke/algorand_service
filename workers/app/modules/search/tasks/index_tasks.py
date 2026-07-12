@@ -20,6 +20,10 @@ def index_article(
     service_id: str,
     published_at_epoch: int,
 ) -> dict[str, str]:
+    tags: list[str] | None = None
+    detail = get_article(article_id)
+    if detail is not None:
+        tags = list(detail.tags or [])
     return upsert_article_document(
         article_id=article_id,
         title=title,
@@ -27,6 +31,7 @@ def index_article(
         body=body,
         service_id=service_id,
         published_at_epoch=published_at_epoch,
+        tags=tags,
     )
 
 
@@ -95,6 +100,7 @@ def reindex_articles(*, limit: int = 200) -> dict[str, object]:
             body=detail.body,
             service_id=detail.service_id,
             published_at_epoch=detail.published_at_epoch,
+            tags=list(detail.tags or []),
         )
         status = outcome.get("status", "")
         if status == "indexed":

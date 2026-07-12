@@ -250,6 +250,52 @@ def recent_content_similarity(title: str, text: str = "") -> tuple[float, str]:
     return best_sim, best_title
 
 
+# The colon-label headline shape ("<Name>: <description of name>") — the house
+# style bans it (headlines must state a concrete development, 2026-07-12), and
+# the prompt alone can't be trusted to hold a small/large model to it forever.
+# Requires ": " (colon+space) within the first ~50 chars so times ("3:1") and
+# late colons in long titles don't trip it.
+_COLON_LABEL_RE = re.compile(r"^[^:]{2,48}:\s")
+
+# Vague marketing verbs the style guide bans in headlines; word-boundary match,
+# any inflection covered by listing the common forms.
+_MARKETING_VERBS_RE = re.compile(
+    r"\b(unveil(?:s|ed|ing)?|empower(?:s|ed|ing)?|elevat(?:es?|ed|ing)|"
+    r"revolutioniz(?:es?|ed|ing)|superchargh?(?:es?|ed|ing)|unleash(?:es|ed|ing)?)\b",
+    re.IGNORECASE,
+)
+
+_HEADLINE_MAX_CHARS = 90
+
+
+def headline_violations(title: str) -> list[str]:
+    """Deterministic house-style checks for a headline. Returns actionable
+    issue strings (prefixed "headline — ") that the compose revision pass can
+    feed straight back to the writer; empty list when the title conforms."""
+    text = (title or "").strip()
+    if not text:
+        return []
+    issues: list[str] = []
+    if _COLON_LABEL_RE.match(text):
+        issues.append(
+            "headline — colon-label title (“<Name>: <description>”). Rewrite as an "
+            "active-voice claim stating what actually happened in THIS story, "
+            "ideally with a verified number or stake"
+        )
+    if len(text) > _HEADLINE_MAX_CHARS:
+        issues.append(
+            f"headline — {len(text)} chars; tighten to under {_HEADLINE_MAX_CHARS} "
+            "by keeping only the single most newsworthy claim"
+        )
+    match = _MARKETING_VERBS_RE.search(text)
+    if match:
+        issues.append(
+            f"headline — vague marketing verb “{match.group(0)}”; replace with the "
+            "concrete verb for what happened (shipped, launched, hit, cut, raised…)"
+        )
+    return issues
+
+
 def grade_article_schema(
     *,
     title: str,
@@ -268,6 +314,7 @@ def grade_article_schema(
     has_table = bool(re.search(r"(^|\n)\s*\|.*\|.*\|", body or ""))
 
     issues: list[str] = []
+    issues.extend(headline_violations(title))
     if len(title or "") > 120:
         issues.append("schema — title exceeds 120 characters")
     if len(summary or "") > 280:

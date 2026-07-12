@@ -3,6 +3,17 @@ import 'package:flutter/scheduler.dart';
 
 import '../config/app_config.dart';
 
+/// Art direction for LIST artwork (story-row thumbs, lead tile art): a mild
+/// desaturation (s=0.8) so og-images scraped from dozens of unrelated brands
+/// sit together as one page instead of shouting at each other. Article-BODY
+/// images are never treated — the journalism shows its sources as they are.
+const ColorFilter editorialThumbFilter = ColorFilter.matrix(<double>[
+  0.84252, 0.14304, 0.01444, 0, 0,
+  0.04252, 0.94304, 0.01444, 0, 0,
+  0.04252, 0.14304, 0.81444, 0, 0,
+  0, 0, 0, 1, 0,
+]);
+
 /// Network image that waits until the browser is idle before fetching — keeps
 /// hero/card art off the engine-boot critical path.
 class LazyNetworkImage extends StatefulWidget {

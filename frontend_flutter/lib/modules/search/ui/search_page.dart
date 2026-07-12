@@ -10,6 +10,7 @@ import '../../../core/providers/api_providers.dart';
 import '../../../core/theme/app_theme_extension.dart';
 import '../../../core/ui/empty_state.dart';
 import '../../../core/ui/error_banner.dart';
+import '../../../core/ui/highlight_text.dart';
 import '../../../core/ui/hover_card.dart';
 import '../../../core/ui/layout.dart';
 import '../../../core/ui/loading_strip.dart';
@@ -48,6 +49,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
         _controller.text = q;
         _search();
       }
+      _focusNode.requestFocus();
     });
   }
 
@@ -195,6 +197,12 @@ class _SearchPageState extends ConsumerState<SearchPage> {
           ),
         ..._items.map((item) {
           final id = item['article_id']?.toString() ?? '';
+          final title = item['title_highlight']?.toString().trim().isNotEmpty == true
+              ? item['title_highlight']!.toString()
+              : item['title']?.toString() ?? '';
+          final excerpt = item['snippet']?.toString().trim().isNotEmpty == true
+              ? item['snippet']!.toString()
+              : item['summary']?.toString() ?? '';
           return Padding(
             padding: const EdgeInsets.only(bottom: AppLayout.itemGap),
             child: HoverCard(
@@ -218,17 +226,17 @@ class _SearchPageState extends ConsumerState<SearchPage> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            item['title']?.toString() ?? '',
+                          HighlightText(
+                            title,
                             style: theme.textTheme.titleLarge?.copyWith(
                               fontSize: 19,
                               height: 1.3,
                             ),
                           ),
                           const SizedBox(height: 8),
-                          Text(
-                            item['summary']?.toString() ?? '',
-                            maxLines: 3,
+                          HighlightText(
+                            excerpt,
+                            maxLines: 4,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.bodyMedium?.copyWith(
                               height: 1.5,

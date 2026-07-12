@@ -330,6 +330,28 @@
       }
     }
   },
+  "navHot": "Hot",
+  "navTopics": "Topics",
+  "hotTitle": "Most read",
+  "hotLead": "The stories readers are opening most right now.",
+  "topicsTitle": "Topics",
+  "topicsLead": "Every tag the newsroom used recently — sized by coverage, warmed by reads.",
+  "topicSubtitle": "Stories tagged “{tag}”",
+  "@topicSubtitle": {
+    "placeholders": {
+      "tag": {
+        "type": "String"
+      }
+    }
+  },
+  "readsCount": "{count, plural, =1{1 read} other{{count} reads}}",
+  "@readsCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sectionMarkets": "Markets",
   "sectionSecurity": "Security",
   "sectionDevelopers": "Developers",
@@ -553,5 +575,19 @@
       }
     }
   },
-  "domainsWalletNotConnected": "Wallet not connected"
+  "domainsWalletNotConnected": "Wallet not connected",
+  "frontPageMoreNews": "More news",
+  "storiesCount": "{count, plural, =1{1 story} other{{count} stories}}",
+  "@storiesCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "byTheNumbersRange": "Past 7 days",
+  "byTheNumbersMarketCap": "Market cap",
+  "byTheNumbersVolume": "24h volume",
+  "hotTabHot": "Hot right now",
+  "hotTabAllTime": "All-time"
 }

@@ -15,7 +15,11 @@ from typing import Annotated, Literal
 import msgspec
 from msgspec import Meta, field
 
-from app.modules.admin.classifier_constants import CONTENT_CATEGORIES, QUALITY_LEVELS
+from app.modules.admin.classifier_constants import (
+    CONTENT_CATEGORIES,
+    QUALITY_LEVELS,
+    normalize_content_category,
+)
 
 # ── Common constrained aliases ────────────────────────────────────────────────
 WalletAddress = Annotated[str, Meta(min_length=58, max_length=58)]
@@ -34,6 +38,10 @@ class ArticleFeedItem(msgspec.Struct, kw_only=True):
     trigger_kind: str = "editorial"
     image_url: str | None = None
     source_url: str | None = None
+    # Read tally, populated only on ranked ("hot") feed responses.
+    views: int | None = None
+    # Last content revision (edit/recompose); None = never revised.
+    updated_at_epoch: int | None = None
 
 
 class ArticleDetail(msgspec.Struct, kw_only=True):
@@ -50,6 +58,7 @@ class ArticleDetail(msgspec.Struct, kw_only=True):
     trigger_kind: str = "editorial"
     views: int = 0
     image_url: str | None = None
+    updated_at_epoch: int | None = None
 
 
 class NewsFeedResponse(msgspec.Struct, kw_only=True):
@@ -158,6 +167,9 @@ class SearchHit(msgspec.Struct, kw_only=True):
     service_id: str | None = None
     published_at_epoch: int | None = None
     score: float | None = None
+    # Typesense highlight snippet (HTML <mark> tags) around the matched terms.
+    snippet: str | None = None
+    title_highlight: str | None = None
 
 
 class SearchResponse(msgspec.Struct, kw_only=True):
@@ -340,16 +352,20 @@ class ClassifierFeedbackCreate(msgspec.Struct, kw_only=True):
     article_id: Annotated[str, Meta(max_length=64)] | None = None
 
     def __post_init__(self) -> None:
-        for attr in ("category", "predicted_category"):
-            value = getattr(self, attr)
-            if value is None:
-                continue
-            normalized = value.strip().lower()
-            if normalized not in CONTENT_CATEGORIES:
-                raise ValueError(
-                    f"category must be one of: {', '.join(CONTENT_CATEGORIES)}"
-                )
-            setattr(self, attr, normalized)
+        # Writer tags / pipeline labels in the category slot coerce to generic —
+        # never block approve/reject on taxonomy mismatch.
+        self.category = normalize_content_category(self.category)
+        if self.predicted_category is not None:
+            pred = self.predicted_category.strip().lower()
+            self.predicted_category = pred or None
+        normalized_cats: list[str] = []
+        for raw in self.categories:
+            cat = normalize_content_category(raw, default="")
+            if cat and cat not in normalized_cats:
+                normalized_cats.append(cat)
+        if self.category not in normalized_cats:
+            normalized_cats.insert(0, self.category)
+        self.categories = normalized_cats
         quality = self.quality.strip().lower()
         if quality not in QUALITY_LEVELS:
             raise ValueError(f"quality must be one of: {', '.join(QUALITY_LEVELS)}")

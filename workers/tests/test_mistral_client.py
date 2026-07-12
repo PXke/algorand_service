@@ -8,6 +8,15 @@ import pytest
 from app.modules.ai.mistral_client import MistralClient, MistralError
 
 
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    """Retryable-status tests below exercise MistralClient's real backoff
+    (MISTRAL_MAX_RETRIES) — without this they genuinely sleep out the full
+    schedule (~30s) for zero extra coverage. Retry count/behavior is still
+    exercised; only the wall-clock wait is removed."""
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+
 def test_chat_json_object_parses_response() -> None:
     payload = {
         "choices": [

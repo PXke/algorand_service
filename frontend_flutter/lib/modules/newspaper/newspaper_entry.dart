@@ -2,5 +2,7 @@
 library;
 
 export 'ui/article_detail_page.dart';
+export 'ui/hot_page.dart';
 export 'ui/news_page.dart';
-export 'ui/section_page.dart';
+export 'ui/topic_page.dart';
+export 'ui/topics_page.dart';

@@ -7,7 +7,7 @@ from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.seo import feeds, render, shell, sitemap
 from app.modules.seo.api.routes import _is_known_app_path
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
-from app.modules.seo.sections import matches_section, section_for_slug
+from app.modules.seo.topics import SECTION_REDIRECTS, reliable_tags
 
 
 def _article(**kw) -> ArticleDetail:
@@ -86,6 +86,15 @@ def test_render_article_head_has_core_tags() -> None:
     assert "img.io/hero.png" in head
     assert 'name="twitter:card" content="summary_large_image"' in head
     assert 'id="ssr-body"' in body and "<h1>" in body
+    # Site chrome: masthead, primary nav and footer links on every page.
+    assert 'class="ssr-brand"' in body and 'href="/"' in body
+    assert 'href="/news"' in body and 'href="/topics"' in body
+    assert 'class="ssr-footer"' in body and 'href="/contact"' in body
+    assert 'href="/feed.xml"' in body and 'href="/sitemap.xml"' in body
+    assert 'aria-label="Breadcrumb"' in body
+    # Tag links, back link and syndication footer.
+    assert 'href="/topic/sdk"' in body and 'rel="tag"' in body
+    assert "← Latest stories" in body
     # Visible SSR content, NOT noscript (Google renders JS and ignores noscript,
     # and the canvas Flutter app has no DOM text) + self-removal on app paint.
     assert "<noscript>" not in body
@@ -93,7 +102,7 @@ def test_render_article_head_has_core_tags() -> None:
 
 
 def test_render_article_hreflang_for_translations() -> None:
-    head, _ = render.render_article(
+    head, body = render.render_article(
         _article(),
         lang="fa",
         translation_langs=["fa", "ar"],
@@ -104,6 +113,11 @@ def test_render_article_hreflang_for_translations() -> None:
     assert "?lang=fa" in head
     assert 'property="og:locale" content="fa_AF"' in head
     assert 'rel="canonical" href="https://algorand.pxke.me/news/articles/abc123?lang=fa"' in head
+    # Visible translation picker in the body (not just <head> hreflang).
+    assert 'aria-label="Translations"' in body
+    assert 'hreflang="fa-AF"' in body
+    assert 'aria-current="true"' in body and "Dari" in body
+    assert 'hreflang="ar"' in body and "?lang=ar" in body
 
 
 def test_render_article_jsonld_is_valid_newsarticle() -> None:
@@ -115,7 +129,15 @@ def test_render_article_jsonld_is_valid_newsarticle() -> None:
     assert data["headline"]
     assert data["datePublished"].startswith("20")
     assert data["articleBody"]
+    assert data["wordCount"] > 0
+    assert data["articleSection"] == "sdk"
+    assert data["speakable"]["cssSelector"]
     assert data["publisher"]["name"] == "PXke Algorand"
+
+
+def test_render_article_og_section_from_primary_tag() -> None:
+    head, _ = render.render_article(_article(tags=["sdk", "release"]))
+    assert 'property="article:section" content="sdk"' in head
 
 
 def test_render_article_falls_back_to_default_image() -> None:
@@ -124,14 +146,23 @@ def test_render_article_falls_back_to_default_image() -> None:
 
 
 def test_render_noindex_marks_robots() -> None:
-    head, _ = render.render_noindex("Admin")
+    head, body = render.render_noindex("Admin")
     assert 'name="robots" content="noindex, follow"' in head
+    assert 'class="ssr-nav"' in body and 'href="/about"' in body
+
+
+def test_ssr_chrome_lists_popular_topics_in_footer() -> None:
+    items = _feed(4)
+    topics = reliable_tags(items)
+    _, body = render.render_front(_feed(4), [], topic_links=topics)
+    assert 'id="ssr-topics-h"' in body
+    assert 'href="/topic/market"' in body or 'href="/topic/sdk"' in body
 
 
 def test_article_has_breadcrumb_and_image_meta() -> None:
     head, _ = render.render_article(_article(image_url=None, tags=["sdk"]))
     assert '"@type":"BreadcrumbList"' in head
-    assert '"name":"Developers"' in head  # section crumb from the "sdk" tag
+    assert '"name":"sdk"' in head  # primary-tag crumb -> /topic/sdk
     # default image -> known dimensions + alt on both og and twitter
     assert 'property="og:image:width" content="512"' in head
     assert 'property="og:image:alt"' in head and 'name="twitter:image:alt"' in head
@@ -144,14 +175,14 @@ def test_article_real_image_omits_dimensions() -> None:
 
 
 def test_head_has_rss_alternate_link() -> None:
-    head, _ = render.render_home(_feed(2))
+    head, _ = render.render_news_feed(_feed(2))
     assert 'type="application/rss+xml"' in head
     assert "/feed.xml" in head
 
 
 def test_home_has_website_searchaction_and_org(monkeypatch) -> None:
     monkeypatch.setattr(render.settings, "seo_same_as", "https://x.com/pxke")
-    head, _ = render.render_home(_feed(2))
+    head, _ = render.render_front(_feed(2), [])
     assert '"@type":"WebSite"' in head and '"@type":"SearchAction"' in head
     assert "/search?q={search_term_string}" in head
     assert '"sameAs":["https://x.com/pxke"]' in head
@@ -173,24 +204,134 @@ def test_rss_feed_structure() -> None:
 
 
 def test_render_home_lists_articles() -> None:
-    head, body = render.render_home(_feed(3))
+    head, body = render.render_news_feed(_feed(3))
     assert "CollectionPage" in head
+    assert 'rel="canonical" href="https://algorand.pxke.me/news"' in head
     assert 'id="pxke-ssr-feed"' in head
     assert '"items":' in head
-    assert body.count("<li>") == 3
+    assert body.count('href="/news/articles/id') == 3
+
+
+def test_render_front_has_editorial_sections() -> None:
+    items = _feed(8)
+    hot = _feed(3)
+    head, body = render.render_front(items, hot)
+    assert 'rel="canonical" href="https://algorand.pxke.me/"' in head
+    assert 'class="ssr-front"' in body
+    assert 'class="ssr-lead"' in body
+    assert "Top stories" in body
+    assert 'href="/hot">Most read' in body
+    assert "More news" in body
+    assert "Full chronological feed" in body
+    assert 'id="pxke-ssr-feed"' in head
+
+
+def test_render_front_differs_from_news_feed() -> None:
+    items = _feed(6)
+    _, front = render.render_front(items, _feed(2))
+    _, news = render.render_news_feed(items)
+    assert 'class="ssr-front"' in front and 'class="ssr-front"' not in news
+    assert "Full chronological feed" in front
+
+
+def test_render_news_canonical_is_distinct_from_home() -> None:
+    items = _feed(2)
+    front_head, _ = render.render_front(items, [])
+    news_head, news_body = render.render_news_feed(items)
+    assert 'rel="canonical" href="https://algorand.pxke.me/"' in front_head
+    assert 'rel="canonical" href="https://algorand.pxke.me/news"' in news_head
+    assert "Latest" in news_body and 'aria-label="Breadcrumb"' in news_body
+
+
+def test_pick_related_articles_shares_tags() -> None:
+    article = _article(tags=["sdk", "release"])
+    feed = _feed(5)
+    feed[1].tags = ["sdk", "market"]
+    feed[3].tags = ["unrelated"]
+    related = render.pick_related_articles(article, feed, limit=3)
+    assert len(related) == 1
+    assert related[0].article_id == "id1"
+
+
+def test_render_article_related_stories() -> None:
+    article = _article()
+    related = [
+        ArticleFeedItem(
+            article_id="id9",
+            service_id="svc",
+            title="Related piece",
+            summary="R",
+            published_at_epoch=1_750_000_100,
+            tags=["sdk"],
+        )
+    ]
+    _, body = render.render_article(article, related=related)
+    assert 'class="ssr-related"' in body
+    assert "Related piece" in body
+    assert 'href="/news/articles/id9"' in body
+
+
+def test_render_hot_embeds_ssr_feed_json() -> None:
+    head, _ = render.render_hot(_feed(3))
+    assert 'id="pxke-ssr-feed"' in head
+
+
+def test_render_topic_truncation_note() -> None:
+    items = _feed(3)
+    head, body = render.render_topic("sdk", items, total_count=47)
+    assert "Showing 3 of 47 stories" in body
+    assert 'id="pxke-ssr-feed"' in head
+    assert 'href="/feed/topic/sdk.xml"' in head
+    assert "Subscribe to this topic (RSS)" in body
+
+
+def test_topic_rss_feed_xml() -> None:
+    xml = feeds.topic_rss_xml("sdk", _feed(2))
+    assert "sdk" in xml
+    assert "/feed/topic/sdk.xml" in xml
+    assert "/topic/sdk" in xml
+    assert xml.count("<item>") == 2
+
+
+def test_render_topics_lists_per_topic_rss() -> None:
+    items = _feed(4)
+    topics = reliable_tags(items)
+    _, body = render.render_topics(topics)
+    assert 'href="/feed/topic/market.xml"' in body or 'href="/feed/topic/sdk.xml"' in body
+
+
+def test_cached_feed_snapshot_reuses_within_ttl(monkeypatch) -> None:
+    from app.modules.seo import topics as topics_mod
+
+    calls = {"n": 0}
+
+    def list_feed(*, limit: int = 500):
+        calls["n"] += 1
+        return _feed(2)
+
+    topics_mod._feed_cache["mono"] = 0.0
+    topics_mod.cached_feed_snapshot(list_feed)
+    topics_mod.cached_feed_snapshot(list_feed)
+    assert calls["n"] == 1
 
 
 def test_beacon_path_validation_rejects_made_up_paths() -> None:
-    # Known static routes and a real section slug pass.
+    # Known static routes and topic slugs pass.
     assert _is_known_app_path("/")
     assert _is_known_app_path("/news")
+    assert _is_known_app_path("/hot")
+    assert _is_known_app_path("/topics")
     assert _is_known_app_path("/about")
-    assert _is_known_app_path("/section/markets")
+    assert _is_known_app_path("/topic/sdk")
     assert _is_known_app_path("/news/articles/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d")
-    # Admin isn't a public pageview route, a bogus section doesn't exist, and a
-    # non-UUID "article id" or arbitrary path must not bump analytics counters.
+    # Admin isn't a public pageview route; retired sections, an overlong or
+    # nested topic slug, a non-UUID "article id" and arbitrary paths must not
+    # bump analytics counters.
     assert not _is_known_app_path("/admin")
-    assert not _is_known_app_path("/section/does-not-exist")
+    assert not _is_known_app_path("/section/markets")
+    assert not _is_known_app_path("/topic/")
+    assert not _is_known_app_path("/topic/" + "x" * 49)
+    assert not _is_known_app_path("/topic/a/b")
     assert not _is_known_app_path("/news/articles/not-a-uuid")
     assert not _is_known_app_path("/random/garbage")
 
@@ -201,11 +342,19 @@ def test_ssr_track_snippet_marks_recorded_path() -> None:
     assert "/news/articles/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d" in snippet
 
 
-def test_section_lookup_and_matching() -> None:
-    sec = section_for_slug("developers")
-    assert sec is not None
-    assert matches_section(sec, ["sdk"])
-    assert not matches_section(sec, ["market"])
+def test_reliable_tags_policy_and_section_redirect_map() -> None:
+    # 10 stories: "market" on 5, "sdk" on 5 (both hit the 50% ubiquity
+    # ceiling), "niche" on 2 (kept), "one-off" on 1 (singleton, dropped).
+    items = _feed(10)
+    items[0].tags = [*items[0].tags, "niche"]
+    items[2].tags = [*items[2].tags, "niche"]
+    items[4].tags = [*items[4].tags, "one-off"]
+    picked = dict(reliable_tags(items))
+    assert picked.get("niche") == 2
+    assert "one-off" not in picked
+    assert "market" not in picked and "sdk" not in picked
+    # Every retired section slug redirects to a topic.
+    assert set(SECTION_REDIRECTS) == {"markets", "security", "developers", "community", "ecosystem"}
 
 
 # --- sitemap / robots --------------------------------------------------------
@@ -224,11 +373,16 @@ def test_robots_news_sitemap_gated_by_flag(monkeypatch) -> None:
     assert "sitemap-news.xml" in sitemap.robots_txt()
 
 
-def test_sitemap_xml_includes_articles_and_sections() -> None:
-    xml = sitemap.sitemap_xml(_feed(2))
+def test_sitemap_xml_includes_articles_and_topics() -> None:
+    # 4 stories -> "market"/"sdk" each on 2 (ubiquity waived on tiny corpora).
+    xml = sitemap.sitemap_xml(_feed(4))
     assert xml.startswith("<?xml")
     assert "https://algorand.pxke.me/news/articles/id0" in xml
-    assert "https://algorand.pxke.me/section/markets" in xml
+    assert "https://algorand.pxke.me/topics" in xml
+    assert "https://algorand.pxke.me/news" in xml
+    assert "https://algorand.pxke.me/hot" in xml
+    assert "https://algorand.pxke.me/topic/market" in xml
+    assert "/section/" not in xml
 
 
 def test_sitemap_article_hreflang_and_translations() -> None:
@@ -255,7 +409,7 @@ def test_sitemap_splits_into_index_when_large(monkeypatch) -> None:
     assert "sitemap-pages.xml" in build.parts
     assert "sitemap-articles-1.xml" in build.parts
     pages = build.parts["sitemap-pages.xml"]
-    assert "/section/markets" in pages
+    assert "/topics" in pages
     assert "?lang=fa" not in pages
     articles = build.parts["sitemap-articles-1.xml"]
     assert "?lang=fa" in articles
@@ -276,8 +430,41 @@ def test_news_sitemap_windows_recent_only() -> None:
     fresh = _feed(2, epoch=int(time.time()) - 3600)
     xml = sitemap.news_sitemap_xml(fresh)
     assert "news:news" in xml and "news:publication_date" in xml
+    assert "news:keywords" in xml
     old = sitemap.news_sitemap_xml(_feed(2, epoch=1_700_000_000))
     assert "<url>" not in old
+
+
+def test_sitemap_excludes_tombstoned_articles(monkeypatch) -> None:
+    items = _feed(3)
+    translations: dict[str, list[str]] = {}
+    monkeypatch.setattr(sitemap, "_tombstoned_ids", lambda *_: {"id1"})
+    xml = sitemap.sitemap_xml(items, translations)
+    assert "id0" in xml and "id2" in xml
+    assert "id1" not in xml
+
+
+def test_news_sitemap_excludes_tombstones(monkeypatch) -> None:
+    import time
+
+    monkeypatch.setattr(sitemap, "_tombstoned_ids", lambda *_: {"id0"})
+    fresh = _feed(2, epoch=int(time.time()) - 3600)
+    xml = sitemap.news_sitemap_xml(fresh)
+    assert "id1" in xml
+    assert "id0" not in xml
+
+
+def test_render_news_feed_truncation_note() -> None:
+    _, body = render.render_news_feed(_feed(3), total_count=120)
+    assert "Showing the 3 newest of 120" in body
+    assert 'href="/feed.xml"' in body
+
+
+def test_render_topics_has_collection_jsonld() -> None:
+    tags = [("sdk", 5), ("market", 3)]
+    head, _ = render.render_topics(tags)
+    assert '"@type":"CollectionPage"' in head
+    assert '"@type":"ItemList"' in head
 
 
 # --- shell injection ---------------------------------------------------------
@@ -397,11 +584,13 @@ def test_rss_full_content_encoded() -> None:
     assert xml.count("content:encoded") == 2  # open+close for the one item with a body
 
 
-def test_llms_txt_lists_feed_and_sections() -> None:
+def test_llms_txt_lists_feed_and_topics() -> None:
     txt = sitemap.llms_txt()
     assert txt.startswith("# PXke Algorand")
     assert "feed.xml" in txt and "sitemap.xml" in txt
-    assert "/section/markets" in txt
+    assert "/topics" in txt
+    assert "/feed/topic/" in txt
+    assert "/section/" not in txt
 
 
 def test_shell_injection_adds_engine_preloads(monkeypatch, tmp_path) -> None:
@@ -409,7 +598,7 @@ def test_shell_injection_adds_engine_preloads(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(shell.settings, "frontend_dist_dir", str(tmp_path))
     shell._cache["html"] = None  # bust the module cache
 
-    head, body = render.render_home(_feed(1))
+    head, body = render.render_front(_feed(1), [])
     doc = shell.render_document(head, body)
     assert doc is not None
     # Renderer preloads are injected by an inline script mirroring
@@ -456,13 +645,14 @@ def test_overlong_title_clamped_at_word_boundary() -> None:
     assert f'property="og:title" content="{t}"' in head
 
 
-def test_first_frame_script_keeps_content_visible() -> None:
-    # aria-hidden only: search engines' renderers reach flutter-first-frame,
-    # and display:none'd main content is devalued in the rendered snapshot.
-    # The engine's own full-viewport canvas already covers the SSR body.
+def test_first_frame_script_removes_ssr_from_dom() -> None:
+    # SSR is in the initial HTML for crawlers; after Flutter paints the script
+    # removes #ssr-body so Ctrl+F does not match text under the canvas.
     _, body = render.render_article(_article())
-    assert "aria-hidden" in body
-    assert "display='none'" not in body and "e.remove()" not in body
+    assert "flutter-first-frame" in body
+    assert 'id="ssr-body"' in body
+    assert "ssr-body" in body and ".remove()" in body
+    assert "aria-hidden" not in body
 
 
 # --- icon-like image_url must not become a hero or share image -----------------

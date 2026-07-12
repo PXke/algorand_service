@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from xml.sax.saxutils import escape
@@ -10,7 +12,9 @@ from xml.sax.saxutils import escape
 from app.core.config import settings
 from app.modules.news.models.schemas import ArticleFeedItem
 from app.modules.seo.render import absolute, article_hreflang_links, article_path, site_url
-from app.modules.seo.sections import SECTIONS
+from app.modules.seo.topics import reliable_tags
+
+logger = logging.getLogger(__name__)
 
 # Google News only wants articles from roughly the last two days.
 _NEWS_WINDOW_SECONDS = 48 * 3600
@@ -20,6 +24,8 @@ MAX_URLS_PER_SITEMAP = 5000
 _URLSET_NS = 'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
 _XHTML_NS = 'xmlns:xhtml="http://www.w3.org/1999/xhtml"'
 _INDEX_NS = 'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
+
+_tombstone_cache: dict[str, object] = {"mono": 0.0, "ids": set()}
 
 
 @dataclass
@@ -72,15 +78,15 @@ def llms_txt() -> str:
         "",
         f"- [Latest articles (RSS, full text)]({absolute('/feed.xml')}): every "
         "article's complete body ships in content:encoded",
-        f"- [Sitemap]({absolute('/sitemap.xml')}): all article and section URLs "
+        f"- [Sitemap]({absolute('/sitemap.xml')}): all article and topic URLs "
         "(multilingual; auto-split when large)",
+        f"- [Topics]({absolute('/topics')}): every topic the newsroom covers, "
+        "with per-topic article listings under /topic/<tag>",
+        f"- [Per-topic RSS]({absolute('/feed/topic/sdk.xml')}): replace `sdk` with "
+        "any topic slug — one feed per writer tag",
         f"- [About]({absolute('/about')}): editorial and AI-authorship disclosure",
         f"- [Contact]({absolute('/contact')}): corrections, tips and feedback form",
-        "",
-        "## Sections",
-        "",
     ]
-    lines += [f"- [{s.label}]({absolute(f'/section/{s.slug}')}): {s.description}" for s in SECTIONS]
     return "\n".join(lines) + "\n"
 
 
@@ -131,17 +137,62 @@ def _sitemap_index_xml(child_filenames: list[str], *, lastmod: str) -> str:
     )
 
 
+def bust_tombstone_cache() -> None:
+    """Call after admin delete so the next sitemap build drops the URL immediately."""
+    _tombstone_cache["mono"] = 0.0
+
+
+def _tombstoned_ids(_article_ids: Iterable[str] | None = None) -> set[str]:
+    """Article IDs hard-deleted by admin (410 Gone). Full-table scan of a tiny
+    tombstone set, cached briefly so sitemap builds don't hammer Cassandra."""
+    now = time.monotonic()
+    cached = _tombstone_cache.get("ids")
+    cached_at = float(_tombstone_cache.get("mono", 0.0))
+    if isinstance(cached, set) and now - cached_at < 60:
+        return cached
+    try:
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import DeletedArticleStmts
+
+        rows = get_cassandra_session().execute(DeletedArticleStmts.LIST_IDS)
+        picked = {str(row.article_id) for row in rows}
+    except Exception:
+        logger.debug("tombstone lookup failed; sitemap omits no extra filter", exc_info=True)
+        picked = set()
+    _tombstone_cache["mono"] = now
+    _tombstone_cache["ids"] = picked
+    return picked
+
+
 def _static_entries(items: list[ArticleFeedItem]) -> list[_UrlEntry]:
     newest = max((i.published_at_epoch for i in items), default=int(time.time()))
     lastmod = _iso_date(newest)
+    topic_entries = []
+    for tag, _count in reliable_tags(items):
+        wanted = tag.lower()
+        topic_newest = max(
+            (
+                i.published_at_epoch
+                for i in items
+                if any(t.strip().lower() == wanted for t in (i.tags or []))
+            ),
+            default=None,
+        )
+        topic_entries.append(
+            _UrlEntry(
+                loc=absolute(f"/topic/{tag}"),
+                lastmod=_iso_date(topic_newest) if topic_newest else None,
+                changefreq="daily",
+            )
+        )
     return [
         _UrlEntry(loc=site_url() + "/", lastmod=lastmod, changefreq="hourly"),
+        _UrlEntry(loc=absolute("/news"), lastmod=lastmod, changefreq="hourly"),
+        _UrlEntry(loc=absolute("/hot"), lastmod=lastmod, changefreq="hourly"),
         _UrlEntry(loc=absolute("/about"), changefreq="monthly"),
         _UrlEntry(loc=absolute("/contact"), changefreq="monthly"),
-        *[
-            _UrlEntry(loc=absolute(f"/section/{s.slug}"), changefreq="daily")
-            for s in SECTIONS
-        ],
+        _UrlEntry(loc=absolute("/topics"), lastmod=lastmod, changefreq="daily"),
+        *topic_entries,
     ]
 
 
@@ -150,12 +201,18 @@ def _article_entries(
     translations_by_id: dict[str, list[str]],
 ) -> list[_UrlEntry]:
     """One <url> per locale variant, each carrying the full hreflang cluster."""
+    tombstones = _tombstoned_ids()
     entries: list[_UrlEntry] = []
     for item in items:
+        if item.article_id in tombstones:
+            continue
         alternates = article_hreflang_links(
             item.article_id, translations_by_id.get(item.article_id)
         )
-        lastmod = _iso_date(item.published_at_epoch)
+        # Revised articles advertise the revision date so crawlers recrawl.
+        lastmod = _iso_date(
+            max(item.published_at_epoch, getattr(item, "updated_at_epoch", None) or 0)
+        )
         seen_locs: set[str] = set()
         for _hreflang, loc in alternates:
             if loc in seen_locs:
@@ -198,10 +255,20 @@ def sitemap_xml(
 
 def news_sitemap_xml(items: list[ArticleFeedItem]) -> str:
     cutoff = int(time.time()) - _NEWS_WINDOW_SECONDS
-    recent = [i for i in items if i.published_at_epoch >= cutoff]
+    tombstones = _tombstoned_ids()
+    recent = [
+        i
+        for i in items
+        if i.published_at_epoch >= cutoff and i.article_id not in tombstones
+    ]
     entries = []
     for item in recent:
         pub = datetime.fromtimestamp(item.published_at_epoch, tz=UTC).isoformat()
+        keywords = ""
+        if item.tags:
+            keywords = (
+                f"<news:keywords>{escape(', '.join(item.tags))}</news:keywords>"
+            )
         entries.append(
             "<url>"
             f"<loc>{escape(absolute(article_path(item.article_id)))}</loc>"
@@ -212,6 +279,7 @@ def news_sitemap_xml(items: list[ArticleFeedItem]) -> str:
             "</news:publication>"
             f"<news:publication_date>{pub}</news:publication_date>"
             f"<news:title>{escape(item.title)}</news:title>"
+            f"{keywords}"
             "</news:news>"
             "</url>"
         )

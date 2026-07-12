@@ -137,6 +137,9 @@ def record_compose_session(
     duration_ms: int = 0,
     session_id: Any = None,
     created_at: datetime | None = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
 ) -> bool:
     """Persist the agentic transcript of one compose (best-effort). Pass a stable
     ``session_id``/``created_at`` (from new_session_ref) to UPSERT the same row at
@@ -150,7 +153,18 @@ def record_compose_session(
             entry: dict[str, Any] = {"role": role}
             content = m.get("content")
             if content is not None:
-                entry["content"] = str(content)[: 1500 if role in ("user", "system") else 4000]
+                text = str(content)
+                # The research→write digest handoff is the one "user" turn worth
+                # seeing in full: it's the ONLY place to audit whether a bad fact
+                # (wrong math, a fabricated date) originated in digest synthesis
+                # or in the write pass itself. The generic 1500-char cap was
+                # truncating it mid-sentence, right around where the Liveness
+                # Signals section lives — hiding exactly the evidence needed to
+                # diagnose a fabrication (2026-07-10, KryptoNurd).
+                cap = 6000 if text.startswith("[stage 2 handoff]") else (
+                    1500 if role in ("user", "system") else 4000
+                )
+                entry["content"] = text[:cap]
             tcs = m.get("tool_calls")
             if tcs:
                 entry["tool_calls"] = [
@@ -185,6 +199,9 @@ def record_compose_session(
                 int(duration_ms),
                 json.dumps(slim)[:120000],
                 str(final_output or "")[:20000],
+                int(prompt_tokens),
+                int(completion_tokens),
+                int(total_tokens),
             ),
         )
         return True

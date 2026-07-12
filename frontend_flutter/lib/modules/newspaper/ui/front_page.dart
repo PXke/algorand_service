@@ -1,12 +1,12 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/api/api_errors.dart';
+import '../../../core/config/app_config.dart' show looksLikeLogoUrl;
 import '../../../core/util/ssr_feed_payload.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/l10n/locale_provider.dart';
@@ -21,7 +21,9 @@ import '../../../core/ui/page_content.dart';
 import '../services/news_api.dart';
 import '../services/placements_api.dart';
 import 'article_card.dart';
+import 'by_the_numbers.dart';
 import 'feed_placement_card.dart';
+import 'story_row.dart';
 
 /// The paper's front page: a section rail, a lead story, a top-stories grid,
 /// the latest file, and the standing footer. This is the app's landing route.
@@ -34,7 +36,10 @@ class FrontPage extends ConsumerStatefulWidget {
 
 class _FrontPageState extends ConsumerState<FrontPage> {
   List<Map<String, dynamic>> _items = const [];
+  List<Map<String, dynamic>> _hot = const [];
   Map<String, dynamic>? _placement;
+  Map<String, dynamic>? _price;
+  List<({int epoch, double price})> _priceHistory = const [];
   String? _error;
   bool _loading = true;
 
@@ -59,6 +64,52 @@ class _FrontPageState extends ConsumerState<FrontPage> {
       () => unawaited(_loadPlacements()),
       Priority.idle,
     );
+    SchedulerBinding.instance.scheduleTask(
+      () => unawaited(_loadHot()),
+      Priority.idle,
+    );
+    SchedulerBinding.instance.scheduleTask(
+      () => unawaited(_loadNumbers()),
+      Priority.idle,
+    );
+  }
+
+  /// "By the numbers" module data. Best-effort: without it the front page
+  /// simply renders without the panel.
+  Future<void> _loadNumbers() async {
+    try {
+      final client = ref.read(apiClientProvider);
+      final price = await client.getJson('/api/v1/metrics/price');
+      if (price['available'] != true) return;
+      List<({int epoch, double price})> history = const [];
+      try {
+        final raw = await client.getJson('/api/v1/metrics/price/history');
+        final points = raw['points'];
+        if (points is List) {
+          history = [
+            for (final p in points.whereType<Map<String, dynamic>>())
+              if (p['epoch'] is int && p['price_usd'] is num)
+                (epoch: p['epoch'] as int, price: (p['price_usd'] as num).toDouble()),
+          ];
+        }
+      } catch (_) {}
+      if (!mounted) return;
+      setState(() {
+        _price = price;
+        _priceHistory = history;
+      });
+    } catch (_) {}
+  }
+
+  /// Most-read module. Best-effort: on any failure the front page simply
+  /// renders without it.
+  Future<void> _loadHot() async {
+    try {
+      final lang = contentLanguageCode(ref, context);
+      final hot = await NewsApi(ref.read(apiClientProvider)).fetchHot(limit: 6, lang: lang);
+      if (!mounted) return;
+      setState(() => _hot = hot);
+    } catch (_) {}
   }
 
   /// Re-fetch after painting SSR-hydrated content so the feed stays fresh.
@@ -68,6 +119,8 @@ class _FrontPageState extends ConsumerState<FrontPage> {
     await _load(silent: true);
     if (!mounted) return;
     await _loadPlacements();
+    if (!mounted) return;
+    await _loadHot();
   }
 
   Future<void> _loadPlacements() async {
@@ -136,31 +189,80 @@ class _FrontPageState extends ConsumerState<FrontPage> {
     );
   }
 
+  /// The lead must carry a photograph — a text-only lead above an image-rich
+  /// grid inverts the visual hierarchy (the grid reads as more important).
+  /// Promote the newest story with a real photo from the top of the feed;
+  /// only if none of the top stories has one does the plain first item lead.
+  static int _leadIndex(List<Map<String, dynamic>> items) {
+    final window = items.length < 5 ? items.length : 5;
+    for (var i = 0; i < window; i++) {
+      final url = items[i]['image_url']?.toString();
+      if (url != null && url.isNotEmpty && !looksLikeLogoUrl(url)) return i;
+    }
+    return 0;
+  }
+
   List<Widget> _buildBody(BuildContext context) {
     if (_items.isEmpty) return const [];
     final l10n = context.l10n;
-    final lead = _items.first;
-    final secondary = _items.skip(1).take(4).toList();
-    final rest = _items.skip(5).toList();
+    final leadIdx = _leadIndex(_items);
+    final lead = _items[leadIdx];
+    final others = [
+      for (var i = 0; i < _items.length; i++)
+        if (i != leadIdx) _items[i],
+    ];
+    final secondary = others.take(4).toList();
+    final rest = others.skip(4).toList();
     final twoCol = MediaQuery.sizeOf(context).width >= 700;
 
     return [
       FadeIn(child: ArticleCard(item: lead, hero: true, onTap: () => _open(lead))),
+      // The secondary stories are the tail of the lead package, not their own
+      // department — an unlabeled continuation, like a broadsheet front.
+      // ("Top stories" as a header read as a synonym of "Most read".)
       if (secondary.isNotEmpty) ...[
-        const SizedBox(height: AppLayout.sectionGap),
-        _SectionLabel(text: l10n.frontPageTopStories, icon: Icons.star_outline),
         const SizedBox(height: AppLayout.itemGap),
-        _Grid(items: secondary, twoCol: twoCol, onOpen: _open),
+        Divider(height: 1, color: context.appColors.border),
+        FadeIn(
+          child: StoryRowGrid(items: secondary, twoCol: twoCol, onOpen: _open),
+        ),
+      ],
+      if (_price != null) ...[
+        const SizedBox(height: AppLayout.sectionGap + 4),
+        FadeIn(child: ByTheNumbers(price: _price!, history: _priceHistory)),
       ],
       if (_placement != null) ...[
         const SizedBox(height: AppLayout.sectionGap),
         FadeIn(child: FeedPlacementCard(placement: _placement!)),
       ],
+      if (_hot.isNotEmpty) ...[
+        const SizedBox(height: AppLayout.sectionGap + 8),
+        // Velocity ranking → the honest label is "Hot", not "Most read"
+        // (lifetime totals live behind the All-time toggle on /hot).
+        _SectionRule(
+          text: l10n.navHot,
+          onMore: () => context.go('/hot'),
+        ),
+        const SizedBox(height: 4),
+        FadeIn(
+          child: StoryRowGrid(
+            items: _hot,
+            twoCol: twoCol,
+            onOpen: _open,
+            dense: true,
+            ranked: true,
+            columnMajor: true,
+          ),
+        ),
+      ],
+      // Everything after the lead package, chronological. Deliberately NOT
+      // labeled "Latest": the newest five stories are the lead + grid above,
+      // so this file is the continuation, not the start.
       if (rest.isNotEmpty) ...[
-        const SizedBox(height: AppLayout.sectionGap),
-        _SectionLabel(text: l10n.frontPageLatest, icon: Icons.bolt_outlined),
-        const SizedBox(height: AppLayout.itemGap),
-        _Grid(items: rest, twoCol: twoCol, onOpen: _open),
+        const SizedBox(height: AppLayout.sectionGap + 8),
+        _SectionRule(text: l10n.frontPageMoreNews),
+        const SizedBox(height: 4),
+        StoryRowGrid(items: rest, twoCol: twoCol, onOpen: _open, dense: true),
       ],
       const SizedBox(height: AppLayout.sectionGap),
       Center(
@@ -173,122 +275,51 @@ class _FrontPageState extends ConsumerState<FrontPage> {
     ];
   }
 }
-
-/// Two-column grid of compact story cards (single column on narrow screens).
-class _Grid extends StatelessWidget {
-  const _Grid({required this.items, required this.twoCol, required this.onOpen});
-
-  final List<Map<String, dynamic>> items;
-  final bool twoCol;
-  final void Function(Map<String, dynamic>) onOpen;
-
-  @override
-  Widget build(BuildContext context) {
-    if (!twoCol) {
-      return Column(
-        children: [
-          for (var i = 0; i < items.length; i++)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 16),
-              child: FadeIn(
-                delay: staggerDelay(i),
-                child: ArticleCard(item: items[i], onTap: () => onOpen(items[i])),
-              ),
-            ),
-        ],
-      );
-    }
-    final rows = <Widget>[];
-    for (var i = 0; i < items.length; i += 2) {
-      final left = items[i];
-      final right = i + 1 < items.length ? items[i + 1] : null;
-      rows.add(
-        FadeIn(
-          delay: staggerDelay(i ~/ 2),
-          child: Padding(
-            padding: const EdgeInsets.only(bottom: 16),
-            child: kIsWeb
-                ? Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        child: ArticleCard(
-                          item: left,
-                          compact: true,
-                          onTap: () => onOpen(left),
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: right == null
-                            ? const SizedBox.shrink()
-                            : ArticleCard(
-                                item: right,
-                                compact: true,
-                                onTap: () => onOpen(right),
-                              ),
-                      ),
-                    ],
-                  )
-                : IntrinsicHeight(
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Expanded(
-                          child: ArticleCard(
-                            item: left,
-                            compact: true,
-                            onTap: () => onOpen(left),
-                          ),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: right == null
-                              ? const SizedBox.shrink()
-                              : ArticleCard(
-                                  item: right,
-                                  compact: true,
-                                  onTap: () => onOpen(right),
-                                ),
-                        ),
-                      ],
-                    ),
-                  ),
-          ),
-        ),
-      );
-    }
-    return Column(children: rows);
-  }
-}
-
-class _SectionLabel extends StatelessWidget {
-  const _SectionLabel({required this.text, this.icon});
+/// here" without icon decoration.
+class _SectionRule extends StatelessWidget {
+  const _SectionRule({required this.text, this.onMore});
 
   final String text;
-  final IconData? icon;
+
+  /// When set, a quiet "→" affordance at the rule's right edge opens the
+  /// department's own page.
+  final VoidCallback? onMore;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = context.appColors;
-    return Row(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (icon != null) ...[
-          Icon(icon, size: 15, color: colors.accent),
-          const SizedBox(width: 7),
-        ],
-        Text(
-          text.toUpperCase(),
-          style: theme.textTheme.labelSmall?.copyWith(
-            color: colors.subtle,
-            letterSpacing: 0.9,
-            fontWeight: FontWeight.w700,
-          ),
+        Row(
+          children: [
+            Container(width: 34, height: 3, color: colors.accent),
+            const SizedBox(width: 12),
+            Text(
+              text.toUpperCase(),
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: theme.textTheme.titleMedium?.color,
+                letterSpacing: 1.4,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const Spacer(),
+            if (onMore != null)
+              IconButton(
+                onPressed: onMore,
+                icon: const Icon(Icons.east, size: 16),
+                color: colors.muted,
+                visualDensity: VisualDensity.compact,
+              ),
+          ],
         ),
-        const SizedBox(width: 12),
-        Expanded(child: Divider(height: 1, color: colors.border)),
+        const SizedBox(height: 8),
+        Divider(height: 1, color: colors.border),
       ],
     );
   }
 }
+
+/// Front-page "Most read" module: the top of the ranked file, two balanced
+/// columns on wide screens, dense rows.

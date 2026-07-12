@@ -252,8 +252,8 @@ def classify_publish_topic(
         combined = f"{page_text}\n{diff}"
 
     lower = combined.lower()
-    if _contains_any(lower, _SCAM_PHRASES) or (
-        _contains_any(lower, _SCAM_CONTEXT_PHRASES) and _contains_any(lower, _SCAM_ALARM_WORDS)
+    if _contains_any(lower, _SCAM_PHRASES) or _context_and_alarm_nearby(
+        lower, _SCAM_CONTEXT_PHRASES, _SCAM_ALARM_WORDS
     ):
         return PublishTopic.SCAM_ALERT
     if _contains_any(lower, _BREAKING_PHRASES) and _contains_any(
@@ -392,6 +392,35 @@ def build_dedupe_key(
 
 def _contains_any(text: str, phrases: tuple[str, ...]) -> bool:
     return any(p in text for p in phrases)
+
+
+# How close a context phrase and an alarm word must be (characters) to count
+# as one signal. _SCAM_CONTEXT_PHRASES' own docstring already says these "only
+# signal a scam ALONGSIDE actual alarm language" — but the check was anywhere-
+# in-the-page, not actually alongside, so e.g. a wallet's "Opt-in to Asset"
+# feature docs plus an unrelated ToS "risk warnings" clause thousands of
+# characters later (2026-07-10: perawallet.app, misfired as SCAM_ALERT/breaking
+# tier every ~5min via the breaking-queue drain) counted as a match. A same-
+# paragraph window catches genuine cases ("beware this rekey scam") without
+# the whole-document false positive.
+_SCAM_PROXIMITY_WINDOW = 200
+
+
+def _context_and_alarm_nearby(
+    text: str, context_phrases: tuple[str, ...], alarm_words: tuple[str, ...]
+) -> bool:
+    for ctx in context_phrases:
+        start = 0
+        while True:
+            idx = text.find(ctx, start)
+            if idx == -1:
+                break
+            lo = max(0, idx - _SCAM_PROXIMITY_WINDOW)
+            hi = idx + len(ctx) + _SCAM_PROXIMITY_WINDOW
+            if any(alarm in text[lo:hi] for alarm in alarm_words):
+                return True
+            start = idx + len(ctx)
+    return False
 
 
 def _diff_mentions_pricing(diff: str | None) -> bool:

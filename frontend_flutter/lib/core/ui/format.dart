@@ -31,7 +31,7 @@ String formatRelativeEpoch(BuildContext context, int? epoch) {
   if (diff.inMinutes < 60) {
     return l10n.timeMinutesAgo(diff.inMinutes);
   }
-  if (diff.inHours < 48) {
+  if (diff.inHours < 24) {
     return l10n.timeHoursAgo(diff.inHours);
   }
   if (diff.inDays < 14) {
@@ -61,6 +61,30 @@ String truncateMiddle(String value, {int head = 8, int tail = 6}) {
   return '${value.substring(0, head)}…${value.substring(value.length - tail)}';
 }
 
+/// Turns raw pipeline service identifiers into reader-facing labels.
+///
+/// The feed stores whatever the pipeline used as its work-unit key: a slug
+/// (`downbad-farm`), a URL (`https://kryptonurd.com/`), a forum topic
+/// (`forum-topic:15198`) or an internal editorial-brief UUID. Only the first
+/// two mean anything to a reader; internal keys must never print as-is.
+String? humanizeServiceId(String? serviceId) {
+  final raw = serviceId?.trim();
+  if (raw == null || raw.isEmpty) return null;
+  if (raw.startsWith('editorial-brief:')) return null;
+  if (raw.startsWith('forum-topic:')) return 'Algorand Forum';
+  if (raw.startsWith('http://') || raw.startsWith('https://')) {
+    final host = Uri.tryParse(raw)?.host ?? '';
+    if (host.isEmpty) return null;
+    return host.startsWith('www.') ? host.substring(4) : host;
+  }
+  // Internal keys that slipped through (uuid-ish tails) stay hidden.
+  if (RegExp(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+      .hasMatch(raw)) {
+    return null;
+  }
+  return raw;
+}
+
 String formatArticleMetaLine(
   BuildContext context, {
   int? publishedEpoch,
@@ -74,10 +98,12 @@ String formatArticleMetaLine(
       : relativeTime
           ? l10n.metaPublishedRelative(formatRelativeEpoch(context, publishedEpoch))
           : l10n.metaPublishedEpoch(formatEpoch(publishedEpoch));
+  final service = humanizeServiceId(serviceId);
+  final serviceLabel = service == null ? null : l10n.metaService(service);
   final parts = <String>[
-    if (publishedLabel != null) publishedLabel,
+    ?publishedLabel,
     if (round != null) l10n.metaRound(round.toString()),
-    if (serviceId != null && serviceId.isNotEmpty) l10n.metaService(serviceId),
+    ?serviceLabel,
   ];
   return parts.join('  ·  ');
 }

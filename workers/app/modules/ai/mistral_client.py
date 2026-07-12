@@ -145,6 +145,14 @@ class MistralRateLimitError(MistralError):
     """Raised when the API keeps returning 429 after the retry budget."""
 
 
+class MistralCreditError(MistralError):
+    """Raised on 401/402 — Mistral rejects the request outright, no retry.
+    Seen in practice (2026-07-10) as 401 "Unauthorized" once monthly prepaid
+    credit ran out; some providers disable the key itself rather than
+    returning a billing-specific code, so this also covers a genuinely bad/
+    revoked key — either way, waiting and retrying the same request won't help."""
+
+
 class MistralClient:
     """Thin connector for Mistral Chat Completions (RFC 9110 HTTP JSON)."""
 
@@ -160,10 +168,24 @@ class MistralClient:
         self._api_base = (api_base if api_base is not None else MISTRAL_API_BASE).rstrip("/")
         self._model = model if model is not None else MISTRAL_MODEL
         self._timeout = float(timeout if timeout is not None else MISTRAL_TIMEOUT_SECONDS)
+        self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        # Not every model accepts reasoning_effort (e.g. Mistral Large 3 400s with
+        # "reasoning_effort is not enabled for this model") — discovered lazily on
+        # the first request rather than hardcoding a model allowlist that goes
+        # stale as Mistral adds/changes models. Once learned, stays off for every
+        # later call on this instance so a multi-round session doesn't re-pay for
+        # the same rejection every round.
+        self._reasoning_effort_unsupported = False
 
     @property
     def is_configured(self) -> bool:
         return bool(self._api_key)
+
+    def usage_totals(self) -> dict[str, int]:
+        """Cumulative token usage across every request this instance has made
+        (a compose session's client(s) are created fresh per session, so this
+        is the session total, not a lifetime counter)."""
+        return dict(self._usage)
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         """POST one chat/completions request through the shared rate-limit gate,
@@ -216,9 +238,31 @@ class MistralClient:
                 )
                 time.sleep(wait)
                 continue
+            if (
+                resp.status_code == 400
+                and "reasoning_effort" in payload
+                and "reasoning_effort" in resp.text
+                and "not enabled" in resp.text
+            ):
+                self._reasoning_effort_unsupported = True
+                payload = {k: v for k, v in payload.items() if k != "reasoning_effort"}
+                logger.warning(
+                    "Mistral model %s does not support reasoning_effort; retrying without it",
+                    self._model,
+                )
+                continue
+            if resp.status_code in (401, 402):
+                raise MistralCreditError(
+                    f"Mistral API {resp.status_code}: {resp.text[:500]}"
+                )
             if resp.status_code >= 400:
                 raise MistralError(f"Mistral API {resp.status_code}: {resp.text[:500]}")
-            return resp.json()
+            data = resp.json()
+            usage = data.get("usage") or {}
+            self._usage["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+            self._usage["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+            self._usage["total_tokens"] += int(usage.get("total_tokens") or 0)
+            return data
         raise MistralError("Mistral request retry loop exhausted")  # unreachable
 
     def _log_task_context(self, op: str) -> None:
@@ -251,7 +295,7 @@ class MistralClient:
             "max_tokens": max_tokens if max_tokens is not None else MISTRAL_MAX_TOKENS,
             "temperature": temperature,
         }
-        if MISTRAL_REASONING_EFFORT:
+        if MISTRAL_REASONING_EFFORT and not self._reasoning_effort_unsupported:
             payload["reasoning_effort"] = MISTRAL_REASONING_EFFORT
         if json_object:
             payload["response_format"] = {"type": "json_object"}
@@ -333,6 +377,16 @@ class MistralClient:
         rounds = max_rounds if max_rounds is not None else MISTRAL_MAX_TOOL_ROUNDS
         convo = list(messages)
         if debug is not None:
+            # Two-stage compose invokes chat_with_tools multiple times sharing
+            # one debug dict (initial research, a RESEARCH_FLOOR nudge pass,
+            # a digest gap-fill pass) — prepend any prior round's transcript so
+            # it survives instead of being silently overwritten by this round's
+            # fresh 2-message start (previously lost every earlier round's tool
+            # calls from the persisted/audited transcript, though not from
+            # `trace`, which accumulates by reference regardless).
+            prior = debug.get("messages")
+            if isinstance(prior, list) and prior:
+                convo = prior + convo
             debug["messages"] = convo  # mutated in place → full transcript
             debug["model"] = self._model
         last_content = ""
@@ -363,7 +417,7 @@ class MistralClient:
                 "tools": tools,
                 "tool_choice": "auto",
             }
-            if MISTRAL_REASONING_EFFORT:
+            if MISTRAL_REASONING_EFFORT and not self._reasoning_effort_unsupported:
                 payload["reasoning_effort"] = MISTRAL_REASONING_EFFORT
             data = self._post(payload)
             try:

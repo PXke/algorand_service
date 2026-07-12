@@ -553,5 +553,20 @@
     }
   },
   "domainsDeadEndSnack": "{domain} marked as dead end",
-  "domainsWalletNotConnected": "钱包未连接"
+  "domainsWalletNotConnected": "钱包未连接",
+  "navHot": "热门",
+  "navTopics": "话题",
+  "hotTitle": "阅读最多",
+  "hotLead": "读者当前打开最多的报道。",
+  "topicsTitle": "话题",
+  "topicsLead": "编辑部近期使用的所有标签——大小代表报道量，颜色代表阅读热度。",
+  "topicSubtitle": "带有“{tag}”标签的报道",
+  "readsCount": "{count, plural, other{{count} 次阅读}}",
+  "frontPageMoreNews": "更多新闻",
+  "storiesCount": "{count, plural, other{{count} 篇报道}}",
+  "byTheNumbersRange": "过去7天",
+  "byTheNumbersMarketCap": "市值",
+  "byTheNumbersVolume": "24小时交易量",
+  "hotTabHot": "当前热门",
+  "hotTabAllTime": "历史最热"
 }

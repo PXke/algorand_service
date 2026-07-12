@@ -76,12 +76,47 @@ GoRouter createAppRouter() {
             ],
           ),
           GoRoute(
+            // Retired human sections: send old links to the closest topic.
             path: '/section/:slug',
+            redirect: (context, state) {
+              const map = {
+                'markets': 'market',
+                'security': 'breaking',
+                'developers': 'sdk',
+                'community': 'community',
+                'ecosystem': 'ecosystem',
+              };
+              final tag = map[state.pathParameters['slug']?.toLowerCase()];
+              return tag == null ? '/topics' : '/topic/$tag';
+            },
+          ),
+          GoRoute(
+            path: '/hot',
             pageBuilder: (context, state) => _page(
               state,
               DeferredWidget(
                 () => loadDeferredWithRetry(loadNewspaperModule),
-                () => buildSectionPage(slug: state.pathParameters['slug'] ?? ''),
+                buildHotPage,
+              ),
+            ),
+          ),
+          GoRoute(
+            path: '/topics',
+            pageBuilder: (context, state) => _page(
+              state,
+              DeferredWidget(
+                () => loadDeferredWithRetry(loadNewspaperModule),
+                buildTopicsPage,
+              ),
+            ),
+          ),
+          GoRoute(
+            path: '/topic/:tag',
+            pageBuilder: (context, state) => _page(
+              state,
+              DeferredWidget(
+                () => loadDeferredWithRetry(loadNewspaperModule),
+                () => buildTopicPage(tag: state.pathParameters['tag'] ?? ''),
               ),
             ),
           ),

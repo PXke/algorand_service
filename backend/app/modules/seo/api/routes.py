@@ -22,15 +22,22 @@ from app.core.query_params import query_param
 from app.modules.news.services.news_service import NewsService
 from app.modules.seo import analytics_store, feeds, render, shell, sitemap
 from app.modules.seo.markdown import md_to_html
-from app.modules.seo.sections import SECTIONS, matches_section, section_for_slug
+from app.modules.seo.topics import (
+    SECTION_REDIRECTS,
+    cached_feed_snapshot,
+    is_reliable_tag,
+    items_for_tag,
+)
 from app.schemas import PageviewBeaconRequest
 
 logger = logging.getLogger(__name__)
 
-_HOME_LIMIT = 12
+_HOME_LIMIT = 30
+_FRONT_HOT_LIMIT = 6
+_NEWS_SSR_LIMIT = 30
 _SECTION_LIMIT = 30
 _FEED_FULL_CONTENT_LIMIT = 20  # newest items carry full content:encoded HTML
-_SITEMAP_LIMIT = 500
+_SITEMAP_LIMIT = 5000
 
 
 def _tracking_opted_out(request: Request) -> bool:
@@ -105,7 +112,16 @@ def _record(request: Request, path: str) -> None:
     )
 
 
-_BEACON_STATIC_PATHS = {"/", "/news", "/about", "/contact", "/search", "/suggestions"}
+_BEACON_STATIC_PATHS = {
+    "/",
+    "/news",
+    "/hot",
+    "/topics",
+    "/about",
+    "/contact",
+    "/search",
+    "/suggestions",
+}
 
 
 def _is_known_app_path(path: str) -> bool:
@@ -120,8 +136,11 @@ def _is_known_app_path(path: str) -> bool:
         except ValueError:
             return False
         return True
-    if path.startswith("/section/"):
-        return section_for_slug(path[len("/section/") :]) is not None
+    if path.startswith("/topic/"):
+        # Any non-empty slug: the Flutter router serves every /topic/:tag.
+        # Cap length to keep junk out of the analytics store.
+        slug = path[len("/topic/") :]
+        return 0 < len(slug) <= 48 and "/" not in slug
     return False
 
 
@@ -182,14 +201,26 @@ def register_seo_routes(app) -> None:
         path = "/"
         _record(request, path)
         items = news.list_feed(limit=_HOME_LIMIT)
-        return _doc_response(render.render_home(items), "public, max-age=120", tracked_path=path)
+        hot = news.hot_feed(limit=_FRONT_HOT_LIMIT)
+        feed, topics = cached_feed_snapshot(news.list_feed)
+        _ = feed
+        return _doc_response(
+            render.render_front(items, hot, topic_links=topics),
+            "public, max-age=120",
+            tracked_path=path,
+        )
 
     @app.get("/news")
     async def news_index(request: Request) -> Response:
         path = "/news"
         _record(request, path)
-        items = news.list_feed(limit=_HOME_LIMIT)
-        return _doc_response(render.render_home(items), "public, max-age=120", tracked_path=path)
+        feed, topics = cached_feed_snapshot(news.list_feed)
+        items = feed[:_NEWS_SSR_LIMIT]
+        return _doc_response(
+            render.render_news_feed(items, topic_links=topics, total_count=len(feed)),
+            "public, max-age=120",
+            tracked_path=path,
+        )
 
     @app.get("/news/articles/:article_id")
     async def article(request: Request) -> Response:
@@ -217,8 +248,17 @@ def register_seo_routes(app) -> None:
         translation_langs = news.translation_langs_for(article_id)
         path = f"/news/articles/{article_id}"
         _record(request, path)
+        # Footer topic links + related stories reuse the cached topics-index feed.
+        feed, topics = cached_feed_snapshot(news.list_feed)
+        related = render.pick_related_articles(detail, feed, limit=5)
         return _doc_response(
-            render.render_article(detail, lang=lang, translation_langs=translation_langs),
+            render.render_article(
+                detail,
+                lang=lang,
+                translation_langs=translation_langs,
+                topic_links=topics,
+                related=related,
+            ),
             "public, max-age=300, stale-while-revalidate=600",
             tracked_path=path,
             html_lang=html_lang_for(lang),
@@ -226,18 +266,58 @@ def register_seo_routes(app) -> None:
 
     @app.get("/section/:slug")
     async def section(request: Request) -> Response:
-        slug = request.path_params.get("slug", "")
-        sec = section_for_slug(slug)
-        if sec is None:
-            _record_notfound(request, f"/section/{slug}")
-            return _doc_response(
-                render.render_noindex("Section not found"), "public, max-age=60", status=404
-            )
-        path = f"/section/{slug}"
+        # The human-defined sections were retired in favour of writer-tag
+        # topics; their URLs are Google-indexed, so 301 to the closest topic.
+        slug = request.path_params.get("slug", "").strip().lower()
+        target = SECTION_REDIRECTS.get(slug)
+        location = f"/topic/{target}" if target else "/topics"
+        return Response(
+            status_code=301,
+            headers={"Location": location, "Cache-Control": "public, max-age=86400"},
+            description="",
+        )
+
+    @app.get("/hot")
+    async def hot(request: Request) -> Response:
+        path = "/hot"
         _record(request, path)
-        feed = news.list_feed(limit=200)
-        items = [i for i in feed if matches_section(sec, i.tags)][:_SECTION_LIMIT]
-        return _doc_response(render.render_section(sec, items), "public, max-age=120", tracked_path=path)
+        items = news.hot_feed(limit=30)
+        _feed, topics = cached_feed_snapshot(news.list_feed)
+        return _doc_response(
+            render.render_hot(items, topic_links=topics),
+            "public, max-age=300",
+            tracked_path=path,
+        )
+
+    @app.get("/topics")
+    async def topics(request: Request) -> Response:
+        path = "/topics"
+        _record(request, path)
+        feed, picked = cached_feed_snapshot(news.list_feed)
+        return _doc_response(
+            render.render_topics(picked), "public, max-age=300", tracked_path=path
+        )
+
+    @app.get("/topic/:tag")
+    async def topic(request: Request) -> Response:
+        tag = request.path_params.get("tag", "").strip().lower()
+        feed, topic_list = cached_feed_snapshot(news.list_feed)
+        matching = items_for_tag(feed, tag)
+        items = matching[:_SECTION_LIMIT]
+        if not items:
+            _record_notfound(request, f"/topic/{tag}")
+            return _doc_response(
+                render.render_noindex("Topic not found"), "public, max-age=60", status=404
+            )
+        path = f"/topic/{tag}"
+        _record(request, path)
+        head, body = render.render_topic(
+            tag, items, topic_links=topic_list, total_count=len(matching)
+        )
+        # Thin topics (single story) stay reachable but out of the index.
+        if not is_reliable_tag(tag, feed):
+            head += '\n<meta name="robots" content="noindex, follow">'
+        return _doc_response((head, body), "public, max-age=120", tracked_path=path)
 
     @app.get("/about")
     async def about(request: Request) -> Response:
@@ -254,7 +334,7 @@ def register_seo_routes(app) -> None:
     @app.get("/search")
     async def search(request: Request) -> Response:
         _ = request
-        return _doc_response(render.render_noindex("Search"), "public, max-age=300")
+        return _doc_response(render.render_noindex("Search", active="/search"), "public, max-age=300")
 
     @app.get("/suggestions")
     async def suggestions(request: Request) -> Response:
@@ -306,6 +386,31 @@ def register_seo_routes(app) -> None:
                 continue
         return _text_response(
             feeds.rss_xml(items, bodies=bodies),
+            "application/rss+xml; charset=utf-8",
+            "public, max-age=900",
+        )
+
+    @app.get("/feed/topic/:tag")
+    async def topic_rss_feed(request: Request) -> Response:
+        tag = request.path_params.get("tag", "").strip().lower()
+        if tag.endswith(".xml"):
+            tag = tag[: -len(".xml")]
+        if not tag or "/" in tag or len(tag) > 48:
+            return Response(
+                status_code=404,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+                description="Not found",
+            )
+        feed, _ = cached_feed_snapshot(news.list_feed)
+        items = items_for_tag(feed, tag)
+        if not items:
+            return Response(
+                status_code=404,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+                description="Not found",
+            )
+        return _text_response(
+            feeds.topic_rss_xml(tag, items),
             "application/rss+xml; charset=utf-8",
             "public, max-age=900",
         )
@@ -394,6 +499,9 @@ def register_seo_routes(app) -> None:
         ("/news", news_index),
         ("/news/articles/:article_id", article),
         ("/section/:slug", section),
+        ("/hot", hot),
+        ("/topics", topics),
+        ("/topic/:tag", topic),
         ("/about", about),
         ("/contact", contact),
         ("/search", search),
@@ -401,6 +509,7 @@ def register_seo_routes(app) -> None:
         ("/admin", admin),
         ("/robots.txt", robots),
         ("/feed.xml", rss_feed),
+        ("/feed/topic/:tag", topic_rss_feed),
         ("/llms.txt", llms_txt),
         ("/sitemap.xml", sitemap_root),
         ("/sitemap-pages.xml", sitemap_pages),
@@ -408,5 +517,3 @@ def register_seo_routes(app) -> None:
         ("/sitemap-news.xml", sitemap_news),
     ):
         _mirror_head(app, path, handler)
-
-    _ = SECTIONS  # referenced for completeness; routes resolve sections per-request

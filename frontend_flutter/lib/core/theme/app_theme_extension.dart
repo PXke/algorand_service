@@ -36,7 +36,9 @@ class AppThemeColors extends ThemeExtension<AppThemeColors> {
   static const light = AppThemeColors(
     panelBackground: Color(0xFFFFFFFF),
     muted: Color(0xFF5C6573),
-    subtle: Color(0xFF6B7480),
+    // 4.68:1 on the paper background (#F8F7F4) — the old #6B7480 sat at
+    // 4.42:1, under the WCAG AA 4.5:1 floor for the small labels it styles.
+    subtle: Color(0xFF67707C),
     border: Color(0xFFDADDE4),
     calloutBackground: Color(0xFFEFEDFC),
     accent: Color(0xFF4F46E5),
@@ -50,7 +52,9 @@ class AppThemeColors extends ThemeExtension<AppThemeColors> {
   static const dark = AppThemeColors(
     panelBackground: Color(0xFF161B24),
     muted: Color(0xFF9AA3B2),
-    subtle: Color(0xFF6B7585),
+    // 4.82:1 on panels — the old #6B7585 read 3.71:1, well under AA for the
+    // timestamps and small labels that use it.
+    subtle: Color(0xFF7E8899),
     border: Color(0xFF272F3D),
     calloutBackground: Color(0xFF1C2030),
     // Muted slate-indigo accent (de-neoned) + a neutral soft tint.

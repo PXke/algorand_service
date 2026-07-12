@@ -18,6 +18,8 @@ class StoredArticle:
     tags: list[str] | None = None
     image_url: str | None = None
     translations: dict[str, str] | None = None
+    # Last content revision (edit/recompose); None = never revised.
+    updated_at_epoch: int | None = None
 
 
 class ArticleStore(Protocol):

@@ -594,6 +594,39 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
+  String get navHot => '热门';
+
+  @override
+  String get navTopics => '话题';
+
+  @override
+  String get hotTitle => '阅读最多';
+
+  @override
+  String get hotLead => '读者当前打开最多的报道。';
+
+  @override
+  String get topicsTitle => '话题';
+
+  @override
+  String get topicsLead => '编辑部近期使用的所有标签——大小代表报道量，颜色代表阅读热度。';
+
+  @override
+  String topicSubtitle(String tag) {
+    return '带有“$tag”标签的报道';
+  }
+
+  @override
+  String readsCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count 次阅读',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String get sectionMarkets => '市场';
 
   @override
@@ -922,4 +955,32 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get domainsWalletNotConnected => '钱包未连接';
+
+  @override
+  String get frontPageMoreNews => '更多新闻';
+
+  @override
+  String storiesCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count 篇报道',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get byTheNumbersRange => '过去7天';
+
+  @override
+  String get byTheNumbersMarketCap => '市值';
+
+  @override
+  String get byTheNumbersVolume => '24小时交易量';
+
+  @override
+  String get hotTabHot => '当前热门';
+
+  @override
+  String get hotTabAllTime => '历史最热';
 }

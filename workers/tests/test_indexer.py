@@ -46,6 +46,46 @@ def test_page_index_skips_when_classifier_rejects(monkeypatch) -> None:
     assert outcome["reason"] == "classifier_rejected"
 
 
+def test_index_article_reads_tags_from_article_detail(monkeypatch) -> None:
+    from app.modules.newspaper.article_store import ArticleDetail
+    from app.modules.search.tasks import index_tasks
+
+    captured: dict = {}
+
+    def fake_get_article(article_id: str) -> ArticleDetail:
+        assert article_id == "a1"
+        return ArticleDetail(
+            article_id="a1",
+            service_id="svc",
+            title="Title",
+            summary="Summary",
+            body="Body",
+            published_at_epoch=1,
+            trigger_txid="",
+            trigger_round=0,
+            source_url="https://example.com",
+            tags=("defi", "payments"),
+        )
+
+    def fake_upsert(**kwargs):
+        captured.update(kwargs)
+        return {"status": "indexed"}
+
+    monkeypatch.setattr(index_tasks, "get_article", fake_get_article)
+    monkeypatch.setattr(index_tasks, "upsert_article_document", fake_upsert)
+
+    outcome = index_tasks.index_article(
+        article_id="a1",
+        title="Title",
+        summary="Summary",
+        body="Body",
+        service_id="svc",
+        published_at_epoch=1,
+    )
+    assert outcome["status"] == "indexed"
+    assert captured["tags"] == ["defi", "payments"]
+
+
 def test_classifier_anchors_chain_silent_ecosystem_domains() -> None:
     """HesabPay/Sealed: real Algorand-ecosystem services whose own sites never
     say 'Algorand' (hesab.com has zero chain mentions). Without a KNOWN_DOMAINS

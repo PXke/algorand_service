@@ -553,5 +553,20 @@
       }
     }
   },
-  "domainsWalletNotConnected": "वॉलेट कनेक्ट नहीं है"
+  "domainsWalletNotConnected": "वॉलेट कनेक्ट नहीं है",
+  "navHot": "लोकप्रिय",
+  "navTopics": "विषय",
+  "hotTitle": "सबसे ज़्यादा पढ़े गए",
+  "hotLead": "वे ख़बरें जिन्हें पाठक अभी सबसे ज़्यादा पढ़ रहे हैं।",
+  "topicsTitle": "विषय",
+  "topicsLead": "न्यूज़रूम द्वारा हाल में इस्तेमाल किए गए सभी टैग — आकार कवरेज से, रंग पढ़े जाने से।",
+  "topicSubtitle": "“{tag}” टैग वाली ख़बरें",
+  "readsCount": "{count, plural, =1{1 बार पढ़ा गया} other{{count} बार पढ़ा गया}}",
+  "frontPageMoreNews": "और ख़बरें",
+  "storiesCount": "{count, plural, =1{1 ख़बर} other{{count} ख़बरें}}",
+  "byTheNumbersRange": "पिछले 7 दिन",
+  "byTheNumbersMarketCap": "बाज़ार पूंजी",
+  "byTheNumbersVolume": "24 घंटे का वॉल्यूम",
+  "hotTabHot": "अभी लोकप्रिय",
+  "hotTabAllTime": "सर्वकालिक"
 }

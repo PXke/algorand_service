@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.modules.search.core.tokenize import build_article_search_tokens
 from app.modules.search.core.typesense_config import build_typesense_client, is_typesense_configured
 
 logger = logging.getLogger(__name__)
@@ -10,12 +11,20 @@ logger = logging.getLogger(__name__)
 ARTICLES_COLLECTION = "articles"
 PAGES_COLLECTION = "pages"
 
+# Keep in sync with backend/app/core/typesense_client.py
+ARTICLE_SEARCH_SYNONYMS: dict[str, list[str]] = {
+    "geo-usa": ["usa", "us", "u.s.", "u.s.a.", "united states"],
+    "geo-uk": ["uk", "u.k.", "united kingdom"],
+    "geo-eu": ["eu", "e.u.", "european union"],
+}
+
 ARTICLES_SCHEMA = {
     "name": ARTICLES_COLLECTION,
     "fields": [
         {"name": "title", "type": "string"},
         {"name": "summary", "type": "string"},
         {"name": "body", "type": "string"},
+        {"name": "tokens", "type": "string[]", "optional": True},
         {"name": "service_id", "type": "string", "facet": True},
         {"name": "published_at", "type": "int64", "sort": True},
     ],
@@ -43,10 +52,20 @@ def _ensure_collection(client: Any, schema: dict[str, object]) -> None:
     name = str(schema["name"])
     try:
         client.collections[name].retrieve()
-        return
     except Exception:
         logger.debug("typesense collection %r not found; creating", name, exc_info=True)
-    client.collections.create(schema)
+        client.collections.create(schema)
+    if name == ARTICLES_COLLECTION:
+        _ensure_article_search_synonyms(client)
+
+
+def _ensure_article_search_synonyms(client: Any) -> None:
+    synonyms_api = client.collections[ARTICLES_COLLECTION].synonyms
+    for syn_id, synonyms in ARTICLE_SEARCH_SYNONYMS.items():
+        try:
+            synonyms_api.upsert(syn_id, {"synonyms": synonyms})
+        except Exception:
+            logger.warning("failed to upsert search synonym %r", syn_id, exc_info=True)
 
 
 def upsert_article_document(
@@ -57,6 +76,7 @@ def upsert_article_document(
     body: str,
     service_id: str,
     published_at_epoch: int,
+    tags: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, str]:
     if not is_typesense_configured():
         return {"status": "skipped", "reason": "typesense_not_configured"}
@@ -67,12 +87,16 @@ def upsert_article_document(
 
     try:
         _ensure_collection(client, ARTICLES_SCHEMA)
+        tokens = build_article_search_tokens(
+            title=title, summary=summary, body=body, tags=tags
+        )
         client.collections[ARTICLES_COLLECTION].documents.upsert(
             {
                 "id": article_id,
                 "title": title,
                 "summary": summary,
                 "body": body,
+                "tokens": tokens,
                 "service_id": service_id,
                 "published_at": published_at_epoch,
             }

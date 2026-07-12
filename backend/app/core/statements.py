@@ -73,6 +73,7 @@ class DeletedArticleStmts:
     GET = _Stmt(
         "SELECT article_id FROM algorand_platform.deleted_articles WHERE article_id = ?"
     )
+    LIST_IDS = _Stmt("SELECT article_id FROM algorand_platform.deleted_articles")
 
 
 class FeedStmts:
@@ -289,14 +290,15 @@ class ToolInsightStmts:
     )
     LIST_COMPOSE_SESSIONS = _Stmt(
         "SELECT created_at, session_id, service_id, source_url, model, status, "
-        "rounds, tool_calls, duration_ms, messages, final_output "
+        "rounds, tool_calls, duration_ms, messages, final_output, "
+        "prompt_tokens, completion_tokens, total_tokens "
         "FROM algorand_platform.compose_sessions WHERE bucket = ? LIMIT 20"
     )
     # Summary-only variant for the polled list view — skips messages/final_output,
     # which can be up to ~140KB per row (see tool_insights_store.record_compose_session).
     LIST_COMPOSE_SESSIONS_SUMMARY = _Stmt(
         "SELECT created_at, session_id, service_id, source_url, model, status, "
-        "rounds, tool_calls, duration_ms "
+        "rounds, tool_calls, duration_ms, prompt_tokens, completion_tokens, total_tokens "
         "FROM algorand_platform.compose_sessions WHERE bucket = ? LIMIT 20"
     )
     GET_COMPOSE_SESSION_DETAIL = _Stmt(
@@ -423,14 +425,14 @@ class NewsStmts:
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     )
     FEED_PAGE = _Stmt(
-        "SELECT article_id, service_id, title, summary, published_at, tags, "
+        "SELECT article_id, service_id, title, summary, published_at, updated_at, tags, "
         "image_url, source_url, translations FROM algorand_platform.articles_feed "
         "WHERE bucket = ? AND published_at < ? LIMIT ?"
     )
     GET_FULL = _Stmt(
         "SELECT article_id, service_id, title, summary, body, "
-        "trigger_txid, trigger_round, source_url, published_at, tags, image_url, "
-        "translations "
+        "trigger_txid, trigger_round, source_url, published_at, updated_at, tags, "
+        "image_url, translations "
         "FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
 
@@ -565,6 +567,21 @@ class ServiceSourceStmts:
 
 
 # --------------------------------------------------------------------------- #
+# page_snapshots
+# --------------------------------------------------------------------------- #
+class SnapshotStmts:
+    GET_LATEST = _Stmt(
+        "SELECT content_hash, title, body FROM algorand_platform.page_snapshots "
+        "WHERE source_id = ? LIMIT 1"
+    )
+    INSERT = _Stmt(
+        "INSERT INTO algorand_platform.page_snapshots "
+        "(source_id, captured_at, content_hash, title, body) "
+        "VALUES (?, ?, ?, ?, ?) USING TTL 3888000"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # feed_placements / feed_placements_by_slot
 # --------------------------------------------------------------------------- #
 class PlacementStmts:
@@ -603,6 +620,12 @@ class PriceMetricsStmts:
     LATEST_SAMPLES = _Stmt(
         "SELECT market_cap_usd, volume_24h_usd, collected_at "
         "FROM algorand_platform.price_metric_samples WHERE asset_id = ? LIMIT 20"
+    )
+    # Sparkline history: newest-first thanks to the DESC clustering order;
+    # ~hourly samples, so 200 rows comfortably covers a week.
+    PRICE_HISTORY = _Stmt(
+        "SELECT collected_at, price_usd "
+        "FROM algorand_platform.price_metric_samples WHERE asset_id = ? LIMIT ?"
     )
 
 

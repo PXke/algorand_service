@@ -1173,6 +1173,54 @@ abstract class AppLocalizations {
   /// **'More in {section}'**
   String frontPageSectionStories(String section);
 
+  /// No description provided for @navHot.
+  ///
+  /// In en, this message translates to:
+  /// **'Hot'**
+  String get navHot;
+
+  /// No description provided for @navTopics.
+  ///
+  /// In en, this message translates to:
+  /// **'Topics'**
+  String get navTopics;
+
+  /// No description provided for @hotTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Most read'**
+  String get hotTitle;
+
+  /// No description provided for @hotLead.
+  ///
+  /// In en, this message translates to:
+  /// **'The stories readers are opening most right now.'**
+  String get hotLead;
+
+  /// No description provided for @topicsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Topics'**
+  String get topicsTitle;
+
+  /// No description provided for @topicsLead.
+  ///
+  /// In en, this message translates to:
+  /// **'Every tag the newsroom used recently — sized by coverage, warmed by reads.'**
+  String get topicsLead;
+
+  /// No description provided for @topicSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Stories tagged “{tag}”'**
+  String topicSubtitle(String tag);
+
+  /// No description provided for @readsCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 read} other{{count} reads}}'**
+  String readsCount(int count);
+
   /// No description provided for @sectionMarkets.
   ///
   /// In en, this message translates to:
@@ -1742,6 +1790,48 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Wallet not connected'**
   String get domainsWalletNotConnected;
+
+  /// No description provided for @frontPageMoreNews.
+  ///
+  /// In en, this message translates to:
+  /// **'More news'**
+  String get frontPageMoreNews;
+
+  /// No description provided for @storiesCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 story} other{{count} stories}}'**
+  String storiesCount(int count);
+
+  /// No description provided for @byTheNumbersRange.
+  ///
+  /// In en, this message translates to:
+  /// **'Past 7 days'**
+  String get byTheNumbersRange;
+
+  /// No description provided for @byTheNumbersMarketCap.
+  ///
+  /// In en, this message translates to:
+  /// **'Market cap'**
+  String get byTheNumbersMarketCap;
+
+  /// No description provided for @byTheNumbersVolume.
+  ///
+  /// In en, this message translates to:
+  /// **'24h volume'**
+  String get byTheNumbersVolume;
+
+  /// No description provided for @hotTabHot.
+  ///
+  /// In en, this message translates to:
+  /// **'Hot right now'**
+  String get hotTabHot;
+
+  /// No description provided for @hotTabAllTime.
+  ///
+  /// In en, this message translates to:
+  /// **'All-time'**
+  String get hotTabAllTime;
 }
 
 class _AppLocalizationsDelegate

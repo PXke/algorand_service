@@ -72,30 +72,20 @@ class _ContactPageState extends ConsumerState<ContactPage> {
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
-    final theme = Theme.of(context);
     final colors = context.appColors;
 
+    // Form fields sit directly on the page (the standard editorial layout);
+    // panels are reserved for placements, not pages.
     return PageScroll(
       children: [
         PageHeader(
           title: l10n.contactTitle,
           subtitle: l10n.contactSubtitle,
         ),
-        DecoratedBox(
-          decoration: BoxDecoration(
-            color: colors.panelBackground,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: colors.border),
-            boxShadow: [
-              BoxShadow(
-                color: colors.cardShadow,
-                blurRadius: 16,
-                offset: const Offset(0, 6),
-              ),
-            ],
-          ),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: AppLayout.maxReadingWidth),
           child: Padding(
-            padding: const EdgeInsets.all(20),
+            padding: EdgeInsets.zero,
             child: _sent
                 ? _SentConfirmation(message: l10n.contactSent)
                 : Column(
@@ -107,7 +97,7 @@ class _ContactPageState extends ConsumerState<ContactPage> {
                         decoration: InputDecoration(
                           labelText: l10n.contactNameLabel,
                           filled: true,
-                          fillColor: theme.scaffoldBackgroundColor,
+                          fillColor: colors.panelBackground,
                         ),
                       ),
                       const SizedBox(height: 12),
@@ -118,7 +108,7 @@ class _ContactPageState extends ConsumerState<ContactPage> {
                         decoration: InputDecoration(
                           labelText: l10n.contactEmailLabel,
                           filled: true,
-                          fillColor: theme.scaffoldBackgroundColor,
+                          fillColor: colors.panelBackground,
                         ),
                       ),
                       const SizedBox(height: 12),
@@ -131,7 +121,7 @@ class _ContactPageState extends ConsumerState<ContactPage> {
                           hintText: l10n.contactMessageHint,
                           alignLabelWithHint: true,
                           filled: true,
-                          fillColor: theme.scaffoldBackgroundColor,
+                          fillColor: colors.panelBackground,
                         ),
                       ),
                       const SizedBox(height: 16),

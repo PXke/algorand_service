@@ -189,20 +189,23 @@ MISTRAL_MODEL = env_str("MISTRAL_MODEL", "mistral-small-latest")
 # (perfect Tool Selection + Error Recovery) > Devstral-2 / Medium-3.1 80% > Large-3
 # 70%. Trade-off of "-latest": aliases can be throttled to a lower TPM tier than a
 # dated pin — if that bites, pin a date (e.g. MISTRAL_MODEL_WRITER=mistral-small-2603).
-# Moved to Medium (2026-06-19): better instruction-following / long-context
-# adherence than Small for final prose. Stage-1 research + digest synthesis run
-# on MISTRAL_MODEL_RESEARCH (Small by default) — better tool-calling per the
-# ToolCall-15 benchmark and much cheaper across ~14 re-sent rounds.
-MISTRAL_MODEL_WRITER = env_str("MISTRAL_MODEL_WRITER", "mistral-medium-latest")
+# Model split (owner decision, 2026-07-12): LARGE writes — final prose and the
+# digest need the strongest instruction-following (headline rules, format
+# rules, banned lexicon) — while SMALL does the mechanical work: the agentic
+# tool loop (Small 4 leads the ToolCall-15 benchmark: 83% > Medium-3.1 80% >
+# Large-3 70%, 2026-06-15) and translations. Prod workers.env has pinned
+# writer/digest to Large since 2026-07-10; these defaults now match so losing
+# an env line can't silently downgrade the writer.
+MISTRAL_MODEL_WRITER = env_str("MISTRAL_MODEL_WRITER", "mistral-large-latest")
 # Agentic research tool loop + research-floor nudges. Small 4 leads on tool
-# selection and error recovery; research does not need Medium's prose fidelity.
+# selection and error recovery; research does not need Large's prose fidelity.
 MISTRAL_MODEL_RESEARCH = env_str("MISTRAL_MODEL_RESEARCH", "mistral-small-latest")
-# Research Digest synthesis (Stage 1→2 handoff). Defaults to the research tier.
-MISTRAL_MODEL_DIGEST = env_str("MISTRAL_MODEL_DIGEST", MISTRAL_MODEL_RESEARCH)
+# Research Digest synthesis (Stage 1→2 handoff): also reader-facing prose.
+MISTRAL_MODEL_DIGEST = env_str("MISTRAL_MODEL_DIGEST", "mistral-large-latest")
 MISTRAL_MODEL_PREMIUM = env_str("MISTRAL_MODEL_PREMIUM", "mistral-small-latest")
 # Translations are mechanical localization of an already-written article — no
 # research, no tools, no editorial judgment — and fire 5x per published article
-# (one per language), so they don't need (or justify) the writer's Medium tier.
+# (one per language), so they don't need (or justify) the writer's Large tier.
 MISTRAL_MODEL_TRANSLATE = env_str("MISTRAL_MODEL_TRANSLATE", "mistral-small-latest")
 # Mistral Small 4 is a HYBRID reasoning model: the reasoning_effort param toggles
 # between fast instruct ("none", ~Small 3.2 chat) and deep step-by-step reasoning
@@ -275,9 +278,14 @@ MISTRAL_TEMP_WRITE = env_float("MISTRAL_TEMP_WRITE", 0.6)
 # graded below this triggers exactly one revision pass with the issues fed back.
 WRITER_REVIEW_ENABLED = env_bool("WRITER_REVIEW_ENABLED", True)
 WRITER_REVIEW_MIN_GRADE = env_float("WRITER_REVIEW_MIN_GRADE", 7.0)
-# Stage 3 qualitative rubric (Small tier): narrative synthesis + technical depth.
+# Stage 3 qualitative rubric (Small tier): narrative synthesis + technical depth,
+# scored 1-5. quality_needs_revision() triggers on strictly-below, so this is the
+# lowest score considered PASSING — 4, not 3: a 3 still carries real, written
+# issues ("reads like a pitch", "not synthesized") that the old default of 3
+# silently let through (3 < 3 is False), so the rubric's own feedback was
+# generated but never fed back into a revision.
 WRITER_QUALITY_LLM_ENABLED = env_bool("WRITER_QUALITY_LLM_ENABLED", True)
-WRITER_QUALITY_LLM_MIN_SCORE = env_int("WRITER_QUALITY_LLM_MIN_SCORE", 3)
+WRITER_QUALITY_LLM_MIN_SCORE = env_int("WRITER_QUALITY_LLM_MIN_SCORE", 4)
 # Length is LAX: any article in [LENGTH_OK_MIN, LENGTH_OK_MAX] words is fine —
 # length is not a graded dimension and not a target. Research DEPTH drives the
 # grade instead, so the model fetches context rather than padding to a word count.
@@ -293,6 +301,15 @@ LENGTH_OK_MAX_WORDS = env_int("LENGTH_OK_MAX_WORDS", 2000)
 RESEARCH_MIN_TOOL_CALLS = env_int("RESEARCH_MIN_TOOL_CALLS", 6)
 RESEARCH_FLOOR_ENABLED = env_bool("RESEARCH_FLOOR_ENABLED", True)
 RESEARCH_FLOOR_MAX_PASSES = env_int("RESEARCH_FLOOR_MAX_PASSES", 1)
+# Digest synthesis (Stage 1b) can flag specific unresolved-but-material gaps
+# (e.g. "no real sales data found for this marketplace"). Rather than handing
+# those straight to the tool-less writer — which either omits them (fine) or
+# invents/recalls something to fill them (the nf.domains fabricated-sales
+# incident) — send the model back for ONE bounded extra research pass
+# targeting exactly those gaps, then re-synthesize the digest. Off switch for
+# cost control; the round budget below keeps a single pass cheap even when on.
+DIGEST_GAP_FILL_ENABLED = env_bool("DIGEST_GAP_FILL_ENABLED", True)
+DIGEST_GAP_FILL_MAX_ROUNDS = env_int("DIGEST_GAP_FILL_MAX_ROUNDS", 4)
 # A compose_session stuck in a non-terminal status (researching/writing) this
 # long is dead, not slow — the compose task's own hard time limit
 # (CELERY_TASK_TIME_LIMIT, 1860s/31min) means a crash that skips the

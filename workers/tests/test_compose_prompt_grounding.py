@@ -158,3 +158,60 @@ def test_build_stage2_user_omits_tool_trace():
     assert "Research Digest" in user
     assert "cannot call tools" in user
     assert "fact" in user
+
+
+def test_research_digest_synthesis_asks_for_unresolved_gaps():
+    assert "Unresolved Gaps" in mc._RESEARCH_DIGEST_SYNTHESIS
+    assert "write exactly: None" in mc._RESEARCH_DIGEST_SYNTHESIS
+
+
+def test_narrative_guidance_bans_facts_outside_digest():
+    """The nf.domains incident: the writer stage added two fabricated sales
+    that weren't even in the (already-fabricated) digest. Stage 2 must be
+    told the Digest is the ceiling, not just a floor, for specific facts."""
+    assert "not already in the Research Digest" in mc._NARRATIVE_GUIDANCE
+    assert "however plausible or familiar it feels" in mc._NARRATIVE_GUIDANCE
+
+
+def test_tools_guidance_bans_memory_as_source():
+    assert "MEMORY IS NOT A SOURCE" in mc._TOOLS_GUIDANCE
+    assert "MEMORY IS NOT A SOURCE" in mc._RESEARCH_PHASE_GUIDANCE
+
+
+class TestExtractUnresolvedGaps:
+    def test_none_returns_empty(self):
+        digest = "## Research Digest\n\n### Unresolved Gaps\n- None\n"
+        assert mc._extract_unresolved_gaps(digest) == ""
+
+    def test_missing_section_returns_empty(self):
+        digest = "## Research Digest\n\n### Verified Facts\n- a fact\n"
+        assert mc._extract_unresolved_gaps(digest) == ""
+
+    def test_real_gaps_extracted(self):
+        digest = (
+            "## Research Digest\n\n"
+            "### Verified Facts\n- a fact\n\n"
+            "### Unresolved Gaps\n"
+            "- No real recent sales data found for the marketplace; a tool "
+            "fetch of the analytics/sales-history page could confirm.\n"
+        )
+        gaps = mc._extract_unresolved_gaps(digest)
+        assert "recent sales data" in gaps
+        assert "Verified Facts" not in gaps
+
+    def test_stops_at_next_heading(self):
+        digest = (
+            "### Unresolved Gaps\n- the on-chain app ID is missing\n\n"
+            "### Numeric Conversions\n- irrelevant trailing section\n"
+        )
+        gaps = mc._extract_unresolved_gaps(digest)
+        assert "app ID" in gaps
+        assert "Numeric Conversions" not in gaps
+        assert "irrelevant trailing section" not in gaps
+
+
+def test_gap_fill_nudge_forbids_recall_and_names_gaps():
+    nudge = mc._gap_fill_nudge("- missing the real sale price")
+    assert "missing the real sale price" in nudge
+    assert "do NOT guess or recall" in nudge.lower() or "NOT guess or recall" in nudge
+    assert "unresolved" in nudge.lower()

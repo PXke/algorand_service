@@ -36,7 +36,27 @@ def _row_needs_review(row) -> bool:
     """Would the classifier hold this row for admin review? Review-bound items
     bypass publish pacing — they don't hit the feed until approved, so spacing
     them out only delays training feedback. Reads the signals computed once at
-    ingest; recomputes only for rows queued before signals existed."""
+    ingest; recomputes only for rows queued before signals existed.
+
+    Scam/incident topics always need review regardless of what the ML
+    classifier thinks — both a sound editorial policy (never auto-publish
+    a serious accusation without a human check) and the fix for a real
+    wasted-compute bug: this pre-compute check is what lets a drain skip
+    composing when the review queue is already full (see
+    _breaking_review_slot_veto). Without the topic short-circuit, a
+    legitimately well-written page that got MIS-classified as scam_alert
+    (2026-07-10: perawallet.app) would score as "confidently publishable" by
+    the ML signals and sail past this check into a full — and wasted —
+    research + compose pass, since a scam/incident piece must always route
+    to review no matter what the ML classifier's confidence says."""
+    from app.modules.newspaper.publish_policy import PublishTopic, is_breaking_topic
+
+    try:
+        if is_breaking_topic(PublishTopic(row.topic)):
+            return True
+    except ValueError:
+        pass
+
     from app.modules.ai.content_signals import ContentSignals
 
     signals = ContentSignals.from_payload(row.payload.get("signals"))
@@ -568,9 +588,9 @@ def drain_approved_feed_queue() -> dict[str, object]:
             # The article just became publicly visible — same IndexNow ping the
             # direct-publish path sends. Best-effort, never blocks the release.
             try:
-                from app.modules.newspaper.indexnow import article_url, ping
+                from app.modules.newspaper.indexnow import ping_article
 
-                ping([article_url(str(art.article_id))])
+                ping_article(str(art.article_id))
             except Exception:
                 pass
         session.execute(

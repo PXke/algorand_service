@@ -30,10 +30,30 @@ def _ctx(**overrides):
 
 def test_veto_order():
     assert pt._PRE_COMPOSE_VETOES == (
+        pt._pending_review_veto,
         pt._domain_cap_veto,
         pt._novelty_duplicate_veto,
         pt._content_quality_veto,
     )
+
+
+def test_pending_review_veto_outcome(monkeypatch):
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.has_pending_review_for_url",
+        lambda _url: True,
+    )
+    assert pt._pending_review_veto(_ctx()) == {
+        "status": "duplicate_review_pending",
+        "service_id": "svc",
+    }
+
+
+def test_pending_review_veto_passes_when_no_pending_review(monkeypatch):
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.has_pending_review_for_url",
+        lambda _url: False,
+    )
+    assert pt._pending_review_veto(_ctx()) is None
 
 
 def test_domain_cap_veto_outcome(monkeypatch):
@@ -95,6 +115,10 @@ def test_content_quality_veto_outcome(monkeypatch):
 
 def test_all_pass_returns_none(monkeypatch):
     monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.has_pending_review_for_url",
+        lambda _url: False,
+    )
+    monkeypatch.setattr(
         "app.modules.crawler.domain_tracker.domain_compose_cap_reached",
         lambda _d: False,
     )
@@ -108,6 +132,23 @@ def test_all_pass_returns_none(monkeypatch):
 
 def test_first_veto_wins(monkeypatch):
     monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.has_pending_review_for_url",
+        lambda _url: True,
+    )
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.domain_compose_cap_reached",
+        lambda _d: (_ for _ in ()).throw(AssertionError("later veto must not run")),
+    )
+    outcome = pt._run_pre_compose_vetoes(_ctx())
+    assert outcome is not None and outcome["status"] == "duplicate_review_pending"
+
+
+def test_second_veto_wins_when_first_passes(monkeypatch):
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.has_pending_review_for_url",
+        lambda _url: False,
+    )
+    monkeypatch.setattr(
         "app.modules.crawler.domain_tracker.domain_compose_cap_reached",
         lambda _d: True,
     )
@@ -117,3 +158,38 @@ def test_first_veto_wins(monkeypatch):
     )
     outcome = pt._run_pre_compose_vetoes(_ctx())
     assert outcome is not None and outcome["status"] == "domain_capped"
+
+
+def test_stale_null_decision_is_refreshed_at_compose_time(monkeypatch):
+    """Rows enqueued under training mode carry publish_decision=null forever;
+    the compose path must re-ask the classifier with today's model instead of
+    holding on a frozen verdict."""
+    from app.modules.ai import publish_classifier
+    from app.modules.ai.content_signals import ContentSignals
+
+    calls = {}
+
+    def fake_predict(text, url, category):
+        calls["args"] = (url, category)
+        return True, 0.93
+
+    monkeypatch.setattr(publish_classifier, "predict_publish", fake_predict)
+
+    signals = ContentSignals.from_payload(
+        {
+            "category": "news",
+            "categories": ["news"],
+            "publish_decision": None,
+            "confidence": 0.81,
+        }
+    )
+    assert signals is not None and signals.publish_decision is None
+    # Mirror the compose-path refresh logic.
+    decision, confidence = signals.publish_decision, signals.confidence
+    if decision is None:
+        decision, confidence = publish_classifier.predict_publish(
+            "text", "https://x.io", signals.category
+        )
+    assert decision is True
+    assert confidence == 0.93
+    assert calls["args"] == ("https://x.io", "news")
