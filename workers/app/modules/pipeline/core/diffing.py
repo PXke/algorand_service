@@ -26,4 +26,14 @@ def build_text_diff(previous: str, current: str, max_lines: int = 200) -> str:
         lineterm="",
     )
     lines = list(diff)
-    return "\n".join(lines[:max_lines])
+    truncated = lines[:max_lines]
+    # difflib's hunk headers (e.g. "@@ -2,12 +2,1181 @@") reflect the FULL
+    # diff's true size even after we cut it down below — without this marker
+    # a consumer (writer prompt or human) sees a header claiming far more
+    # lines changed than are actually shown, with no indication anything was
+    # cut (root-caused an overstated "massive expansion" framing on an
+    # AlgoSeas article, 2026-07-13/14).
+    omitted = len(lines) - len(truncated)
+    if omitted > 0:
+        truncated.append(f"... ({omitted} more diff lines omitted)")
+    return "\n".join(truncated)
