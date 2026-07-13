@@ -967,6 +967,29 @@ class AppLocalizationsFa extends AppLocalizations {
   String get domainsApproveExplore => 'تأیید و کاوش';
 
   @override
+  String get domainsCrawlOnce => 'یک‌بار بخزد، بدون منبع';
+
+  @override
+  String get domainsAddButton => 'افزودن';
+
+  @override
+  String get domainsAddAsSeed => 'افزودن به‌عنوان منبع دائمی';
+
+  @override
+  String get domainsScoreUnexplained => 'جزئیات امتیاز در دسترس نیست';
+
+  @override
+  String get paginationPrevious => 'قبلی';
+
+  @override
+  String get paginationNext => 'بعدی';
+
+  @override
+  String paginationPageOf(int page, int total) {
+    return 'صفحه $page از $total';
+  }
+
+  @override
   String get domainsMarkDeadEnd => 'علامت‌گذاری به‌عنوان بن‌بست';
 
   @override

@@ -114,6 +114,10 @@ class Settings(msgspec.Struct, kw_only=True):
 
     news_store: str = "memory"
     news_feed_bucket: str = "main"
+    # Mirror of the worker's PAUSE_INTAKE_ON_FEED_BACKLOG (off by default) — read
+    # here only so the admin "pull top topic" action can report the same gate
+    # the worker itself checks, instead of guessing.
+    pause_intake_on_feed_backlog: bool = False
     news_max_articles_per_day: int = 7
     news_feed_limit: int = 50
     news_placement_slot: str = "news_feed_inline"
@@ -125,6 +129,10 @@ class Settings(msgspec.Struct, kw_only=True):
     url_reject_cooldown_ttl: int = 7 * 24 * 3600
 
     celery_broker_url: str = "redis://localhost:6379/1"
+    # Same result backend the workers' Celery app uses (celery_app.py) — lets
+    # admin actions that fire a task wait briefly for its real result instead
+    # of guessing. Must point at the same Redis DB as workers' REDIS_RESULT_URL.
+    redis_result_url: str = "redis://localhost:6379/2"
     ingest_api_key: str = ""
     admin_wallet_addresses: str = ""
 

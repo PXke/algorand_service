@@ -639,8 +639,24 @@ def register_admin_routes(app) -> None:
         from app.core.cassandra import get_cassandra_session
 
         status = (request.query_params.get("status", "") or "").strip().lower()
+        try:
+            page = max(0, int(request.query_params.get("page", "0") or "0"))
+        except ValueError:
+            page = 0
+        try:
+            page_size = int(request.query_params.get("page_size", "25") or "25")
+        except ValueError:
+            page_size = 25
+        page_size = max(1, min(page_size, 100))
 
-        def _compute() -> dict:
+        def _compute_full_list() -> list[dict]:
+            """The metadata scan+sort — one query, cheap. Cached under a FIXED
+            key (no page/page_size in it) so the existing exact-match
+            _invalidate_domains_cache() still busts it correctly after a
+            domain is set/cleared; pagination and the per-domain page-count
+            queries happen fresh on every request, outside this cache, since
+            they're now scoped to a single page instead of the whole ~500-row
+            set and are cheap enough not to need caching."""
             from app.core.statements import DomainTrackingStmts
 
             session = get_cassandra_session()
@@ -690,32 +706,56 @@ def register_admin_routes(app) -> None:
                         # Content-based relevance (classify_pending_domains): real page
                         # text scored 0-1. Used to sort the review queue, NOT to decide.
                         "content_relevance": content_rel,
+                        # Why it scored that way (score_page()'s own reasons, e.g.
+                        # "known_domain:algorand.foundation", "keywords:4",
+                        # "reject_noise:2") — shown next to the score in the admin
+                        # UI instead of a bare unexplained number (owner feedback
+                        # 2026-07-12). Empty for domains scored before this existed.
+                        "content_relevance_reasons": meta.get("content_relevance_reasons", ""),
                     }
                 )
             # Assist the reviewer: surface the most relevant pending domains first
             # (highest content score). Unscored (None) sort last.
             items.sort(key=lambda it: it.get("content_relevance") or -1.0, reverse=True)
+            order = {"pending": 0, "dead_end": 1, "approved": 2}
+            items.sort(key=lambda d: (order.get(d["frontier_status"], 2), -(d["relevance_score"])))
+            return items
+
+        def _compute() -> dict:
+            # The full scan+sort is the part worth a short cache (smooths tab
+            # switches/nearby page loads) — cached under the ORIGINAL fixed key
+            # (status only, no page in it) so the existing exact-match
+            # _invalidate_domains_cache() still works unchanged after a domain
+            # is set/cleared. Pagination and the per-domain page-count queries
+            # below run fresh every request, uncached — cheap enough at
+            # page-size scale (<=100) not to need it (the real cost was ~500
+            # concurrent COUNT(*) calls across the WHOLE set, now scoped to a
+            # single page; owner feedback 2026-07-12).
+            items = cached_json(f"admin:domains:{status or 'all'}", 15, _compute_full_list)
+            session = get_cassandra_session()
+            total = len(items)
+            page_items = items[page * page_size : (page + 1) * page_size]
+
             # Pages harvested per domain: one single-partition COUNT each, fired
-            # concurrently so the admin view stays responsive even with ~500 domains.
+            # concurrently. Scoped to just this page (was ALL ~500 items before
+            # pagination existed — the actual source of the page being slow to
+            # load, not just the row count itself; owner feedback 2026-07-12).
             from app.core.statements import CrawledPageStmts
 
             count_futures = {
                 item["domain"]: session.execute_async(
                     CrawledPageStmts.COUNT_BY_DOMAIN, (item["domain"],)
                 )
-                for item in items
+                for item in page_items
                 if item["domain"]
             }
-            for item in items:
+            for item in page_items:
                 future = count_futures.get(item["domain"])
                 try:
                     row = future.result().one() if future is not None else None
                     item["pages_crawled"] = int(row.c) if row and row.c is not None else 0
                 except Exception:
                     item["pages_crawled"] = 0
-
-            order = {"pending": 0, "dead_end": 1, "approved": 2}
-            items.sort(key=lambda d: (order.get(d["frontier_status"], 2), -(d["relevance_score"])))
 
             # Frontier auto-approve tally for today (UTC), read from the shared
             # Redis set the worker writes on each score-gated auto-approve. Robust
@@ -733,19 +773,19 @@ def register_admin_routes(app) -> None:
             except Exception:
                 auto_today = []
             return {
-                "items": items,
+                "items": page_items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
                 "auto_approved_today": len(auto_today),
                 "auto_approved_domains": auto_today,
             }
 
-        # ~500 concurrent COUNT(*) per load; a short cache smooths repeated views
-        # and tab switches. Invalidated on domain set/clear below. to_thread keeps
-        # the recompute (and its blocking COUNT waits) off the event loop.
+        # to_thread keeps the recompute (and its blocking Cassandra calls) off
+        # the event loop.
         import asyncio
 
-        return await asyncio.to_thread(
-            cached_json, f"admin:domains:{status or 'all'}", 15, _compute
-        )
+        return await asyncio.to_thread(_compute)
 
     @app.get("/api/v1/admin/tool-suggestions")
     async def admin_list_tool_suggestions(request: Request) -> Response:
@@ -961,7 +1001,7 @@ def register_admin_routes(app) -> None:
                 )
                 enqueued = True
             source_created = False
-            if payload.is_relevant:
+            if payload.is_relevant and payload.as_seed:
                 # Domain-centric model: an approved domain becomes a monitored
                 # source so its content is reported on going forward — we don't
                 # re-judge individual pages for relevance. If another service
@@ -1012,6 +1052,24 @@ def register_admin_routes(app) -> None:
                 except Exception:
                     logger.warning(
                         "failed to trigger crawl/scrape for approved domain %s",
+                        payload.domain,
+                        exc_info=True,
+                    )
+            elif payload.is_relevant and enqueued:
+                # Frontier-only approval (as_seed=False): no service_registry
+                # row, so there's nothing for fetch_source to operate on — just
+                # drain the queue now instead of waiting for the crawl beat, so
+                # the domain still gets explored promptly for this one pass.
+                try:
+                    from celery import Celery
+
+                    from app.core.config import settings
+
+                    app = Celery(broker=settings.celery_broker_url)
+                    app.send_task("app.tasks.crawler.drain_url_queue", queue="scrape")
+                except Exception:
+                    logger.warning(
+                        "failed to trigger frontier-only crawl for domain %s",
                         payload.domain,
                         exc_info=True,
                     )
@@ -1082,24 +1140,102 @@ def register_admin_routes(app) -> None:
     async def admin_compose_next(request: Request) -> Response:
         """Force the pipeline to compose the highest-interest pending candidate
         now (instead of waiting for the next verdict/drain). The new proposal
-        appears in the review queue once the worker finishes (a few seconds)."""
+        appears in the review queue once the worker finishes (a few seconds).
+
+        The worker task this triggers (run_mistral_diff_check) silently no-ops
+        if a review is already pending or the approved-feed backlog is paused
+        for intake — from the admin's side that used to look identical to a
+        genuine failure ("nothing happened"). Both gates are cheap reads, so
+        check them here first and report the real reason instead of always
+        claiming success."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
-        try:
+        import asyncio
+
+        from app.core.cassandra import get_cassandra_session
+        from app.core.config import settings
+        from app.core.statements import ClassifierReviewStmts, PendingFeedStmts
+
+        session = get_cassandra_session()
+        pending_review = await asyncio.to_thread(
+            session.execute, ClassifierReviewStmts.LIST_PENDING, ("pending", 1)
+        )
+        if pending_review.one() is not None:
+            return {
+                "triggered": False,
+                "reason": "classifier_review_pending",
+                "message": "A proposal is already waiting in the review queue — "
+                "resolve it before pulling a new one.",
+            }
+        if settings.pause_intake_on_feed_backlog:
+            pending_feed = await asyncio.to_thread(
+                session.execute,
+                PendingFeedStmts.PEEK_ID,
+                (settings.news_feed_bucket,),
+            )
+            if pending_feed.one() is not None:
+                return {
+                    "triggered": False,
+                    "reason": "approved_feed_pending_release",
+                    "message": "The approved-feed backlog is paused for new intake "
+                    "until it drains.",
+                }
+        def _fire_and_wait() -> dict:
+            import contextlib
+
             from celery import Celery
+            from celery.exceptions import TimeoutError as CeleryTimeoutError
 
-            from app.core.config import settings
-
-            app_c = Celery(broker=settings.celery_broker_url)
-            app_c.send_task(
+            app_c = Celery(broker=settings.celery_broker_url, backend=settings.redis_result_url)
+            diff_async = app_c.send_task(
                 "app.tasks.newspaper.check_and_publish_mistral_on_diff", queue="pipeline"
             )
-            app_c.send_task(
+            drain_async = app_c.send_task(
                 "app.tasks.newspaper.drain_standard_publish_queue", queue="pipeline"
             )
+            # Both tasks return almost instantly when they find nothing to do
+            # (Redis/Cassandra reads only) — real scraping/composing/publishing
+            # takes far longer. A short wait doubles as "did it actually find
+            # work?" without duplicating the tasks' own gating logic here.
+            diff_result: dict | None = None
+            drain_result: dict | None = None
+            with contextlib.suppress(CeleryTimeoutError):
+                diff_result = diff_async.get(timeout=4)
+            with contextlib.suppress(CeleryTimeoutError):
+                drain_result = drain_async.get(timeout=4)
+            return {"diff": diff_result, "drain": drain_result}
+
+        try:
+            outcome = await asyncio.to_thread(_fire_and_wait)
         except Exception as exc:
             return json_error_response(502, "broker_unavailable", str(exc))
+
+        diff_result = outcome["diff"] or {}
+        drain_result = outcome["drain"] or {}
+        cap_reached = drain_result.get("reason") == "standard_daily_cap_reached"
+        all_cooling_down = diff_result.get("checked") == 0 and diff_result.get("throttled", 0) > 0
+        if cap_reached and all_cooling_down:
+            return {
+                "triggered": False,
+                "reason": "no_capacity",
+                "message": "Every known source is still within its re-scrape cooldown, "
+                "and today's publish cap is already reached — nothing to pull right now.",
+            }
+        if cap_reached:
+            return {
+                "triggered": False,
+                "reason": "standard_daily_cap_reached",
+                "message": "Today's publish cap is already reached — queued items won't "
+                "release until tomorrow.",
+            }
+        if all_cooling_down:
+            return {
+                "triggered": False,
+                "reason": "all_sources_on_cooldown",
+                "message": "Every known source was checked within its re-scrape window — "
+                "nothing fresh to pull right now.",
+            }
         return {"triggered": True}
 
     @app.post("/api/v1/admin/classifier-reviews/recompose")

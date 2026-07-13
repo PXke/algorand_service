@@ -376,29 +376,44 @@ class AdminApi {
     );
   }
 
-  Future<({List<Map<String, dynamic>> items, int autoApprovedToday})> listDomains({
+  Future<({List<Map<String, dynamic>> items, int autoApprovedToday, int total})> listDomains({
     required String walletAddress,
     String? status,
+    int page = 0,
+    int pageSize = 25,
   }) async {
-    final q = (status != null && status.isNotEmpty && status != 'all') ? '?status=$status' : '';
+    final params = <String>[
+      if (status != null && status.isNotEmpty && status != 'all') 'status=$status',
+      'page=$page',
+      'page_size=$pageSize',
+    ];
     final body = await _client.getJson(
-      '/api/v1/admin/domains$q',
+      '/api/v1/admin/domains?${params.join('&')}',
       headers: _adminHeaders(walletAddress),
     );
     final items = body['items'];
     final list = items is List ? items.whereType<Map<String, dynamic>>().toList() : <Map<String, dynamic>>[];
     final auto = body['auto_approved_today'];
-    return (items: list, autoApprovedToday: auto is int ? auto : 0);
+    final total = body['total'];
+    return (
+      items: list,
+      autoApprovedToday: auto is int ? auto : 0,
+      total: total is int ? total : list.length,
+    );
   }
 
   Future<Map<String, dynamic>> setDomainRelevant({
     required String walletAddress,
     required String domain,
     required bool isRelevant,
+    // False approves the domain for one-time frontier crawling only — no
+    // permanent monitored source gets created, so it won't be repeatedly
+    // re-scraped going forward. Defaults true to match prior behavior.
+    bool asSeed = true,
   }) async {
     return _client.postJson(
       '/api/v1/admin/domains/set',
-      body: {'domain': domain, 'is_relevant': isRelevant},
+      body: {'domain': domain, 'is_relevant': isRelevant, 'as_seed': asSeed},
       headers: _adminHeaders(walletAddress),
     );
   }

@@ -23,15 +23,64 @@ class DomainsTab extends ConsumerStatefulWidget {
 class _DomainsTabState extends ConsumerState<DomainsTab> {
   List<Map<String, dynamic>> _items = const [];
   int _autoApprovedToday = 0;
+  int _page = 0;
+  int _total = 0;
+  static const _pageSize = 25;
   bool _loading = true;
   String? _error;
   String _filter = 'all';
   final Set<String> _busy = {};
+  final _addDomainController = TextEditingController();
+  bool _addAsSeed = false;
+  bool _adding = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+  }
+
+  @override
+  void dispose() {
+    _addDomainController.dispose();
+    super.dispose();
+  }
+
+  /// Manually adds a domain the crawler has never discovered on its own —
+  /// e.g. something mentioned in Discord, which isn't crawlable, so there's
+  /// no page for a link to have been extracted from. The backend already
+  /// handles a domain with no existing domain_tracking row (falls back to
+  /// sane defaults), so this is really just exposing that path in the UI.
+  Future<void> _addDomain() async {
+    final wallet = ref.read(sessionStateProvider).walletAddress;
+    // Accept a pasted full URL too, not just a bare domain.
+    final domain = _addDomainController.text
+        .trim()
+        .toLowerCase()
+        .replaceFirst(RegExp(r'^https?://'), '')
+        .split('/')
+        .first;
+    if (wallet == null || domain.isEmpty) return;
+    setState(() => _adding = true);
+    try {
+      await ref.read(adminApiProvider).setDomainRelevant(
+        walletAddress: wallet,
+        domain: domain,
+        isRelevant: true,
+        asSeed: _addAsSeed,
+      );
+      _addDomainController.clear();
+      await _load();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.domainsApprovedSnack(domain))),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _adding = false);
+    }
   }
 
   Future<void> _load() async {
@@ -48,12 +97,16 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
       _error = null;
     });
     try {
-      final result =
-          await ref.read(adminApiProvider)
-              .listDomains(walletAddress: wallet, status: _filter);
+      final result = await ref.read(adminApiProvider).listDomains(
+            walletAddress: wallet,
+            status: _filter,
+            page: _page,
+            pageSize: _pageSize,
+          );
       if (!mounted) return;
       setState(() {
         _items = result.items;
+        _total = result.total;
         _autoApprovedToday = result.autoApprovedToday;
         _loading = false;
       });
@@ -66,7 +119,11 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
     }
   }
 
-  Future<void> _set(Map<String, dynamic> item, {required bool relevant}) async {
+  Future<void> _set(
+    Map<String, dynamic> item, {
+    required bool relevant,
+    bool asSeed = true,
+  }) async {
     final wallet = ref.read(sessionStateProvider).walletAddress;
     final domain = item['domain']?.toString() ?? '';
     if (wallet == null || domain.isEmpty) return;
@@ -77,6 +134,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
         walletAddress: wallet,
         domain: domain,
         isRelevant: makeRelevant,
+        asSeed: asSeed,
       );
       await _load();
       if (!mounted) return;
@@ -114,9 +172,11 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
     final theme = Theme.of(context);
     final colors = context.appColors;
     final l10n = context.l10n;
-    // Server-side filtered, so show the count only for the active view.
-    final shown = _items.length;
+    // Server-side filtered; _total is the real matching count (not just this
+    // page's _items.length, now that the list is paginated).
+    final shown = _total;
     final visible = _items;
+    final totalPages = _total == 0 ? 1 : ((_total - 1) ~/ _pageSize) + 1;
 
     return PageScroll(
       refresh: _load,
@@ -150,6 +210,57 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
           ],
         ),
         const SizedBox(height: AppLayout.itemGap),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _addDomainController,
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        hintText: 'example.com',
+                        border: OutlineInputBorder(),
+                      ),
+                      onSubmitted: (_) => _adding ? null : _addDomain(),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.tonal(
+                    onPressed: _adding ? null : _addDomain,
+                    style: FilledButton.styleFrom(visualDensity: VisualDensity.compact),
+                    child: _adding
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : Text(l10n.domainsAddButton),
+                  ),
+                ],
+              ),
+              CheckboxListTile(
+                value: _addAsSeed,
+                onChanged: (v) => setState(() => _addAsSeed = v ?? false),
+                controlAffinity: ListTileControlAffinity.leading,
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(
+                  l10n.domainsAddAsSeed,
+                  style: theme.textTheme.bodySmall,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: AppLayout.itemGap),
         Wrap(
           spacing: 8,
           children: [
@@ -158,7 +269,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
                 _filter == 'all' ? l10n.domainsFilterAllCount(shown) : l10n.domainsFilterAll,
               ),
               selected: _filter == 'all',
-              onSelected: (_) { setState(() => _filter = 'all'); _load(); },
+              onSelected: (_) { setState(() { _filter = 'all'; _page = 0; }); _load(); },
             ),
             FilterChip(
               label: Text(
@@ -167,7 +278,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
                     : l10n.domainsFilterPending,
               ),
               selected: _filter == 'pending',
-              onSelected: (_) { setState(() => _filter = 'pending'); _load(); },
+              onSelected: (_) { setState(() { _filter = 'pending'; _page = 0; }); _load(); },
             ),
             FilterChip(
               label: Text(
@@ -176,7 +287,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
                     : l10n.domainsFilterDeadEnds,
               ),
               selected: _filter == 'dead_end',
-              onSelected: (_) { setState(() => _filter = 'dead_end'); _load(); },
+              onSelected: (_) { setState(() { _filter = 'dead_end'; _page = 0; }); _load(); },
             ),
           ],
         ),
@@ -193,12 +304,70 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
               padding: const EdgeInsets.only(bottom: AppLayout.itemGap),
               child: _domainCard(theme, colors, item),
             )),
+        if (!_loading && visible.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                TextButton(
+                  onPressed: _page > 0
+                      ? () { setState(() => _page -= 1); _load(); }
+                      : null,
+                  child: Text(l10n.paginationPrevious),
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  l10n.paginationPageOf(_page + 1, totalPages),
+                  style: theme.textTheme.bodySmall?.copyWith(color: colors.muted),
+                ),
+                const SizedBox(width: 12),
+                TextButton(
+                  onPressed: _page + 1 < totalPages
+                      ? () { setState(() => _page += 1); _load(); }
+                      : null,
+                  child: Text(l10n.paginationNext),
+                ),
+              ],
+            ),
+          ),
       ],
     );
   }
 
   /// Content-relevance score (0-1) from the crawled page text — a review AID
   /// (queue is sorted by it), not an auto-decision. Green = likely relevant.
+  /// score_page()'s own reason tags (e.g. "known_domain:x.com", "keywords:4",
+  /// "exact:algorand", "reject_noise:2", "below_threshold") turned into a
+  /// short human sentence — the score alone doesn't say WHY it landed there
+  /// (owner feedback 2026-07-12).
+  String _humanizeRelevanceReasons(String raw) {
+    if (raw.isEmpty) return '';
+    final parts = <String>[];
+    for (final tag in raw.split(';')) {
+      final t = tag.trim();
+      if (t.isEmpty) continue;
+      final i = t.indexOf(':');
+      final key = i == -1 ? t : t.substring(0, i);
+      final value = i == -1 ? '' : t.substring(i + 1);
+      switch (key) {
+        case 'known_domain':
+          parts.add('known Algorand domain ($value)');
+        case 'keywords':
+          parts.add('$value Algorand keyword${value == '1' ? '' : 's'} found');
+        case 'exact':
+          parts.add('mentions "$value" directly');
+        case 'reject_noise':
+          parts.add('$value off-topic term${value == '1' ? '' : 's'} (algorithm/algebra/etc.)');
+        case 'below_threshold':
+          parts.add('no positive signals found');
+        default:
+          parts.add(t);
+      }
+    }
+    return parts.join(', ');
+  }
+
   Widget _relevanceChip(ThemeData theme, double score) {
     final color = score >= 0.4
         ? const Color(0xFF2E7D32)
@@ -275,12 +444,27 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
               ),
               if (item['content_relevance'] != null) ...[
                 const SizedBox(width: 6),
-                _relevanceChip(theme, (item['content_relevance'] as num).toDouble()),
+                Tooltip(
+                  message: _humanizeRelevanceReasons(
+                            item['content_relevance_reasons'] as String? ?? '')
+                        .isEmpty
+                      ? l10n.domainsScoreUnexplained
+                      : _humanizeRelevanceReasons(
+                          item['content_relevance_reasons'] as String? ?? ''),
+                  child: _relevanceChip(theme, (item['content_relevance'] as num).toDouble()),
+                ),
               ],
               const SizedBox(width: 6),
               Icon(Icons.open_in_new, size: 18, color: colors.muted),
             ],
           ),
+          if ((item['content_relevance_reasons'] as String? ?? '').isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(
+              _humanizeRelevanceReasons(item['content_relevance_reasons'] as String? ?? ''),
+              style: theme.textTheme.labelSmall?.copyWith(color: colors.muted),
+            ),
+          ],
           const SizedBox(height: 6),
           if (pending) ...[
             if ((item['preview_title'] as String? ?? '').isNotEmpty)
@@ -351,6 +535,13 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
                     visualDensity: VisualDensity.compact,
                   ),
                   child: Text(l10n.domainsDeadEnd),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  onPressed:
+                      busy ? null : () => _set(item, relevant: true, asSeed: false),
+                  style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact),
+                  child: Text(l10n.domainsCrawlOnce),
                 ),
                 const SizedBox(width: 8),
                 FilledButton.tonal(

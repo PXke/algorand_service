@@ -1,5 +1,10 @@
 # Brick: Worker scraper — Reddit
 
+> **REMOVED (2026-07-06).** Discord/Reddit/Telegram + external-push lanes were
+> removed in the pipeline simplification — do not restore. No
+> `workers/app/modules/reddit*` code exists; this doc is kept only so old
+> links resolve.
+
 ## Goal
 
 Crawl **two (or more) Reddit communities** (subreddits) registered in `service_registry` and feed the newspaper pipeline.

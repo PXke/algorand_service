@@ -1761,6 +1761,48 @@ abstract class AppLocalizations {
   /// **'Approve & explore'**
   String get domainsApproveExplore;
 
+  /// No description provided for @domainsCrawlOnce.
+  ///
+  /// In en, this message translates to:
+  /// **'Crawl once, no seed'**
+  String get domainsCrawlOnce;
+
+  /// No description provided for @domainsAddButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Add'**
+  String get domainsAddButton;
+
+  /// No description provided for @domainsAddAsSeed.
+  ///
+  /// In en, this message translates to:
+  /// **'Add as permanent source'**
+  String get domainsAddAsSeed;
+
+  /// No description provided for @domainsScoreUnexplained.
+  ///
+  /// In en, this message translates to:
+  /// **'Score breakdown not available'**
+  String get domainsScoreUnexplained;
+
+  /// No description provided for @paginationPrevious.
+  ///
+  /// In en, this message translates to:
+  /// **'Previous'**
+  String get paginationPrevious;
+
+  /// No description provided for @paginationNext.
+  ///
+  /// In en, this message translates to:
+  /// **'Next'**
+  String get paginationNext;
+
+  /// No description provided for @paginationPageOf.
+  ///
+  /// In en, this message translates to:
+  /// **'Page {page} of {total}'**
+  String paginationPageOf(int page, int total);
+
   /// No description provided for @domainsMarkDeadEnd.
   ///
   /// In en, this message translates to:

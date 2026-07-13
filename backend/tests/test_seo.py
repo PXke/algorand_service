@@ -140,9 +140,15 @@ def test_render_article_og_section_from_primary_tag() -> None:
     assert 'property="article:section" content="sdk"' in head
 
 
-def test_render_article_falls_back_to_default_image() -> None:
+def test_render_article_falls_back_to_generated_share_card() -> None:
+    """No real photo -> a per-article generated OG card (proper 1200x630
+    aspect, names the story) instead of the generic square app icon. The
+    Schema.org publisher `logo` legitimately still points at the site icon —
+    that's the organization's brand mark, a different field from og:image —
+    so this checks the image METAS specifically, not every occurrence."""
     head, _ = render.render_article(_article(image_url=None))
-    assert "/icons/Icon-512.png" in head
+    assert 'property="og:image" content="https://algorand.pxke.me/og/article/abc123.png"' in head
+    assert 'name="twitter:image" content="https://algorand.pxke.me/og/article/abc123.png"' in head
 
 
 def test_render_noindex_marks_robots() -> None:
@@ -163,9 +169,19 @@ def test_article_has_breadcrumb_and_image_meta() -> None:
     head, _ = render.render_article(_article(image_url=None, tags=["sdk"]))
     assert '"@type":"BreadcrumbList"' in head
     assert '"name":"sdk"' in head  # primary-tag crumb -> /topic/sdk
-    # default image -> known dimensions + alt on both og and twitter
-    assert 'property="og:image:width" content="512"' in head
+    # generated share card -> known (og-standard) dimensions + alt on og/twitter
+    assert 'property="og:image:width" content="1200"' in head
+    assert 'property="og:image:height" content="630"' in head
     assert 'property="og:image:alt"' in head and 'name="twitter:image:alt"' in head
+
+
+def test_article_icon_like_image_also_gets_share_card() -> None:
+    """A source favicon/logo in image_url (the workers' brand-icon fallback)
+    must not leak into og:image as a stretched square icon — it gets the same
+    generated card as a fully missing image."""
+    head, _ = render.render_article(_article(image_url="https://x.io/favicon.ico"))
+    assert "/og/article/abc123.png" in head
+    assert "favicon.ico" not in head
 
 
 def test_article_real_image_omits_dimensions() -> None:
@@ -281,7 +297,7 @@ def test_render_topic_truncation_note() -> None:
     head, body = render.render_topic("sdk", items, total_count=47)
     assert "Showing 3 of 47 stories" in body
     assert 'id="pxke-ssr-feed"' in head
-    assert 'href="/feed/topic/sdk.xml"' in head
+    assert 'href="https://algorand.pxke.me/feed/topic/sdk.xml"' in head
     assert "Subscribe to this topic (RSS)" in body
 
 
@@ -495,7 +511,10 @@ def test_shell_injection_dedups_and_keeps_bootstrap(monkeypatch, tmp_path) -> No
     assert doc.count('property="og:title"') == 1
     assert doc.count('name="twitter:title"') == 1
     assert doc.count('rel="canonical"') == 1
-    assert doc.count('type="application/rss+xml"') == 1
+    # Scoped to the <link rel="alternate"> autodiscovery tag specifically — the
+    # SSR footer also has an intentional, unrelated <a ... type="application/
+    # rss+xml"> syndication link that legitimately shares the bare substring.
+    assert doc.count('<link rel="alternate" type="application/rss+xml"') == 1
     assert "flutter_bootstrap.js" in doc
     assert 'id="ssr-body"' in doc
 
@@ -663,8 +682,8 @@ def test_favicon_image_url_never_becomes_hero_or_og_image() -> None:
         _article(image_url="https://brain-chain.app/favicon.svg")
     )
     assert "favicon.svg" not in head and "favicon.svg" not in body
-    # Metas fall back to the site default share image instead.
-    assert 'property="og:image" content="https://algorand.pxke.me/icons/' in head
+    # Metas fall back to the generated share card instead.
+    assert 'property="og:image" content="https://algorand.pxke.me/og/article/' in head
     # No stretched-icon hero in the SSR body.
     assert "<img" not in body
 
@@ -691,3 +710,16 @@ def test_icon_word_boundary_matching() -> None:
     assert _is_icon_like("https://x.io/anything.svg")
     assert not _is_icon_like("https://x.io/silicon.png")
     assert not _is_icon_like("https://x.io/features/hero-image.jpg")
+
+
+def test_chain_only_tag_gets_friendly_display_label() -> None:
+    """primary_tag() returns the raw slug (used for /topic/<tag> URLs); the
+    breadcrumb, og:section and articleSection show display_tag_label's
+    friendlier text instead — mirrors the Flutter displayTagLabel mapping."""
+    head, _ = render.render_article(
+        _article(tags=["chain-only", "discovery", "payments"])
+    )
+    assert '"name":"on-chain"' in head
+    assert 'property="article:section" content="on-chain"' in head
+    assert '"articleSection":"on-chain"' in head
+    assert "/topic/chain-only" in head  # URL slug stays raw

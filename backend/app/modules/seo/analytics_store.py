@@ -15,6 +15,7 @@ import contextlib
 import hashlib
 import ipaddress
 import logging
+import re
 from datetime import UTC, datetime
 from functools import lru_cache
 from urllib.parse import urlparse
@@ -104,6 +105,38 @@ _BOT_TOKENS = (
     "researchscan",
     "aani",
     "gdnplus",
+    "ipscanner",
+    "infrawatch",
+    "cyberconvoyscout",
+    "netcraftsurveyagent",
+    # A real Google-operated crawler (distinct product from Googlebot) that
+    # sends a generic "Mozilla/... Chrome/..." UA with just a self-identifying
+    # "(compatible; GoogleOther)" suffix — the fallback below only catches UAs
+    # that DON'T look like Mozilla, so this needs its own token (found leaking
+    # into "human" direct traffic 2026-07-12).
+    "googleother",
+)
+
+# Real browsers never embed a URL in their own UA string. Polite crawlers do,
+# by convention — "(compatible; Name/ver; +https://...)" or a bare trailing
+# "+https://..." — so this is the general case of the specific bots above
+# (FlipboardProxy, GoogleOther, etc.) and catches new ones without needing a
+# name added here first. Found leaking into "human" direct traffic 2026-07-13:
+# SkyWatch (a Bluesky automod bot), SvelteKit-FYI and NuxtFyi (SEO scrapers).
+_SELF_ID_URL_RE = re.compile(r"\+https?://")
+
+# Exact-match, not a substring token: this specific frozen iOS-13.2.3/Safari-
+# 13.0.3 string is a well-known stock default UA bundled in several scraping
+# libraries. Confirmed 2026-07-12 (see _UA_FREQ_THRESHOLD comment below) as
+# the single biggest offender in pageview_direct_sample — 471 rows over 7
+# days, peak 172/day — landing on many distinct article paths with no
+# referrer each time. It stays under the frequency threshold on quieter days,
+# so is_repeated_ua() alone won't always catch it; denylist it outright.
+_KNOWN_DECOY_UAS = frozenset(
+    {
+        "mozilla/5.0 (iphone; cpu iphone os 13_2_3 like mac os x) applewebkit/605.1.15 "
+        "(khtml, like gecko) version/13.0.3 mobile/15e148 safari/604.1",
+    }
 )
 
 _TODAY_FMT = "%Y-%m-%d"
@@ -187,12 +220,140 @@ def is_bot(user_agent: str | None) -> bool:
     ua = (user_agent or "").lower()
     if not ua:
         return True  # no UA -> almost always a script/scanner
+    if ua in _KNOWN_DECOY_UAS:
+        return True
     if any(tok in ua for tok in _BOT_TOKENS):
+        return True
+    if _SELF_ID_URL_RE.search(ua):
         return True
     # Every mainstream browser sends a "Mozilla/..." product token. A non-empty
     # UA without it is a library/scraper that just isn't in the denylist above —
     # the main thing that was inflating "human (direct)".
     return "mozilla/" not in ua
+
+
+# ── Repeated-UA anomaly detection ────────────────────────────────────────────
+# is_bot() only catches bots that self-identify (a name token, or no "mozilla/"
+# at all). It cannot catch a scraper that hardcodes one ordinary-looking browser
+# UA and reuses it on every request — found 2026-07-12 in a full 7-day pull of
+# pageview_direct_sample (3713 rows / 402 distinct UAs): one byte-identical
+# legacy-iOS Safari string alone was 471 rows (peak 172/day), on top of the
+# named bots is_bot() already denylists. Real diverse human traffic doesn't
+# repeat one exact UA like that; a scraper replaying a fixed string does.
+# Counted per exact UA (hashed, nothing stored raw) per day in Redis — fails
+# open on any Redis error, same as the rest of this module's Redis usage.
+_UA_FREQ_PREFIX = "algorand:uafreq:"
+_UA_FREQ_TTL_SECONDS = 36 * 60 * 60  # a day plus buffer past midnight rollover
+# Evidence-based, not a guess: a full 7-day pull of pageview_direct_sample
+# (2026-07-12, 3713 rows / 402 distinct UAs) showed a clean gap between
+# genuinely organic traffic (tops out at 12/day for the most repeated
+# ordinary modern browser signature) and actual slow-repeat scrapers (two
+# obsolete-version UAs — a 2016-era Firefox/47.0 and a Chrome/108-on-macOS-13
+# string — steady at 19/day for a week straight). 15 sits in that gap.
+# Revisit upward if real traffic grows enough to organically cross it.
+_UA_FREQ_THRESHOLD = 15
+
+
+def _ua_freq_key(user_agent: str, day: str) -> str:
+    digest = hashlib.sha256(user_agent.encode()).hexdigest()[:16]
+    return f"{_UA_FREQ_PREFIX}{day}:{digest}"
+
+
+def is_repeated_ua(user_agent: str | None, day: str | None = None) -> bool:
+    """True once this exact UA string has been seen more than the threshold
+    number of times today. Complements is_bot() rather than replacing it —
+    call both. Fails open: a Redis hiccup means "not flagged", never blocks
+    page serving."""
+    ua = (user_agent or "").strip()
+    if not ua:
+        return False  # is_bot() already treats an empty UA as a bot
+    try:
+        r = _uv_redis()
+        key = _ua_freq_key(ua, day or _today())
+        count = r.incr(key)
+        if count == 1:
+            r.expire(key, _UA_FREQ_TTL_SECONDS)
+        return count > _UA_FREQ_THRESHOLD
+    except Exception as exc:  # Redis down — fail open, never block a real view
+        log.debug("ua frequency check skipped: %s", exc)
+        return False
+
+
+# ── UA structural plausibility ───────────────────────────────────────────────
+# is_bot() only catches self-identifying bots; is_repeated_ua() only catches
+# one fixed string reused past a daily threshold — a bot that fakes a fresh
+# random UA every request slips both. Real browser UAs are generated by the
+# vendor's own fixed code, not user-editable text, so certain tokens are
+# permanently frozen or must self-consistently match — a violation is a
+# same-request, zero-volume-needed tell a hand-rolled/badly-randomized UA
+# generator gets wrong. Every rule below is pinned to a specific, stable,
+# long-documented vendor convention (not a guess) so this doesn't rot as real
+# browsers update:
+#   - "(KHTML, like Gecko)" is one fixed phrase in every WebKit/Blink UA
+#     (Chrome, Safari, Edge, Opera, Brave…) — found a real "live Gecko" typo
+#     in prod sample data 2026-07-12.
+#   - Chrome/Chromium has kept AppleWebKit AND the trailing Safari/ token
+#     frozen at exactly "537.36" since ~2013 specifically so UA-sniffing
+#     code doesn't break — real Chrome (and Chromium-based browsers) never
+#     varies this, regardless of actual Chrome version.
+#   - Firefox's `rv:` token and its trailing `Firefox/` version are always
+#     identical by construction — the browser reads one value into both.
+#   - Desktop Firefox (not Android) has kept its Gecko/ token frozen at the
+#     literal placeholder "20100101" since ~2012, same rationale as Chrome's
+#     537.36 freeze; Firefox for Android does NOT freeze this, so the check
+#     is scoped to desktop only.
+# Deliberately NOT checking Safari's own Version/·Safari/ token relationship
+# (unlike Chrome, real Safari's history there is less rigidly consistent —
+# not confident enough to avoid false positives on genuine older Safari).
+_KHTML_TOKEN_RE = re.compile(r"KHTML")
+_LIKE_GECKO_RE = re.compile(r"KHTML,\s*like Gecko")
+_CHROME_TOKEN_RE = re.compile(r"Chrome/")
+_APPLEWEBKIT_VERSION_RE = re.compile(r"AppleWebKit/([\d.]+)")
+_TRAILING_SAFARI_VERSION_RE = re.compile(r"Safari/([\d.]+)")
+_FIREFOX_VERSION_RE = re.compile(r"Firefox/([\d.]+)")
+_GECKO_RV_RE = re.compile(r"rv:([\d.]+)")
+_GECKO_VERSION_RE = re.compile(r"Gecko/(\S+)")
+_CHROME_FROZEN_WEBKIT = "537.36"
+_FIREFOX_DESKTOP_FROZEN_GECKO = "20100101"
+
+
+def is_malformed_ua(user_agent: str | None) -> bool:
+    """True when a UA claims to be a specific mainstream browser but violates
+    that vendor's own fixed/frozen string conventions — something a real
+    install of that browser cannot produce. Catches fakes on the first
+    request, unlike is_repeated_ua(). Fails open: an unrecognized (but
+    internally consistent) UA shape is never flagged, only a proven
+    contradiction."""
+    ua = (user_agent or "").strip()
+    if not ua:
+        return False
+
+    if _KHTML_TOKEN_RE.search(ua) and not _LIKE_GECKO_RE.search(ua):
+        return True
+
+    if _CHROME_TOKEN_RE.search(ua):
+        webkit_match = _APPLEWEBKIT_VERSION_RE.search(ua)
+        safari_match = _TRAILING_SAFARI_VERSION_RE.search(ua)
+        if webkit_match and webkit_match.group(1) != _CHROME_FROZEN_WEBKIT:
+            return True
+        if safari_match and safari_match.group(1) != _CHROME_FROZEN_WEBKIT:
+            return True
+
+    firefox_match = _FIREFOX_VERSION_RE.search(ua)
+    if firefox_match:
+        rv_match = _GECKO_RV_RE.search(ua)
+        if rv_match and rv_match.group(1) != firefox_match.group(1):
+            return True
+        is_mobile_firefox = "Android" in ua or "Mobile" in ua
+        gecko_match = _GECKO_VERSION_RE.search(ua)
+        if (
+            not is_mobile_firefox
+            and gecko_match
+            and gecko_match.group(1) != _FIREFOX_DESKTOP_FROZEN_GECKO
+        ):
+            return True
+
+    return False
 
 
 def ua_class(user_agent: str | None) -> str:
@@ -238,7 +399,7 @@ def browser_family(user_agent: str | None) -> str:
 # Friendly names for crawlers worth distinguishing, matched against the UA. Order
 # matters: first hit wins, so put specific tokens before generic ones.
 _BOT_NAMES = (
-    ("Googlebot", ("googlebot", "google favicon", "google-extended")),
+    ("Googlebot", ("googlebot", "google favicon", "google-extended", "googleother")),
     ("Bingbot", ("bingbot", "bingpreview")),
     ("GPTBot", ("gptbot",)),
     ("ClaudeBot", ("claudebot", "anthropic")),
@@ -250,6 +411,9 @@ _BOT_NAMES = (
     ("Bytespider", ("bytespider",)),
     ("AhrefsBot", ("ahrefs",)),
     ("SemrushBot", ("semrush",)),
+    # Dedicated line, not lumped into "Other bot" — this was ~35% of a sampled
+    # "human direct" pull before being denylisted (2026-07-12), worth watching.
+    ("IPScanner", ("ipscanner",)),
     (
         "Social unfurler",
         (
@@ -315,6 +479,12 @@ def bot_name(user_agent: str | None) -> str:
     for name, tokens in _BOT_NAMES:
         if any(t in ua for t in tokens):
             return name
+    # Checked with original casing (is_malformed_ua's vendor-token regexes are
+    # case-sensitive by design — real browsers are consistently cased) after
+    # the named-bot loop, so a scanner that also happens to fake a broken
+    # Chrome UA still gets its specific name, not lumped into this bucket.
+    if is_malformed_ua(user_agent):
+        return "Malformed UA"
     return "Other bot"
 
 
@@ -825,7 +995,11 @@ def record_pageview(
 
         session = get_cassandra_session()
         day = _today()
-        kind = "bot" if is_bot(user_agent) else "human"
+        kind = (
+            "bot"
+            if (is_bot(user_agent) or is_malformed_ua(user_agent) or is_repeated_ua(user_agent))
+            else "human"
+        )
         # Privacy-safe unique visitor count (Redis HLL), independent of Cassandra.
         record_unique(kind, client_ip, user_agent, day)
         session.execute_async(AnalyticsStmts.PAGEVIEW_BUMP, (kind, day))
@@ -867,7 +1041,7 @@ def record_search(query: str, result_count: int, *, user_agent: str | None = Non
     """Best-effort: count a search term for the day (and separately when it
     returned nothing). Bots are skipped so the demand signal stays human."""
     q = (query or "").strip().lower()
-    if not q or is_bot(user_agent):
+    if not q or is_bot(user_agent) or is_malformed_ua(user_agent):
         return
     try:
         from app.core.cassandra import get_cassandra_session

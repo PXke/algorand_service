@@ -969,6 +969,29 @@ class AppLocalizationsPs extends AppLocalizations {
   String get domainsApproveExplore => 'تایید او پلټل';
 
   @override
+  String get domainsCrawlOnce => 'یوځل وڅارل شي، پرته له سرچینې';
+
+  @override
+  String get domainsAddButton => 'زیاتول';
+
+  @override
+  String get domainsAddAsSeed => 'د دایمي سرچینې په توګه یې زیات کړئ';
+
+  @override
+  String get domainsScoreUnexplained => 'د نمرې تفصیل شتون نلري';
+
+  @override
+  String get paginationPrevious => 'پخوانی';
+
+  @override
+  String get paginationNext => 'راتلونکی';
+
+  @override
+  String paginationPageOf(int page, int total) {
+    return 'مخ $page د $total څخه';
+  }
+
+  @override
   String get domainsMarkDeadEnd => 'د بن‌بست په توګه نښه کول';
 
   @override

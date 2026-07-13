@@ -1,5 +1,12 @@
 # Crawler types (differentiated lanes)
 
+> **Stale rows (2026-07-06):** `reddit`/`telegram`/`discord` lanes below were
+> removed in the pipeline simplification — no `RedditCrawlerDriver`/
+> `TelegramCrawlerDriver`/`DiscordCrawlerDriver` exist. The current
+> `CrawlerType` enum (`workers/app/modules/scraper/crawler_types.py`) is
+> `web`, `youtube`, `mail`, `chain`, `metrics`, `bluesky` — the last three
+> rows aren't reflected in the table below yet.
+
 Each crawler is a **separate lane** with its own driver, DB row in `crawler_config`, and env override.
 
 ## News / ingest crawlers

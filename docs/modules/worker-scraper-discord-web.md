@@ -1,5 +1,10 @@
 # Brick: Worker scraper — Discord (web)
 
+> **REMOVED (2026-07-06).** Discord/Reddit/Telegram + external-push lanes were
+> removed in the pipeline simplification — do not restore. No
+> `workers/app/modules/discord*` code exists; this doc is kept only so old
+> links resolve.
+
 ## Goal
 
 Crawl Discord **like a website**: open `https://discord.com/channels/…` in headless Chromium (Playwright), extract visible text — same pattern as SPA web crawl.

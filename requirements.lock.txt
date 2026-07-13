@@ -6,7 +6,7 @@ aiosignal==1.4.0
     # via aiohttp
 amqp==5.3.1
     # via kombu
-anyio==4.14.1
+anyio==4.14.2
     # via httpx
 attrs==26.1.0
     # via aiohttp
@@ -111,7 +111,9 @@ packaging==26.2
 pfzy==0.3.4
     # via inquirerpy
 pillow==12.3.0
-    # via algorand-platform-workers (workers/pyproject.toml)
+    # via
+    #   algorand-platform-backend (backend/pyproject.toml)
+    #   algorand-platform-workers (workers/pyproject.toml)
 playwright==1.61.0
     # via algorand-platform-workers (workers/pyproject.toml)
 prompt-toolkit==3.0.52
@@ -173,7 +175,7 @@ typing-extensions==4.16.0
     #   beautifulsoup4
     #   pyee
     #   typesense
-tzdata==2026.2
+tzdata==2026.3
     # via kombu
 tzlocal==5.4.4
     # via celery

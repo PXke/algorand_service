@@ -972,6 +972,29 @@ class AppLocalizationsEn extends AppLocalizations {
   String get domainsApproveExplore => 'Approve & explore';
 
   @override
+  String get domainsCrawlOnce => 'Crawl once, no seed';
+
+  @override
+  String get domainsAddButton => 'Add';
+
+  @override
+  String get domainsAddAsSeed => 'Add as permanent source';
+
+  @override
+  String get domainsScoreUnexplained => 'Score breakdown not available';
+
+  @override
+  String get paginationPrevious => 'Previous';
+
+  @override
+  String get paginationNext => 'Next';
+
+  @override
+  String paginationPageOf(int page, int total) {
+    return 'Page $page of $total';
+  }
+
+  @override
   String get domainsMarkDeadEnd => 'Mark dead end';
 
   @override

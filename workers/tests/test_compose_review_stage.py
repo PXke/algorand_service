@@ -147,6 +147,9 @@ def test_parse_article_fields_grade_defaults_none() -> None:
 
 
 def test_low_quality_llm_triggers_revision(monkeypatch) -> None:
+    # Quality mock never improves — with WRITER_REVISION_MAX_PASSES=2 (default)
+    # this should genuinely attempt a SECOND revision instead of giving up
+    # after one, then stop once the revision budget is spent.
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
         lambda **kw: {"grade": 10.0, "issues": []},
@@ -167,8 +170,65 @@ def test_low_quality_llm_triggers_revision(monkeypatch) -> None:
         system="sys", gen_user="u", trace=trace,
     )
 
-    assert fake.calls == 1
+    assert fake.calls == 2  # spent both revision passes since quality never clears
     assert out["body"] == "deeper revised body with more detail"
+    reviews = [e for e in trace if e["tool"] == "review_draft"]
+    assert len(reviews) == 3  # initial grade + 2 rechecks
+
+
+def test_revision_stops_once_max_passes_reached(monkeypatch) -> None:
+    # Bound it to 1 revision explicitly and confirm the loop respects it even
+    # though the mock quality never improves — no unbounded looping.
+    import app.core.config as cfg
+
+    monkeypatch.setattr(cfg, "WRITER_REVISION_MAX_PASSES", 1)
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **kw: {"grade": 10.0, "issues": []},
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **kw: {
+            "narrative_synthesis": 2,
+            "technical_depth": 2,
+            "issues": ["technical depth scored 2/5 — explain layer-1 mechanics"],
+        },
+    )
+    trace: list[dict] = []
+    fake = _FakeMistral({"title": "T2", "body": "deeper revised body with more detail"})
+
+    _review_and_revise(
+        fake, {"title": "T", "body": "short generic press release body"},
+        system="sys", gen_user="u", trace=trace,
+    )
+
+    assert fake.calls == 1
+
+
+def test_second_revision_only_fires_when_first_still_fixable(monkeypatch) -> None:
+    # First revision clears the bar -> the loop must NOT spend a second
+    # revision call it doesn't need, even though up to 2 are allowed.
+    grades = iter([
+        {"grade": 5.0, "issues": ["structure — Formatting Deserts: 6 prose blocks"]},
+        {"grade": 8.0, "issues": []},
+    ])
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **kw: next(grades),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+    )
+    trace: list[dict] = []
+    fake = _FakeMistral({"title": "T2", "body": "a much longer grounded body"})
+
+    out = _review_and_revise(
+        fake, {"title": "T", "body": "short"}, system="sys", gen_user="u", trace=trace
+    )
+
+    assert fake.calls == 1
+    assert out["_heuristic_grade"]["grade"] == 8.0
 
 
 def test_disabled_skips_review(monkeypatch) -> None:

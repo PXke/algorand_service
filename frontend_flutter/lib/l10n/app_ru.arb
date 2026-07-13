@@ -535,6 +535,19 @@
   },
   "domainsDeadEnd": "Тупик",
   "domainsApproveExplore": "Одобрить и исследовать",
+  "domainsCrawlOnce": "Обход один раз, без источника",
+  "domainsAddButton": "Добавить",
+  "domainsAddAsSeed": "Добавить как постоянный источник",
+  "domainsScoreUnexplained": "Разбивка оценки недоступна",
+  "paginationPrevious": "Назад",
+  "paginationNext": "Далее",
+  "paginationPageOf": "Страница {page} из {total}",
+  "@paginationPageOf": {
+    "placeholders": {
+      "page": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
   "domainsMarkDeadEnd": "Отметить как тупик",
   "domainsRevive": "Восстановить",
   "domainsApprovedSnack": "{domain} одобрен — краулер может его исследовать",

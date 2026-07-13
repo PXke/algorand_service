@@ -535,6 +535,19 @@
   },
   "domainsDeadEnd": "गतिरोध",
   "domainsApproveExplore": "स्वीकृत करें और अन्वेषण करें",
+  "domainsCrawlOnce": "एक बार क्रॉल करें, स्रोत नहीं",
+  "domainsAddButton": "जोड़ें",
+  "domainsAddAsSeed": "स्थायी स्रोत के रूप में जोड़ें",
+  "domainsScoreUnexplained": "स्कोर का विवरण उपलब्ध नहीं है",
+  "paginationPrevious": "पिछला",
+  "paginationNext": "अगला",
+  "paginationPageOf": "पृष्ठ {page} में से {total}",
+  "@paginationPageOf": {
+    "placeholders": {
+      "page": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
   "domainsMarkDeadEnd": "मृत अंत चिह्नित करें",
   "domainsRevive": "पुनर्जीवित",
   "domainsApprovedSnack": "{domain} approved — the crawler may explore it",

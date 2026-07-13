@@ -1,5 +1,11 @@
 # Local browser bridge (your computer)
 
+> **REMOVED (2026-07-06).** The external-push lane this fed (`POST
+> /api/v1/ingest/signal` → `workers/app/modules/newspaper/external_ingest_queue.py`)
+> has no callers anywhere in the worker codebase — the backend endpoint still
+> exists but nothing drains the queue. Do not restore; kept only so old links
+> resolve.
+
 > **Firefox users:** prefer the [Firefox channel sync extension](firefox-channel-sync.md) — no Chrome debugging port, matches how you already browse.
 
 ## Idea

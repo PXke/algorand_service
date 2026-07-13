@@ -1,5 +1,10 @@
 # Brick: Worker scraper — Telegram (web)
 
+> **REMOVED (2026-07-06).** Discord/Reddit/Telegram + external-push lanes were
+> removed in the pipeline simplification — do not restore. No
+> `workers/app/modules/telegram*` code exists; this doc is kept only so old
+> links resolve.
+
 ## Goal
 
 Crawl **public** Telegram announcement channels like a normal website via `https://t.me/s/{username}` — **no bot** required.

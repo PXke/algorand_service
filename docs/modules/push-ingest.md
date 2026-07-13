@@ -1,5 +1,11 @@
 # Push ingest — Discord / Telegram without bots
 
+> **REMOVED (2026-07-06).** This lane fed `workers/app/modules/newspaper/external_ingest_queue.py`,
+> which has no callers anywhere in the worker codebase — the
+> `POST /api/v1/ingest/signal` endpoint still exists in `backend/app/modules/ingest/`
+> but nothing drains the queue it writes to. Do not restore; kept only so old
+> links resolve.
+
 Official Algorand **Discord** and many **Telegram** channels cannot host our bot. Polling those URLs will always fail or return empty. Use **push** lanes instead.
 
 ## Primary API

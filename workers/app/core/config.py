@@ -44,7 +44,7 @@ TESTNET_INDEXER_URL = env_str(
     "TESTNET_INDEXER_URL", "https://testnet-idx.algonode.cloud"
 ).rstrip("/")
 NEWS_FEED_BUCKET = env_str("NEWS_FEED_BUCKET", "main")
-NEWS_MAX_ARTICLES_PER_DAY = min(max(1, env_int("NEWS_MAX_ARTICLES_PER_DAY", 7)), 7)
+NEWS_MAX_ARTICLES_PER_DAY = min(max(1, env_int("NEWS_MAX_ARTICLES_PER_DAY", 3)), 7)
 NEWS_MAX_BREAKING_PER_DAY = env_int("NEWS_MAX_BREAKING_PER_DAY", 2)
 NEWS_STRICT_DAILY_CAP = env_bool("NEWS_STRICT_DAILY_CAP", True)
 CRAWL_PAUSE_WHEN_PUBLISH_CAP_FULL = env_bool("CRAWL_PAUSE_WHEN_PUBLISH_CAP_FULL", True)
@@ -78,7 +78,7 @@ WRITER_EDITORIAL_BRIEFS_ENABLED = env_bool("WRITER_EDITORIAL_BRIEFS_ENABLED", Tr
 
 ARTICLE_EDIT_WINDOW_HOURS = env_int("ARTICLE_EDIT_WINDOW_HOURS", 24)
 BREAKING_INLINE_DRAIN = env_bool("BREAKING_INLINE_DRAIN", False)
-NEWS_STANDARD_INTERVAL_HOURS = env_int("NEWS_STANDARD_INTERVAL_HOURS", 3)
+NEWS_STANDARD_INTERVAL_HOURS = env_int("NEWS_STANDARD_INTERVAL_HOURS", 8)
 NEWS_MIN_DIFF_LINES = env_int("NEWS_MIN_DIFF_LINES", 3)
 # CONTENT_UPDATE-specific relevance floor: a service-diff item below this is
 # never enqueued at all, regardless of diff size. Kept separate from (and
@@ -275,9 +275,14 @@ MISTRAL_TEMP_RESEARCH = env_float("MISTRAL_TEMP_RESEARCH", 0.15)
 MISTRAL_TEMP_WRITE = env_float("MISTRAL_TEMP_WRITE", 0.6)
 # Two-stage compose: after generation, the heuristic grader runs deterministically
 # (the warm pass has no tools, so the model can't call review_draft itself). A draft
-# graded below this triggers exactly one revision pass with the issues fed back.
+# graded below this triggers a revision pass with the issues fed back, up to
+# WRITER_REVISION_MAX_PASSES times — a pass that comes back clean stops early
+# (2026-07-13: raised 1 -> 2 after a real critical_distance regression on the one
+# allowed pass went unfixed; each extra pass costs one more Mistral revision call
+# + one more grading call, only spent when a draft is still flagged).
 WRITER_REVIEW_ENABLED = env_bool("WRITER_REVIEW_ENABLED", True)
 WRITER_REVIEW_MIN_GRADE = env_float("WRITER_REVIEW_MIN_GRADE", 7.0)
+WRITER_REVISION_MAX_PASSES = env_int("WRITER_REVISION_MAX_PASSES", 2)
 # Stage 3 qualitative rubric (Small tier): narrative synthesis + technical depth,
 # scored 1-5. quality_needs_revision() triggers on strictly-below, so this is the
 # lowest score considered PASSING — 4, not 3: a 3 still carries real, written
@@ -329,6 +334,31 @@ PUBLIC_SITE_URL = env_str("PUBLIC_SITE_URL", "https://algorand.pxke.me").rstrip(
 # Seznam and Naver when an article publishes. Public by design — also served as
 # a static {key}.txt at the site root for verification. Empty disables pinging.
 INDEXNOW_KEY = env_str("INDEXNOW_KEY", "63e7ffa13f3ca734700ca375c0581b41")
+
+# Social auto-post on publish (owner decision 2026-07-12): each channel is
+# independently enabled by having credentials set — no separate ENABLED flag,
+# an empty handle/token IS "disabled" (see SocialDistributor.enabled). App
+# password, not the main account password (Settings > App Passwords in the
+# Bluesky app) — can be revoked independently, can't change account settings.
+# Reuses the SAME account (and so the same two env vars) as search_bluesky's
+# research tool in research_tools.py — owner deliberately repurposed the
+# existing agent-research account (2026-07-12), handle changed to the
+# algorand.pxke.me custom domain. research_tools.py reads BLUESKY_IDENTIFIER
+# via os.getenv() directly rather than this constant — both read the same
+# underlying env var, so there's still only one value to keep in sync, just
+# two code paths reading it.
+BLUESKY_IDENTIFIER = env_str("BLUESKY_IDENTIFIER", "")
+BLUESKY_APP_PASSWORD = env_str("BLUESKY_APP_PASSWORD", "")
+# Bot token from @BotFather; chat_id is the target channel (e.g. "@channelname"
+# for a public channel, or the numeric id for a private one — the bot must be
+# added as an admin of the channel either way).
+TELEGRAM_BOT_TOKEN = env_str("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = env_str("TELEGRAM_CHAT_ID", "")
+# e.g. "https://mastodon.social" — whichever instance the bot account lives
+# on. Access token from Settings > Development > New Application (needs
+# write:statuses + write:media scopes) on that instance.
+MASTODON_INSTANCE_URL = env_str("MASTODON_INSTANCE_URL", "")
+MASTODON_ACCESS_TOKEN = env_str("MASTODON_ACCESS_TOKEN", "")
 # Client-side rate limiting (Redis-coordinated across all workers). Spacing is a
 # hard floor on time between calls (leaky bucket) — at least 15s/call to stay
 # well under the per-second AND tokens/minute caps and avoid 429 storms.
@@ -647,6 +677,26 @@ GATEKEEPER_ENFORCE = env_bool("GATEKEEPER_ENFORCE", False)
 # unvalidated ML output).
 WRITER_QUALITY_GATE_ENABLED = env_bool("WRITER_QUALITY_GATE_ENABLED", True)
 WRITER_QUALITY_FLOOR = env_float("WRITER_QUALITY_FLOOR", 6.0)
+# Autonomous mode for archive-refresh recomposes (owner decision, 2026-07-12):
+# recompose_published may swap a draft straight onto the LIVE article without
+# a human click when the draft clears a HIGHER bar than fresh-article
+# auto-publish — this overwrites a page that's already public, so the floor is
+# intentionally stricter than WRITER_QUALITY_FLOOR. Backtested against the 5
+# Tier-1 archive recomposes (all hand-approved 2026-07-12): 4/5 scored >=8.0
+# and would have auto-applied; the 5th (a 93-char headline, 3 over the cap)
+# correctly failed the headline check and would have stayed in review — the
+# gate catching exactly the one article that needed a human look.
+RECOMPOSE_AUTO_APPLY_ENABLED = env_bool("RECOMPOSE_AUTO_APPLY_ENABLED", True)
+RECOMPOSE_AUTO_APPLY_GRADE_FLOOR = env_float("RECOMPOSE_AUTO_APPLY_GRADE_FLOOR", 8.0)
+# Same strict AND-gate design as recompose, applied to BRAND NEW content the
+# classifier wasn't confident about (would otherwise always wait for a human
+# review click). Floor matches recompose's, not the looser 6.0 fresh-content
+# floor used elsewhere (WRITER_QUALITY_FLOOR) — fresh content has zero prior
+# human vetting at all, unlike recompose which only touches content a human
+# already approved once, so there's no argument for a looser bar here
+# (owner decision 2026-07-12).
+FRESH_AUTO_APPROVE_ENABLED = env_bool("FRESH_AUTO_APPROVE_ENABLED", True)
+FRESH_AUTO_APPROVE_GRADE_FLOOR = env_float("FRESH_AUTO_APPROVE_GRADE_FLOOR", 8.0)
 # Article is flagged when the grounded fraction of its numeric claims falls below
 # this (too many figures with no anchor in the tool trace).
 GATEKEEPER_FACT_MIN = env_float("GATEKEEPER_FACT_MIN", 0.80)

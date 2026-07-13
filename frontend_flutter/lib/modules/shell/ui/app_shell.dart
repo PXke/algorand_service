@@ -35,9 +35,6 @@ class AppShell extends ConsumerWidget {
     final colors = context.appColors;
     final theme = Theme.of(context);
     final isAdmin = ref.watch(isAdminWalletProvider);
-    // Exclude the owner's own visits from analytics: drop a "don't track" cookie
-    // (read by the SSR pageview recorder) whenever the admin wallet connects.
-    ref.listen(isAdminWalletProvider, (_, next) => setAnalyticsOptOut(next));
     final width = MediaQuery.sizeOf(context).width;
     final wide = width >= _mastheadBreakpoint;
     final compact = width < 520;
@@ -129,6 +126,7 @@ class AppShell extends ConsumerWidget {
             ),
       body: Column(
         children: [
+          const _AdminAnalyticsOptOut(),
           if (_showMarketsBar(location))
             DeferredWidget(
               () => loadDeferredWithRetry(loadMarketsModule),
@@ -360,6 +358,32 @@ class _MastheadTabState extends State<_MastheadTab> {
         ),
       ),
     );
+  }
+}
+
+/// Sets the `pxke_no_track` cookie when an admin wallet is connected so SSR
+/// pageviews and article read counts skip the owner.
+class _AdminAnalyticsOptOut extends ConsumerStatefulWidget {
+  const _AdminAnalyticsOptOut();
+
+  @override
+  ConsumerState<_AdminAnalyticsOptOut> createState() => _AdminAnalyticsOptOutState();
+}
+
+class _AdminAnalyticsOptOutState extends ConsumerState<_AdminAnalyticsOptOut> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setAnalyticsOptOut(ref.read(isAdminWalletProvider));
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    ref.listen(isAdminWalletProvider, (_, next) => setAnalyticsOptOut(next));
+    return const SizedBox.shrink();
   }
 }
 

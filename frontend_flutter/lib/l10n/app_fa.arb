@@ -535,6 +535,19 @@
   },
   "domainsDeadEnd": "بن‌بست",
   "domainsApproveExplore": "تأیید و کاوش",
+  "domainsCrawlOnce": "یک‌بار بخزد، بدون منبع",
+  "domainsAddButton": "افزودن",
+  "domainsAddAsSeed": "افزودن به‌عنوان منبع دائمی",
+  "domainsScoreUnexplained": "جزئیات امتیاز در دسترس نیست",
+  "paginationPrevious": "قبلی",
+  "paginationNext": "بعدی",
+  "paginationPageOf": "صفحه {page} از {total}",
+  "@paginationPageOf": {
+    "placeholders": {
+      "page": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
   "domainsMarkDeadEnd": "علامت‌گذاری به‌عنوان بن‌بست",
   "domainsRevive": "احیا",
   "domainsApprovedSnack": "{domain} تأیید شد — کرالر می‌تواند آن را کاوش کند",

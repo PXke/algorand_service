@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -30,6 +31,8 @@ from app.modules.newspaper.publish_queue_store import (
 )
 from app.modules.newspaper.publish_schedule import record_standard_publish
 from app.modules.newspaper.tasks.publish_tasks import publish_from_queued_row
+
+logger = logging.getLogger(__name__)
 
 
 def _row_needs_review(row) -> bool:
@@ -593,6 +596,14 @@ def drain_approved_feed_queue() -> dict[str, object]:
                 ping_article(str(art.article_id))
             except Exception:
                 pass
+            try:
+                from app.modules.newspaper.tasks.distribution_tasks import distribute_article
+
+                distribute_article.delay(article_id=str(art.article_id))
+            except Exception:
+                logger.warning(
+                    "failed to queue distribution for article %s", art.article_id, exc_info=True
+                )
         session.execute(
             PendingFeedStmts.DELETE,
             (r.bucket, r.interest_score, r.approved_at, r.article_id),

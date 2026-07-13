@@ -535,6 +535,19 @@
   "domainsPagesCrawled": "{count} pages",
   "domainsDeadEnd": "Impasse",
   "domainsApproveExplore": "Approuver et explorer",
+  "domainsCrawlOnce": "Explorer une fois, sans source",
+  "domainsAddButton": "Ajouter",
+  "domainsAddAsSeed": "Ajouter comme source permanente",
+  "domainsScoreUnexplained": "Détail du score non disponible",
+  "paginationPrevious": "Précédent",
+  "paginationNext": "Suivant",
+  "paginationPageOf": "Page {page} sur {total}",
+  "@paginationPageOf": {
+    "placeholders": {
+      "page": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
   "domainsMarkDeadEnd": "Marquer comme impasse",
   "domainsRevive": "Réactiver",
   "@domainsApprovedSnack": {

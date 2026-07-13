@@ -15,6 +15,44 @@ def test_is_bot_detection() -> None:
     )
 
 
+def test_is_bot_flags_self_identifying_url_convention() -> None:
+    # Polite crawlers (but never real browsers) embed a "+https://..." info
+    # link in their UA by convention. Found leaking into "human (direct)"
+    # traffic 2026-07-13: a Bluesky automod bot, and two third-party SEO
+    # preview scrapers — none named in the token denylist.
+    assert a.is_bot(
+        "Mozilla/5.0 (compatible; SkyWatch/1.0; "
+        "+https://github.com/skywatch-bsky/skywatch-automod)"
+    )
+    assert a.is_bot("Mozilla/5.0 (compatible; SvelteKit-FYI/1.0; +https://sveltekit.fyi)")
+    assert a.is_bot("Mozilla/5.0 (compatible; NuxtFyi/0.1; +https://nuxt.fyi)")
+    assert a.is_bot(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.11; rv:49.0) Gecko/20100101 "
+        "Firefox/49.0 (FlipboardProxy/1.2; +http://flipboard.com/browserproxy)"
+    )
+    # Ordinary browsers never carry a "+http" self-ID link.
+    assert not a.is_bot(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+    )
+
+
+def test_is_bot_flags_known_decoy_ua() -> None:
+    # Exact-match denylist for the specific frozen iOS-13.2.3/Safari-13.0.3
+    # string identified 2026-07-12 as the single biggest offender in
+    # pageview_direct_sample (471 rows/7 days, peak 172/day) — structurally
+    # well-formed and non-self-identifying, so only an exact match catches it
+    # on the first request rather than waiting on is_repeated_ua's threshold.
+    assert a.is_bot(
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"
+    )
+    # A different iPhone build/Safari version is real diverse traffic, not this bot.
+    assert not a.is_bot(
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    )
+
+
 def test_referrer_host_classification() -> None:
     # Missing/blank Referer is true direct (dark social, bookmarks, no header).
     assert a.referrer_host(None) == "(direct)"
@@ -272,6 +310,140 @@ def test_is_bot_flags_internet_scanners() -> None:
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
         "AppleWebKit/605 Mobile Safari/604"
     )
+
+
+def test_is_bot_flags_self_identifying_tools_found_in_direct_traffic() -> None:
+    # 2026-07-12: a 500-row sample of "human direct" pageviews was ~35%
+    # IPScanner and ~10% GoogleOther, both sending Mozilla/-prefixed UAs so
+    # they slipped the "mozilla/" fallback check like the internet scanners
+    # above. Both self-identify in parens like the rest of the denylist.
+    assert a.is_bot("Mozilla/5.0 (compatible; IPScanner/1.0)")
+    assert a.is_bot(
+        "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/150.0.7871.46 Mobile Safari/537.36 (compatible; GoogleOther)"
+    )
+    assert a.bot_name("Mozilla/5.0 (compatible; IPScanner/1.0)") == "IPScanner"
+    assert a.bot_name("Mozilla/5.0 (compatible; GoogleOther)") == "Googlebot"
+
+
+def test_is_repeated_ua_flags_only_past_threshold(monkeypatch) -> None:
+    # 2026-07-12: same sample also had 100/500 byte-identical requests for one
+    # ordinary-looking (non-self-identifying) legacy-iOS UA — is_bot() can't
+    # catch this by name, so this is a separate per-day exact-match counter.
+    fake = _FakeRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) Version/13.0.3 Safari/604.1"
+    day = "2026-07-12"
+
+    for _ in range(a._UA_FREQ_THRESHOLD):
+        assert not a.is_repeated_ua(ua, day=day)
+    # The next hit crosses the threshold.
+    assert a.is_repeated_ua(ua, day=day)
+
+
+def test_is_repeated_ua_counts_each_distinct_ua_separately(monkeypatch) -> None:
+    fake = _FakeRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    day = "2026-07-12"
+    for _ in range(a._UA_FREQ_THRESHOLD + 5):
+        a.is_repeated_ua("Mozilla/5.0 (Windows NT 10.0) Chrome/133", day=day)
+    # A different UA on the same day starts its own fresh count, unaffected by
+    # how many times the first UA was seen.
+    assert not a.is_repeated_ua("Mozilla/5.0 (Macintosh) Safari/605", day=day)
+
+
+def test_is_repeated_ua_ignores_empty_and_fails_open(monkeypatch) -> None:
+    assert not a.is_repeated_ua(None)
+    assert not a.is_repeated_ua("")
+
+    def _boom():
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(a, "_uv_redis", _boom)
+    assert not a.is_repeated_ua("Mozilla/5.0 (Windows NT 10.0) Chrome/133")
+
+
+def test_is_malformed_ua_flags_real_fake_found_in_prod_sample() -> None:
+    # 2026-07-12: this exact string was in a live pageview_direct_sample pull —
+    # three independent violations in one UA (typo'd "live Gecko", a 3-part
+    # AppleWebKit version, and a Chrome UA whose Safari/ token doesn't match
+    # Chrome's permanently-frozen 537.36). Any one of them alone is enough.
+    assert a.is_malformed_ua(
+        "Mozilla/5.0 (Windows NT 6.2;en-US) AppleWebKit/537.32.36 "
+        "(KHTML, live Gecko) Chrome/55.0.3103.66 Safari/537.32"
+    )
+
+
+def test_is_malformed_ua_flags_bad_khtml_phrase_alone() -> None:
+    assert a.is_malformed_ua("Mozilla/5.0 (X11; Linux x86_64) KHTML, liek Gecko Safari/537.36")
+
+
+def test_is_malformed_ua_flags_chrome_with_wrong_webkit_version() -> None:
+    # Real Chrome has kept AppleWebKit frozen at exactly 537.36 since ~2013,
+    # regardless of actual Chrome version — this is impossible from a real
+    # install no matter how old or new.
+    assert a.is_malformed_ua(
+        "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/601.1 "
+        "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/601.1"
+    )
+
+
+def test_is_malformed_ua_flags_firefox_rv_mismatch() -> None:
+    # rv: and the trailing Firefox/ version are always identical by
+    # construction in a real Firefox — a mismatch can't happen organically.
+    assert a.is_malformed_ua(
+        "Mozilla/5.0 (Windows NT 10.0; rv:47.0) Gecko/20100101 Firefox/128.0"
+    )
+
+
+def test_is_malformed_ua_flags_desktop_firefox_unfrozen_gecko() -> None:
+    # Desktop Firefox has kept Gecko/ frozen at "20100101" since ~2012 — a
+    # real Gecko/128.0 desktop UA is impossible. Mobile (Android) Firefox is
+    # explicitly NOT held to this, since it genuinely doesn't freeze this token.
+    assert a.is_malformed_ua("Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/128.0 Firefox/128.0")
+    assert not a.is_malformed_ua(
+        "Mozilla/5.0 (Android 15; Mobile; rv:152.0) Gecko/152.0 Firefox/152.0"
+    )
+
+
+def test_is_malformed_ua_allows_genuine_modern_browsers() -> None:
+    # Real, currently-plausible UAs must never be flagged.
+    assert not a.is_malformed_ua(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+    )
+    assert not a.is_malformed_ua(
+        "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+    )
+    assert not a.is_malformed_ua(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/17.3.1 Safari/605.1.15"
+    )
+    # Real Safari's Version/·Safari/ relationship is deliberately not policed
+    # (less rigidly consistent historically than Chrome's), so this known
+    # live-traffic UA — plausible syntax, just suspicious on repeat volume —
+    # must NOT be flagged by structure alone.
+    assert not a.is_malformed_ua(
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"
+    )
+
+
+def test_is_malformed_ua_ignores_empty() -> None:
+    assert not a.is_malformed_ua(None)
+    assert not a.is_malformed_ua("")
+
+
+def test_bot_name_labels_malformed_ua_distinctly() -> None:
+    assert (
+        a.bot_name(
+            "Mozilla/5.0 (Windows NT 6.2;en-US) AppleWebKit/537.32.36 "
+            "(KHTML, live Gecko) Chrome/55.0.3103.66 Safari/537.32"
+        )
+        == "Malformed UA"
+    )
+    # A named bot still wins even if it also happens to have odd syntax.
+    assert a.bot_name("Mozilla/5.0 (compatible; GPTBot/1.1; live Gecko)") == "GPTBot"
 
 
 def test_session_counts_excludes_multipage_from_total() -> None:

@@ -64,6 +64,7 @@ class _WalletConnectUriDialogState extends State<_WalletConnectUriDialog> {
       defaultTargetPlatform == TargetPlatform.iOS;
 
   bool _showQr = !_isMobile;
+  bool _launchFailed = false;
 
   @override
   void initState() {
@@ -105,6 +106,7 @@ class _WalletConnectUriDialogState extends State<_WalletConnectUriDialog> {
 
   Future<void> _launch(BuildContext context, Uri uri, {required String target}) async {
     final l10n = context.l10n;
+    setState(() => _launchFailed = false);
     try {
       final launched = await launchUrl(
         uri,
@@ -112,12 +114,14 @@ class _WalletConnectUriDialogState extends State<_WalletConnectUriDialog> {
         webOnlyWindowName: target,
       );
       if (!launched && context.mounted) {
+        setState(() => _launchFailed = true);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(l10n.walletOpenFailed)),
         );
       }
     } catch (_) {
       if (context.mounted) {
+        setState(() => _launchFailed = true);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(l10n.walletOpenFailed)),
         );
@@ -127,11 +131,24 @@ class _WalletConnectUriDialogState extends State<_WalletConnectUriDialog> {
 
   /// Bare `wc:topic@1` foregrounds the existing wallet session (standard
   /// WalletConnect v1 behavior) so the pending sign request becomes visible.
-  Future<void> _reopenWallet(BuildContext context) =>
-      _launch(context, Uri.parse(widget.uri.split('?').first), target: '_self');
+  Future<void> _reopenWallet(BuildContext context) => _launch(
+        context,
+        Uri.parse(
+          peraDeepLink(
+            widget.uri.split('?').first,
+            isIOS: defaultTargetPlatform == TargetPlatform.iOS,
+          ),
+        ),
+        target: '_self',
+      );
 
-  Future<void> _openWallet(BuildContext context) =>
-      _launch(context, Uri.parse(widget.uri), target: _isMobile ? '_self' : '_blank');
+  Future<void> _openWallet(BuildContext context) => _launch(
+        context,
+        Uri.parse(
+          peraDeepLink(widget.uri, isIOS: defaultTargetPlatform == TargetPlatform.iOS),
+        ),
+        target: _isMobile ? '_self' : '_blank',
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -244,6 +261,34 @@ class _WalletConnectUriDialogState extends State<_WalletConnectUriDialog> {
               icon: const Icon(Icons.account_balance_wallet_outlined, size: 20),
               label: Text(l10n.walletOpenWallet),
             ),
+            // The snackbar version of this message is easy to miss/dismiss
+            // before reading; a persistent inline retry prompt (Pera's own
+            // web SDK shows an equivalent "Can't Launch Pera" panel) gives
+            // the user an obvious next step instead of a dead end.
+            if (_launchFailed) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.errorContainer.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        l10n.walletOpenFailed,
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () => _openWallet(context),
+                      child: Text(l10n.walletRetry),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 8),
             TextButton.icon(
               onPressed: () => setState(() => _showQr = !_showQr),
@@ -418,4 +463,24 @@ class _SignExplainer extends StatelessWidget {
       ],
     );
   }
+}
+
+/// Wraps a WalletConnect pairing `wc:...` URI in the deep link Pera Wallet's
+/// app actually expects, which differs by platform. This is pulled from
+/// Pera's own web SDK behavior (perawallet/connect,
+/// src/util/peraWalletUtils.ts: generatePeraWalletConnectDeepLink), NOT
+/// guessed: iOS Safari's handling of an arbitrary custom scheme invoked from
+/// web content (as opposed to one the requesting page's own app owns) is
+/// unreliable, so Pera registers its own `perawallet-wc://` scheme and
+/// expects the WalletConnect URI wrapped inside it as a query param.
+/// Android's intent-filter resolution of arbitrary custom schemes is
+/// reliable enough that Pera hands it the bare `wc:` URI unmodified there —
+/// confirmed against Pera's source 2026-07-12. Sending every platform the
+/// Android-only bare-URI form was the actual cause of "mobile link doesn't
+/// work" reports: iOS silently failed to hand off to the Pera app at all.
+String peraDeepLink(String wcUri, {required bool isIOS}) {
+  if (isIOS) {
+    return 'perawallet-wc://wc?uri=${Uri.encodeComponent(wcUri)}';
+  }
+  return wcUri;
 }

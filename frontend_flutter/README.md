@@ -1,6 +1,7 @@
 # Flutter Frontend
 
-Web-first client for the Algorand Platform (News, Suggestions, Search).
+Web-first client for **PXke Algorand**, a tag-sectioned newspaper built on the
+Algorand Platform (front page, topic pages, article search, admin console).
 
 ## Run (web)
 
@@ -16,21 +17,25 @@ Backend must use matching `AUTH_DOMAIN=localhost`. **Web only:** CORS applies in
 
 ## Architecture
 
-- `lib/core/` — API client, `AppConfig` (`--dart-define`), router, theme
-- `lib/modules/` — auth, newspaper, suggestions, search, shell
+- `lib/core/` — API client, `AppConfig` (`--dart-define`), router, theme, l10n locale list
+- `lib/modules/` — `newspaper` (front page, feed, article detail, hot, topics, about/contact), `admin` (ops console), `auth` (wallet login/session), `search`, `suggestions` (flag-gated), `shell` (app chrome, `AppShell`/`AppSwitcher`), `misc` (deferred-loading bundle re-exporting About/Contact/Search/Suggestions)
 - `wallet_auth_flutter` — path dependency in `pubspec.yaml`
 
 ## Products
 
 | Route | Product |
 |-------|---------|
-| `/` | Home — product tiles |
-| `/news` | News feed + article detail (optional `?service_id=` filter) |
-| `/admin` | Admin sources panel (wallet in `ADMIN_WALLET_ADDRESSES`) |
-| `/sources` | Registered crawlers: Discord, Reddit, web |
+| `/` | Front page (newspaper) |
+| `/news`, `/news/articles/:articleId` | News feed + article detail |
+| `/topics`, `/topic/:tag` | Tag-derived topic pages (the section structure) |
+| `/hot` | Trending/hot page |
+| `/section/:slug` | Redirect-only: legacy section slugs → `/topic/<tag>` or `/topics` |
+| `/about`, `/contact` | Misc bundle |
+| `/search` | Article search (Typesense or feed fallback) |
+| `/suggestions` | Suggestions board — flag-gated (`AppConfig.suggestionsEnabled`); redirects to `/` when disabled |
+| `/admin` | Admin console (wallet in `ADMIN_WALLET_ADDRESSES`) — tabs: Seeds, Articles, Writer Briefs, Classifier, Queue, Training, Gatekeeper, Domains, Tool Insights, Sessions, Analytics, Inbox, System |
+| `/sources` | Redirect-only → `/admin` (standalone sources UI retired) |
 
 **Appearance:** Light and dark themes; toggle in the app bar or choose Light / Dark / System in the drawer.
 
-**Languages:** English and Spanish (`lib/l10n/`). Choose **Language** in the drawer (or system default). Regenerate after ARB edits: `flutter gen-l10n`.
-| `/suggestions` | Suggestions board |
-| `/search` | Article search (Typesense or feed fallback) |
+**Languages:** 9 — English, Spanish, Arabic, Farsi, French, Hindi, Pashto, Russian, Chinese (`lib/l10n/`). Choose **Language** in the drawer (or system default). Regenerate after ARB edits: `flutter gen-l10n`.

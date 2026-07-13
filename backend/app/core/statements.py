@@ -406,6 +406,9 @@ class PendingFeedStmts:
         "(bucket, interest_score, approved_at, article_id) "
         "VALUES (?, ?, ?, ?)"
     )
+    PEEK_ID = _Stmt(
+        "SELECT article_id FROM algorand_platform.pending_feed_queue WHERE bucket = ? LIMIT 1"
+    )
 
 
 # --------------------------------------------------------------------------- #

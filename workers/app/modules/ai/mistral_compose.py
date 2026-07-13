@@ -355,7 +355,9 @@ _NARRATIVE_GUIDANCE = (
     "2. PROBLEM -> SOLUTION FRAME: ground the opening in the real-world friction "
     "the project addresses — contrast the legacy pain (e.g. multi-day settlement, "
     "intermediary fees) with the specific chain mechanics that resolve it (e.g. "
-    "~4s finality, sub-cent fees). When verified findings document the mechanics, "
+    "sub-3-second finality — Algorand's dynamic round times average ~2.8s as of "
+    "2026, NOT the older '4-second' figure some pretrained knowledge still cites "
+    "— sub-cent fees). When verified findings document the mechanics, "
     "use them; when sources are thin, you MUST still complete the frame using your "
     "expert knowledge of Algorand layer-1 infrastructure — never invent quotes, "
     "partnerships, or product-specific guarantees, but DO explain why Algorand's "
@@ -635,18 +637,21 @@ def _review_and_revise(
     trace: list[dict],
     debug: dict | None = None,
 ) -> dict:
-    """Stage 3+4 of two-stage compose: grade the draft, then revise once if weak.
+    """Stage 3+4 of two-stage compose: grade the draft, then revise if weak.
 
     The warm generation pass runs with NO tools, so the model cannot call
     review_draft itself — we run the heuristic grader deterministically here and,
-    on a sub-threshold grade or any listed issues, do exactly one revision pass
-    with the concrete issues fed back. Both gradings are recorded in the trace
-    like review_draft tool calls so telemetry/insights see them.
+    on a sub-threshold grade or any listed issues, revise with the concrete
+    issues fed back, up to WRITER_REVISION_MAX_PASSES times (a pass that comes
+    back clean stops the loop early — most drafts never need a second). Every
+    grading is recorded in the trace like review_draft tool calls so
+    telemetry/insights see them.
     """
     from app.core.config import (
         MISTRAL_TEMP_WRITE,
         WRITER_QUALITY_LLM_MIN_SCORE,
         WRITER_REVIEW_ENABLED,
+        WRITER_REVISION_MAX_PASSES,
     )
     from app.modules.newspaper.article_grader import grade_article_draft
     from app.modules.newspaper.article_quality_llm import (
@@ -656,85 +661,6 @@ def _review_and_revise(
 
     if not WRITER_REVIEW_ENABLED:
         return payload
-    title = str(payload.get("title", "") or "")
-    body = str(payload.get("body", "") or "")
-    summary = str(payload.get("summary", "") or "")
-    if not body:
-        return payload
-
-    try:
-        review = grade_article_draft(title=title, summary=summary, body=body)
-    except Exception as exc:
-        review = {"error": str(exc)[:200], "grade": None}
-    try:
-        quality = grade_article_quality_llm(title=title, body=body, client=mistral)
-    except Exception as exc:
-        quality = {"model": "llm_rubric_error", "error": str(exc)[:200], "issues": []}
-    review["quality"] = quality
-    # The grader reads the FULL title+body; we record only a compact label in the
-    # trace (title + word count) to avoid dumping the whole body into the trace.
-    grade_args = {"title": title, "words": len(body.split())}
-    trace.append({"tool": "review_draft", "arguments": grade_args, "result": review})
-    _debug_tool_turn(debug, "review_draft", grade_args, review)
-    # Attach to the payload dict now (mutated in place) so every `return payload`
-    # below carries this grade even when no revision is attempted — the caller
-    # (publish gate) reads it via MistralArticleFields.heuristic_grade.
-    payload["_heuristic_grade"] = review
-
-    issues = list(review.get("issues") or [])
-    # "headline" issues are the structural enforcement of the house headline
-    # style: the prompt states the rules, but only this deterministic check +
-    # forced revision makes them invariants (prompts drift; regexes don't).
-    schema_fixable = [
-        i
-        for i in issues
-        if i.startswith(("too long", "structure", "schema", "headline"))
-    ]
-    quality_fixable: list[str] = []
-    if quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE):
-        quality_fixable = list(quality.get("issues") or [])
-    fixable = schema_fixable + quality_fixable
-    if not fixable:
-        return payload
-
-    issues_block = "\n".join(f"- {i}" for i in fixable[:10])
-    too_long = any(i.startswith("too long") for i in fixable)
-    needs_depth = quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE)
-    # The reviser is judged by the 75% word-count guard below; give it that
-    # constraint as a CONCRETE number — "keep roughly the same length" alone
-    # still lost >25% of the words in ~10% of prod revisions, wasting the call.
-    draft_words = len(body.split())
-    min_words = int(draft_words * 0.8)
-    length_rule = (
-        "Trim padding/filler to bring it under the limit, but keep every real fact."
-        if too_long
-        else (
-            "Improve narrative synthesis and Algorand technical depth — use verified "
-            "facts from the Research Digest and, where sources are thin, your expert "
-            "knowledge of Algorand layer-1 mechanics to explain legacy friction vs "
-            "protocol solutions. Move multi-item data into a Markdown table (Concept / "
-            "Real-World Implication). PRESERVE every verified fact. Do NOT invent "
-            "quotes, partnerships, or numbers. "
-            if needs_depth
-            else "PRESERVE every fact AND keep the same length — only REORGANIZE "
-            "the existing prose into section headings and short paragraphs; move "
-            "comparative data into a Markdown table if needed. Do NOT use narrative "
-            "bullet lists. Do NOT drop information, summarize away detail, or shorten "
-            "the article: "
-        )
-    )
-    if not too_long and not needs_depth:
-        length_rule += (
-            f"the draft is {draft_words} words and your revision MUST stay above "
-            f"{min_words} words or it will be rejected."
-        )
-    revise_user = (
-        gen_user + f"\n\nA reviewer flagged these problems:\n{issues_block}\n\n"
-        f"{length_rule} Do NOT add, invent, or restate facts beyond the research "
-        "digest above, and do not pad with new filler. Return the full revised "
-        "article as the same JSON object."
-    )
-    gen_system = system + _STAGE2_GENERATION_GUIDANCE
 
     def _note_revision_failure(reason: str) -> None:
         # Surface WHY the revision didn't happen instead of silently keeping the
@@ -745,58 +671,134 @@ def _review_and_revise(
         trace.append({"tool": "review_draft", "arguments": args, "result": result})
         _debug_tool_turn(debug, "review_draft", args, result)
 
-    try:
-        revised = mistral.chat_json_object(
-            [
-                {"role": "system", "content": gen_system},
-                {"role": "user", "content": revise_user},
-            ],
-            temperature=MISTRAL_TEMP_WRITE,
-        )
-    except Exception as exc:
-        _note_revision_failure(f"revision call failed: {type(exc).__name__}: {exc}")
-        return payload
-    if not str(revised.get("body", "") or "").strip():
-        _note_revision_failure("revision returned an empty body")
-        return payload
-    # Safety net: a structure-only fix must not gut the article. If it dropped
-    # more than ~25% of the words (and we weren't trimming an over-long piece),
-    # keep the original — a reformat that loses that much has lost real content.
-    orig_words = len(body.split())
-    new_words = len(str(revised.get("body", "")).split())
-    if not too_long and orig_words and new_words < 0.75 * orig_words:
-        _note_revision_failure(
-            f"revision dropped too much content ({orig_words} -> {new_words} words); kept original"
-        )
-        return payload
+    current = payload
+    max_revisions = max(1, WRITER_REVISION_MAX_PASSES)
+    revise_count = 0
+    while True:
+        title = str(current.get("title", "") or "")
+        body = str(current.get("body", "") or "")
+        summary = str(current.get("summary", "") or "")
+        if not body:
+            return current
 
-    # Record the post-revision grade for telemetry. No further revision pass.
-    # Default to the pre-revision grade if the regrade itself fails, so the
-    # floor-gate downstream never sees revision as erasing a known grade.
-    revised["_heuristic_grade"] = review
-    try:
-        revised_body = str(revised.get("body", "") or "")
-        regrade = grade_article_draft(
-            title=str(revised.get("title", "") or ""),
-            summary=str(revised.get("summary", "") or ""),
-            body=revised_body,
+        try:
+            review = grade_article_draft(title=title, summary=summary, body=body)
+        except Exception as exc:
+            review = {"error": str(exc)[:200], "grade": None}
+        try:
+            quality = grade_article_quality_llm(title=title, body=body, client=mistral)
+        except Exception as exc:
+            quality = {"model": "llm_rubric_error", "error": str(exc)[:200], "issues": []}
+        review["quality"] = quality
+        # The grader reads the FULL title+body; we record only a compact label in
+        # the trace (title + word count) to avoid dumping the whole body into it.
+        grade_args = {"title": title, "words": len(body.split())}
+        if revise_count > 0:
+            grade_args["recheck"] = True
+        trace.append({"tool": "review_draft", "arguments": grade_args, "result": review})
+        _debug_tool_turn(debug, "review_draft", grade_args, review)
+        # Attach to the current draft (mutated in place) so every return below
+        # carries this grade even when no (further) revision is attempted — the
+        # caller (publish gate) reads it via MistralArticleFields.heuristic_grade.
+        current["_heuristic_grade"] = review
+
+        issues = list(review.get("issues") or [])
+        # "headline" issues are the structural enforcement of the house headline
+        # style: the prompt states the rules, but only this deterministic check +
+        # forced revision makes them invariants (prompts drift; regexes don't).
+        schema_fixable = [
+            i
+            for i in issues
+            if i.startswith(("too long", "structure", "schema", "headline"))
+        ]
+        quality_fixable: list[str] = []
+        if quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE):
+            quality_fixable = list(quality.get("issues") or [])
+        fixable = schema_fixable + quality_fixable
+        if not fixable:
+            return current
+        if revise_count >= max_revisions:
+            # Out of revisions — return the current draft with its (still-flagged)
+            # grade attached rather than revising into a draft that never gets
+            # checked again.
+            return current
+
+        issues_block = "\n".join(f"- {i}" for i in fixable[:10])
+        too_long = any(i.startswith("too long") for i in fixable)
+        needs_depth = quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE)
+        # The reviser is judged by the 75% word-count guard below; give it that
+        # constraint as a CONCRETE number — "keep roughly the same length" alone
+        # still lost >25% of the words in ~10% of prod revisions, wasting the call.
+        draft_words = len(body.split())
+        min_words = int(draft_words * 0.8)
+        length_rule = (
+            "Trim padding/filler to bring it under the limit, but keep every real fact."
+            if too_long
+            else (
+                "Improve narrative synthesis, Algorand technical depth, and critical "
+                "distance — use verified facts from the Research Digest and, where "
+                "sources are thin, your expert knowledge of Algorand layer-1 mechanics "
+                "to explain legacy friction vs protocol solutions. Move multi-item data "
+                "into a Markdown table (Concept / Real-World Implication). If the subject "
+                "has a conflict of interest (a centralized exchange's product, a reward "
+                "structure that incentivizes holding the SAME platform's token, an "
+                "unaudited protocol), name the actual risk/tradeoff a reader needs "
+                "instead of just relaying the subject's own marketing framing. PRESERVE "
+                "every verified fact. Do NOT invent quotes, partnerships, or numbers. "
+                if needs_depth
+                else "PRESERVE every fact AND keep the same length — only REORGANIZE "
+                "the existing prose into section headings and short paragraphs; move "
+                "comparative data into a Markdown table if needed. Do NOT use narrative "
+                "bullet lists. Do NOT drop information, summarize away detail, or shorten "
+                "the article: "
+            )
         )
-        regrade["quality"] = grade_article_quality_llm(
-            title=str(revised.get("title", "") or ""),
-            body=revised_body,
-            client=mistral,
+        if not too_long and not needs_depth:
+            length_rule += (
+                f"the draft is {draft_words} words and your revision MUST stay above "
+                f"{min_words} words or it will be rejected."
+            )
+        revise_user = (
+            gen_user + f"\n\nA reviewer flagged these problems:\n{issues_block}\n\n"
+            f"{length_rule} Do NOT add, invent, or restate facts beyond the research "
+            "digest above, and do not pad with new filler. Return the full revised "
+            "article as the same JSON object."
         )
-        revised["_heuristic_grade"] = regrade
-        recheck_args = {
-            "title": revised.get("title", ""),
-            "words": len(revised_body.split()),
-            "recheck": True,
-        }
-        trace.append({"tool": "review_draft", "arguments": recheck_args, "result": regrade})
-        _debug_tool_turn(debug, "review_draft", recheck_args, regrade)
-    except Exception:
-        logger.warning("failed to record post-revision grade telemetry", exc_info=True)
-    return revised
+        gen_system = system + _STAGE2_GENERATION_GUIDANCE
+
+        try:
+            revised = mistral.chat_json_object(
+                [
+                    {"role": "system", "content": gen_system},
+                    {"role": "user", "content": revise_user},
+                ],
+                temperature=MISTRAL_TEMP_WRITE,
+            )
+        except Exception as exc:
+            _note_revision_failure(f"revision call failed: {type(exc).__name__}: {exc}")
+            return current
+        if not str(revised.get("body", "") or "").strip():
+            _note_revision_failure("revision returned an empty body")
+            return current
+        # Safety net: a structure-only fix must not gut the article. If it dropped
+        # more than ~25% of the words (and we weren't trimming an over-long piece),
+        # keep the current draft — a reformat that loses that much has lost real
+        # content.
+        orig_words = len(body.split())
+        new_words = len(str(revised.get("body", "")).split())
+        if not too_long and orig_words and new_words < 0.75 * orig_words:
+            _note_revision_failure(
+                f"revision dropped too much content ({orig_words} -> {new_words} words); "
+                "kept prior draft"
+            )
+            return current
+
+        # Default to this pass's grade if the next pass's regrade itself fails,
+        # so the floor-gate downstream never sees revision as erasing a known
+        # grade. The loop's next iteration overwrites this with the real regrade.
+        revised["_heuristic_grade"] = review
+        current = revised
+        revise_count += 1
 
 
 # Stable output contract shared by every compose function. Kept in the SYSTEM

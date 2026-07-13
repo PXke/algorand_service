@@ -535,6 +535,19 @@
   },
   "domainsDeadEnd": "بن‌بست",
   "domainsApproveExplore": "تایید او پلټل",
+  "domainsCrawlOnce": "یوځل وڅارل شي، پرته له سرچینې",
+  "domainsAddButton": "زیاتول",
+  "domainsAddAsSeed": "د دایمي سرچینې په توګه یې زیات کړئ",
+  "domainsScoreUnexplained": "د نمرې تفصیل شتون نلري",
+  "paginationPrevious": "پخوانی",
+  "paginationNext": "راتلونکی",
+  "paginationPageOf": "مخ {page} د {total} څخه",
+  "@paginationPageOf": {
+    "placeholders": {
+      "page": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
   "domainsMarkDeadEnd": "د بن‌بست په توګه نښه کول",
   "domainsRevive": "بیا راژوندي کول",
   "domainsApprovedSnack": "{domain} تایید شو — کرالر کولی شي پلټنه وکړي",

@@ -78,7 +78,8 @@ def classify_pending_domains(
         if len(text.strip()) < 100:
             unreadable += 1
             continue
-        score = round(float(score_page(url=url, text=text).score), 3)
+        score_result = score_page(url=url, text=text)
+        score = round(float(score_result.score), 3)
         scored += 1
         will_reject = (
             auto_reject
@@ -88,7 +89,15 @@ def classify_pending_domains(
         if len(samples) < 40:
             samples.append({"domain": domain, "score": score, "reject": will_reject})
         if not dry_run:
-            new_meta = {**meta, "content_relevance": f"{score:.3f}"}
+            new_meta = {
+                **meta,
+                "content_relevance": f"{score:.3f}",
+                # Why the score landed where it did — shown next to the score
+                # chip in the admin Domains tab; previously computed by
+                # score_page() and thrown away, so a reviewer had a number
+                # with no explanation (owner feedback 2026-07-12).
+                "content_relevance_reasons": "; ".join(score_result.reasons),
+            }
             if will_reject:
                 new_meta["frontier_status"] = "dead_end"
                 new_meta["auto_rejected"] = "content_off_topic"

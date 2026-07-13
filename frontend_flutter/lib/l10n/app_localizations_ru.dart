@@ -978,6 +978,29 @@ class AppLocalizationsRu extends AppLocalizations {
   String get domainsApproveExplore => 'Одобрить и исследовать';
 
   @override
+  String get domainsCrawlOnce => 'Обход один раз, без источника';
+
+  @override
+  String get domainsAddButton => 'Добавить';
+
+  @override
+  String get domainsAddAsSeed => 'Добавить как постоянный источник';
+
+  @override
+  String get domainsScoreUnexplained => 'Разбивка оценки недоступна';
+
+  @override
+  String get paginationPrevious => 'Назад';
+
+  @override
+  String get paginationNext => 'Далее';
+
+  @override
+  String paginationPageOf(int page, int total) {
+    return 'Страница $page из $total';
+  }
+
+  @override
   String get domainsMarkDeadEnd => 'Отметить как тупик';
 
   @override

@@ -26,6 +26,13 @@ data = {
     "WALLET_CONNECT_BRIDGE": os.environ.get(
         "FRONTEND_WALLET_CONNECT_BRIDGE", "https://wallet-connect-a.perawallet.app"
     ),
+    "BUGSNAG_API_KEY": (
+        os.environ.get("FRONTEND_BUGSNAG_API_KEY", "7712dd9a5b49cc654fd24ce23a18d0c3").strip()
+        or "7712dd9a5b49cc654fd24ce23a18d0c3"
+    ),
+    "BUGSNAG_RELEASE_STAGE": os.environ.get(
+        "FRONTEND_BUGSNAG_RELEASE_STAGE", "production"
+    ),
 }
 with open(out, "w", encoding="utf-8") as fh:
     json.dump(data, fh, indent=2)

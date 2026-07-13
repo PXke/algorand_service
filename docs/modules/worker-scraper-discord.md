@@ -1,5 +1,14 @@
 # Brick: Worker scraper — Discord
 
+> **REMOVED (2026-07-06).** Discord/Reddit/Telegram + external-push lanes were
+> removed in the pipeline simplification — do not restore. No
+> `workers/app/modules/discord*` code exists; this doc is kept only so old
+> links resolve. See [worker-scraper-reddit.md](worker-scraper-reddit.md),
+> [worker-scraper-telegram.md](worker-scraper-telegram.md),
+> [worker-scraper-discord-web.md](worker-scraper-discord-web.md),
+> [local-browser-bridge.md](local-browser-bridge.md),
+> [firefox-channel-sync.md](firefox-channel-sync.md) — same status.
+
 ## Goal
 
 Crawl **two (or more) Discord channels** registered in `service_registry` and feed the newspaper pipeline (snapshots → diff → articles).

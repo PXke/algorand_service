@@ -404,3 +404,9 @@ class ScraperRunRequest(msgspec.Struct, kw_only=True):
 class DomainSetRequest(msgspec.Struct, kw_only=True):
     domain: Annotated[str, Meta(min_length=3, max_length=256)]
     is_relevant: bool
+    # Default True preserves existing behavior for every caller that predates
+    # this field (approving a domain always became a permanent monitored
+    # source). False approves the domain for one-time frontier crawling only
+    # — no service_registry row, so it won't be repeatedly re-scraped/diffed
+    # going forward, just explored for whatever's linked from it right now.
+    as_seed: bool = True

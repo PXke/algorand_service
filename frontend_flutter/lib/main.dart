@@ -1,11 +1,10 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 
 import 'app.dart';
 import 'core/util/bugsnag_init_stub.dart'
+    if (dart.library.html) 'core/util/bugsnag_init_web.dart'
     if (dart.library.io) 'core/util/bugsnag_init_mobile.dart';
 
 Future<void> main() async {
@@ -16,7 +15,6 @@ Future<void> main() async {
   // router is created.
   usePathUrlStrategy();
   WidgetsFlutterBinding.ensureInitialized();
+  await initBugsnag();
   runApp(ProviderScope(child: AlgorandPlatformApp()));
-  // Crash reporting is mobile-only; web skips it entirely for a leaner bundle.
-  unawaited(initBugsnag());
 }

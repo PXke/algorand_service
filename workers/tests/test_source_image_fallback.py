@@ -97,6 +97,23 @@ def test_hero_allows_cdn_hosted_og_images() -> None:
         assert _with_hero_image("body", image, "t", source_url="https://rug.ninja/") != "body"
 
 
+def test_hero_allows_same_platform_shared_media_host() -> None:
+    # Live 2026-07-13 bug: every Medium-sourced article silently lost its hero
+    # image because domain_from_url deliberately keeps multi-tenant platform
+    # subdomains distinct (so unrelated authors aren't merged as one source),
+    # which made Medium's own shared image CDN (miro.medium.com) look foreign
+    # to any one *.medium.com publication.
+    assert _plausible_image_host(
+        "https://miro.medium.com/v2/resize:fit:2400/1*abc.jpeg",
+        "https://valar-staking.medium.com",
+    )
+    # A genuinely different platform must still be rejected.
+    assert not _plausible_image_host(
+        "https://miro.medium.com/v2/resize:fit:2400/1*abc.jpeg",
+        "https://some-blog.substack.com",
+    )
+
+
 def test_hero_still_drops_foreign_website_images() -> None:
     # The case the guard exists for: a news aggregator hotlinking another
     # news site's stock photo.

@@ -40,9 +40,7 @@ _FEED_FULL_CONTENT_LIMIT = 20  # newest items carry full content:encoded HTML
 _SITEMAP_LIMIT = 5000
 
 
-def _tracking_opted_out(request: Request) -> bool:
-    """True when the viewer asked not to be counted (admin wallet connected)."""
-    return "pxke_no_track=1" in _header(request, "cookie")
+from app.core.tracking import tracking_opted_out_from_headers
 
 
 def _doc_response(
@@ -99,7 +97,7 @@ def _query_params(request: Request) -> dict:
 
 def _record(request: Request, path: str) -> None:
     """Best-effort pageview record for a public document route."""
-    if _tracking_opted_out(request):
+    if tracking_opted_out_from_headers(request.headers):
         return
     analytics_store.record_pageview(
         path=path,
@@ -264,6 +262,50 @@ def register_seo_routes(app) -> None:
             html_lang=html_lang_for(lang),
         )
 
+    @app.get("/og/article/:article_id")
+    async def og_article_card(request: Request) -> Response:
+        """Generated share-card PNG (accent slug, kicker, serif headline —
+        see seo/share_card.py) for an article's title/primary tag. Always
+        generates regardless of whether the article has a real photo; the
+        DECISION to use this vs. a real og:image lives in render.py, which is
+        the only caller that should ever link here."""
+        import asyncio
+        import hashlib
+
+        from app.core.cache import cached_bytes
+        from app.modules.seo.topics import display_tag_label, primary_tag
+
+        article_id = request.path_params.get("article_id", "")
+        if article_id.endswith(".png"):
+            article_id = article_id[: -len(".png")]
+        detail = news.get_article(article_id) if article_id else None
+        if detail is None:
+            return Response(
+                status_code=404,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+                description="Not found",
+            )
+        raw_tag = primary_tag(detail.tags)
+        kicker = display_tag_label(raw_tag) if raw_tag else ""
+        # Deterministic across processes (unlike builtin hash(), which is
+        # PYTHONHASHSEED-randomized per run) — title/kicker baked into the
+        # key so an edit or recompose auto-busts the cache, no invalidation
+        # call needed; the stale entry just ages out of Redis unread.
+        digest = hashlib.sha256(f"{detail.title}\x00{kicker}".encode()).hexdigest()[:16]
+        cache_key = f"ogcard:{article_id}:{digest}"
+
+        def compute() -> bytes:
+            from app.modules.seo.share_card import render_share_card
+
+            return render_share_card(title=detail.title, kicker=kicker)
+
+        data = await asyncio.to_thread(cached_bytes, cache_key, 2_592_000, compute)
+        return Response(
+            status_code=200,
+            headers={"Content-Type": "image/png", "Cache-Control": "public, max-age=86400"},
+            description=data,
+        )
+
     @app.get("/section/:slug")
     async def section(request: Request) -> Response:
         # The human-defined sections were retired in favour of writer-tag
@@ -351,7 +393,7 @@ def register_seo_routes(app) -> None:
         """Client-side beacon for a Flutter in-app route change — the initial
         document load is already recorded server-side; this covers navigation
         after that, which never hits a document route."""
-        if _tracking_opted_out(request):
+        if tracking_opted_out_from_headers(request.headers):
             return {"ok": True}
         try:
             payload = serialization.decode(request.body, PageviewBeaconRequest)
@@ -498,6 +540,7 @@ def register_seo_routes(app) -> None:
         ("/", home),
         ("/news", news_index),
         ("/news/articles/:article_id", article),
+        ("/og/article/:article_id", og_article_card),
         ("/section/:slug", section),
         ("/hot", hot),
         ("/topics", topics),

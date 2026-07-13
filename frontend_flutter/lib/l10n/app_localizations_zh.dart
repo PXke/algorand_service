@@ -938,6 +938,29 @@ class AppLocalizationsZh extends AppLocalizations {
   String get domainsApproveExplore => '批准并探索';
 
   @override
+  String get domainsCrawlOnce => '仅爬取一次，不作为来源';
+
+  @override
+  String get domainsAddButton => '添加';
+
+  @override
+  String get domainsAddAsSeed => '添加为永久来源';
+
+  @override
+  String get domainsScoreUnexplained => '暂无评分明细';
+
+  @override
+  String get paginationPrevious => '上一页';
+
+  @override
+  String get paginationNext => '下一页';
+
+  @override
+  String paginationPageOf(int page, int total) {
+    return '第 $page 页，共 $total 页';
+  }
+
+  @override
   String get domainsMarkDeadEnd => '标记死胡同';
 
   @override

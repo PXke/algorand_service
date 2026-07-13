@@ -557,6 +557,19 @@
   },
   "domainsDeadEnd": "Dead end",
   "domainsApproveExplore": "Approve & explore",
+  "domainsCrawlOnce": "Crawl once, no seed",
+  "domainsAddButton": "Add",
+  "domainsAddAsSeed": "Add as permanent source",
+  "domainsScoreUnexplained": "Score breakdown not available",
+  "paginationPrevious": "Previous",
+  "paginationNext": "Next",
+  "paginationPageOf": "Page {page} of {total}",
+  "@paginationPageOf": {
+    "placeholders": {
+      "page": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
   "domainsMarkDeadEnd": "Mark dead end",
   "domainsRevive": "Revive",
   "domainsApprovedSnack": "{domain} approved — the crawler may explore it",

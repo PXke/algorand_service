@@ -125,11 +125,18 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
     if (wallet == null) return;
     setState(() => _composing = true);
     try {
-      await ref.read(adminApiProvider).composeNextReview(walletAddress: wallet);
+      final result = await ref.read(adminApiProvider).composeNextReview(walletAddress: wallet);
       if (!mounted) return;
+      final triggered = result['triggered'] == true;
+      final message = triggered
+          ? 'Pulling the top topic — it will appear shortly'
+          : (result['message'] as String? ?? 'Skipped — nothing to pull right now');
+      // Default SnackBar duration (4s) is shorter than the 6s wait below, so it
+      // was vanishing before the reload — nothing visible ever seemed to happen.
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Pulling the top topic — it will appear shortly')),
+        SnackBar(content: Text(message), duration: const Duration(seconds: 8)),
       );
+      if (!triggered) return;
       // Give the worker a few seconds to compose, then reload.
       await Future.delayed(const Duration(seconds: 6));
       await _load();

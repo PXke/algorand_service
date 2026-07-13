@@ -1,5 +1,11 @@
 # Firefox channel sync (extension)
 
+> **REMOVED (2026-07-06).** The external-push lane this fed (`POST
+> /api/v1/ingest/signal` → `workers/app/modules/newspaper/external_ingest_queue.py`)
+> has no callers anywhere in the worker codebase — nothing drains the queue,
+> so the `extensions/algorand-channel-sync/` browser extension is orphaned.
+> Do not restore; kept only so old links resolve.
+
 ## What you asked for
 
 You already visit Discord, Telegram, and Reddit in **Firefox** with **your account**. The platform should reuse that — not run headless crawlers or read your profile database off disk.

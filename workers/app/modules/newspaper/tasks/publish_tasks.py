@@ -53,11 +53,23 @@ def _plausible_image_host(og_image: str, source_url: str) -> bool:
     registrable domain, or a recognizable CDN/media host."""
     from urllib.parse import urlparse
 
-    from app.modules.crawler.domain_tracker import domain_from_url
+    from app.modules.crawler.domain_tracker import _PLATFORM_SUFFIXES, domain_from_url
 
     image_domain = domain_from_url(og_image)
     site_domain = domain_from_url(source_url)
     if not image_domain or not site_domain or image_domain == site_domain:
+        return True
+    # domain_from_url deliberately keeps multi-tenant platform subdomains
+    # distinct (valar-staking.medium.com != some-other-author.medium.com) so
+    # unrelated authors aren't merged into one "source" — but that same rule
+    # makes a platform's own SHARED media host (miro.medium.com serves images
+    # for every *.medium.com publication) look foreign to any one publication.
+    # Found live 2026-07-13: every Medium-sourced article was silently losing
+    # its hero image because of exactly this. Treat same-platform subdomains
+    # as plausible for each other.
+    image_suffix = ".".join(image_domain.split(".")[-2:])
+    site_suffix = ".".join(site_domain.split(".")[-2:])
+    if image_suffix == site_suffix and image_suffix in _PLATFORM_SUFFIXES:
         return True
     host = (urlparse(og_image).hostname or "").lower()
     return any(hint in host for hint in _IMAGE_CDN_HINTS)
@@ -239,6 +251,67 @@ def _quality_floor_fails(heuristic_grade: dict | None) -> bool:
         return float(grade) < config.WRITER_QUALITY_FLOOR
     except (TypeError, ValueError):
         return False
+
+
+def _fresh_auto_approve_passes(
+    *, title: str, body: str, page_text: str, source_url: str
+) -> tuple[bool, dict[str, str]]:
+    """Strict autonomous-approve gate for content that would otherwise wait for
+    a human review click (owner decision 2026-07-12), mirroring
+    recompose_published's auto-apply design exactly: grade + headline +
+    gatekeeper factuality must ALL clear a bar at least as strict as
+    recompose's — fresh content has zero prior human vetting at all, unlike
+    recompose which only touches content a human already approved once, so
+    there's no argument for a looser bar here. Fails CLOSED: any missing or
+    errored signal blocks auto-approve, never allows it. Always returns
+    metadata (even on failure) for the review-row audit trail."""
+    import json as _json
+
+    from app.core import config as worker_config
+
+    meta: dict[str, str] = {}
+    grade_value: float | None = None
+    try:
+        from app.modules.newspaper.article_grader import grade_article_draft
+
+        grade = grade_article_draft(title=title, body=body, source_url=source_url)
+        grade_value = float(grade["grade"])
+        meta["grade"] = str(grade["grade"])
+        meta["grade_detail"] = _json.dumps(
+            {"subscores": grade["subscores"], "issues": grade["issues"]},
+            separators=(",", ":"),
+        )
+    except Exception:
+        logger.warning("fresh auto-approve grading failed for %s", source_url, exc_info=True)
+
+    gate_ok = False
+    try:
+        from app.modules.gatekeeper.live import gate_draft
+
+        gate = gate_draft(
+            source_text=page_text, article_text=f"{title}\n{body}", service_id=source_url
+        )
+        if gate is not None:
+            meta.update(gate.as_metadata())
+            gate_ok = gate.factuality_score >= worker_config.GATEKEEPER_FACT_MIN
+        else:
+            gate_ok = True  # gatekeeper disabled entirely — no signal to fail on
+    except Exception:
+        logger.warning(
+            "fresh auto-approve gatekeeper check failed for %s", source_url, exc_info=True
+        )
+
+    from app.modules.newspaper.article_grader import headline_violations
+
+    passed = (
+        worker_config.FRESH_AUTO_APPROVE_ENABLED
+        and grade_value is not None
+        and grade_value >= worker_config.FRESH_AUTO_APPROVE_GRADE_FLOOR
+        and not headline_violations(title)
+        and gate_ok
+    )
+    meta["auto_applied"] = "1" if passed else "0"
+    return passed, meta
 
 
 @dataclass(frozen=True)
@@ -552,7 +625,47 @@ def publish_from_queued_row(
         except Exception:
             logger.warning("failed to resolve source images for %s", row.scrape_url, exc_info=True)
 
-    if clf_decision is not True or gate_enforced_review:
+    # Autonomous mode for fresh content (owner decision 2026-07-12): content
+    # the classifier wasn't confident about no longer waits on a human click
+    # if it clears the same strict AND-gate recompose uses (grade + headline +
+    # gatekeeper factuality). A review row is still written and immediately
+    # resolved "auto_approved" so the audit trail stays visible in admin —
+    # deliberately never fed into classifier_feedback (that table trains from
+    # HUMAN labels; an auto-decision isn't one).
+    needs_review = clf_decision is not True or gate_enforced_review
+    if needs_review:
+        fresh_auto_approved, fresh_auto_meta = _fresh_auto_approve_passes(
+            title=composed.title,
+            body=composed.body,
+            page_text=page_text_for_clf,
+            source_url=row.scrape_url,
+        )
+        if fresh_auto_approved:
+            needs_review = False
+            from app.modules.crawler.classifier_review_store import (
+                complete_classifier_review,
+                enqueue_classifier_review,
+            )
+
+            auto_review_id = enqueue_classifier_review(
+                url=row.scrape_url,
+                page_text=page_text_for_clf,
+                page_title=str(payload.get("page_title", "")) or composed.title,
+                category=clf_category,
+                storage_score=signals.storage_score,
+                metadata={
+                    "source": _source_kind_from_url(row.scrape_url) or "web",
+                    "confidence": f"{clf_confidence:.3f}",
+                    "categories": ",".join(signals.categories),
+                    "diverted_by": "gatekeeper" if gate_enforced_review else "classifier",
+                    "og_image": image_field,
+                    "service_id": row.service_id,
+                    **fresh_auto_meta,
+                },
+            )
+            complete_classifier_review(auto_review_id, resolution="auto_approved")
+
+    if needs_review:
         from app.modules.crawler.classifier_review_store import (
             enqueue_classifier_review,
             has_pending_review_for_url,
@@ -733,6 +846,14 @@ def publish_from_queued_row(
         service_id=row.service_id,
         published_at_epoch=int(time.time()),
     )
+    # Auto-post to social channels (Bluesky, Telegram, ...) — best-effort,
+    # each channel isolated from the others, never blocks the publish itself.
+    try:
+        from app.modules.newspaper.tasks.distribution_tasks import distribute_article
+
+        distribute_article.delay(article_id=article_id)
+    except Exception:
+        logger.warning("failed to queue distribution for article %s", article_id, exc_info=True)
     # Notify IndexNow (Bing/Ecosia/DuckDuckGo, Yandex, Seznam, Naver) so the new
     # story gets crawled in minutes. Best-effort — never let it block a publish.
     try:
@@ -1317,14 +1438,15 @@ def backfill_article_translations_task(limit: int = 500) -> dict:
 @celery_app.task(name="app.tasks.newspaper.recompose_published", bind=True, max_retries=20)
 def recompose_published(self, article_id: str) -> dict[str, str]:
     """Archive refresh: re-compose a PUBLISHED article into a NEW unlisted
-    draft and hold it in the review queue. The live article is untouched until
-    the admin approves, at which point apply_recomposed_article swaps the new
-    content onto the SAME article_id (URL and published_at survive; updated_at
-    is stamped so the revision surfaces as dateModified).
+    draft. When the draft clears the (strict) RECOMPOSE_AUTO_APPLY bar — grade,
+    headline style, gatekeeper — it swaps onto the live article_id immediately
+    (autonomous mode); otherwise it holds in the review queue for a human.
+    Either way apply_recomposed_article does the swap: URL and published_at
+    survive, updated_at is stamped so the revision surfaces as dateModified.
 
     recompose_review cannot serve this case: it reuses the article_id at
-    compose time, which would replace the live page before any human approval
-    — and approving it would double-publish the feed row."""
+    compose time, which would replace the live page before any approval
+    (human or automatic) — and approving it would double-publish the feed row."""
     import json as _json
 
     from app.core.cassandra import get_cassandra_session
@@ -1433,12 +1555,14 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
     )
 
     grade_meta: dict[str, str] = {}
+    grade_value: float | None = None
     try:
         from app.modules.newspaper.article_grader import grade_article_draft
 
         grade = grade_article_draft(
             title=composed.title, body=composed.body, source_url=source_url
         )
+        grade_value = float(grade["grade"])
         grade_meta = {
             "grade": str(grade["grade"]),
             "grade_detail": _json.dumps(
@@ -1448,6 +1572,53 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
         }
     except Exception:
         grade_meta = {}
+
+    # Autonomous mode (owner decision, 2026-07-12): swap the draft onto the
+    # live article without a human click when EVERY signal clears a bar
+    # stricter than fresh-article auto-publish — this overwrites a page
+    # that's already public, so any missing/errored signal (grade, gate) or
+    # unmet check fails CLOSED to manual review, never open.
+    #
+    # gate_ok reflects factuality (numeric entailment) only, not the
+    # completeness rule's OSINT-tool-call check. Completeness fires on any
+    # source mentioning a website/founder/company — true for nearly every
+    # service-profile source — but the writer only sporadically calls the
+    # matching domain/registry/sanctions tools mid-compose, so in practice
+    # it blocked ~all Tier-2 recomposes regardless of content quality (owner
+    # confirmed 2026-07-12 after auditing review metadata: grades were
+    # consistently 7.3-10 while completeness failed almost universally).
+    # Completeness is designed to triage under-researched NEW candidates;
+    # a recompose is a rewrite of a service a human already approved once,
+    # so that diligence bar matters less here. Still recorded in grade_meta
+    # for visibility, just no longer gates auto-apply.
+    from app.core import config as worker_config
+
+    gate_ok = False
+    try:
+        from app.modules.gatekeeper.live import gate_draft
+
+        gate = gate_draft(
+            source_text=page_text,
+            article_text=f"{composed.title}\n{composed.body}",
+            service_id=source_url or f"article:{article_id}",
+        )
+        if gate is not None:
+            grade_meta.update(gate.as_metadata())
+            gate_ok = gate.factuality_score >= worker_config.GATEKEEPER_FACT_MIN
+        else:
+            gate_ok = True  # gatekeeper disabled entirely — no signal to fail on
+    except Exception:
+        logger.warning("recompose gatekeeper check failed for %s", article_id, exc_info=True)
+
+    from app.modules.newspaper.article_grader import headline_violations
+
+    auto_apply = (
+        worker_config.RECOMPOSE_AUTO_APPLY_ENABLED
+        and grade_value is not None
+        and grade_value >= worker_config.RECOMPOSE_AUTO_APPLY_GRADE_FLOOR
+        and not headline_violations(composed.title)
+        and gate_ok
+    )
 
     review_id = enqueue_classifier_review(
         url=source_url or f"article:{article_id}",
@@ -1461,9 +1632,28 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
             "og_image": image_field,
             "service_id": service_id,
             "source": "recompose_published",
+            "auto_applied": "1" if auto_apply else "0",
             **grade_meta,
         },
     )
+
+    if auto_apply:
+        from app.modules.crawler.classifier_review_store import complete_classifier_review
+
+        # Resolve the review immediately (audit trail stays visible in admin
+        # as "auto_approved") rather than leaving it pending for a click that
+        # will never come. Never written to classifier_feedback — that table
+        # trains the classifier from HUMAN labels; an auto-decision isn't one,
+        # and feeding it back in would let the model approve its own homework.
+        complete_classifier_review(review_id, resolution="auto_approved")
+        apply_result = apply_recomposed_article(draft_id, article_id)
+        return {
+            "status": "auto_applied",
+            "review_id": review_id,
+            "draft_article_id": draft_id,
+            "apply_result": apply_result.get("status", "unknown"),
+        }
+
     return {"status": "ok", "review_id": review_id, "draft_article_id": draft_id}
 
 

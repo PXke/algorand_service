@@ -1,6 +1,8 @@
 # Algorand Platform
 
-Monorepo for an Algorand-focused platform built with Robyn (backend), Celery workers, and Flutter web frontend.
+Monorepo for **PXke Algorand**, an Algorand-focused, largely autonomous
+newspaper — Robyn backend + SSR, Celery workers (frontier crawler, writer
+pipeline, gatekeeper, social distribution), and a Flutter web frontend.
 
 ## Workspace Layout
 
@@ -27,11 +29,23 @@ Monorepo for an Algorand-focused platform built with Robyn (backend), Celery wor
 - **Done:** Product 0 — wallet auth (`wallet_auth_flutter`, ARC-0025 / ARC-0060 / SIWA, Robyn verify + session)
 - **Done:** Monorepo scaffold + deploy scripts
 - **Done:** Conduit → Cassandra exporter, Newspaper pipeline, Suggestions, Search API (Typesense + fallback)
-- **Done:** CORS, `/health/ready`, Flutter shell (News | Suggestions | Search), CI workflows
+- **Done:** CORS, `/health/ready`, Flutter shell, CI workflows
 - **TestNet:** run `cql-migrate`, Conduit, Celery worker + beat, seed `service_registry`
 - **Client target:** Flutter **web first** (WalletConnect QR from browser)
 
-## Recent worker features (documented)
+## Platform today
+
+The product pivoted from a chain-event feed to a fully managed newspaper
+(~7 articles/day, quality/depth over speed). Key pieces beyond the initial
+milestones above:
+
+- **Frontier crawler** — autonomous domain discovery, per-URL politeness/cooldown, ecosystem-directory sync, admin approve/reject queue (`workers/app/modules/crawler/`)
+- **Two-stage writer pipeline** — research → gap-fill → write → grade → revise via Mistral, with a pre-publish gatekeeper (deterministic gate live in shadow mode; ModernBERT MTTH quality head staged, not yet serving) (`workers/app/modules/newspaper/`, `workers/app/modules/gatekeeper/`)
+- **SEO/SSR surface** — server-rendered `<title>`/OG/JSON-LD + sitemaps + feeds for crawlers, Flutter boots from the same HTML for humans (`backend/app/modules/seo/`)
+- **Admin console** — wallet-gated ops/CMS: article edit, source curation, classifier retrain, gatekeeper tuning, publish queue, analytics (`backend/app/modules/admin/`, Flutter `/admin`)
+- **Social auto-distribution** — Bluesky, Telegram, Mastodon posting on publish (`workers/app/modules/distribution/`)
+- **8-language article translation** (every non-English UI locale), 9-language UI (`lib/l10n/`)
+- **msgspec** for all wire schemas (pydantic fully removed); **prepared-statement registry** for all Cassandra queries (`backend/app/core/statements.py`)
 
 - **Weekly digest** — Monday beat + manual task; market + feed highlights → [docs/modules/weekly-price-analysis.md](docs/modules/weekly-price-analysis.md)
 - **Price metrics for Mistral** — hourly CoinGecko samples + Cassandra brief → [docs/modules/price-metrics-mistral.md](docs/modules/price-metrics-mistral.md)
@@ -48,3 +62,4 @@ Each feature is a **brick** with its own doc under `docs/modules/` (goal, status
 - CQL migrations: [docs/architecture/cql-migrations.md](docs/architecture/cql-migrations.md)
 - `docs/architecture/release-cadence.md`: **2w dev → freeze → 2w TestNet → release** (4-week cycle).
 - `docs/architecture/wallet-auth-protocol.md`: wallet auth flows, ARC-0025 / ARC-0060 coverage, diagrams.
+- [docs/architecture/publish-pipeline-workflow.md](docs/architecture/publish-pipeline-workflow.md): compose → gate → publish → translate → distribute, with a diagram.

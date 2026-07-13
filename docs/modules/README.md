@@ -41,6 +41,11 @@ Product overview docs ([newspaper.md](newspaper.md), [suggestions.md](suggestion
 | `health-observability` | [health-observability.md](health-observability.md) | done |
 | `celery-redis-queues` | [celery-redis-queues.md](celery-redis-queues.md) | done |
 | `quality-ci` | [quality-ci.md](quality-ci.md) | done |
+| `seo` | [seo.md](seo.md) | done |
+| `admin` | [admin.md](admin.md) | done |
+| `media-proxy` | [media-proxy.md](media-proxy.md) | done |
+| `placements` | [placements.md](placements.md) | done |
+| `contact` | [contact.md](contact.md) | done |
 
 ## Chain bricks
 
@@ -64,6 +69,10 @@ Product overview docs ([newspaper.md](newspaper.md), [suggestions.md](suggestion
 | `weekly-price-analysis` | [weekly-price-analysis.md](weekly-price-analysis.md) | partial |
 | `price-metrics-mistral` | [price-metrics-mistral.md](price-metrics-mistral.md) | done |
 | `ai-mistral-connector` | [ai-mistral-connector.md](ai-mistral-connector.md) | partial |
+| `worker-scraper-browser` | [worker-scraper-browser.md](worker-scraper-browser.md) | done |
+| `gatekeeper` | [gatekeeper.md](gatekeeper.md) | partial |
+| `distribution` | [distribution.md](distribution.md) | done |
+| `article-translations` | [article-translations.md](article-translations.md) | done |
 | Overview | [newspaper.md](newspaper.md) | — |
 
 ## Product 2 — Suggestions
@@ -100,3 +109,30 @@ Product overview docs ([newspaper.md](newspaper.md), [suggestions.md](suggestion
 | `worker-security` | [worker-security.md](worker-security.md) | partial |
 
 Legacy pointer: [scraper-pipeline.md](scraper-pipeline.md).
+
+## Supporting / reference docs (not full bricks)
+
+Notes, policies, and plans that inform one or more bricks above but don't
+follow the Goal/Status/Features template themselves:
+
+- [crawler-types.md](crawler-types.md) — crawler lane table (currently stale, see banner in the doc)
+- [crawler-status.md](crawler-status.md), [crawler-toggles.md](crawler-toggles.md) (legacy), [crawler-access-strategy.md](crawler-access-strategy.md), [discovery-mode.md](discovery-mode.md), [url-queue.md](url-queue.md) — `crawler` brick internals
+- [editorial-platform-vision.md](editorial-platform-vision.md), [editorial-workflow.md](editorial-workflow.md), [news-pipeline-plan.md](news-pipeline-plan.md) — product direction notes for the newspaper pivot
+- [mistral-model-selection.md](mistral-model-selection.md), [publish-classifier.md](publish-classifier.md), [publish-policy.md](publish-policy.md), [writer-enrichment.md](writer-enrichment.md), [content-categorization.md](content-categorization.md) — writer/pipeline internals
+- [advertisements.md](advertisements.md) — design notes behind the `placements` brick
+- [scam-article-enrichment.md](scam-article-enrichment.md) — planned, not started
+- [deployment-checklist.md](deployment-checklist.md) — supplements the `deployment` brick
+
+## Deprecated — do not restore
+
+Discord/Reddit/Telegram scraping + the external-push lane were removed in the
+2026-07-06 pipeline simplification. These docs are kept only so old links
+resolve; each carries a banner explaining what replaced or removed it:
+
+- [worker-scraper-discord.md](worker-scraper-discord.md)
+- [worker-scraper-discord-web.md](worker-scraper-discord-web.md)
+- [worker-scraper-reddit.md](worker-scraper-reddit.md)
+- [worker-scraper-telegram.md](worker-scraper-telegram.md)
+- [push-ingest.md](push-ingest.md)
+- [local-browser-bridge.md](local-browser-bridge.md)
+- [firefox-channel-sync.md](firefox-channel-sync.md) — the `extensions/algorand-channel-sync/` code is orphaned, not deleted

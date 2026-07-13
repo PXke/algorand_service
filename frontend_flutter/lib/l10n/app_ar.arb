@@ -535,6 +535,19 @@
   "domainsPagesCrawled": "{count} صفحة",
   "domainsDeadEnd": "مسار مسدود",
   "domainsApproveExplore": "اعتماد واستكشاف",
+  "domainsCrawlOnce": "زحف مرة واحدة، بدون تأسيس",
+  "domainsAddButton": "إضافة",
+  "domainsAddAsSeed": "إضافة كمصدر دائم",
+  "domainsScoreUnexplained": "تفصيل النتيجة غير متاح",
+  "paginationPrevious": "السابق",
+  "paginationNext": "التالي",
+  "paginationPageOf": "صفحة {page} من {total}",
+  "@paginationPageOf": {
+    "placeholders": {
+      "page": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
   "domainsMarkDeadEnd": "تعليم كمسار مسدود",
   "domainsRevive": "إعادة تفعيل",
   "@domainsApprovedSnack": {

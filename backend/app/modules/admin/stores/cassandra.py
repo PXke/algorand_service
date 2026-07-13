@@ -131,11 +131,23 @@ class AdminCassandraStore:
         from app.core.statements import ArticleStmts, FeedStmts
 
         aid = UUID(current.article_id)
-        published_at = datetime.fromtimestamp(current.published_at_epoch, tz=UTC)
         tags = list(current.tags or [])
         if tag_extra and tag_extra not in tags:
             tags.append(tag_extra)
         session = get_cassandra_session()
+        # Feed PK precision rule (see replace_article_content in the workers
+        # package): current.published_at_epoch is an int (whole seconds) —
+        # reconstructing a datetime from it truncates the sub-second precision
+        # articles_feed's clustering key actually has, upserting a PHANTOM
+        # duplicate row instead of updating the real one (found live 2026-07-13,
+        # two published articles each showing twice in the sitemap after being
+        # edited through this exact path). Read the real timestamp fresh instead.
+        pub_row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
+        published_at = (
+            pub_row.published_at
+            if pub_row is not None and pub_row.published_at is not None
+            else datetime.fromtimestamp(current.published_at_epoch, tz=UTC)
+        )
         session.execute(
             ArticleStmts.UPDATE_CONTENT,
             (title, summary, body, tags, aid),
@@ -984,6 +996,26 @@ class AdminCassandraStore:
             logger.warning("failed to trigger apply_recomposed_article", exc_info=True)
 
     @staticmethod
+    def _trigger_distribution(article_id: str) -> None:
+        """Auto-post to social channels (Bluesky, Telegram, ...) once an
+        admin-approved fresh article actually lands in the feed. Recompose
+        approvals deliberately do NOT trigger this (see
+        apply_recomposed_article) — reposting every refresh of already-
+        published content would look repetitive to followers."""
+        try:
+            from celery import Celery
+
+            from app.core.config import settings
+
+            Celery(broker=settings.celery_broker_url).send_task(
+                "app.tasks.newspaper.distribute_article",
+                args=[article_id],
+                queue="pipeline",
+            )
+        except Exception:
+            logger.warning("failed to trigger distribute_article", exc_info=True)
+
+    @staticmethod
     def _trigger_compose_next() -> None:
         try:
             from celery import Celery
@@ -1092,6 +1124,7 @@ class AdminCassandraStore:
         if self._feed_count_today(session, bucket) < cap and self._feed_release_due():
             if self._publish_article_to_feed(article_id):
                 self._enqueue_article_translations(article_id)
+                self._trigger_distribution(article_id)
             self._record_feed_release()
             return "published"
         try:

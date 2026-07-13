@@ -92,11 +92,18 @@ class AppConfig {
 /// the backend stores the source's icon in image_url (and as the body's lead
 /// image) when a story has no real share image, and icon files are
 /// unmistakable by path. These must never be blown up into a hero/cover crop.
+/// Also catches dynamic per-page OG-image-generator endpoints (the Next.js/
+/// Vercel `/og/[slug]` convention): these render a logo + page title on a
+/// solid background for whatever route asked, so they pass basic image
+/// checks (real dimensions, resolves fine) while carrying zero content
+/// specific to the article (e.g. algodirectory.app/og/Explore showing on an
+/// unrelated story — 2026-07-12).
 bool looksLikeLogoUrl(String url) {
   final path = (Uri.tryParse(url)?.path ?? url).toLowerCase();
   if (path.endsWith('.svg') || path.endsWith('.ico')) return true;
-  return RegExp(r'favicon|apple-touch|/icons?[/._-]|[/._-]icons?[._-]|logo')
-      .hasMatch(path);
+  return RegExp(
+    r'favicon|apple-touch|/icons?[/._-]|[/._-]icons?[._-]|logo|/og(/|$)|opengraph',
+  ).hasMatch(path);
 }
 
 String proxiedImageUrl(String url) {

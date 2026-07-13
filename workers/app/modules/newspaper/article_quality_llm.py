@@ -15,9 +15,20 @@ _QUALITY_RUBRIC = (
     "definitions of curriculum pillars or feature lists.\n"
     "- technical_depth: bridges the story to Algorand layer-1 mechanics (throughput, "
     "consensus, ASA/tokenization, state proofs, etc.) and names the legacy friction "
-    "being solved — NOT foundation name-drops without explaining why Algorand fits.\n\n"
+    "being solved — NOT foundation name-drops without explaining why Algorand fits.\n"
+    "- critical_distance: does the draft apply independent scrutiny to a company's "
+    "or project's own claims, or does it just restate their marketing framing as "
+    "fact? A subject with an obvious conflict of interest (e.g. a centralized "
+    "exchange's staking product, a token whose reward tier structure incentivizes "
+    "holding the SAME platform's token, an unaudited or newly-launched protocol) "
+    "should have that conflict, and the real risk/tradeoff a reader needs (custodial "
+    "risk vs protocol-level control, counterparty risk, lack of audit, centralization) "
+    "named explicitly — not omitted, and not buried under the subject's own framing "
+    "of its benefits. A piece that only lists features/benefits without naming what "
+    "a skeptical reader would want to know scores LOW here even if well-written.\n\n"
     "Output a single JSON object with exactly these keys:\n"
-    '{"narrative_synthesis": 3, "technical_depth": 3, "issues": ["short fix"]}\n'
+    '{"narrative_synthesis": 3, "technical_depth": 3, "critical_distance": 3, '
+    '"issues": ["short fix"]}\n'
     "JSON SAFETY: Return JSON only — no markdown fences or prose. In issue strings "
     "use single quotes for any quoted text, or avoid double quotes entirely; never "
     "emit unescaped double quotes inside JSON string values.\n"
@@ -28,11 +39,14 @@ _FALLBACK_QUALITY = {
     "model": "llm_rubric_error",
     "narrative_synthesis": 2,
     "technical_depth": 2,
+    "critical_distance": 2,
     "issues": [
         "quality rubric could not be parsed — weave facts into connected journalism, "
         "not dictionary-style summaries",
         "explain Algorand layer-1 mechanics vs legacy friction; put multi-item data "
         "in a Markdown table (Concept / Real-World Implication columns)",
+        "name the actual risk/tradeoff instead of just relaying the subject's own "
+        "marketing framing",
     ],
 }
 
@@ -97,6 +111,7 @@ def grade_article_quality_llm(
             raise ValueError("non-object LLM grade")
         narrative = _clamp_score(parsed.get("narrative_synthesis"))
         technical = _clamp_score(parsed.get("technical_depth"))
+        critical_distance = _clamp_score(parsed.get("critical_distance"))
         issues = [
             str(i).strip()
             for i in (parsed.get("issues") or [])
@@ -112,10 +127,17 @@ def grade_article_quality_llm(
                 f"technical depth scored {technical}/5 — explain why Algorand's "
                 "layer-1 mechanics fit this story, not just name-drop the foundation"
             )
+        if critical_distance is not None and critical_distance < 4:
+            issues.append(
+                f"critical distance scored {critical_distance}/5 — name the actual "
+                "risk/tradeoff (custodial risk, conflict of interest, lack of audit) "
+                "instead of just relaying the subject's own marketing framing"
+            )
         return {
             "model": "llm_rubric",
             "narrative_synthesis": narrative,
             "technical_depth": technical,
+            "critical_distance": critical_distance,
             "issues": issues,
         }
     except Exception as exc:
@@ -134,8 +156,8 @@ def _clamp_score(value: Any) -> int | None:
 
 
 def quality_needs_revision(quality: dict[str, Any], *, min_score: int) -> bool:
-    """True when either LLM dimension falls below the revision threshold."""
-    for key in ("narrative_synthesis", "technical_depth"):
+    """True when any LLM dimension falls below the revision threshold."""
+    for key in ("narrative_synthesis", "technical_depth", "critical_distance"):
         score = quality.get(key)
         if score is not None and int(score) < min_score:
             return True

@@ -970,6 +970,29 @@ class AppLocalizationsHi extends AppLocalizations {
   String get domainsApproveExplore => 'स्वीकृत करें और अन्वेषण करें';
 
   @override
+  String get domainsCrawlOnce => 'एक बार क्रॉल करें, स्रोत नहीं';
+
+  @override
+  String get domainsAddButton => 'जोड़ें';
+
+  @override
+  String get domainsAddAsSeed => 'स्थायी स्रोत के रूप में जोड़ें';
+
+  @override
+  String get domainsScoreUnexplained => 'स्कोर का विवरण उपलब्ध नहीं है';
+
+  @override
+  String get paginationPrevious => 'पिछला';
+
+  @override
+  String get paginationNext => 'अगला';
+
+  @override
+  String paginationPageOf(int page, int total) {
+    return 'पृष्ठ $page में से $total';
+  }
+
+  @override
   String get domainsMarkDeadEnd => 'मृत अंत चिह्नित करें';
 
   @override

@@ -977,6 +977,29 @@ class AppLocalizationsEs extends AppLocalizations {
   String get domainsApproveExplore => 'Aprobar y explorar';
 
   @override
+  String get domainsCrawlOnce => 'Rastrear una vez, sin fuente';
+
+  @override
+  String get domainsAddButton => 'Añadir';
+
+  @override
+  String get domainsAddAsSeed => 'Añadir como fuente permanente';
+
+  @override
+  String get domainsScoreUnexplained => 'Desglose de puntuación no disponible';
+
+  @override
+  String get paginationPrevious => 'Anterior';
+
+  @override
+  String get paginationNext => 'Siguiente';
+
+  @override
+  String paginationPageOf(int page, int total) {
+    return 'Página $page de $total';
+  }
+
+  @override
   String get domainsMarkDeadEnd => 'Marcar como callejón sin salida';
 
   @override

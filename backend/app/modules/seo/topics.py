@@ -33,8 +33,21 @@ DEFAULT_CAP = 100
 BOILERPLATE_TAGS = frozenset({"web", "news", "discovery", "algorand", "generic", "service"})
 
 
+# Internal-jargon tags with a friendlier reader-facing label — mirrors the
+# Flutter displayTagLabel (modules/newspaper/sections.dart). Applied only to
+# DISPLAY text (breadcrumb, kicker, articleSection); URL slugs (/topic/<tag>)
+# always use the raw tag, in both this backend and the app, so a link never
+# changes shape based on this table.
+_TAG_DISPLAY_LABELS: dict[str, str] = {"chain-only": "on-chain"}
+
+
+def display_tag_label(tag: str) -> str:
+    return _TAG_DISPLAY_LABELS.get(tag.strip().lower(), tag)
+
+
 def primary_tag(tags: list[str] | None) -> str | None:
-    """First non-boilerplate tag, falling back to the plain first tag."""
+    """First non-boilerplate tag (raw slug — see display_tag_label for the
+    reader-facing text), falling back to the plain first tag."""
     cleaned = [t.strip().lower() for t in (tags or []) if t.strip()]
     for tag in cleaned:
         if tag not in BOILERPLATE_TAGS:

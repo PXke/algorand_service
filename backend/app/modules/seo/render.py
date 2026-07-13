@@ -28,7 +28,7 @@ from app.core.config import settings
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.seo.chrome import SSR_CHROME_STYLE, ssr_page
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
-from app.modules.seo.topics import primary_tag, topic_feed_path
+from app.modules.seo.topics import display_tag_label, primary_tag, topic_feed_path
 
 
 def site_url() -> str:
@@ -186,6 +186,7 @@ def _meta_block(
 
 
 _DEFAULT_IMAGE_DIMS = (512, 512)  # icons/Icon-512.png
+_OG_CARD_DIMS = (1200, 630)  # seo/share_card.py — the standard OG share size
 
 
 def _image_for(image_url: str | None) -> tuple[str, bool]:
@@ -213,7 +214,15 @@ def _is_icon_like(image_url: str) -> bool:
     if path.endswith((".svg", ".ico")):
         return True
     name = path.rsplit("/", 1)[-1]
-    return bool(_ICON_NAME_RE.search(name)) or "/icons/" in path
+    if bool(_ICON_NAME_RE.search(name)) or "/icons/" in path:
+        return True
+    # Dynamic per-page OG-image-generator endpoints (Next.js/Vercel's `/og/
+    # [slug]` convention): render a logo + page title on a solid background
+    # for whatever route asked, so they pass basic image checks (real
+    # dimensions, resolves fine) while carrying zero content specific to the
+    # article (e.g. algodirectory.app/og/Explore on an unrelated story about
+    # ALGO collateral — 2026-07-12).
+    return "/og/" in path or "opengraph" in path
 
 
 def article_path(article_id: str) -> str:
@@ -255,16 +264,22 @@ def article_hreflang_links(
 # needs no extra request.
 _SSR_STYLE = (
     "<style>"
+    # Paints the paper background under #ssr-body's own gutters too, so there
+    # is no flash of default-white margin around the centered column.
+    "html,body{background:#F8F7F4}"
     + SSR_CHROME_STYLE
     # The loading notice only exists for humans watching the app boot, so it is
     # hidden from the reading flow's start: JS reveals it, and it dies with the
-    # div on first frame. No-JS readers and crawlers never see it.
-    + "#ssr-loading{display:none;font:13px/1.4 system-ui,sans-serif;color:#666;"
-    "border-bottom:1px solid #ddd;padding-bottom:10px;margin-bottom:18px}"
+    # div on first frame. No-JS readers and crawlers never see it. Styled as a
+    # small kicker label (matching the share card's kicker treatment) rather
+    # than an apologetic status line, since the content right below it is the
+    # real page, not a placeholder.
+    + "#ssr-loading{display:none;font:600 11px/1.4 system-ui,sans-serif;"
+    "letter-spacing:.06em;text-transform:uppercase;color:#4F46E5;margin:0 0 18px}"
     "</style>"
 )
 _SSR_LOADING = (
-    '<p id="ssr-loading">Loading the interactive edition…</p>'
+    '<p id="ssr-loading">Live edition loading…</p>'
     "<script>document.getElementById('ssr-loading').style.display='block';</script>"
 )
 # Flutter's engine dispatches `flutter-first-frame` once the real UI has painted.
@@ -356,7 +371,14 @@ def _translation_links_html(
         label = _LANG_LABELS.get(code, code)
         hreflang = SEO_HREFLANG_LOCALES.get(code, code)
         if code == current:
-            parts.append(f'<span aria-current="true">{html.escape(label)}</span>')
+            # hreflang has no formal meaning on a non-link element, but keeps this
+            # entry visually/structurally consistent with the head's <link
+            # hreflang> for the same language (readers scraping the body picker
+            # shouldn't see the current language as the one missing a tag).
+            parts.append(
+                f'<span aria-current="true" hreflang="{_attr(hreflang)}">'
+                f"{html.escape(label)}</span>"
+            )
         else:
             parts.append(
                 f'<a href="{_attr(path)}" hreflang="{_attr(hreflang)}">'
@@ -430,10 +452,16 @@ def render_article(
     canonical = article_url(article.article_id, lang_code)
     image, is_default = _image_for(article.image_url)
     # A brand-icon fallback (favicon/logo) is tile art, not a share image or
-    # banner — use the site default for metas and skip the body hero below.
+    # banner — skip it for the body hero below same as a missing image.
     icon_like = bool(article.image_url) and _is_icon_like(image)
-    if icon_like:
-        image, is_default = absolute(settings.seo_default_image), True
+    og_card = is_default or icon_like
+    if og_card:
+        # No real photo at all, or only a source favicon/logo: a generated
+        # share card (title + kicker on the paper background, see
+        # seo/share_card.py) beats the generic square app icon every article
+        # without one otherwise shared — proper 1200x630 aspect, and it
+        # actually names the story instead of repeating the same tile.
+        image, is_default = absolute(f"/og/article/{article.article_id}.png"), True
     body_text = md_to_text(article.body)
     description = truncate(article.summary or body_text, 160)
     published_iso = _iso(article.published_at_epoch)
@@ -449,10 +477,14 @@ def render_article(
 
     trail = [("Home", site_url() + "/")]
     # Breadcrumb through the story's primary writer tag — the paper's real
-    # taxonomy (the fixed human sections were retired).
+    # taxonomy (the fixed human sections were retired). The URL always uses
+    # the raw tag slug (matches /topic/<tag> in both the app and here); only
+    # the visible label goes through display_tag_label ("chain-only" ->
+    # "on-chain") — same split the share-card kicker uses.
     primary = primary_tag(article.tags)
+    primary_label = display_tag_label(primary) if primary else None
     if primary:
-        trail.append((primary, absolute(f"/topic/{primary}")))
+        trail.append((primary_label, absolute(f"/topic/{primary}")))
     trail.append((truncate(article.title, 80), canonical))
 
     news_article = {
@@ -474,7 +506,7 @@ def render_article(
         "speakable": _speakable_jsonld(),
     }
     if primary:
-        news_article["articleSection"] = primary
+        news_article["articleSection"] = primary_label
     if lang_code:
         news_article["inLanguage"] = html_lang_for(lang_code)
 
@@ -498,12 +530,12 @@ def render_article(
         modified_iso=modified_iso,
         tags=article.tags,
         image_alt=article.title,
-        image_dims=_DEFAULT_IMAGE_DIMS if is_default else None,
+        image_dims=_OG_CARD_DIMS if og_card else None,
         json_ld=[news_article, _breadcrumb(trail)],
         og_locale=current_og,
         og_locale_alternates=og_alternates,
         hreflang_links=hreflang_links,
-        og_section=primary,
+        og_section=primary_label,
     )
 
     body_html = md_to_html(article.body)

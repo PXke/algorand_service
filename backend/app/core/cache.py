@@ -28,6 +28,13 @@ def _client():
     return redis.from_url(settings.redis_url, decode_responses=True, socket_connect_timeout=2)
 
 
+@lru_cache(maxsize=1)
+def _binary_client():
+    import redis
+
+    return redis.from_url(settings.redis_url, decode_responses=False, socket_connect_timeout=2)
+
+
 def cached_json(key: str, ttl_seconds: int, compute: Callable[[], T]) -> T:
     """Return cached JSON for `key`, else run `compute()`, cache it, and return it.
     `compute`'s result must be JSON-serializable."""
@@ -39,6 +46,20 @@ def cached_json(key: str, ttl_seconds: int, compute: Callable[[], T]) -> T:
     value = compute()
     with suppress(Exception):
         _client().set(full, json.dumps(value, separators=(",", ":")), ex=ttl_seconds)
+    return value
+
+
+def cached_bytes(key: str, ttl_seconds: int, compute: Callable[[], bytes]) -> bytes:
+    """Binary sibling of cached_json — for generated images and other
+    non-JSON payloads (a decode_responses=True client would mangle bytes)."""
+    full = _PREFIX + key
+    with suppress(Exception):
+        hit = _binary_client().get(full)
+        if hit is not None:
+            return hit
+    value = compute()
+    with suppress(Exception):
+        _binary_client().set(full, value, ex=ttl_seconds)
     return value
 
 

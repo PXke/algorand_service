@@ -1,0 +1,89 @@
+# Publish pipeline — compose → gate → publish → translate → distribute
+
+Cross-cutting workflow doc spanning `newspaper`, `gatekeeper`, `article-translations`
+and `distribution` bricks. Traced against code 2026-07-13 — verify line numbers
+before relying on them if this doc gets old.
+
+## Entry points into the pipeline
+
+| Trigger | Where |
+|---|---|
+| Chain event (service txn seen) | `chain_tail/tasks/watch_blocks.py:66` → `publish_from_chain_event` (`publish_tasks.py:1065`) |
+| Crawler/diff discovery | `newspaper/mistral_diff_check.py:38` |
+| Service-watch pollers (YouTube, forum, Bluesky, mail) | `scraper/tasks/{youtube,forum,bluesky}_poll_tasks.py`, `newspaper/tasks/mail_poll_tasks.py` — enqueue straight onto the publish queue, skipping the scrape step |
+| Manual recompose (admin) | `recompose_review` (`publish_tasks.py:1107`) |
+| Auto-refresh of a published article | `recompose_published` (`publish_tasks.py:1427`) |
+
+All non-recompose triggers land a row on `publish_queue`; a drain
+(`queue_drain_tasks.py`) or `publish_from_queued_row` (`publish_tasks.py:408`)
+picks it up and does the actual work.
+
+## Two distinct paths from here
+
+**A. Full compose path** (`drain_breaking_publish_queue`, `drain_standard_publish_queue`,
+direct chain-event publish) — runs compose, gatekeeper, and quality-floor checks.
+
+**B. Admin-approved drain** (`drain_approved_feed_queue`, `queue_drain_tasks.py:541`)
+— a human already approved the draft via the review UI, so this path writes
+straight to the feed with **no compose and no gatekeeper call**. It still runs
+translation + distribution (steps 4–5 below), identically to path A.
+
+```mermaid
+flowchart TD
+    T[Trigger: chain event / crawler diff / service-watch poll] --> Q[publish_queue row]
+    Q -->|full compose path| C[compose_scrape_article\nresearch -> gap-fill -> write -> grade -> revise]
+    Q -->|admin already approved| F[drain_approved_feed_queue]
+    C --> G{gatekeeper gate_draft\nGATEKEEPER_ENFORCE default OFF}
+    G -->|fails + enforce on| R[Diverted to review queue]
+    G -->|passes / shadow / disabled| P[insert_article\nwrites articles_by_id + articles_feed]
+    F --> P
+    P --> D[distribute_article.delay\nBluesky / Telegram / Mastodon]
+    P --> X[enqueue_article_translations\n8 langs, fire-and-forget]
+    D -.original-language only, no ordering dependency.- X
+```
+
+## Ordered steps (full compose path)
+
+1. **Compose** — `compose_scrape_article` (`publish_tasks.py:543`) → Mistral path
+   `compose_scrape_article_mistral` (`mistral_compose.py:1161`); the
+   research → gap-fill → write → grade → revise loop is `_review_and_revise`
+   (`mistral_compose.py:629`).
+2. **Gate** — `gate_draft` (`gatekeeper/live.py`) is called from up to 5 sites
+   in `publish_tasks.py` (lines ~196, 277, 728, 1295, 1586) depending on which
+   path the draft takes. **`GATEKEEPER_ENFORCE` defaults off** — the
+   deterministic gate runs and logs but does not block; the ModernBERT MTTH
+   quality head is trained but has no caller in this path at all (see
+   [gatekeeper.md](../modules/gatekeeper.md)). The thing that actually
+   diverts low-quality drafts today is `_quality_floor_fails`
+   (`publish_tasks.py:224`, `WRITER_QUALITY_GATE_ENABLED`, default on) — the
+   older sklearn grader, not the gatekeeper.
+3. **Persist** — `insert_article` (`publish_tasks.py:804` → `article_store.py:226`)
+   writes `ArticleStmts.INSERT` then, since `publish_to_feed=True`,
+   `FeedStmts.INSERT`. Presence in `articles_feed` **is** the published state
+   — there's no separate status column.
+4. **Distribute** — `distribute_article.delay(article_id=...)` queued at
+   `publish_tasks.py:842`. Builds the social post from `article.title` /
+   `article.summary` only — **never reads `article.translations`**, so posts
+   are always in the original (English) language regardless of what's
+   translated yet.
+5. **Translate** — `enqueue_article_translations` at `publish_tasks.py:904`
+   (called *after* the distribution enqueue, but both are async — no ordering
+   guarantee or dependency between them, and none is needed since
+   distribution doesn't consume translations). Fans out one fire-and-forget
+   Celery task per language in `ARTICLE_TRANSLATION_LANGS` (`fa, ps, ar, ru,
+   zh, hi, es, fr` — all 8 non-English UI locales) via `translate_article`
+   (`publish_tasks.py:1357` → `mistral_compose.py:1936`,
+   `MISTRAL_MODEL_TRANSLATE=mistral-small-latest`).
+
+## Recompose behavior (published-article auto-refresh)
+
+`apply_recomposed_article` (`publish_tasks.py:1649`) swaps the live content
+and **re-enqueues translations** (clearing the old ones first,
+`publish_tasks.py:1711`) but **deliberately never calls `distribute_article`**
+(see docstring at `distribution_tasks.py:4-6`) — editorial edits shouldn't
+trigger a second social post.
+
+## Depends on
+
+- [gatekeeper.md](../modules/gatekeeper.md), [distribution.md](../modules/distribution.md),
+  [article-translations.md](../modules/article-translations.md), [article-compose.md](../modules/article-compose.md)

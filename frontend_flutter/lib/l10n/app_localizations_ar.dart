@@ -967,6 +967,29 @@ class AppLocalizationsAr extends AppLocalizations {
   String get domainsApproveExplore => 'اعتماد واستكشاف';
 
   @override
+  String get domainsCrawlOnce => 'زحف مرة واحدة، بدون تأسيس';
+
+  @override
+  String get domainsAddButton => 'إضافة';
+
+  @override
+  String get domainsAddAsSeed => 'إضافة كمصدر دائم';
+
+  @override
+  String get domainsScoreUnexplained => 'تفصيل النتيجة غير متاح';
+
+  @override
+  String get paginationPrevious => 'السابق';
+
+  @override
+  String get paginationNext => 'التالي';
+
+  @override
+  String paginationPageOf(int page, int total) {
+    return 'صفحة $page من $total';
+  }
+
+  @override
   String get domainsMarkDeadEnd => 'تعليم كمسار مسدود';
 
   @override

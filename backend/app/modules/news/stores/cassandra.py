@@ -21,6 +21,19 @@ def _epoch(dt: datetime | None) -> int:
 
 class CassandraArticleStore:
     def insert(self, article: StoredArticle, *, feed_bucket: str = "main") -> None:
+        # UNREACHABLE IN PRODUCTION as of 2026-07-13: NewsService (the only
+        # consumer of ArticleStore) never calls this — real article writes
+        # happen entirely in the `workers` package via insert_article /
+        # insert_stored_article, which write full-precision datetimes
+        # directly and bypass this class. Kept only to satisfy the
+        # ArticleStore Protocol (InMemoryArticleStore's insert() IS live,
+        # used by ~20 tests). If this ever gets wired up for real: the
+        # published_at reconstruction below TRUNCATES to whole seconds
+        # (StoredArticle.published_at_epoch is an int), which silently
+        # upserts a phantom duplicate row in articles_feed whose PRIMARY KEY
+        # includes published_at at full precision — found and cleaned up one
+        # such duplicate (Bitrue article, 2026-07-13) whose origin predates
+        # this comment and could not be traced to a live call site.
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import NewsStmts
 
@@ -100,7 +113,7 @@ class CassandraArticleStore:
                         tags=list(row.tags or []),
                         image_url=getattr(row, "image_url", None),
                         source_url=getattr(row, "source_url", None),
-                        translations=getattr(row, "translations", None),
+                        translations=dict(row.translations) if row.translations else None,
                         updated_at_epoch=(
                             _epoch(getattr(row, "updated_at", None)) or None
                         ),
@@ -135,6 +148,6 @@ class CassandraArticleStore:
             source_url=row.source_url,
             tags=list(row.tags or []),
             image_url=getattr(row, "image_url", None),
-            translations=getattr(row, "translations", None),
+            translations=dict(row.translations) if row.translations else None,
             updated_at_epoch=_epoch(getattr(row, "updated_at", None)) or None,
         )

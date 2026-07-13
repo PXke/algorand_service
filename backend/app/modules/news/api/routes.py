@@ -9,6 +9,7 @@ from app.core import serialization
 from app.core.config import settings
 from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
+from app.core.tracking import tracking_opted_out_from_headers
 from app.modules.news.services.news_service import NewsService
 
 
@@ -100,11 +101,16 @@ def register_news_routes(app) -> None:
         # fetches this JSON, which used to inflate "reads" — reuse the same UA
         # denylist the pageview analytics already trusts.
         from app.modules.news.stores.view_counts import record_view
-        from app.modules.seo.analytics_store import is_bot
+        from app.modules.seo.analytics_store import is_bot, is_malformed_ua, is_repeated_ua
 
         user_agent = (
             request.headers.get("user-agent") or request.headers.get("User-Agent") or ""
         )
-        if not is_bot(user_agent):
+        if (
+            not is_bot(user_agent)
+            and not is_malformed_ua(user_agent)
+            and not is_repeated_ua(user_agent)
+            and not tracking_opted_out_from_headers(request.headers)
+        ):
             record_view(article_id)
         return serialization.to_builtins(detail)

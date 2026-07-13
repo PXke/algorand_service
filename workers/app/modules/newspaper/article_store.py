@@ -60,7 +60,7 @@ def get_article(article_id: str) -> ArticleDetail | None:
         trigger_round=int(row.trigger_round) if row.trigger_round is not None else 0,
         source_url=row.source_url or "",
         prompt_version=getattr(row, "prompt_version", "") or "",
-        translations=getattr(row, "translations", None),
+        translations=dict(row.translations) if row.translations else None,
         tags=tuple(row.tags or []),
     )
 
@@ -146,6 +146,13 @@ def list_feed_articles(*, bucket: str = NEWS_FEED_BUCKET, limit: int = 100) -> l
     for row in rows:
         published_at = row.published_at
         epoch = int(published_at.timestamp()) if published_at else 0
+        # FeedStmts.BY_BUCKET doesn't select translations at all (unlike the
+        # other call sites) — getattr(default=None), NOT row.translations
+        # directly, or this raises AttributeError on every row and silently
+        # breaks every caller (count_articles_published_on_utc_day and thus
+        # the daily publish cap — found live 2026-07-13, self-inflicted by
+        # the translations JSON-serialization fix earlier the same day).
+        raw_translations = getattr(row, "translations", None)
         items.append(
             FeedArticleRow(
                 article_id=str(row.article_id),
@@ -153,7 +160,7 @@ def list_feed_articles(*, bucket: str = NEWS_FEED_BUCKET, limit: int = 100) -> l
                 title=row.title,
                 summary=row.summary or "",
                 published_at_epoch=epoch,
-                translations=getattr(row, "translations", None),
+                translations=dict(raw_translations) if raw_translations else None,
             )
         )
     return items
