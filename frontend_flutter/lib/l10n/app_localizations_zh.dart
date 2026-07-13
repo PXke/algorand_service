@@ -673,6 +673,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get articleShare => '分享';
 
   @override
+  String get articleShareCopyLink => '复制链接';
+
+  @override
   String get articleLinkCopied => '链接已复制到剪贴板';
 
   @override
@@ -683,6 +686,9 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get footerAboutHeading => '关于';
+
+  @override
+  String get footerFollowHeading => '关注我们';
 
   @override
   String footerRights(String year) {

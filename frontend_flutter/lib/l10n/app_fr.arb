@@ -358,10 +358,12 @@
   "articleReadingTime": "{count} min de lecture",
   "articleRelatedTitle": "Articles connexes",
   "articleShare": "Partager",
+  "articleShareCopyLink": "Copier le lien",
   "articleLinkCopied": "Lien copié dans le presse-papiers",
   "footerTagline": "Couverture indépendante et automatisée de l'écosystème Algorand.",
   "footerSectionsHeading": "Rubriques",
   "footerAboutHeading": "À propos",
+  "footerFollowHeading": "Suivez-nous",
   "@footerRights": {
     "placeholders": {
       "year": {

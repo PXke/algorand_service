@@ -380,10 +380,12 @@
   },
   "articleRelatedTitle": "Related stories",
   "articleShare": "Share",
+  "articleShareCopyLink": "Copy link",
   "articleLinkCopied": "Link copied to clipboard",
   "footerTagline": "Independent, automated coverage of the Algorand ecosystem.",
   "footerSectionsHeading": "Sections",
   "footerAboutHeading": "About",
+  "footerFollowHeading": "Follow",
   "footerRights": "© {year} PXke Algorand. Independent coverage of the Algorand ecosystem.",
   "@footerRights": {
     "placeholders": {

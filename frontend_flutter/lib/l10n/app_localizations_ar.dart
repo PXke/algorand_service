@@ -698,6 +698,9 @@ class AppLocalizationsAr extends AppLocalizations {
   String get articleShare => 'مشاركة';
 
   @override
+  String get articleShareCopyLink => 'نسخ الرابط';
+
+  @override
   String get articleLinkCopied => 'تم نسخ الرابط';
 
   @override
@@ -708,6 +711,9 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get footerAboutHeading => 'حول';
+
+  @override
+  String get footerFollowHeading => 'تابعنا';
 
   @override
   String footerRights(String year) {

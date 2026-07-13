@@ -1313,7 +1313,7 @@ def _compose_via_writer_tools(
     Defaults to ``user``."""
     from app.modules.newspaper.compose_lock import compose_lock
 
-    with compose_lock():
+    with compose_lock(label=source_url):
         return _compose_via_writer_tools_locked(
             system=system,
             user=user,
@@ -1745,7 +1745,7 @@ New reporting to integrate:
                 "service_id": source_url,
                 "source_url": source_url,
             }
-            with compose_lock():
+            with compose_lock(label=source_url):
                 tool_schemas, tool_handlers = all_tools(context=tool_context)
                 tool_system = system + _TOOLS_GUIDANCE
                 raw = mistral.chat_with_tools(

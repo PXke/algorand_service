@@ -358,10 +358,12 @@
   },
   "articleRelatedTitle": "داستان‌های مرتبط",
   "articleShare": "اشتراک‌گذاری",
+  "articleShareCopyLink": "کپی پیوند",
   "articleLinkCopied": "لینک در کلیپ‌بورد کپی شد",
   "footerTagline": "پوشش مستقل و خودکار اکوسیستم Algorand.",
   "footerSectionsHeading": "بخش‌ها",
   "footerAboutHeading": "درباره",
+  "footerFollowHeading": "دنبال کنید",
   "footerRights": "© {year} PXke Algorand. پوشش مستقل اکوسیستم Algorand.",
   "@footerRights": {
     "placeholders": {

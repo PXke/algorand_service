@@ -358,10 +358,12 @@
   "articleReadingTime": "{count} min read",
   "articleRelatedTitle": "相关故事",
   "articleShare": "分享",
+  "articleShareCopyLink": "复制链接",
   "articleLinkCopied": "链接已复制到剪贴板",
   "footerTagline": "独立、自动化地覆盖 Algorand 生态系统。",
   "footerSectionsHeading": "部分",
   "footerAboutHeading": "关于",
+  "footerFollowHeading": "关注我们",
   "@footerRights": {
     "placeholders": {
       "year": {

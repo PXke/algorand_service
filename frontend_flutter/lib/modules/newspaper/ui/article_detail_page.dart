@@ -22,6 +22,8 @@ import '../sections.dart';
 import '../services/news_api.dart';
 import 'story_row.dart';
 
+enum _ShareTarget { whatsapp, bluesky, telegram, x, facebook }
+
 class ArticleDetailPage extends ConsumerStatefulWidget {
   const ArticleDetailPage({super.key, required this.articleId});
 
@@ -111,18 +113,42 @@ class _ArticleDetailPageState extends ConsumerState<ArticleDetailPage> {
     return l10n.articleByline(desk);
   }
 
-  Future<void> _share(BuildContext context, Map<String, dynamic> article) async {
+  /// Absolute URL for this article — a bare path is useless outside the app.
+  /// Uri.base is the page's own origin on web, so this works in dev and prod
+  /// without config.
+  String _articleUrl(Map<String, dynamic> article) {
     final id = article['article_id']?.toString() ?? '';
-    // Absolute URL — a bare path is useless outside the app. Uri.base is the
-    // page's own origin on web, so this works in dev and prod without config.
-    final url = Uri.base.origin.isEmpty
+    return Uri.base.origin.isEmpty
         ? '/news/articles/$id'
         : '${Uri.base.origin}/news/articles/$id';
-    await Clipboard.setData(ClipboardData(text: url));
+  }
+
+  Future<void> _copyLink(BuildContext context, Map<String, dynamic> article) async {
+    await Clipboard.setData(ClipboardData(text: _articleUrl(article)));
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(context.l10n.articleLinkCopied)),
     );
+  }
+
+  /// Every target below is a plain share-intent URL — no API key, no app
+  /// registration, no auth. Opens the platform's own pre-filled share/compose
+  /// dialog in a new tab; the visitor still has to hit send.
+  Future<void> _shareVia(_ShareTarget target, Map<String, dynamic> article) async {
+    final url = _articleUrl(article);
+    final title = article['title']?.toString() ?? '';
+    final uri = switch (target) {
+      _ShareTarget.whatsapp => Uri.https('wa.me', '', {'text': '$title $url'}),
+      _ShareTarget.bluesky =>
+        Uri.https('bsky.app', '/intent/compose', {'text': '$title $url'}),
+      _ShareTarget.telegram =>
+        Uri.https('t.me', '/share/url', {'url': url, 'text': title}),
+      _ShareTarget.x =>
+        Uri.https('twitter.com', '/intent/tweet', {'text': title, 'url': url}),
+      _ShareTarget.facebook =>
+        Uri.https('www.facebook.com', '/sharer/sharer.php', {'u': url}),
+    };
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   List<String> _articleTags(Map<String, dynamic> article) {
@@ -268,10 +294,39 @@ class _ArticleDetailPageState extends ConsumerState<ArticleDetailPage> {
                               ],
                             ),
                           ),
-                          IconButton(
+                          PopupMenuButton<_ShareTarget?>(
                             tooltip: l10n.articleShare,
-                            onPressed: () => _share(context, article),
                             icon: const Icon(Icons.ios_share, size: 18),
+                            onSelected: (target) => target == null
+                                ? _copyLink(context, article)
+                                : _shareVia(target, article),
+                            itemBuilder: (context) => [
+                              const PopupMenuItem(
+                                value: _ShareTarget.whatsapp,
+                                child: Text('WhatsApp'),
+                              ),
+                              const PopupMenuItem(
+                                value: _ShareTarget.bluesky,
+                                child: Text('Bluesky'),
+                              ),
+                              const PopupMenuItem(
+                                value: _ShareTarget.telegram,
+                                child: Text('Telegram'),
+                              ),
+                              const PopupMenuItem(
+                                value: _ShareTarget.x,
+                                child: Text('X'),
+                              ),
+                              const PopupMenuItem(
+                                value: _ShareTarget.facebook,
+                                child: Text('Facebook'),
+                              ),
+                              const PopupMenuDivider(),
+                              PopupMenuItem(
+                                value: null,
+                                child: Text(l10n.articleShareCopyLink),
+                              ),
+                            ],
                           ),
                         ],
                       ),

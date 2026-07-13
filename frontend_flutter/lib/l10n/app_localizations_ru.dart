@@ -706,6 +706,9 @@ class AppLocalizationsRu extends AppLocalizations {
   String get articleShare => 'Поделиться';
 
   @override
+  String get articleShareCopyLink => 'Скопировать ссылку';
+
+  @override
   String get articleLinkCopied => 'Ссылка скопирована в буфер обмена';
 
   @override
@@ -717,6 +720,9 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get footerAboutHeading => 'О нас';
+
+  @override
+  String get footerFollowHeading => 'Подписывайтесь';
 
   @override
   String footerRights(String year) {

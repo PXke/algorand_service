@@ -358,10 +358,12 @@
   },
   "articleRelatedTitle": "اړوندې کیسې",
   "articleShare": "شریکول",
+  "articleShareCopyLink": "لینک کاپي کړئ",
   "articleLinkCopied": "لینک کلپ بورډ ته کاپي شو",
   "footerTagline": "د Algorand اکوسیستم خپلواک، اتومات پوښښ.",
   "footerSectionsHeading": "برخې",
   "footerAboutHeading": "په اړه",
+  "footerFollowHeading": "تعقیب کړئ",
   "footerRights": "© {year} PXke Algorand. د Algorand اکوسیستم خپلواک پوښښ.",
   "@footerRights": {
     "placeholders": {

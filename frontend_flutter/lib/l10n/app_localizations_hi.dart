@@ -699,6 +699,9 @@ class AppLocalizationsHi extends AppLocalizations {
   String get articleShare => 'शेयर करना';
 
   @override
+  String get articleShareCopyLink => 'लिंक कॉपी करें';
+
+  @override
   String get articleLinkCopied => 'लिंक को क्लिपबोर्ड पर कॉपी किया गया';
 
   @override
@@ -710,6 +713,9 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get footerAboutHeading => 'के बारे में';
+
+  @override
+  String get footerFollowHeading => 'फ़ॉलो करें';
 
   @override
   String footerRights(String year) {

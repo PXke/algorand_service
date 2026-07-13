@@ -1305,6 +1305,12 @@ abstract class AppLocalizations {
   /// **'Share'**
   String get articleShare;
 
+  /// No description provided for @articleShareCopyLink.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy link'**
+  String get articleShareCopyLink;
+
   /// No description provided for @articleLinkCopied.
   ///
   /// In en, this message translates to:
@@ -1328,6 +1334,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'About'**
   String get footerAboutHeading;
+
+  /// No description provided for @footerFollowHeading.
+  ///
+  /// In en, this message translates to:
+  /// **'Follow'**
+  String get footerFollowHeading;
 
   /// No description provided for @footerRights.
   ///

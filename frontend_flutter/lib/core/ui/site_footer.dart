@@ -99,6 +99,35 @@ class SiteFooter extends StatelessWidget {
       ],
     );
 
+    // Brand names are proper nouns, not translated — same convention as the
+    // "RSS" link above.
+    final followColumn = _FooterColumn(
+      heading: l10n.footerFollowHeading,
+      links: [
+        _FooterLink(
+          label: 'Bluesky',
+          onTap: () => launchUrl(
+            Uri.parse('https://bsky.app/profile/algorand.pxke.me'),
+            mode: LaunchMode.externalApplication,
+          ),
+        ),
+        _FooterLink(
+          label: 'Mastodon',
+          onTap: () => launchUrl(
+            Uri.parse('https://mastodon.social/@pxkealgorandnews'),
+            mode: LaunchMode.externalApplication,
+          ),
+        ),
+        _FooterLink(
+          label: 'Telegram',
+          onTap: () => launchUrl(
+            Uri.parse('https://t.me/PXkeAlgorandNews'),
+            mode: LaunchMode.externalApplication,
+          ),
+        ),
+      ],
+    );
+
     return DecoratedBox(
       decoration: BoxDecoration(
         border: Border(top: BorderSide(color: colors.border)),
@@ -124,6 +153,8 @@ class SiteFooter extends StatelessWidget {
                           Expanded(child: sectionsColumn),
                           const SizedBox(width: 48),
                           aboutColumn,
+                          const SizedBox(width: 48),
+                          followColumn,
                         ],
                       ),
                     ),
@@ -135,6 +166,8 @@ class SiteFooter extends StatelessWidget {
                 sectionsColumn,
                 const SizedBox(height: 24),
                 aboutColumn,
+                const SizedBox(height: 24),
+                followColumn,
               ],
               const SizedBox(height: 28),
               Divider(height: 1, color: colors.border),

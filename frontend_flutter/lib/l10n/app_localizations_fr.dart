@@ -703,6 +703,9 @@ class AppLocalizationsFr extends AppLocalizations {
   String get articleShare => 'Partager';
 
   @override
+  String get articleShareCopyLink => 'Copier le lien';
+
+  @override
   String get articleLinkCopied => 'Lien copié dans le presse-papiers';
 
   @override
@@ -714,6 +717,9 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get footerAboutHeading => 'À propos';
+
+  @override
+  String get footerFollowHeading => 'Suivez-nous';
 
   @override
   String footerRights(String year) {

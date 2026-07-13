@@ -358,10 +358,12 @@
   "articleReadingTime": "{count} دقائق قراءة",
   "articleRelatedTitle": "قصص ذات صلة",
   "articleShare": "مشاركة",
+  "articleShareCopyLink": "نسخ الرابط",
   "articleLinkCopied": "تم نسخ الرابط",
   "footerTagline": "تغطية مستقلة وآلية لنظام Algorand البيئي.",
   "footerSectionsHeading": "الأقسام",
   "footerAboutHeading": "حول",
+  "footerFollowHeading": "تابعنا",
   "@footerRights": {
     "placeholders": {
       "year": {

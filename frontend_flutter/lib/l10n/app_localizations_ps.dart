@@ -699,6 +699,9 @@ class AppLocalizationsPs extends AppLocalizations {
   String get articleShare => 'شریکول';
 
   @override
+  String get articleShareCopyLink => 'لینک کاپي کړئ';
+
+  @override
   String get articleLinkCopied => 'لینک کلپ بورډ ته کاپي شو';
 
   @override
@@ -709,6 +712,9 @@ class AppLocalizationsPs extends AppLocalizations {
 
   @override
   String get footerAboutHeading => 'په اړه';
+
+  @override
+  String get footerFollowHeading => 'تعقیب کړئ';
 
   @override
   String footerRights(String year) {

@@ -358,10 +358,12 @@
   },
   "articleRelatedTitle": "Похожие материалы",
   "articleShare": "Поделиться",
+  "articleShareCopyLink": "Скопировать ссылку",
   "articleLinkCopied": "Ссылка скопирована в буфер обмена",
   "footerTagline": "Независимое автоматизированное освещение экосистемы Algorand.",
   "footerSectionsHeading": "Разделы",
   "footerAboutHeading": "О нас",
+  "footerFollowHeading": "Подписывайтесь",
   "footerRights": "© {year} PXke Algorand. Независимое освещение экосистемы Algorand.",
   "@footerRights": {
     "placeholders": {

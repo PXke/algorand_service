@@ -358,10 +358,12 @@
   },
   "articleRelatedTitle": "संबंधित कहानियां",
   "articleShare": "शेयर करना",
+  "articleShareCopyLink": "लिंक कॉपी करें",
   "articleLinkCopied": "लिंक को क्लिपबोर्ड पर कॉपी किया गया",
   "footerTagline": "अल्गोरंड पारिस्थितिकी तंत्र का स्वतंत्र, स्वचालित कवरेज।",
   "footerSectionsHeading": "धारा",
   "footerAboutHeading": "के बारे में",
+  "footerFollowHeading": "फ़ॉलो करें",
   "footerRights": "© {year} PXke Algorand. Independent coverage of the Algorand ecosystem.",
   "@footerRights": {
     "placeholders": {

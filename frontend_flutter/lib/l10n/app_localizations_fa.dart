@@ -697,6 +697,9 @@ class AppLocalizationsFa extends AppLocalizations {
   String get articleShare => 'اشتراک‌گذاری';
 
   @override
+  String get articleShareCopyLink => 'کپی پیوند';
+
+  @override
   String get articleLinkCopied => 'لینک در کلیپ‌بورد کپی شد';
 
   @override
@@ -707,6 +710,9 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get footerAboutHeading => 'درباره';
+
+  @override
+  String get footerFollowHeading => 'دنبال کنید';
 
   @override
   String footerRights(String year) {
