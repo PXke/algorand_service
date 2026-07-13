@@ -678,6 +678,10 @@ class AnalyticsStmts:
         "UPDATE algorand_platform.pageview_browser_daily SET views = views + 1 "
         "WHERE day = ? AND browser = ?"
     )
+    LANGUAGE_BUMP = _Stmt(
+        "UPDATE algorand_platform.pageview_language_daily SET views = views + 1 "
+        "WHERE day = ? AND lang = ?"
+    )
     HOUR_BUMP = _Stmt(
         "UPDATE algorand_platform.pageview_hour_daily SET views = views + 1 "
         "WHERE day = ? AND hour = ?"
@@ -750,6 +754,9 @@ class AnalyticsStmts:
     )
     AGG_BROWSER = _Stmt(
         "SELECT browser, views FROM algorand_platform.pageview_browser_daily WHERE day = ?"
+    )
+    AGG_LANGUAGE = _Stmt(
+        "SELECT lang, views FROM algorand_platform.pageview_language_daily WHERE day = ?"
     )
     AGG_REFERRER_URL = _Stmt(
         "SELECT referrer_url, views FROM algorand_platform.pageview_referrer_url_daily "

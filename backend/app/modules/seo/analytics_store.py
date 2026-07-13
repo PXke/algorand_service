@@ -356,6 +356,55 @@ def is_malformed_ua(user_agent: str | None) -> bool:
     return False
 
 
+# ── Fetch Metadata (Sec-Fetch-*) presence ────────────────────────────────────
+# Every evergreen browser auto-sends Sec-Fetch-Mode on every request (document
+# navigation AND same-origin fetch/XHR, e.g. the beacon POST) since Chrome 76
+# (2019) / Firefox 90 (2021) — no mainstream HTTP client or scraping library
+# (requests, httpx, curl, most headless scripts) sets it, and it can't be
+# faked by copying a real UA string. Scoped to Chrome/Firefox tokens only:
+# Safari didn't support Fetch Metadata until 16.4 (Mar 2023) and the
+# AppleWebKit/Safari version numbers in a UA don't map cleanly to the actual
+# Safari release, so a Safari (or iOS Chrome/"CriOS", which is WebKit under
+# the hood and follows Safari's timeline, not "Chrome/") UA is never flagged
+# here — same conservative carve-out is_malformed_ua takes on Safari above.
+_CHROME_MAJOR_RE = re.compile(r"Chrome/(\d+)")
+_FIREFOX_MAJOR_RE = re.compile(r"Firefox/(\d+)")
+_FETCH_METADATA_MIN_CHROME = 76
+_FETCH_METADATA_MIN_FIREFOX = 90
+
+
+def is_missing_fetch_metadata(user_agent: str | None, sec_fetch_mode: str | None) -> bool:
+    """True when a UA that must send Sec-Fetch-Mode (a modern Chrome/Firefox)
+    didn't. Checked once per request; the exact header value doesn't matter,
+    only whether the browser bothered to set it at all."""
+    if sec_fetch_mode:
+        return False
+    ua = user_agent or ""
+    chrome_match = _CHROME_MAJOR_RE.search(ua)
+    if chrome_match and int(chrome_match.group(1)) >= _FETCH_METADATA_MIN_CHROME:
+        return True
+    firefox_match = _FIREFOX_MAJOR_RE.search(ua)
+    if firefox_match and int(firefox_match.group(1)) >= _FETCH_METADATA_MIN_FIREFOX:
+        return True
+    return False
+
+
+# ── Reader language (Accept-Language) ────────────────────────────────────────
+_ACCEPT_LANG_TAG_RE = re.compile(r"^[a-zA-Z]{2,3}")
+
+
+def primary_language(accept_language: str | None) -> str | None:
+    """Best-effort primary language subtag from an Accept-Language header
+    (e.g. "en-US,en;q=0.9,fa;q=0.8" -> "en"). None for missing/unparseable —
+    never guess, an absent value is just left out of the breakdown."""
+    header = (accept_language or "").strip()
+    if not header:
+        return None
+    first = header.split(",", 1)[0].split(";", 1)[0].strip()
+    match = _ACCEPT_LANG_TAG_RE.match(first)
+    return match.group(0).lower() if match else None
+
+
 def ua_class(user_agent: str | None) -> str:
     """Coarse class for a UA, used to break down the '(direct)' bucket so plain
     browser traffic (dark social, bookmarks) is distinguishable from scripts."""
@@ -983,6 +1032,8 @@ def record_pageview(
     user_agent: str | None,
     client_ip: str | None = None,
     campaign: str | None = None,
+    accept_language: str | None = None,
+    sec_fetch_mode: str | None = None,
 ) -> None:
     """Best-effort counter bumps for one document request. Never raises."""
     if is_internal_client(client_ip):
@@ -997,7 +1048,12 @@ def record_pageview(
         day = _today()
         kind = (
             "bot"
-            if (is_bot(user_agent) or is_malformed_ua(user_agent) or is_repeated_ua(user_agent))
+            if (
+                is_bot(user_agent)
+                or is_malformed_ua(user_agent)
+                or is_repeated_ua(user_agent)
+                or is_missing_fetch_metadata(user_agent, sec_fetch_mode)
+            )
             else "human"
         )
         # Privacy-safe unique visitor count (Redis HLL), independent of Cassandra.
@@ -1021,6 +1077,9 @@ def record_pageview(
             session.execute_async(AnalyticsStmts.DEVICE_BUMP, (day, ua_class(user_agent)))
             session.execute_async(AnalyticsStmts.BROWSER_BUMP, (day, browser_family(user_agent)))
             session.execute_async(AnalyticsStmts.HOUR_BUMP, (day, datetime.now(UTC).hour))
+            lang = primary_language(accept_language)
+            if lang:
+                session.execute_async(AnalyticsStmts.LANGUAGE_BUMP, (day, lang[:8]))
             referrer = referrer_host(referer)
             session.execute_async(AnalyticsStmts.REFERRER_BUMP, (day, referrer))
             # Source -> landing-page attribution (which referrer drove which page).
@@ -1409,6 +1468,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
         "top_notfound": [],
         "device": [],
         "browser": [],
+        "languages": [],
         "hours": [],
         "referrer_categories": [],
         "sections": [],
@@ -1480,6 +1540,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
             "hour": AnalyticsStmts.HOUR_BY_DAY,
             "device": AnalyticsStmts.AGG_DEVICE,
             "browser": AnalyticsStmts.AGG_BROWSER,
+            "language": AnalyticsStmts.AGG_LANGUAGE,
             "referrer_url": AnalyticsStmts.AGG_REFERRER_URL,
             "session": AnalyticsStmts.SESSION_BY_DAY,
             "geo": AnalyticsStmts.AGG_GEO,
@@ -1538,6 +1599,7 @@ def read_analytics(days: int = 14, *, top: int = 20) -> dict:
 
         out["device"] = _rank(by_day["device"], "device", limit=top)
         out["browser"] = _rank(by_day["browser"], "browser", limit=top)
+        out["languages"] = _rank(by_day["language"], "lang", limit=top)
         out["hours"] = _hours_from_rows(by_day["hour"])
         out["referrer_categories"] = _referrer_categories_from_rows(by_day["referrer"])
         out["sections"] = _sections_from_rows(by_day["path_kind"], article_cards, limit=top)

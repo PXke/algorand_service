@@ -15,6 +15,45 @@ def test_is_bot_detection() -> None:
     )
 
 
+def test_is_missing_fetch_metadata_flags_modern_chrome_and_firefox() -> None:
+    chrome_ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+    firefox_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.3; rv:132.0) Gecko/20100101 Firefox/132.0"
+    # No Sec-Fetch-Mode at all -> both would auto-send it since Chrome 76 / Firefox 90.
+    assert a.is_missing_fetch_metadata(chrome_ua, None)
+    assert a.is_missing_fetch_metadata(firefox_ua, "")
+    # Header present (any value — only presence is checked) -> not flagged.
+    assert not a.is_missing_fetch_metadata(chrome_ua, "navigate")
+    assert not a.is_missing_fetch_metadata(firefox_ua, "cors")
+
+
+def test_is_missing_fetch_metadata_ignores_old_and_non_qualifying_uas() -> None:
+    # A Chrome/Firefox version below the Fetch-Metadata rollout never had it —
+    # missing the header there is expected, not a bot tell.
+    assert not a.is_missing_fetch_metadata("Mozilla/5.0 Chrome/60.0.0.0 Safari/537.36", None)
+    assert not a.is_missing_fetch_metadata(
+        "Mozilla/5.0 (X11; Linux x86_64; rv:80.0) Gecko/20100101 Firefox/80.0", None
+    )
+    # Safari (and WebKit-based iOS Chrome/"CriOS") didn't support Fetch
+    # Metadata until 16.4 — never flagged regardless of Sec-Fetch-Mode.
+    assert not a.is_missing_fetch_metadata(
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        None,
+    )
+
+
+def test_primary_language_parses_accept_language_header() -> None:
+    assert a.primary_language("en-US,en;q=0.9,fa;q=0.8") == "en"
+    assert a.primary_language("fr-FR") == "fr"
+    assert a.primary_language("zh-Hans-CN;q=1.0") == "zh"
+    assert a.primary_language(None) is None
+    assert a.primary_language("") is None
+    assert a.primary_language("***") is None
+
+
 def test_is_bot_flags_self_identifying_url_convention() -> None:
     # Polite crawlers (but never real browsers) embed a "+https://..." info
     # link in their UA by convention. Found leaking into "human (direct)"

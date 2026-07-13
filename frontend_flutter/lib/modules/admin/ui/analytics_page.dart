@@ -187,6 +187,7 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
           _donutRow(theme, colors, [
             _donutCard(theme, colors, 'Devices', data['device'], 'device'),
             _donutCard(theme, colors, 'Browsers', data['browser'], 'browser'),
+            _donutCard(theme, colors, 'Languages', data['languages'], 'lang'),
           ]),
           _sessionsChart(theme, colors, data['sessions_daily']),
           _hourChart(theme, colors, data['hours']),

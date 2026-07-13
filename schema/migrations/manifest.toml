@@ -485,3 +485,11 @@ file = "backend/schema/migrations/app/052_article_updated_at.cql"
 tier = "prod"
 status = "active"
 description = "articles_by_id + articles_feed: updated_at timestamp so edits/recomposes surface as dateModified (JSON-LD, meta, sitemap lastmod)"
+
+[[migrations]]
+stream = "app"
+version = "053"
+file = "backend/schema/migrations/app/053_pageview_language_daily.cql"
+tier = "prod"
+status = "active"
+description = "pageview_language_daily: reader Accept-Language breakdown per day, alongside the existing device/browser counters"

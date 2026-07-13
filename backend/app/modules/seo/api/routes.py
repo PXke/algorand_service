@@ -107,6 +107,10 @@ def _record(request: Request, path: str) -> None:
         client_ip=_header(request, "x-forwarded-for") or _header(request, "x-real-ip"),
         # Campaign tag (utm_*/ref) off the landing URL — names dark-social traffic.
         campaign=analytics_store.campaign_label(_query_params(request)),
+        accept_language=_header(request, "accept-language"),
+        # Sent by every evergreen browser on both the initial document GET and
+        # this same beacon POST — see analytics_store.is_missing_fetch_metadata.
+        sec_fetch_mode=_header(request, "sec-fetch-mode"),
     )
 
 
