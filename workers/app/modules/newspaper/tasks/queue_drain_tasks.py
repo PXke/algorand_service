@@ -355,6 +355,21 @@ def drain_standard_publish_queue() -> dict[str, object]:
     if slots <= 0:
         return {"status": "skipped", "reason": "standard_daily_cap_reached", "published": 0}
 
+    # Release an admin-approved backlog item first (held because the cap was
+    # full when it was approved) — cheap, no compose cost, and shares this
+    # exact pacing gate/budget with composing something new below (folded in
+    # from the old standalone drain_approved_feed_queue task/beat entry). Only
+    # gates THIS step on the interval, same as before — review composition
+    # below intentionally bypasses publish pacing (it doesn't hit the feed
+    # until approved), so a blanket check up here would wrongly delay it too.
+    from app.modules.newspaper.publish_schedule import is_standard_publish_due
+
+    due, _detail = is_standard_publish_due()
+    if due:
+        backlog = _release_pending_feed_backlog(slots=slots)
+        if backlog.get("published", 0):
+            return {**backlog, "tier": "standard", "source": "pending_feed_backlog"}
+
     pending = _pending_for_tier(PublishTier.STANDARD, limit=config.PUBLISH_QUEUE_BATCH_LIMIT)
     published = 0
     results: list[dict[str, str]] = []
@@ -525,41 +540,31 @@ def expire_stale_queue_items() -> dict[str, object]:
     }
 
 
-@celery_app.task(name="app.tasks.newspaper.drain_approved_feed_queue")
-def drain_approved_feed_queue() -> dict[str, object]:
-    """Release admin-approved articles that were held because the daily feed
-    cap was already reached, up to the remaining slots (interest order).
+def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
+    """Release ONE admin-approved article that was held because the daily
+    feed cap was already reached (pending_feed_queue), interest order.
 
-    Shares the SAME pacing clock as the primary drain_standard_publish_queue
-    path (is_standard_publish_due / NEWS_STANDARD_INTERVAL_HOURS), not a
-    separate one — a held article going out via this path is still a
-    standard-tier release and must respect the same cadence. Previously used
-    its own feed_release_due/APPROVED_FEED_MIN_GAP_SECONDS (1h default),
-    which let backlog releases come out far more often than the intended
-    8h-apart rhythm (root-caused 2026-07-14 via the AlgoVanity article)."""
+    Shares the SAME pacing clock as the caller (is_standard_publish_due /
+    NEWS_STANDARD_INTERVAL_HOURS), not a separate one — a held article going
+    out via this path is still a standard-tier release and must respect the
+    same cadence. Previously ran as its own Celery task/beat entry
+    (drain_approved_feed_queue) with its own feed_release_due/
+    APPROVED_FEED_MIN_GAP_SECONDS (1h default), which let backlog releases
+    come out far more often than the intended 8h-apart rhythm (root-caused
+    2026-07-14 via the AlgoVanity article) — folded into
+    drain_standard_publish_queue since both already share one pacing gate
+    and one daily budget, so a separate task+beat entry was an avoidable
+    extra moving part that most cycles did nothing anyway."""
     from datetime import UTC, datetime
 
     from app.core import config as cfg
     from app.core.cassandra import get_cassandra_session
-    from app.modules.newspaper.article_store import insert_stored_article  # noqa: F401
-    from app.modules.newspaper.publish_policy import remaining_standard_publish_slots
-
-    slots = remaining_standard_publish_slots()
-    if slots <= 0:
-        return {"status": "skipped", "reason": "daily_cap_reached", "published": 0}
-
-    from app.modules.newspaper.publish_schedule import is_standard_publish_due
-
-    due, detail = is_standard_publish_due()
-    if not due:
-        return {"status": "skipped", "reason": detail, "published": 0}
-
     from app.core.statements import ArticleStmts, FeedStmts, PendingFeedStmts
 
     session = get_cassandra_session()
     bucket = getattr(cfg, "NEWS_FEED_BUCKET", "main") or "main"
-    # One per run — the standard-publish interval pacing (shared with the
-    # primary drain path) keeps releases at NEWS_STANDARD_INTERVAL_HOURS apart.
+    # One per run — the standard-publish interval pacing keeps releases at
+    # NEWS_STANDARD_INTERVAL_HOURS apart regardless of which path releases them.
     rows = list(session.execute(PendingFeedStmts.PEEK, (bucket,)))
     published = 0
     for r in rows:
@@ -613,6 +618,26 @@ def drain_approved_feed_queue() -> dict[str, object]:
             (r.bucket, r.interest_score, r.approved_at, r.article_id),
         )
     return {"status": "ok", "published": published, "slots": slots}
+
+
+@celery_app.task(name="app.tasks.newspaper.drain_approved_feed_queue")
+def drain_approved_feed_queue() -> dict[str, object]:
+    """Thin, directly-invocable wrapper around _release_pending_feed_backlog
+    — no longer on its own beat schedule (folded into
+    drain_standard_publish_queue, which now checks the backlog first), kept
+    registered for manual/debug triggers."""
+    from app.modules.newspaper.publish_policy import remaining_standard_publish_slots
+    from app.modules.newspaper.publish_schedule import is_standard_publish_due
+
+    slots = remaining_standard_publish_slots()
+    if slots <= 0:
+        return {"status": "skipped", "reason": "daily_cap_reached", "published": 0}
+
+    due, detail = is_standard_publish_due()
+    if not due:
+        return {"status": "skipped", "reason": detail, "published": 0}
+
+    return _release_pending_feed_backlog(slots=slots)
 
 
 @celery_app.task(name="app.tasks.newspaper.ensure_review_ready")

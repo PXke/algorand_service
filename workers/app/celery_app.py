@@ -119,10 +119,11 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.newspaper.ensure_review_ready",
         "schedule": float(os.getenv("ENSURE_REVIEW_READY_SECONDS", "3600")),
     }
-    schedule["drain-approved-feed-queue"] = {
-        "task": "app.tasks.newspaper.drain_approved_feed_queue",
-        "schedule": float(os.getenv("APPROVED_FEED_DRAIN_SECONDS", "3600")),
-    }
+    # drain_approved_feed_queue's pending_feed_queue release was folded into
+    # drain_standard_publish_queue (2026-07-14) — they already shared one
+    # pacing gate/budget, so a separate task+beat entry was an avoidable
+    # extra moving part that most cycles did nothing anyway. The task itself
+    # is kept registered (queue_drain_tasks.py) for manual/debug triggers.
     schedule["sync-ecosystem-directories"] = {
         "task": "app.tasks.crawler.sync_ecosystem_directories",
         "schedule": float(os.getenv("ECOSYSTEM_SYNC_SECONDS", "86400")),

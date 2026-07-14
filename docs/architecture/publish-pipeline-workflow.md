@@ -18,21 +18,29 @@ All non-recompose triggers land a row on `publish_queue`; a drain
 (`queue_drain_tasks.py`) or `publish_from_queued_row` (`publish_tasks.py:408`)
 picks it up and does the actual work.
 
-## Two distinct paths from here
+## Two release shapes, one task
 
 **A. Full compose path** (`drain_breaking_publish_queue`, `drain_standard_publish_queue`,
 direct chain-event publish) — runs compose, gatekeeper, and quality-floor checks.
 
-**B. Admin-approved drain** (`drain_approved_feed_queue`, `queue_drain_tasks.py:541`)
-— a human already approved the draft via the review UI, so this path writes
-straight to the feed with **no compose and no gatekeeper call**. It still runs
-translation + distribution (steps 4–5 below), identically to path A.
+**B. Admin-approved backlog release** — a human already approved a draft via
+the review UI, but the daily feed cap was full at approval time so it sat in
+`pending_feed_queue`. Releasing it writes straight to the feed with **no
+compose and no gatekeeper call**, but still runs translation + distribution
+(steps 4–5 below), identically to path A. This used to be its own Celery
+task/beat entry (`drain_approved_feed_queue`) — folded into
+`drain_standard_publish_queue` (2026-07-14) as an early step, since both
+already shared one pacing gate (`is_standard_publish_due`) and one daily
+budget: a backlog item is tried first (cheap, no compose cost) before
+`drain_standard_publish_queue` considers composing anything new.
+`drain_approved_feed_queue` itself is still registered as a Celery task
+(manual/debug triggers only, not on the beat schedule).
 
 ```mermaid
 flowchart TD
     T[Trigger: chain event / crawler diff / service-watch poll] --> Q[publish_queue row]
+    Q -->|drain_standard_publish_queue: backlog first| F[pending_feed_queue release\nno compose, same pacing gate]
     Q -->|full compose path| C[compose_scrape_article\nresearch -> gap-fill -> write -> grade -> revise]
-    Q -->|admin already approved| F[drain_approved_feed_queue]
     C --> G{gatekeeper gate_draft\nGATEKEEPER_ENFORCE default OFF}
     G -->|fails + enforce on| R[Diverted to review queue]
     G -->|passes / shadow / disabled| P[insert_article\nwrites articles_by_id + articles_feed]
