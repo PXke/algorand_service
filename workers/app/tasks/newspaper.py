@@ -12,7 +12,6 @@ from app.modules.newspaper.tasks.publish_tasks import (
 )
 from app.modules.newspaper.tasks.queue_drain_tasks import (
     drain_breaking_publish_queue,
-    drain_publish_queue,
     drain_standard_publish_queue,
     expire_stale_queue_items,
 )
@@ -22,7 +21,6 @@ __all__ = [
     "check_and_publish_mistral_on_diff",
     "distribute_article",
     "drain_breaking_publish_queue",
-    "drain_publish_queue",
     "drain_standard_publish_queue",
     "expire_stale_queue_items",
     "publish_from_chain_event",

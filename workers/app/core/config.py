@@ -248,9 +248,9 @@ MISTRAL_MAX_SOURCE_CHARS = env_int("MISTRAL_MAX_SOURCE_CHARS", 48_000)
 # always gets the full MISTRAL_MAX_SOURCE_CHARS clip.
 MISTRAL_RESEARCH_SOURCE_CHARS = env_int("MISTRAL_RESEARCH_SOURCE_CHARS", 16_000)
 # Periodic re-scrape of ALL monitored sources to detect content diffs and compose
-# updates. Heavy (scrapes every source), so keep it infrequent — it is the writer's
-# main background churn. 1h; lower only if you need faster update detection.
-MISTRAL_DIFF_POLL_SECONDS = env_int("MISTRAL_DIFF_POLL_SECONDS", 3600)
+# updates (MISTRAL_DIFF_POLL_SECONDS, default 600s) is read directly via
+# os.getenv in celery_app.py's beat schedule — not duplicated here, since a
+# module-level constant here was never actually consumed by anything.
 # Agentic writer tool-round cap. Originally 10 to stop a confused model looping
 # (it was re-calling the same price/market tools 15-20x per article) — the loop's
 # (tool+args) dedup now guards against that specific failure mode independently,

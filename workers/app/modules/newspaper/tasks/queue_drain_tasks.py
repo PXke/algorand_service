@@ -525,19 +525,6 @@ def expire_stale_queue_items() -> dict[str, object]:
     }
 
 
-@celery_app.task(name="app.tasks.newspaper.drain_publish_queue")
-def drain_publish_queue() -> dict[str, object]:
-    """Legacy entry: run breaking then standard drains."""
-    breaking = drain_breaking_publish_queue()
-    standard = drain_standard_publish_queue()
-    return {
-        "status": "ok",
-        "breaking": breaking,
-        "standard": standard,
-        "published": int(breaking.get("published", 0)) + int(standard.get("published", 0)),
-    }
-
-
 @celery_app.task(name="app.tasks.newspaper.drain_approved_feed_queue")
 def drain_approved_feed_queue() -> dict[str, object]:
     """Release admin-approved articles that were held because the daily feed
