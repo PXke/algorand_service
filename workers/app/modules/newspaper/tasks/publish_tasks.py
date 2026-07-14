@@ -45,6 +45,11 @@ _IMAGE_CDN_HINTS: tuple[str, ...] = (
     "amazonaws",
     "googleusercontent",
     "twimg",
+    # A docs site's own OG-image-generator subdomain (e.g. defly.gitbook.io
+    # serving ~gitbook/ogimage/… for docs.defly.app) — same shared-host
+    # pattern as the others here, found missing during the 2026-07-14
+    # backfill (a perfectly good 1200x630 GitBook OG image was rejected).
+    "gitbook",
 )
 
 
@@ -54,6 +59,18 @@ def _plausible_image_host(og_image: str, source_url: str) -> bool:
     from urllib.parse import urlparse
 
     from app.modules.crawler.domain_tracker import _PLATFORM_SUFFIXES, domain_from_url
+
+    # Synthetic, non-fetchable source identifiers (editorial://brief/…,
+    # mail://message/…) have no real site to compare an image's domain
+    # against. domain_from_url parses the netloc of ANY scheme://netloc/...
+    # string, so "editorial://brief/<uuid>" reads as if "brief" were a real
+    # hostname — a URL-parsing artifact, not a genuine site — which silently
+    # rejected perfectly good images (algorand.co, GitBook OG images, …) on
+    # these lanes the first time a re-validation backfill ever exercised this
+    # combination (2026-07-14). Only http(s) sources have a real domain to
+    # check at all.
+    if not source_url.lower().startswith(("http://", "https://")):
+        return True
 
     image_domain = domain_from_url(og_image)
     site_domain = domain_from_url(source_url)

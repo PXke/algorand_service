@@ -125,6 +125,35 @@ def test_hero_allows_same_platform_shared_media_host() -> None:
     )
 
 
+def test_hero_allows_gitbook_ogimage_host() -> None:
+    # 2026-07-14 backfill finding: a docs site's own GitBook-hosted OG-image
+    # generator (defly.gitbook.io serving docs.defly.app) is the same
+    # shared-host pattern as Medium/Cloudinary/etc — a perfectly good
+    # 1200x630 image was wrongly rejected before "gitbook" was recognized.
+    assert _plausible_image_host(
+        "https://defly.gitbook.io/defly-manual/~gitbook/ogimage/abc123",
+        "https://docs.defly.app",
+    )
+
+
+def test_hero_allows_any_image_for_non_http_source() -> None:
+    # editorial://brief/<uuid> and mail://message/<n> are synthetic, non-
+    # fetchable source identifiers, not real websites — domain_from_url
+    # parses their netloc as if it were a real hostname ("brief", "message"),
+    # which wrongly rejected perfectly good images (algorand.co, GitBook OG
+    # images) the first time a re-validation backfill exercised this
+    # combination (2026-07-14). Only http(s) sources have a real domain to
+    # compare against at all.
+    assert _plausible_image_host(
+        "https://algorand.co/hubfs/DeFi%20protocols-2.png",
+        "editorial://brief/1f1719f9-6dd0-4ca3-9961-812d9851ebc6",
+    )
+    assert _plausible_image_host(
+        "https://x402.org/wp-content/uploads/sites/10/2026/06/Untitled-design.png",
+        "mail://message/7",
+    )
+
+
 def test_hero_still_drops_foreign_website_images() -> None:
     # The case the guard exists for: a news aggregator hotlinking another
     # news site's stock photo.
