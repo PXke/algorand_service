@@ -132,12 +132,23 @@ def _tool_lookup_asset(asset_id: Any) -> dict[str, Any]:
     if data.get("_status") == 404:
         return {"asset_id": int(aid), "error": "asset not found"}
     p = data.get("params", {}) or {}
+    total = p.get("total")
+    decimals = p.get("decimals")
+    # total/decimals are raw base units — division-by-10**decimals done here,
+    # not left to the model. Doing it in-prompt is exactly how a real incident
+    # happened (2026-07-14): the writer manually converted a 15-digit raw ASA
+    # total and got the decimal shift wrong, reporting "1 trillion" for what
+    # total_adjusted below correctly computes as 1 billion.
+    total_adjusted = None
+    if isinstance(total, int | float) and isinstance(decimals, int) and decimals >= 0:
+        total_adjusted = round(total / (10**decimals), 6)
     return {
         "asset_id": int(aid),
         "name": p.get("name"),
         "unit_name": p.get("unit-name"),
-        "total": p.get("total"),
-        "decimals": p.get("decimals"),
+        "total": total,
+        "decimals": decimals,
+        "total_adjusted": total_adjusted,
         "creator": p.get("creator"),
         "url": p.get("url"),
         "default_frozen": p.get("default-frozen"),
@@ -145,6 +156,47 @@ def _tool_lookup_asset(asset_id: Any) -> dict[str, Any]:
         "freeze": p.get("freeze"),
         "clawback": p.get("clawback"),
         "reserve": p.get("reserve"),
+    }
+
+
+def _tool_get_asset_holder_share(asset_id: Any, address: str) -> dict[str, Any]:
+    """A specific address's share of an ASA's total supply, computed here (not
+    left to the model) — use this instead of manually dividing lookup_asset's
+    total by lookup_account's raw holding, which is exactly how a real
+    fabricated "99.99%" concentration claim happened (2026-07-14): the model
+    got the decimal-shift arithmetic wrong on a 15-digit raw amount."""
+    addr = (address or "").strip()
+    if not addr:
+        return {"error": "address required"}
+    asset = _tool_lookup_asset(asset_id)
+    if asset.get("error"):
+        return asset
+    total = asset.get("total")
+    decimals = asset.get("decimals")
+    if not isinstance(total, int | float) or not total:
+        return {"error": "asset has no usable total supply"}
+    account = _tool_lookup_account(addr)
+    if account.get("error"):
+        return account
+    target_asset_id = asset.get("asset_id")
+    holding = next(
+        (
+            a.get("amount")
+            for a in account.get("assets", [])
+            if a.get("asset_id") == target_asset_id
+        ),
+        0,
+    )
+    holding = holding or 0
+    holding_adjusted = (
+        round(holding / (10**decimals), 6) if isinstance(decimals, int) and decimals >= 0 else None
+    )
+    return {
+        "asset_id": asset.get("asset_id"),
+        "address": addr,
+        "holder_amount_adjusted": holding_adjusted,
+        "total_supply_adjusted": asset.get("total_adjusted"),
+        "share_pct": round(100 * holding / total, 4),
     }
 
 
@@ -366,6 +418,30 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "get_asset_holder_share",
+            "description": (
+                "A specific address's share of an ASA's total supply, as a real "
+                "percentage computed here — use this instead of manually dividing "
+                "lookup_asset's total by an amount from lookup_account when reporting "
+                "a holder's concentration (e.g. 'the creator holds X% of supply'). "
+                "Never compute that percentage yourself from the raw numbers."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "integer", "description": "numeric ASA id"},
+                    "address": {
+                        "type": "string",
+                        "description": "58-char Algorand address to check",
+                    },
+                },
+                "required": ["asset_id", "address"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_consensus_stats",
             "description": (
                 "Algorand network consensus participation: ALGO stake currently ONLINE "
@@ -404,6 +480,7 @@ CHAIN_HANDLERS: dict[str, Any] = {
     "lookup_account": _tool_lookup_account,
     "lookup_asset": _tool_lookup_asset,
     "lookup_application": _tool_lookup_application,
+    "get_asset_holder_share": _tool_get_asset_holder_share,
     "get_consensus_stats": _tool_get_consensus_stats,
     "testnet_lookup": _tool_testnet_lookup,
 }
