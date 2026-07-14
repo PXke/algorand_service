@@ -231,6 +231,96 @@ def test_second_revision_only_fires_when_first_still_fixable(monkeypatch) -> Non
     assert out["_heuristic_grade"]["grade"] == 8.0
 
 
+class _SequenceMistral:
+    """Returns a different revised draft on each successive call, and records
+    the exact revise_user text sent each time (needed to check carry-forward
+    memory reaches the prompt, not just the return value)."""
+
+    def __init__(self, revisions: list[dict]) -> None:
+        self._revisions = list(revisions)
+        self.calls = 0
+        self.sent_users: list[str] = []
+
+    def chat_json_object(self, messages, temperature=None):
+        self.sent_users.append(messages[-1]["content"])
+        out = self._revisions[self.calls]
+        self.calls += 1
+        return out
+
+
+def test_best_of_n_returns_highest_scoring_pass_not_last(monkeypatch) -> None:
+    """Regression-pin the real 2026-07-14 CompX incident: pass 2 (grade 8.6)
+    fixed a headline issue but not yet its own new one; pass 3 (grade 7.3,
+    the LAST pass) fixed that but re-broke structure pass 2 had already
+    cleaned up. The loop must not just return whatever pass happened to run
+    last — it must return the best-scoring draft it ever produced."""
+    grades = iter([
+        {"grade": 5.0, "issues": ["structure — Buried Metrics: 5 metrics in one paragraph"]},
+        {"grade": 8.6, "issues": ["headline — colon-label title"]},
+        {"grade": 7.3, "issues": []},  # clean, but scores lower than pass 2
+    ])
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **kw: next(grades),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+    )
+    trace: list[dict] = []
+    fake = _SequenceMistral([
+        {"title": "T2", "body": "pass two body — the best draft"},
+        {"title": "T3", "body": "pass three body — regressed but graded last"},
+    ])
+
+    out = _review_and_revise(
+        fake, {"title": "T1", "body": "pass one body"},
+        system="sys", gen_user="u", trace=trace,
+    )
+
+    assert fake.calls == 2
+    assert out["body"] == "pass two body — the best draft"
+    assert out["_heuristic_grade"]["grade"] == 8.6
+
+
+def test_carry_forward_tells_revision_not_to_undo_earlier_fix(monkeypatch) -> None:
+    """An issue resolved in pass 1 (dropped from pass 2's issue list) must be
+    named explicitly in pass 2's revision prompt as 'already fixed — do not
+    reintroduce', so the model doesn't trade it away while fixing the new
+    issue pass 2 raised."""
+    grades = iter([
+        {"grade": 5.0, "issues": ["structure — Buried Metrics: 5 metrics in one paragraph"]},
+        {"grade": 6.0, "issues": ["headline — colon-label title"]},
+        {"grade": 8.0, "issues": []},
+    ])
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **kw: next(grades),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+    )
+    trace: list[dict] = []
+    fake = _SequenceMistral([
+        {"title": "T2", "body": "pass two body"},
+        {"title": "T3", "body": "pass three body"},
+    ])
+
+    _review_and_revise(
+        fake, {"title": "T1", "body": "pass one body"},
+        system="sys", gen_user="u", trace=trace,
+    )
+
+    assert fake.calls == 2
+    # First revision prompt has nothing to carry forward yet.
+    assert "already fixed" not in fake.sent_users[0]
+    # Second revision prompt must name the structure issue pass 1 already
+    # fixed, since pass 2's own issue list no longer includes it.
+    assert "already fixed" in fake.sent_users[1]
+    assert "Buried Metrics" in fake.sent_users[1]
+
+
 def test_disabled_skips_review(monkeypatch) -> None:
     import app.core.config as cfg
 

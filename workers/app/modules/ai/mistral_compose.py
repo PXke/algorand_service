@@ -714,6 +714,20 @@ def _review_and_revise(
     current = payload
     max_revisions = max(1, WRITER_REVISION_MAX_PASSES)
     revise_count = 0
+    # Best-of-N: a revision pass can trade one fixed issue for a regression on
+    # something an EARLIER pass already fixed (observed 2026-07-14 on a CompX
+    # recompose — a pass that fixed a headline colon-label re-broke structure
+    # a prior pass had already cleaned up, and being the LAST pass, the
+    # regressed draft is what got kept). Track the best-scoring pass seen and
+    # return that instead of just whatever the loop happened to end on.
+    best_current = payload
+    best_score = float("-inf")
+    # Carry-forward memory: each revision prompt below only sees the CURRENT
+    # pass's flagged issues, with no record of what earlier passes already
+    # fixed — the model has no way to know a rewrite it's about to do would
+    # undo a fix from two passes ago. Accumulate every issue ever raised so a
+    # later prompt can be told which ones must NOT come back.
+    ever_raised: set[str] = set()
     while True:
         title = str(current.get("title", "") or "")
         body = str(current.get("body", "") or "")
@@ -751,21 +765,42 @@ def _review_and_revise(
             for i in issues
             if i.startswith(("too long", "structure", "schema", "headline"))
         ]
-        quality_fixable: list[str] = []
-        if quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE):
-            quality_fixable = list(quality.get("issues") or [])
+        needs_revision = quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE)
+        quality_fixable: list[str] = list(quality.get("issues") or []) if needs_revision else []
         fixable = schema_fixable + quality_fixable
-        if not fixable:
-            return current
-        if revise_count >= max_revisions:
-            # Out of revisions — return the current draft with its (still-flagged)
-            # grade attached rather than revising into a draft that never gets
-            # checked again.
-            return current
 
+        grade_val = review.get("grade")
+        score = float(grade_val) if isinstance(grade_val, int | float) else 0.0
+        if needs_revision:
+            score -= 2.0
+        # Ties favor the LATER pass: a revision that plateaus on the same
+        # numeric grade (e.g. a stuck quality-rubric score) has still likely
+        # addressed whatever was flagged, so prefer the freshest draft over
+        # reverting all the way back to the first pass. Only a strictly WORSE
+        # score is treated as a regression and passed over.
+        if score >= best_score:
+            best_score = score
+            best_current = current
+
+        if not fixable:
+            return best_current
+        if revise_count >= max_revisions:
+            # Out of revisions — return the BEST pass seen, not necessarily
+            # this last one (see best-of-N note above).
+            return best_current
+
+        already_fixed = sorted(ever_raised - set(fixable))
+        ever_raised.update(fixable)
         issues_block = "\n".join(f"- {i}" for i in fixable[:10])
+        carried_block = ""
+        if already_fixed:
+            carried_block = (
+                "\n\nThese issues were already fixed in an earlier revision pass — "
+                "do NOT reintroduce them while addressing the list above:\n"
+                + "\n".join(f"- {i}" for i in already_fixed[:10])
+            )
         too_long = any(i.startswith("too long") for i in fixable)
-        needs_depth = quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE)
+        needs_depth = needs_revision
         # The reviser is judged by the 75% word-count guard below; give it that
         # constraint as a CONCRETE number — "keep roughly the same length" alone
         # still lost >25% of the words in ~10% of prod revisions, wasting the call.
@@ -802,7 +837,7 @@ def _review_and_revise(
             gen_user + f"\n\nA reviewer flagged these problems:\n{issues_block}\n\n"
             f"{length_rule} Do NOT add, invent, or restate facts beyond the research "
             "digest above, and do not pad with new filler. Return the full revised "
-            "article as the same JSON object."
+            f"article as the same JSON object.{carried_block}"
         )
         gen_system = system + _STAGE2_GENERATION_GUIDANCE
 
@@ -816,10 +851,10 @@ def _review_and_revise(
             )
         except Exception as exc:
             _note_revision_failure(f"revision call failed: {type(exc).__name__}: {exc}")
-            return current
+            return best_current
         if not str(revised.get("body", "") or "").strip():
             _note_revision_failure("revision returned an empty body")
-            return current
+            return best_current
         # Safety net: a structure-only fix must not gut the article. If it dropped
         # more than ~25% of the words (and we weren't trimming an over-long piece),
         # keep the current draft — a reformat that loses that much has lost real
@@ -831,7 +866,7 @@ def _review_and_revise(
                 f"revision dropped too much content ({orig_words} -> {new_words} words); "
                 "kept prior draft"
             )
-            return current
+            return best_current
 
         # Default to this pass's grade if the next pass's regrade itself fails,
         # so the floor-gate downstream never sees revision as erasing a known
