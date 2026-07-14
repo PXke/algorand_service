@@ -75,12 +75,22 @@ def _plausible_image_host(og_image: str, source_url: str) -> bool:
     return any(hint in host for hint in _IMAGE_CDN_HINTS)
 
 
-def _is_real_image(url: str, *, min_dimension: int = 32) -> bool:
-    """Fetch and decode a candidate image; reject anti-hotlink decoy pixels —
-    some sites (Cloudflare-fronted or otherwise) serve a valid-but-blank 1x1
-    transparent image to non-browser requests instead of an error, so it
-    looks like a successful fetch while rendering as nothing (root-caused via
-    geographia.com.br and docs.vestigelabs.org, 2026-07-14)."""
+def _is_real_image(url: str, *, min_dimension: int = 120) -> bool:
+    """Fetch and decode a candidate image; reject content that's too small or
+    blank to be worth showing.
+
+    This is a QUALITY judgment made from the actual pixels, not a URL-shape
+    guess (that's what the frontend's looksLikeLogoUrl does, since it can't
+    fetch/decode client-side — the backend can, so it shouldn't need to
+    guess). min_dimension=120 draws the line between a real favicon (16-48px,
+    genuinely too small/blurry blown up) and a decent app/touch icon (120px+,
+    e.g. AlgoVanity's 192x192 apple-touch-icon — perfectly fine as a feed
+    thumbnail even though its URL "looks like" a logo). Also rejects
+    anti-hotlink decoy pixels — some sites (Cloudflare-fronted or otherwise)
+    serve a valid-but-blank 1x1 transparent image to non-browser requests
+    instead of an error, so it looks like a successful fetch while rendering
+    as nothing (root-caused via geographia.com.br and docs.vestigelabs.org,
+    2026-07-14)."""
     from io import BytesIO
 
     from app.core.net_guard import guarded_get
@@ -110,35 +120,25 @@ def _validated_hero(image: str, source_url: str) -> str:
     project) could still become the article's image_url/feed-tile/OG-card
     even though it was correctly kept out of the body text.
 
-    Also applied to the brand-logo fallback (not just a true og:image
-    candidate): a raw favicon leaking into image_url doesn't just get hidden
-    by the frontend's own looksLikeLogoUrl guard — it also feeds the
-    server-rendered OG social-card meta tag, which has no such filter, so a
-    blurry favicon would still show up in Discord/Twitter link previews.
-
-    Pure/URL-based only (no network I/O) — see _validated_hero_checked for
-    the decoy-pixel content check used at actual compose call sites."""
-    from app.modules.scraper.core.page_metadata import _looks_like_logo_url
-
+    Domain-plausibility only (no network I/O, no URL-shape guessing) — see
+    _validated_hero_checked for the actual content-quality check (real
+    dimensions, not-blank) used at compose call sites. A URL that merely
+    "looks like" a logo (e.g. contains apple-touch/icon/favicon) is NOT
+    rejected here: whether it's actually too small/blurry to use is a
+    pixel-level judgment, not a URL-shape one — see _is_real_image."""
     if not image:
         return image
     if source_url and not _plausible_image_host(image, source_url):
         logger.warning("dropping implausible og:image %s for %s", image, source_url)
         return ""
-    if _looks_like_logo_url(image):
-        logger.info("dropping logo-shaped candidate %s for %s", image, source_url)
-        return ""
     return image
 
 
 def _validated_hero_checked(image: str, source_url: str) -> str:
-    """_validated_hero, then fetch+decode to reject anti-hotlink decoy pixels
-    — some sites serve a valid-but-blank 1x1 transparent image to non-browser
-    requests instead of an error, so it looks like a successful fetch while
-    rendering as nothing (root-caused via geographia.com.br and
-    docs.vestigelabs.org, 2026-07-14). Does real network I/O — use this at
-    compose call sites, not _validated_hero directly, so pure unit tests of
-    the URL-based gate stay fast and deterministic."""
+    """_validated_hero, then fetch+decode to reject images too small or blank
+    to be worth showing (see _is_real_image). Does real network I/O — use
+    this at compose call sites, not _validated_hero directly, so pure unit
+    tests of the URL-based gate stay fast and deterministic."""
     image = _validated_hero(image, source_url)
     if image and not _is_real_image(image):
         logger.warning("dropping degenerate/decoy og:image %s for %s", image, source_url)
