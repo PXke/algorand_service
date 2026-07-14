@@ -11,9 +11,11 @@ from app.modules.newspaper.source_image import (
     resolve_article_images,
     source_urls_from_body,
 )
+from app.modules.newspaper.tasks import publish_tasks
 from app.modules.newspaper.tasks.publish_tasks import (
     _plausible_image_host,
     _validated_hero,
+    _validated_hero_checked,
     _with_hero_image,
 )
 
@@ -160,4 +162,93 @@ def test_validated_hero_keeps_plausible_image_url() -> None:
             "https://res.cloudinary.com/noahapp/image/upload/x.png", "https://noah.com"
         )
         == "https://res.cloudinary.com/noahapp/image/upload/x.png"
+    )
+
+
+def test_validated_hero_drops_favicon_and_logo_shaped_urls() -> None:
+    # 2026-07-14: a raw favicon/logo leaking into image_url isn't just hidden
+    # by the frontend — it also feeds the server-rendered OG social-card meta
+    # tag, which has no such filter. _validated_hero itself stays pure/fast
+    # (no network) so this check must be URL-shape only.
+    assert _validated_hero("https://a-wallet.net/favicon.ico", "https://a-wallet.net") == ""
+    assert _validated_hero("https://a-wallet.net/img/logo.svg", "https://a-wallet.net") == ""
+
+
+def _fake_response(*, content: bytes, status_ok: bool = True):
+    class _Resp:
+        def __init__(self) -> None:
+            self.content = content
+
+        def raise_for_status(self) -> None:
+            if not status_ok:
+                raise RuntimeError("bad status")
+
+    return _Resp()
+
+
+def _png_bytes(*, size: tuple[int, int], mode: str = "RGB", transparent: bool = False) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    if transparent:
+        img = Image.new("RGBA", size, (0, 0, 0, 0))
+    else:
+        img = Image.new(mode, size, (10, 20, 30))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_validated_hero_checked_drops_decoy_pixel(monkeypatch) -> None:
+    # geographia.com.br/docs.vestigelabs.org-shaped case: a real, non-logo-
+    # shaped URL that resolves to a 1x1 fully-transparent decoy pixel instead
+    # of an error (2026-07-14 root cause).
+    monkeypatch.setattr(
+        "app.core.net_guard.guarded_get",
+        lambda *a, **kw: _fake_response(content=_png_bytes(size=(1, 1), transparent=True)),
+    )
+    assert (
+        _validated_hero_checked("https://geographia.com.br/hero.png", "https://geographia.com.br")
+        == ""
+    )
+
+
+def test_validated_hero_checked_drops_tiny_image(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.core.net_guard.guarded_get",
+        lambda *a, **kw: _fake_response(content=_png_bytes(size=(8, 8))),
+    )
+    assert _validated_hero_checked("https://vestige.fi/hero.png", "https://vestige.fi") == ""
+
+
+def test_validated_hero_checked_keeps_real_image(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.core.net_guard.guarded_get",
+        lambda *a, **kw: _fake_response(content=_png_bytes(size=(1200, 630))),
+    )
+    assert (
+        _validated_hero_checked("https://vestige.fi/hero.png", "https://vestige.fi")
+        == "https://vestige.fi/hero.png"
+    )
+
+
+def test_validated_hero_checked_drops_on_fetch_failure(monkeypatch) -> None:
+    def _boom(*a, **kw):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr("app.core.net_guard.guarded_get", _boom)
+    assert _validated_hero_checked("https://vestige.fi/hero.png", "https://vestige.fi") == ""
+
+
+def test_validated_hero_checked_never_fetches_for_shape_rejected_url(monkeypatch) -> None:
+    # Favicon rejection happens in the pure gate — no network call should
+    # even be attempted for an obviously logo-shaped URL.
+    monkeypatch.setattr(
+        publish_tasks,
+        "_is_real_image",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not fetch")),
+    )
+    assert (
+        _validated_hero_checked("https://a-wallet.net/favicon.ico", "https://a-wallet.net") == ""
     )

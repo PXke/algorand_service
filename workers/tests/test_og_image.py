@@ -24,3 +24,25 @@ def test_no_meta_returns_empty_even_with_content_images() -> None:
     # Inner <img> must NOT be used — only advertised social meta counts.
     s = _soup('<img src="https://cdn.x.com/photo.jpg" width="800" height="400">')
     assert extract_og_image(s, "https://x.com") == ""
+
+
+def test_favicon_og_image_skipped_for_better_twitter_image() -> None:
+    # A site declares og:image as its favicon (a-wallet.net does exactly
+    # this) but a real photographic twitter:image also exists — the favicon
+    # must not win just because it's listed first (2026-07-14).
+    s = _soup(
+        '<meta property="og:image" content="/favicon.ico">'
+        '<meta name="twitter:image" content="/img/social-preview.png">'
+    )
+    assert (
+        extract_og_image(s, "https://a-wallet.net")
+        == "https://a-wallet.net/img/social-preview.png"
+    )
+
+
+def test_all_logo_shaped_candidates_returns_empty() -> None:
+    s = _soup(
+        '<meta property="og:image" content="/favicon.ico">'
+        '<meta name="twitter:image" content="/apple-touch-icon.png">'
+    )
+    assert extract_og_image(s, "https://x.com") == ""

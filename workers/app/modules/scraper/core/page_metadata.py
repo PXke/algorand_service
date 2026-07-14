@@ -27,6 +27,26 @@ def _meta_content(soup, attr: str, value: str) -> str:
     return ""
 
 
+# Mirrors the frontend's looksLikeLogoUrl (app_config.dart) — a site's own
+# og:image sometimes points at its favicon or a generic OG-generator endpoint
+# rather than real share artwork (e.g. a-wallet.net declares og:image =
+# /favicon.ico while a real twitter:image sits right below it, 2026-07-14).
+# Skip such candidates so a later, better meta tag gets a chance instead of
+# accepting the first hit uncritically.
+_LOGO_SHAPED_RE = re.compile(
+    r"favicon|apple-touch|/icons?[/._-]|[/._-]icons?[._-]|logo|/og(/|$)|opengraph"
+)
+
+
+def _looks_like_logo_url(url: str) -> bool:
+    from urllib.parse import urlparse
+
+    path = urlparse(url).path.lower()
+    if path.endswith((".svg", ".ico")):
+        return True
+    return bool(_LOGO_SHAPED_RE.search(path))
+
+
 def extract_og_image(soup, base_url: str = "") -> str:
     """The page's explicitly-advertised social/share image → absolute URL, or "".
 
@@ -44,7 +64,9 @@ def extract_og_image(soup, base_url: str = "") -> str:
     ):
         tag = soup.find("meta", attrs=attrs)
         if tag and tag.get("content"):
-            return urljoin(base_url, str(tag["content"]).strip())
+            candidate = urljoin(base_url, str(tag["content"]).strip())
+            if not _looks_like_logo_url(candidate):
+                return candidate
     return ""
 
 

@@ -75,14 +75,73 @@ def _plausible_image_host(og_image: str, source_url: str) -> bool:
     return any(hint in host for hint in _IMAGE_CDN_HINTS)
 
 
+def _is_real_image(url: str, *, min_dimension: int = 32) -> bool:
+    """Fetch and decode a candidate image; reject anti-hotlink decoy pixels —
+    some sites (Cloudflare-fronted or otherwise) serve a valid-but-blank 1x1
+    transparent image to non-browser requests instead of an error, so it
+    looks like a successful fetch while rendering as nothing (root-caused via
+    geographia.com.br and docs.vestigelabs.org, 2026-07-14)."""
+    from io import BytesIO
+
+    from app.core.net_guard import guarded_get
+
+    try:
+        resp = guarded_get(url, timeout=6.0)
+        resp.raise_for_status()
+        from PIL import Image
+
+        img = Image.open(BytesIO(resp.content))
+        if img.width < min_dimension or img.height < min_dimension:
+            return False
+        if img.mode in ("RGBA", "LA"):
+            alpha = img.convert("RGBA").split()[-1]
+            if alpha.getextrema() == (0, 0):  # fully transparent
+                return False
+    except Exception:
+        logger.info("hero image validation fetch failed for %s", url, exc_info=True)
+        return False
+    return True
+
+
 def _validated_hero(image: str, source_url: str) -> str:
     """Gate a candidate share image the same way _with_hero_image gates the
     body embed — previously only the body used this check, so a template
     site's stale/foreign og:image (e.g. copy-pasted from an unrelated
     project) could still become the article's image_url/feed-tile/OG-card
-    even though it was correctly kept out of the body text."""
-    if image and source_url and not _plausible_image_host(image, source_url):
+    even though it was correctly kept out of the body text.
+
+    Also applied to the brand-logo fallback (not just a true og:image
+    candidate): a raw favicon leaking into image_url doesn't just get hidden
+    by the frontend's own looksLikeLogoUrl guard — it also feeds the
+    server-rendered OG social-card meta tag, which has no such filter, so a
+    blurry favicon would still show up in Discord/Twitter link previews.
+
+    Pure/URL-based only (no network I/O) — see _validated_hero_checked for
+    the decoy-pixel content check used at actual compose call sites."""
+    from app.modules.scraper.core.page_metadata import _looks_like_logo_url
+
+    if not image:
+        return image
+    if source_url and not _plausible_image_host(image, source_url):
         logger.warning("dropping implausible og:image %s for %s", image, source_url)
+        return ""
+    if _looks_like_logo_url(image):
+        logger.info("dropping logo-shaped candidate %s for %s", image, source_url)
+        return ""
+    return image
+
+
+def _validated_hero_checked(image: str, source_url: str) -> str:
+    """_validated_hero, then fetch+decode to reject anti-hotlink decoy pixels
+    — some sites serve a valid-but-blank 1x1 transparent image to non-browser
+    requests instead of an error, so it looks like a successful fetch while
+    rendering as nothing (root-caused via geographia.com.br and
+    docs.vestigelabs.org, 2026-07-14). Does real network I/O — use this at
+    compose call sites, not _validated_hero directly, so pure unit tests of
+    the URL-based gate stay fast and deterministic."""
+    image = _validated_hero(image, source_url)
+    if image and not _is_real_image(image):
+        logger.warning("dropping degenerate/decoy og:image %s for %s", image, source_url)
         return ""
     return image
 
@@ -604,7 +663,7 @@ def publish_from_queued_row(
     # the feed tile and the social/OG card show real artwork (best-effort). A
     # true share image (og/twitter) is also embedded in the body; a brand logo
     # populates image_url only (it's not a body banner).
-    _payload_og = _validated_hero(str(payload.get("og_image", "")).strip(), row.scrape_url)
+    _payload_og = _validated_hero_checked(str(payload.get("og_image", "")).strip(), row.scrape_url)
     hero_image = _payload_og
     image_field = _payload_og
     if not _payload_og:
@@ -619,9 +678,9 @@ def publish_from_queued_row(
                 service_id=row.service_id,
                 body=composed.body,
             )
-            _og = _validated_hero(_og, row.scrape_url)
+            _og = _validated_hero_checked(_og, row.scrape_url)
             hero_image = _og
-            image_field = _og or _logo
+            image_field = _og or _validated_hero_checked(_logo, row.scrape_url)
         except Exception:
             logger.warning("failed to resolve source images for %s", row.scrape_url, exc_info=True)
 
@@ -1232,7 +1291,7 @@ def recompose_review(review_id: str) -> dict[str, str]:
     # a bad image (foreign/stale template artwork) would otherwise survive
     # every subsequent recompose unchanged, since it's never empty and this
     # function only re-resolves when it IS empty.
-    og_image = _validated_hero(og_image, url)
+    og_image = _validated_hero_checked(og_image, url)
     image_field = og_image
     if not og_image:
         # Older reviews (and any path that never resolved one) carry no image —
@@ -1245,9 +1304,9 @@ def recompose_review(review_id: str) -> dict[str, str]:
             _og, _logo = resolve_article_images(
                 source_url=url, service_id=service_id, body=composed.body
             )
-            _og = _validated_hero(_og, url)
+            _og = _validated_hero_checked(_og, url)
             og_image = _og
-            image_field = _og or _logo
+            image_field = _og or _validated_hero_checked(_logo, url)
         except Exception:
             logger.warning("failed to resolve source images for %s", url, exc_info=True)
     tags = _merge_tags(
@@ -1513,7 +1572,7 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
 
     # Hero: fresh og when the re-scrape produced one, else the live article's
     # current art (never downgrade a working hero to nothing).
-    og_image = _validated_hero(scraped_og, source_url)
+    og_image = _validated_hero_checked(scraped_og, source_url)
     image_field = og_image
     if not image_field:
         try:
