@@ -412,6 +412,25 @@ EOF
   if [[ ${#RESTART_UNITS[@]} -eq 0 ]]; then
     echo ">>> No service restart required (frontend/static-only deploy)"
   else
+    if [[ " ${RESTART_UNITS[*]} " == *" algorand-platform-celery "* ]]; then
+      # Best-effort, non-blocking: a celery restart sends SIGQUIT, which
+      # silently kills an in-flight compose (no exception handler runs, the
+      # compose_sessions row is orphaned at researching/writing until the
+      # hourly reap_stale_compose_sessions catches it — root-caused
+      # 2026-07-14). We don't wait for the lock to clear (up to 31 min,
+      # not worth it for this fast-iteration deploy workflow) — just warn
+      # so a wasted compose isn't a silent mystery next time.
+      ssh "$SSH_SVC" bash -s 2>/dev/null <<EOF || true
+set -a; source '${SHARED}/workers.env'; set +a
+cd '${CURRENT}/workers'
+'${VENV}/bin/python' -c "
+from app.modules.newspaper.compose_lock import get_compose_lock_status
+status = get_compose_lock_status()
+if status:
+    print('>>> WARNING: compose lock held', status, '-- this restart will silently kill it mid-compose')
+"
+EOF
+    fi
     echo ">>> [root] Restarting: ${RESTART_UNITS[*]}"
     ssh "$SSH_ROOT" "systemctl restart ${RESTART_UNITS[*]}"
   fi
