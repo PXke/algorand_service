@@ -20,6 +20,7 @@ dependencies = [
   "scipy>=1.11.0",
   "pypdf>=4.0.0",
   "pillow>=10.0.0",
+  "yt-dlp>=2025.1.1",
 ]
 
 [project.optional-dependencies]

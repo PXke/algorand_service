@@ -153,7 +153,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # xz-utils: decompress the .tar.xz release. libnginx-mod-http-brotli: enables
 # brotli_static in our nginx site (auto-loaded via /etc/nginx/modules-enabled).
-apt-get install -y -qq python3 python3-venv python3-dev build-essential rsync curl xz-utils brotli
+# ffmpeg: audio extraction for the local YouTube transcription pipeline.
+apt-get install -y -qq python3 python3-venv python3-dev build-essential rsync curl xz-utils brotli ffmpeg
 apt-get install -y -qq libnginx-mod-http-brotli \
   || echo "warn: libnginx-mod-http-brotli unavailable — install ngx_brotli before enabling brotli_static" >&2
 EOF

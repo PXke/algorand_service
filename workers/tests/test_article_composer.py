@@ -114,6 +114,81 @@ def test_compose_scrape_mistral_only_raises_when_not_configured(monkeypatch) -> 
         )
 
 
+def test_compose_scrape_folds_transcript_into_page_text_for_non_recap(monkeypatch) -> None:
+    """transcript_text was previously accepted but silently dropped for every
+    topic except COMMUNITY_RECAP — the local YouTube pipeline needs it to
+    reach the general writer path too."""
+    import app.core.config as config
+    import app.modules.newspaper.article_composer as composer_module
+
+    monkeypatch.setattr(config, "MISTRAL_ENABLED", False)
+    monkeypatch.setattr(config, "MISTRAL_API_KEY", "")
+    monkeypatch.setattr(config, "YOUTUBE_TRANSCRIPT_MAX_CHARS", 20_000)
+
+    captured = {}
+
+    def fake_service_discovery(**kwargs):
+        captured.update(kwargs)
+        return "Title", "Summary", "Body"
+
+    monkeypatch.setattr(
+        composer_module, "compose_service_discovery_article", fake_service_discovery
+    )
+
+    compose_scrape_article(
+        service_name="Svc",
+        source_url="https://example.com",
+        page_title="Page",
+        page_text="original page text",
+        txid="TX",
+        round_num=1,
+        diff=None,
+        is_first_snapshot=True,
+        publish_kind=PublishKind.SERVICE_DISCOVERY,
+        transcript_text="the video said something important",
+    )
+    assert "original page text" in captured["page_text"]
+    assert "Video transcript:" in captured["page_text"]
+    assert "the video said something important" in captured["page_text"]
+
+
+def test_compose_scrape_recap_topic_does_not_double_fold_transcript(monkeypatch) -> None:
+    """COMMUNITY_RECAP already gets the full transcript via
+    compose_recap_from_transcript_mistral — the page_text fold-in must not
+    also fire for that topic."""
+    import app.core.config as config
+    import app.modules.newspaper.article_composer as composer_module
+    from app.modules.newspaper.publish_policy import PublishTopic
+
+    monkeypatch.setattr(config, "MISTRAL_ENABLED", False)
+    monkeypatch.setattr(config, "MISTRAL_API_KEY", "")
+
+    captured = {}
+
+    def fake_recap_template(**kwargs):
+        captured.update(kwargs)
+        return "Title", "Summary", "Body"
+
+    monkeypatch.setattr(
+        composer_module, "compose_community_recap_article", fake_recap_template
+    )
+
+    compose_scrape_article(
+        service_name="Svc",
+        source_url="https://example.com",
+        page_title="Page",
+        page_text="original page text",
+        txid="TX",
+        round_num=1,
+        diff=None,
+        is_first_snapshot=True,
+        publish_kind=PublishKind.CONTENT_UPDATE,
+        publish_topic=PublishTopic.COMMUNITY_RECAP,
+        transcript_text="the video said something important",
+    )
+    assert captured["page_text"] == "original page text"
+
+
 def test_compose_weekly_price_template_when_disabled(monkeypatch) -> None:
     import app.core.config as config
 

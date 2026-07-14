@@ -63,6 +63,16 @@ def compose_scrape_article(
     """Compose by publish kind (discovery vs update) with optional Mistral."""
     topic = publish_topic or PublishTopic.GENERIC
 
+    # COMMUNITY_RECAP gets the full transcript via compose_recap_from_transcript_mistral
+    # below; every other topic previously dropped transcript_text entirely. Fold it into
+    # page_text so the existing writer prompt (which already treats page_text as raw
+    # source material) picks it up without a dispatch-logic rewrite.
+    if transcript_text and topic != PublishTopic.COMMUNITY_RECAP:
+        page_text = (
+            f"{page_text}\n\nVideo transcript:\n"
+            f"{trim_text_to_chars(transcript_text, config.YOUTUBE_TRANSCRIPT_MAX_CHARS)}"
+        )
+
     if topic == PublishTopic.EDITORIAL_ASSIGNMENT and mistral_configured():
         try:
             fields = compose_assignment_article_mistral(

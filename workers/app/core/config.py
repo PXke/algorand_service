@@ -260,6 +260,10 @@ MISTRAL_DIFF_POLL_SECONDS = env_int("MISTRAL_DIFF_POLL_SECONDS", 3600)
 # more throttled Mistral call (MISTRAL_MIN_REQUEST_INTERVAL_SECONDS apart), so
 # +4 rounds is ~+60s worst case — cheap against the ~30min task time limit.
 MISTRAL_MAX_TOOL_ROUNDS = env_int("MISTRAL_MAX_TOOL_ROUNDS", 14)
+# Voxtral audio transcription (local YouTube pipeline) — same Mistral account,
+# different endpoint (/audio/transcriptions, multipart) from the chat models above.
+MISTRAL_VOXTRAL_MODEL = env_str("MISTRAL_VOXTRAL_MODEL", "voxtral-mini-latest")
+MISTRAL_VOXTRAL_TIMEOUT = env_int("MISTRAL_VOXTRAL_TIMEOUT", 120)
 # Two-stage compose: a cold research pass (tools, low temp for deterministic tool
 # calls) followed by a warm generation pass (tools removed, prompt swapped, higher
 # temp to break AI-speak). Off = legacy single agentic loop at the write temp.
@@ -483,6 +487,15 @@ YOUTUBE_TRANSCRIPT_TIMEOUT = env_int("YOUTUBE_TRANSCRIPT_TIMEOUT", 30)
 # is later skipped by the enqueue gate and so never leaves a snapshot. Bounds
 # credit burn; transient failures may retry after this TTL. 30 days.
 YOUTUBE_TRANSCRIPT_ATTEMPT_TTL = env_int("YOUTUBE_TRANSCRIPT_ATTEMPT_TTL", 2592000)
+# Local pipeline: yt-dlp (proxied — the prod IP is bot-blocked for direct audio
+# download, confirmed live) -> ffmpeg audio extract -> Voxtral transcription.
+# Tried first when enabled; falls back to the third-party API above on failure.
+# One opaque proxy URL, no vendor-specific config — yt-dlp's `proxy` option takes
+# the standard scheme://user:pass@host:port form directly for any vendor.
+YOUTUBE_LOCAL_TRANSCRIBE_ENABLED = env_bool("YOUTUBE_LOCAL_TRANSCRIBE_ENABLED", False)
+YOUTUBE_DOWNLOAD_PROXY_URL = env_str("YOUTUBE_DOWNLOAD_PROXY_URL", "")
+YOUTUBE_DOWNLOAD_TIMEOUT = env_int("YOUTUBE_DOWNLOAD_TIMEOUT", 180)
+YOUTUBE_TRANSCRIPT_MAX_CHARS = env_int("YOUTUBE_TRANSCRIPT_MAX_CHARS", 20_000)
 DISCOVERY_MODE_ENABLED = env_bool("DISCOVERY_MODE_ENABLED", True)
 SPA_FALLBACK_ENABLED = env_bool("SPA_FALLBACK_ENABLED", True)
 CONTENT_CATEGORIZATION_ENABLED = env_bool("CONTENT_CATEGORIZATION_ENABLED", True)

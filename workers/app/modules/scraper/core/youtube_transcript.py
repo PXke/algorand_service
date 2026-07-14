@@ -77,7 +77,7 @@ def _extract_transcript_text(data: Any) -> str:
     return ""
 
 
-def fetch_video_transcript(video_id: str) -> str:
+def _fetch_via_third_party_api(video_id: str) -> str:
     """Fetch a video transcript via the configured third-party API.
 
     Returns plain text, or "" when disabled/unconfigured/unavailable. Never
@@ -123,3 +123,46 @@ def fetch_video_transcript(video_id: str) -> str:
             return resp.text.strip()
     except Exception:
         return ""
+
+
+def _fetch_via_local_pipeline(video_id: str) -> str:
+    """Local yt-dlp (proxied) -> ffmpeg -> Voxtral pipeline. "" on any failure
+    or when disabled — never raises."""
+    from app.core.config import YOUTUBE_LOCAL_TRANSCRIBE_ENABLED
+
+    if not YOUTUBE_LOCAL_TRANSCRIBE_ENABLED or not video_id:
+        return ""
+
+    import os
+    import shutil
+
+    from app.modules.ai.voxtral_client import transcribe_audio
+    from app.modules.scraper.core.youtube_audio import download_video_audio
+
+    audio_path = None
+    try:
+        audio_path = download_video_audio(video_id)
+        if not audio_path:
+            return ""
+        return transcribe_audio(audio_path)
+    except Exception:
+        logger.warning("local transcription failed for %s", video_id, exc_info=True)
+        return ""
+    finally:
+        if audio_path:
+            shutil.rmtree(os.path.dirname(audio_path), ignore_errors=True)
+
+
+def fetch_video_transcript(video_id: str) -> str:
+    """Best-effort transcript: local yt-dlp+Voxtral pipeline first (if
+    enabled), falling back to the legacy third-party API (if configured).
+
+    Returns plain text, or "" when unavailable. Never raises — transcript is
+    best-effort enrichment, not required for publishing.
+    """
+    if not video_id:
+        return ""
+    text = _fetch_via_local_pipeline(video_id)
+    if text:
+        return text
+    return _fetch_via_third_party_api(video_id)

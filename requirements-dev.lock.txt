@@ -115,7 +115,9 @@ packaging==26.2
 pfzy==0.3.4
     # via inquirerpy
 pillow==12.3.0
-    # via algorand-platform-workers (workers/pyproject.toml)
+    # via
+    #   algorand-platform-backend (backend/pyproject.toml)
+    #   algorand-platform-workers (workers/pyproject.toml)
 playwright==1.61.0
     # via algorand-platform-workers (workers/pyproject.toml)
 pluggy==1.6.0
@@ -216,3 +218,5 @@ wrapt==2.2.2
     # via deprecated
 yarl==1.24.2
     # via aiohttp
+yt-dlp==2026.7.4
+    # via algorand-platform-workers (workers/pyproject.toml)
