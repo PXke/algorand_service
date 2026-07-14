@@ -881,6 +881,92 @@ class AdminCassandraStore:
             )
         return True
 
+    def _write_domain_relevance(self, domain: str, *, is_relevant: bool) -> tuple[dict, str]:
+        """Write the domain_tracking row and return (metadata, pending_url) for
+        the caller's own follow-up logic (e.g. admin_set_domain's frontier
+        crawl enqueue on approval). Shared by admin_set_domain and
+        reject_domain_source so there is one write, not two hand-copies of
+        the same INSERT."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import DomainTrackingStmts
+
+        session = get_cassandra_session()
+        row = session.execute(DomainTrackingStmts.GET_FOR_CORRECTION, (domain,)).one()
+        now = datetime.now(tz=UTC)
+        meta = dict(row.metadata or {}) if row is not None else {}
+        meta["frontier_set_by_admin"] = "true"
+        meta["frontier_status"] = "approved" if is_relevant else "dead_end"
+        pending_url = meta.pop("pending_url", "")
+        session.execute(
+            DomainTrackingStmts.INSERT,
+            (
+                domain,
+                row.last_crawled_at if row is not None else now,
+                row.last_online_at if row is not None else now,
+                float(row.relevance_score or 0) if row is not None else 0.0,
+                (row.category if row is not None else "") or "",
+                is_relevant,
+                meta,
+                "approved" if is_relevant else "dead_end",
+            ),
+        )
+        return meta, pending_url
+
+    def _record_domain_relevance_feedback(
+        self, *, domain: str, meta: dict, pending_url: str, is_relevant: bool, wallet: str
+    ) -> None:
+        """Train the relevance classifier on this domain decision. Shared by
+        admin_set_domain and reject_domain_source."""
+        try:
+            blob = " ".join(
+                x
+                for x in (
+                    meta.get("preview_title", ""),
+                    meta.get("preview_description", ""),
+                    meta.get("preview_keywords", ""),
+                    meta.get("link_text", ""),
+                )
+                if x
+            ).strip()
+            if blob:
+                self.record_classifier_feedback(
+                    url=pending_url or f"https://{domain}",
+                    text_sample=blob[:2000],
+                    category="news" if is_relevant else "generic",
+                    predicted_category=None,
+                    quality="high" if is_relevant else "spam",
+                    predicted_publish=is_relevant,
+                    approved=is_relevant,
+                    admin_wallet=wallet,
+                    source_relevant=is_relevant,
+                    training_only=True,
+                )
+        except Exception:
+            logger.warning(
+                "failed to record classifier feedback for domain %s", domain, exc_info=True
+            )
+
+    def reject_domain_source(
+        self, *, domain: str, wallet: str, source_url_hint: str = ""
+    ) -> None:
+        """Permanently mark a domain irrelevant so it's never re-scraped or
+        re-composed — run_publish_pipeline's is_dead_end_domain check (via
+        domain_tracker.is_dead_end_domain) reads this exact flag before any
+        future scrape/compose spend. For use anywhere an admin judges a
+        source irrecoverably bad (e.g. deleting a fabricated article), not
+        just the Domains tab's own "Mark Dead End" button — a deleted
+        article previously left this flag unset, so the same source could
+        (and did, 2026-07-14: GEO World Energy / world.geographia.com.br)
+        get re-crawled and re-composed from scratch after being deleted once."""
+        meta, pending_url = self._write_domain_relevance(domain, is_relevant=False)
+        self._record_domain_relevance_feedback(
+            domain=domain,
+            meta=meta,
+            pending_url=pending_url or source_url_hint,
+            is_relevant=False,
+            wallet=wallet,
+        )
+
     def _publish_article_to_feed(self, article_id: str) -> bool:
         from uuid import UUID
 

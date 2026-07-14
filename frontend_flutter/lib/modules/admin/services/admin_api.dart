@@ -37,9 +37,13 @@ class AdminApi {
   Future<Map<String, dynamic>> deleteArticle({
     required String walletAddress,
     required String articleId,
+    bool blockSource = false,
   }) async {
+    final path = blockSource
+        ? '/api/v1/admin/articles/$articleId?block_source=true'
+        : '/api/v1/admin/articles/$articleId';
     return _client.deleteJson(
-      '/api/v1/admin/articles/$articleId',
+      path,
       headers: _adminHeaders(walletAddress),
     );
   }

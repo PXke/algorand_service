@@ -332,25 +332,42 @@ class _AdminArticlesTabState extends ConsumerState<_AdminArticlesTab> {
     if (wallet == null || id == null) return;
 
     final title = _titleController.text.trim();
+    var blockSource = false;
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete article?'),
-        content: Text(
-          title.isEmpty
-              ? 'This article will be removed from the feed permanently.'
-              : '"$title" will be removed from the feed permanently.',
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(ctx).colorScheme.error,
-            ),
-            child: const Text('Delete'),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Delete article?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title.isEmpty
+                    ? 'This article will be removed from the feed permanently.'
+                    : '"$title" will be removed from the feed permanently.',
+              ),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                value: blockSource,
+                onChanged: (v) => setDialogState(() => blockSource = v ?? false),
+                title: const Text('Also block this source'),
+                subtitle: const Text('Stop it from ever being re-crawled or re-composed'),
+              ),
+            ],
           ),
-        ],
+          actions: [
+            TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(ctx).colorScheme.error,
+              ),
+              child: const Text('Delete'),
+            ),
+          ],
+        ),
       ),
     );
     if (confirmed != true || !mounted) return;
@@ -360,9 +377,10 @@ class _AdminArticlesTabState extends ConsumerState<_AdminArticlesTab> {
       _error = null;
     });
     try {
-      await ref.read(adminApiProvider).deleteArticle(
+      final result = await ref.read(adminApiProvider).deleteArticle(
         walletAddress: wallet,
         articleId: id,
+        blockSource: blockSource,
       );
       if (!mounted) return;
       setState(() {
@@ -371,8 +389,13 @@ class _AdminArticlesTabState extends ConsumerState<_AdminArticlesTab> {
         _summaryController.clear();
         _bodyController.clear();
       });
+      final sourceBlocked = result['source_blocked'] == true;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Article deleted')),
+        SnackBar(
+          content: Text(
+            sourceBlocked ? 'Article deleted, source blocked' : 'Article deleted',
+          ),
+        ),
       );
       await _loadFeed();
     } catch (e) {

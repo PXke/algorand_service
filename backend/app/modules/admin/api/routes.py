@@ -92,12 +92,36 @@ def register_admin_routes(app) -> None:
         if denied is not None:
             return denied
         article_id = request.path_params.get("article_id", "")
+        block_source = (request.query_params.get("block_source", "") or "").strip().lower() in (
+            "1",
+            "true",
+        )
+        wallet = verified_admin_wallet(request)
         import asyncio
+
+        source_url = ""
+        if block_source:
+            current = await asyncio.to_thread(store.get_article, article_id)
+            source_url = (current.source_url or "") if current is not None else ""
 
         deleted = await asyncio.to_thread(store.delete_article, article_id)
         if not deleted:
             return json_error_response(404, "not_found", "Article not found")
-        return {"deleted": True, "article_id": article_id}
+
+        blocked = False
+        if block_source and source_url:
+            from app.modules.registry.sources import domain_from_url
+
+            domain = domain_from_url(source_url)
+            if domain:
+                await asyncio.to_thread(
+                    store.reject_domain_source,
+                    domain=domain,
+                    wallet=wallet,
+                    source_url_hint=source_url,
+                )
+                blocked = True
+        return {"deleted": True, "article_id": article_id, "source_blocked": blocked}
 
     @app.get("/api/v1/admin/articles/:article_id/versions")
     async def admin_article_versions(request: Request) -> Response:
@@ -949,32 +973,14 @@ def register_admin_routes(app) -> None:
 
         def _compute() -> dict:
             from app.core.cassandra import get_cassandra_session
-            from app.core.statements import DomainTrackingStmts
 
             session = get_cassandra_session()
-            row = session.execute(
-                DomainTrackingStmts.GET_FOR_CORRECTION, (payload.domain,)
-            ).one()
+            meta, pending_url = store._write_domain_relevance(
+                payload.domain, is_relevant=payload.is_relevant
+            )
             from datetime import UTC, datetime
 
             now = datetime.now(tz=UTC)
-            meta = dict(row.metadata or {}) if row is not None else {}
-            meta["frontier_set_by_admin"] = "true"
-            meta["frontier_status"] = "approved" if payload.is_relevant else "dead_end"
-            pending_url = meta.pop("pending_url", "")
-            session.execute(
-                DomainTrackingStmts.INSERT,
-                (
-                    payload.domain,
-                    row.last_crawled_at if row is not None else now,
-                    row.last_online_at if row is not None else now,
-                    float(row.relevance_score or 0) if row is not None else 0.0,
-                    (row.category if row is not None else "") or "",
-                    payload.is_relevant,
-                    meta,
-                    "approved" if payload.is_relevant else "dead_end",
-                ),
-            )
             enqueued = False
             if payload.is_relevant and pending_url:
                 # Approving a held domain starts its exploration right away.
@@ -1076,36 +1082,13 @@ def register_admin_routes(app) -> None:
             # Close the learning loop: log this domain decision as classifier
             # feedback (preview text + approved flag) so the relevance model trains
             # on it and generalizes to similar new domains — not just this one.
-            try:
-                blob = " ".join(
-                    x
-                    for x in (
-                        meta.get("preview_title", ""),
-                        meta.get("preview_description", ""),
-                        meta.get("preview_keywords", ""),
-                        meta.get("link_text", ""),
-                    )
-                    if x
-                ).strip()
-                if blob:
-                    store.record_classifier_feedback(
-                        url=pending_url or f"https://{payload.domain}",
-                        text_sample=blob[:2000],
-                        category="news" if payload.is_relevant else "generic",
-                        predicted_category=None,
-                        quality="high" if payload.is_relevant else "spam",
-                        predicted_publish=payload.is_relevant,
-                        approved=payload.is_relevant,
-                        admin_wallet=wallet,
-                        source_relevant=payload.is_relevant,
-                        training_only=True,
-                    )
-            except Exception:
-                logger.warning(
-                    "failed to record classifier feedback for domain %s",
-                    payload.domain,
-                    exc_info=True,
-                )
+            store._record_domain_relevance_feedback(
+                domain=payload.domain,
+                meta=meta,
+                pending_url=pending_url,
+                is_relevant=payload.is_relevant,
+                wallet=wallet,
+            )
 
             return {
                 "saved": True,
