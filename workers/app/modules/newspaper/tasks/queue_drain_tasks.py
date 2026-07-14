@@ -541,7 +541,15 @@ def drain_publish_queue() -> dict[str, object]:
 @celery_app.task(name="app.tasks.newspaper.drain_approved_feed_queue")
 def drain_approved_feed_queue() -> dict[str, object]:
     """Release admin-approved articles that were held because the daily feed
-    cap was already reached, up to the remaining 7/day slots (interest order)."""
+    cap was already reached, up to the remaining slots (interest order).
+
+    Shares the SAME pacing clock as the primary drain_standard_publish_queue
+    path (is_standard_publish_due / NEWS_STANDARD_INTERVAL_HOURS), not a
+    separate one — a held article going out via this path is still a
+    standard-tier release and must respect the same cadence. Previously used
+    its own feed_release_due/APPROVED_FEED_MIN_GAP_SECONDS (1h default),
+    which let backlog releases come out far more often than the intended
+    8h-apart rhythm (root-caused 2026-07-14 via the AlgoVanity article)."""
     from datetime import UTC, datetime
 
     from app.core import config as cfg
@@ -553,17 +561,18 @@ def drain_approved_feed_queue() -> dict[str, object]:
     if slots <= 0:
         return {"status": "skipped", "reason": "daily_cap_reached", "published": 0}
 
-    from app.modules.newspaper.publish_schedule import feed_release_due, record_feed_release
+    from app.modules.newspaper.publish_schedule import is_standard_publish_due
 
-    due, remaining = feed_release_due(min_gap_seconds=cfg.APPROVED_FEED_MIN_GAP_SECONDS)
+    due, detail = is_standard_publish_due()
     if not due:
-        return {"status": "skipped", "reason": f"min_gap ({remaining}s remaining)", "published": 0}
+        return {"status": "skipped", "reason": detail, "published": 0}
 
     from app.core.statements import ArticleStmts, FeedStmts, PendingFeedStmts
 
     session = get_cassandra_session()
     bucket = getattr(cfg, "NEWS_FEED_BUCKET", "main") or "main"
-    # One per run — the min-gap pacing keeps releases at most one per hour.
+    # One per run — the standard-publish interval pacing (shared with the
+    # primary drain path) keeps releases at NEWS_STANDARD_INTERVAL_HOURS apart.
     rows = list(session.execute(PendingFeedStmts.PEEK, (bucket,)))
     published = 0
     for r in rows:
@@ -582,7 +591,7 @@ def drain_approved_feed_queue() -> dict[str, object]:
                 ),
             )
             published += 1
-            record_feed_release()
+            record_standard_publish()
             from app.modules.newspaper.tasks.publish_tasks import (
                 enqueue_article_translations,
             )

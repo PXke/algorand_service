@@ -1045,16 +1045,25 @@ class AdminCassandraStore:
         )
         return sum(1 for _ in rows)
 
+    # Shares the SAME Redis key and interval as the workers' primary
+    # drain_standard_publish_queue pacing (publish_schedule.py /
+    # NEWS_STANDARD_INTERVAL_HOURS) — an admin-approved article published
+    # immediately here is still a standard-tier release and must respect the
+    # same cadence as one released by the worker's queue drain. Previously
+    # used its own news:last_feed_release_epoch key + a 1h default
+    # (APPROVED_FEED_MIN_GAP_SECONDS), which let immediate/backlog releases
+    # come out far more often than the intended NEWS_STANDARD_INTERVAL_HOURS
+    # rhythm (root-caused 2026-07-14 via the AlgoVanity article).
     @staticmethod
-    def _feed_gap_seconds() -> int:
+    def _standard_publish_interval_seconds() -> int:
         import os
 
         try:
-            return int(os.getenv("APPROVED_FEED_MIN_GAP_SECONDS", "3600"))
+            return max(1, int(os.getenv("NEWS_STANDARD_INTERVAL_HOURS", "8"))) * 3600
         except ValueError:
-            return 3600
+            return 8 * 3600
 
-    def _feed_release_due(self) -> bool:
+    def _is_standard_publish_due(self) -> bool:
         import time
 
         from app.core.config import settings
@@ -1063,14 +1072,14 @@ class AdminCassandraStore:
             import redis
 
             client = redis.from_url(settings.redis_url, decode_responses=True)
-            raw = client.get("news:last_feed_release_epoch")
+            raw = client.get("news:last_standard_publish_epoch")
             if raw is None:
                 return True
-            return (int(time.time()) - int(raw)) >= self._feed_gap_seconds()
+            return (int(time.time()) - int(raw)) >= self._standard_publish_interval_seconds()
         except Exception:
             return True
 
-    def _record_feed_release(self) -> None:
+    def _record_standard_publish(self) -> None:
         import time
 
         from app.core.config import settings
@@ -1079,9 +1088,9 @@ class AdminCassandraStore:
             import redis
 
             client = redis.from_url(settings.redis_url, decode_responses=True)
-            client.set("news:last_feed_release_epoch", str(int(time.time())))
+            client.set("news:last_standard_publish_epoch", str(int(time.time())))
         except Exception:
-            logger.warning("failed to record feed release timestamp", exc_info=True)
+            logger.warning("failed to record standard publish timestamp", exc_info=True)
 
     @staticmethod
     def _record_url_rejected(url: str) -> None:
@@ -1109,7 +1118,7 @@ class AdminCassandraStore:
 
     def _publish_or_queue_article(self, article_id: str) -> str:
         """Publish to the feed if under the daily cap; otherwise hold in
-        pending_feed_queue for a worker to release at 7/day."""
+        pending_feed_queue for a worker to release at the configured pace."""
         from uuid import UUID
 
         from app.core.cassandra import get_cassandra_session
@@ -1118,14 +1127,15 @@ class AdminCassandraStore:
 
         session = get_cassandra_session()
         bucket = getattr(settings, "news_feed_bucket", "main") or "main"
-        cap = int(getattr(settings, "news_max_articles_per_day", 7) or 7)
-        # Publish now only if under the daily cap AND ≥1h since the last feed
-        # release — otherwise queue, so the feed gets a steady drip not a dump.
-        if self._feed_count_today(session, bucket) < cap and self._feed_release_due():
+        cap = int(getattr(settings, "news_max_articles_per_day", 3) or 3)
+        # Publish now only if under the daily cap AND the standard-publish
+        # interval has elapsed since the last standard release — otherwise
+        # queue, so the feed gets a steady drip not a dump.
+        if self._feed_count_today(session, bucket) < cap and self._is_standard_publish_due():
             if self._publish_article_to_feed(article_id):
                 self._enqueue_article_translations(article_id)
                 self._trigger_distribution(article_id)
-            self._record_feed_release()
+            self._record_standard_publish()
             return "published"
         try:
             aid = UUID(article_id)

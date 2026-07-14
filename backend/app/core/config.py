@@ -118,7 +118,12 @@ class Settings(msgspec.Struct, kw_only=True):
     # here only so the admin "pull top topic" action can report the same gate
     # the worker itself checks, instead of guessing.
     pause_intake_on_feed_backlog: bool = False
-    news_max_articles_per_day: int = 7
+    # Mirror of the worker's NEWS_MAX_ARTICLES_PER_DAY (default 3, same env var
+    # name) — was stuck at the old default of 7 here, so an admin's immediate-
+    # publish approval could think there was cap room the worker pipeline
+    # didn't agree with (root-caused 2026-07-14 alongside the release-pacing
+    # unification, see AdminCassandraStore._is_standard_publish_due).
+    news_max_articles_per_day: int = 3
     news_feed_limit: int = 50
     news_placement_slot: str = "news_feed_inline"
     news_placement_limit: int = 5

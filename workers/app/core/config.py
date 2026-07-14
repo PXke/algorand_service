@@ -633,14 +633,15 @@ FRONTIER_CONTENT_PROMOTE_SCORE = env_float("FRONTIER_CONTENT_PROMOTE_SCORE", 0.5
 # pipeline stops composing/holding new reviews until the admin clears some.
 MAX_PENDING_REVIEWS = env_int("MAX_PENDING_REVIEWS", 1)
 
-# Minimum spacing between two articles released to the feed from the approved
-# queue (admin-approved, over-cap items). Default 1 hour.
-APPROVED_FEED_MIN_GAP_SECONDS = env_int("APPROVED_FEED_MIN_GAP_SECONDS", 3600)
-# Whether a backlog of admin-approved articles still awaiting the (paced, ~1/h)
-# feed release should PAUSE new-content intake (the diff-check / "pull top
-# topic"). Default False: classification intake is upstream of and independent
-# from the public-feed drip — a couple of approvals must not starve the review
-# queue for hours.
+# Approved-queue (over-cap) releases share the same pacing clock as the
+# primary standard-publish path — see NEWS_STANDARD_INTERVAL_HOURS and
+# publish_schedule.is_standard_publish_due(). No separate gap setting here.
+#
+# Whether a backlog of admin-approved articles still awaiting release should
+# PAUSE new-content intake (the diff-check / "pull top topic"). Default
+# False: classification intake is upstream of and independent from the
+# public-feed drip — a couple of approvals must not starve the review queue
+# for hours.
 PAUSE_INTAKE_ON_FEED_BACKLOG = env_bool("PAUSE_INTAKE_ON_FEED_BACKLOG", False)
 
 # Let the Mistral writer call live tools (price, chain head, platform search)
