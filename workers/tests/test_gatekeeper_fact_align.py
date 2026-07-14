@@ -54,6 +54,39 @@ def test_no_numbers_is_vacuously_grounded() -> None:
     assert fa.numeric_entailment_score("{}", "A purely qualitative update.").score == 1.0
 
 
+def test_percent_suffixed_trace_value_grounds_matching_claim() -> None:
+    """A genuinely server-computed percentage (e.g. get_asset_holder_share's
+    share_pct, investigation_store._stringify_percent_fields applies the '%'
+    suffix before storage) must actually be able to ground a matching
+    article claim — before that fix, every real percentage this codebase
+    computes was serialized as a bare float with no '%', so it could never
+    register as a percent-class anchor at all (2026-07-14)."""
+    trace = '{"asset_id": 1732165149, "share_pct": "11.2112%"}'
+    article = "The creator holds about 11.21% of the token supply."
+    r = fa.numeric_entailment_score(trace, article)
+    assert r.score == 1.0
+    assert r.ungrounded == ()
+
+
+def test_fabricated_holder_percentage_not_grounded_by_real_share() -> None:
+    """Regression-pin the actual CompX incident: the real, correctly-computed
+    holder share (11.2112%, now percent-suffixed per the Fix 2 storage
+    change) must NOT ground a fabricated, wildly different claim (99.99%) —
+    confirming the gatekeeper correctly flags the fabrication as ungrounded
+    once the real percentage is actually visible as a percent-class anchor,
+    rather than the two both being invisible to entailment (which is what
+    let the fabricated claim score gk_factuality=1.00 in the real incident)."""
+    trace = (
+        '{"asset_id": 1732165149, "address": "CREATOR", '
+        '"holder_amount_adjusted": 112111670.453492, '
+        '"total_supply_adjusted": 1000000000.0, "share_pct": "11.2112%"}'
+    )
+    article = "A single wallet holds 99.99% of the token supply."
+    r = fa.numeric_entailment_score(trace, article)
+    assert "99.99%" in r.ungrounded
+    assert r.score < 0.8  # below GATEKEEPER_FACT_MIN
+
+
 def test_extract_dates_formats() -> None:
     from datetime import date
 

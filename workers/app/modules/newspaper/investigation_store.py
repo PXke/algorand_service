@@ -4,6 +4,30 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+# Known percentage-shaped fields this codebase computes server-side (never
+# left to the model — see chain_tools.py/writer_enrichment/price_analysis.py).
+_PERCENT_KEYS = frozenset({"online_pct", "change_24h_pct", "week_change_pct", "share_pct"})
+
+
+def _stringify_percent_fields(result: Any) -> Any:
+    """Render known percentage fields with a literal '%' before storing, so
+    the gatekeeper's numeric-entailment check (fact_align.py) can recognize
+    them as percent-class grounding anchors. A bare JSON float (e.g.
+    "online_pct": 92.35) can never ground a "%"-suffixed article claim under
+    its strict unit-equality rule, so a genuinely-computed percentage was
+    otherwise invisible to grounding — root-caused 2026-07-14 alongside a
+    fabricated "99.99%" holder-concentration claim that should have failed
+    entailment but scored gk_factuality=1.00, because nothing in the trace
+    was recognized as percent-class at all."""
+    if not isinstance(result, dict):
+        return result
+    out = dict(result)
+    for key in _PERCENT_KEYS:
+        value = out.get(key)
+        if isinstance(value, int | float):
+            out[key] = f"{value}%"
+    return out
+
 
 def load_investigation_trace(service_id: str, *, limit: int = 25) -> str:
     """Reconstruct the agent's tool trace as a text blob for the gatekeeper.
@@ -56,7 +80,7 @@ def store_investigation_findings(
                     source_url[:512],
                     str(entry.get("tool", ""))[:64],
                     json.dumps(entry.get("arguments", {}))[:2000],
-                    json.dumps(entry.get("result", {}))[:8000],
+                    json.dumps(_stringify_percent_fields(entry.get("result", {})))[:8000],
                 ),
             )
             n += 1
