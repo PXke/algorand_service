@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../../../core/config/app_config.dart';
 import '../../../core/ui/lazy_network_image.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/theme/app_theme_extension.dart';
@@ -111,9 +110,11 @@ class _HeroLeadState extends State<_HeroLead> {
     final epoch = item['published_at_epoch'] as int?;
     final serviceId = item['service_id']?.toString();
     final imageUrl = item['image_url']?.toString();
-    final hasPhoto = imageUrl != null &&
-        imageUrl.isNotEmpty &&
-        !looksLikeLogoUrl(imageUrl);
+    // image_url is already dimension-vetted server-side (_validated_hero_checked
+    // measures the real pixels — a decent 192x192 app icon passes even though
+    // its URL "looks like" a logo) — no need for the URL-shape re-guess the
+    // body-markdown path still uses for un-vetted inline images.
+    final hasPhoto = imageUrl != null && imageUrl.isNotEmpty;
 
     return LayoutBuilder(
       builder: (context, c) {

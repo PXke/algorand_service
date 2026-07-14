@@ -6,7 +6,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/api/api_errors.dart';
-import '../../../core/config/app_config.dart' show looksLikeLogoUrl;
 import '../../../core/util/ssr_feed_payload.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/l10n/locale_provider.dart';
@@ -193,11 +192,17 @@ class _FrontPageState extends ConsumerState<FrontPage> {
   /// grid inverts the visual hierarchy (the grid reads as more important).
   /// Promote the newest story with a real photo from the top of the feed;
   /// only if none of the top stories has one does the plain first item lead.
+  ///
+  /// image_url is already dimension-vetted server-side
+  /// (_validated_hero_checked measures the real pixels), so no URL-shape
+  /// re-guess here — a decent app icon shouldn't be skipped just because its
+  /// URL "looks like" a logo (was picking a WORSE image with a broken/decoy
+  /// backing content just because its URL didn't look like a logo, 2026-07-14).
   static int _leadIndex(List<Map<String, dynamic>> items) {
     final window = items.length < 5 ? items.length : 5;
     for (var i = 0; i < window; i++) {
       final url = items[i]['image_url']?.toString();
-      if (url != null && url.isNotEmpty && !looksLikeLogoUrl(url)) return i;
+      if (url != null && url.isNotEmpty) return i;
     }
     return 0;
   }

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../../../core/config/app_config.dart';
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/theme/app_theme_extension.dart';
 import '../../../core/ui/format.dart';
@@ -73,9 +72,8 @@ class _StoryRowState extends State<StoryRow> {
     final kicker =
         (primary != null ? displayTagLabel(primary) : l10n.navNews).toUpperCase();
     final imageUrl = item['image_url']?.toString();
-    final hasPhoto = imageUrl != null &&
-        imageUrl.isNotEmpty &&
-        !looksLikeLogoUrl(imageUrl);
+    // image_url is already dimension-vetted server-side (see article_card.dart).
+    final hasPhoto = imageUrl != null && imageUrl.isNotEmpty;
     final metaLine = dense
         ? ''
         : formatArticleMetaLine(
