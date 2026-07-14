@@ -35,6 +35,32 @@ def test_length_and_marketing_verbs() -> None:
     ))
 
 
+def test_negligible_dollar_figure_flagged() -> None:
+    """Regression-pin the real 2026-07-14 CompX incident: '$2.4K TVL' survived
+    every revision pass because nothing deterministic ever caught it — the
+    NUMERIC HONESTY prompt rule ('$4,000 TVL... is negligible, not a headline
+    metric') is soft guidance the model can drift away from under revision
+    pressure, exactly like colon-label headlines did before this file's own
+    deterministic check existed."""
+    for title in (
+        "CompX launches DeFi infrastructure on Algorand with $2.4K TVL",
+        "Some Protocol hits $4,000 TVL milestone on Algorand",
+        "Tiny Project raises $135 in its first week",
+    ):
+        issues = headline_violations(title)
+        assert any("negligible figure" in i for i in issues), title
+
+
+def test_real_dollar_figure_not_flagged() -> None:
+    for title in (
+        "Folks Finance TVL crosses $50M on Algorand",
+        "AlgoStartup raises $2.5M seed round",
+        "Protocol X hits $12,000 in daily volume",
+    ):
+        issues = headline_violations(title)
+        assert not any("negligible figure" in i for i in issues), title
+
+
 def test_headline_issues_flow_into_schema_grade() -> None:
     result = grade_article_schema(
         title="Nodely: The Global Backbone",

@@ -267,6 +267,18 @@ _MARKETING_VERBS_RE = re.compile(
 
 _HEADLINE_MAX_CHARS = 90
 
+# A dollar figure in the headline, e.g. "$2.4K", "$4,000", "$135". The
+# NUMERIC HONESTY prompt rule (mistral_compose.py) already tells the model a
+# sub-$10K TVL/figure is "negligible, not a headline metric" — but that's a
+# soft prompt rule, and prompt rules drift under revision pressure exactly
+# like the colon-label headline did before it got a deterministic check here
+# (2026-07-12). Confirmed reproducing 2026-07-14: a CompX recompose kept
+# "$2.4K TVL" in the headline across every revision pass despite the prompt
+# rule, because nothing deterministic ever flagged it.
+_DOLLAR_FIGURE_RE = re.compile(r"\$([\d,]+(?:\.\d+)?)\s*([kKmMbB])?\b")
+_NEGLIGIBLE_HEADLINE_DOLLAR_THRESHOLD = 10_000
+_DOLLAR_MULTIPLIERS = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
+
 
 def headline_violations(title: str) -> list[str]:
     """Deterministic house-style checks for a headline. Returns actionable
@@ -293,6 +305,19 @@ def headline_violations(title: str) -> list[str]:
             f"headline — vague marketing verb “{match.group(0)}”; replace with the "
             "concrete verb for what happened (shipped, launched, hit, cut, raised…)"
         )
+    for dm in _DOLLAR_FIGURE_RE.finditer(text):
+        raw, suffix = dm.group(1), (dm.group(2) or "").lower()
+        try:
+            value = float(raw.replace(",", "")) * _DOLLAR_MULTIPLIERS.get(suffix, 1)
+        except ValueError:
+            continue
+        if value < _NEGLIGIBLE_HEADLINE_DOLLAR_THRESHOLD:
+            issues.append(
+                f"headline — “${raw}{dm.group(2) or ''}” is a negligible figure, not a "
+                "headline metric; drop it and lead with what actually happened instead "
+                "(the number can still appear in the body)"
+            )
+            break
     return issues
 
 
