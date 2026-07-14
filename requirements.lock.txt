@@ -98,7 +98,7 @@ multidict==6.7.1
     #   yarl
 multiprocess==0.70.19
     # via robyn
-narwhals==2.23.0
+narwhals==2.24.0
     # via scikit-learn
 numpy==2.5.1
     # via
