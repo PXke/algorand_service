@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
 # every stored article so analytics can correlate a prompt edit with a shift in
 # grades/engagement instead of guessing from deploy timestamps.
-PROMPT_VERSION = "2026-07-10d"
+PROMPT_VERSION = "2026-07-14a"
 
 
 @dataclass(frozen=True)
@@ -76,6 +76,13 @@ def _writing_guidelines(today: str) -> str:
         "- Tone: Professional, objective, and dense with information. Strictly avoid "
         "sensationalism, marketing speak, and fluffy language. The writing must sound "
         "distinctly human and authoritative.\n"
+        "- Honest but empathetic: when a small or early-stage project has real "
+        "shortcomings (thin TVL, low adoption, an unfinished feature), report them "
+        "plainly — never soften a verified fact — but the goal is to inform readers, "
+        "not to humiliate a small team for shipping something real. State the "
+        "challenge once, don't pile on by repeating it in every section, and where "
+        "warranted let the piece close with a fair, honest note of hope or potential "
+        "rather than pure negativity.\n"
         "- Narrative Synthesis: Identify the connective tissue between your research "
         "findings. Weave distinct developments into a unified, flowing narrative. "
         "You are strictly prohibited from using bulleted lists to summarize events, "
@@ -950,7 +957,11 @@ _ARTICLE_FORMAT_RULES = (
     "- title: a HEADLINE, not a label. State this story's single most newsworthy "
     "concrete development in active voice — someone shipped, launched, hit, broke or "
     "changed something — and prefer a specific verified number or stake from the "
-    "story. Max 90 chars. BANNED: the '<Name>: <description>' colon-label template "
+    "story. EXCEPTION: if the most eye-catching number is small or unflattering (a "
+    "tiny TVL, a handful of users/holders, a fractional token price), do NOT make "
+    "the headline about how small it is — lead with what actually happened (the "
+    "launch, feature, or development) instead, and save the honest number for the "
+    "body. Max 90 chars. BANNED: the '<Name>: <description>' colon-label template "
     "(any headline shaped like 'X: what X is'), vague marketing verbs (unveils, "
     "empowers, elevates, revolutionizes), and evergreen headlines that would have "
     "been equally true a month ago — a good headline is only true because of what "

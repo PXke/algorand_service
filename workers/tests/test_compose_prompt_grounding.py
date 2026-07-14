@@ -231,6 +231,33 @@ class TestExtractUnresolvedGaps:
         assert "irrelevant trailing section" not in gaps
 
 
+def test_title_rule_avoids_leading_headline_with_unflattering_number():
+    """The CompX clAMM draft (2026-07-14): the writer led the HEADLINE itself
+    with '$2.28K TVL' — factually honest, but it turned a legitimate feature
+    launch into a headline about how small the project still is. The title
+    rule's "prefer a specific verified number" clause needs an exception for
+    small/unflattering numbers, distinct from NUMERIC HONESTY (which governs
+    the body, not headline choice). _ARTICLE_FORMAT_RULES feeds the shared
+    `system` prompt used by both the single-stage and Stage 2 (gen_system =
+    system + _STAGE2_GENERATION_GUIDANCE) paths, so one rule here covers both
+    — no _NARRATIVE_GUIDANCE duplication needed, unlike _TOOLS_GUIDANCE-only
+    rules."""
+    assert "tiny TVL" in mc._ARTICLE_FORMAT_RULES
+    assert "do NOT make" in mc._ARTICLE_FORMAT_RULES
+    assert "lead with what actually happened" in mc._ARTICLE_FORMAT_RULES
+
+
+def test_writing_guidelines_are_honest_but_empathetic():
+    """Same CompX incident as the title-exception test above: the body itself
+    repeated the tiny-TVL framing in nearly every section, piling on a small
+    early-stage team rather than just stating the challenge once. This is a
+    body-tone rule (separate from the headline-specific fix), so it lives in
+    _writing_guidelines — shared system prompt, no duplication needed."""
+    guidelines = mc._writing_guidelines("2026-07-14")
+    assert "Honest but empathetic" in guidelines
+    assert "not to humiliate a small team" in guidelines
+
+
 def test_gap_fill_nudge_forbids_recall_and_names_gaps():
     nudge = mc._gap_fill_nudge("- missing the real sale price")
     assert "missing the real sale price" in nudge
