@@ -410,3 +410,10 @@ class DomainSetRequest(msgspec.Struct, kw_only=True):
     # — no service_registry row, so it won't be repeatedly re-scraped/diffed
     # going forward, just explored for whatever's linked from it right now.
     as_seed: bool = True
+
+
+class ToolSuggestionResolveRequest(msgspec.Struct, kw_only=True):
+    # Bulk-resolve every unresolved suggestion for this exact capability name
+    # (the Tool gaps panel groups by capability, so "dismiss this group" is
+    # the natural admin action — not one row at a time).
+    capability: Annotated[str, Meta(min_length=1, max_length=200)]

@@ -967,6 +967,54 @@ class AdminCassandraStore:
             wallet=wallet,
         )
 
+    def list_tool_suggestions(self, *, include_resolved: bool = False) -> list[dict]:
+        """Capabilities the writer model wished it had (via suggest_tool), newest
+        first. Resolved suggestions (tools that have since shipped) are hidden by
+        default so the Tool gaps panel only shows genuine gaps instead of growing
+        forever — see resolve_tool_suggestions."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ToolInsightStmts
+
+        session = get_cassandra_session()
+        rows = session.execute(ToolInsightStmts.LIST_SUGGESTIONS, ("all",))
+        return [
+            {
+                "suggestion_id": str(r.suggestion_id) if r.suggestion_id else "",
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "capability": r.capability or "",
+                "reason": r.reason or "",
+                "service_id": r.service_id or "",
+                "source_url": r.source_url or "",
+                "model": r.model or "",
+                "resolved": bool(r.resolved),
+            }
+            for r in rows
+            if include_resolved or not r.resolved
+        ]
+
+    def resolve_tool_suggestions(self, capability: str) -> int:
+        """Mark every unresolved suggestion for one capability as resolved (the
+        tool now exists) — dismisses the whole group the Tool gaps panel shows
+        at once, not one row at a time. Rows are kept (not deleted) so the
+        request count stays visible as history; the table also self-prunes via
+        a 90-day TTL (migration 028)."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ToolInsightStmts
+
+        session = get_cassandra_session()
+        rows = session.execute(ToolInsightStmts.LIST_SUGGESTIONS, ("all",))
+        target = capability.strip().lower()
+        n = 0
+        for r in rows:
+            if (r.capability or "").strip().lower() != target or r.resolved:
+                continue
+            session.execute(
+                ToolInsightStmts.RESOLVE_SUGGESTION,
+                (True, "all", r.created_at, r.suggestion_id),
+            )
+            n += 1
+        return n
+
     def _publish_article_to_feed(self, article_id: str) -> bool:
         from uuid import UUID
 

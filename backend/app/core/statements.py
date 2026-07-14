@@ -290,8 +290,13 @@ class CrawledPageStmts:
 # --------------------------------------------------------------------------- #
 class ToolInsightStmts:
     LIST_SUGGESTIONS = _Stmt(
-        "SELECT created_at, capability, reason, service_id, source_url, model "
+        "SELECT created_at, suggestion_id, capability, reason, service_id, source_url, "
+        "model, resolved "
         "FROM algorand_platform.tool_suggestions WHERE bucket = ? LIMIT 300"
+    )
+    RESOLVE_SUGGESTION = _Stmt(
+        "UPDATE algorand_platform.tool_suggestions SET resolved = ? "
+        "WHERE bucket = ? AND created_at = ? AND suggestion_id = ?"
     )
     LIST_COMPOSE_FEEDBACK = _Stmt(
         "SELECT created_at, category, severity, summary, detail, related_tool, "

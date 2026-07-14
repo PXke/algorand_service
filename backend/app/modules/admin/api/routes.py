@@ -18,6 +18,7 @@ from app.modules.admin.schemas import (
     ScraperRunRequest,
     ServiceMergeRequest,
     SourceUpsertRequest,
+    ToolSuggestionResolveRequest,
 )
 from app.modules.admin.stores.cassandra import AdminCassandraStore
 
@@ -814,33 +815,44 @@ def register_admin_routes(app) -> None:
     @app.get("/api/v1/admin/tool-suggestions")
     async def admin_list_tool_suggestions(request: Request) -> Response:
         """Capabilities the writer model wished it had (via the suggest_tool tool),
-        newest first — input for which tools to build next."""
+        newest first — input for which tools to build next. Resolved suggestions
+        (tools that have since shipped) are hidden by default so the list only
+        shows genuine gaps instead of growing forever; pass ?include_resolved=true
+        to see the full history."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
-
-        def _compute() -> dict:
-            from app.core.cassandra import get_cassandra_session
-            from app.core.statements import ToolInsightStmts
-
-            session = get_cassandra_session()
-            rows = session.execute(ToolInsightStmts.LIST_SUGGESTIONS, ("all",))
-            items = [
-                {
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
-                    "capability": r.capability or "",
-                    "reason": r.reason or "",
-                    "service_id": r.service_id or "",
-                    "source_url": r.source_url or "",
-                    "model": r.model or "",
-                }
-                for r in rows
-            ]
-            return {"items": items}
+        include_resolved = (
+            request.query_params.get("include_resolved", "") or ""
+        ).strip().lower() in ("1", "true")
 
         import asyncio
 
-        return await asyncio.to_thread(_compute)
+        items = await asyncio.to_thread(
+            store.list_tool_suggestions, include_resolved=include_resolved
+        )
+        return {"items": items}
+
+    @app.post("/api/v1/admin/tool-suggestions/resolve")
+    async def admin_resolve_tool_suggestions(request: Request) -> Response:
+        """Mark every unresolved suggestion for one capability as resolved (the
+        tool now exists) — dismisses the whole group the Tool gaps panel shows,
+        not one row at a time. Rows are kept (not deleted) so the request count
+        stays visible as history; the table also self-prunes via a 90-day TTL."""
+        denied = require_admin_wallet(request)
+        if denied is not None:
+            return denied
+        try:
+            payload = serialization.decode(request.body, ToolSuggestionResolveRequest)
+        except Exception as exc:
+            return json_error_response(400, "invalid_request", str(exc))
+
+        import asyncio
+
+        resolved_count = await asyncio.to_thread(
+            store.resolve_tool_suggestions, payload.capability
+        )
+        return {"capability": payload.capability, "resolved_count": resolved_count}
 
     @app.get("/api/v1/admin/compose-feedback")
     async def admin_list_compose_feedback(request: Request) -> Response:
