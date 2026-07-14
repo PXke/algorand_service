@@ -90,27 +90,42 @@ def _is_real_image(url: str, *, min_dimension: int = 120) -> bool:
     serve a valid-but-blank 1x1 transparent image to non-browser requests
     instead of an error, so it looks like a successful fetch while rendering
     as nothing (root-caused via geographia.com.br and docs.vestigelabs.org,
-    2026-07-14)."""
+    2026-07-14).
+
+    One retry on any failure (network hiccup, timeout, decode error) before
+    giving up: a backfill re-validating many articles hits dozens of
+    different external hosts back-to-back, and a single transient blip must
+    not permanently blank out a genuinely good image — this fails closed
+    (rejects) on the FIRST error only after a second attempt also fails,
+    which happened for real to several perfectly fine images
+    (algorand.co, two GitBook OG images, x402.org, hesab.com) during the
+    2026-07-14 backfill and had to be manually restored."""
+    import time
     from io import BytesIO
 
     from app.core.net_guard import guarded_get
 
-    try:
-        resp = guarded_get(url, timeout=6.0)
-        resp.raise_for_status()
-        from PIL import Image
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        if attempt:
+            time.sleep(0.75)
+        try:
+            resp = guarded_get(url, timeout=10.0)
+            resp.raise_for_status()
+            from PIL import Image
 
-        img = Image.open(BytesIO(resp.content))
-        if img.width < min_dimension or img.height < min_dimension:
-            return False
-        if img.mode in ("RGBA", "LA"):
-            alpha = img.convert("RGBA").split()[-1]
-            if alpha.getextrema() == (0, 0):  # fully transparent
+            img = Image.open(BytesIO(resp.content))
+            if img.width < min_dimension or img.height < min_dimension:
                 return False
-    except Exception:
-        logger.info("hero image validation fetch failed for %s", url, exc_info=True)
-        return False
-    return True
+            if img.mode in ("RGBA", "LA"):
+                alpha = img.convert("RGBA").split()[-1]
+                if alpha.getextrema() == (0, 0):  # fully transparent
+                    return False
+            return True
+        except Exception as exc:
+            last_exc = exc
+    logger.info("hero image validation fetch failed for %s (after retry): %s", url, last_exc)
+    return False
 
 
 def _validated_hero(image: str, source_url: str) -> str:

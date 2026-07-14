@@ -5,6 +5,8 @@ same), and recompose (og_image was never stashed in review metadata). Plus the
 2026-07-06 cross-domain hero guard dropped every CDN-hosted og:image (the
 majority pattern: cloudfront/cloudinary/ipfs/discourse-cdn)."""
 
+import pytest
+
 import app.modules.newspaper.source_image as si
 from app.modules.newspaper.source_image import (
     candidate_urls,
@@ -18,6 +20,13 @@ from app.modules.newspaper.tasks.publish_tasks import (
     _validated_hero_checked,
     _with_hero_image,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    # _is_real_image retries once with a real sleep between attempts — no
+    # test here needs that actual delay.
+    monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
 
 _BODY = """HesabPay runs on Algorand.
 
@@ -260,6 +269,27 @@ def test_validated_hero_checked_keeps_real_image(monkeypatch) -> None:
         _validated_hero_checked("https://vestige.fi/hero.png", "https://vestige.fi")
         == "https://vestige.fi/hero.png"
     )
+
+
+def test_validated_hero_checked_retries_once_on_transient_failure(monkeypatch) -> None:
+    # 2026-07-14: a batch backfill hitting dozens of external hosts back-to-
+    # back saw several perfectly good images (algorand.co, GitBook OG images,
+    # x402.org, hesab.com) wrongly cleared by a single transient fetch
+    # failure. One retry before giving up fixes that.
+    calls = {"n": 0}
+
+    def _flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError("transient")
+        return _fake_response(content=_png_bytes(size=(1200, 630)))
+
+    monkeypatch.setattr("app.core.net_guard.guarded_get", _flaky)
+    assert (
+        _validated_hero_checked("https://vestige.fi/hero.png", "https://vestige.fi")
+        == "https://vestige.fi/hero.png"
+    )
+    assert calls["n"] == 2
 
 
 def test_validated_hero_checked_drops_on_fetch_failure(monkeypatch) -> None:
