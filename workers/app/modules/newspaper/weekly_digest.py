@@ -14,7 +14,6 @@ from app.core.config import (
 from app.modules.newspaper.price_analysis import (
     PriceAnalysisError,
     WeeklyPriceSnapshot,
-    compose_weekly_price_article,
     fetch_weekly_price,
 )
 
@@ -103,57 +102,6 @@ def collect_recent_feed_articles(
     return recent[:max_articles]
 
 
-def compose_weekly_digest_article(context: WeeklyDigestContext) -> tuple[str, str, str]:
-    """Compact weekly recap (~1,500 chars target): market + ecosystem highlights."""
-    snap = context.price
-    direction = "up" if snap.week_change_pct >= 0 else "down"
-    n = len(context.articles)
-    title = f"Weekly digest — {snap.asset_name}"
-    summary = (
-        f"{snap.asset_name} {direction} {abs(snap.week_change_pct):.1f}% over 7d. "
-        f"{n} platform stories: launches, services, and updates."
-    )
-
-    lines = [
-        f"# Week {context.week_key}",
-        "",
-        (
-            f"**{snap.asset_name}** closed the week at **${snap.price_usd:,.4f}** "
-            f"({snap.week_change_pct:+.1f}% vs 7d open). Range: "
-            f"${snap.week_low_usd:,.4f} – ${snap.week_high_usd:,.4f} (CoinGecko)."
-        ),
-        "",
-    ]
-
-    if n == 0:
-        lines.append(
-            "No additional community articles were published on the platform this week."
-        )
-    else:
-        lines.append(f"**{n} highlights** from monitored sources:")
-        lines.append("")
-        from app.core.config import PUBLIC_ARTICLE_BASE_URL
-
-        for item in context.articles[:12]:
-            blurb = item.summary.strip() or item.title
-            if len(blurb) > 120:
-                blurb = blurb[:117] + "…"
-            link = f"{PUBLIC_ARTICLE_BASE_URL}/{item.article_id}"
-            lines.append(f"- **[{item.title}]({link})** — {blurb}")
-        if n > 12:
-            lines.append(f"- _…and {n - 12} more in the feed._")
-
-    lines.append("")
-    lines.append(
-        "_Weekly issue · market data + curated platform articles · not financial advice._"
-    )
-    return title, summary, body_from_lines(lines)
-
-
-def body_from_lines(lines: list[str]) -> str:
-    return "\n".join(lines)
-
-
 def fetch_price_only(asset_id: str) -> WeeklyPriceSnapshot:
     """Backward-compatible price fetch."""
     return fetch_weekly_price(asset_id)
@@ -164,8 +112,6 @@ __all__ = [
     "PriceAnalysisError",
     "WeeklyDigestContext",
     "build_weekly_digest",
-    "compose_weekly_digest_article",
-    "compose_weekly_price_article",
     "current_week_key",
     "digest_article_id",
     "fetch_weekly_price",

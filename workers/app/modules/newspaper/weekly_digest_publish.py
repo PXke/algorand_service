@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 
 import httpx
@@ -17,6 +18,8 @@ from app.modules.newspaper.weekly_digest import (
     weekly_digest_trigger_id,
 )
 from app.modules.search.tasks.index_tasks import index_article
+
+logger = logging.getLogger(__name__)
 
 
 def run_weekly_digest_publish(
@@ -37,7 +40,16 @@ def run_weekly_digest_publish(
     article_uuid = digest_article_id(week_key)
     txid = weekly_digest_trigger_id(week_key)
 
-    composed = compose_weekly_digest(context)
+    from app.modules.ai.mistral_client import MistralCreditError, MistralError
+
+    try:
+        composed = compose_weekly_digest(context)
+    except MistralError as exc:
+        credit_issue = isinstance(exc, MistralCreditError)
+        status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
+        logger.error("Weekly digest compose failed for week %s: %s", week_key, exc)
+        return {"status": status, "week": week_key, "detail": str(exc)[:200]}
+
     title = composed.title
     summary = composed.summary
     body = sanitize_body(composed.body)

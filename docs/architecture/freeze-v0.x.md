@@ -17,7 +17,7 @@ Target: end of current **2-week dev window** before TestNet validation. See [rel
 - [x] Template + diff articles (no LLM)
 - [x] Celery beat schedule + `algorand-platform-celery-beat.service`
 - [x] Playwright scraper for SPAs (`worker-scraper-browser`, `CRAWLER_WEB_SPA_ENABLED`)
-- [x] LLM article generation (Mistral connector; template fallback)
+- [x] LLM article generation (Mistral connector; template fallback removed 2026-07-14 — Mistral is now required, no fallback)
 
 ## Product 2 — Suggestions + votes
 

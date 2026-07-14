@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from app.modules.ai.mistral_client import MistralError
 from app.modules.newspaper import weekly_digest_publish
 from app.modules.newspaper.price_analysis import WeeklyPriceSnapshot
 from app.modules.newspaper.weekly_digest import WeeklyDigestContext
@@ -94,3 +95,41 @@ def test_run_publishes_new_digest(monkeypatch) -> None:
     assert result["status"] == "published"
     assert result["feed_articles"] == "0"
     assert indexed
+
+
+def test_run_skips_cleanly_when_mistral_unavailable(monkeypatch) -> None:
+    """No template fallback exists (owner decision 2026-07-14) —
+    compose_weekly_digest now raises MistralError instead of silently
+    falling back, and this was the one caller in the whole compose layer
+    with no existing exception handling for that. Must skip cleanly with a
+    status dict, not let the Celery task fail with an uncaught exception."""
+    import app.core.config as config
+
+    monkeypatch.setattr(config, "PRICE_ANALYSIS_ENABLED", True)
+    ctx = WeeklyDigestContext(
+        week_key="2026-W23",
+        week_label="2026-06-02",
+        price=WeeklyPriceSnapshot(
+            asset_id="algorand",
+            asset_name="Algorand",
+            currency="USD",
+            price_usd=1.0,
+            week_open_usd=1.0,
+            week_high_usd=1.0,
+            week_low_usd=1.0,
+            week_change_pct=0.0,
+            as_of=datetime(2026, 6, 2, tzinfo=UTC),
+        ),
+        articles=(),
+    )
+
+    monkeypatch.setattr(weekly_digest_publish, "build_weekly_digest", lambda **kw: ctx)
+
+    def fail_compose(_ctx):
+        raise MistralError("MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback")
+
+    monkeypatch.setattr(weekly_digest_publish, "compose_weekly_digest", fail_compose)
+
+    result = weekly_digest_publish.run_weekly_digest_publish()
+    assert result["status"] == "mistral_failed"
+    assert result["week"] == "2026-W23"

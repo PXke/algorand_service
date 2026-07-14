@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 
-from app.modules.newspaper.article_edit_compose import compose_article_edit
+from app.core.config import mistral_configured
 from app.modules.newspaper.article_store import get_article, update_article
 from app.modules.newspaper.article_tags import derive_article_tags
 from app.modules.newspaper.article_version_store import save_article_version
@@ -66,15 +66,26 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
     new_title = str(payload.get("page_title", ""))
 
     try:
-        title, summary, body, composer = compose_article_edit(
-            existing=existing,
-            new_page_text=new_text,
-            new_page_title=new_title,
+        # No template fallback exists (owner decision 2026-07-14: a lesser,
+        # robotic article is worse than no article) — Mistral or nothing.
+        if not mistral_configured():
+            raise MistralError(
+                "MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback"
+            )
+        from app.modules.ai.mistral_compose import compose_article_edit_mistral
+
+        fields = compose_article_edit_mistral(
+            service_name=row.display_name or existing.service_id,
             source_url=row.scrape_url,
+            existing_title=existing.title,
+            existing_summary=existing.summary,
+            existing_body=existing.body,
+            new_page_title=new_title,
+            new_page_text=new_text,
             diff=payload.get("diff"),
             enrichment_block=enrichment_block,
-            service_name=row.display_name,
         )
+        title, summary, body, composer = fields.title, fields.summary, fields.body, "mistral"
     except ComposeBusyError:
         raise
     except MistralError as exc:

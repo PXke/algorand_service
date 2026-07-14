@@ -67,7 +67,11 @@ username/password admin accounts:
   non-admin wallet rejected (403)
   ```
 
-## 4. Mistral AI key (LLM article generation)
+## 4. Mistral AI key (LLM article generation) — REQUIRED, no template fallback
+
+There is no template fallback (removed 2026-07-14: a lesser, robotic article is worse
+than no article) — leaving `MISTRAL_ENABLED=0` means the pipeline composes nothing at
+all, not "run on templates instead."
 
 1. Create an API key in the [Mistral console](https://console.mistral.ai/) (API Keys).
 2. On the host, add to the **workers** env (systemd unit env file or `.env`):
@@ -79,14 +83,13 @@ username/password admin accounts:
    MISTRAL_MODEL_BREAKING=mistral-small-latest # breaking credibility JSON
    MISTRAL_MODEL_DIGEST=mistral-small-latest   # weekly digest
    MISTRAL_MODEL_PREMIUM=mistral-medium-latest # transcript recaps
-   MISTRAL_FALLBACK_TEMPLATE=1                 # template fallback on API errors
   ```
 3. Restart workers, then verify: trigger a publish and check the Celery result for
-  `"composer": "mistral"` (template fallback shows `"template"`).
+  `"composer": "mistral"` (or `"mistral_assignment"`/`"mistral_transcript"` for those
+  prompt paths). A Mistral failure now shows up as `"status": "mistral_failed"` or
+  `"mistral_credit_insufficient"` — no article, not a template one.
 4. Optional gates that use the key: `BREAKING_MISTRAL_CREDIBILITY=1` (Mistral verdict
   before breaking publishes — link evidence is fetched when `BREAKING_FOLLOW_LINKS=1`).
-
-Leave `MISTRAL_ENABLED=0` to run fully template-based (no external AI calls).
 
 ## 5. Backend env (API)
 

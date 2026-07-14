@@ -14,7 +14,7 @@ Official references: [Mistral models overview](https://docs.mistral.ai/models/ov
 | **D — Diff poll (optional)** | `check_and_publish_mistral_on_diff` | Same as A per changed source | Same as A | High | Bounded by registry size × change rate (expensive if all sources) |
 | **E — Future** | Video recap transcript, link “case file” | Long (10k–50k+) | Long article | Highest | Rare |
 
-Templates remain the default (`MISTRAL_ENABLED=0`, `MISTRAL_FALLBACK_TEMPLATE=1`); Mistral is an enhancement layer.
+Mistral is required — there is no template fallback (removed 2026-07-14: a lesser, robotic article is worse than no article). `MISTRAL_ENABLED=0` means nothing gets composed, not "run on templates instead."
 
 ## Recommendation summary
 

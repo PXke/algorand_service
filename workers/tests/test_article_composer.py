@@ -4,34 +4,30 @@ import pytest
 
 from app.modules.ai.mistral_client import MistralError
 from app.modules.newspaper.article_composer import compose_scrape_article
-from app.modules.newspaper.price_analysis import WeeklyPriceSnapshot
-from app.modules.newspaper.publish_policy import PublishKind
+from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
 
 
-def test_compose_scrape_uses_template_when_mistral_disabled(monkeypatch) -> None:
-    monkeypatch.setenv("MISTRAL_ENABLED", "0")
-    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
-
+def test_compose_scrape_raises_when_mistral_not_configured(monkeypatch) -> None:
+    """No template fallback exists (owner decision 2026-07-14) — every
+    compose requires Mistral now, whether or not the caller ever set the
+    now-vestigial mistral_only flag."""
     import app.core.config as config
 
     monkeypatch.setattr(config, "MISTRAL_ENABLED", False)
     monkeypatch.setattr(config, "MISTRAL_API_KEY", "")
 
-    result = compose_scrape_article(
-        service_name="Svc",
-        source_url="https://example.com",
-        page_title="Page",
-        page_text="body text",
-        txid="TXID",
-        round_num=1,
-        diff=None,
-        is_first_snapshot=True,
-        publish_kind=PublishKind.SERVICE_DISCOVERY,
-    )
-    assert result.composer == "template"
-    assert "Svc" in result.title
-    assert result.publish_kind == "service_discovery"
-    assert "profile" in result.summary.lower() or "tracking" in result.summary.lower()
+    with pytest.raises(MistralError, match="MISTRAL"):
+        compose_scrape_article(
+            service_name="Svc",
+            source_url="https://example.com",
+            page_title="Page",
+            page_text="body",
+            txid="TX",
+            round_num=1,
+            diff=None,
+            is_first_snapshot=True,
+            publish_kind=PublishKind.SERVICE_DISCOVERY,
+        )
 
 
 def test_compose_scrape_uses_mistral_when_configured(monkeypatch) -> None:
@@ -66,51 +62,34 @@ def test_compose_scrape_uses_mistral_when_configured(monkeypatch) -> None:
     assert result.title == "AI Title"
 
 
-def test_compose_scrape_falls_back_on_mistral_error(monkeypatch) -> None:
+def test_compose_scrape_raises_on_mistral_error_no_fallback(monkeypatch) -> None:
+    """No template fallback exists — a Mistral failure must propagate as
+    MistralError so callers can cleanly skip (see
+    publish_from_queued_row/recompose_review/recompose_published, which
+    already catch MistralError and return a {"status": ...} dict before any
+    DB write happens)."""
     import app.core.config as config
     import app.modules.newspaper.article_composer as composer_module
 
     monkeypatch.setattr(config, "MISTRAL_ENABLED", True)
     monkeypatch.setattr(config, "MISTRAL_API_KEY", "key")
-    monkeypatch.setattr(config, "MISTRAL_FALLBACK_TEMPLATE", True)
 
     def fail_mistral(**kwargs):
         raise MistralError("api down")
 
     monkeypatch.setattr(composer_module, "compose_scrape_article_mistral", fail_mistral)
 
-    result = compose_scrape_article(
-        service_name="Svc",
-        source_url="https://example.com",
-        page_title="Page",
-        page_text="body",
-        txid="TX",
-        round_num=2,
-        diff=None,
-        is_first_snapshot=True,
-        publish_kind=PublishKind.SERVICE_DISCOVERY,
-    )
-    assert result.composer == "template"
-
-
-def test_compose_scrape_mistral_only_raises_when_not_configured(monkeypatch) -> None:
-    import app.core.config as config
-
-    monkeypatch.setattr(config, "MISTRAL_ENABLED", False)
-    monkeypatch.setattr(config, "MISTRAL_API_KEY", "")
-
-    with pytest.raises(Exception, match="MISTRAL"):
+    with pytest.raises(MistralError, match="api down"):
         compose_scrape_article(
             service_name="Svc",
             source_url="https://example.com",
             page_title="Page",
             page_text="body",
             txid="TX",
-            round_num=1,
+            round_num=2,
             diff=None,
             is_first_snapshot=True,
             publish_kind=PublishKind.SERVICE_DISCOVERY,
-            mistral_only=True,
         )
 
 
@@ -121,19 +100,22 @@ def test_compose_scrape_folds_transcript_into_page_text_for_non_recap(monkeypatc
     import app.core.config as config
     import app.modules.newspaper.article_composer as composer_module
 
-    monkeypatch.setattr(config, "MISTRAL_ENABLED", False)
-    monkeypatch.setattr(config, "MISTRAL_API_KEY", "")
+    monkeypatch.setattr(config, "MISTRAL_ENABLED", True)
+    monkeypatch.setattr(config, "MISTRAL_API_KEY", "key")
     monkeypatch.setattr(config, "YOUTUBE_TRANSCRIPT_MAX_CHARS", 20_000)
 
     captured = {}
 
-    def fake_service_discovery(**kwargs):
-        captured.update(kwargs)
-        return "Title", "Summary", "Body"
+    class FakeFields:
+        title = "Title"
+        summary = "Summary"
+        body = "Body"
 
-    monkeypatch.setattr(
-        composer_module, "compose_service_discovery_article", fake_service_discovery
-    )
+    def fake_mistral(**kwargs):
+        captured.update(kwargs)
+        return FakeFields()
+
+    monkeypatch.setattr(composer_module, "compose_scrape_article_mistral", fake_mistral)
 
     compose_scrape_article(
         service_name="Svc",
@@ -153,27 +135,36 @@ def test_compose_scrape_folds_transcript_into_page_text_for_non_recap(monkeypatc
 
 
 def test_compose_scrape_recap_topic_does_not_double_fold_transcript(monkeypatch) -> None:
-    """COMMUNITY_RECAP already gets the full transcript via
-    compose_recap_from_transcript_mistral — the page_text fold-in must not
-    also fire for that topic."""
+    """COMMUNITY_RECAP routes to compose_recap_from_transcript_mistral (which
+    takes transcript_text as its own dedicated param, not page_text) — it
+    must never fall through to the generic compose_scrape_article_mistral
+    path, which is the only place the page_text transcript-fold applies."""
     import app.core.config as config
     import app.modules.newspaper.article_composer as composer_module
-    from app.modules.newspaper.publish_policy import PublishTopic
 
-    monkeypatch.setattr(config, "MISTRAL_ENABLED", False)
-    monkeypatch.setattr(config, "MISTRAL_API_KEY", "")
+    monkeypatch.setattr(config, "MISTRAL_ENABLED", True)
+    monkeypatch.setattr(config, "MISTRAL_API_KEY", "key")
 
     captured = {}
 
-    def fake_recap_template(**kwargs):
+    class FakeFields:
+        title = "Title"
+        summary = "Summary"
+        body = "Body"
+
+    def fake_recap_mistral(**kwargs):
         captured.update(kwargs)
-        return "Title", "Summary", "Body"
+        return FakeFields()
+
+    def fail_generic_mistral(**kwargs):
+        raise AssertionError("must not fall through to the generic scrape compose")
 
     monkeypatch.setattr(
-        composer_module, "compose_community_recap_article", fake_recap_template
+        composer_module, "compose_recap_from_transcript_mistral", fake_recap_mistral
     )
+    monkeypatch.setattr(composer_module, "compose_scrape_article_mistral", fail_generic_mistral)
 
-    compose_scrape_article(
+    result = compose_scrape_article(
         service_name="Svc",
         source_url="https://example.com",
         page_title="Page",
@@ -186,27 +177,5 @@ def test_compose_scrape_recap_topic_does_not_double_fold_transcript(monkeypatch)
         publish_topic=PublishTopic.COMMUNITY_RECAP,
         transcript_text="the video said something important",
     )
-    assert captured["page_text"] == "original page text"
-
-
-def test_compose_weekly_price_template_when_disabled(monkeypatch) -> None:
-    import app.core.config as config
-
-    monkeypatch.setattr(config, "MISTRAL_ENABLED", False)
-    monkeypatch.setattr(config, "MISTRAL_API_KEY", "")
-
-    from app.modules.newspaper.article_composer import compose_weekly_price
-
-    snap = WeeklyPriceSnapshot(
-        asset_id="algorand",
-        asset_name="Algorand",
-        currency="USD",
-        price_usd=0.25,
-        week_open_usd=0.20,
-        week_high_usd=0.26,
-        week_low_usd=0.19,
-        week_change_pct=25.0,
-        as_of=__import__("datetime").datetime(2026, 6, 2, tzinfo=__import__("datetime").UTC),
-    )
-    result = compose_weekly_price(snap)
-    assert result.composer == "template"
+    assert result.composer == "mistral_transcript"
+    assert captured["transcript_text"] == "the video said something important"

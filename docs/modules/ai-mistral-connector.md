@@ -2,7 +2,7 @@
 
 ## Goal
 
-Generate newspaper **title**, **summary**, and **markdown body** via [Mistral Chat Completions](https://docs.mistral.ai/api/) when enabled, with template fallback.
+Generate newspaper **title**, **summary**, and **markdown body** via [Mistral Chat Completions](https://docs.mistral.ai/api/). Required — no template fallback exists (owner decision 2026-07-14: a lesser, robotic article is worse than no article). If Mistral isn't configured or fails, the pipeline cleanly skips instead of publishing anything.
 
 ## Status
 
@@ -15,9 +15,7 @@ Generate newspaper **title**, **summary**, and **markdown body** via [Mistral Ch
 - `compose_scrape_article` — scrape-triggered articles (publish pipeline)
 - `compose_weekly_digest` — weekly digest (CoinGecko + feed highlights)
 - Stored price brief from [price-metrics-mistral.md](price-metrics-mistral.md) is appended to price/digest prompts when available
-- `compose_weekly_price` — price-only legacy helper
 - `compose_recap_from_transcript_mistral` — community-call recap from a video transcript (`MISTRAL_MODEL_PREMIUM`)
-- Fallback to template when `MISTRAL_FALLBACK_TEMPLATE=1` (default)
 
 ## Configuration
 
@@ -34,7 +32,6 @@ Model selection guide: [mistral-model-selection.md](mistral-model-selection.md).
 | `MISTRAL_API_BASE` | `https://api.mistral.ai/v1` | API base URL |
 | `MISTRAL_MAX_TOKENS` | `1024` | Completion token cap |
 | `MISTRAL_TIMEOUT_SECONDS` | `60` | HTTP timeout |
-| `MISTRAL_FALLBACK_TEMPLATE` | `1` | Use template on API/parse errors |
 | `MISTRAL_MAX_SOURCE_CHARS` | `6000` | Scrape text clipped for prompts |
 
 Enable locally:
@@ -44,7 +41,9 @@ export MISTRAL_ENABLED=1
 export MISTRAL_API_KEY=your-key
 ```
 
-Celery publish responses include `"composer": "mistral"` or `"template"`.
+Without this, no articles are composed — `compose_scrape_article`/`compose_weekly_digest` raise `MistralError` immediately, and every caller treats that as a clean skip (no queue/DB side effects).
+
+Celery publish responses include `"composer": "mistral"`, `"mistral_assignment"`, or `"mistral_transcript"` depending on which prompt path ran.
 
 ## Periodic diff check (Celery beat)
 
@@ -74,7 +73,6 @@ cd workers && PYTHONPATH=. celery -A app.celery_app call app.tasks.newspaper.che
 
 ## Depends on
 
-- `article-compose` (template fallback)
 - `price-metrics-mistral` (optional stored brief in prompts)
 - `worker-scraper`, `publish_from_chain_event`, `weekly-price-analysis`
 

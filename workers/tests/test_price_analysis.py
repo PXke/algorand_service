@@ -2,30 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.modules.newspaper.price_analysis import (
-    WeeklyPriceSnapshot,
-    compose_weekly_price_article,
-    fetch_weekly_price,
-)
-
-
-def test_compose_weekly_price_article() -> None:
-    snap = WeeklyPriceSnapshot(
-        asset_id="algorand",
-        asset_name="Algorand",
-        currency="USD",
-        price_usd=0.25,
-        week_open_usd=0.20,
-        week_high_usd=0.26,
-        week_low_usd=0.19,
-        week_change_pct=25.0,
-        as_of=__import__("datetime").datetime(2026, 6, 2, 12, 0, tzinfo=__import__("datetime").UTC),
-    )
-    title, summary, body = compose_weekly_price_article(snap)
-    assert "Algorand" in title
-    assert "weekly" in title.lower() or "price" in title.lower()
-    assert "+25.00%" in body
-    assert summary
+from app.modules.newspaper.price_analysis import fetch_weekly_price
 
 
 def test_fetch_weekly_price_mocked(monkeypatch) -> None:

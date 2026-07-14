@@ -233,8 +233,10 @@ MISTRAL_TOOL_RESULT_MAX_CHARS = env_int("MISTRAL_TOOL_RESULT_MAX_CHARS", 24000)
 # so token-estimate error never tips a request over the edge.
 MISTRAL_CONTEXT_SAFETY_TOKENS = env_int("MISTRAL_CONTEXT_SAFETY_TOKENS", 4000)
 MISTRAL_TIMEOUT_SECONDS = env_int("MISTRAL_TIMEOUT_SECONDS", 120)
+# REQUIRED for article generation — there is no template fallback (owner
+# decision 2026-07-14: a lesser, robotic article is worse than no article).
+# Nothing gets composed until this is True with a valid MISTRAL_API_KEY.
 MISTRAL_ENABLED = env_bool("MISTRAL_ENABLED", False)
-MISTRAL_FALLBACK_TEMPLATE = env_bool("MISTRAL_FALLBACK_TEMPLATE", True)
 # ~48k chars ≈ 12k TOKENS of source context for the composer — sized to carry
 # the full service-watch aggregate (SERVICE_CONTEXT_MAX_CHARS), not one page.
 # The original intent was 12k tokens; an earlier reading as 12k CHARS silently
