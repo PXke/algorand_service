@@ -393,6 +393,101 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
     return out
 
 
+def _tool_github_repository_search(query: str, limit: int = 5) -> dict[str, Any]:
+    """Search ALL of GitHub for repos matching a keyword query — use this when
+    github_activity's owner/repo guess 404s and you don't know the real owner
+    (e.g. a project's site names it but not its GitHub org). Not scoped to one
+    owner, unlike github_activity's owner-repo-listing fallback."""
+    import os
+
+    q = (query or "").strip()
+    if not q:
+        return {"error": "query must not be empty"}
+    n = max(1, min(int(limit), 10))
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        resp = _guarded_get(
+            "https://api.github.com/search/repositories",
+            params={"q": q, "per_page": n, "sort": "stars"},
+            headers=headers,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return {"query": q, "error": str(exc)[:200]}
+    items = data.get("items", []) if isinstance(data, dict) else []
+    return {
+        "query": q,
+        "total_count": data.get("total_count") if isinstance(data, dict) else None,
+        "results": [
+            {
+                "repo": r.get("full_name"),
+                "description": (r.get("description") or "")[:160],
+                "stars": r.get("stargazers_count"),
+                "pushed_at": r.get("pushed_at"),
+            }
+            for r in items
+            if isinstance(r, dict)
+        ][:n],
+    }
+
+
+def _tool_search_token_listings(asset_id: Any) -> dict[str, Any]:
+    """Whether an Algorand ASA is actually listed/tradeable on the two biggest
+    Algorand DEXs (Tinyman, Pact) — real liquidity, price, and 24h/7d volume in
+    USD, or confirmation it's NOT listed anywhere. Use this instead of assuming
+    a token trades just because it exists; a real supply with zero listings
+    is itself a notable fact worth reporting."""
+    aid = str(asset_id).strip()
+    if not aid.isdigit():
+        return {"error": "asset_id must be a numeric ASA id"}
+    out: dict[str, Any] = {"asset_id": int(aid)}
+    try:
+        resp = _guarded_get(f"https://mainnet.analytics.tinyman.org/api/v1/assets/{aid}/")
+        if resp.status_code == 404:
+            out["tinyman"] = {"listed": False}
+        else:
+            resp.raise_for_status()
+            t = resp.json()
+            out["tinyman"] = {
+                "listed": True,
+                "verified": t.get("is_verified"),
+                "liquidity_usd": t.get("liquidity_in_usd"),
+                "price_usd": t.get("price_in_usd"),
+                "volume_24h_usd": t.get("last_day_volume_in_usd"),
+                "volume_7d_usd": t.get("last_week_volume_in_usd"),
+            }
+    except Exception as exc:
+        out["tinyman"] = {"error": str(exc)[:200]}
+    try:
+        resp = _guarded_get(
+            "https://api.pact.fi/api/pools", params={"asset_id": aid, "limit": 10}
+        )
+        resp.raise_for_status()
+        pools = (resp.json() or {}).get("results", [])
+        out["pact"] = {
+            "listed": bool(pools),
+            "pool_count": len(pools),
+            "pools": [
+                {
+                    "pair": (
+                        f"{(p.get('primary_asset') or {}).get('unit_name')}/"
+                        f"{(p.get('secondary_asset') or {}).get('unit_name')}"
+                    ),
+                    "tvl_usd": (p.get("primary_asset") or {}).get("tvl_usd"),
+                }
+                for p in pools
+                if isinstance(p, dict)
+            ][:5],
+        }
+    except Exception as exc:
+        out["pact"] = {"error": str(exc)[:200]}
+    return out
+
+
 def _fetch_failure_hint(url: str, error: str, *, status_code: int | None = None) -> str:
     """Steer the writer to the dedicated tool (or a different strategy) for
     fetches that failed in a known way.
@@ -1194,6 +1289,49 @@ _GITHUB_SCHEMA = {
     },
 }
 
+_GITHUB_SEARCH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "github_repository_search",
+        "description": (
+            "Search all of GitHub by keyword for repos matching a project — use "
+            "when github_activity's owner/repo guess 404s and the real GitHub "
+            "org/owner isn't known (a project's own site rarely spells it out). "
+            "Not scoped to one owner."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "keywords, e.g. 'CompX Algorand' or a project name",
+                },
+                "limit": {"type": "integer", "description": "1-10 results, default 5"},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+_TOKEN_LISTINGS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_token_listings",
+        "description": (
+            "Check whether an Algorand ASA is actually listed/tradeable on "
+            "Tinyman and Pact (the two biggest Algorand DEXs) — real liquidity, "
+            "price, and 24h/7d volume in USD, or confirmation it's not listed "
+            "anywhere. Use before reporting a token as tradeable, and use a real "
+            "'not listed anywhere' result as a notable fact, not a dead end."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"asset_id": {"type": "integer", "description": "numeric ASA id"}},
+            "required": ["asset_id"],
+        },
+    },
+}
+
 _FETCH_SCHEMA = {
     "type": "function",
     "function": {
@@ -1401,10 +1539,11 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Enabled external research tools as (schemas, handlers).
 
     search_web needs SEARXNG_URL and search_bluesky needs an app-password, so they
-    register only when usable. github_activity, github_repository_contents,
-    fetch_url, get_defi_tvl, discourse_forum, get_node_stats,
-    medium_api_article_list, reddit_api_post_history and xgov_proposal_status hit
-    free public APIs and are always available (GITHUB_TOKEN optional).
+    register only when usable. github_activity, github_repository_search,
+    github_repository_contents, search_token_listings, fetch_url, get_defi_tvl,
+    discourse_forum, get_node_stats, medium_api_article_list,
+    reddit_api_post_history and xgov_proposal_status hit free public APIs and
+    are always available (GITHUB_TOKEN optional).
     """
     import os
 
@@ -1412,7 +1551,9 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
     schemas: list[dict[str, Any]] = [
         _GITHUB_SCHEMA,
+        _GITHUB_SEARCH_SCHEMA,
         _GITHUB_CONTENTS_SCHEMA,
+        _TOKEN_LISTINGS_SCHEMA,
         _FETCH_SCHEMA,
         _DEFILLAMA_SCHEMA,
         _DISCOURSE_SCHEMA,
@@ -1423,7 +1564,9 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     ]
     handlers: dict[str, Any] = {
         "github_activity": _tool_github_activity,
+        "github_repository_search": _tool_github_repository_search,
         "github_repository_contents": _tool_github_repo_contents,
+        "search_token_listings": _tool_search_token_listings,
         "fetch_url": _tool_fetch_url,
         "get_defi_tvl": _tool_get_defi_tvl,
         "discourse_forum": _tool_discourse_forum,

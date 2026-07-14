@@ -103,3 +103,56 @@ def test_asset_holder_share_tool_registered() -> None:
     names = {s["function"]["name"] for s in schemas}
     assert "get_asset_holder_share" in names
     assert "get_asset_holder_share" in handlers
+
+
+def test_lookup_asset_by_name_returns_candidates(monkeypatch) -> None:
+    """algod's lookup_asset needs a numeric id and can't search by name — this
+    is the tool a stronger research model explicitly asked for (suggest_tool,
+    2026-07-14) when a project's asset_id guess 404'd. Uses the mainnet
+    indexer, mirroring the existing testnet_lookup pattern."""
+    monkeypatch.setattr(
+        chain_tools,
+        "_mainnet_idx_get",
+        lambda path, params=None: {
+            "assets": [
+                {
+                    "index": 1732165149,
+                    "params": {
+                        "name": "CompX Token",
+                        "unit-name": "COMPX",
+                        "creator": "CREATOR_ADDR",
+                    },
+                }
+            ]
+        },
+    )
+    result = chain_tools._tool_lookup_asset_by_name("COMPX")
+    assert result["query"] == "COMPX"
+    assert result["results"] == [
+        {
+            "asset_id": 1732165149,
+            "name": "CompX Token",
+            "unit_name": "COMPX",
+            "creator": "CREATOR_ADDR",
+        }
+    ]
+
+
+def test_lookup_asset_by_name_requires_nonempty_name() -> None:
+    result = chain_tools._tool_lookup_asset_by_name("")
+    assert "error" in result
+
+
+def test_lookup_asset_by_name_propagates_indexer_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        chain_tools, "_mainnet_idx_get", lambda path, params=None: {"error": "timeout"}
+    )
+    result = chain_tools._tool_lookup_asset_by_name("COMPX")
+    assert result["error"] == "timeout"
+
+
+def test_lookup_asset_by_name_tool_registered() -> None:
+    schemas, handlers = chain_tools.chain_tools()
+    names = {s["function"]["name"] for s in schemas}
+    assert "lookup_asset_by_name" in names
+    assert "lookup_asset_by_name" in handlers

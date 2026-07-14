@@ -159,6 +159,56 @@ def _tool_lookup_asset(asset_id: Any) -> dict[str, Any]:
     }
 
 
+def _mainnet_idx_get(path: str, params: dict | None = None) -> Any:
+    """GET a path off the public MAINNET indexer (name-search capable, unlike
+    algod). Returns parsed JSON, {"_status": 404} for a missing entity, or
+    {"error": ...}."""
+    import httpx
+
+    from app.core.config import MAINNET_INDEXER_URL
+
+    if not MAINNET_INDEXER_URL:
+        return {"error": "mainnet indexer not configured (MAINNET_INDEXER_URL unset)"}
+    try:
+        with httpx.Client(timeout=_TIMEOUT) as http:
+            r = http.get(f"{MAINNET_INDEXER_URL}{path}", params=params)
+        if r.status_code == 404:
+            return {"_status": 404}
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
+def _tool_lookup_asset_by_name(name: str, limit: int = 5) -> dict[str, Any]:
+    """Search mainnet ASAs by name/unit-name when the numeric asset_id isn't
+    known yet — lookup_asset needs an id, and algod itself can't search by
+    name (only the indexer can). Use this first to find the id, then
+    lookup_asset for the full parameters."""
+    q = (name or "").strip()
+    if not q:
+        return {"error": "name must not be empty"}
+    n = max(1, min(int(limit), 20))
+    data = _mainnet_idx_get("/v2/assets", params={"name": q, "limit": n})
+    if not isinstance(data, dict):
+        return {"error": "unexpected indexer response"}
+    if data.get("error"):
+        return data
+    assets = data.get("assets", []) or []
+    results = []
+    for a in assets:
+        if not isinstance(a, dict):
+            continue
+        p = a.get("params", {}) or {}
+        results.append({
+            "asset_id": a.get("index"),
+            "name": p.get("name"),
+            "unit_name": p.get("unit-name"),
+            "creator": p.get("creator"),
+        })
+    return {"query": q, "results": results[:n]}
+
+
 def _tool_get_asset_holder_share(asset_id: Any, address: str) -> dict[str, Any]:
     """A specific address's share of an ASA's total supply, computed here (not
     left to the model) — use this instead of manually dividing lookup_asset's
@@ -418,6 +468,29 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "lookup_asset_by_name",
+            "description": (
+                "Search mainnet Algorand Standard Assets by name or unit-name when "
+                "you don't have the numeric asset_id yet (algod's lookup_asset needs "
+                "an id and can't search by name). Returns candidate asset_ids to pass "
+                "into lookup_asset for full parameters."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "asset name or unit-name to search for, e.g. 'COMPX'",
+                    },
+                    "limit": {"type": "integer", "description": "1-20 results, default 5"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_asset_holder_share",
             "description": (
                 "A specific address's share of an ASA's total supply, as a real "
@@ -479,6 +552,7 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
 CHAIN_HANDLERS: dict[str, Any] = {
     "lookup_account": _tool_lookup_account,
     "lookup_asset": _tool_lookup_asset,
+    "lookup_asset_by_name": _tool_lookup_asset_by_name,
     "lookup_application": _tool_lookup_application,
     "get_asset_holder_share": _tool_get_asset_holder_share,
     "get_consensus_stats": _tool_get_consensus_stats,

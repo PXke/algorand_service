@@ -43,6 +43,11 @@ ALGOD_TOKEN = env_str("ALGOD_TOKEN", "")
 TESTNET_INDEXER_URL = env_str(
     "TESTNET_INDEXER_URL", "https://testnet-idx.algonode.cloud"
 ).rstrip("/")
+# Public AlgoNode MAINNET indexer — read-only, name-search capable (unlike
+# algod, which only looks up assets by numeric id). Backs lookup_asset_by_name.
+MAINNET_INDEXER_URL = env_str(
+    "MAINNET_INDEXER_URL", "https://mainnet-idx.algonode.cloud"
+).rstrip("/")
 NEWS_FEED_BUCKET = env_str("NEWS_FEED_BUCKET", "main")
 NEWS_MAX_ARTICLES_PER_DAY = min(max(1, env_int("NEWS_MAX_ARTICLES_PER_DAY", 3)), 7)
 NEWS_MAX_BREAKING_PER_DAY = env_int("NEWS_MAX_BREAKING_PER_DAY", 2)
