@@ -19,7 +19,6 @@ from app.modules.newspaper.writer_enrichment.collectors.internal_db import colle
 from app.modules.newspaper.writer_enrichment.collectors.internal_search import (
     search_platform_mentions,
 )
-from app.modules.newspaper.writer_enrichment.collectors.market import collect_market_context
 from app.modules.newspaper.writer_enrichment.collectors.profile_diff import (
     diff_against_stored_intelligence,
 )
@@ -77,7 +76,17 @@ def gather_writer_enrichment(
     )
 
     bundle.sections["internal"] = collect_internal_context(service_id=service_id)
-    bundle.sections["market"] = collect_market_context()
+    # Market context (ALGO price/mcap/volume) is deliberately NOT injected here.
+    # It used to be handed to the writer unconditionally, which bypassed the
+    # system prompt's own "ALGO PRICE/MARKET RULE" ("fetch and mention ONLY
+    # when the metric materially helps THIS story... when in doubt, leave it
+    # out") — the model had no reason to exercise that judgment when the data
+    # was free. The writer already has the get_algo_market tool (writer_tools.py)
+    # to fetch the exact same data itself when it decides a story genuinely
+    # needs it; a tool call also lands in the research trace, so the gatekeeper's
+    # numeric-entailment check can actually verify it (root-caused 2026-07-14:
+    # this unconditional injection was invisible to that check, producing a
+    # false-positive "ungrounded figures" flag on numbers that were correct).
     bundle.sections["app_stores"] = detect_app_store_links(page_text, source_url)
     bundle.sections["chain"] = collect_chain_context(
         service_id=service_id,
@@ -155,17 +164,6 @@ def format_enrichment_for_writer(bundle: WriterEnrichmentBundle) -> str:
     lines = [f"## Writer enrichment ({bundle.phase})"]
     if bundle.primary_domain:
         lines.append(f"Primary domain: **{bundle.primary_domain}**")
-
-    market = bundle.sections.get("market", {})
-    if market.get("available"):
-        bits = [f"price ${market.get('price_usd')}"]
-        if market.get("change_24h_pct") is not None:
-            bits.append(f"24h {market['change_24h_pct']:+.2f}%")
-        if market.get("market_cap_usd"):
-            bits.append(f"mcap ${market['market_cap_usd']:,.0f}")
-        lines.append("ALGO market (live): " + ", ".join(bits))
-        if market.get("trend_narrative"):
-            lines.append(f"Market trend: {market['trend_narrative']}")
 
     internal = bundle.sections.get("internal", {})
     if internal.get("prior_articles"):
