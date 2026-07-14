@@ -1540,6 +1540,7 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
     (human or automatic) — and approving it would double-publish the feed row."""
     import json as _json
 
+    from app.core import config as worker_config
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
     from app.modules.ai.mistral_client import MistralCreditError, MistralError
@@ -1573,6 +1574,36 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
         except Exception:
             logger.warning(
                 "recompose_published: fresh scrape failed for %s — composing from stored body",
+                source_url,
+                exc_info=True,
+            )
+
+    # Service-watch aggregate: the discovery path (run_publish_pipeline) never
+    # composes from a single page alone — it pulls in the service's other
+    # already-crawled pages so a distinct product/subpage a prior crawl found
+    # (e.g. a service's separate payments/API offering) is actually visible to
+    # the model instead of depending on it re-finding that page via live
+    # search every single time. An archive refresh re-researches the same
+    # service and deserves the same corpus — its previous omission is why a
+    # CompX recompose kept missing a page (compx.io/app/canix402) that had
+    # already been crawled three times before the recompose ever ran
+    # (root-caused 2026-07-14).
+    is_web_source = bool(source_url) and _source_kind_from_url(source_url) == "web"
+    if is_web_source and worker_config.SERVICE_CONTEXT_ENABLED:
+        try:
+            from app.modules.newspaper.service_context import build_service_context
+
+            page_text = build_service_context(
+                service_id=service_id or source_url,
+                display_name=service_id,
+                entry_url=source_url,
+                entry_title=page_title,
+                entry_text=page_text,
+            )
+        except Exception:
+            logger.warning(
+                "recompose_published: service context aggregation failed for %s — "
+                "using entry page only",
                 source_url,
                 exc_info=True,
             )
