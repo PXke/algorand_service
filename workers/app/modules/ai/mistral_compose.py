@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
 # every stored article so analytics can correlate a prompt edit with a shift in
 # grades/engagement instead of guessing from deploy timestamps.
-PROMPT_VERSION = "2026-07-14a"
+PROMPT_VERSION = "2026-07-14b"
 
 
 @dataclass(frozen=True)
@@ -195,6 +195,13 @@ _TOOLS_GUIDANCE = (
     "vote state), varying the arguments to dig deeper. "
     "Stop when you have gathered AND verified the facts this story needs — not at "
     "an arbitrary call count.\n"
+    "RESEARCH COMPLETENESS: when a search result surfaces a DISTINCT product, "
+    "subdomain, or URL clearly connected to the subject — not just another page "
+    "about the same thing you already found — fetch and evaluate it before "
+    "concluding research. A related product you never even opened is a bigger gap "
+    "than an unanswered question you flagged honestly. This matters most for "
+    "first-coverage/new-service stories, where missing a major feature of the "
+    "subject is worse than a routine update missing a minor detail.\n"
     "ALGO PRICE/MARKET RULE: do not add market or chain metrics by default. This "
     "covers ALGO price AND network stats like TVL, volume, node/validator counts and "
     "block times. Fetch and mention any of them ONLY when the metric materially helps "

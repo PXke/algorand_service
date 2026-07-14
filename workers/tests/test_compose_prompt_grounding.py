@@ -258,6 +258,20 @@ def test_writing_guidelines_are_honest_but_empathetic():
     assert "not to humiliate a small team" in guidelines
 
 
+def test_research_completeness_rule_reaches_both_phases():
+    """The CompX incident (2026-07-14): the research phase's own first web
+    search already surfaced a directly relevant lead (canix402-api.compx.io,
+    CompX's separate x402-protocol paid API product) but the model never
+    followed up on it — a research-thoroughness gap, not a missing tool.
+    Must reach both _TOOLS_GUIDANCE (single-stage/legacy) and
+    _RESEARCH_PHASE_GUIDANCE (two-stage research pass) since it's inserted
+    before the SELF-REVIEW split marker both derive from."""
+    assert "RESEARCH COMPLETENESS" in mc._TOOLS_GUIDANCE
+    assert "DISTINCT product, subdomain, or URL" in mc._TOOLS_GUIDANCE
+    assert "RESEARCH COMPLETENESS" in mc._RESEARCH_PHASE_GUIDANCE
+    assert "DISTINCT product, subdomain, or URL" in mc._RESEARCH_PHASE_GUIDANCE
+
+
 def test_gap_fill_nudge_forbids_recall_and_names_gaps():
     nudge = mc._gap_fill_nudge("- missing the real sale price")
     assert "missing the real sale price" in nudge
