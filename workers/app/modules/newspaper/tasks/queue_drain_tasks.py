@@ -578,18 +578,26 @@ def drain_approved_feed_queue() -> dict[str, object]:
     for r in rows:
         art = session.execute(ArticleStmts.GET_FOR_FEED, (r.article_id,)).one()
         if art is not None:
+            # This is the article's FIRST (and only) entry into articles_feed —
+            # art.published_at was stamped at compose time, not release time,
+            # so it must be re-stamped now on both the feed row and the
+            # source-of-truth articles_by_id row.
+            released_at = datetime.now(tz=UTC)
             session.execute(
-                FeedStmts.INSERT_BASIC,
+                FeedStmts.INSERT,
                 (
-                    _feed_month(art.published_at or datetime.now(tz=UTC)),
-                    art.published_at or datetime.now(tz=UTC),
+                    _feed_month(released_at),
+                    released_at,
                     art.article_id,
                     art.service_id,
                     art.title,
                     art.summary or "",
                     list(art.tags or []),
+                    art.image_url,
+                    art.source_url,
                 ),
             )
+            session.execute(ArticleStmts.UPDATE_PUBLISHED_AT, (released_at, art.article_id))
             published += 1
             record_standard_publish()
             from app.modules.newspaper.tasks.publish_tasks import (

@@ -59,6 +59,16 @@ class ArticleStmts:
         "WHERE article_id = ?"
     )
     UPDATE_TAGS = _Stmt("UPDATE algorand_platform.articles_by_id SET tags = ? WHERE article_id = ?")
+    # Stamp the REAL release moment when a held/review draft first goes live —
+    # insert_stored_article stamps published_at at compose time even for
+    # publish_to_feed=False drafts, so first release must overwrite it here,
+    # not just feed the stale value into articles_feed (root-caused 2026-07-14:
+    # a held draft's displayed timestamp reflected when it was drafted, not
+    # when it actually went public, which also let it dodge the daily cap's
+    # published_at-windowed count).
+    UPDATE_PUBLISHED_AT = _Stmt(
+        "UPDATE algorand_platform.articles_by_id SET published_at = ? WHERE article_id = ?"
+    )
     DELETE = _Stmt("DELETE FROM algorand_platform.articles_by_id WHERE article_id = ?")
 
 

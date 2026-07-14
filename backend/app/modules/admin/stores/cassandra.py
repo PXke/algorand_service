@@ -895,7 +895,12 @@ class AdminCassandraStore:
         row = session.execute(ArticleStmts.GET_FEED_ROW, (aid,)).one()
         if row is None:
             return False
-        published_at = row.published_at or datetime.now(tz=UTC)
+        # This is the article's FIRST (and only) entry into articles_feed — a
+        # held/review draft's published_at is stamped at compose time, not
+        # release time, so it must be re-stamped now, on both the feed row and
+        # the source-of-truth articles_by_id row (kept in sync so the single-
+        # article view and the feed listing agree on when it actually went live).
+        published_at = datetime.now(tz=UTC)
         tags = list(row.tags or [])
         session.execute(
             FeedStmts.INSERT_FULL,
@@ -904,6 +909,7 @@ class AdminCassandraStore:
                 row.title, row.summary or "", tags, row.image_url, row.source_url,
             ),
         )
+        session.execute(ArticleStmts.UPDATE_PUBLISHED_AT, (published_at, aid))
         # Register the service_id match key: the workers only register match
         # keys on their direct-publish path, so review-approved articles were
         # invisible to service_has_article() — the first-coverage reframing

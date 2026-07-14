@@ -53,8 +53,18 @@ class ArticleStmts:
     )
     GET_IMAGE = _Stmt("SELECT image_url FROM algorand_platform.articles_by_id WHERE article_id = ?")
     GET_FOR_FEED = _Stmt(
-        "SELECT article_id, service_id, title, summary, published_at, tags "
+        "SELECT article_id, service_id, title, summary, published_at, tags, "
+        "image_url, source_url "
         "FROM algorand_platform.articles_by_id WHERE article_id = ?"
+    )
+    # Stamp the REAL release moment when a review-held draft first goes live —
+    # insert_stored_article stamps published_at at compose time even for
+    # publish_to_feed=False drafts, so first release must overwrite it here
+    # (root-caused 2026-07-14: a held draft's displayed timestamp reflected
+    # when it was drafted, not when it went public, which also let it dodge
+    # the daily cap's published_at-windowed count).
+    UPDATE_PUBLISHED_AT = _Stmt(
+        "UPDATE algorand_platform.articles_by_id SET published_at = ? WHERE article_id = ?"
     )
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.articles_by_id ("
