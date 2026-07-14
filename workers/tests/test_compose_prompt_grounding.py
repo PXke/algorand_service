@@ -24,6 +24,19 @@ def test_research_phase_inherits_grounding_rules():
     pass keeps them."""
     assert "ONE PRODUCT, ONE SOURCE" in mc._RESEARCH_PHASE_GUIDANCE
     assert "SELF-PUBLISHED CLAIMS" in mc._RESEARCH_PHASE_GUIDANCE
+    assert "NAMED REAL-WORLD ASSET CLAIMS" in mc._RESEARCH_PHASE_GUIDANCE
+
+
+def test_tools_guidance_scrutinizes_named_asset_ownership_claims():
+    """The GEO World Energy draft (2026-07-14): the writer wrote up a claim
+    of fractional ownership of specific, real, government/utility-owned dams
+    (Xiluodu, Belo Monte, Grand Coulee, Robert-Bourassa) as fact, even though
+    its own research turned up the project's own tweet calling it a
+    'play2earn game' — a tell that the 'ownership' language was gamified
+    branding, not a real asset-backed claim."""
+    assert "NAMED REAL-WORLD ASSET CLAIMS" in mc._TOOLS_GUIDANCE
+    assert "play2earn" in mc._TOOLS_GUIDANCE
+    assert "extraordinary claim" in mc._TOOLS_GUIDANCE
 
 
 def test_narrative_guidance_carries_grounding_to_stage_two():
@@ -35,6 +48,14 @@ def test_narrative_guidance_carries_grounding_to_stage_two():
     assert "competitor products" in mc._NARRATIVE_GUIDANCE
     assert "undocumented" in mc._NARRATIVE_GUIDANCE
     assert "transplanted onto the story's subject" in mc._NARRATIVE_GUIDANCE
+    # 2026-07-14: adding a rule to _TOOLS_GUIDANCE alone does NOT reach the
+    # pass that actually writes the article — _NARRATIVE_GUIDANCE must carry
+    # its own copy, same as SELF-PUBLISHED CLAIMS/ONE PRODUCT ONE SOURCE
+    # above. Caught this gap in the NAMED REAL-WORLD ASSET CLAIMS rule itself
+    # right after adding it — see test_tools_guidance_scrutinizes_named_asset_
+    # ownership_claims for the _TOOLS_GUIDANCE half.
+    assert "extraordinary claim" in mc._NARRATIVE_GUIDANCE
+    assert "play2earn" in mc._NARRATIVE_GUIDANCE
 
 
 def test_stakes_rule_allows_algorand_expert_knowledge(monkeypatch):
