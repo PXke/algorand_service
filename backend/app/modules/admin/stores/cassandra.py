@@ -1083,7 +1083,14 @@ class AdminCassandraStore:
                 return True
             return (int(time.time()) - int(raw)) >= self._standard_publish_interval_seconds()
         except Exception:
-            return True
+            # Fail CLOSED: a Redis error must never look like "clock elapsed,
+            # go ahead and publish" — that would silently bypass the pacing
+            # cadence entirely. Skipping this run and retrying later is the
+            # safe direction; the workers side (publish_schedule.py) already
+            # fails this way by letting the exception propagate and abort the
+            # task, so this keeps both paths' behavior aligned.
+            logger.warning("standard-publish due-check failed; treating as not due", exc_info=True)
+            return False
 
     def _record_standard_publish(self) -> None:
         import time
