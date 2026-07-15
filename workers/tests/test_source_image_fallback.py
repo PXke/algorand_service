@@ -85,6 +85,73 @@ def test_resolve_article_images_uses_body_sources_when_direct_fails(monkeypatch)
     assert fetched[0] == "https://hesab.com/about"
 
 
+def test_dead_declared_og_falls_through_to_sources_block(monkeypatch) -> None:
+    """Root-caused 2026-07-16 (Aramid + Subtopia published imageless):
+    aramid.finance declares og/twitter images that both 404, and subtopia.io's
+    og:image sits on the dead nftstorage.link IPFS gateway. The resolver
+    accepted the DECLARED og unvalidated and stopped early, so the
+    Sources-block fallback never ran — and the caller's post-hoc validation
+    could only blank the result, not recover a better candidate. With
+    ``validate`` wired into the resolver, a dead og is rejected mid-search
+    and the cited links still get their chance."""
+    pages = {
+        "https://aramid.finance/": ("https://www.aramid.finance/og-image.jpg", ""),
+        "https://hesab.com/about": ("https://hesab.com/images/logos/favicon.png", ""),
+    }
+    monkeypatch.setattr(si, "_images_from_url", lambda url: pages.get(url, ("", "")))
+
+    def validate(image, page_url):
+        # The declared og 404s in the real incident — validator rejects it.
+        if image == "https://www.aramid.finance/og-image.jpg":
+            return ""
+        return image
+
+    og, _logo = resolve_article_images(
+        source_url="https://aramid.finance/",
+        service_id="aramid-finance",
+        body=_BODY,
+        validate=validate,
+    )
+    assert og == "https://hesab.com/images/logos/favicon.png"
+
+
+def test_resolver_validation_is_anchored_to_the_declaring_page(monkeypatch) -> None:
+    """A GitHub/docs link cited in Sources advertises an image on ITS own
+    CDN (opengraph.githubassets.com) — foreign to the article's subject site
+    but correct for the declaring page. Validation must therefore be anchored
+    to the page each image was found on, not the article's source_url."""
+    pages = {
+        "https://hesab.com/about": ("https://cdn.hesab-images.net/og.png", ""),
+    }
+    monkeypatch.setattr(si, "_images_from_url", lambda url: pages.get(url, ("", "")))
+    seen: list[tuple[str, str]] = []
+
+    def validate(image, page_url):
+        seen.append((image, page_url))
+        return image
+
+    og, _ = resolve_article_images(
+        source_url="editorial://brief/x",
+        service_id="editorial-brief:x",
+        body=_BODY,
+        validate=validate,
+    )
+    assert og == "https://cdn.hesab-images.net/og.png"
+    assert ("https://cdn.hesab-images.net/og.png", "https://hesab.com/about") in seen
+
+
+def test_resolver_without_validate_keeps_first_declared_og(monkeypatch) -> None:
+    # Legacy behavior (backfill --dry-run style callers): no validator, first
+    # declared og wins unvalidated.
+    monkeypatch.setattr(
+        si, "_images_from_url", lambda url: ("https://site.com/og.png", "")
+    )
+    og, _ = resolve_article_images(
+        source_url="https://site.com/", service_id="", body=""
+    )
+    assert og == "https://site.com/og.png"
+
+
 def test_resolve_article_images_prefers_direct_source(monkeypatch) -> None:
     monkeypatch.setattr(
         si, "resolve_source_images", lambda **kw: ("https://site.com/og.png", "")

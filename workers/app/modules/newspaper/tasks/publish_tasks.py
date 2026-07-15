@@ -705,14 +705,17 @@ def publish_from_queued_row(
             # body-sources fallback covers lanes with no fetchable source_url
             # (editorial://brief/…, mail://message/…): the writer's own cited
             # research links are the only place a real image can come from.
+            # Validation runs INSIDE the resolver (anchored to the page that
+            # declared each image) so a dead declared og:image can't
+            # short-circuit past the cited-links fallback.
             _og, _logo = resolve_article_images(
                 source_url=row.scrape_url,
                 service_id=row.service_id,
                 body=composed.body,
+                validate=_validated_hero_checked,
             )
-            _og = _validated_hero_checked(_og, row.scrape_url)
             hero_image = _og
-            image_field = _og or _validated_hero_checked(_logo, row.scrape_url)
+            image_field = _og or _logo
         except Exception:
             logger.warning("failed to resolve source images for %s", row.scrape_url, exc_info=True)
 
@@ -1391,11 +1394,13 @@ def recompose_review(review_id: str) -> dict[str, str]:
             from app.modules.newspaper.source_image import resolve_article_images
 
             _og, _logo = resolve_article_images(
-                source_url=url, service_id=service_id, body=composed.body
+                source_url=url,
+                service_id=service_id,
+                body=composed.body,
+                validate=_validated_hero_checked,
             )
-            _og = _validated_hero_checked(_og, url)
             og_image = _og
-            image_field = _og or _validated_hero_checked(_logo, url)
+            image_field = _og or _logo
         except Exception:
             logger.warning("failed to resolve source images for %s", url, exc_info=True)
     tags = _merge_tags(

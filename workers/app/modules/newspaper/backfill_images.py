@@ -43,10 +43,13 @@ def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
         # sources aren't fetchable, so their image comes from the article's
         # own Sources block).
         detail = get_article(aid)
+        from app.modules.newspaper.tasks.publish_tasks import _validated_hero_checked
+
         og, logo = resolve_article_images(
             source_url=meta.source_url,
             service_id=meta.service_id,
             body=detail.body if detail else "",
+            validate=_validated_hero_checked,
         )
         image = og or logo
         if not image:
