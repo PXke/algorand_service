@@ -263,10 +263,14 @@ MISTRAL_RESEARCH_SOURCE_CHARS = env_int("MISTRAL_RESEARCH_SOURCE_CHARS", 16_000)
 # (tool+args) dedup now guards against that specific failure mode independently,
 # and a prod session audit (2026-07-05) found 65% of composes still hit the old
 # cap of 10 mid-research (many distinct tool calls, not repeats) and got forced
-# into "write now" with an incomplete picture. Raised to 14; each round costs one
-# more throttled Mistral call (MISTRAL_MIN_REQUEST_INTERVAL_SECONDS apart), so
-# +4 rounds is ~+60s worst case — cheap against the ~30min task time limit.
-MISTRAL_MAX_TOOL_ROUNDS = env_int("MISTRAL_MAX_TOOL_ROUNDS", 14)
+# into "write now" with an incomplete picture. Raised to 14, then to 24
+# (2026-07-15, owner request): a research-hostile story (4 dead/quiet NFT
+# marketplaces, many 0-result searches) hit the DIGEST_GAP_FILL ceiling and
+# never got a real chance to fill its gaps. Each round costs one more
+# throttled Mistral call (MISTRAL_MIN_REQUEST_INTERVAL_SECONDS apart), so the
+# extra 10 rounds is ~+150s worst case — still cheap against the ~30min task
+# time limit. The (tool+args) dedup guard still bounds true runaway loops.
+MISTRAL_MAX_TOOL_ROUNDS = env_int("MISTRAL_MAX_TOOL_ROUNDS", 24)
 # Voxtral audio transcription (local YouTube pipeline) — same Mistral account,
 # different endpoint (/audio/transcriptions, multipart) from the chat models above.
 MISTRAL_VOXTRAL_MODEL = env_str("MISTRAL_VOXTRAL_MODEL", "voxtral-mini-latest")
@@ -316,7 +320,9 @@ LENGTH_OK_MAX_WORDS = env_int("LENGTH_OK_MAX_WORDS", 2000)
 # several trivial calls that all skim the same one or two domains.
 RESEARCH_MIN_TOOL_CALLS = env_int("RESEARCH_MIN_TOOL_CALLS", 6)
 RESEARCH_FLOOR_ENABLED = env_bool("RESEARCH_FLOOR_ENABLED", True)
-RESEARCH_FLOOR_MAX_PASSES = env_int("RESEARCH_FLOOR_MAX_PASSES", 1)
+# Raised 1->2 alongside MISTRAL_MAX_TOOL_ROUNDS (2026-07-15, owner request):
+# more headroom for research-hostile stories, still bounded.
+RESEARCH_FLOOR_MAX_PASSES = env_int("RESEARCH_FLOOR_MAX_PASSES", 2)
 # Digest synthesis (Stage 1b) can flag specific unresolved-but-material gaps
 # (e.g. "no real sales data found for this marketplace"). Rather than handing
 # those straight to the tool-less writer — which either omits them (fine) or
@@ -325,7 +331,10 @@ RESEARCH_FLOOR_MAX_PASSES = env_int("RESEARCH_FLOOR_MAX_PASSES", 1)
 # targeting exactly those gaps, then re-synthesize the digest. Off switch for
 # cost control; the round budget below keeps a single pass cheap even when on.
 DIGEST_GAP_FILL_ENABLED = env_bool("DIGEST_GAP_FILL_ENABLED", True)
-DIGEST_GAP_FILL_MAX_ROUNDS = env_int("DIGEST_GAP_FILL_MAX_ROUNDS", 4)
+# Raised 4->8 (2026-07-15, owner request): a research-hostile story (4
+# dead/quiet NFT marketplaces) hit this exact ceiling mid-gap-fill and never
+# got a real shot at resolving its flagged gaps.
+DIGEST_GAP_FILL_MAX_ROUNDS = env_int("DIGEST_GAP_FILL_MAX_ROUNDS", 8)
 # A compose_session stuck in a non-terminal status (researching/writing) this
 # long is dead, not slow — the compose task's own hard time limit
 # (CELERY_TASK_TIME_LIMIT, 1860s/31min) means a crash that skips the
