@@ -95,7 +95,11 @@ class NewsService:
 
         def velocity(pair: tuple[ArticleFeedItem, int]) -> float:
             item, views = pair
-            age_days = max((now - item.published_at_epoch) / 86400.0, 0.25)
+            # Age from the ORIGINAL publication: a recompose re-publish
+            # re-stamps published_at, and lifetime views divided by a
+            # just-reset age would catapult any refreshed old article to #1.
+            born = item.first_published_at_epoch or item.published_at_epoch
+            age_days = max((now - born) / 86400.0, 0.25)
             return views / age_days
 
         key = (
@@ -228,5 +232,8 @@ class NewsService:
             ),
             image_url=getattr(article, "image_url", None),
             source_url=getattr(article, "source_url", None),
+            first_published_at_epoch=getattr(
+                article, "first_published_at_epoch", None
+            ),
             updated_at_epoch=getattr(article, "updated_at_epoch", None),
         )

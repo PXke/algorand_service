@@ -179,3 +179,28 @@ def test_hot_feed_velocity_vs_alltime(monkeypatch) -> None:
     top = service.hot_feed(rank="top")
     assert [i.article_id for i in top] == ["old", "new"]
     assert top[0].views == 100
+
+
+def test_hot_feed_ages_recomposed_articles_from_first_publication(
+    monkeypatch,
+) -> None:
+    """A recompose re-publish re-stamps published_at. Velocity must age the
+    article from first_published_at_epoch, or its lifetime views divided by
+    a just-reset age would catapult any refreshed old story to #1 hot."""
+    import time
+
+    from app.modules.news.stores import view_counts
+
+    now = int(time.time())
+    store = InMemoryArticleStore()
+    refreshed = _story("refreshed", now - 3600, [])  # recomposed 1h ago...
+    refreshed.first_published_at_epoch = now - 30 * 86400  # ...born 30d ago
+    store.insert(refreshed)
+    store.insert(_story("new", now - 1 * 86400, []))  # 30 views / 1d = 30/d
+    monkeypatch.setattr(
+        view_counts, "get_views_bulk", lambda ids: {"refreshed": 100, "new": 30}
+    )
+    # refreshed: 100 views / 30d ≈ 3.3/d — well below new's 30/d. (With the
+    # bug, 100 views / 0.25d floor = 400/d would have ranked it first.)
+    hot = NewsService(store=store).hot_feed(rank="hot")
+    assert [i.article_id for i in hot] == ["new", "refreshed"]

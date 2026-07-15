@@ -143,15 +143,20 @@ class AdminCassandraStore:
         # two published articles each showing twice in the sitemap after being
         # edited through this exact path). Read the real timestamp fresh instead.
         pub_row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
-        published_at = (
-            pub_row.published_at
-            if pub_row is not None and pub_row.published_at is not None
-            else datetime.fromtimestamp(current.published_at_epoch, tz=UTC)
-        )
         session.execute(
             ArticleStmts.UPDATE_CONTENT,
             (title, summary, body, tags, aid),
         )
+        if pub_row is None or pub_row.published_at is None:
+            # Unpublished/held article: it has no feed row, and the old
+            # fallback (reconstructing published_at from the seconds epoch)
+            # would upsert a phantom at a truncated timestamp.
+            logger.warning(
+                "admin edit: no published_at for %s — feed row skipped",
+                current.article_id,
+            )
+            return
+        published_at = pub_row.published_at
         session.execute(
             FeedStmts.INSERT_FULL,
             (

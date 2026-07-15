@@ -69,6 +69,7 @@ class CassandraArticleStore:
                 article.summary,
                 tags,
                 article.image_url,
+                article.source_url,
             ),
         )
 
@@ -116,6 +117,9 @@ class CassandraArticleStore:
                         translations=dict(row.translations) if row.translations else None,
                         updated_at_epoch=(
                             _epoch(getattr(row, "updated_at", None)) or None
+                        ),
+                        first_published_at_epoch=(
+                            _epoch(getattr(row, "first_published_at", None)) or None
                         ),
                     )
                 )

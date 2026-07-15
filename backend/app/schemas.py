@@ -42,6 +42,9 @@ class ArticleFeedItem(msgspec.Struct, kw_only=True):
     views: int | None = None
     # Last content revision (edit/recompose); None = never revised.
     updated_at_epoch: int | None = None
+    # Original first publication; set only after a recompose re-publish
+    # re-stamped published_at. None = published_at IS the original date.
+    first_published_at_epoch: int | None = None
 
 
 class ArticleDetail(msgspec.Struct, kw_only=True):

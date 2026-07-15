@@ -20,6 +20,10 @@ class StoredArticle:
     translations: dict[str, str] | None = None
     # Last content revision (edit/recompose); None = never revised.
     updated_at_epoch: int | None = None
+    # Original first publication; differs from published_at_epoch only after
+    # a recompose re-publish (which re-stamps published_at). None = never
+    # recomposed.
+    first_published_at_epoch: int | None = None
 
 
 class ArticleStore(Protocol):

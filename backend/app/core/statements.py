@@ -439,11 +439,13 @@ class NewsStmts:
     )
     INSERT_FEED = _Stmt(
         "INSERT INTO algorand_platform.articles_feed ("
-        "bucket, published_at, article_id, service_id, title, summary, tags, image_url"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "bucket, published_at, article_id, service_id, title, summary, tags, image_url, "
+        "source_url"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     FEED_PAGE = _Stmt(
-        "SELECT article_id, service_id, title, summary, published_at, updated_at, tags, "
+        "SELECT article_id, service_id, title, summary, published_at, first_published_at, "
+        "updated_at, tags, "
         "image_url, source_url, translations FROM algorand_platform.articles_feed "
         "WHERE bucket = ? AND published_at < ? LIMIT ?"
     )
