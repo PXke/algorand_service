@@ -28,7 +28,9 @@ _bsky_token_cache: dict[str, float | str] = {}
 def _tool_search_web(query: str, limit: int = 6) -> dict[str, Any]:
     """General web search via SearXNG: titles, URLs and snippets a journalist
     would skim before writing. Use to discover sources and context you were not
-    handed; then fetch the most relevant URL with the safe fetch tool."""
+    handed; then fetch the most relevant URL with the safe fetch tool. Also
+    queries news-specific engines (Bing News, DuckDuckGo News, Google News) for
+    a real publish-date signal — general engines rarely return one at all."""
     import httpx
 
     from app.core.config import SEARXNG_URL
@@ -43,19 +45,32 @@ def _tool_search_web(query: str, limit: int = 6) -> dict[str, Any]:
         with httpx.Client(timeout=12.0, headers={"User-Agent": _UA}) as client:
             resp = client.get(
                 f"{SEARXNG_URL}/search",
-                params={"q": q, "format": "json", "categories": "general", "language": "en"},
+                params={
+                    "q": q,
+                    "format": "json",
+                    "categories": "general,news",
+                    "language": "en",
+                },
             )
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:
         return {"query": query, "error": str(exc)[:200], "results": []}
+    # News engines (Bing/DuckDuckGo/Google News) carry a real publish date;
+    # general engines (Bing/DuckDuckGo web) almost never do — surface whichever
+    # results actually have one first, so a freshness-sensitive story doesn't
+    # lose its few dated hits to the 12-result truncation below.
+    ranked = sorted(
+        data.get("results") or [], key=lambda r: 0 if r.get("publishedDate") else 1
+    )
     results = []
-    for r in (data.get("results") or [])[:n]:
+    for r in ranked[:n]:
         results.append(
             {
                 "title": (r.get("title") or "")[:200],
                 "url": r.get("url") or "",
                 "snippet": (r.get("content") or "")[:300],
+                "published_date": r.get("publishedDate") or None,
             }
         )
     return {"query": query, "count": len(results), "results": results}
@@ -145,9 +160,12 @@ _WEB_SCHEMA = {
     "function": {
         "name": "search_web",
         "description": (
-            "General web search (SearXNG) — titles, URLs and snippets to discover "
-            "sources and context you were not handed. Use this first when you need "
-            "to research a topic; then fetch the best URL with the safe fetch tool."
+            "General + news web search (SearXNG) — titles, URLs and snippets to "
+            "discover sources and context you were not handed. Use this first when "
+            "you need to research a topic; then fetch the best URL with the safe "
+            "fetch tool. Results with a real published_date (from news engines) are "
+            "returned first — use that date, never a guess, when a result's "
+            "recency matters to the story."
         ),
         "parameters": {
             "type": "object",
