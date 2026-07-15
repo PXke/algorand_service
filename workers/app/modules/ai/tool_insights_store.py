@@ -148,7 +148,18 @@ def record_compose_session(
     try:
         debug = debug or {}
         slim: list[dict[str, Any]] = []
-        for m in (debug.get("messages") or [])[:60]:
+        # No message-count cap: the two-stage pipeline's most diagnostically
+        # important turns (the research->write digest handoff,
+        # review_draft/LLM-rubric grading, the final write) always come at the
+        # END of the transcript, after all research rounds. A research-heavy
+        # story can easily exceed 60 messages on tool calls alone (confirmed
+        # 2026-07-14: a 4-marketplace NFT story hit 68 tool_calls) — a
+        # first-N slice silently dropped the entire handoff+review tail even
+        # though the grading itself ran correctly (visible in final_output's
+        # heuristic_grade, just invisible in the admin Sessions transcript).
+        # Per-message content is still capped below, so row size stays bounded
+        # by round count, not unbounded per entry.
+        for m in debug.get("messages") or []:
             role = str(m.get("role", ""))
             entry: dict[str, Any] = {"role": role}
             content = m.get("content")
@@ -178,6 +189,18 @@ def record_compose_session(
                 entry["name"] = str(m.get("name"))[:64]
             slim.append(entry)
 
+        # Drop from the FRONT (oldest research rounds first) until the
+        # serialized transcript fits the storage cap, instead of blindly
+        # slicing the JSON string — a raw string slice cuts mid-object and
+        # produces invalid JSON, which would silently break every reader of
+        # this column (the Sessions page's json.loads) rather than just
+        # dropping the least valuable (earliest) entries cleanly.
+        messages_json = json.dumps(slim)
+        while len(messages_json) > 120_000 and len(slim) > 1:
+            slim.pop(0)
+            messages_json = json.dumps(slim)
+        messages_json = messages_json[:120_000]
+
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
@@ -197,7 +220,7 @@ def record_compose_session(
                 int(debug.get("rounds", 0) or 0),
                 len(trace or []),
                 int(duration_ms),
-                json.dumps(slim)[:120000],
+                messages_json,
                 str(final_output or "")[:20000],
                 int(prompt_tokens),
                 int(completion_tokens),
