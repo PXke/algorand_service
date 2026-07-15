@@ -1760,6 +1760,17 @@ def _compose_via_writer_tools_locked(
             # Tool/parse failure (the API worked): fall back to single-shot. Mark
             # the row 'fallback' so it leaves the non-terminal state instead of
             # appearing stuck mid-compose.
+            #
+            # Root-caused 2026-07-16: this branch swallowed the exception with
+            # ZERO logging, so a real crash (dork.fi: 16 real tool calls,
+            # including a genuine docs.dork.fi fetch, then silently died before
+            # the next assistant turn) was only reconstructable after the fact
+            # by manually replaying compose_sessions.messages — the traceback
+            # itself was gone forever. logger.exception here costs nothing and
+            # makes every future one of these actually diagnosable.
+            logger.exception(
+                "compose fell back to ungrounded single-shot for %s", source_url
+            )
             with contextlib.suppress(Exception):
                 _checkpoint("fallback")
 
