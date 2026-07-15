@@ -182,18 +182,27 @@ def test_stage2_digest_only_no_tools():
 
 
 def test_stage2_expert_knowledge_carveout_excludes_business_facts():
-    """Root-caused 2026-07-15: a draft invented '0.001 ALGO per transfer' and
-    a nonexistent 'ASA royalty parameters' enforcement mechanism for a real
-    marketplace whose fees the Research Digest explicitly never found —
-    Stage 2's unqualified 'use your expert knowledge of Algorand layer-1
-    mechanics' permission was being stretched from 'explain general protocol
-    behavior' to 'invent this specific project's specific business facts'.
-    The carve-out must draw that line explicitly, not just generally forbid
-    inventing 'numbers'."""
+    """Root-caused 2026-07-15: a draft invented '0.001 ALGO per transfer' as a
+    marketplace-SPECIFIC fee (the network's real ~0.001 ALGO minimum fee is
+    fine to cite generally; claiming it as one marketplace's own fee is not)
+    and separately asserted, unverified, that named marketplaces specifically
+    implement ASA-parameter-based royalty enforcement (ARC-18) when the
+    Research Digest never confirmed this for any of them. NOTE: ARC-18 is a
+    real Algorand standard — it genuinely repurposes an ASA's Clawback/
+    Freeze/Manager fields to route transfers through a separate Royalty
+    Enforcer application; it is opt-in and bypassable, not fake and not an
+    automatic built-in ASA field. An earlier version of this fix incorrectly
+    called it 'nonexistent', which was itself wrong and has been corrected —
+    the rule is about verifying WHICH project uses it, not denying the
+    mechanism exists. Stage 2's unqualified 'use your expert knowledge of
+    Algorand layer-1 mechanics' permission was being stretched from 'explain
+    general protocol behavior' to 'invent this specific project's specific
+    business facts'. The carve-out must draw that line explicitly."""
     assert "GENERAL protocol behavior" in mc._STAGE2_GENERATION_GUIDANCE
     assert "never use that" in mc._STAGE2_GENERATION_GUIDANCE.lower()
     assert "fee schedule" in mc._STAGE2_GENERATION_GUIDANCE
-    assert "ASA royalty parameters" in mc._STAGE2_GENERATION_GUIDANCE
+    assert "opt-in and can be" in mc._STAGE2_GENERATION_GUIDANCE
+    assert "nonexistent" not in mc._STAGE2_GENERATION_GUIDANCE.lower()
 
 
 def test_technical_stakes_bridges_algorand_layer1():
