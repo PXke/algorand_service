@@ -725,6 +725,17 @@ def _review_and_revise(
     if not WRITER_REVIEW_ENABLED:
         return payload
 
+    # LLM rubric grading (narrative synthesis/technical depth/critical
+    # distance) is a judgment task, not generation — it doesn't need the
+    # writer's Large-tier model. Was previously (silently) run on `mistral`
+    # itself, the SAME Large client used for Stage 2 generation, despite
+    # grade_article_quality_llm's own docstring calling itself a "Fast
+    # Small-tier rubric" — that intent only ever applied to its unused
+    # default. Use the research-tier client explicitly (cheaper; and as of
+    # 2026-07-15, mistral-small-latest gets reasoning_effort="high" for free
+    # since MistralClient now knows it actually supports reasoning).
+    quality_mistral = get_mistral_research_client()
+
     def _note_revision_failure(reason: str) -> None:
         # Surface WHY the revision didn't happen instead of silently keeping the
         # weak draft — otherwise a rate-limited/failed revision is invisible and
@@ -763,7 +774,7 @@ def _review_and_revise(
         except Exception as exc:
             review = {"error": str(exc)[:200], "grade": None}
         try:
-            quality = grade_article_quality_llm(title=title, body=body, client=mistral)
+            quality = grade_article_quality_llm(title=title, body=body, client=quality_mistral)
         except Exception as exc:
             quality = {"model": "llm_rubric_error", "error": str(exc)[:200], "issues": []}
         review["quality"] = quality

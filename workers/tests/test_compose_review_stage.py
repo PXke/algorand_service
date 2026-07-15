@@ -321,6 +321,41 @@ def test_carry_forward_tells_revision_not_to_undo_earlier_fix(monkeypatch) -> No
     assert "Buried Metrics" in fake.sent_users[1]
 
 
+def test_quality_rubric_uses_research_client_not_writer_client(monkeypatch) -> None:
+    """LLM rubric grading is a judgment task, not generation — it must run on
+    the research (Small) client, not the Large writer client passed in for
+    Stage 2 generation/revision. grade_article_quality_llm's own docstring
+    calls itself a 'Fast Small-tier rubric', but that only ever applied to
+    its unused default — the actual call site was silently passing the
+    writer's Large client until this was fixed 2026-07-15."""
+    import app.modules.ai.mistral_compose as mc
+
+    seen_clients: list[object] = []
+
+    def _fake_grade_quality(*, title, body, client=None):
+        seen_clients.append(client)
+        return {"narrative_synthesis": 4, "technical_depth": 4, "issues": []}
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **kw: {"grade": 9.0, "issues": []},
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        _fake_grade_quality,
+    )
+    research_client = object()
+    monkeypatch.setattr(mc, "get_mistral_research_client", lambda: research_client)
+
+    writer_client = _FakeMistral({"title": "X", "body": "Y"})
+    _review_and_revise(
+        writer_client, {"title": "T", "body": "good body"}, system="s", gen_user="u", trace=[]
+    )
+
+    assert seen_clients == [research_client]
+    assert seen_clients[0] is not writer_client
+
+
 def test_disabled_skips_review(monkeypatch) -> None:
     import app.core.config as cfg
 
