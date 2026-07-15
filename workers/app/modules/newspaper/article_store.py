@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -7,6 +8,8 @@ from uuid import UUID
 
 from app.core.config import NEWS_FEED_BUCKET
 from app.core.feed_bucket import feed_month, months_back
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -305,8 +308,14 @@ def update_article(
     session.execute(
         ArticleStmts.UPDATE, (title, summary, body, tag_list, updated_at, aid)
     )
+    # Complete feed row, not a partial one: this INSERT is an upsert, and on a
+    # deleted feed row a partial write resurrects a degraded article (no image/
+    # source). Harmless on live rows — Cassandra INSERT leaves unlisted columns
+    # untouched, but every listed one must carry the real value.
+    image_row = session.execute(ArticleStmts.GET_IMAGE, (aid,)).one()
+    image = (image_row.image_url or None) if image_row else None
     session.execute(
-        FeedStmts.INSERT_BASIC,
+        FeedStmts.INSERT_FULL,
         (
             feed_month(published_at),
             published_at,
@@ -315,6 +324,8 @@ def update_article(
             title,
             summary,
             tag_list,
+            image,
+            existing.source_url or None,
             updated_at,
         ),
     )
@@ -409,10 +420,19 @@ def update_article_image(article_id: str, image_url: str) -> bool:
         return False
     published_at = row.published_at  # full-precision datetime, matches the feed PK
     session.execute(ArticleStmts.UPDATE_IMAGE, (image_url, aid))
-    session.execute(
+    feed_result = session.execute(
         FeedStmts.UPDATE_IMAGE,
         (image_url, feed_month(published_at), published_at, aid),
     )
+    if not feed_result.was_applied:
+        # IF EXISTS declined: no feed row at this PK (held article, deleted
+        # row, or moved by a concurrent recompose). Correct no-op — the old
+        # behavior upserted a phantom here.
+        logger.warning(
+            "update_article_image: no feed row for %s at %s — feed image skipped",
+            article_id,
+            published_at,
+        )
     return True
 
 
@@ -491,9 +511,28 @@ def update_article_translations(article_id: str, translations: dict[str, str]) -
         return False
     published_at = row.published_at
 
-    session.execute(ArticleStmts.UPDATE_TRANSLATIONS, (translations, aid))
-    session.execute(
+    detail_result = session.execute(
+        ArticleStmts.UPDATE_TRANSLATIONS, (translations, aid)
+    )
+    if not detail_result.was_applied:
+        # Article deleted after this translation was enqueued — dropping the
+        # write is correct (a plain upsert resurrected phantom rows).
+        logger.warning(
+            "update_article_translations: article %s no longer exists — dropped",
+            article_id,
+        )
+        return False
+    feed_result = session.execute(
         FeedStmts.UPDATE_TRANSLATIONS,
         (translations, feed_month(published_at), published_at, aid),
     )
+    if not feed_result.was_applied:
+        # No feed row at this PK: unlisted/held article, or the row moved
+        # under us (recompose re-publish re-stamps published_at and re-enqueues
+        # fresh translations, so this in-flight write is stale — drop it).
+        logger.warning(
+            "update_article_translations: no feed row for %s at %s — feed skipped",
+            article_id,
+            published_at,
+        )
     return True

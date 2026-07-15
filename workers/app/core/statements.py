@@ -92,9 +92,12 @@ class ArticleStmts:
         "UPDATE algorand_platform.articles_by_id SET image_url = ? "
         "WHERE article_id = ?"
     )
+    # IF EXISTS (LWT): translation tasks can outlive the article they were
+    # enqueued for — a plain upsert would resurrect a deleted article as a
+    # translations-only phantom row.
     UPDATE_TRANSLATIONS = _Stmt(
         "UPDATE algorand_platform.articles_by_id SET translations = translations + ? "
-        "WHERE article_id = ?"
+        "WHERE article_id = ? IF EXISTS"
     )
 
 
@@ -116,11 +119,6 @@ class FeedStmts:
         "image_url, source_url"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    INSERT_BASIC = _Stmt(
-        "INSERT INTO algorand_platform.articles_feed ("
-        "bucket, published_at, article_id, service_id, title, summary, tags, updated_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
     # Complete feed row for a recompose re-publish: published_at moved, so the
     # old row is DELETEd and this full row inserted. Must carry EVERY projection
     # column — a partial write here creates a phantom row (null service_id) that
@@ -135,13 +133,18 @@ class FeedStmts:
         "DELETE translations FROM algorand_platform.articles_feed "
         "WHERE bucket = ? AND published_at = ? AND article_id = ?"
     )
+    # IF EXISTS (LWT) on both: these run against a PK that can be absent (held
+    # article never in the feed, row deleted by an admin, or MOVED by a
+    # recompose re-publish between the caller's published_at read and this
+    # write). A plain upsert then creates a partial phantom row the feed API
+    # silently hides — incident 2026-07-15. Not-applied is a correct no-op.
     UPDATE_IMAGE = _Stmt(
         "UPDATE algorand_platform.articles_feed SET image_url = ? "
-        "WHERE bucket = ? AND published_at = ? AND article_id = ?"
+        "WHERE bucket = ? AND published_at = ? AND article_id = ? IF EXISTS"
     )
     UPDATE_TRANSLATIONS = _Stmt(
         "UPDATE algorand_platform.articles_feed SET translations = translations + ? "
-        "WHERE bucket = ? AND published_at = ? AND article_id = ?"
+        "WHERE bucket = ? AND published_at = ? AND article_id = ? IF EXISTS"
     )
     SCAN_ALL = _Stmt(
         "SELECT bucket, published_at, article_id, "
