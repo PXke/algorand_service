@@ -119,9 +119,13 @@ class FeedStmts:
         "bucket, published_at, article_id, service_id, title, summary, tags, updated_at"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     )
+    # Also re-sets service_id/source_url: Cassandra UPDATE is an upsert, so if
+    # the feed row was deleted (admin queue clear) this statement re-creates it —
+    # without these columns the resurrected row is a phantom (null service_id)
+    # that the feed API's defensive filter silently hides (incident 2026-07-15).
     UPDATE_CONTENT_FULL = _Stmt(
         "UPDATE algorand_platform.articles_feed SET title = ?, summary = ?, tags = ?, "
-        "image_url = ?, updated_at = ? "
+        "image_url = ?, service_id = ?, source_url = ?, updated_at = ? "
         "WHERE bucket = ? AND published_at = ? AND article_id = ?"
     )
     CLEAR_TRANSLATIONS = _Stmt(

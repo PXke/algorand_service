@@ -362,7 +362,18 @@ def replace_article_content(
     bucket = feed_month(published_at)
     session.execute(
         FeedStmts.UPDATE_CONTENT_FULL,
-        (title, summary, tags, image, updated_at, bucket, published_at, aid),
+        (
+            title,
+            summary,
+            tags,
+            image,
+            existing.service_id,
+            existing.source_url or None,
+            updated_at,
+            bucket,
+            published_at,
+            aid,
+        ),
     )
     session.execute(FeedStmts.CLEAR_TRANSLATIONS, (bucket, published_at, aid))
     return True
