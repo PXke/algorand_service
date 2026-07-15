@@ -223,14 +223,17 @@ MISTRAL_REASONING_EFFORT = env_str("MISTRAL_REASONING_EFFORT", "high")
 # 12000 comfortably fits a ~4000-word long-form article once JSON-escaped; the
 # reservation against TPM is trivial on the 375k-TPM pinned model.
 MISTRAL_MAX_TOKENS = env_int("MISTRAL_MAX_TOKENS", 12000)
-# Writer agentic-loop context management. mistral-medium-latest exposes a 256k
-# token window (mistral-small ~128k — override via env if you switch the writer
-# model down); cost is not the constraint here, so tool results stay generous and
-# we only elide the OLDEST ones when the whole conversation nears this limit.
+# Writer agentic-loop context management — the FALLBACK only. MistralClient
+# now asks Mistral's own GET /v1/models for each model's real
+# max_context_length at construction (mistral_client._fetch_model_metadata,
+# cached per model per process) and uses that instead whenever the live
+# lookup succeeds. This default is what a client falls back to if that lookup
+# fails (network blip, endpoint down) — it stopped mattering for correctness
+# on 2026-07-15, when a hardcoded comment here ("mistral-small ~128k") turned
+# out to be stale: Mistral had silently upgraded the "-latest" aliases to
+# 262144 without changing the model name. A single research/writer constant
+# is enough now since the real number comes from the live model, not this file.
 MISTRAL_CONTEXT_TOKENS = env_int("MISTRAL_CONTEXT_TOKENS", 256000)
-# Stage-1 research runs on MISTRAL_MODEL_RESEARCH (Small, ~128k window). Keep a
-# separate budget so fit_messages_to_budget trims before the API rejects.
-MISTRAL_RESEARCH_CONTEXT_TOKENS = env_int("MISTRAL_RESEARCH_CONTEXT_TOKENS", 128000)
 # Per-tool-result character cap (structure-preserving — see token_budget). Large
 # enough to carry a full article body; ~24k chars ≈ a long page.
 MISTRAL_TOOL_RESULT_MAX_CHARS = env_int("MISTRAL_TOOL_RESULT_MAX_CHARS", 24000)

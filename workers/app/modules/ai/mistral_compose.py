@@ -1446,7 +1446,6 @@ def _compose_via_writer_tools_locked(
             from app.core.config import (
                 MISTRAL_MODEL_RESEARCH,
                 MISTRAL_MODEL_WRITER,
-                MISTRAL_RESEARCH_CONTEXT_TOKENS,
                 MISTRAL_TEMP_RESEARCH,
                 MISTRAL_TEMP_WRITE,
                 WRITER_TWO_STAGE,
@@ -1539,7 +1538,6 @@ def _compose_via_writer_tools_locked(
                     debug=debug,
                     temperature=MISTRAL_TEMP_RESEARCH,
                     require_tool=None,
-                    context_tokens=MISTRAL_RESEARCH_CONTEXT_TOKENS,
                 )
                 # Research FLOOR: if it stopped too early (the exact failure where
                 # it reads an existing profile and quits), send it back to dig
@@ -1569,7 +1567,6 @@ def _compose_via_writer_tools_locked(
                             debug=debug,
                             temperature=MISTRAL_TEMP_RESEARCH,
                             require_tool=None,
-                            context_tokens=MISTRAL_RESEARCH_CONTEXT_TOKENS,
                         )
                 # Stage 1b — synthesize a structured Research Digest handoff so Stage 2
                 # grounds on high-signal facts, not raw tool JSON.
@@ -1599,7 +1596,6 @@ def _compose_via_writer_tools_locked(
                             debug=debug,
                             temperature=MISTRAL_TEMP_RESEARCH,
                             require_tool=None,
-                            context_tokens=MISTRAL_RESEARCH_CONTEXT_TOKENS,
                             max_rounds=DIGEST_GAP_FILL_MAX_ROUNDS,
                         )
                         digest = _synthesize_research_digest(

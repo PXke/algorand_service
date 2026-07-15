@@ -153,6 +153,44 @@ class MistralCreditError(MistralError):
     revoked key — either way, waiting and retrying the same request won't help."""
 
 
+# Live model metadata (max context length, reasoning_effort support) from
+# Mistral's own GET /v1/models, cached per model name for this process's
+# lifetime — refreshes naturally on every deploy/restart. Root-caused
+# 2026-07-15: a hardcoded context-length comment ("mistral-small ~128k") went
+# stale when Mistral silently upgraded the "-latest" alias to 262144 without
+# changing the model name, and every Large-tier request was silently paying
+# for two API calls (send reasoning_effort, get rejected, retry without it)
+# because nothing checked the model's actual advertised capabilities. A
+# module-level cache (not per-instance) since MistralClient instances are
+# created fresh per compose session but the underlying model's real
+# properties don't change between them.
+_model_metadata_cache: dict[str, dict[str, Any]] = {}
+
+
+def _fetch_model_metadata(*, api_base: str, api_key: str, model: str) -> dict[str, Any]:
+    """{"max_context_length": int, "reasoning": bool} for `model`, or {} on any
+    failure — callers fall back to their existing hardcoded defaults, so a
+    slow/unreachable /v1/models never blocks a compose."""
+    cached = _model_metadata_cache.get(model)
+    if cached is not None:
+        return cached
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(f"{api_base}/models", headers={"Authorization": f"Bearer {api_key}"})
+        resp.raise_for_status()
+        for m in resp.json().get("data", []):
+            if m.get("id") == model:
+                meta = {
+                    "max_context_length": m.get("max_context_length"),
+                    "reasoning": bool((m.get("capabilities") or {}).get("reasoning")),
+                }
+                _model_metadata_cache[model] = meta
+                return meta
+    except Exception:
+        logger.debug("failed to fetch live metadata for model %s", model, exc_info=True)
+    return {}  # not cached — a transient failure should be retried by the next instance
+
+
 class MistralClient:
     """Thin connector for Mistral Chat Completions (RFC 9110 HTTP JSON)."""
 
@@ -169,13 +207,18 @@ class MistralClient:
         self._model = model if model is not None else MISTRAL_MODEL
         self._timeout = float(timeout if timeout is not None else MISTRAL_TIMEOUT_SECONDS)
         self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        self._metadata = (
+            _fetch_model_metadata(api_base=self._api_base, api_key=self._api_key, model=self._model)
+            if self._api_key
+            else {}
+        )
         # Not every model accepts reasoning_effort (e.g. Mistral Large 3 400s with
-        # "reasoning_effort is not enabled for this model") — discovered lazily on
-        # the first request rather than hardcoding a model allowlist that goes
-        # stale as Mistral adds/changes models. Once learned, stays off for every
-        # later call on this instance so a multi-round session doesn't re-pay for
-        # the same rejection every round.
-        self._reasoning_effort_unsupported = False
+        # "reasoning_effort is not enabled for this model"). Seeded from live
+        # capabilities when available; the 400-response check below is still a
+        # lazy-discovery safety net for whatever the live lookup missed or
+        # couldn't reach, and stays off for every later call on this instance so
+        # a multi-round session doesn't re-pay for the same rejection every round.
+        self._reasoning_effort_unsupported = not self._metadata.get("reasoning", True)
 
     @property
     def is_configured(self) -> bool:
@@ -401,7 +444,12 @@ class MistralClient:
         required_nudged = False
         response_reserve = max_tokens if max_tokens is not None else MISTRAL_MAX_TOKENS
         # Leave room for the model's reply plus a safety pad below the window.
-        window = context_tokens if context_tokens is not None else MISTRAL_CONTEXT_TOKENS
+        # An explicit context_tokens always wins; otherwise prefer this
+        # instance's own live-fetched limit (correct for whatever self._model
+        # actually is) over the generic hardcoded fallback.
+        window = context_tokens if context_tokens is not None else (
+            self._metadata.get("max_context_length") or MISTRAL_CONTEXT_TOKENS
+        )
         convo_budget = window - response_reserve - MISTRAL_CONTEXT_SAFETY_TOKENS
         for round_idx in range(rounds):
             # Token-aware trim: keep tool results generous, but if many rounds have
