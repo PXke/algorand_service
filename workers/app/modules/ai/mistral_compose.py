@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
 # every stored article so analytics can correlate a prompt edit with a shift in
 # grades/engagement instead of guessing from deploy timestamps.
-PROMPT_VERSION = "2026-07-15c"
+PROMPT_VERSION = "2026-07-15d"
 
 
 @dataclass(frozen=True)
@@ -430,8 +430,13 @@ _NARRATIVE_GUIDANCE = (
     "attributed statements ('according to the project'), not established facts "
     "— and for speculative or token-launch subjects, include the risk context "
     "a fair journalist would. Where a *product-specific* mechanism is "
-    "undocumented, say so plainly — but you may still explain Algorand's "
-    "general layer-1 mechanics when bridging why the story matters on-chain. "
+    "undocumented — a marketplace's exact fee percentage, which royalty "
+    "standard it enforces, its specific commission structure — say so plainly "
+    "(\"fees are undisclosed\") rather than inventing a number or naming a "
+    "mechanism the Digest never verified; you may still explain Algorand's "
+    "general layer-1 mechanics (consensus, finality, ASA tokenization AS A "
+    "CONCEPT) when bridging why the story matters on-chain, but that license "
+    "never extends to a specific project's specific business facts. "
     "A claim of tokenizing/fractionalizing ownership in a SPECIFIC, NAMED "
     "real-world physical asset (a named dam, building, mine, etc.) is an "
     "extraordinary claim — a small crypto project essentially never holds any "
@@ -456,8 +461,17 @@ _STAGE2_GENERATION_GUIDANCE = (
     "You have NO tools in this phase. Do not fetch URLs or run searches. Verified "
     "external facts (quotes, partnerships, numbers, dates) must come from the "
     "Research Digest and source material — never invent those. You MAY use your "
-    "expert knowledge of Algorand layer-1 mechanics to explain why the story "
-    "matters when sources are thin.\n"
+    "expert knowledge of Algorand layer-1 mechanics — GENERAL protocol behavior "
+    "(consensus, finality time, typical fee ranges, tokenization standards) — to "
+    "explain why the story matters when sources are thin. You may NEVER use that "
+    "same license to invent a SPECIFIC fact about the subject itself: a named "
+    "project's fee schedule, exact percentages, or which enforcement mechanism it "
+    "uses (e.g. claiming a specific royalty standard applies to it) are business "
+    "facts, not protocol theory — if the Digest doesn't state them, say they are "
+    "undisclosed/unverified, do not fill the gap with a plausible-sounding "
+    "invention (root-caused 2026-07-15: a draft invented '0.001 ALGO per "
+    "transfer' and a nonexistent 'ASA royalty parameters' mechanism for a "
+    "marketplace whose fees the Digest explicitly never found).\n"
 )
 
 

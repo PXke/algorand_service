@@ -181,6 +181,21 @@ def test_stage2_digest_only_no_tools():
     assert "Research Digest" in mc._STAGE2_GENERATION_GUIDANCE
 
 
+def test_stage2_expert_knowledge_carveout_excludes_business_facts():
+    """Root-caused 2026-07-15: a draft invented '0.001 ALGO per transfer' and
+    a nonexistent 'ASA royalty parameters' enforcement mechanism for a real
+    marketplace whose fees the Research Digest explicitly never found —
+    Stage 2's unqualified 'use your expert knowledge of Algorand layer-1
+    mechanics' permission was being stretched from 'explain general protocol
+    behavior' to 'invent this specific project's specific business facts'.
+    The carve-out must draw that line explicitly, not just generally forbid
+    inventing 'numbers'."""
+    assert "GENERAL protocol behavior" in mc._STAGE2_GENERATION_GUIDANCE
+    assert "never use that" in mc._STAGE2_GENERATION_GUIDANCE.lower()
+    assert "fee schedule" in mc._STAGE2_GENERATION_GUIDANCE
+    assert "ASA royalty parameters" in mc._STAGE2_GENERATION_GUIDANCE
+
+
 def test_technical_stakes_bridges_algorand_layer1():
     guidelines = mc._writing_guidelines("2026-07-09")
     assert "layer-1 architecture" in guidelines
@@ -226,6 +241,17 @@ def test_narrative_guidance_bans_facts_outside_digest():
     told the Digest is the ceiling, not just a floor, for specific facts."""
     assert "not already in the Research Digest" in mc._NARRATIVE_GUIDANCE
     assert "however plausible or familiar it feels" in mc._NARRATIVE_GUIDANCE
+
+
+def test_narrative_guidance_names_fees_as_undocumented_product_specifics():
+    """Same 2026-07-15 incident as the Stage-2 carve-out fix — the existing
+    'product-specific mechanism is undocumented, say so plainly' rule was
+    real but abstract enough that the model didn't recognize a marketplace's
+    fee schedule/royalty enforcement as an instance of it. Pin the concrete
+    example so it can't be missed."""
+    assert "fee percentage" in mc._NARRATIVE_GUIDANCE
+    assert "royalty standard it enforces" in mc._NARRATIVE_GUIDANCE
+    assert "fees are undisclosed" in mc._NARRATIVE_GUIDANCE
 
 
 def test_tools_guidance_bans_memory_as_source():
