@@ -491,8 +491,17 @@ def _tool_search_token_listings(asset_id: Any) -> dict[str, Any]:
     except Exception as exc:
         out["tinyman"] = {"error": str(exc)[:200]}
     try:
+        # Pact's API silently ignores an unrecognized `asset_id` param and
+        # returns its entire (currently ~3900-pool) unfiltered listing instead
+        # of erroring — confirmed live 2026-07-14: a COMPX query returned
+        # unrelated USDC/goUSD, ALGO/gALGO pools with count=3863, matching the
+        # platform total. `primary_asset__on_chain_id` is the real filter (and,
+        # despite the name, matches the asset on EITHER side of the pool —
+        # verified live: it returns pools where the target is primary AND
+        # pools where it's secondary, both under this one param).
         resp = _guarded_get(
-            "https://api.pact.fi/api/pools", params={"asset_id": aid, "limit": 10}
+            "https://api.pact.fi/api/pools",
+            params={"primary_asset__on_chain_id": aid, "limit": 10},
         )
         resp.raise_for_status()
         pools = (resp.json() or {}).get("results", [])

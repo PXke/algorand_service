@@ -130,6 +130,30 @@ def test_search_token_listings_not_listed_on_tinyman(monkeypatch):
     assert result["pact"]["pool_count"] == 0
 
 
+def test_search_token_listings_uses_pacts_real_filter_param(monkeypatch):
+    """Regression-pin a real incident (2026-07-14/15): Pact's API silently
+    ignores an unrecognized `asset_id` query param and returns its ENTIRE
+    ~3900-pool listing instead of erroring — confirmed live, a COMPX query
+    returned unrelated USDC/goUSD and ALGO/gALGO pools with count=3863,
+    matching the platform total exactly. `primary_asset__on_chain_id` is
+    the real filter (verified live to match the asset on either side of
+    the pool, despite the name)."""
+    captured_params: list = []
+
+    def fake_get(url, **kw):
+        if "tinyman" in url:
+            return _json_response(url, 404, {})
+        captured_params.append(kw.get("params"))
+        return _json_response(url, 200, {"results": []})
+
+    monkeypatch.setattr(research_tools, "_guarded_get", fake_get)
+    _tool_search_token_listings(1732165149)
+
+    assert len(captured_params) == 1
+    assert captured_params[0]["primary_asset__on_chain_id"] == "1732165149"
+    assert "asset_id" not in captured_params[0]
+
+
 def test_search_token_listings_requires_numeric_asset_id():
     result = _tool_search_token_listings("not-a-number")
     assert "error" in result

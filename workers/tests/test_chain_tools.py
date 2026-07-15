@@ -203,3 +203,35 @@ def test_lookup_account_proceeds_for_a_valid_address(monkeypatch) -> None:
 
     assert "error" not in result
     assert result["balance_algo"] == 5.0
+
+
+def test_testnet_lookup_rejects_invalid_address_without_hitting_indexer(monkeypatch) -> None:
+    """testnet_lookup(address=...) had the SAME address-fabrication gap
+    lookup_account did before it was fixed 2026-07-14 — found during a
+    broader tool-degradation audit 2026-07-15 when a made-up test address
+    triggered a generic 400 instead of a clear validation error."""
+    calls = []
+    monkeypatch.setattr(
+        chain_tools, "_testnet_idx_get", lambda path, params=None: calls.append(path) or {}
+    )
+
+    fake_addr = "EXA6RX5G6G2UXIMZ2HXV4C5OMJ3XKPN7VBP7GWQ2DEAF7WIOMCQBZWBXUY"
+    result = chain_tools._tool_testnet_lookup(address=fake_addr)
+
+    assert "error" in result
+    assert "never construct, guess" in result["error"]
+    assert calls == []
+
+
+def test_testnet_lookup_proceeds_for_a_valid_address(monkeypatch) -> None:
+    real = chain_tools._encode_address(b"\x04" * 32)
+    monkeypatch.setattr(
+        chain_tools,
+        "_testnet_idx_get",
+        lambda path, params=None: {"account": {"amount": 1_000_000}},
+    )
+
+    result = chain_tools._tool_testnet_lookup(address=real)
+
+    assert "error" not in result
+    assert result["found"] is True

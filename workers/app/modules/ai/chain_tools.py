@@ -409,6 +409,8 @@ def _tool_testnet_lookup(
         }
 
     if address:
+        if not _is_valid_address(address):
+            return {"address": address, "error": _INVALID_ADDRESS_ERROR}
         acct = _testnet_idx_get(f"/v2/accounts/{address}")
         if not isinstance(acct, dict) or acct.get("error"):
             return acct if isinstance(acct, dict) else {"error": "unexpected indexer response"}
