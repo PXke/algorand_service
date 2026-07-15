@@ -77,12 +77,42 @@ def _decode_value(v: dict) -> Any:
     return "0x" + raw.hex()
 
 
+def _is_valid_address(addr: str) -> bool:
+    """58-char Algorand address format + checksum validity — the inverse of
+    _encode_address. Rejects a fabricated address BEFORE it reaches algod,
+    with a clear reason, instead of algod's generic 400 (root-caused
+    2026-07-14: the model invented plausible-looking addresses like
+    'EXA6RX5G...' for projects it had no real address for — three of the
+    four weren't even the right length, and none had a chance of a valid
+    checksum since nothing was actually generated)."""
+    if len(addr) != 58:
+        return False
+    try:
+        raw = base64.b32decode(addr + "=" * ((8 - len(addr) % 8) % 8), casefold=True)
+    except Exception:
+        return False
+    if len(raw) != 36:
+        return False
+    pubkey, chksum = raw[:32], raw[32:]
+    return hashlib.new("sha512_256", pubkey).digest()[-4:] == chksum
+
+
+_INVALID_ADDRESS_ERROR = (
+    "not a valid Algorand address (wrong length or bad checksum). Only call "
+    "this with an address you actually found in a fetched page, search "
+    "result, or another tool's output — never construct, guess, or "
+    "pattern-match one yourself, even a plausible-looking 'vanity' one."
+)
+
+
 def _tool_lookup_account(address: str) -> dict[str, Any]:
     """Live state of an Algorand account: ALGO balance, ASAs held, and the apps it
     created or opted into."""
     addr = (address or "").strip()
     if not addr:
         return {"error": "address required"}
+    if not _is_valid_address(addr):
+        return {"address": addr, "error": _INVALID_ADDRESS_ERROR}
     data = _algod_get(f"/v2/accounts/{addr}")
     if not isinstance(data, dict):
         return {"error": "unexpected algod response"}
@@ -419,7 +449,12 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
             "description": (
                 "Live on-chain state of an Algorand account by address: ALGO balance, "
                 "ASAs held, and the apps it created or opted into. Use to verify holdings, "
-                "treasury balances, or whether an account participates in a protocol."
+                "treasury balances, or whether an account participates in a protocol. "
+                "The address MUST be one you actually found in a fetched page, search "
+                "result, or another tool's output — never construct, guess, or "
+                "pattern-match a plausible-looking one yourself (e.g. 'the project's name "
+                "as a prefix'). If you don't have a real address for this project, say so "
+                "in the article instead of inventing one to check."
             ),
             "parameters": {
                 "type": "object",

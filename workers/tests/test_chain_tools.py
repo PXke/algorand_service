@@ -66,7 +66,8 @@ def test_get_asset_holder_share_computes_real_percentage(monkeypatch) -> None:
 
     monkeypatch.setattr(chain_tools, "_algod_get", fake_algod_get)
 
-    result = chain_tools._tool_get_asset_holder_share(1732165149, "CREATOR_ADDR")
+    creator_addr = chain_tools._encode_address(b"\x02" * 32)
+    result = chain_tools._tool_get_asset_holder_share(1732165149, creator_addr)
     assert result["total_supply_adjusted"] == 1_000_000_000.0
     assert result["holder_amount_adjusted"] == 112_111_670.453492
     assert result["share_pct"] == 11.2112
@@ -83,7 +84,8 @@ def test_get_asset_holder_share_zero_when_address_does_not_hold_asset(monkeypatc
 
     monkeypatch.setattr(chain_tools, "_algod_get", fake_algod_get)
 
-    result = chain_tools._tool_get_asset_holder_share(1, "SOME_ADDR")
+    addr = chain_tools._encode_address(b"\x03" * 32)
+    result = chain_tools._tool_get_asset_holder_share(1, addr)
     assert result["share_pct"] == 0.0
 
 
@@ -156,3 +158,48 @@ def test_lookup_asset_by_name_tool_registered() -> None:
     names = {s["function"]["name"] for s in schemas}
     assert "lookup_asset_by_name" in names
     assert "lookup_asset_by_name" in handlers
+
+
+def test_is_valid_address_rejects_the_real_fabricated_addresses() -> None:
+    """Regression-pin the actual 2026-07-14 incident: a model composing an
+    NFT-marketplace article invented four plausible-looking addresses (each
+    just the project's name as a prefix) and called lookup_account on them —
+    all four failed algod with an unhelpful generic 400. Three of the four
+    weren't even 58 characters."""
+    for addr in (
+        "EXA6RX5G6G2UXIMZ2HXV4C5OMJ3XKPN7VBP7GWQ2DEAF7WIOMCQBZWBXUY",
+        "ALGOXNFT7KIZYGTA2T4T6336623FC6HDTYNY5YNVT4FHIMD2Q6UW73EDE",
+        "DARTROOM5XUPXW7M7VKIGJ2T6H7WNWSJT27GXURCJN5XCQ5QJHQPHJQLQ2Y",
+        "ABRIS5XUPXW7M7VKIGJ2T6H7WNWSJT27GXURCJN5XCQ5QJHQPHJQLQ2Y4",
+    ):
+        assert not chain_tools._is_valid_address(addr), addr
+
+
+def test_is_valid_address_accepts_a_real_checksum() -> None:
+    # _encode_address is the exact inverse of the check under test — a
+    # genuine round-trip, not a hand-picked string that happens to look right.
+    real = chain_tools._encode_address(b"\x00" * 32)
+    assert len(real) == 58
+    assert chain_tools._is_valid_address(real)
+
+
+def test_lookup_account_rejects_invalid_address_without_hitting_algod(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(chain_tools, "_algod_get", lambda path: calls.append(path) or {})
+
+    fake_addr = "EXA6RX5G6G2UXIMZ2HXV4C5OMJ3XKPN7VBP7GWQ2DEAF7WIOMCQBZWBXUY"
+    result = chain_tools._tool_lookup_account(fake_addr)
+
+    assert "error" in result
+    assert "never construct, guess" in result["error"]
+    assert calls == []  # no wasted network call for a string that can't be real
+
+
+def test_lookup_account_proceeds_for_a_valid_address(monkeypatch) -> None:
+    real = chain_tools._encode_address(b"\x01" * 32)
+    monkeypatch.setattr(chain_tools, "_algod_get", lambda path: {"amount": 5_000_000, "assets": []})
+
+    result = chain_tools._tool_lookup_account(real)
+
+    assert "error" not in result
+    assert result["balance_algo"] == 5.0
