@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
 # every stored article so analytics can correlate a prompt edit with a shift in
 # grades/engagement instead of guessing from deploy timestamps.
-PROMPT_VERSION = "2026-07-15a"
+PROMPT_VERSION = "2026-07-15b"
 
 
 @dataclass(frozen=True)
@@ -83,6 +83,16 @@ def _writing_guidelines(today: str) -> str:
         "challenge once, don't pile on by repeating it in every section, and where "
         "warranted let the piece close with a fair, honest note of hope or potential "
         "rather than pure negativity.\n"
+        "- No restatement across sections: state each specific fact or judgment "
+        "ONCE, in the section it belongs to. A comparison table, a 'why this "
+        "matters' analysis, and a reader-guidance section must each ADD something "
+        "the reader doesn't already have — not independently re-derive the same "
+        "observation from scratch (e.g. 'fees are undisclosed' or 'volume is "
+        "self-reported and unverified' showing up nearly verbatim in the prose, "
+        "the table, AND a bulleted list is a structure that has failed this rule, "
+        "root-caused 2026-07-15). If a later section would just restate an earlier "
+        "point, either cut it from that section or phrase it as a callback ('as "
+        "noted above') instead of rewriting it as if for the first time.\n"
         "- Narrative Synthesis: Identify the connective tissue between your research "
         "findings. Weave distinct developments into a unified, flowing narrative. "
         "You are strictly prohibited from using bulleted lists to summarize events, "

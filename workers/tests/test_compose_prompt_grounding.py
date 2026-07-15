@@ -188,6 +188,20 @@ def test_technical_stakes_bridges_algorand_layer1():
     assert "Pure Proof-of-Stake" in guidelines
 
 
+def test_writing_guidelines_bans_cross_section_restatement():
+    """Root-caused 2026-07-15 on a real NFT-marketplace article: 'fees are
+    undisclosed' and 'AlgoSeas volume is self-reported/unverified' each
+    showed up in the per-subject prose, the comparison table, a bulleted
+    'why this matters' analysis, AND a reader-guidance section — four
+    independent re-derivations of the same two facts. The existing 'state
+    the challenge once' rule didn't catch this because it's scoped to
+    criticism of a project's shortcomings, not general factual restatement
+    across a table/bullets/guidance structure."""
+    guidelines = mc._writing_guidelines("2026-07-09")
+    assert "No restatement across sections" in guidelines
+    assert "ONCE, in the section it belongs to" in guidelines
+
+
 def test_narrative_guidance_requires_data_table():
     assert "DATA PRESENTATION" in mc._NARRATIVE_GUIDANCE
     assert "Concept' and 'Real-World Implication'" in mc._NARRATIVE_GUIDANCE
