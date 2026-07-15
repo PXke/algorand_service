@@ -34,6 +34,48 @@ def test_quality_needs_revision_low_critical_distance() -> None:
     )
 
 
+def test_quality_needs_revision_low_repetition() -> None:
+    """Root-caused 2026-07-15: a real NFT-marketplace draft restated 'fees are
+    undisclosed' five times across sections and still scored 8.6 overall,
+    because nothing scored dimension checked by quality_needs_revision covered
+    cross-section repetition — the rubric's own free-text issues mentioned it,
+    but that alone never forced a revision pass."""
+    assert quality_needs_revision(
+        {"narrative_synthesis": 5, "technical_depth": 5, "critical_distance": 5, "repetition": 2},
+        min_score=3,
+    )
+    assert not quality_needs_revision(
+        {"narrative_synthesis": 3, "technical_depth": 3, "critical_distance": 3, "repetition": 3},
+        min_score=3,
+    )
+    # Missing key (older callers/tests) must not crash or count as failing.
+    assert not quality_needs_revision(
+        {"narrative_synthesis": 3, "technical_depth": 3, "critical_distance": 3}, min_score=3
+    )
+
+
+def test_grade_article_quality_llm_includes_repetition(monkeypatch) -> None:
+    class _StubClient:
+        def chat_json_object(self, *_a, **_kw):
+            return {
+                "narrative_synthesis": 4,
+                "technical_depth": 4,
+                "critical_distance": 4,
+                "repetition": 2,
+                "issues": [],
+            }
+
+    monkeypatch.setattr(
+        "app.core.config.WRITER_QUALITY_LLM_ENABLED", True, raising=False
+    )
+    result = grade_article_quality_llm(
+        title="T", body="Some article body text.", client=_StubClient()
+    )
+    assert result["model"] == "llm_rubric"
+    assert result["repetition"] == 2
+    assert any("repetition scored 2/5" in i for i in result["issues"])
+
+
 def test_grade_article_schema_ignores_relevance_in_issues() -> None:
     from app.modules.newspaper.article_grader import grade_article_draft
 

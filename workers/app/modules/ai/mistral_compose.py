@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
 # every stored article so analytics can correlate a prompt edit with a shift in
 # grades/engagement instead of guessing from deploy timestamps.
-PROMPT_VERSION = "2026-07-15b"
+PROMPT_VERSION = "2026-07-15c"
 
 
 @dataclass(frozen=True)
@@ -852,8 +852,12 @@ def _review_and_revise(
                 "has a conflict of interest (a centralized exchange's product, a reward "
                 "structure that incentivizes holding the SAME platform's token, an "
                 "unaudited protocol), name the actual risk/tradeoff a reader needs "
-                "instead of just relaying the subject's own marketing framing. PRESERVE "
-                "every verified fact. Do NOT invent quotes, partnerships, or numbers. "
+                "instead of just relaying the subject's own marketing framing. If a "
+                "specific fact or judgment (a number, a named risk, a conclusion) "
+                "currently appears in more than one section, CUT the later restatements "
+                "and keep only the first mention — do not just reword the same point "
+                "each time it comes up. PRESERVE every verified fact. Do NOT invent "
+                "quotes, partnerships, or numbers. "
                 if needs_depth
                 else "PRESERVE every fact AND keep the same length — only REORGANIZE "
                 "the existing prose into section headings and short paragraphs; move "

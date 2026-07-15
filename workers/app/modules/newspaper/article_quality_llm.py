@@ -25,10 +25,19 @@ _QUALITY_RUBRIC = (
     "risk vs protocol-level control, counterparty risk, lack of audit, centralization) "
     "named explicitly — not omitted, and not buried under the subject's own framing "
     "of its benefits. A piece that only lists features/benefits without naming what "
-    "a skeptical reader would want to know scores LOW here even if well-written.\n\n"
+    "a skeptical reader would want to know scores LOW here even if well-written.\n"
+    "- repetition: does any specific fact or judgment (a number, a named risk, a "
+    "conclusion like 'fees are undisclosed') get independently RESTATED across "
+    "multiple sections — e.g. once in the prose, again in a table, again in a "
+    "bullet list, again in a closing summary — instead of being said once and "
+    "referenced afterward? Score 5 only if nothing is restated from scratch after "
+    "its first mention; score LOW (1-2) if the same specific point is restated as "
+    "a fresh observation 3+ times across the piece, even if each restatement is "
+    "worded slightly differently — that still counts as repetition, not new "
+    "information.\n\n"
     "Output a single JSON object with exactly these keys:\n"
     '{"narrative_synthesis": 3, "technical_depth": 3, "critical_distance": 3, '
-    '"issues": ["short fix"]}\n'
+    '"repetition": 3, "issues": ["short fix"]}\n'
     "JSON SAFETY: Return JSON only — no markdown fences or prose. In issue strings "
     "use single quotes for any quoted text, or avoid double quotes entirely; never "
     "emit unescaped double quotes inside JSON string values.\n"
@@ -40,6 +49,7 @@ _FALLBACK_QUALITY = {
     "narrative_synthesis": 2,
     "technical_depth": 2,
     "critical_distance": 2,
+    "repetition": 2,
     "issues": [
         "quality rubric could not be parsed — weave facts into connected journalism, "
         "not dictionary-style summaries",
@@ -112,6 +122,7 @@ def grade_article_quality_llm(
         narrative = _clamp_score(parsed.get("narrative_synthesis"))
         technical = _clamp_score(parsed.get("technical_depth"))
         critical_distance = _clamp_score(parsed.get("critical_distance"))
+        repetition = _clamp_score(parsed.get("repetition"))
         issues = [
             str(i).strip()
             for i in (parsed.get("issues") or [])
@@ -133,11 +144,18 @@ def grade_article_quality_llm(
                 "risk/tradeoff (custodial risk, conflict of interest, lack of audit) "
                 "instead of just relaying the subject's own marketing framing"
             )
+        if repetition is not None and repetition < 4:
+            issues.append(
+                f"repetition scored {repetition}/5 — a specific fact or judgment is "
+                "restated as a fresh observation in more than one section; keep the "
+                "first mention and cut (or reference back to) the rest"
+            )
         return {
             "model": "llm_rubric",
             "narrative_synthesis": narrative,
             "technical_depth": technical,
             "critical_distance": critical_distance,
+            "repetition": repetition,
             "issues": issues,
         }
     except Exception as exc:
@@ -157,7 +175,7 @@ def _clamp_score(value: Any) -> int | None:
 
 def quality_needs_revision(quality: dict[str, Any], *, min_score: int) -> bool:
     """True when any LLM dimension falls below the revision threshold."""
-    for key in ("narrative_synthesis", "technical_depth", "critical_distance"):
+    for key in ("narrative_synthesis", "technical_depth", "critical_distance", "repetition"):
         score = quality.get(key)
         if score is not None and int(score) < min_score:
             return True

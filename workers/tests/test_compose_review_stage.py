@@ -146,6 +146,52 @@ def test_parse_article_fields_grade_defaults_none() -> None:
     assert fields.heuristic_grade is None
 
 
+def test_low_repetition_score_triggers_revision_with_cut_instruction(monkeypatch) -> None:
+    """A repetition-only failure (all other rubric dimensions fine) must still
+    trigger a revision pass, and that pass's prompt must explicitly tell the
+    model to CUT restated points rather than just vaguely 'improve' the draft
+    — root-caused 2026-07-15 on a real NFT-marketplace article that restated
+    'fees are undisclosed' five times across sections."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **kw: {"grade": 10.0, "issues": []},
+    )
+    quality_results = iter([
+        {
+            "narrative_synthesis": 5,
+            "technical_depth": 5,
+            "critical_distance": 5,
+            "repetition": 2,
+            "issues": [
+                "repetition scored 2/5 — a specific fact is restated in more than one section"
+            ],
+        },
+        {
+            "narrative_synthesis": 5,
+            "technical_depth": 5,
+            "critical_distance": 5,
+            "repetition": 5,
+            "issues": [],
+        },
+    ])
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **kw: next(quality_results),
+    )
+    seq = _SequenceMistral([
+        {"title": "T2", "body": "the fact stated once and a tightened rest of the section"}
+    ])
+
+    out = _review_and_revise(
+        seq, {"title": "T", "body": "the same fact restated in every section of the draft"},
+        system="sys", gen_user="u", trace=[],
+    )
+
+    assert seq.calls == 1
+    assert "CUT the later restatements" in seq.sent_users[0]
+    assert out["body"] == "the fact stated once and a tightened rest of the section"
+
+
 def test_low_quality_llm_triggers_revision(monkeypatch) -> None:
     # Quality mock never improves — with WRITER_REVISION_MAX_PASSES=2 (default)
     # this should genuinely attempt a SECOND revision instead of giving up
