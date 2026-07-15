@@ -566,6 +566,11 @@ class InvestigationStmts:
 # pending_feed_queue
 # --------------------------------------------------------------------------- #
 class PendingFeedStmts:
+    INSERT = _Stmt(
+        "INSERT INTO algorand_platform.pending_feed_queue "
+        "(bucket, interest_score, approved_at, article_id) "
+        "VALUES (?, ?, ?, ?)"
+    )
     PEEK = _Stmt(
         "SELECT bucket, interest_score, approved_at, article_id "
         "FROM algorand_platform.pending_feed_queue WHERE bucket = ? LIMIT 1"

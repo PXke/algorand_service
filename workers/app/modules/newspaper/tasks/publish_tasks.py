@@ -724,6 +724,7 @@ def publish_from_queued_row(
     # deliberately never fed into classifier_feedback (that table trains from
     # HUMAN labels; an auto-decision isn't one).
     needs_review = clf_decision is not True or gate_enforced_review
+    route_to_backlog = False
     if needs_review:
         fresh_auto_approved, fresh_auto_meta = _fresh_auto_approve_passes(
             title=composed.title,
@@ -732,7 +733,31 @@ def publish_from_queued_row(
             source_url=row.scrape_url,
         )
         if fresh_auto_approved:
-            needs_review = False
+            # An auto-approved article is approved, not exempt from cadence:
+            # it may publish NOW only when the standard interval has elapsed
+            # and a daily slot is free; otherwise the finished draft is stored
+            # unlisted and queued in pending_feed_queue for the paced backlog
+            # release. Without this gate a drain run with several
+            # auto-approvable rows chain-published them minutes apart — three
+            # articles in a row on 2026-07-15, because the review branch
+            # bypasses publish pacing by design and an "auto-published"
+            # outcome advanced neither the pacing clock nor the run budget.
+            if tier == PublishTier.BREAKING:
+                pacing_open = True  # breaking is urgent by definition
+            else:
+                from app.modules.newspaper.publish_policy import (
+                    remaining_standard_publish_slots,
+                )
+                from app.modules.newspaper.publish_schedule import (
+                    is_standard_publish_due,
+                )
+
+                due, _due_detail = is_standard_publish_due()
+                pacing_open = due and remaining_standard_publish_slots() > 0
+            if pacing_open:
+                needs_review = False
+            else:
+                route_to_backlog = True
             from app.modules.crawler.classifier_review_store import (
                 complete_classifier_review,
                 enqueue_classifier_review,
@@ -751,12 +776,13 @@ def publish_from_queued_row(
                     "diverted_by": "gatekeeper" if gate_enforced_review else "classifier",
                     "og_image": image_field,
                     "service_id": row.service_id,
+                    "auto_route": "backlog" if route_to_backlog else "publish",
                     **fresh_auto_meta,
                 },
             )
             complete_classifier_review(auto_review_id, resolution="auto_approved")
 
-    if needs_review:
+    if needs_review or route_to_backlog:
         from app.modules.crawler.classifier_review_store import (
             enqueue_classifier_review,
             has_pending_review_for_url,
@@ -770,7 +796,9 @@ def publish_from_queued_row(
             }
         from app.modules.crawler.classifier_review_store import review_queue_full
 
-        if review_queue_full():
+        # Backlog-bound drafts are already approved — the review slot being
+        # occupied must not block them.
+        if not route_to_backlog and review_queue_full():
             return {"status": "review_queue_full", "service_id": row.service_id}
 
         held_kind = _source_kind_from_url(row.scrape_url)
@@ -839,25 +867,27 @@ def publish_from_queued_row(
                 grade_meta.update(gate.as_metadata())
         except Exception:
             logger.warning("gatekeeper grading failed for %s", row.scrape_url, exc_info=True)
-        review_id = enqueue_classifier_review(
-            url=row.scrape_url,
-            page_text=page_text_for_clf,
-            page_title=str(payload.get("page_title", "")) or held_title,
-            category=clf_category,
-            storage_score=signals.storage_score,
-            metadata={
-                "article_id": held_article_id,
-                "source": held_kind or "web",
-                "confidence": f"{clf_confidence:.3f}",
-                "categories": ",".join(signals.categories),
-                "diverted_by": "gatekeeper" if gate_enforced_review else "classifier",
-                # recompose_review carries these forward — without og_image
-                # here, every recomposed article silently lost its image.
-                "og_image": image_field,
-                "service_id": row.service_id,
-                **grade_meta,
-            },
-        )
+        review_id = ""
+        if not route_to_backlog:
+            review_id = enqueue_classifier_review(
+                url=row.scrape_url,
+                page_text=page_text_for_clf,
+                page_title=str(payload.get("page_title", "")) or held_title,
+                category=clf_category,
+                storage_score=signals.storage_score,
+                metadata={
+                    "article_id": held_article_id,
+                    "source": held_kind or "web",
+                    "confidence": f"{clf_confidence:.3f}",
+                    "categories": ",".join(signals.categories),
+                    "diverted_by": "gatekeeper" if gate_enforced_review else "classifier",
+                    # recompose_review carries these forward — without og_image
+                    # here, every recomposed article silently lost its image.
+                    "og_image": image_field,
+                    "service_id": row.service_id,
+                    **grade_meta,
+                },
+            )
         # A held-for-review draft is a created article — count it toward the
         # per-website daily cap so a domain can't exceed its COMPOSE_MAX_PER_DOMAIN_PER_DAY.
         if compose_domain:
@@ -875,6 +905,33 @@ def publish_from_queued_row(
                 mark_brief_run(
                     brief_id=str(payload.get("brief_id", "")), article_id=held_article_id
                 )
+        if route_to_backlog:
+            # Approved but the cadence/cap is closed: hand the finished
+            # article to pending_feed_queue — _release_pending_feed_backlog
+            # ships it later at the standard pace (re-stamping published_at
+            # at release, same as the admin approve-when-capped path).
+            from datetime import UTC as _UTC
+            from datetime import datetime as _dt
+            from uuid import UUID
+
+            from app.core import config as worker_config
+            from app.core.cassandra import get_cassandra_session
+            from app.core.statements import PendingFeedStmts
+
+            get_cassandra_session().execute(
+                PendingFeedStmts.INSERT,
+                (
+                    worker_config.NEWS_FEED_BUCKET or "main",
+                    0.0,  # interest unknown here; FIFO within the day is fine
+                    _dt.now(tz=_UTC),
+                    UUID(held_article_id),
+                ),
+            )
+            return {
+                "status": "approved_backlog",
+                "service_id": row.service_id,
+                "article_id": held_article_id,
+            }
         return {
             "status": "review",
             "service_id": row.service_id,

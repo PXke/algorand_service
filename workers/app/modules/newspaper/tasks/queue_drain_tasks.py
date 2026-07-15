@@ -401,12 +401,25 @@ def drain_standard_publish_queue() -> dict[str, object]:
                 if review_full or reviews_composed >= config.REVIEW_COMPOSE_BATCH_LIMIT:
                     continue
                 outcome = _compose_review_row(row)
-                if outcome.get("status") == "review":
+                outcome_status = outcome.get("status")
+                if outcome_status == "review":
                     reviews_composed += 1
                     # The slot we just filled may now be full (MAX_PENDING_REVIEWS
                     # is typically 1) — re-check so we don't compose more reviews
                     # this run only to discard them with "review_queue_full".
                     review_full = review_queue_full()
+                elif outcome_status == "published":
+                    # Fresh-auto-approve published straight to the feed: that
+                    # is a real standard-tier release. Advance the pacing
+                    # clock and spend this run's feed budget — on 2026-07-15
+                    # neither happened and one drain run chain-published
+                    # three articles minutes apart.
+                    record_standard_publish()
+                    published += 1
+                elif outcome_status == "approved_backlog":
+                    # A full compose was spent even though nothing hit the
+                    # feed — count it toward the per-run compose budget.
+                    reviews_composed += 1
                 results.append({"queue_id": row.queue_id, **outcome})
                 continue
 

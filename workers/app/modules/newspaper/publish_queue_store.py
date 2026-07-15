@@ -26,7 +26,15 @@ def queue_row_tier(row: QueuedPublishRow) -> PublishTier:
 # status is added in one place — a missing one here is the bug class behind
 # "the same topic keeps reappearing".
 TERMINAL_OUTCOMES = frozenset(
-    {"published", "review", "duplicate", "duplicate_review_pending"}
+    {
+        "published",
+        "review",
+        # Auto-approved article stored to pending_feed_queue for the paced
+        # backlog release — the queue row is resolved, the article exists.
+        "approved_backlog",
+        "duplicate",
+        "duplicate_review_pending",
+    }
 )
 
 
