@@ -150,6 +150,26 @@ def test_research_digest_synthesis_schema():
     assert "READY" not in mc._RESEARCH_PHASE_GUIDANCE
 
 
+def test_research_digest_synthesis_carries_chart_verbatim():
+    """Root-caused 2026-07-14: a chart_data tool call succeeded (returned a
+    valid markdown_fence) during research, but the digest-synthesis prompt
+    had no section for it — none of Verified Facts/Verbatim Quotes/Liveness
+    Signals/Numeric Conversions/Unresolved Gaps fit a code-fence artifact, so
+    the digest LLM silently dropped it and the published article had no
+    chart at all despite the tool succeeding. Stage 2 has no tools and works
+    ONLY from the digest, so this section is the only way a chart can survive
+    into the final body."""
+    assert "### Chart" in mc._RESEARCH_DIGEST_SYNTHESIS
+    assert "markdown_fence" in mc._RESEARCH_DIGEST_SYNTHESIS
+    assert "VERBATIM" in mc._RESEARCH_DIGEST_SYNTHESIS
+
+
+def test_narrative_guidance_tells_stage2_to_paste_chart_verbatim():
+    assert "CHART" in mc._NARRATIVE_GUIDANCE
+    assert "### Chart" in mc._NARRATIVE_GUIDANCE
+    assert "paste it VERBATIM" in mc._NARRATIVE_GUIDANCE
+
+
 def test_research_phase_truncation_discipline():
     assert "TRUNCATION DISCIPLINE" in mc._RESEARCH_PHASE_GUIDANCE
     assert "continue_reading=true" in mc._RESEARCH_PHASE_GUIDANCE

@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
 # every stored article so analytics can correlate a prompt edit with a shift in
 # grades/engagement instead of guessing from deploy timestamps.
-PROMPT_VERSION = "2026-07-14b"
+PROMPT_VERSION = "2026-07-15a"
 
 
 @dataclass(frozen=True)
@@ -400,6 +400,12 @@ _NARRATIVE_GUIDANCE = (
     "feature sets), you MUST isolate it into a Markdown table with explicit columns "
     "for 'Concept' and 'Real-World Implication' — never bury multi-item data in "
     "dictionary-style paragraphs or comma-separated sentences.\n"
+    "5. CHART: if the Research Digest's ### Chart section contains a fenced "
+    "```chart block (not 'None'), paste it VERBATIM into the body at the point "
+    "most relevant to the data it shows — you have no tools in this stage and "
+    "cannot regenerate or verify new chart numbers, so never re-derive, "
+    "reformat, or invent chart JSON yourself. If the Chart section says "
+    "'None', do not fabricate a chart.\n"
     "This is EXPANSION BY EXPLANATION — never invent external facts, quotes, or "
     "partnerships, and still no generic filler. This includes specific data points "
     "— a named transaction, a price, a date — that are not already in the Research "
@@ -497,6 +503,13 @@ _RESEARCH_DIGEST_SYNTHESIS = (
     "with decimals=2 is 1,000,000,000 tokens, not 100,000,000,000) and show your "
     "division so Stage 2 doesn't have to re-derive it and doesn't repeat the raw "
     "integer as if it were the token count.\n\n"
+    "### Chart\n"
+    "- If a chart_data tool call in the trace above returned a `markdown_fence` "
+    "field (a successful ```chart block), copy that fence VERBATIM into this "
+    "section exactly as it appears in the trace — do not re-derive, reformat, "
+    "or paraphrase the JSON; Stage 2 has no tools and cannot rebuild it. If "
+    "chart_data was never called, or every call returned an error (no "
+    "`markdown_fence` anywhere in the trace), write exactly: None\n\n"
     "### Unresolved Gaps\n"
     "- List up to 3 SPECIFIC, answerable questions that materially matter to "
     "this story and that a further tool call could plausibly resolve (e.g. "
