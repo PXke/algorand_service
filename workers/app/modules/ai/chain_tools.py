@@ -211,20 +211,50 @@ def _mainnet_idx_get(path: str, params: dict | None = None) -> Any:
 
 
 def _tool_lookup_asset_by_name(name: str, limit: int = 5) -> dict[str, Any]:
-    """Search mainnet ASAs by name/unit-name when the numeric asset_id isn't
-    known yet — lookup_asset needs an id, and algod itself can't search by
-    name (only the indexer can). Use this first to find the id, then
-    lookup_asset for the full parameters."""
+    """Search mainnet ASAs by ticker/unit-name (preferred) or display name when
+    the numeric asset_id isn't known yet — lookup_asset needs an id, and algod
+    itself can't search by name (only the indexer can). Use this first to find
+    the id, then lookup_asset for the full parameters.
+
+    Root-caused 2026-07-16: a ticker query (e.g. "WAD") used to hit the
+    indexer's `name` param, which substring-matches a project's free-text
+    DISPLAY name — but a real stablecoin's display name may not contain its
+    own ticker at all ("Whale Asset Dollar" doesn't contain "wad"), so its own
+    token was invisible to this search while unrelated spam/airdrop tokens
+    with garbled names ("32353024;WADIWYER") matched purely by coincidence. A
+    compose cited that spam asset's id as the real token's — the model wasn't
+    hallucinating a number, it was quoting this tool's top (and only
+    plausible-looking) "result" verbatim.
+
+    Fix: query the indexer's `unit` param (substring-matches unit-name, the
+    actual ticker) over a wide page, then rank an EXACT case-insensitive
+    unit-name match first — real tokens surface at the top instead of getting
+    lost in substring noise. Falls back to the old `name` search only when the
+    ticker search finds nothing at all (a genuine display-name lookup, e.g.
+    "CompX")."""
     q = (name or "").strip()
     if not q:
         return {"error": "name must not be empty"}
     n = max(1, min(int(limit), 20))
-    data = _mainnet_idx_get("/v2/assets", params={"name": q, "limit": n})
+    data = _mainnet_idx_get("/v2/assets", params={"unit": q, "limit": 100})
     if not isinstance(data, dict):
         return {"error": "unexpected indexer response"}
     if data.get("error"):
         return data
     assets = data.get("assets", []) or []
+    if not assets:
+        data = _mainnet_idx_get("/v2/assets", params={"name": q, "limit": n})
+        if not isinstance(data, dict):
+            return {"error": "unexpected indexer response"}
+        if data.get("error"):
+            return data
+        assets = data.get("assets", []) or []
+
+    def _rank(a: dict[str, Any]) -> int:
+        unit = ((a.get("params") or {}).get("unit-name") or "").strip().upper()
+        return 0 if unit == q.upper() else 1
+
+    assets = sorted(assets, key=_rank)
     results = []
     for a in assets:
         if not isinstance(a, dict):

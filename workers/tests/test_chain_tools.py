@@ -140,6 +140,61 @@ def test_lookup_asset_by_name_returns_candidates(monkeypatch) -> None:
     ]
 
 
+def test_lookup_asset_by_name_finds_real_ticker_among_name_substring_noise(
+    monkeypatch,
+) -> None:
+    """Root-caused 2026-07-16: searching "WAD" via the indexer's `name` param
+    (old behavior) matched spam/airdrop tokens whose free-text NAME field
+    happens to contain the substring "wad" (e.g. "32353024;WADIWYER") while
+    completely missing the real token — DorkFi's actual stablecoin is named
+    "Whale Asset Dollar" (ticker WAD), and "Whale Asset Dollar" does not
+    contain the substring "wad" at all. A compose cited the spam asset's id
+    as the real token's. The fix queries `unit` (the ticker field) instead
+    and ranks an exact unit-name match first."""
+    real = {
+        "index": 3334160924,
+        "params": {"name": "Whale Asset Dollar", "unit-name": "WAD", "creator": "REAL"},
+    }
+    partial = {
+        "index": 292312665,
+        "params": {"name": "Circumscribed", "unit-name": "cwad001", "creator": "OTHER"},
+    }
+    calls: list[dict] = []
+
+    def fake_idx_get(path, params=None):
+        calls.append(dict(params or {}))
+        assert "unit" in params, "must search by ticker (unit), not free-text name"
+        return {"assets": [partial, real]}
+
+    monkeypatch.setattr(chain_tools, "_mainnet_idx_get", fake_idx_get)
+    result = chain_tools._tool_lookup_asset_by_name("WAD", limit=5)
+    assert len(calls) == 1  # exact ticker hit found — no name-search fallback needed
+    assert result["results"][0]["asset_id"] == 3334160924
+    assert result["results"][0]["unit_name"] == "WAD"
+
+
+def test_lookup_asset_by_name_falls_back_to_display_name_search(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    def fake_idx_get(path, params=None):
+        calls.append(dict(params or {}))
+        if "unit" in params:
+            return {"assets": []}  # no ticker hits
+        return {
+            "assets": [
+                {
+                    "index": 1732165149,
+                    "params": {"name": "CompX Token", "unit-name": "COMPX", "creator": "C"},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(chain_tools, "_mainnet_idx_get", fake_idx_get)
+    result = chain_tools._tool_lookup_asset_by_name("CompX")
+    assert len(calls) == 2  # ticker search, then the display-name fallback
+    assert result["results"][0]["asset_id"] == 1732165149
+
+
 def test_lookup_asset_by_name_requires_nonempty_name() -> None:
     result = chain_tools._tool_lookup_asset_by_name("")
     assert "error" in result
