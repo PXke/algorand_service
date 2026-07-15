@@ -108,3 +108,26 @@ def test_search_web_not_configured_without_url(monkeypatch) -> None:
 
     assert result["error"] == "web search not configured"
     assert result["results"] == []
+
+
+def test_search_web_surfaces_suggestions(monkeypatch) -> None:
+    payload = {
+        "results": [],
+        "suggestions": ["algorand nft marketplaces", "algo nft market"],
+    }
+    monkeypatch.setattr("httpx.Client", lambda **kw: _FakeClient(payload, captured=[]))
+    monkeypatch.setattr("app.core.config.SEARXNG_URL", "http://127.0.0.1:8888")
+
+    result = _tool_search_web("algorand nft marketplce")
+
+    assert result["suggestions"] == ["algorand nft marketplaces", "algo nft market"]
+
+
+def test_search_web_omits_suggestions_key_when_none(monkeypatch) -> None:
+    payload = {"results": [], "suggestions": []}
+    monkeypatch.setattr("httpx.Client", lambda **kw: _FakeClient(payload, captured=[]))
+    monkeypatch.setattr("app.core.config.SEARXNG_URL", "http://127.0.0.1:8888")
+
+    result = _tool_search_web("a well-formed query")
+
+    assert "suggestions" not in result

@@ -73,7 +73,15 @@ def _tool_search_web(query: str, limit: int = 6) -> dict[str, Any]:
                 "published_date": r.get("publishedDate") or None,
             }
         )
-    return {"query": query, "count": len(results), "results": results}
+    out: dict[str, Any] = {"query": query, "count": len(results), "results": results}
+    # SearXNG's own query-refinement hints (e.g. a likely spelling correction
+    # or a related term) — previously fetched and silently discarded. Surface
+    # them so a query that returns few/no results can be retried smarter
+    # instead of the model guessing blind at a rephrase.
+    suggestions = [str(s)[:100] for s in (data.get("suggestions") or [])][:5]
+    if suggestions:
+        out["suggestions"] = suggestions
+    return out
 
 
 def _bsky_access_token() -> str:
@@ -165,7 +173,9 @@ _WEB_SCHEMA = {
             "you need to research a topic; then fetch the best URL with the safe "
             "fetch tool. Results with a real published_date (from news engines) are "
             "returned first — use that date, never a guess, when a result's "
-            "recency matters to the story."
+            "recency matters to the story. A response with few/no results may "
+            "include `suggestions` (alternate phrasings) — try one of those before "
+            "giving up on the query."
         ),
         "parameters": {
             "type": "object",
