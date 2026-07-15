@@ -39,6 +39,7 @@ def _article_row(aid) -> MagicMock:
     row.prompt_version = ""
     row.translations = None
     row.tags = ["nft"]
+    row.first_published_at = None  # never recomposed before
     return row
 
 
@@ -105,6 +106,8 @@ def test_replace_inserts_complete_feed_row_at_new_published_at(
     assert bucket == new_published_at.strftime("%Y-%m")
     assert service_id == "editorial-brief:53016f2f"
     assert params[8] == "editorial://brief/53016f2f"  # source_url
+    # First recompose: first_published_at is seeded with the ORIGINAL date.
+    assert params[9] == _OLD_PUBLISHED_AT
 
 
 def test_replace_restamps_published_at_to_apply_time(monkeypatch) -> None:
@@ -122,8 +125,68 @@ def test_replace_restamps_published_at_to_apply_time(monkeypatch) -> None:
     assert len(updates) == 1
     stmt, params = updates[0]
     assert "published_at = ?" in stmt
-    # (title, summary, body, tags, image, published_at, updated_at, aid)
+    assert "first_published_at = ?" in stmt
+    # (title, summary, body, tags, image, published_at, first_published_at,
+    #  updated_at, aid)
     assert params[5] == new_published_at
+    assert params[6] == _OLD_PUBLISHED_AT
+
+
+def test_second_recompose_preserves_original_first_published_at(
+    monkeypatch,
+) -> None:
+    """first_published_at is set ONCE (first recompose) and carried verbatim
+    afterwards — a weekly refresh chain must not walk the original date
+    forward one recompose at a time."""
+    aid = uuid4()
+    row = _article_row(aid)
+    original = datetime(2026, 5, 1, 12, 0, 0, 111000)
+    row.first_published_at = original  # already recomposed once before
+    _, session = _run_replace(monkeypatch, row)
+
+    inserts = _calls_matching(
+        session, "INSERT INTO algorand_platform.articles_feed"
+    )
+    assert inserts[0][1][9] == original
+    updates = _calls_matching(
+        session, "UPDATE algorand_platform.articles_by_id SET title"
+    )
+    assert updates[0][1][6] == original
+
+
+def test_daily_cap_ignores_recompose_republishes(monkeypatch) -> None:
+    """A recomposed article re-enters today's published_at window but must
+    not consume a daily publish slot — count by first_published_at."""
+    from app.modules.newspaper import article_store
+
+    day_start = 1_784_073_600  # 2026-07-14 00:00 UTC
+    rows = [
+        # Genuinely new article today.
+        article_store.FeedArticleRow(
+            article_id="a", service_id="s1", title="t", summary="",
+            published_at_epoch=day_start + 3600,
+        ),
+        # Recomposed today, FIRST published two weeks ago — not a new publish.
+        article_store.FeedArticleRow(
+            article_id="b", service_id="s2", title="t", summary="",
+            published_at_epoch=day_start + 7200,
+            first_published_at_epoch=day_start - 14 * 86400,
+        ),
+        # Old article, untouched.
+        article_store.FeedArticleRow(
+            article_id="c", service_id="s3", title="t", summary="",
+            published_at_epoch=day_start - 86400,
+        ),
+    ]
+    monkeypatch.setattr(
+        article_store, "list_feed_articles", lambda *, limit=500: rows
+    )
+    assert (
+        article_store.count_articles_published_on_utc_day(
+            day_start_epoch=day_start
+        )
+        == 1
+    )
 
 
 def test_replace_feed_insert_binds_null_for_empty_source_url(

@@ -44,7 +44,7 @@ class ArticleStmts:
     EXISTS = _Stmt("SELECT article_id FROM algorand_platform.articles_by_id WHERE article_id = ?")
     GET_TAGS = _Stmt("SELECT tags FROM algorand_platform.articles_by_id WHERE article_id = ?")
     GET_PUBLISHED_AT = _Stmt(
-        "SELECT published_at FROM algorand_platform.articles_by_id "
+        "SELECT published_at, first_published_at FROM algorand_platform.articles_by_id "
         "WHERE article_id = ?"
     )
     GET_IMAGE_META = _Stmt(
@@ -83,7 +83,8 @@ class ArticleStmts:
     # 2026-07-15), so the refreshed story returns to the top of the feed.
     UPDATE_CONTENT_FULL = _Stmt(
         "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ?, "
-        "image_url = ?, published_at = ?, updated_at = ? WHERE article_id = ?"
+        "image_url = ?, published_at = ?, first_published_at = ?, updated_at = ? "
+        "WHERE article_id = ?"
     )
     CLEAR_TRANSLATIONS = _Stmt(
         "DELETE translations FROM algorand_platform.articles_by_id WHERE article_id = ?"
@@ -103,11 +104,12 @@ class ArticleStmts:
 
 class FeedStmts:
     BY_BUCKET = _Stmt(
-        "SELECT article_id, service_id, title, summary, published_at "
+        "SELECT article_id, service_id, title, summary, published_at, first_published_at "
         "FROM algorand_platform.articles_feed WHERE bucket = ? LIMIT ?"
     )
     BY_BUCKET_TAGS = _Stmt(
-        "SELECT published_at, tags FROM algorand_platform.articles_feed WHERE bucket = ? LIMIT ?"
+        "SELECT published_at, first_published_at, tags "
+        "FROM algorand_platform.articles_feed WHERE bucket = ? LIMIT ?"
     )
     BY_BUCKET_RECENT = _Stmt(
         "SELECT article_id, title, tags, published_at FROM algorand_platform.articles_feed "
@@ -126,8 +128,8 @@ class FeedStmts:
     INSERT_FULL = _Stmt(
         "INSERT INTO algorand_platform.articles_feed ("
         "bucket, published_at, article_id, service_id, title, summary, tags, "
-        "image_url, source_url, updated_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "image_url, source_url, first_published_at, updated_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     CLEAR_TRANSLATIONS = _Stmt(
         "DELETE translations FROM algorand_platform.articles_feed "

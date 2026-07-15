@@ -63,6 +63,7 @@ def _row(aid) -> MagicMock:
     row.prompt_version = ""
     row.translations = None
     row.tags = ["tag"]
+    row.first_published_at = None
     return row
 
 

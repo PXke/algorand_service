@@ -20,6 +20,10 @@ class FeedArticleRow:
     summary: str
     published_at_epoch: int
     translations: dict[str, str] | None = None
+    # Original publication moment; differs from published_at_epoch only after
+    # a recompose re-publish (which re-stamps published_at). None = never
+    # recomposed.
+    first_published_at_epoch: int | None = None
 
 
 @dataclass(frozen=True)
@@ -86,9 +90,15 @@ def count_articles_for_service(service_id: str, *, limit: int = 500) -> int:
 
 
 def count_articles_published_on_utc_day(*, day_start_epoch: int, limit: int = 500) -> int:
-    """Count feed articles published on or after UTC midnight for that day."""
+    """Count feed articles FIRST published on or after UTC midnight for that day.
+
+    Uses first_published_at when present: a recompose re-publish re-stamps
+    published_at to the apply time, and counting the refresh as a new publish
+    would burn a real slot out of the daily cap."""
     return sum(
-        1 for row in list_feed_articles(limit=limit) if row.published_at_epoch >= day_start_epoch
+        1
+        for row in list_feed_articles(limit=limit)
+        if (row.first_published_at_epoch or row.published_at_epoch) >= day_start_epoch
     )
 
 
@@ -114,7 +124,9 @@ def count_feed_articles_with_tag_on_day(
     needle = tag.strip().lower()
     count = 0
     for row in rows:
-        published_at = row.published_at
+        # first_published_at survives recompose re-publishes; a refresh must
+        # not count as a fresh publish for the daily caps.
+        published_at = getattr(row, "first_published_at", None) or row.published_at
         if not published_at:
             continue
         if int(published_at.timestamp()) < day_start_epoch:
@@ -156,6 +168,7 @@ def list_feed_articles(*, bucket: str = NEWS_FEED_BUCKET, limit: int = 100) -> l
         # the daily publish cap — found live 2026-07-13, self-inflicted by
         # the translations JSON-serialization fix earlier the same day).
         raw_translations = getattr(row, "translations", None)
+        first_published = getattr(row, "first_published_at", None)
         items.append(
             FeedArticleRow(
                 article_id=str(row.article_id),
@@ -164,6 +177,9 @@ def list_feed_articles(*, bucket: str = NEWS_FEED_BUCKET, limit: int = 100) -> l
                 summary=row.summary or "",
                 published_at_epoch=epoch,
                 translations=dict(raw_translations) if raw_translations else None,
+                first_published_at_epoch=(
+                    int(first_published.timestamp()) if first_published else None
+                ),
             )
         )
     return items
@@ -326,6 +342,9 @@ def update_article(
             tag_list,
             image,
             existing.source_url or None,
+            # Carry the stored value (INSERT with null would tombstone it on
+            # an article that was recomposed before this edit).
+            getattr(pub_row, "first_published_at", None),
             updated_at,
         ),
     )
@@ -366,6 +385,10 @@ def replace_article_content(
     if row is None or row.published_at is None:
         return None
     old_published_at = row.published_at
+    # Original publication date survives every re-publish: set once on the
+    # first recompose, carried verbatim afterwards. Daily caps and hot
+    # ranking read this instead of the re-stamped published_at.
+    first_published_at = getattr(row, "first_published_at", None) or old_published_at
     existing = get_article(article_id)
     if existing is None:
         return None
@@ -373,7 +396,7 @@ def replace_article_content(
     image = image_url or None
     session.execute(
         ArticleStmts.UPDATE_CONTENT_FULL,
-        (title, summary, body, tags, image, now, now, aid),
+        (title, summary, body, tags, image, now, first_published_at, now, aid),
     )
     session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (aid,))
     session.execute(
@@ -391,6 +414,7 @@ def replace_article_content(
             tags,
             image,
             existing.source_url or None,
+            first_published_at,
             now,
         ),
     )

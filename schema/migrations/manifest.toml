@@ -493,3 +493,11 @@ file = "backend/schema/migrations/app/053_pageview_language_daily.cql"
 tier = "prod"
 status = "active"
 description = "pageview_language_daily: reader Accept-Language breakdown per day, alongside the existing device/browser counters"
+
+[[migrations]]
+stream = "app"
+version = "054"
+file = "backend/schema/migrations/app/054_first_published_at.cql"
+tier = "prod"
+status = "active"
+description = "articles_by_id + articles_feed: first_published_at preserved across recompose re-publishes so daily caps and hot ranking use the original publication date"
