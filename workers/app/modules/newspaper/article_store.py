@@ -329,54 +329,61 @@ def replace_article_content(
     body: str,
     tags: list[str],
     image_url: str,
-) -> bool:
+) -> datetime | None:
     """Swap a published article's content in place (approved recompose): same
-    article_id, same URL, same published_at — new prose, tags and art, with
-    updated_at stamped and stale translations cleared (the translation of the
-    OLD prose must not keep serving; re-enqueue after this).
+    article_id, same URL — new prose, tags and art, with stale translations
+    cleared (the translation of the OLD prose must not keep serving;
+    re-enqueue after this). Returns the new published_at, or None on failure.
 
-    Feed PK precision rule as update_article_image: reuse the raw published_at
-    verbatim, never reconstruct from an epoch."""
+    Recompose is a RE-publish (owner policy 2026-07-15): published_at is
+    re-stamped to the apply time so the refreshed story returns to the top of
+    the feed — safe because article URLs are id-based. published_at is part of
+    the feed PK, so the row MOVES: the old row (located via the raw
+    full-precision timestamp, never reconstructed from an epoch) is deleted
+    and a COMPLETE new row inserted. Never a partial feed upsert here — one
+    resurrected a deleted row without service_id and the feed API's defensive
+    filter silently hid the article (incident 2026-07-15)."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
 
     try:
         aid = UUID(article_id)
     except ValueError:
-        return False
+        return None
     session = get_cassandra_session()
     row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
     if row is None or row.published_at is None:
-        return False
-    published_at = row.published_at
+        return None
+    old_published_at = row.published_at
     existing = get_article(article_id)
     if existing is None:
-        return False
-    updated_at = datetime.now(tz=UTC)
+        return None
+    now = datetime.now(tz=UTC)
     image = image_url or None
     session.execute(
         ArticleStmts.UPDATE_CONTENT_FULL,
-        (title, summary, body, tags, image, updated_at, aid),
+        (title, summary, body, tags, image, now, now, aid),
     )
     session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (aid,))
-    bucket = feed_month(published_at)
     session.execute(
-        FeedStmts.UPDATE_CONTENT_FULL,
+        FeedStmts.DELETE, (feed_month(old_published_at), old_published_at, aid)
+    )
+    session.execute(
+        FeedStmts.INSERT_FULL,
         (
+            feed_month(now),
+            now,
+            aid,
+            existing.service_id,
             title,
             summary,
             tags,
             image,
-            existing.service_id,
             existing.source_url or None,
-            updated_at,
-            bucket,
-            published_at,
-            aid,
+            now,
         ),
     )
-    session.execute(FeedStmts.CLEAR_TRANSLATIONS, (bucket, published_at, aid))
-    return True
+    return now
 
 
 def update_article_image(article_id: str, image_url: str) -> bool:

@@ -78,10 +78,12 @@ class ArticleStmts:
         "updated_at = ? WHERE article_id = ?"
     )
     # Content swap for an approved recompose of a PUBLISHED article: replaces
-    # prose + art on the SAME article_id (URL and published_at survive).
+    # prose + art on the SAME article_id (URL survives; id-based routes).
+    # published_at is re-stamped too — recompose is a re-publish (owner policy
+    # 2026-07-15), so the refreshed story returns to the top of the feed.
     UPDATE_CONTENT_FULL = _Stmt(
         "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ?, "
-        "image_url = ?, updated_at = ? WHERE article_id = ?"
+        "image_url = ?, published_at = ?, updated_at = ? WHERE article_id = ?"
     )
     CLEAR_TRANSLATIONS = _Stmt(
         "DELETE translations FROM algorand_platform.articles_by_id WHERE article_id = ?"
@@ -119,14 +121,15 @@ class FeedStmts:
         "bucket, published_at, article_id, service_id, title, summary, tags, updated_at"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    # Also re-sets service_id/source_url: Cassandra UPDATE is an upsert, so if
-    # the feed row was deleted (admin queue clear) this statement re-creates it —
-    # without these columns the resurrected row is a phantom (null service_id)
-    # that the feed API's defensive filter silently hides (incident 2026-07-15).
-    UPDATE_CONTENT_FULL = _Stmt(
-        "UPDATE algorand_platform.articles_feed SET title = ?, summary = ?, tags = ?, "
-        "image_url = ?, service_id = ?, source_url = ?, updated_at = ? "
-        "WHERE bucket = ? AND published_at = ? AND article_id = ?"
+    # Complete feed row for a recompose re-publish: published_at moved, so the
+    # old row is DELETEd and this full row inserted. Must carry EVERY projection
+    # column — a partial write here creates a phantom row (null service_id) that
+    # the feed API's defensive filter silently hides (incident 2026-07-15).
+    INSERT_FULL = _Stmt(
+        "INSERT INTO algorand_platform.articles_feed ("
+        "bucket, published_at, article_id, service_id, title, summary, tags, "
+        "image_url, source_url, updated_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     CLEAR_TRANSLATIONS = _Stmt(
         "DELETE translations FROM algorand_platform.articles_feed "

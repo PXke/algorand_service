@@ -1532,8 +1532,9 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
     draft. When the draft clears the (strict) RECOMPOSE_AUTO_APPLY bar — grade,
     headline style, gatekeeper — it swaps onto the live article_id immediately
     (autonomous mode); otherwise it holds in the review queue for a human.
-    Either way apply_recomposed_article does the swap: URL and published_at
-    survive, updated_at is stamped so the revision surfaces as dateModified.
+    Either way apply_recomposed_article does the swap: the URL survives and
+    published_at is re-stamped to the apply time (recompose is a re-publish —
+    owner policy 2026-07-15 — the story returns to the top of the feed).
 
     recompose_review cannot serve this case: it reuses the article_id at
     compose time, which would replace the live page before any approval
@@ -1782,10 +1783,12 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
 @celery_app.task(name="app.tasks.newspaper.apply_recomposed_article")
 def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dict[str, str]:
     """Approved recompose of a published article: swap the draft's content
-    onto the live article_id (same URL, same published_at, updated_at stamped),
-    version both states, re-index, re-translate, ping IndexNow. The unlisted
-    draft row is left behind (same convention as recompose_review's superseded
-    drafts — never in the feed or sitemap)."""
+    onto the live article_id (same URL; published_at re-stamped to the apply
+    time — recompose is a re-publish, owner policy 2026-07-15 — so the story
+    returns to the top of the feed), version both states, re-index,
+    re-translate, ping IndexNow. The unlisted draft row is left behind (same
+    convention as recompose_review's superseded drafts — never in the feed or
+    sitemap)."""
     import time as _time
     from uuid import UUID as _UUID
 
@@ -1815,14 +1818,15 @@ def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dic
         edit_reason="before_recompose_published",
         editor="system",
     )
-    if not replace_article_content(
+    new_published_at = replace_article_content(
         article_id=live_article_id,
         title=draft.title,
         summary=draft.summary,
         body=draft.body,
         tags=tags,
         image_url=image_url,
-    ):
+    )
+    if not new_published_at:
         return {"status": "error", "reason": "replace_failed"}
     save_article_version(
         article_id=live_article_id,
@@ -1839,7 +1843,7 @@ def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dic
         summary=draft.summary,
         body=draft.body,
         service_id=live.service_id,
-        published_at_epoch=live.published_at_epoch or int(_time.time()),
+        published_at_epoch=int(new_published_at.timestamp()) or int(_time.time()),
     )
     # Translations were cleared with the old prose; re-enqueue all languages.
     enqueue_article_translations(live_article_id)
