@@ -675,9 +675,12 @@ def render_front(
 ) -> tuple[str, str]:
     """Editorial front page at / — mirrors the Flutter FrontPage layout."""
     canonical = site_url() + "/"
+    # Front-page <title>: brand + what the paper IS — the bare brand drew
+    # zero clicks on its own SERP (task #39). Stays under the ~65-char clamp.
+    front_title = f"{settings.site_name} — Daily Ecosystem News & Analysis"
     if not items:
         head = _meta_block(
-            title=settings.site_name,
+            title=front_title,
             description=settings.site_tagline,
             canonical=canonical,
             image=absolute(settings.seo_default_image),
@@ -729,7 +732,7 @@ def render_front(
     main_html = "".join(sections)
 
     head = _meta_block(
-        title=settings.site_name,
+        title=front_title,
         description=settings.site_tagline,
         canonical=canonical,
         image=absolute(lead.image_url) if lead.image_url and not _is_icon_like(absolute(lead.image_url)) else absolute(settings.seo_default_image),

@@ -31,7 +31,14 @@ class Settings(msgspec.Struct, kw_only=True):
     # client fetches are deferred and early preconnect hurt Lighthouse scores.
     public_api_url: str = ""
     site_name: str = "PXke Algorand"
-    site_tagline: str = "Algorand ecosystem news, search and tools."
+    # Doubles as the meta description for the front page and RSS channel —
+    # written for the SERP snippet (task #39, 2026-07-16: the brand query
+    # showed a bare "news, search and tools" line and drew zero clicks).
+    site_tagline: str = (
+        "Independent daily coverage of the Algorand ecosystem — verified "
+        "reporting on wallets, DeFi, NFTs and infrastructure, fact-checked "
+        "on-chain before it publishes."
+    )
     # Absolute path to the built Flutter web dir (holds index.html). Empty =
     # auto-detect: <release>/frontend_web (prod) then frontend_flutter/build/web (dev).
     frontend_dist_dir: str = ""
