@@ -582,6 +582,9 @@ class PendingFeedStmts:
     PEEK_ID = _Stmt(
         "SELECT article_id FROM algorand_platform.pending_feed_queue WHERE bucket = ? LIMIT 1"
     )
+    LIST_IDS = _Stmt(
+        "SELECT article_id FROM algorand_platform.pending_feed_queue WHERE bucket = ?"
+    )
 
 
 # --------------------------------------------------------------------------- #

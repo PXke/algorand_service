@@ -73,7 +73,43 @@ def _link_is_live(url: str) -> bool:
         return False
 
 
-def sanitize_untraced_links(payload: dict[str, Any], trace: list[dict] | None) -> dict[str, Any]:
+def dead_untraced_links(
+    body: str,
+    trace: list[dict] | None,
+    *,
+    checked: dict[str, bool] | None = None,
+) -> list[str]:
+    """Body markdown-link urls that neither appeared in the research trace nor
+    resolve live — the fabrication-suspect set. Pass a shared ``checked`` dict
+    to reuse live-check results across revision passes (urls rarely change
+    between passes; re-fetching them each pass would triple the cost)."""
+    if not body:
+        return []
+    traced = _trace_url_set(trace)
+    checked = checked if checked is not None else {}
+    dead: list[str] = []
+    live_checks = 0
+    for match in _MD_LINK_RE.finditer(body):
+        url = match.group(2)
+        norm = _normalize(url)
+        if norm in traced:
+            continue
+        if norm not in checked:
+            if live_checks >= _MAX_LIVE_CHECKS:
+                continue  # budget spent — treat the rest as fine, never stall
+            live_checks += 1
+            checked[norm] = _link_is_live(url)
+        if not checked[norm] and url not in dead:
+            dead.append(url)
+    return dead
+
+
+def sanitize_untraced_links(
+    payload: dict[str, Any],
+    trace: list[dict] | None,
+    *,
+    checked: dict[str, bool] | None = None,
+) -> dict[str, Any]:
     """Delink body urls that neither appeared in the research trace nor
     resolve live. Mutates and returns payload; records removals under
     payload['_links_removed'] so the persisted final_output stays auditable."""
@@ -84,23 +120,14 @@ def sanitize_untraced_links(payload: dict[str, Any], trace: list[dict] | None) -
     body = payload.get("body")
     if not isinstance(body, str) or not body:
         return payload
-    traced = _trace_url_set(trace)
+    dead = set(dead_untraced_links(body, trace, checked=checked))
+    if not dead:
+        return payload
     removed: list[str] = []
-    checked: dict[str, bool] = {}
-    live_checks = 0
 
     def _replace(match: re.Match) -> str:
-        nonlocal live_checks
         text, url = match.group(1), match.group(2)
-        norm = _normalize(url)
-        if norm in traced:
-            return match.group(0)
-        if norm not in checked:
-            if live_checks >= _MAX_LIVE_CHECKS:
-                return match.group(0)  # budget spent — keep rather than stall
-            live_checks += 1
-            checked[norm] = _link_is_live(url)
-        if checked[norm]:
+        if url not in dead:
             return match.group(0)
         removed.append(url)
         return text

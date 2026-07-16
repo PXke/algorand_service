@@ -79,6 +79,27 @@ def _pending_for_tier(tier: PublishTier, *, limit: int) -> list:
     return [row for row in list_pending_queue(limit=limit) if queue_row_tier(row) == tier]
 
 
+def _pending_feed_backlog_full() -> bool:
+    """True when pending_feed_queue already holds PENDING_FEED_MAX_DEPTH+
+    approved articles awaiting paced release. Composing further ahead than
+    that only burns Mistral budget to publish staler content later — the
+    auto-approve → backlog path bypasses the 1-slot review throttle, so
+    without this check hourly drains composed all night (2026-07-16: six
+    articles / two days of inventory queued overnight). Fails open: a
+    Cassandra blip must not stop the pipeline."""
+    from app.core import config as cfg
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PendingFeedStmts
+
+    try:
+        bucket = getattr(cfg, "NEWS_FEED_BUCKET", "main") or "main"
+        rows = list(get_cassandra_session().execute(PendingFeedStmts.LIST_IDS, (bucket,)))
+        return len(rows) >= cfg.PENDING_FEED_MAX_DEPTH
+    except Exception:
+        logger.warning("pending-feed depth check failed — treating as not full", exc_info=True)
+        return False
+
+
 def _domain_capped(row) -> bool:
     """True when this web source already created its allotted articles today
     (COMPOSE_MAX_PER_DOMAIN_PER_DAY). Such rows are deferred rather than composed."""
@@ -381,6 +402,7 @@ def drain_standard_publish_queue() -> dict[str, object]:
     # a result that gets discarded with "review_queue_full". Skip them until the
     # admin clears the queue; publish-worthy items still flow below.
     review_full = review_queue_full()
+    backlog_full = _pending_feed_backlog_full()
     reviews_composed = 0
     try:
         for row in pending:
@@ -399,6 +421,11 @@ def drain_standard_publish_queue() -> dict[str, object]:
 
             if _row_needs_review(row):
                 if review_full or reviews_composed >= config.REVIEW_COMPOSE_BATCH_LIMIT:
+                    continue
+                if backlog_full:
+                    # A full day of releases is already queued — composing more
+                    # now is pure cost. Rows stay pending; composing resumes
+                    # once the paced release drains the backlog below the cap.
                     continue
                 outcome = _compose_review_row(row)
                 outcome_status = outcome.get("status")
@@ -661,6 +688,12 @@ def ensure_review_ready() -> dict[str, object]:
 
     if review_queue_full():
         return {"status": "skipped", "reason": "review_queue_full"}
+    if _pending_feed_backlog_full():
+        # Auto-approve routes most composes past the review slot into the
+        # backlog — when a full day of releases is already queued, this beat
+        # composing "one for the admin" really just kept stacking inventory
+        # (2026-07-16 overnight loop).
+        return {"status": "skipped", "reason": "pending_feed_backlog_full"}
     pending = _pending_for_tier(PublishTier.STANDARD, limit=8)
     for row in pending:
         if not _row_needs_review(row):

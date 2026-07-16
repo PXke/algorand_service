@@ -449,6 +449,12 @@ LINK_GATE_ENABLED = env_bool("LINK_GATE_ENABLED", True)
 # trace / compose input (2026-07-16: a draft attributed an invented phrase in
 # quotation marks to the Goanna Council). Words survive as paraphrase.
 QUOTE_GATE_ENABLED = env_bool("QUOTE_GATE_ENABLED", True)
+# Stop composing review-bound candidates once pending_feed_queue already holds
+# this many approved articles awaiting paced release (2026-07-16: auto-approve
+# → backlog bypassed the 1-slot review throttle, so hourly drains composed 6
+# articles overnight — two full days of publish inventory at 3/day, ~1.5M
+# tokens — with nothing to stop the loop).
+PENDING_FEED_MAX_DEPTH = env_int("PENDING_FEED_MAX_DEPTH", 3)
 # Near-duplicate guard, applied AT COMPOSITION (not enqueue — the set of
 # published articles can grow between a candidate being queued and composed).
 # Skip composing when a recently published headline is at least this Jaccard-

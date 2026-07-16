@@ -105,6 +105,31 @@ def test_gate_disabled_is_a_noop(monkeypatch) -> None:
     assert out["body"] == body
 
 
+def test_dead_untraced_links_reports_for_revision_feedback(monkeypatch) -> None:
+    """Owner request 2026-07-16: instead of only silently delinking at the end,
+    tell the WRITER a link is dead during the revision loop so it can swap in
+    a working alternative. dead_untraced_links is that reporting core; the
+    shared `checked` cache keeps it to one network check per url across
+    passes."""
+    from app.modules.newspaper.link_gate import dead_untraced_links
+
+    calls = {"n": 0}
+
+    def fake_live(url):
+        calls["n"] += 1
+        return False
+
+    monkeypatch.setattr(link_gate, "_link_is_live", fake_live)
+    body = (
+        "See [Dartroom](https://dartroom.xyz/) and [dead](https://gone.example/)."
+    )
+    cache: dict[str, bool] = {}
+    assert dead_untraced_links(body, _TRACE, checked=cache) == ["https://gone.example/"]
+    # Second pass (revised draft, same link still present): cache hit, no fetch.
+    assert dead_untraced_links(body, _TRACE, checked=cache) == ["https://gone.example/"]
+    assert calls["n"] == 1
+
+
 def test_duplicate_urls_checked_once(monkeypatch) -> None:
     checks = {"n": 0}
 

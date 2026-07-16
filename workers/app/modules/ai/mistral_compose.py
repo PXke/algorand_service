@@ -791,6 +791,11 @@ def _review_and_revise(
     # undo a fix from two passes ago. Accumulate every issue ever raised so a
     # later prompt can be told which ones must NOT come back.
     ever_raised: set[str] = set()
+    # Shared live-check cache: link urls rarely change between passes, so one
+    # network check per url across the whole revision loop (owner request
+    # 2026-07-16: tell the writer a link is dead so it can find an alternative
+    # — the post-hoc gate can only delink, the writer can substitute).
+    link_check_cache: dict[str, bool] = {}
     while True:
         title = str(current.get("title", "") or "")
         body = str(current.get("body", "") or "")
@@ -830,7 +835,28 @@ def _review_and_revise(
         ]
         needs_revision = quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE)
         quality_fixable: list[str] = list(quality.get("issues") or []) if needs_revision else []
-        fixable = schema_fixable + quality_fixable
+        # Dead-link feedback: an untraced url that doesn't resolve forces a
+        # revision pass with the specific url named, so the writer can swap in
+        # a working alternative from its research instead of the final gate
+        # silently delinking it (which loses the citation entirely).
+        link_fixable: list[str] = []
+        from app.core.config import LINK_GATE_ENABLED
+
+        if LINK_GATE_ENABLED:
+            try:
+                from app.modules.newspaper.link_gate import dead_untraced_links
+
+                for _dead_url in dead_untraced_links(body, trace, checked=link_check_cache):
+                    link_fixable.append(
+                        f"dead link: {_dead_url} is unreachable and never appeared "
+                        "in your research — replace it with a working URL you "
+                        "actually researched, or drop the link and keep plain text"
+                    )
+            except Exception:
+                logger.warning("dead-link check failed during revision", exc_info=True)
+        if link_fixable:
+            review["dead_links"] = link_fixable
+        fixable = schema_fixable + quality_fixable + link_fixable
 
         grade_val = review.get("grade")
         score = float(grade_val) if isinstance(grade_val, int | float) else 0.0

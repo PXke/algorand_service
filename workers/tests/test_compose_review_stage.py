@@ -415,3 +415,55 @@ def test_disabled_skips_review(monkeypatch) -> None:
     assert out is payload
     assert fake.calls == 0
     assert trace == []
+
+
+def test_dead_link_feedback_forces_revision_naming_the_url(monkeypatch) -> None:
+    """Owner request 2026-07-16: a dead cited link must be surfaced to the
+    WRITER during revision ('your link X is unreachable — find an
+    alternative'), not just silently delinked by the post-hoc gate. The dead
+    url must appear verbatim in the revision instructions so the model knows
+    exactly which citation to replace."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **kw: {"grade": 9.0, "issues": []},  # otherwise clean draft
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+    )
+    monkeypatch.setattr("app.core.config.LINK_GATE_ENABLED", True, raising=False)
+    dead_results = iter([["https://downbad.art/"], []])  # fixed after revision
+    monkeypatch.setattr(
+        "app.modules.newspaper.link_gate.dead_untraced_links",
+        lambda body, trace, checked=None: next(dead_results),
+    )
+
+    class _CapturingMistral:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_messages = None
+
+        def chat_json_object(self, messages, temperature=None):
+            self.calls += 1
+            self.last_messages = messages
+            return {
+                "title": "T",
+                "body": "see [Downbad](https://downbad.farm/) instead",
+                "summary": "s",
+            }
+
+    fake = _CapturingMistral()
+    trace: list[dict] = []
+    out = _review_and_revise(
+        fake,
+        {"title": "T", "body": "see [Downbad](https://downbad.art/)"},
+        system="s",
+        gen_user="u",
+        trace=trace,
+    )
+
+    assert fake.calls == 1  # the dead link alone forced the revision
+    prompt_text = str(fake.last_messages)
+    assert "https://downbad.art/" in prompt_text
+    assert "unreachable" in prompt_text
+    assert out["body"] == "see [Downbad](https://downbad.farm/) instead"

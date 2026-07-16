@@ -40,6 +40,7 @@ def _row(queue_id: str) -> SimpleNamespace:
 @pytest.fixture
 def drain_env(monkeypatch):
     """Neutralize everything around the review-branch accounting under test."""
+    monkeypatch.setattr(qdt, "_pending_feed_backlog_full", lambda: False)
     monkeypatch.setattr(qdt, "remaining_standard_publish_slots", lambda: 3)
     # Backlog-release step: not due, so it stays out of the way.
     monkeypatch.setattr(
@@ -115,3 +116,38 @@ def test_approved_backlog_outcome_counts_toward_compose_batch_limit(
 
 def test_approved_backlog_is_terminal() -> None:
     assert "approved_backlog" in TERMINAL_OUTCOMES
+
+
+def test_full_backlog_stops_review_composes(monkeypatch, drain_env) -> None:
+    """2026-07-16: auto-approve → backlog bypassed the 1-slot review throttle,
+    so hourly drains composed six articles overnight — two days of publish
+    inventory at 3/day. With PENDING_FEED_MAX_DEPTH articles already queued,
+    review-bound rows must stay pending, uncomposed."""
+    monkeypatch.setattr(qdt, "_pending_feed_backlog_full", lambda: True)
+    rows = [_row("r1"), _row("r2")]
+    monkeypatch.setattr(qdt, "_pending_for_tier", lambda _tier, limit: rows)
+    monkeypatch.setattr(
+        qdt,
+        "_compose_review_row",
+        lambda row: pytest.fail("must not compose while the backlog is full"),
+    )
+
+    result = qdt.drain_standard_publish_queue()
+
+    assert result["published"] == 0
+    assert drain_env == []  # clock untouched — nothing happened
+
+
+def test_ensure_review_ready_skips_when_backlog_full(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.review_queue_full",
+        lambda: False,
+    )
+    monkeypatch.setattr(qdt, "_pending_feed_backlog_full", lambda: True)
+    monkeypatch.setattr(
+        qdt,
+        "_pending_for_tier",
+        lambda _tier, limit: pytest.fail("must not even list candidates"),
+    )
+    result = qdt.ensure_review_ready()
+    assert result == {"status": "skipped", "reason": "pending_feed_backlog_full"}
