@@ -13,5 +13,14 @@ abstract class WalletConnector {
     required AuthNonce nonce,
   });
 
+  /// Force-revive the wallet transport after the app returns to the
+  /// foreground. Mobile browsers suspend or kill the bridge WebSocket while
+  /// the tab is backgrounded — which is exactly what happens when the user
+  /// deep-links out to the wallet app to approve — and a reconnect budget
+  /// can exhaust while the page is frozen, leaving the dapp waiting forever
+  /// for an approval the wallet already sent. Default: no-op (transports
+  /// without a persistent socket have nothing to revive).
+  void wakeTransport() {}
+
   Future<void> disconnect();
 }

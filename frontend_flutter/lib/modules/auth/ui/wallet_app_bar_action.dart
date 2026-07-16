@@ -30,6 +30,7 @@ class WalletAppBarAction extends ConsumerWidget {
           uri,
           onCancel: client.cancelPendingConnect,
           onRetry: () => _startSignIn(context, client),
+          onResumed: client.wakeTransport,
           authState: client.state,
         );
       },

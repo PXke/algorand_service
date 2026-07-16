@@ -199,6 +199,22 @@ class WalletConnectAlgorandConnector implements WalletConnector {
     return base64Encode(List<int>.from(first as List));
   }
 
+  /// Root cause of "login works on desktop, hangs on mobile" (2026-07-16):
+  /// deep-linking to the wallet backgrounds the browser tab; the OS kills or
+  /// starves the bridge WebSocket, and ReconnectingWebSocket gives up after
+  /// 5 attempts (~13s of backoff) — so on return the session-approval (or
+  /// sign response) sits queued on the bridge with nobody subscribed.
+  /// WalletConnect.reconnect() force-closes and reopens the transport, which
+  /// re-queues topic subscriptions; pending request completers are held in
+  /// memory and resolve when the queued response finally arrives. Guarded so
+  /// it never CONSTRUCTS the lazy connector just to reconnect nothing.
+  @override
+  void wakeTransport() {
+    final connector = _connectorInstance;
+    if (connector == null) return;
+    connector.reconnect();
+  }
+
   @override
   Future<void> disconnect() async {
     // Never touch the lazy getter here — disconnecting when nothing was ever

@@ -107,6 +107,11 @@ class WalletAuthClient {
     state.value = state.value.copyWith(isLoading: false, clearError: true);
   }
 
+  /// See [WalletConnector.wakeTransport] — call when the app returns to the
+  /// foreground mid-login so a socket the mobile OS killed while the user
+  /// was in the wallet app gets reopened and the queued response delivered.
+  void wakeTransport() => _wallet.wakeTransport();
+
   Future<void> logout() async {
     final token = state.value.sessionToken;
     if (token != null) {

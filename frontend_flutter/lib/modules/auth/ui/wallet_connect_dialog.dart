@@ -22,13 +22,18 @@ void showWalletConnectUriDialog(
   String uri, {
   VoidCallback? onCancel,
   VoidCallback? onRetry,
+  VoidCallback? onResumed,
   ValueListenable<WalletAuthState>? authState,
 }) {
   showDialog<String>(
     context: context,
     barrierDismissible: true,
     builder: (dialogContext) {
-      return _WalletConnectUriDialog(uri: uri, authState: authState);
+      return _WalletConnectUriDialog(
+        uri: uri,
+        authState: authState,
+        onResumed: onResumed,
+      );
     },
   ).then((result) {
     // Retry is only reachable from the error step, where the failed attempt
@@ -44,7 +49,7 @@ void showWalletConnectUriDialog(
 }
 
 class _WalletConnectUriDialog extends StatefulWidget {
-  const _WalletConnectUriDialog({required this.uri, this.authState});
+  const _WalletConnectUriDialog({required this.uri, this.authState, this.onResumed});
 
   static const resultSuccess = 'success';
   static const resultRetry = 'retry';
@@ -52,11 +57,18 @@ class _WalletConnectUriDialog extends StatefulWidget {
   final String uri;
   final ValueListenable<WalletAuthState>? authState;
 
+  /// Fired when the app returns to the foreground while this dialog is up —
+  /// i.e. the user just came back from the wallet app. Used to revive the
+  /// bridge socket the mobile OS killed in the background (the cause of
+  /// "login works on desktop, hangs forever on mobile", 2026-07-16).
+  final VoidCallback? onResumed;
+
   @override
   State<_WalletConnectUriDialog> createState() => _WalletConnectUriDialogState();
 }
 
-class _WalletConnectUriDialogState extends State<_WalletConnectUriDialog> {
+class _WalletConnectUriDialogState extends State<_WalletConnectUriDialog>
+    with WidgetsBindingObserver {
   /// On phones the QR is useless (you cannot scan your own screen), so the
   /// deep link leads and the QR hides behind a toggle.
   static bool get _isMobile =>
@@ -70,12 +82,25 @@ class _WalletConnectUriDialogState extends State<_WalletConnectUriDialog> {
   void initState() {
     super.initState();
     widget.authState?.addListener(_onAuthChanged);
+    WidgetsBinding.instance.addObserver(this);
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.authState?.removeListener(_onAuthChanged);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Coming back from the wallet app (Flutter web maps the browser tab's
+    // visibilitychange to these states): the bridge WebSocket may have been
+    // killed while we were backgrounded and its reconnect budget exhausted —
+    // revive it so the approval/sign response queued on the bridge arrives.
+    if (state == AppLifecycleState.resumed) {
+      widget.onResumed?.call();
+    }
   }
 
   void _onAuthChanged() {
