@@ -14,8 +14,11 @@ aborts the article.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _UA = "algorand-platform-newspaper/1.0 (+https://algorand.pxke.me)"
 # searchPosts requires an authenticated session (the public AppView 403s it), so
@@ -293,15 +296,42 @@ def _guarded_post(
         return client.post(url, json=json, headers=h)
 
 
-def _github_owner_repos(owner: str, headers: dict) -> dict[str, Any]:
+def _github_get(url: str, *, params: dict | None = None, timeout: float | None = None):
+    """GET against the GitHub API with GITHUB_TOKEN when set — but never let a
+    dead token take a tool down. GitHub answers 401 to ANY request carrying a
+    revoked/expired token, while the same request unauthenticated succeeds
+    (just rate-limited harder). Root-caused 2026-07-16: the prod token expired
+    and github_repository_search started returning '401 Unauthorized' verbatim
+    into research traces; on 401-with-token this logs loudly and retries once
+    without the Authorization header."""
+    import os
+
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    kwargs: dict[str, Any] = {"params": params, "headers": headers}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    resp = _guarded_get(url, **kwargs)
+    if resp.status_code == 401 and token:
+        logger.warning(
+            "GITHUB_TOKEN was rejected (expired/revoked?) — retrying %s unauthenticated",
+            url,
+        )
+        headers.pop("Authorization", None)
+        resp = _guarded_get(url, **kwargs)
+    return resp
+
+
+def _github_owner_repos(owner: str) -> dict[str, Any]:
     """Repo list for a GitHub org/user, most recently pushed first — returned when
     the model passes an owner instead of owner/name (the top prod failure mode for
     this tool), so it can pick a repo and call again instead of dead-ending."""
     try:
-        resp = _guarded_get(
+        resp = _github_get(
             f"https://api.github.com/users/{owner}/repos",
             params={"sort": "pushed", "per_page": 8},
-            headers=headers,
         )
         if resp.status_code == 404:
             return {"owner": owner, "error": "owner not found on GitHub"}
@@ -328,8 +358,6 @@ def _github_owner_repos(owner: str, headers: dict) -> dict[str, Any]:
 def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
     """Recent activity for a GitHub repo: metadata, latest releases and commits.
     Accepts 'owner/name' or a github.com URL; a bare owner/org lists its repos."""
-    import os
-
     slug = (repo or "").strip().rstrip("/")
     if "github.com/" in slug:
         slug = slug.split("github.com/", 1)[1]
@@ -337,23 +365,19 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
     if slug.endswith(".git"):
         slug = slug[:-4]
     n = max(1, min(int(limit), 10))
-    headers = {"Accept": "application/vnd.github+json"}
-    token = os.getenv("GITHUB_TOKEN", "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
     if "/" not in slug and slug:
         # An org/user, not a repo — list its repos instead of erroring.
-        return _github_owner_repos(slug, headers)
+        return _github_owner_repos(slug)
     if slug.count("/") != 1 or not all(slug.split("/")):
         return {"error": f"expected owner/name, got '{repo}'"}
     out: dict[str, Any] = {"repo": slug}
     try:
-        meta_resp = _guarded_get(f"https://api.github.com/repos/{slug}", headers=headers)
+        meta_resp = _github_get(f"https://api.github.com/repos/{slug}")
         if meta_resp.status_code == 404:
             # A wrong repo guess under a real owner (prod: 'AlgoNode/algonode') —
             # surface the owner's actual repos rather than a dead end.
             owner = slug.split("/")[0]
-            listing = _github_owner_repos(owner, headers)
+            listing = _github_owner_repos(owner)
             if listing.get("repos"):
                 listing["error"] = f"repo '{slug}' not found; owner's repos listed"
                 return listing
@@ -369,10 +393,9 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
     except Exception as exc:
         return {"repo": slug, "error": str(exc)[:200]}
     try:
-        rel = _guarded_get(
+        rel = _github_get(
             f"https://api.github.com/repos/{slug}/releases",
             params={"per_page": n},
-            headers=headers,
         ).json()
         out["releases"] = [
             {
@@ -387,10 +410,9 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
     except Exception:
         out["releases"] = []
     try:
-        commits = _guarded_get(
+        commits = _github_get(
             f"https://api.github.com/repos/{slug}/commits",
             params={"per_page": n},
-            headers=headers,
         ).json()
         out["recent_commits"] = [
             {
@@ -406,10 +428,9 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
     try:
         # Top contributors by total commit count — who really built the project,
         # a stronger "anonymous team" signal than the last few commit authors.
-        contributors = _guarded_get(
+        contributors = _github_get(
             f"https://api.github.com/repos/{slug}/contributors",
             params={"per_page": n},
-            headers=headers,
         ).json()
         out["top_contributors"] = [
             {"login": c.get("login"), "contributions": c.get("contributions")}
@@ -426,21 +447,14 @@ def _tool_github_repository_search(query: str, limit: int = 5) -> dict[str, Any]
     github_activity's owner/repo guess 404s and you don't know the real owner
     (e.g. a project's site names it but not its GitHub org). Not scoped to one
     owner, unlike github_activity's owner-repo-listing fallback."""
-    import os
-
     q = (query or "").strip()
     if not q:
         return {"error": "query must not be empty"}
     n = max(1, min(int(limit), 10))
-    headers = {"Accept": "application/vnd.github+json"}
-    token = os.getenv("GITHUB_TOKEN", "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
     try:
-        resp = _guarded_get(
+        resp = _github_get(
             "https://api.github.com/search/repositories",
             params={"q": q, "per_page": n, "sort": "stars"},
-            headers=headers,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -1013,7 +1027,6 @@ def _tool_github_repo_contents(repo: str, path: str = "", ref: str = "") -> dict
     decoded text. Use to READ smart-contract source and judge what a project
     actually shipped (github_activity only gives metadata). GITHUB_TOKEN optional."""
     import base64
-    import os
 
     slug = _normalize_repo_slug(repo)
     if not slug:
@@ -1022,14 +1035,10 @@ def _tool_github_repo_contents(repo: str, path: str = "", ref: str = "") -> dict
             "list, call github_activity with just the owner"
         }
     p = (path or "").strip().lstrip("/")
-    headers = {"Accept": "application/vnd.github+json"}
-    token = os.getenv("GITHUB_TOKEN", "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
     params = {"ref": ref.strip()} if ref and ref.strip() else None
     try:
-        resp = _guarded_get(
-            f"https://api.github.com/repos/{slug}/contents/{p}", headers=headers, params=params
+        resp = _github_get(
+            f"https://api.github.com/repos/{slug}/contents/{p}", params=params
         )
         if resp.status_code == 404:
             return {"repo": slug, "path": p, "error": "path not found"}
@@ -1054,7 +1063,7 @@ def _tool_github_repo_contents(repo: str, path: str = "", ref: str = "") -> dict
         # Files >1MB come back with empty content + a download_url; fetch that.
         if not text and data.get("download_url"):
             try:
-                text = _guarded_get(data["download_url"], headers=headers, timeout=15.0).text
+                text = _github_get(data["download_url"], timeout=15.0).text
             except Exception:
                 text = ""
         cap = 12000
@@ -1233,12 +1242,6 @@ def _tool_xgov_proposal(proposal_id: int = 0, limit: int = 8) -> dict[str, Any]:
     category, status Draft/Final/Approved/Rejected/Withdrawn, forum link) plus an
     abstract snippet. With proposal_id, one proposal in full; without, the
     newest proposals' summaries."""
-    import os
-
-    headers = {"Accept": "application/vnd.github+json"}
-    token = os.getenv("GITHUB_TOKEN", "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
 
     def _fetch_one(pid: int, with_abstract: bool) -> dict[str, Any] | None:
         try:
@@ -1280,7 +1283,7 @@ def _tool_xgov_proposal(proposal_id: int = 0, limit: int = 8) -> dict[str, Any]:
 
     n = max(1, min(int(limit), 10))
     try:
-        resp = _guarded_get(f"{_XGOV_API}/Proposals", headers=headers)
+        resp = _github_get(f"{_XGOV_API}/Proposals")
         resp.raise_for_status()
         listing = resp.json() or []
     except Exception as exc:

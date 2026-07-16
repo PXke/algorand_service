@@ -56,6 +56,52 @@ def test_github_repository_search_returns_candidates(monkeypatch):
     ]
 
 
+def test_github_get_retries_unauthenticated_when_token_rejected(monkeypatch):
+    """Root-caused 2026-07-16: the prod GITHUB_TOKEN expired, and GitHub
+    answers 401 to ANY request carrying a revoked token — so every github_*
+    tool call started failing verbatim ('401 Unauthorized' straight into the
+    research trace of the isitalgorandsbirthday.com compose), even though the
+    same request would have SUCCEEDED unauthenticated (rate-limited harder,
+    but working). A dead token must degrade to anonymous access, not take the
+    whole tool family down."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_expired_token")
+    calls: list[dict] = []
+
+    def fake_get(url, **kw):
+        # Copy — _github_get mutates the same dict in place for the retry.
+        calls.append(dict(kw.get("headers") or {}))
+        if "Authorization" in (kw.get("headers") or {}):
+            return _json_response(url, 401, {"message": "Bad credentials"})
+        return _json_response(
+            url,
+            200,
+            {"total_count": 1, "items": [{"full_name": "real/repo"}]},
+        )
+
+    monkeypatch.setattr(research_tools, "_guarded_get", fake_get)
+    result = _tool_github_repository_search("algorand birthday")
+    assert len(calls) == 2
+    assert "Authorization" in calls[0]
+    assert "Authorization" not in calls[1]
+    assert result["results"][0]["repo"] == "real/repo"
+    assert "error" not in result
+
+
+def test_github_get_no_retry_without_token(monkeypatch):
+    # Anonymous 401 (should not happen, but) must not double the request.
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    calls: list[str] = []
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        return _json_response(url, 401, {"message": "nope"})
+
+    monkeypatch.setattr(research_tools, "_guarded_get", fake_get)
+    result = _tool_github_repository_search("whatever")
+    assert len(calls) == 1
+    assert "error" in result
+
+
 def test_github_repository_search_requires_nonempty_query():
     result = _tool_github_repository_search("")
     assert "error" in result
