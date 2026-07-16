@@ -346,3 +346,14 @@ def test_gap_fill_nudge_forbids_recall_and_names_gaps():
     assert "missing the real sale price" in nudge
     assert "do NOT guess or recall" in nudge.lower() or "NOT guess or recall" in nudge
     assert "unresolved" in nudge.lower()
+
+
+def test_stage2_forbids_nonverbatim_quotation_marks():
+    """Root-caused 2026-07-16: the RandGallery article attributed an invented
+    phrase to the Goanna Council inside quotation marks — the phrase existed
+    nowhere in the trace or the supplied announcement. Quotation marks are a
+    verbatim claim; the prompt must say so explicitly (the deterministic
+    quote_gate then enforces it — see test_quote_gate.py)."""
+    assert "QUOTATION MARKS ARE A VERBATIM CLAIM" in mc._STAGE2_GENERATION_GUIDANCE
+    assert "word-for-word" in mc._STAGE2_GENERATION_GUIDANCE
+    assert "paraphrase WITHOUT" in mc._STAGE2_GENERATION_GUIDANCE

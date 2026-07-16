@@ -445,6 +445,10 @@ URL_REJECT_COOLDOWN_TTL = env_int("URL_REJECT_COOLDOWN_TTL", 604800)
 # live (2026-07-16: the writer decorated real project names with invented
 # urls — downbad.art, alchemon.com — that the numeric gatekeeper can't see).
 LINK_GATE_ENABLED = env_bool("LINK_GATE_ENABLED", True)
+# De-quote body quotations (4+ words) that aren't verbatim in the research
+# trace / compose input (2026-07-16: a draft attributed an invented phrase in
+# quotation marks to the Goanna Council). Words survive as paraphrase.
+QUOTE_GATE_ENABLED = env_bool("QUOTE_GATE_ENABLED", True)
 # Near-duplicate guard, applied AT COMPOSITION (not enqueue — the set of
 # published articles can grow between a candidate being queued and composed).
 # Skip composing when a recently published headline is at least this Jaccard-

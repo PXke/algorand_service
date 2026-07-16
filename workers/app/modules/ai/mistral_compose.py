@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
 # every stored article so analytics can correlate a prompt edit with a shift in
 # grades/engagement instead of guessing from deploy timestamps.
-PROMPT_VERSION = "2026-07-15d"
+PROMPT_VERSION = "2026-07-16a"
 
 
 @dataclass(frozen=True)
@@ -481,6 +481,12 @@ _STAGE2_GENERATION_GUIDANCE = (
     "SPECIFIC marketplace's fee is not — and separately asserted, unverified, "
     "that named marketplaces specifically implement ASA-parameter-based royalty "
     "enforcement the Digest never confirmed for any of them).\n"
+    "QUOTATION MARKS ARE A VERBATIM CLAIM: only put words inside quotation "
+    "marks when they appear word-for-word in the Research Digest or source "
+    "material. To convey the gist of what someone said, paraphrase WITHOUT "
+    "quotation marks and attribute it plainly (root-caused 2026-07-16: a "
+    "draft invented a phrase and attributed it to a named council in quotes "
+    "— fabricating a quotation is worse than fabricating a number).\n"
 )
 
 
@@ -1700,6 +1706,15 @@ def _compose_via_writer_tools_locked(
             from app.modules.newspaper.link_gate import sanitize_untraced_links
 
             payload = sanitize_untraced_links(payload, trace)
+            # Quotation-integrity gate: quotation marks are a verbatim claim —
+            # de-quote any 4+-word quotation that isn't word-for-word in the
+            # research trace or the compose input (same incident: an invented
+            # phrase was attributed to the Goanna Council in quotes).
+            from app.modules.newspaper.quote_gate import unquote_ungrounded_quotes
+
+            payload = unquote_ungrounded_quotes(
+                payload, trace, extra_texts=[user, research_user or ""]
+            )
             raw = _json.dumps(payload)
             _duration_ms = int((_time.monotonic() - _t0) * 1000)
             try:
