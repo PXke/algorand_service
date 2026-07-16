@@ -193,3 +193,47 @@ def test_stale_null_decision_is_refreshed_at_compose_time(monkeypatch):
     assert decision is True
     assert confidence == 0.93
     assert calls["args"] == ("https://x.io", "news")
+
+
+def test_same_service_novelty_bar_blocks_the_alpha_arcade_pair(monkeypatch):
+    """2026-07-16: 'Alpha Arcade Goes Live with Daily Algorand Price
+    Prediction Markets' vs 'Alpha Arcade expands to daily Algorand price
+    markets with $3,415 volume' scores 0.455 title-Jaccard — under the global
+    0.6 gate, yet plainly the same story about the same service ten days
+    later. Same-service re-coverage gets the stricter 0.4 bar."""
+    monkeypatch.setattr("app.core.config.NOVELTY_GATE_ENABLED", True, raising=False)
+    monkeypatch.setattr("app.core.config.NOVELTY_MAX_SIMILARITY", 0.6, raising=False)
+    monkeypatch.setattr(
+        "app.core.config.NOVELTY_SAME_SERVICE_MAX_SIMILARITY", 0.4, raising=False
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.recent_title_similarity",
+        lambda _t: (0.455, "Alpha Arcade Goes Live with Daily Algorand Price Prediction Markets"),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.recent_same_service_similarity",
+        lambda _t, _sid: (0.455, "Alpha Arcade Goes Live with Daily Algorand Price Prediction Markets"),
+    )
+    outcome = pt._novelty_duplicate_veto(_ctx())
+    assert outcome is not None
+    assert outcome["reason"] == "too_similar_to_own_recent_coverage"
+    assert outcome["similarity"] == 0.46
+
+
+def test_same_similarity_from_a_DIFFERENT_service_still_passes(monkeypatch):
+    # 0.455 against some other service's headline is legitimate coverage of a
+    # related-but-distinct story — only same-service re-coverage is tightened.
+    monkeypatch.setattr("app.core.config.NOVELTY_GATE_ENABLED", True, raising=False)
+    monkeypatch.setattr("app.core.config.NOVELTY_MAX_SIMILARITY", 0.6, raising=False)
+    monkeypatch.setattr(
+        "app.core.config.NOVELTY_SAME_SERVICE_MAX_SIMILARITY", 0.4, raising=False
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.recent_title_similarity",
+        lambda _t: (0.455, "Someone Else's Similar Headline"),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.recent_same_service_similarity",
+        lambda _t, _sid: (0.1, ""),
+    )
+    assert pt._novelty_duplicate_veto(_ctx()) is None

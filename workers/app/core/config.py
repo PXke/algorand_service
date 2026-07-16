@@ -464,6 +464,10 @@ NOVELTY_GATE_ENABLED = env_bool("NOVELTY_GATE_ENABLED", True)
 # Title-token Jaccard catches near-identical headlines, not loose paraphrases
 # (that needs embeddings); the post-compose grader novelty flags the softer cases.
 NOVELTY_MAX_SIMILARITY = env_float("NOVELTY_MAX_SIMILARITY", 0.6)
+# Stricter bar when the closest recent article covers the SAME service:
+# re-covering one's own subject with a slightly reworded headline is the
+# common near-duplicate shape (Alpha Arcade pair, 0.455 Jaccard, 2026-07-16).
+NOVELTY_SAME_SERVICE_MAX_SIMILARITY = env_float("NOVELTY_SAME_SERVICE_MAX_SIMILARITY", 0.4)
 # Content-level novelty: retrieve recently-published articles textually closest to
 # a candidate from the Typesense articles index (title+summary+body), then score
 # overlap against the candidate's title+summary tokens. Catches same-topic /

@@ -508,9 +508,13 @@ def _novelty_duplicate_veto(ctx: _ComposeVetoCtx) -> dict | None:
 
     if not worker_config.NOVELTY_GATE_ENABLED:
         return None
-    from app.modules.newspaper.article_grader import recent_title_similarity
+    from app.modules.newspaper.article_grader import (
+        recent_same_service_similarity,
+        recent_title_similarity,
+    )
 
-    sim, closest = recent_title_similarity(str(ctx.row.payload.get("page_title", "")))
+    page_title = str(ctx.row.payload.get("page_title", ""))
+    sim, closest = recent_title_similarity(page_title)
     if sim >= worker_config.NOVELTY_MAX_SIMILARITY:
         return {
             "status": "duplicate",
@@ -518,6 +522,19 @@ def _novelty_duplicate_veto(ctx: _ComposeVetoCtx) -> dict | None:
             "service_id": ctx.row.service_id,
             "closest_title": closest,
             "similarity": round(sim, 2),
+        }
+    # Same-service re-coverage gets a stricter bar: the Alpha Arcade pair
+    # ("Goes Live with Daily ... Price Prediction Markets" vs "expands to
+    # daily ... price markets") scored 0.455 — under the global gate, yet
+    # plainly the same story ten days later (2026-07-16).
+    svc_sim, svc_closest = recent_same_service_similarity(page_title, ctx.row.service_id)
+    if svc_sim >= worker_config.NOVELTY_SAME_SERVICE_MAX_SIMILARITY:
+        return {
+            "status": "duplicate",
+            "reason": "too_similar_to_own_recent_coverage",
+            "service_id": ctx.row.service_id,
+            "closest_title": svc_closest,
+            "similarity": round(svc_sim, 2),
         }
     return None
 

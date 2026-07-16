@@ -112,8 +112,8 @@ class FeedStmts:
         "FROM algorand_platform.articles_feed WHERE bucket = ? LIMIT ?"
     )
     BY_BUCKET_RECENT = _Stmt(
-        "SELECT article_id, title, tags, published_at FROM algorand_platform.articles_feed "
-        "WHERE bucket = ?"
+        "SELECT article_id, service_id, title, tags, published_at "
+        "FROM algorand_platform.articles_feed WHERE bucket = ?"
     )
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.articles_feed ("

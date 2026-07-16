@@ -99,6 +99,7 @@ class _Recent:
     views: int = 0
     tags: tuple[str, ...] = ()
     published_at_epoch: float = 0.0
+    service_id: str = ""
 
 
 _RECENT_CACHE: dict[str, object] = {"at": 0.0, "rows": []}
@@ -149,6 +150,7 @@ def _recent_articles(limit: int = 60) -> list[_Recent]:
             views=int(views.get(str(r.article_id), 0)),
             tags=tuple(r.tags or ()),
             published_at_epoch=_epoch(getattr(r, "published_at", None)),
+            service_id=str(getattr(r, "service_id", "") or ""),
         )
         for r in rows
     ]
@@ -184,6 +186,26 @@ def recent_title_similarity(title: str) -> tuple[float, str]:
     same tokenizer/metric as the grader's novelty so they agree."""
     try:
         recent = _recent_articles()
+    except Exception:
+        return 0.0, ""
+    return _closest_similarity(_tokens(title), recent)
+
+
+def recent_same_service_similarity(title: str, service_id: str) -> tuple[float, str]:
+    """recent_title_similarity restricted to articles from the SAME service.
+    Re-covering one's own subject deserves a stricter near-duplicate bar than
+    the global one: 'Alpha Arcade Goes Live with Daily Algorand Price
+    Prediction Markets' vs 'Alpha Arcade expands to daily Algorand price
+    markets with $3,415 volume' scores only 0.455 title-Jaccard — under the
+    global 0.6 gate — yet is plainly the same story about the same service
+    ten days later (found 2026-07-16 as a near-duplicate pair; the second
+    draft only failed to reach readers because a review-queue clear orphaned
+    it)."""
+    sid = (service_id or "").strip().lower()
+    if not sid:
+        return 0.0, ""
+    try:
+        recent = [a for a in _recent_articles() if a.service_id.strip().lower() == sid]
     except Exception:
         return 0.0, ""
     return _closest_similarity(_tokens(title), recent)
