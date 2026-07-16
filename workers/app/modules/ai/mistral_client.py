@@ -438,6 +438,25 @@ class MistralClient:
         # times. Cache (name+args) signatures and refuse to re-run an identical
         # call, nudging the model to write instead.
         seen_calls: set[str] = set()
+        # Cross-pass dedup (2026-07-16): the research floor and gap-fill passes
+        # call chat_with_tools again with a FRESH conversation but the SAME
+        # shared trace — an empty cache here let a later pass re-run an earlier
+        # pass's identical searches verbatim (a real RandGallery session
+        # repeated 5 of its 35 calls; ~970k tokens total). Seed from the trace
+        # so exact repeats get the "already called" nudge across passes too.
+        # Errored calls are NOT seeded: retrying a transient failure in a later
+        # pass is legitimate.
+        for entry in trace or ():
+            result = entry.get("result")
+            if isinstance(result, dict) and result.get("error"):
+                continue
+            try:
+                seen_calls.add(
+                    f"{entry.get('tool')}:"
+                    f"{json.dumps(entry.get('arguments') or {}, sort_keys=True)}"
+                )
+            except (TypeError, ValueError):
+                continue
         # Enforce a mandatory tool (e.g. review_draft): the model is not allowed
         # to produce its final answer until it has called this tool at least once.
         required_satisfied = require_tool is None

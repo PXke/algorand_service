@@ -558,8 +558,8 @@ def _fetch_failure_hint(url: str, error: str, *, status_code: int | None = None)
         )
     if host.endswith("reddit.com"):
         return (
-            "reddit.com blocks server fetches — use reddit_api_post_history "
-            "for a user's posts/comments instead"
+            "reddit blocks all requests from this server — no reddit data is "
+            "available; use Bluesky or forum search for community sentiment"
         )
     if host.endswith("github.com"):
         return (
@@ -1140,74 +1140,18 @@ def _tool_medium_articles(source: str, limit: int = 15) -> dict[str, Any]:
 
 
 def _tool_reddit_history(user: str, kind: str = "submitted", limit: int = 15) -> dict[str, Any]:
-    """Recent Reddit history for a user via Reddit's public JSON (no auth, rate-
-    limited). kind: 'submitted' (posts, default) or 'comments'. Returns subreddit,
-    title/body snippet, score, comments, date and permalink — use to verify a
-    publication timeline or gauge community engagement."""
-    from datetime import UTC, datetime
-
-    u = (user or "").strip().lstrip("@")
-    if u.lower().startswith("u/"):
-        u = u[2:]
-    if not u:
-        return {"error": "user required"}
-    k = "comments" if (kind or "").strip().lower().startswith("comment") else "submitted"
-    n = max(1, min(int(limit), 25))
-    try:
-        resp = _guarded_get(
-            f"https://www.reddit.com/user/{u}/{k}.json",
-            headers={"Accept": "application/json"},
-            params={"limit": n, "raw_json": 1},
-            timeout=12.0,
-        )
-        if resp.status_code == 404:
-            return {"user": u, "error": "user not found", "items": []}
-        if resp.status_code == 429:
-            return {"user": u, "error": "reddit rate-limited (429); try again later", "items": []}
-        if resp.status_code == 403:
-            return {
-                "user": u,
-                "error": "reddit blocked this request (403) — it rate-limits server IPs; "
-                "treat as unavailable for this story",
-                "items": [],
-            }
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
-        return {"user": u, "error": str(exc)[:200], "items": []}
-
-    def _iso(ts: Any) -> str:
-        try:
-            return datetime.fromtimestamp(float(ts), tz=UTC).strftime("%Y-%m-%d")
-        except Exception:
-            return ""
-
-    items = []
-    for c in ((data.get("data", {}) or {}).get("children", []) or [])[:n]:
-        d = (c.get("data") or {}) if isinstance(c, dict) else {}
-        perma = f"https://www.reddit.com{d.get('permalink', '')}" if d.get("permalink") else ""
-        if k == "submitted":
-            items.append(
-                {
-                    "subreddit": d.get("subreddit"),
-                    "title": (d.get("title") or "")[:200],
-                    "score": d.get("score"),
-                    "num_comments": d.get("num_comments"),
-                    "date": _iso(d.get("created_utc")),
-                    "permalink": perma,
-                }
-            )
-        else:
-            items.append(
-                {
-                    "subreddit": d.get("subreddit"),
-                    "body": (d.get("body") or "")[:300],
-                    "score": d.get("score"),
-                    "date": _iso(d.get("created_utc")),
-                    "permalink": perma,
-                }
-            )
-    return {"user": u, "kind": k, "count": len(items), "items": items}
+    """PHASED OUT (owner decision 2026-07-16): reddit blocks this server's IP
+    outright — every live call 403'd in prod traces (both compose sessions
+    audited on 2026-07-15 burned a call each discovering this). The tool is no
+    longer offered in the schema list; this stub stays registered so any
+    cached/replayed prompt that still names it gets a truthful answer with
+    ZERO network round-trips instead of a guaranteed 403."""
+    return {
+        "user": (user or "").strip(),
+        "error": "reddit blocks requests from this server — no reddit data is "
+        "available; use Bluesky or forum search for community sentiment",
+        "items": [],
+    }
 
 
 _XGOV_RAW = "https://raw.githubusercontent.com/algorandfoundation/xGov/main"
@@ -1525,28 +1469,6 @@ _MEDIUM_SCHEMA = {
     },
 }
 
-_REDDIT_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "reddit_api_post_history",
-        "description": (
-            "Recent Reddit history for a user via Reddit's public JSON (free, rate-"
-            "limited): subreddit, title/body, score, comments, date and permalink. Use "
-            "to verify a publication timeline or gauge engagement. kind: 'submitted' "
-            "(posts) or 'comments'."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "user": {"type": "string", "description": "reddit username (with or without u/)"},
-                "kind": {"type": "string", "description": "'submitted' (default) or 'comments'"},
-                "limit": {"type": "integer", "description": "1-25, default 15"},
-            },
-            "required": ["user"],
-        },
-    },
-}
-
 _XGOV_SCHEMA = {
     "type": "function",
     "function": {
@@ -1599,7 +1521,10 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         _DISCOURSE_SCHEMA,
         _NODE_STATS_SCHEMA,
         _MEDIUM_SCHEMA,
-        _REDDIT_SCHEMA,
+        # reddit_api_post_history deliberately has NO schema (2026-07-16):
+        # reddit blocks this server's IP — offering the tool just burned one
+        # 403 per session. Its stub handler (still registered below) answers
+        # any stale reference truthfully with zero network round-trips.
         _XGOV_SCHEMA,
     ]
     handlers: dict[str, Any] = {

@@ -124,3 +124,105 @@ def test_debug_transcript_accumulates_across_multiple_chat_with_tools_calls(
     # trace already accumulated correctly by reference — the real bug was
     # only in the debug transcript, but assert it here too as a sanity check.
     assert len(trace) == 2
+
+
+def test_cross_pass_dedup_seeds_seen_calls_from_trace(monkeypatch) -> None:
+    """2026-07-16 audit finding: the research floor / gap-fill passes call
+    chat_with_tools again with a fresh conversation but the SAME shared trace,
+    and the per-call dedup cache started empty — so a later pass happily
+    re-ran an earlier pass's identical searches (a real RandGallery session
+    repeated 5 of its 35 tool calls). Seeding seen_calls from the trace makes
+    an exact repeat in pass 2 a no-execute nudge, same as within one pass."""
+    client = MistralClient(api_key="test-key")
+    executed = {"n": 0}
+
+    def handler(**kwargs):
+        executed["n"] += 1
+        return {"data": "fresh"}
+
+    seq = [
+        _msg(
+            tool_calls=[
+                {
+                    "id": "1",
+                    "function": {
+                        "name": "search_web",
+                        "arguments": '{"query": "RandGallery closing"}',
+                    },
+                }
+            ]
+        ),
+        _msg(content="DONE"),
+    ]
+    calls = {"n": 0}
+
+    def fake_post(payload):
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i]
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    # Trace already contains this exact call from a previous pass.
+    trace = [
+        {
+            "tool": "search_web",
+            "arguments": {"query": "RandGallery closing"},
+            "result": {"results": ["earlier data"]},
+        }
+    ]
+    out = client.chat_with_tools(
+        [{"role": "user", "content": "pass 2"}],
+        tools=[],
+        handlers={"search_web": handler},
+        trace=trace,
+    )
+    assert out == "DONE"
+    assert executed["n"] == 0  # the duplicate was nudged, never re-executed
+
+
+def test_cross_pass_dedup_still_allows_retry_of_errored_calls(monkeypatch) -> None:
+    # A transient failure in pass 1 must stay retryable in pass 2.
+    client = MistralClient(api_key="test-key")
+    executed = {"n": 0}
+
+    def handler(**kwargs):
+        executed["n"] += 1
+        return {"data": "second attempt worked"}
+
+    seq = [
+        _msg(
+            tool_calls=[
+                {
+                    "id": "1",
+                    "function": {
+                        "name": "fetch_url",
+                        "arguments": '{"url": "https://example.com/"}',
+                    },
+                }
+            ]
+        ),
+        _msg(content="DONE"),
+    ]
+    calls = {"n": 0}
+
+    def fake_post(payload):
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i]
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    trace = [
+        {
+            "tool": "fetch_url",
+            "arguments": {"url": "https://example.com/"},
+            "result": {"error": "timeout"},
+        }
+    ]
+    out = client.chat_with_tools(
+        [{"role": "user", "content": "pass 2"}],
+        tools=[],
+        handlers={"fetch_url": handler},
+        trace=trace,
+    )
+    assert out == "DONE"
+    assert executed["n"] == 1  # errored call re-ran

@@ -20,12 +20,32 @@ def test_fetch_hint_steers_medium_and_reddit_to_dedicated_tools() -> None:
     assert "medium_api_article_list" in _fetch_failure_hint(
         "https://medium.com/@author/post-123", "Client error '403 Forbidden'"
     )
-    assert "reddit_api_post_history" in _fetch_failure_hint(
+    # reddit tool phased out 2026-07-16 (server IP is hard-blocked): the hint
+    # must say no reddit data exists rather than steer to a tool that 403s.
+    reddit_hint = _fetch_failure_hint(
         "https://www.reddit.com/r/algorand/comments/x/", "Client error '403 Blocked'"
     )
+    assert "reddit_api_post_history" not in reddit_hint
+    assert "no reddit data" in reddit_hint
     assert "github_activity" in _fetch_failure_hint(
         "https://github.com/algorand/go-algorand", "Client error '403 rate limited'"
     )
+
+
+def test_reddit_tool_is_not_offered_but_stub_answers_without_network() -> None:
+    """Phased out 2026-07-16: reddit hard-blocks this server's IP, so offering
+    the tool burned one guaranteed-403 call per compose session. No schema is
+    registered anymore; the stub handler stays for stale references and must
+    answer without any network round-trip."""
+    from app.modules.ai.research_tools import _tool_reddit_history
+    from app.modules.ai.research_tools import research_tools as research_tools_fn
+
+    schemas, handlers = research_tools_fn()
+    assert "reddit_api_post_history" not in _names(schemas)
+    assert "reddit_api_post_history" in handlers
+    result = _tool_reddit_history("someuser")
+    assert "reddit blocks" in result["error"]
+    assert result["items"] == []
 
 
 def test_fetch_hint_suggests_archive_for_gone_pages_only() -> None:
