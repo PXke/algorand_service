@@ -112,6 +112,7 @@ def test_grade_article_quality_llm_includes_critical_distance(monkeypatch) -> No
                 "narrative_synthesis": 4,
                 "technical_depth": 4,
                 "critical_distance": 2,
+                "repetition": 4,
                 "issues": [],
             }
 
@@ -124,6 +125,64 @@ def test_grade_article_quality_llm_includes_critical_distance(monkeypatch) -> No
     assert result["model"] == "llm_rubric"
     assert result["critical_distance"] == 2
     assert any("critical distance scored 2/5" in i for i in result["issues"])
+
+
+def test_partial_rubric_response_retries_then_fails_closed(monkeypatch) -> None:
+    """2026-07-16: a real draft was graded narrative_synthesis=3 with the
+    other three dimensions null — the rubric response was partial, and
+    quality_needs_revision treats None as passing, so the draft was
+    effectively graded on 1 of 4 dimensions. A partial response must retry
+    once, and any dimension still missing FAILS CLOSED at 2."""
+    calls = {"n": 0}
+
+    class _PartialClient:
+        def chat_json_object(self, *_a, **_kw):
+            calls["n"] += 1
+            return {"narrative_synthesis": 3, "issues": []}  # always partial
+
+    monkeypatch.setattr(
+        "app.core.config.WRITER_QUALITY_LLM_ENABLED", True, raising=False
+    )
+    result = grade_article_quality_llm(
+        title="T", body="Some article body text.", client=_PartialClient()
+    )
+    assert calls["n"] == 2  # one retry
+    assert result["model"] == "llm_rubric_partial"
+    assert result["narrative_synthesis"] == 3  # the score it DID give survives
+    assert result["technical_depth"] == 2  # missing -> failing
+    assert result["critical_distance"] == 2
+    assert result["repetition"] == 2
+    assert quality_needs_revision(result, min_score=3)
+    assert any("no score" in i for i in result["issues"])
+
+
+def test_partial_rubric_recovered_by_retry_is_not_flagged(monkeypatch) -> None:
+    responses = iter(
+        [
+            {"narrative_synthesis": 4, "issues": []},  # partial first answer
+            {
+                "narrative_synthesis": 4,
+                "technical_depth": 4,
+                "critical_distance": 4,
+                "repetition": 4,
+                "issues": [],
+            },
+        ]
+    )
+
+    class _FlakyClient:
+        def chat_json_object(self, *_a, **_kw):
+            return next(responses)
+
+    monkeypatch.setattr(
+        "app.core.config.WRITER_QUALITY_LLM_ENABLED", True, raising=False
+    )
+    result = grade_article_quality_llm(
+        title="T", body="Some article body text.", client=_FlakyClient()
+    )
+    assert result["model"] == "llm_rubric"
+    assert result["technical_depth"] == 4
+    assert not quality_needs_revision(result, min_score=3)
 
 
 def test_grade_failure_falls_back_to_revision_trigger(monkeypatch) -> None:

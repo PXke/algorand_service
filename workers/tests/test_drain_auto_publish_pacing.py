@@ -151,3 +151,63 @@ def test_ensure_review_ready_skips_when_backlog_full(monkeypatch) -> None:
     )
     result = qdt.ensure_review_ready()
     assert result == {"status": "skipped", "reason": "pending_feed_backlog_full"}
+
+
+def test_capped_compose_is_stashed_to_backlog_not_discarded(monkeypatch) -> None:
+    """2026-07-15: a finished ok compose (the 'Seven Real-World Apps' YouTube
+    article) hit 'standard daily publish cap reached (3/3)' AFTER composing,
+    got returned as rate_limited, and the content was thrown away (its queue
+    row later aged out). The stash helper must store the article unlisted and
+    queue it for the paced backlog release instead."""
+    from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    stored: dict = {}
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.insert_stored_article",
+        lambda **kw: (stored.update(kw), ("aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000", True))[1],
+    )
+    executed: list = []
+
+    class _FakeSession:
+        def execute(self, stmt, params=None):
+            executed.append((stmt, params))
+
+    monkeypatch.setattr(
+        "app.core.cassandra.get_cassandra_session", lambda: _FakeSession()
+    )
+    monkeypatch.setattr(
+        "app.core.cassandra.prepare_cached", lambda cql: cql
+    )
+
+    row = SimpleNamespace(
+        queue_id="q1",
+        service_id="youtube-algorand-foundation",
+        scrape_url="https://www.youtube.com/watch?v=3hiqzTfcdF4",
+        payload={"txid": "", "round_num": 0},
+    )
+    composed = SimpleNamespace(
+        title="Seven Real-World Apps",
+        summary="s",
+        body="body text",
+        publish_kind=None,
+        extra_tags=(),
+        prompt_version="2026-07-16a",
+    )
+    out = pt._stash_capped_compose_to_backlog(
+        row=row,
+        composed=composed,
+        payload=row.payload,
+        hero_image="",
+        image_field="",
+        publish_kind=PublishKind.CONTENT_UPDATE,
+        topic=PublishTopic.GENERIC,
+        tier=pt.PublishTier.STANDARD,
+        reason="standard daily publish cap reached (3/3)",
+    )
+
+    assert out["status"] == "approved_backlog"
+    assert stored["publish_to_feed"] is False
+    assert stored["title"] == "Seven Real-World Apps"
+    assert len(executed) == 1  # the pending_feed_queue INSERT
+    assert "pending_feed_queue" in str(executed[0][0])

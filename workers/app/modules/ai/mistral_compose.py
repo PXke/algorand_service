@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
 # every stored article so analytics can correlate a prompt edit with a shift in
 # grades/engagement instead of guessing from deploy timestamps.
-PROMPT_VERSION = "2026-07-16a"
+PROMPT_VERSION = "2026-07-16b"
 
 
 @dataclass(frozen=True)
@@ -97,6 +97,14 @@ def _writing_guidelines(today: str) -> str:
         "findings. Weave distinct developments into a unified, flowing narrative. "
         "You are strictly prohibited from using bulleted lists to summarize events, "
         "features, or updates.\n"
+        "- Vary your lede: do NOT open the article with the newspaper's standard "
+        "layer-1 pitch (Pure Proof-of-Stake, sub-3-second finality, sub-cent fees). "
+        "Nearly every recent piece opened with that same paragraph, and readers "
+        "scrolling the feed see the identical intro on every story (observed "
+        "2026-07-16). Lead with what is specific to THIS story — the tension, the "
+        "actor, the change, the stakes. Protocol mechanics belong mid-piece, in the "
+        "section where they earn their place explaining this story's friction; "
+        "mention them there, once, not as a ritual opener.\n"
         "- Technical Stakes & Depth: Ground abstract announcements in specific "
         "architecture. You must explicitly bridge the announcement to the underlying "
         "layer-1 architecture. If the verified material mentions a partnership or "
@@ -168,7 +176,34 @@ def _writer_system_prompt(today: str, *, assignment: bool = False) -> str:
 # The ALGO PRICE/MARKET RULE is deliberate: the small model used to fetch the
 # price for every story and pad unrelated articles (a dev tool, a partnership)
 # with an irrelevant price table, which made them look automated.
-_TOOLS_GUIDANCE = (
+# ── Investigation prompt ────────────────────────────────────────────────────
+# Refactored 2026-07-16 (owner request): the rules below accreted one
+# production incident at a time into a single 150-line string, and the
+# research-phase variant was derived by string-splitting it at the literal
+# text "SELF-REVIEW (MANDATORY" — fragile, and impossible to see which prompt
+# a given rule reached. Now each thematic block is a named constant and
+# _TOOLS_GUIDANCE / _RESEARCH_PHASE_GUIDANCE compose them explicitly:
+#
+#   _RESEARCH_MISSION_AND_ROUTING   what tools exist and when to reach for them
+#   _VERIFICATION_DISCIPLINE        legitimacy stories, chaining, completeness
+#   _METRICS_DISCIPLINE             market-metrics restraint + numeric skepticism
+#   _SOURCING_AND_FRAMING_RULES     liveness, citations, memory-not-a-source,
+#                                   one-product-one-source, undocumented
+#                                   mechanics, self-published claims, RWA claims
+#   _NO_FABRICATION                 the length-vs-invention contract
+#   _STRICT_QUOTE_GROUNDING         (defined above, shared with other prompts)
+#   _FEEDBACK_CHANNELS              suggest_tool + report_compose_issue
+#   _SELF_REVIEW_RULES              single-stage only — the two-stage research
+#                                   pass has no draft to review yet
+#   _RESEARCH_PHASE_ADDENDUM        research-pass-only: adequacy floor,
+#                                   truncation discipline, "don't write yet"
+#
+# Rule text is deliberately verbatim from before the refactor — every block is
+# pinned by tests in test_compose_prompt_grounding.py naming the incident it
+# guards against. Add new rules to the section they belong to; both composed
+# prompts pick them up automatically (or exactly one, if that's what you want).
+
+_RESEARCH_MISSION_AND_ROUTING = (
     "\n\nThe source material is your STARTING POINT, not the finished article: it "
     "identifies the story but is often thin, dated, or padded with boilerplate. Use "
     "the provided facts only where they are genuinely the story, and reach for tools "
@@ -191,6 +226,9 @@ _TOOLS_GUIDANCE = (
     "pierce companies with query_corporate_registry; pull cases with "
     "query_court_dockets; check leaks with search_leak_databases; see who really "
     "builds a project (top contributors, releases, commits) with github_activity.\n"
+)
+
+_VERIFICATION_DISCIPLINE = (
     "LEGITIMACY STORIES — when a piece turns on whether a token, coin or project is "
     "real/safe/worth attention, you MUST actually RUN the verification tools before "
     "you conclude, not just describe them: lookup_asset + lookup_account on the "
@@ -212,6 +250,9 @@ _TOOLS_GUIDANCE = (
     "than an unanswered question you flagged honestly. This matters most for "
     "first-coverage/new-service stories, where missing a major feature of the "
     "subject is worse than a routine update missing a minor detail.\n"
+)
+
+_METRICS_DISCIPLINE = (
     "ALGO PRICE/MARKET RULE: do not add market or chain metrics by default. This "
     "covers ALGO price AND network stats like TVL, volume, node/validator counts and "
     "block times. Fetch and mention any of them ONLY when the metric materially helps "
@@ -231,6 +272,9 @@ _TOOLS_GUIDANCE = (
     "you can verify on-chain/on the actual DEX over a third-party aggregator, and never "
     "print both side by side as if they agree. If you cannot tell which is right, drop "
     "the one you cannot verify rather than including both.\n"
+)
+
+_SOURCING_AND_FRAMING_RULES = (
     "LIVENESS CHECK: weigh whether the project is actually ALIVE before choosing a "
     "tense and frame. Signals of dormancy: the primary site times out or errors on "
     "every fetch attempt, on-chain accounts show 'Offline' status with only dust "
@@ -289,6 +333,9 @@ _TOOLS_GUIDANCE = (
     "occurred — state plainly that the 'ownership' is a token/game mechanic "
     "with no verified connection to the real institution, or drop the "
     "specific asset-ownership framing entirely.\n"
+)
+
+_NO_FABRICATION = (
     "NO FABRICATION (but DO use what you found): never invent, guess at, or embellish "
     "facts to fill space or hit a length target. Within that bound, fully develop "
     "every angle your research actually supports — explain mechanisms, who is "
@@ -297,8 +344,10 @@ _TOOLS_GUIDANCE = (
     "source earns a short piece; a rich one earns a thorough one. Stop only when the "
     "verified material is genuinely exhausted. Making things up is the one thing "
     "that is never acceptable.\n"
-    + _STRICT_QUOTE_GROUNDING
-    + "TOOL GAPS (do this every story, do not skip): after researching, ask whether "
+)
+
+_FEEDBACK_CHANNELS = (
+    "TOOL GAPS (do this every story, do not skip): after researching, ask whether "
     "any fact, number, or source would have made THIS story sharper, deeper, or "
     "better verified if a tool could have fetched it. Call suggest_tool for EACH "
     "such gap — even when you finished the article without it. This is NOT only for "
@@ -310,6 +359,9 @@ _TOOLS_GUIDANCE = (
     "report_compose_issue with a specific category and summary (use suggest_tool "
     "only for capabilities that do not exist yet). This feeds engineering — report "
     "real friction, not nitpicks, then continue.\n"
+)
+
+_SELF_REVIEW_RULES = (
     "SELF-REVIEW (MANDATORY — every article, no exceptions): you MUST call "
     "review_draft at least once before you finish; do NOT output the final JSON "
     "until you have. When the draft is complete, call review_draft with your "
@@ -326,13 +378,8 @@ _TOOLS_GUIDANCE = (
     "after revising). Then output the final JSON article."
 )
 
-
-# Research-phase guidance for two-stage compose: the tool-discipline + journalism
-# rules WITHOUT the self-review/"then WRITE" steering — the warm pass produces the
-# article separately, and review_draft has no draft to grade yet.
-_RESEARCH_PHASE_GUIDANCE = (
-    _TOOLS_GUIDANCE.split("SELF-REVIEW (MANDATORY")[0].rstrip()
-    + "\n\nRESEARCH PHASE ONLY: right now your job is to gather and verify the "
+_RESEARCH_PHASE_ADDENDUM = (
+    "\nRESEARCH PHASE ONLY: right now your job is to gather and verify the "
     "facts THIS story needs using the tools — do NOT write the article yet. Chain "
     "as many tool calls as the story needs, letting each result guide the next; "
     "do not stop at the first answer if a follow-up would sharpen or verify a key "
@@ -356,6 +403,32 @@ _RESEARCH_PHASE_GUIDANCE = (
     "specific sub-links or tighten search terms.\n"
     "When your research is adequate, stop calling tools. Do not write the article "
     "yet — synthesis will produce the handoff digest.\n"
+)
+
+# Single-stage/legacy loop: research + write + mandatory self-review in one pass.
+_TOOLS_GUIDANCE = (
+    _RESEARCH_MISSION_AND_ROUTING
+    + _VERIFICATION_DISCIPLINE
+    + _METRICS_DISCIPLINE
+    + _SOURCING_AND_FRAMING_RULES
+    + _NO_FABRICATION
+    + _STRICT_QUOTE_GROUNDING
+    + _FEEDBACK_CHANNELS
+    + _SELF_REVIEW_RULES
+)
+
+# Two-stage research pass: same rules WITHOUT the self-review/"then WRITE"
+# steering — the warm pass produces the article separately, and review_draft
+# has no draft to grade yet.
+_RESEARCH_PHASE_GUIDANCE = (
+    _RESEARCH_MISSION_AND_ROUTING
+    + _VERIFICATION_DISCIPLINE
+    + _METRICS_DISCIPLINE
+    + _SOURCING_AND_FRAMING_RULES
+    + _NO_FABRICATION
+    + _STRICT_QUOTE_GROUNDING
+    + _FEEDBACK_CHANNELS
+    + _RESEARCH_PHASE_ADDENDUM
 )
 
 

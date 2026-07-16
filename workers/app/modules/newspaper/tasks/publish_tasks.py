@@ -204,6 +204,77 @@ def _merge_tags(base: list[str], extra) -> list[str]:
     return out[:10]
 
 
+def _stash_capped_compose_to_backlog(
+    *, row, composed, payload, hero_image, image_field, publish_kind, topic, tier, reason
+) -> dict[str, str]:
+    """The daily cap filled between the drain's pre-compose check and this
+    publish attempt (composes take minutes; another lane can take the last
+    slot meanwhile). The old behavior returned rate_limited and THREW AWAY
+    the finished article — the 2026-07-15 'Seven Real-World Apps' YouTube
+    compose (~300k tokens, status ok) died exactly this way, then its queue
+    row aged out and the content was lost. Store it unlisted and queue it in
+    pending_feed_queue instead, exactly like the auto-approve backlog path:
+    the paced release ships it once a slot opens."""
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    from app.core import config as worker_config
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PendingFeedStmts
+    from app.modules.newspaper.article_store import insert_stored_article
+    from app.modules.newspaper.security import sanitize_body
+
+    title, summary = composed.title, composed.summary
+    body = _with_hero_image(
+        sanitize_body(composed.body), hero_image, title, source_url=row.scrape_url
+    )
+    tags = _merge_tags(
+        derive_article_tags(
+            service_id=row.service_id,
+            source_kind=_source_kind_from_url(row.scrape_url),
+            title=title,
+            publish_kind=composed.publish_kind or publish_kind.value,
+            publish_topic=topic.value,
+            publish_tier=tier.value,
+        ),
+        getattr(composed, "extra_tags", ()),
+    )
+    article_id, _ = insert_stored_article(
+        service_id=row.service_id,
+        title=title,
+        summary=summary,
+        body=body,
+        trigger_txid=str(payload.get("txid", "")),
+        trigger_round=int(payload.get("round_num", 0)),
+        source_url=row.scrape_url,
+        publish_to_feed=False,
+        image_url=image_field,
+        tags=tags,
+        prompt_version=getattr(composed, "prompt_version", ""),
+    )
+    get_cassandra_session().execute(
+        PendingFeedStmts.INSERT,
+        (
+            worker_config.NEWS_FEED_BUCKET or "main",
+            0.0,  # interest unknown here; FIFO within the day is fine
+            datetime.now(tz=UTC),
+            UUID(article_id),
+        ),
+    )
+    logger.warning(
+        "daily cap filled mid-compose (%s) — stored article %s to the "
+        "pending_feed backlog instead of discarding the finished compose",
+        reason,
+        article_id,
+    )
+    return {
+        "status": "approved_backlog",
+        "service_id": row.service_id,
+        "article_id": article_id,
+        "reason": reason,
+    }
+
+
 from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
 
 
@@ -953,8 +1024,32 @@ def publish_from_queued_row(
         assert_publish_allowed(tier=tier)
         reserved, reserve_reason = reserve_publish_slot(tier=tier)
         if not reserved:
+            if tier == PublishTier.STANDARD:
+                return _stash_capped_compose_to_backlog(
+                    row=row,
+                    composed=composed,
+                    payload=payload,
+                    hero_image=hero_image,
+                    image_field=image_field,
+                    publish_kind=publish_kind,
+                    topic=topic,
+                    tier=tier,
+                    reason=reserve_reason,
+                )
             return {"status": "rate_limited", "reason": reserve_reason, "tier": tier.value}
     except PublishCapExceededError as exc:
+        if tier == PublishTier.STANDARD:
+            return _stash_capped_compose_to_backlog(
+                row=row,
+                composed=composed,
+                payload=payload,
+                hero_image=hero_image,
+                image_field=image_field,
+                publish_kind=publish_kind,
+                topic=topic,
+                tier=tier,
+                reason=str(exc),
+            )
         return {"status": "rate_limited", "reason": str(exc), "tier": tier.value}
 
     title, summary, body = composed.title, composed.summary, sanitize_body(composed.body)

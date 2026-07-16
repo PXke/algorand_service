@@ -357,3 +357,36 @@ def test_stage2_forbids_nonverbatim_quotation_marks():
     assert "QUOTATION MARKS ARE A VERBATIM CLAIM" in mc._STAGE2_GENERATION_GUIDANCE
     assert "word-for-word" in mc._STAGE2_GENERATION_GUIDANCE
     assert "paraphrase WITHOUT" in mc._STAGE2_GENERATION_GUIDANCE
+
+
+def test_writing_guidelines_forbid_the_boilerplate_lede():
+    """2026-07-16: every recent article opened with the identical PPoS/
+    finality/fees paragraph — cross-article repetition the per-article
+    rubric can't see. The guidelines must tell the writer to lead with the
+    story-specific tension and keep protocol mechanics mid-piece."""
+    text = mc._writing_guidelines("2026-07-16")
+    assert "Vary your lede" in text
+    assert "standard" in text and "layer-1 pitch" in text
+    assert "specific to THIS story" in text
+
+
+def test_guidance_composed_from_named_sections_not_string_split():
+    """Refactor 2026-07-16 (owner task #32): _RESEARCH_PHASE_GUIDANCE used to
+    be derived by splitting _TOOLS_GUIDANCE at the literal text 'SELF-REVIEW
+    (MANDATORY' — a rename of that heading would have silently changed which
+    rules reach the research pass. Both prompts now compose named section
+    constants; this pins that every section lands where intended."""
+    for section in (
+        mc._RESEARCH_MISSION_AND_ROUTING,
+        mc._VERIFICATION_DISCIPLINE,
+        mc._METRICS_DISCIPLINE,
+        mc._SOURCING_AND_FRAMING_RULES,
+        mc._NO_FABRICATION,
+        mc._FEEDBACK_CHANNELS,
+    ):
+        assert section in mc._TOOLS_GUIDANCE
+        assert section in mc._RESEARCH_PHASE_GUIDANCE
+    assert mc._SELF_REVIEW_RULES in mc._TOOLS_GUIDANCE
+    assert mc._SELF_REVIEW_RULES not in mc._RESEARCH_PHASE_GUIDANCE
+    assert mc._RESEARCH_PHASE_ADDENDUM in mc._RESEARCH_PHASE_GUIDANCE
+    assert mc._RESEARCH_PHASE_ADDENDUM not in mc._TOOLS_GUIDANCE

@@ -119,15 +119,44 @@ def grade_article_quality_llm(
         )
         if not isinstance(parsed, dict):
             raise ValueError("non-object LLM grade")
-        narrative = _clamp_score(parsed.get("narrative_synthesis"))
-        technical = _clamp_score(parsed.get("technical_depth"))
-        critical_distance = _clamp_score(parsed.get("critical_distance"))
-        repetition = _clamp_score(parsed.get("repetition"))
+        dims = ("narrative_synthesis", "technical_depth", "critical_distance", "repetition")
+        scores = {k: _clamp_score(parsed.get(k)) for k in dims}
+        # Partial responses must not silently pass (2026-07-16: a real draft
+        # got narrative_synthesis=3 with the other three dimensions null —
+        # graded on 1 of 4, and quality_needs_revision treats None as fine).
+        # One retry, then any still-missing dimension FAILS CLOSED at 2
+        # (below every revision threshold), same stance as _FALLBACK_QUALITY.
+        if any(v is None for v in scores.values()):
+            retry = mistral.chat_json_object(
+                messages,
+                temperature=MISTRAL_TEMP_RESEARCH,
+                max_tokens=800,
+            )
+            if isinstance(retry, dict):
+                for k in dims:
+                    if scores[k] is None:
+                        scores[k] = _clamp_score(retry.get(k))
+                if isinstance(retry.get("issues"), list) and not parsed.get("issues"):
+                    parsed["issues"] = retry["issues"]
+        missing = [k for k, v in scores.items() if v is None]
+        for k in missing:
+            scores[k] = 2
+        narrative = scores["narrative_synthesis"]
+        technical = scores["technical_depth"]
+        critical_distance = scores["critical_distance"]
+        repetition = scores["repetition"]
         issues = [
             str(i).strip()
             for i in (parsed.get("issues") or [])
             if str(i).strip()
         ][:6]
+        if missing:
+            logger.warning("LLM rubric returned partial scores; missing %s", missing)
+            issues.append(
+                "rubric returned no score for "
+                + ", ".join(missing)
+                + " (twice) — treated as failing; re-grade on revision"
+            )
         if narrative is not None and narrative < 4:
             issues.append(
                 f"narrative synthesis scored {narrative}/5 — weave facts into "
@@ -151,7 +180,7 @@ def grade_article_quality_llm(
                 "first mention and cut (or reference back to) the rest"
             )
         return {
-            "model": "llm_rubric",
+            "model": "llm_rubric_partial" if missing else "llm_rubric",
             "narrative_synthesis": narrative,
             "technical_depth": technical,
             "critical_distance": critical_distance,
