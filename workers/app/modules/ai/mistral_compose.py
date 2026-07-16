@@ -1694,6 +1694,12 @@ def _compose_via_writer_tools_locked(
             # body doesn't already cite, so deep links survive into the published
             # article (lifts citation density; preserves existing prose).
             payload = append_reference_block(payload, trace)
+            # Deterministic link gate: delink body urls the research never
+            # surfaced and that don't resolve live (invented-url pattern the
+            # numeric gatekeeper can't see — RandGallery incident 2026-07-16).
+            from app.modules.newspaper.link_gate import sanitize_untraced_links
+
+            payload = sanitize_untraced_links(payload, trace)
             raw = _json.dumps(payload)
             _duration_ms = int((_time.monotonic() - _t0) * 1000)
             try:

@@ -441,6 +441,10 @@ COMPOSE_SERVICE_COOLDOWN_HOURS = env_int("COMPOSE_SERVICE_COOLDOWN_HOURS", 168)
 # this long (seconds). Stops a rejected page re-entering the candidate queue the
 # moment its content hash shifts again. Default 7 days.
 URL_REJECT_COOLDOWN_TTL = env_int("URL_REJECT_COOLDOWN_TTL", 604800)
+# Delink body urls that neither appeared in the research trace nor resolve
+# live (2026-07-16: the writer decorated real project names with invented
+# urls — downbad.art, alchemon.com — that the numeric gatekeeper can't see).
+LINK_GATE_ENABLED = env_bool("LINK_GATE_ENABLED", True)
 # Near-duplicate guard, applied AT COMPOSITION (not enqueue — the set of
 # published articles can grow between a candidate being queued and composed).
 # Skip composing when a recently published headline is at least this Jaccard-
