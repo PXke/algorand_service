@@ -395,6 +395,13 @@ def _content_quality_fails(relevance: float, kind: PublishKind | None = None) ->
     return relevance < config.FRONTIER_CONTENT_REJECT_SCORE
 
 
+def _writer_flagged_breaking(tier: PublishTier, composed) -> bool:
+    """True when the writer called mark_breaking_news this compose and the
+    row isn't already breaking-tier. Kept pure/tiny so the decision is
+    testable without exercising the rest of publish_from_queued_row."""
+    return bool(getattr(composed, "breaking_reason", None)) and tier != PublishTier.BREAKING
+
+
 def _quality_floor_fails(heuristic_grade: dict | None) -> bool:
     """Second quality veto on the auto-publish path: the writer's own two-stage
     grade/revise pass (article_grader.grade_article_draft, same score
@@ -780,6 +787,20 @@ def publish_from_queued_row(
             "service_id": row.service_id,
             "detail": str(exc),
         }
+
+    # Writer-declared breaking news (mark_breaking_news tool) replaces the
+    # deterministic keyword classifier disabled 2026-07-17 — see
+    # classify_publish_tier's docstring. Upgrading tier here, before the cap
+    # check and the "Breaking:" prefix below, means the writer's call flows
+    # through the SAME tested cap/prefix/pacing-bypass machinery the old
+    # (broken-detection, sound-mechanics) system used — only the DECISION
+    # MAKER changed, from a page-text substring scan to the model that
+    # actually researched the story.
+    if _writer_flagged_breaking(tier, composed):
+        logger.info(
+            "writer marked %s breaking: %s", row.service_id, composed.breaking_reason
+        )
+        tier = PublishTier.BREAKING
 
     # Classifier gate: only confidently publish-worthy content goes straight
     # to the feed. Everything else is stored unpublished and queued for admin

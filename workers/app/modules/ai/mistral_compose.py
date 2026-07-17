@@ -46,6 +46,10 @@ class MistralArticleFields:
     # itself failed. Lets a caller (e.g. the publish gate) act on the SAME grade
     # the writer saw, instead of recomputing it blind.
     heuristic_grade: dict | None = None
+    # Writer-declared urgency (mark_breaking_news tool, replaces the
+    # deterministic keyword classifier disabled 2026-07-17) — None unless the
+    # writer actually called the tool this compose.
+    breaking_reason: str | None = None
 
 
 # The single hardest accuracy rule. The small model, told to write full-depth,
@@ -1435,6 +1439,7 @@ def _parse_article_fields(payload: dict[str, Any]) -> MistralArticleFields:
         body=body,
         tags=tuple(tags[:6]),
         heuristic_grade=payload.get("_heuristic_grade"),
+        breaking_reason=payload.get("_breaking_reason"),
     )
 
 
@@ -1858,6 +1863,15 @@ def _compose_via_writer_tools_locked(
             payload = link_and_verify_chain_entities(
                 payload, trace, extra_texts=[user, research_user or ""]
             )
+            # Writer-declared breaking news (replaces the deterministic keyword
+            # classifier, disabled 2026-07-17): scanned from the trace like the
+            # gates above, since mark_breaking_news never mutates the draft —
+            # it's a judgment call the publish gate reads afterward.
+            from app.modules.ai.breaking_news_tool import breaking_reason_from_trace
+
+            breaking_reason = breaking_reason_from_trace(trace)
+            if breaking_reason is not None:
+                payload["_breaking_reason"] = breaking_reason
             raw = _json.dumps(payload)
             _duration_ms = int((_time.monotonic() - _t0) * 1000)
             try:

@@ -751,6 +751,16 @@ def all_tools(
         handlers["spike_story"] = spike_story_handler
     except Exception:
         logger.warning("failed to load spike_story tool", exc_info=True)
+    try:
+        from app.modules.ai.breaking_news_tool import (
+            MARK_BREAKING_NEWS_SCHEMA,
+            mark_breaking_news_handler,
+        )
+
+        schemas.append(MARK_BREAKING_NEWS_SCHEMA)
+        handlers["mark_breaking_news"] = mark_breaking_news_handler
+    except Exception:
+        logger.warning("failed to load mark_breaking_news tool", exc_info=True)
     # Registered last, once every toolset is merged, so the already-have-it
     # check sees the FULL tool registry for this compose.
     handlers["report_compose_issue"] = _make_report_compose_issue_handler(context)
