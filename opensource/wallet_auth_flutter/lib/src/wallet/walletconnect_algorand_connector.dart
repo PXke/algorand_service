@@ -212,6 +212,12 @@ class WalletConnectAlgorandConnector implements WalletConnector {
   void wakeTransport() {
     final connector = _connectorInstance;
     if (connector == null) return;
+    // Only revive a DEAD socket. Foreground events also fire for harmless
+    // visibility flickers (the OS "Open in Pera?" prompt covering the page,
+    // quick app switches) — force-reconnecting a healthy socket there churns
+    // the transport at the worst possible moment, right as the pairing or
+    // sign request is in flight (v1 of this fix did exactly that, 2026-07-16).
+    if (connector.bridgeConnected) return;
     connector.reconnect();
   }
 
