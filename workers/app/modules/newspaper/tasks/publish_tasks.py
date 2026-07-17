@@ -641,12 +641,30 @@ def publish_from_queued_row(
     publish_mode = str(payload.get("publish_mode", "create"))
     linked_article_id = str(payload.get("linked_article_id", "")).strip()
     if publish_mode == "edit" and linked_article_id:
-        from app.modules.newspaper.article_edit_service import run_article_edit
+        from app.modules.newspaper.article_matching import is_edit_window_open
 
-        try:
-            return run_article_edit(row)
-        except ComposeBusyError:
-            return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
+        if is_edit_window_open(linked_article_id):
+            from app.modules.newspaper.article_edit_service import run_article_edit
+
+            try:
+                return run_article_edit(row)
+            except ComposeBusyError:
+                return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
+        # publish_mode was decided at INGEST time; a row can sit pending for
+        # days behind cooldowns (observed: a 4-day-old edit row, 2026-07-17
+        # audit) and drain long after the linked article's edit window closed.
+        # Editing a days-old article from a stale routing decision is wrong —
+        # fall through to the create path instead, which is exactly what
+        # resolve_publish_mode would have decided today. Mutating the payload
+        # keeps the downstream match-key registration (keyed on publish_mode
+        # == "create") consistent with the path actually taken.
+        logger.info(
+            "edit window closed for linked article %s — composing as new article",
+            linked_article_id,
+        )
+        publish_mode = "create"
+        payload["publish_mode"] = "create"
+        payload.pop("linked_article_id", None)
 
     # We ALWAYS resolve the compose domain (registrable: domain_from_url
     # collapses forum.folks.finance -> folks.finance, so subdomains of one

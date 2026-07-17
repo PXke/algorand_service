@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import UTC, datetime
 
 from app.core.config import mistral_configured
 from app.modules.newspaper.article_store import get_article, update_article
@@ -30,7 +31,16 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
 
     existing = get_article(linked_id)
     if existing is None:
-        return {"status": "skipped", "reason": "article_not_found", "linked_article_id": linked_id}
+        # Permanent: the linked article was deleted after this row was queued.
+        # queue_status retires the row (via _resolve) instead of leaving it
+        # pending — a pending row here redrained every breaking beat forever
+        # AND starved the service's one-pending-row slot (audit 2026-07-17).
+        return {
+            "status": "skipped",
+            "reason": "article_not_found",
+            "queue_status": "expired",
+            "linked_article_id": linked_id,
+        }
 
     try:
         topic = PublishTopic(row.topic)
@@ -157,7 +167,11 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
     except Exception:
         pass
 
-    from app.modules.newspaper.article_matching import build_match_keys, register_article_match_keys
+    from app.modules.newspaper.article_matching import (
+        build_match_keys,
+        edit_window_closes_at,
+        register_article_match_keys,
+    )
 
     keys = payload.get("match_keys")
     if not isinstance(keys, list) or not keys:
@@ -176,7 +190,22 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
             for k in keys
             if isinstance(k, (list, tuple)) and len(k) == 2
         ]
-    register_article_match_keys(article_id=linked_id, keys=keys)
+    # Anchor the re-registered keys' edit window to the article's ORIGINAL
+    # publish time, never "now": the default (now + window) meant every edit
+    # rolled the window forward another 24h — and since each edit also adds
+    # the editing source's own keys, one stray match could keep an article
+    # editable (and accumulating keys) indefinitely. That rolling window is
+    # how the 2026-07-17 runaway kept re-opening itself; with this anchor the
+    # window converges to publish + ARTICLE_EDIT_WINDOW_HOURS and closes,
+    # matching what is_edit_window_open already enforces for explicit edits.
+    published_at = None
+    if existing.published_at_epoch:
+        published_at = datetime.fromtimestamp(existing.published_at_epoch, tz=UTC)
+    register_article_match_keys(
+        article_id=linked_id,
+        keys=keys,
+        closes_at=edit_window_closes_at(from_time=published_at) if published_at else None,
+    )
 
     return {
         "status": "edited",
