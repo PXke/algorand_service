@@ -40,9 +40,17 @@ def test_build_match_keys_body_domains_suppressed_outside_scam_incident_topics()
     )
     domains = {v for t, v in keys if t == "domain"}
     assert "algoblow.com" not in domains
+    # Cashtags share the gate (audit 2026-07-17): $ALGO/$USDC appear in
+    # ordinary market coverage constantly, so an ungated "keyword" key routes
+    # unrelated future updates into editing whatever article mentioned the
+    # ticker last — same magnet mechanic as body domains, same fix.
+    assert not any(t == "keyword" for t, _ in keys)
     # The source's own registrable domain (from source_url, not the body)
     # is a different code path — a normal, narrow signal, untouched by this.
     assert ("source_url", "https://algorand.co/blog/some-post") in [(t, v) for t, v in keys]
+    # Addresses stay ungated in ANY topic: 58-char checksummed strings are
+    # high-precision "same story" signals, unlike domains/tickers.
+    assert any(t == "algo_address" for t, _ in keys)
 
 
 def test_build_match_keys_domain_source_uses_registry_domain_not_page_url():

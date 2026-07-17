@@ -64,16 +64,22 @@ def build_match_keys(
     # the same live article, which then got re-edited on every ~2-minute
     # beat forever (see publish_queue_store.TERMINAL_OUTCOMES) — 165 edits /
     # 330 versions in under 4 hours before this was caught by hand.
+    # Cashtags get the same topic gate as body domains, for the same reason:
+    # $ALGO/$USDC appear in ordinary market coverage constantly, so an
+    # ungated "keyword" key routes unrelated future updates into editing
+    # whatever article happened to mention the ticker last ($SCAMTOKEN
+    # continuity on an alert is the signal this key type exists for).
     if topic in ("scam_alert", "network_incident"):
         _urls, domains = extract_domains_and_urls(page_text)
         for domain in domains:
             add("domain", domain)
+        for match in _KEYWORD_RE.finditer(page_text):
+            add("keyword", match.group(1).lower())
 
+    # Addresses stay ungated: 58-char checksummed strings are high-precision
+    # "same story" signals in any topic, unlike domains/tickers.
     for addr in extract_algorand_addresses(page_text):
         add("algo_address", addr.upper())
-
-    for match in _KEYWORD_RE.finditer(page_text):
-        add("keyword", match.group(1).lower())
 
     for kw in extra_keywords:
         add("keyword", kw.lower())
