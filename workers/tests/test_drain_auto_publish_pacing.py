@@ -128,6 +128,15 @@ def test_edited_is_terminal() -> None:
     assert "edited" in TERMINAL_OUTCOMES
 
 
+def test_edit_failure_is_terminal() -> None:
+    """run_article_edit's failure outcome ({"reason": "update_failed"}) is
+    only reachable when update_article() returns False, which is ONLY a
+    permanent condition (linked article deleted, malformed id, never
+    published) — a real Cassandra write error raises instead. Same
+    missing-terminal-status shape as "edited"; closed alongside it."""
+    assert "failed" in TERMINAL_OUTCOMES
+
+
 def test_full_backlog_stops_review_composes(monkeypatch, drain_env) -> None:
     """2026-07-16: auto-approve → backlog bypassed the 1-slot review throttle,
     so hourly drains composed six articles overnight — two days of publish

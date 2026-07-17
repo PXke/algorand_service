@@ -47,6 +47,14 @@ TERMINAL_OUTCOMES = frozenset(
         # every beat — 165 edit calls / 330 versions in under 4 hours on one
         # live article before this was caught and stopped by hand.
         "edited",
+        # run_article_edit's failure outcome ({"reason": "update_failed"}) —
+        # only reachable when update_article() returns False, which is ONLY
+        # a permanent condition (linked article deleted, malformed id, or
+        # never actually published) — a real Cassandra write error raises
+        # instead of returning False, so retrying here can never help.
+        # Same missing-terminal-status shape as "edited" above; fixed
+        # alongside it rather than waiting for a second live incident.
+        "failed",
     }
 )
 
