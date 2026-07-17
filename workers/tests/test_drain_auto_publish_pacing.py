@@ -118,6 +118,16 @@ def test_approved_backlog_is_terminal() -> None:
     assert "approved_backlog" in TERMINAL_OUTCOMES
 
 
+def test_edited_is_terminal() -> None:
+    """Regression pin (2026-07-17): run_article_edit's success outcome
+    ({"status": "edited", ...}) was missing from TERMINAL_OUTCOMES, so a
+    completed edit never resolved its queue row — the row stayed "pending"
+    and drain_breaking_publish_queue (fires every ~2 min) redrained and
+    re-edited the same live article every beat, forever. 165 edits / 330
+    versions on one article in under 4 hours before this was caught by hand."""
+    assert "edited" in TERMINAL_OUTCOMES
+
+
 def test_full_backlog_stops_review_composes(monkeypatch, drain_env) -> None:
     """2026-07-16: auto-approve → backlog bypassed the 1-slot review throttle,
     so hourly drains composed six articles overnight — two days of publish

@@ -7,10 +7,14 @@ D13 = (Path(__file__).parent / "fixtures" / "algoblow_d13_alert.txt").read_text(
 
 
 def test_build_match_keys_algoblow():
+    # scam_alert topic: body-mentioned domains ARE a legitimate "this belongs
+    # to that story" signal — a later report about algoblow.com should
+    # attach to the same scam-alert article.
     keys = build_match_keys(
         service_id="algorand-scam-alerts",
         page_text=D13,
         source_url="https://x.com/d13_co/status/1",
+        topic="scam_alert",
     )
     types = {t for t, _ in keys}
     assert "domain" in types
@@ -18,6 +22,27 @@ def test_build_match_keys_algoblow():
     assert "keyword" in types
     assert ("domain", "algoblow.com") in [(t, v) for t, v in keys]
     assert ("source_url", "https://x.com/d13_co/status/1") in [(t, v) for t, v in keys]
+
+
+def test_build_match_keys_body_domains_suppressed_outside_scam_incident_topics():
+    """Regression pin (2026-07-17): body-mentioned domains registered as
+    match keys for ORDINARY content turned the most-cited article into a
+    magnet for every unrelated future update mentioning any of them — six
+    unrelated sources all got routed to "edit" the same live article, which
+    then re-edited itself every ~2 minutes forever (missing terminal-outcome
+    bug, fixed separately) — 165 edits / 330 versions in under 4 hours.
+    Without topic=scam_alert/network_incident, body domains must NOT become
+    match keys; the source's own domain/service_id still can (unaffected)."""
+    keys = build_match_keys(
+        service_id="algorand-foundation-blog",
+        page_text=D13,  # same body-mentioned domain (algoblow.com), different topic
+        source_url="https://algorand.co/blog/some-post",
+    )
+    domains = {v for t, v in keys if t == "domain"}
+    assert "algoblow.com" not in domains
+    # The source's own registrable domain (from source_url, not the body)
+    # is a different code path — a normal, narrow signal, untouched by this.
+    assert ("source_url", "https://algorand.co/blog/some-post") in [(t, v) for t, v in keys]
 
 
 def test_build_match_keys_domain_source_uses_registry_domain_not_page_url():

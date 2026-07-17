@@ -22,6 +22,7 @@ def build_match_keys(
     extra_keywords: tuple[str, ...] = (),
     match_kind: str = "",
     match_value: str = "",
+    topic: str = "",
 ) -> list[tuple[str, str]]:
     """Normalized (key_type, key_value) pairs for article lookup."""
     keys: list[tuple[str, str]] = []
@@ -50,9 +51,23 @@ def build_match_keys(
     elif source_url.strip():
         add("source_url", _normalize_source_url(source_url))
 
-    _urls, domains = extract_domains_and_urls(page_text)
-    for domain in domains:
-        add("domain", domain)
+    # Domains MENTIONED in the body text (as opposed to the source's own
+    # domain above) are only a meaningful "this belongs to that story" signal
+    # for scam/incident continuity — a scam alert about algoblow.com should
+    # attach a LATER report about algoblow.com to the same article. For
+    # ordinary content this is dangerously broad: nearly every article cites
+    # algorand.co/forum.algorand.co/github.com in its own Sources section,
+    # so extracting those as match keys turned the most-cited article into a
+    # magnet for every unrelated future update mentioning any of them — a
+    # real runaway loop (2026-07-17): six unrelated sources (the Algorand
+    # blog, forum, Nodely, Haystack, a GitHub repo) all got routed to "edit"
+    # the same live article, which then got re-edited on every ~2-minute
+    # beat forever (see publish_queue_store.TERMINAL_OUTCOMES) — 165 edits /
+    # 330 versions in under 4 hours before this was caught by hand.
+    if topic in ("scam_alert", "network_incident"):
+        _urls, domains = extract_domains_and_urls(page_text)
+        for domain in domains:
+            add("domain", domain)
 
     for addr in extract_algorand_addresses(page_text):
         add("algo_address", addr.upper())
@@ -206,6 +221,7 @@ def resolve_publish_mode(
         extra_keywords=extra,
         match_kind=match_kind,
         match_value=match_value,
+        topic=topic,
     )
     if (
         requested_mode == "edit"

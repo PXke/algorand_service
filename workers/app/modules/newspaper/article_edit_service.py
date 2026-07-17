@@ -166,6 +166,7 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
             page_text=new_text,
             source_url=row.scrape_url,
             extra_keywords=("scam",) if topic == PublishTopic.SCAM_ALERT else (),
+            topic=topic.value,
             match_kind=str(payload.get("match_kind", "")),
             match_value=str(payload.get("match_value", "")),
         )

@@ -1186,6 +1186,7 @@ def publish_from_queued_row(
                 page_text=str(payload.get("page_text", "")),
                 source_url=row.scrape_url,
                 extra_keywords=("scam",) if topic == PublishTopic.SCAM_ALERT else (),
+                topic=topic.value,
                 match_kind=str(payload.get("match_kind", "")),
                 match_value=str(payload.get("match_value", "")),
             )

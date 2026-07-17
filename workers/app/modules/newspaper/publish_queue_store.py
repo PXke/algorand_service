@@ -40,6 +40,13 @@ TERMINAL_OUTCOMES = frozenset(
         # "duplicate" so the row doesn't loop. An admin can still trigger a
         # manual recompose to override.
         "aborted_by_writer",
+        # run_article_edit's success outcome — MISSING here caused a real
+        # runaway loop (2026-07-17): a completed edit never resolved the
+        # queue row, so the row stayed "pending" and drain_breaking_publish_queue
+        # (fires every ~2 min) redrained and re-edited the same article on
+        # every beat — 165 edit calls / 330 versions in under 4 hours on one
+        # live article before this was caught and stopped by hand.
+        "edited",
     }
 )
 
