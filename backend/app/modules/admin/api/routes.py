@@ -296,6 +296,19 @@ def register_admin_routes(app) -> None:
         items = await asyncio.to_thread(store.list_publish_queue, limit=limit)
         return {"items": items}
 
+    @app.get("/api/v1/admin/pending-feed-backlog")
+    async def admin_pending_feed_backlog(request: Request) -> Response | dict:
+        """Approved articles waiting in pending_feed_queue for paced release
+        (capped by PENDING_FEED_MAX_DEPTH) — distinct from the in-flight
+        composing work publish-queue shows."""
+        denied = require_admin_wallet(request)
+        if denied is not None:
+            return denied
+        import asyncio
+
+        items = await asyncio.to_thread(store.list_pending_feed_backlog)
+        return {"items": items}
+
     @app.get("/api/v1/admin/publish-queue/:queue_id/breakdown")
     async def admin_publish_queue_breakdown(request: Request) -> Response | dict:
         """One row's enqueue-time priority_breakdown + content signals."""

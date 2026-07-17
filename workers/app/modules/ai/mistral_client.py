@@ -26,6 +26,7 @@ from app.core.config import (
     MISTRAL_TOOL_RESULT_MAX_CHARS,
 )
 from app.modules.ai.mistral_rate_limit import throttle_mistral
+from app.modules.ai.story_spike import StorySpikedError
 from app.modules.ai.token_budget import fit_messages_to_budget, serialize_tool_result
 
 logger = logging.getLogger(__name__)
@@ -552,6 +553,24 @@ class MistralClient:
                     handler = handlers.get(name)
                     try:
                         result = handler(**args) if handler else {"error": f"unknown tool {name}"}
+                    except StorySpikedError as spike:
+                        # The one tool "failure" that MUST abort the article —
+                        # spike_story is the writer refusing to compose at all.
+                        # Record it in the trace first so the session shows the
+                        # writer's own reasoning, then let it escape the loop.
+                        if trace is not None:
+                            trace.append(
+                                {
+                                    "tool": name,
+                                    "arguments": args,
+                                    "result": {
+                                        "spiked": True,
+                                        "category": spike.category,
+                                        "reason": spike.reason,
+                                    },
+                                }
+                            )
+                        raise
                     except Exception as exc:  # tool failure must not abort the article
                         result = {"error": str(exc)}
                 if name == require_tool:

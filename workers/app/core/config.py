@@ -449,6 +449,12 @@ LINK_GATE_ENABLED = env_bool("LINK_GATE_ENABLED", True)
 # trace / compose input (2026-07-16: a draft attributed an invented phrase in
 # quotation marks to the Goanna Council). Words survive as paraphrase.
 QUOTE_GATE_ENABLED = env_bool("QUOTE_GATE_ENABLED", True)
+# Cited ASA ids / addresses / txids must exist on-chain (mainnet or testnet);
+# verified ones get auto-linked to an explorer, provably-missing ones are fed
+# back to the writer and delinked (2026-07-17: AlgoGlyph published "50.16% of
+# supply" for a holding the chain says is 25.08% — a clickable explorer link
+# and a deterministic resolve of the same id makes that class visible).
+CHAIN_ENTITY_GATE_ENABLED = env_bool("CHAIN_ENTITY_GATE_ENABLED", True)
 # Stop composing review-bound candidates once pending_feed_queue already holds
 # this many approved articles awaiting paced release (2026-07-16: auto-approve
 # → backlog bypassed the 1-slot review throttle, so hourly drains composed 6

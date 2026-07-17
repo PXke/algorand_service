@@ -1497,6 +1497,36 @@ class AdminCassandraStore:
         room = max(0, limit - len(pending))
         return pending + resolved[:room]
 
+    def list_pending_feed_backlog(self) -> list[dict]:
+        """Articles already approved and composed, waiting in pending_feed_queue
+        for the paced-release worker to publish them (PENDING_FEED_MAX_DEPTH
+        caps this at 3) — distinct from publish_queue above, which is
+        in-flight COMPOSING work. Not surfaced anywhere in admin before
+        2026-07-17; checking it required a direct DB read."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.config import settings
+        from app.core.statements import PendingFeedStmts
+
+        session = get_cassandra_session()
+        rows = list(
+            session.execute(PendingFeedStmts.LIST_ALL, (settings.news_feed_bucket,))
+        )
+        items: list[dict] = []
+        for row in rows:
+            article_id = str(row.article_id)
+            article = self.get_article(article_id)
+            items.append(
+                {
+                    "article_id": article_id,
+                    "title": article.title if article else "",
+                    "service_id": article.service_id if article else "",
+                    "interest_score": float(row.interest_score or 0),
+                    "approved_at": row.approved_at.isoformat() if row.approved_at else "",
+                }
+            )
+        items.sort(key=lambda it: it["approved_at"])
+        return items
+
     def publish_queue_breakdown(self, queue_id: str) -> dict | None:
         """One row's priority_breakdown (computed at enqueue, stored on the
         payload) plus content signals — the "why this score" companion to

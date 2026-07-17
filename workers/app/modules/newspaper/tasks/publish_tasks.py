@@ -615,6 +615,7 @@ def publish_from_queued_row(
     the next beat.
     """
     from app.modules.ai.mistral_client import MistralCreditError, MistralError
+    from app.modules.ai.story_spike import StorySpikedError
     from app.modules.newspaper.security import sanitize_body
 
     payload = row.payload
@@ -752,6 +753,22 @@ def publish_from_queued_row(
         )
     except ComposeBusyError:
         return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
+    except StorySpikedError as spike:
+        # The writer refused to compose this story (spike_story tool) — a
+        # judgment call, resolved cleanly (no retry this cycle). An admin can
+        # still recompose manually to override.
+        logger.info(
+            "writer spiked %s (%s): %s [%s]",
+            row.service_id,
+            row.scrape_url,
+            spike.category,
+            spike.reason,
+        )
+        return {
+            "status": "aborted_by_writer",
+            "service_id": row.service_id,
+            "reason": f"{spike.category}: {spike.reason}",
+        }
     except MistralError as exc:
         credit_issue = isinstance(exc, MistralCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
@@ -1391,6 +1408,7 @@ def recompose_review(review_id: str) -> dict[str, str]:
 
     from app.core.cassandra import get_cassandra_session
     from app.modules.ai.mistral_client import MistralCreditError, MistralError
+    from app.modules.ai.story_spike import StorySpikedError
     from app.modules.crawler.classifier_review_store import (
         complete_classifier_review,
         enqueue_classifier_review,
@@ -1473,6 +1491,18 @@ def recompose_review(review_id: str) -> dict[str, str]:
             },
         )
         return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
+    except StorySpikedError as spike:
+        logger.info(
+            "writer spiked recompose of review %s (%s): %s [%s]",
+            review_id,
+            url,
+            spike.category,
+            spike.reason,
+        )
+        return {
+            "status": "aborted_by_writer",
+            "reason": f"{spike.category}: {spike.reason}",
+        }
     except MistralError as exc:
         credit_issue = isinstance(exc, MistralCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
@@ -1719,6 +1749,7 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
     from app.modules.ai.mistral_client import MistralCreditError, MistralError
+    from app.modules.ai.story_spike import StorySpikedError
     from app.modules.crawler.classifier_review_store import enqueue_classifier_review
     from app.modules.newspaper.article_store import get_article, insert_stored_article
     from app.modules.newspaper.security import sanitize_body
@@ -1802,6 +1833,17 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
         # recomposes DO collide). A plain return here silently dropped the
         # whole recompose; retry with backoff instead until the lock frees.
         raise self.retry(exc=exc, countdown=180)
+    except StorySpikedError as spike:
+        logger.info(
+            "writer spiked archive-refresh of %s: %s [%s]",
+            article_id,
+            spike.category,
+            spike.reason,
+        )
+        return {
+            "status": "aborted_by_writer",
+            "reason": f"{spike.category}: {spike.reason}",
+        }
     except MistralError as exc:
         credit_issue = isinstance(exc, MistralCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"

@@ -19,6 +19,7 @@ from app.modules.ai.mistral_client import (
     get_mistral_research_client,
 )
 from app.modules.ai.reference_block import append_reference_block
+from app.modules.ai.story_spike import StorySpikedError
 from app.modules.metrics.price_metrics_store import load_mistral_context
 from app.modules.newspaper.price_analysis import WeeklyPriceSnapshot
 from app.modules.newspaper.weekly_digest import WeeklyDigestContext
@@ -344,6 +345,13 @@ _NO_FABRICATION = (
     "source earns a short piece; a rich one earns a thorough one. Stop only when the "
     "verified material is genuinely exhausted. Making things up is the one thing "
     "that is never acceptable.\n"
+    "SUPPLY-SHARE ARITHMETIC: never hand-compute a holder's percentage share of an "
+    "ASA's total supply by dividing lookup_asset's total by lookup_account's raw "
+    "holding yourself — the units are almost never adjusted for decimals the same "
+    "way, and doing this by hand produced a real fabricated claim (a holder "
+    "reported at double their true share). Call get_asset_holder_share(asset_id, "
+    "address) and quote its share_pct verbatim; if you cannot call it, state the "
+    "raw holding and total without computing a percentage at all.\n"
 )
 
 _FEEDBACK_CHANNELS = (
@@ -869,6 +877,9 @@ def _review_and_revise(
     # 2026-07-16: tell the writer a link is dead so it can find an alternative
     # — the post-hoc gate can only delink, the writer can substitute).
     link_check_cache: dict[str, bool] = {}
+    # Same rationale, for on-chain entity lookups (asset/address/txid exist
+    # checks are network calls too, and rarely change between passes).
+    chain_check_cache: dict[tuple[str, str], str] = {}
     while True:
         title = str(current.get("title", "") or "")
         body = str(current.get("body", "") or "")
@@ -929,7 +940,29 @@ def _review_and_revise(
                 logger.warning("dead-link check failed during revision", exc_info=True)
         if link_fixable:
             review["dead_links"] = link_fixable
-        fixable = schema_fixable + quality_fixable + link_fixable
+        # Chain-entity feedback: an invalid/untraced/nonexistent ASA id,
+        # address, or txid forces a revision pass naming the exact entity —
+        # same rationale as dead-link feedback (AlgoGlyph incident
+        # 2026-07-17), catching fabricated numbers the numeric gatekeeper
+        # can't see because the chain data was never wrong, only the model's
+        # arithmetic/attribution on top of it.
+        chain_fixable: list[str] = []
+        from app.core.config import CHAIN_ENTITY_GATE_ENABLED
+
+        if CHAIN_ENTITY_GATE_ENABLED:
+            try:
+                from app.modules.newspaper.chain_entity_gate import (
+                    unverifiable_chain_entities,
+                )
+
+                chain_fixable = unverifiable_chain_entities(
+                    body, trace, extra_texts=[gen_user], checked=chain_check_cache
+                )
+            except Exception:
+                logger.warning("chain-entity check failed during revision", exc_info=True)
+        if chain_fixable:
+            review["chain_entities"] = chain_fixable
+        fixable = schema_fixable + quality_fixable + link_fixable + chain_fixable
 
         grade_val = review.get("grade")
         score = float(grade_val) if isinstance(grade_val, int | float) else 0.0
@@ -1814,6 +1847,17 @@ def _compose_via_writer_tools_locked(
             payload = unquote_ungrounded_quotes(
                 payload, trace, extra_texts=[user, research_user or ""]
             )
+            # Chain-entity gate: cited ASA ids / addresses / txids must exist
+            # on-chain — verified ones get auto-linked to an explorer,
+            # provably-missing ones are delinked (AlgoGlyph incident
+            # 2026-07-17: a real asset's holder share was reported as double
+            # its true percentage; a clickable explorer link on the cited
+            # asset/address makes that class of error checkable by anyone).
+            from app.modules.newspaper.chain_entity_gate import link_and_verify_chain_entities
+
+            payload = link_and_verify_chain_entities(
+                payload, trace, extra_texts=[user, research_user or ""]
+            )
             raw = _json.dumps(payload)
             _duration_ms = int((_time.monotonic() - _t0) * 1000)
             try:
@@ -1859,6 +1903,23 @@ def _compose_via_writer_tools_locked(
             except Exception:
                 logger.warning("failed to record tool-insights session", exc_info=True)
             return _parse_article_fields(payload)
+        except StorySpikedError as spike:
+            # The writer refused the story (spike_story tool) — a judgment,
+            # not a failure. MUST be caught before the generic Exception
+            # below: falling through would trigger the ungrounded single-shot
+            # fallback, i.e. compose exactly the evidence-free article the
+            # writer just declined to write. The trace already carries the
+            # spike call (mistral_client records it before re-raising), so
+            # the Sessions view shows the writer's own reasoning.
+            logger.info(
+                "writer spiked story for %s (%s): %s",
+                source_url,
+                spike.category,
+                spike.reason,
+            )
+            with contextlib.suppress(Exception):
+                _checkpoint("aborted_by_writer")
+            raise
         except MistralCreditError:
             # 401/402 — no retry will help (bad key or credit exhausted), so
             # tag it distinctly from a generic API error: the admin Sessions

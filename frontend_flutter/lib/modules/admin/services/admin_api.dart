@@ -83,6 +83,21 @@ class AdminApi {
     );
   }
 
+  /// Approved articles waiting in pending_feed_queue for paced release
+  /// (capped by PENDING_FEED_MAX_DEPTH) — distinct from listPublishQueue,
+  /// which shows in-flight composing work.
+  Future<List<Map<String, dynamic>>> listPendingFeedBacklog({
+    required String walletAddress,
+  }) async {
+    final body = await _client.getJson(
+      '/api/v1/admin/pending-feed-backlog',
+      headers: _adminHeaders(walletAddress),
+    );
+    final items = body['items'];
+    if (items is! List) return const [];
+    return items.whereType<Map<String, dynamic>>().toList();
+  }
+
   Future<List<Map<String, dynamic>>> listClassifierReviews({
     required String walletAddress,
   }) async {

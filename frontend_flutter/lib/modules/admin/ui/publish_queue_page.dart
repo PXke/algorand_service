@@ -21,6 +21,7 @@ class PublishQueueTab extends ConsumerStatefulWidget {
 
 class _PublishQueueTabState extends ConsumerState<PublishQueueTab> {
   List<Map<String, dynamic>> _items = const [];
+  List<Map<String, dynamic>> _backlog = const [];
   final Map<String, Map<String, dynamic>> _breakdowns = {};
   final Set<String> _breakdownLoading = {};
   final Set<String> _expanded = {};
@@ -52,9 +53,18 @@ class _PublishQueueTabState extends ConsumerState<PublishQueueTab> {
     try {
       final items =
           await ref.read(adminApiProvider).listPublishQueue(walletAddress: wallet);
+      // Best-effort: the backlog panel is a bonus view, not the tab's core
+      // job — a failure here must not blank out the main queue list.
+      List<Map<String, dynamic>> backlog = const [];
+      try {
+        backlog = await ref
+            .read(adminApiProvider)
+            .listPendingFeedBacklog(walletAddress: wallet);
+      } catch (_) {}
       if (!mounted) return;
       setState(() {
         _items = items;
+        _backlog = backlog;
         _loading = false;
       });
     } catch (e) {
@@ -127,6 +137,10 @@ class _PublishQueueTabState extends ConsumerState<PublishQueueTab> {
           ],
         ),
         const SizedBox(height: AppLayout.itemGap),
+        if (_backlog.isNotEmpty) ...[
+          _PendingReleasePanel(items: _backlog),
+          const SizedBox(height: AppLayout.itemGap),
+        ],
         Wrap(
           spacing: 8,
           children: _statusFilters
@@ -165,6 +179,74 @@ class _PublishQueueTabState extends ConsumerState<PublishQueueTab> {
           },
         ),
       ],
+    );
+  }
+}
+
+/// Approved articles already composed, waiting in pending_feed_queue for the
+/// paced-release worker to publish them (PENDING_FEED_MAX_DEPTH caps this —
+/// default 3). Distinct from the rows below, which are still COMPOSING.
+class _PendingReleasePanel extends StatelessWidget {
+  const _PendingReleasePanel({required this.items});
+
+  final List<Map<String, dynamic>> items;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = context.appColors;
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: theme.cardTheme.color,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: colors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.hourglass_bottom, size: 16, color: theme.colorScheme.primary),
+              const SizedBox(width: 8),
+              Text('Pending release (${items.length})', style: theme.textTheme.titleSmall),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Approved and composed — waiting for the paced-release worker to '
+            'publish them.',
+            style: theme.textTheme.bodySmall?.copyWith(color: colors.muted),
+          ),
+          const SizedBox(height: 10),
+          ...items.map((item) {
+            final title = item['title']?.toString() ?? '';
+            final serviceId = item['service_id']?.toString() ?? '';
+            final approvedAt =
+                (item['approved_at']?.toString() ?? '').replaceFirst('T', ' ');
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      title.isEmpty ? serviceId : title,
+                      style: theme.textTheme.bodySmall,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    approvedAt.length > 16 ? approvedAt.substring(0, 16) : approvedAt,
+                    style: theme.textTheme.labelSmall?.copyWith(color: colors.muted),
+                  ),
+                ],
+              ),
+            );
+          }),
+        ],
+      ),
     );
   }
 }
