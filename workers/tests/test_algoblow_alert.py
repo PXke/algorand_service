@@ -24,7 +24,11 @@ VICTIM_ADDRS = [
 ]
 
 
-def test_algoblow_classified_scam_breaking():
+def test_algoblow_classified_scam_breaking(monkeypatch):
+    # BREAKING_TIER_ENABLED defaults off (2026-07-17) — this pins the
+    # underlying keyword logic for when it's re-enabled; topic classification
+    # itself (asserted below) is unaffected and still forces human review.
+    monkeypatch.setattr("app.core.config.BREAKING_TIER_ENABLED", True)
     topic = classify_publish_topic(
         page_text=D13_TEXT,
         diff=None,
@@ -33,6 +37,17 @@ def test_algoblow_classified_scam_breaking():
     )
     assert topic == PublishTopic.SCAM_ALERT
     assert classify_publish_tier(topic=topic, page_text=D13_TEXT) == PublishTier.BREAKING
+
+
+def test_algoblow_stays_standard_tier_while_breaking_disabled():
+    topic = classify_publish_topic(
+        page_text=D13_TEXT,
+        diff=None,
+        publish_kind=PublishKind.CONTENT_UPDATE,
+        source_kind="push",
+    )
+    assert topic == PublishTopic.SCAM_ALERT
+    assert classify_publish_tier(topic=topic, page_text=D13_TEXT) == PublishTier.STANDARD
 
 
 def test_algoblow_extracts_domain_and_addresses():

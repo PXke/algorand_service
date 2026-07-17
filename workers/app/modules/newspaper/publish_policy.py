@@ -362,7 +362,14 @@ def build_publish_intent(
 
 
 def classify_publish_tier(*, topic: PublishTopic, page_text: str) -> PublishTier:
-    """Breaking tier: scams, network incidents — immediate path, separate daily cap."""
+    """Breaking tier: scams, network incidents — immediate path, separate daily
+    cap. Disabled by default (BREAKING_TIER_ENABLED, 2026-07-17): the keyword
+    scan below false-positived on ordinary positive infrastructure claims (see
+    config.py) — the topic-classification short-circuits above it stay live
+    (SCAM_ALERT/NETWORK_INCIDENT still force human review), only the "skip
+    the queue, prepend Breaking:" escalation is off."""
+    if not config.BREAKING_TIER_ENABLED:
+        return PublishTier.STANDARD
     if topic in (PublishTopic.SCAM_ALERT, PublishTopic.NETWORK_INCIDENT):
         return PublishTier.BREAKING
     lower = page_text.lower()

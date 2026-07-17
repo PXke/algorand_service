@@ -6,6 +6,8 @@ aiosignal==1.4.0
     # via aiohttp
 amqp==5.3.1
     # via kombu
+annotated-types==0.7.0
+    # via pydantic
 anyio==4.14.2
     # via httpx
 attrs==26.1.0
@@ -56,7 +58,7 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
-geoip2==5.2.0
+geoip2==5.3.0
     # via algorand-platform-backend (backend/pyproject.toml)
 geomet==1.1.0
     # via cassandra-driver
@@ -130,6 +132,10 @@ pycparser==3.0
     # via cffi
 pycryptodomex==3.23.0
     # via py-algorand-sdk
+pydantic==2.13.4
+    # via x402-avm
+pydantic-core==2.46.4
+    # via pydantic
 pyee==13.0.1
     # via playwright
 pynacl==1.6.2
@@ -173,8 +179,14 @@ typesense==2.0.0
 typing-extensions==4.16.0
     # via
     #   beautifulsoup4
+    #   pydantic
+    #   pydantic-core
     #   pyee
     #   typesense
+    #   typing-inspection
+    #   x402-avm
+typing-inspection==0.4.2
+    # via pydantic
 tzdata==2026.3
     # via kombu
 tzlocal==5.4.4
@@ -196,6 +208,8 @@ webob==1.8.10
     # via bugsnag
 wrapt==2.2.2
     # via deprecated
+x402-avm==2.0.2
+    # via algorand-platform-backend (backend/pyproject.toml)
 yarl==1.24.2
     # via aiohttp
 yt-dlp==2026.7.4

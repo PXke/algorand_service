@@ -7,7 +7,10 @@ from app.modules.newspaper.publish_policy import (
 from app.modules.newspaper.publish_schedule import is_standard_publish_due
 
 
-def test_scam_classified_as_breaking_tier() -> None:
+def test_scam_classified_as_breaking_tier(monkeypatch) -> None:
+    # BREAKING_TIER_ENABLED defaults off (2026-07-17) — pins the underlying
+    # keyword logic for when it's re-enabled.
+    monkeypatch.setattr("app.core.config.BREAKING_TIER_ENABLED", True)
     intent = build_publish_intent(
         service_id="discord-alerts",
         page_text="SCAM ALERT: user lost $100,000 — see https://example.com/proof",
@@ -16,6 +19,17 @@ def test_scam_classified_as_breaking_tier() -> None:
     )
     assert intent.topic == PublishTopic.SCAM_ALERT
     assert intent.tier == PublishTier.BREAKING
+
+
+def test_scam_stays_standard_tier_while_breaking_disabled() -> None:
+    intent = build_publish_intent(
+        service_id="discord-alerts",
+        page_text="SCAM ALERT: user lost $100,000 — see https://example.com/proof",
+        is_first_snapshot=False,
+        diff="+ warning line",
+    )
+    assert intent.topic == PublishTopic.SCAM_ALERT
+    assert intent.tier == PublishTier.STANDARD
 
 
 def test_sdk_stays_standard_tier() -> None:

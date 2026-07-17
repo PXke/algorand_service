@@ -130,8 +130,11 @@ def test_classify_scam_alert_topic() -> None:
     assert priority_for_topic(topic) == 100
 
 
-def test_classify_foundation_discord_warning_as_scam_breaking() -> None:
-    """Real-style Foundation @everyone warning (algoblow.com) — Discord-only comms."""
+def test_classify_foundation_discord_warning_as_scam_breaking(monkeypatch) -> None:
+    """Real-style Foundation @everyone warning (algoblow.com) — Discord-only comms.
+    BREAKING_TIER_ENABLED defaults off (2026-07-17) — pins the underlying
+    keyword logic for when it's re-enabled."""
+    monkeypatch.setattr("app.core.config.BREAKING_TIER_ENABLED", True)
     text = (
         "@everyone WARNING DO NOT interact with algoblow.com! "
         "This is a malicious app that will attempt to take control of accounts "
@@ -146,6 +149,28 @@ def test_classify_foundation_discord_warning_as_scam_breaking() -> None:
     assert topic == PublishTopic.SCAM_ALERT
     tier = classify_publish_tier(topic=topic, page_text=text)
     assert tier == PublishTier.BREAKING
+
+
+def test_breaking_tier_disabled_by_default_even_for_scam_topic() -> None:
+    """Regression pin (2026-07-17): a crypto.news interview boasting 'zero
+    downtime' got keyword-matched into NETWORK_INCIDENT and shipped as
+    'Breaking:' about a 10-month-old, already-concluded campaign. Owner
+    decision: no deterministic BREAKING tier — a future version should have
+    the WRITER decide via an explicit tool call, not a keyword scan. Even a
+    genuine SCAM_ALERT topic must not escalate to BREAKING while this is off."""
+    text = (
+        "@everyone WARNING DO NOT interact with algoblow.com! "
+        "This is a malicious app that will attempt to take control of accounts "
+        "by including a rekey in transaction requests."
+    )
+    topic = classify_publish_topic(
+        page_text=text,
+        diff=None,
+        publish_kind=PublishKind.CONTENT_UPDATE,
+        source_kind="firefox_extension",
+    )
+    assert topic == PublishTopic.SCAM_ALERT
+    assert classify_publish_tier(topic=topic, page_text=text) == PublishTier.STANDARD
 
 
 def test_opt_in_mention_alone_is_not_scam_alert() -> None:

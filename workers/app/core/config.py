@@ -51,6 +51,16 @@ MAINNET_INDEXER_URL = env_str(
 NEWS_FEED_BUCKET = env_str("NEWS_FEED_BUCKET", "main")
 NEWS_MAX_ARTICLES_PER_DAY = min(max(1, env_int("NEWS_MAX_ARTICLES_PER_DAY", 3)), 7)
 NEWS_MAX_BREAKING_PER_DAY = env_int("NEWS_MAX_BREAKING_PER_DAY", 2)
+# Off (2026-07-17): classify_publish_tier's keyword-based BREAKING detection
+# produced real false positives — a crypto.news interview about Algorand's
+# "zero downtime" track record got tagged NETWORK_INCIDENT (the bare words
+# "down"/"network"/"lost " are all it took) and shipped as "Breaking:" about
+# a 10-month-old, already-concluded campaign. Owner decision: no deterministic
+# BREAKING tier for now; a future version should have the WRITER decide via
+# an explicit tool call, not a keyword scan. classify_publish_tier always
+# returns STANDARD while this is false — topic classification (scam_alert /
+# network_incident) and their mandatory-review routing are untouched.
+BREAKING_TIER_ENABLED = env_bool("BREAKING_TIER_ENABLED", False)
 NEWS_STRICT_DAILY_CAP = env_bool("NEWS_STRICT_DAILY_CAP", True)
 CRAWL_PAUSE_WHEN_PUBLISH_CAP_FULL = env_bool("CRAWL_PAUSE_WHEN_PUBLISH_CAP_FULL", True)
 
