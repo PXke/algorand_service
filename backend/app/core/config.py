@@ -148,6 +148,16 @@ class Settings(msgspec.Struct, kw_only=True):
     ingest_api_key: str = ""
     admin_wallet_addresses: str = ""
 
+    # x402 paid-endpoint plumbing (Algorand Global x402 Challenge). Off by
+    # default until a facilitator/pay_to address is actually configured.
+    x402_enabled: bool = False
+    x402_facilitator_url: str = "https://facilitator.goplausible.xyz/"
+    # TestNet CAIP-2 id by default — flip to the mainnet genesis hash for the
+    # real contest submission, not before.
+    x402_network: str = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI="
+    # Public address only — no private key is held by this module.
+    x402_pay_to_address: str = ""
+
     @property
     def cors_origins(self) -> list[str]:
         raw = self.cors_allowed_origins.strip()

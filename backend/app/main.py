@@ -10,6 +10,7 @@ from app.modules.admin.api.routes import register_admin_routes
 from app.modules.auth.api.routes import register_auth_routes
 from app.modules.contact.api.routes import register_contact_routes
 from app.modules.ingest.api.routes import register_ingest_routes
+from app.modules.kyc.api.routes import register_kyc_routes
 from app.modules.media.api.routes import register_media_routes
 from app.modules.metrics.api.routes import register_metrics_routes
 from app.modules.news.api.routes import register_news_routes
@@ -51,6 +52,8 @@ register_search_routes(app)
 register_contact_routes(app)
 if settings.suggestions_enabled:
     register_suggestions_routes(app)
+if settings.x402_enabled:
+    register_kyc_routes(app)
 
 # SEO document routes (/, /news/articles/:id, /section/:slug, robots, sitemaps).
 # Registered last so nothing shadows the JSON API under /api/*; nginx decides
