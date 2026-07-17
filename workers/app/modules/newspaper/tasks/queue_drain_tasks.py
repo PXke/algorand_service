@@ -261,7 +261,15 @@ def _breaking_review_slot_veto(ctx: _BreakingVetoCtx) -> dict | None:
 
 
 def _breaking_credibility_veto(ctx: _BreakingVetoCtx) -> dict | None:
-    """Breaking must be corroborated (alert keywords + evidence), or it waits."""
+    """Breaking must be corroborated (alert keywords + evidence).
+
+    The assessment is a pure heuristic over the row's static page_text, so a
+    not-credible verdict can never change on a later beat — retire the row
+    (queue_status) instead of leaving it pending. A pending row here was
+    re-assessed every ~2-minute breaking beat forever AND held the service's
+    one-pending-row slot hostage: observed 2026-07-17, a hay-app row stuck
+    "not_credible" for 7 days, starving all hay-app coverage. The next scrape
+    re-offers the story fresh if it grows real evidence."""
     ctx.assessment = assess_breaking_credibility(
         page_text=str(ctx.row.payload.get("page_text", "")),
         source_url=ctx.row.scrape_url,
@@ -272,6 +280,7 @@ def _breaking_credibility_veto(ctx: _BreakingVetoCtx) -> dict | None:
             "status": "skipped",
             "reason": f"not_credible:{ctx.assessment.reason}",
             "method": ctx.assessment.method,
+            "queue_status": "expired",
         }
     return None
 
@@ -326,7 +335,17 @@ def drain_breaking_publish_queue() -> dict[str, object]:
             ctx = _BreakingVetoCtx(row=row, review_full=review_full)
             veto_outcome = _run_breaking_vetoes(ctx)
             if veto_outcome is not None:
-                record_queue_reason(row.queue_id, str(veto_outcome.get("reason", "skipped")))
+                # A veto may carry queue_status (credibility: permanent verdict
+                # on static text) to retire the row; the transient vetoes
+                # (daily cap, review slot) leave it pending for a later beat.
+                veto_queue_status = str(veto_outcome.get("queue_status", ""))
+                veto_reason = str(veto_outcome.get("reason", "skipped"))
+                if veto_queue_status:
+                    mark_queue_status(
+                        row.queue_id, veto_queue_status, reason=veto_reason
+                    )
+                else:
+                    record_queue_reason(row.queue_id, veto_reason)
                 results.append({"queue_id": row.queue_id, **veto_outcome})
                 continue
 

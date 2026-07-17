@@ -70,12 +70,73 @@ def test_credibility_veto_outcome_and_stashes_assessment(monkeypatch):
     )
     ctx = _ctx()
     outcome = qdt._breaking_credibility_veto(ctx)
+    # queue_status "expired" retires the row: the heuristic runs on the row's
+    # STATIC page_text, so a not-credible verdict can never change on a later
+    # beat — before this, the row stayed pending, was re-assessed every
+    # ~2-minute breaking beat forever, and starved the service's one
+    # pending-row slot (observed: hay-app row stuck 7 days, audit 2026-07-17).
     assert outcome == {
         "status": "skipped",
         "reason": "not_credible:no_evidence",
         "method": "heuristic",
+        "queue_status": "expired",
     }
     assert ctx.assessment is not None and ctx.assessment.method == "heuristic"
+
+
+def test_drain_retires_not_credible_row_but_leaves_transient_veto_pending(monkeypatch):
+    """The drain honors a veto's queue_status: credibility retires the row
+    (mark_queue_status), while transient vetoes (cap/review-slot) only record
+    a reason and leave the row pending for the next beat."""
+    row = _ctx().row
+    monkeypatch.setattr(qdt, "remaining_breaking_publish_slots", lambda: 3)
+    monkeypatch.setattr(qdt, "_pending_for_tier", lambda _tier, limit: [row])
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.review_queue_full",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        qdt,
+        "evaluate_breaking_publish",
+        lambda *_a, **_kw: SimpleNamespace(allowed=True, reason="ok"),
+    )
+    monkeypatch.setattr(qdt, "_row_needs_review", lambda _r: False)
+    monkeypatch.setattr(
+        qdt,
+        "assess_breaking_credibility",
+        lambda **_kw: BreakingAssessment(
+            credible=False, reason="no_evidence", method="heuristic"
+        ),
+    )
+    marked: list = []
+    monkeypatch.setattr(
+        qdt,
+        "mark_queue_status",
+        lambda qid, status, reason="": marked.append((qid, status, reason)),
+    )
+    monkeypatch.setattr(
+        qdt,
+        "publish_from_queued_row",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not compose")),
+    )
+
+    qdt.drain_breaking_publish_queue()
+    assert marked == [("q1", "expired", "not_credible:no_evidence")]
+
+    # Transient veto (daily cap): row must stay pending — reason only.
+    marked.clear()
+    recorded: list = []
+    monkeypatch.setattr(
+        qdt, "record_queue_reason", lambda qid, reason: recorded.append((qid, reason))
+    )
+    monkeypatch.setattr(
+        qdt,
+        "evaluate_breaking_publish",
+        lambda *_a, **_kw: SimpleNamespace(allowed=False, reason="breaking_daily_cap_reached"),
+    )
+    qdt.drain_breaking_publish_queue()
+    assert marked == []
+    assert recorded == [("q1", "breaking_daily_cap_reached")]
 
 
 def test_credible_row_passes_with_assessment_available(monkeypatch):
