@@ -278,6 +278,10 @@ def _breaking_credibility_veto(ctx: _BreakingVetoCtx) -> dict | None:
 
 # Evaluated in order, first non-None outcome wins — same pattern as the
 # standard drain's _PRE_COMPOSE_GATES and compose-side _PRE_COMPOSE_VETOES.
+# Deliberately NO domain/service cooldown or novelty veto here (owner
+# decision, re-confirmed 2026-07-17): breaking is the one tier where a
+# genuine alert must never wait behind a cooldown from routine coverage
+# of the same source. Credibility + policy caps are the safety net.
 _BREAKING_VETOES = (
     _breaking_policy_veto,
     _breaking_review_slot_veto,

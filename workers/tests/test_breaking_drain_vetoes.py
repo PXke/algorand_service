@@ -27,6 +27,9 @@ def _ctx(review_full=False, payload=None):
 
 
 def test_veto_order():
+    # Exactly these three — the absence of domain/service cooldown vetoes is
+    # deliberate (owner decision, re-confirmed 2026-07-17): breaking must
+    # never wait behind a cooldown stamped by routine coverage of the source.
     assert qdt._BREAKING_VETOES == (
         qdt._breaking_policy_veto,
         qdt._breaking_review_slot_veto,
