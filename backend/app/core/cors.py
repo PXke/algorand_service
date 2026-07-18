@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from robyn import Response, Robyn
+from robyn import Request, Response, Robyn
 
 from app.core.config import settings
 
@@ -29,6 +29,9 @@ def _origin_allowed(origin: str, allowed: list[str]) -> bool:
     return cors_permissive()
 
 
+_ALLOW_METHODS = "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS"
+
+
 def register_cors(app: Robyn) -> None:
     origins = settings.cors_origins
     if not origins:
@@ -42,28 +45,34 @@ def register_cors(app: Robyn) -> None:
             return Response(status_code=403, description="", headers={})
 
         if request.method == "OPTIONS":
-            allow_origin = origin if origin else (origins[0] if origins else "*")
-            return Response(
-                status_code=204,
-                headers={
-                    "Access-Control-Allow-Origin": allow_origin,
-                    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS",
-                    "Access-Control-Allow-Headers": ", ".join(_DEFAULT_HEADERS),
-                    "Access-Control-Allow-Credentials": "true",
-                    "Access-Control-Max-Age": "3600",
-                },
-                description="",
-            )
+            # Reflect the (already-validated) origin. Never echo "*" here: it is
+            # invalid combined with Allow-Credentials, and a preflight only ever
+            # arrives with a concrete Origin anyway.
+            headers = {
+                "Access-Control-Allow-Methods": _ALLOW_METHODS,
+                "Access-Control-Allow-Headers": ", ".join(_DEFAULT_HEADERS),
+                "Access-Control-Max-Age": "3600",
+                "Vary": "Origin",
+            }
+            if origin:
+                headers["Access-Control-Allow-Origin"] = origin
+                headers["Access-Control-Allow-Credentials"] = "true"
+            return Response(status_code=204, headers=headers, description="")
 
         return request
 
-    if len(origins) == 1:
-        app.set_response_header("Access-Control-Allow-Origin", origins[0])
-    else:
-        app.set_response_header("Access-Control-Allow-Origin", "*")
-
-    app.set_response_header(
-        "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS"
-    )
-    app.set_response_header("Access-Control-Allow-Headers", ", ".join(_DEFAULT_HEADERS))
-    app.set_response_header("Access-Control-Allow-Credentials", "true")
+    @app.after_request()
+    def cors_response_headers(request: Request, response: Response) -> Response:
+        # Set Allow-Origin per-response by REFLECTING the validated request
+        # origin, rather than a static header. A static value cannot vary with
+        # >1 configured origin, and the old fallback emitted
+        # "Access-Control-Allow-Origin: *" together with Allow-Credentials:true
+        # — a combination browsers reject and that would, if it ever resolved,
+        # expose credentialed responses to any site. Disallowed origins were
+        # already 403'd in before_request; here we only reach allowed ones.
+        origin = request.headers.get("Origin")
+        if origin and _origin_allowed(origin, origins):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Vary"] = "Origin"
+        return response

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import secrets
+
 import msgspec
 from robyn import Request, Response
 
@@ -23,7 +25,9 @@ def _check_ingest_auth(request: Request) -> Response | None:
     if auth.lower().startswith("bearer "):
         token = auth[7:].strip()
     provided = (header or token or "").strip()
-    if not provided or provided != settings.ingest_api_key:
+    # Constant-time compare: a plain != leaks the key byte-by-byte via response
+    # timing (short-circuits at the first differing char).
+    if not provided or not secrets.compare_digest(provided, settings.ingest_api_key):
         return json_error_response(401, "unauthorized", "Invalid ingest API key")
     return None
 

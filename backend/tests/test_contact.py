@@ -5,9 +5,32 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from app.core import serialization
-from app.modules.contact.api.routes import _rate_limited
+from app.modules.contact.api.routes import _client_ip, _rate_limited
 from app.modules.contact.store import list_recent
 from app.schemas import ContactMessageRequest
+
+
+def _req(headers: dict[str, str]) -> SimpleNamespace:
+    lower = {k.lower(): v for k, v in headers.items()}
+    return SimpleNamespace(headers=SimpleNamespace(get=lambda k, d=None: lower.get(k.lower(), d)))
+
+
+def test_client_ip_trusts_x_real_ip_over_forwarded_for() -> None:
+    # nginx sets X-Real-IP from $remote_addr and overwrites any client value, so
+    # it wins even when a spoofed XFF is present.
+    ip = _client_ip(_req({"X-Real-IP": "9.9.9.9", "X-Forwarded-For": "1.1.1.1, 9.9.9.9"}))
+    assert ip == "9.9.9.9"
+
+
+def test_client_ip_ignores_spoofed_forwarded_for_prefix() -> None:
+    # proxy_add_x_forwarded_for PREPENDS the client's own XFF, so the real IP is
+    # the LAST hop — never the attacker-controlled first element.
+    ip = _client_ip(_req({"X-Forwarded-For": "1.1.1.1, 2.2.2.2, 10.0.0.5"}))
+    assert ip == "10.0.0.5"
+
+
+def test_client_ip_empty_when_no_headers() -> None:
+    assert _client_ip(_req({})) == ""
 
 
 def test_contact_request_decode_defaults() -> None:

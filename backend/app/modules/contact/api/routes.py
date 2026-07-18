@@ -27,12 +27,20 @@ _RATE_LIMIT_PER_HOUR = 5
 
 
 def _client_ip(request: Request) -> str:
-    raw = (
-        request.headers.get("x-forwarded-for")
-        or request.headers.get("x-real-ip")
-        or ""
-    )
-    return raw.split(",")[0].strip()
+    """Real client IP for rate-limiting, resistant to header spoofing.
+
+    Trust X-Real-IP first: nginx sets it from $remote_addr and overwrites any
+    client-supplied value (see deploy/nginx). X-Forwarded-For is NOT safe to
+    read left-to-right — nginx's proxy_add_x_forwarded_for prepends the client's
+    own XFF, so its first element is attacker-controlled and would hand every
+    spoofed value its own rate-limit bucket. Fall back to the LAST XFF hop (the
+    one appended by our proxy) only when X-Real-IP is absent (e.g. local dev)."""
+    real_ip = (request.headers.get("x-real-ip") or "").strip()
+    if real_ip:
+        return real_ip
+    xff = request.headers.get("x-forwarded-for") or ""
+    parts = [p.strip() for p in xff.split(",") if p.strip()]
+    return parts[-1] if parts else ""
 
 
 @lru_cache(maxsize=1)
