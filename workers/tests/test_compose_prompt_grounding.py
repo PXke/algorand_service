@@ -410,3 +410,13 @@ def test_guidance_composed_from_named_sections_not_string_split():
     assert mc._SELF_REVIEW_RULES not in mc._RESEARCH_PHASE_GUIDANCE
     assert mc._RESEARCH_PHASE_ADDENDUM in mc._RESEARCH_PHASE_GUIDANCE
     assert mc._RESEARCH_PHASE_ADDENDUM not in mc._TOOLS_GUIDANCE
+
+
+def test_writing_guidelines_reject_diff_noise_as_news():
+    """2026-07-18 quantum-rebrand draft: a canonical-tag capitalization tweak
+    was written up as one of 'three substantive updates', complete with
+    'normalizing capitalization in line with the Foundation's branding' —
+    mechanical diff artifacts dressed as reporting."""
+    guidelines = mc._writing_guidelines("2026-07-09")
+    assert "Diff noise is not news" in guidelines
+    assert "canonical" in guidelines
