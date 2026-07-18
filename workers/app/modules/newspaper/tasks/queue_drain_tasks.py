@@ -633,6 +633,14 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
     for r in rows:
         art = session.execute(ArticleStmts.GET_FOR_FEED, (r.article_id,)).one()
         if art is not None:
+            # Time-capsule fix (2026-07-18): the article was composed days
+            # ago and stored unlisted — gates added SINCE its compose never
+            # saw it. Re-run the body-only self-healing gates now, before it
+            # becomes publicly visible; fail-open (an already-approved
+            # article is never blocked, only corrected).
+            from app.modules.newspaper.release_gates import apply_release_gates
+
+            apply_release_gates(str(r.article_id))
             # This is the article's FIRST (and only) entry into articles_feed —
             # art.published_at was stamped at compose time, not release time,
             # so it must be re-stamped now on both the feed row and the
