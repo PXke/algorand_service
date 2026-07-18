@@ -183,14 +183,25 @@ def remaining_daily_publish_slots(*, when: datetime | None = None) -> int:
 
 
 def remaining_standard_publish_slots(*, when: datetime | None = None) -> int:
-    day_start = utc_day_start_epoch(when)
-    published = count_standard_articles_on_utc_day(day_start_epoch=day_start)
+    """Redundancy pruning (2026-07-18, deferred from the gate consolidation):
+    the daily cap used to have two parallel counting implementations — this
+    advisory read counted Cassandra feed rows while publish_daily_guard's
+    atomic reserve counted Redis reservations, and the two drift intra-day
+    (in-flight reservations are invisible to the feed count; backlog
+    releases used to insert feed rows without reserving). One counting
+    authority now: the guard's reservation-aware Redis counter, itself
+    initialized from the feed count once per day. The Cassandra counters
+    below survive solely as that init source."""
+    from app.modules.newspaper.publish_daily_guard import published_count_today
+
+    published = published_count_today(tier=PublishTier.STANDARD, when=when)
     return max(0, config.NEWS_MAX_ARTICLES_PER_DAY - published)
 
 
 def remaining_breaking_publish_slots(*, when: datetime | None = None) -> int:
-    day_start = utc_day_start_epoch(when)
-    published = count_breaking_articles_on_utc_day(day_start_epoch=day_start)
+    from app.modules.newspaper.publish_daily_guard import published_count_today
+
+    published = published_count_today(tier=PublishTier.BREAKING, when=when)
     return max(0, config.NEWS_MAX_BREAKING_PER_DAY - published)
 
 

@@ -83,6 +83,12 @@ def test_drain_approved_feed_queue_stamps_release_time_and_keeps_image(monkeypat
         lambda: (True, "no_prior_standard_publish"),
     )
     monkeypatch.setattr(queue_drain_tasks, "record_standard_publish", lambda: None)
+    # Backlog releases reserve their slot in the daily-cap counter like any
+    # other standard publish (2026-07-18) — stub the Redis-backed guard.
+    monkeypatch.setattr(
+        "app.modules.newspaper.publish_daily_guard.reserve_publish_slot",
+        lambda **_kw: (True, "ok"),
+    )
     monkeypatch.setattr(
         "app.modules.newspaper.tasks.publish_tasks.enqueue_article_translations",
         lambda *_a, **_kw: None,

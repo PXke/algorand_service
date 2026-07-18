@@ -150,6 +150,10 @@ def test_release_drain_invokes_gates_before_feed_insert(monkeypatch):
     monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
     monkeypatch.setattr(qdt, "record_standard_publish", lambda **_kw: None)
     monkeypatch.setattr(
+        "app.modules.newspaper.publish_daily_guard.reserve_publish_slot",
+        lambda **_kw: (True, "ok"),
+    )
+    monkeypatch.setattr(
         "app.modules.newspaper.tasks.publish_tasks.enqueue_article_translations",
         lambda _aid: None,
     )

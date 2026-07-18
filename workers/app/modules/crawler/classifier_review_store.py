@@ -56,6 +56,17 @@ def count_pending_reviews(*, scan_limit: int = 500) -> int:
 
 
 def review_queue_full() -> bool:
+    """Whether the 1-slot review gate (MAX_PENDING_REVIEWS) is occupied.
+
+    Deliberately checked at MULTIPLE call sites (both drains at run start +
+    refreshed after a fill, ensure_review_ready, and inside the compose's
+    held-review path) — audited 2026-07-18 and kept: these are the same
+    predicate at DIFFERENT decision moments/entry points, not redundant
+    computation. The inner publish-path check is the only protection for
+    non-drain callers (admin recompose, editorial assignments), and the
+    drain-level checks avoid burning a full Mistral compose on a row whose
+    review outcome couldn't land anyway. Collapsing them to one site would
+    remove protection, not duplication."""
     from app.core.config import MAX_PENDING_REVIEWS
 
     return count_pending_reviews() >= MAX_PENDING_REVIEWS

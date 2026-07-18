@@ -641,26 +641,49 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
             from app.modules.newspaper.release_gates import apply_release_gates
 
             apply_release_gates(str(r.article_id))
+            # A backlog release is a standard-tier publish against the same
+            # daily cap as direct publishes — reserve its slot in the SAME
+            # atomic counter (2026-07-18 redundancy pruning: releases used
+            # to insert feed rows without reserving, silently undercounting
+            # the guard's Redis counter for the rest of the day).
+            from app.modules.newspaper.publish_daily_guard import (
+                release_publish_slot,
+                reserve_publish_slot,
+            )
+            from app.modules.newspaper.publish_policy import PublishTier
+
+            reserved, reserve_reason = reserve_publish_slot(tier=PublishTier.STANDARD)
+            if not reserved:
+                logger.info("backlog release blocked: %s", reserve_reason)
+                break
             # This is the article's FIRST (and only) entry into articles_feed —
             # art.published_at was stamped at compose time, not release time,
             # so it must be re-stamped now on both the feed row and the
             # source-of-truth articles_by_id row.
             released_at = datetime.now(tz=UTC)
-            session.execute(
-                FeedStmts.INSERT,
-                (
-                    _feed_month(released_at),
-                    released_at,
-                    art.article_id,
-                    art.service_id,
-                    art.title,
-                    art.summary or "",
-                    list(art.tags or []),
-                    art.image_url,
-                    art.source_url,
-                ),
-            )
-            session.execute(ArticleStmts.UPDATE_PUBLISHED_AT, (released_at, art.article_id))
+            try:
+                session.execute(
+                    FeedStmts.INSERT,
+                    (
+                        _feed_month(released_at),
+                        released_at,
+                        art.article_id,
+                        art.service_id,
+                        art.title,
+                        art.summary or "",
+                        list(art.tags or []),
+                        art.image_url,
+                        art.source_url,
+                    ),
+                )
+                session.execute(
+                    ArticleStmts.UPDATE_PUBLISHED_AT, (released_at, art.article_id)
+                )
+            except Exception:
+                # The article never became visible — hand the slot back so
+                # the day's budget isn't burned by a failed write.
+                release_publish_slot(tier=PublishTier.STANDARD)
+                raise
             published += 1
             record_standard_publish()
             from app.modules.newspaper.tasks.publish_tasks import (
