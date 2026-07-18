@@ -761,6 +761,16 @@ def all_tools(
         handlers["mark_breaking_news"] = mark_breaking_news_handler
     except Exception:
         logger.warning("failed to load mark_breaking_news tool", exc_info=True)
+    try:
+        from app.modules.ai.alert_topic_tool import (
+            CONFIRM_ALERT_TOPIC_SCHEMA,
+            confirm_alert_topic_handler,
+        )
+
+        schemas.append(CONFIRM_ALERT_TOPIC_SCHEMA)
+        handlers["confirm_alert_topic"] = confirm_alert_topic_handler
+    except Exception:
+        logger.warning("failed to load confirm_alert_topic tool", exc_info=True)
     # Registered last, once every toolset is merged, so the already-have-it
     # check sees the FULL tool registry for this compose.
     handlers["report_compose_issue"] = _make_report_compose_issue_handler(context)

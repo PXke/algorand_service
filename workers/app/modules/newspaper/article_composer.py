@@ -29,6 +29,7 @@ class ArticleComposeResult:
     prompt_version: str = ""
     heuristic_grade: dict | None = None
     breaking_reason: str | None = None
+    confirmed_alert: str | None = None
 
 
 def _require_mistral() -> None:
@@ -142,6 +143,7 @@ def compose_scrape_article(
         prompt_version=getattr(fields, "prompt_version", ""),
         heuristic_grade=getattr(fields, "heuristic_grade", None),
         breaking_reason=getattr(fields, "breaking_reason", None),
+        confirmed_alert=getattr(fields, "confirmed_alert", None),
     )
 
 

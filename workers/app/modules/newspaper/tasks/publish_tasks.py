@@ -234,7 +234,7 @@ def _stash_capped_compose_to_backlog(
             source_kind=_source_kind_from_url(row.scrape_url),
             title=title,
             publish_kind=composed.publish_kind or publish_kind.value,
-            publish_topic=topic.value,
+            publish_topic=_effective_alert_topic(topic, composed).value,
             publish_tier=tier.value,
         ),
         getattr(composed, "extra_tags", ()),
@@ -400,6 +400,26 @@ def _writer_flagged_breaking(tier: PublishTier, composed) -> bool:
     row isn't already breaking-tier. Kept pure/tiny so the decision is
     testable without exercising the rest of publish_from_queued_row."""
     return bool(getattr(composed, "breaking_reason", None)) and tier != PublishTier.BREAKING
+
+
+def _effective_alert_topic(topic: PublishTopic, composed) -> PublishTopic:
+    """Reader-facing topic for tags and match keys. The keyword topic
+    classifier still ROUTES rows (priority, mandatory review — a false
+    positive there only costs a review slot), but a scam/incident label only
+    keeps its reader-facing consequences — the alert tag and the scam-topic
+    match-key carve-out — when the writer confirmed it via the
+    confirm_alert_topic tool. 2026-07-18: the Foundation's own homepage
+    rebrand shipped toward readers tagged 'scam-alert' because a quoted
+    research paper asked about 'malicious servers' — second false scam
+    labeling in a week; same fix shape as mark_breaking_news for the tier.
+    Kept pure/tiny like _writer_flagged_breaking above."""
+    if topic not in (PublishTopic.SCAM_ALERT, PublishTopic.NETWORK_INCIDENT):
+        return topic
+    confirmed = getattr(composed, "confirmed_alert", None)
+    if confirmed in (PublishTopic.SCAM_ALERT.value, PublishTopic.NETWORK_INCIDENT.value):
+        # The writer's kind wins even when it differs from the keyword route.
+        return PublishTopic(confirmed)
+    return PublishTopic.GENERIC
 
 
 def _quality_floor_fails(heuristic_grade: dict | None) -> bool:
@@ -956,7 +976,7 @@ def publish_from_queued_row(
                 source_kind=held_kind,
                 title=held_title,
                 publish_kind=composed.publish_kind or publish_kind.value,
-                publish_topic=topic.value,
+                publish_topic=_effective_alert_topic(topic, composed).value,
                 publish_tier=tier.value,
             ),
             getattr(composed, "extra_tags", ()),
@@ -1147,7 +1167,7 @@ def publish_from_queued_row(
                     source_kind=source_kind,
                     title=title,
                     publish_kind=composed.publish_kind or publish_kind.value,
-                    publish_topic=topic.value,
+                    publish_topic=_effective_alert_topic(topic, composed).value,
                     publish_tier=tier.value,
                 ),
                 getattr(composed, "extra_tags", ()),
@@ -1197,14 +1217,19 @@ def publish_from_queued_row(
             register_article_match_keys,
         )
 
+        eff_topic = _effective_alert_topic(topic, composed)
         keys = payload.get("match_keys")
-        if not isinstance(keys, list) or not keys:
+        # Keys precomputed at INGEST carry the keyword topic's carve-outs
+        # (body domains/cashtags become edit-routing keys for scam topics).
+        # If the writer didn't confirm the alert, those carve-outs are
+        # exactly what must not register — rebuild under the effective topic.
+        if eff_topic != topic or not isinstance(keys, list) or not keys:
             keys = build_match_keys(
                 service_id=row.service_id,
                 page_text=str(payload.get("page_text", "")),
                 source_url=row.scrape_url,
-                extra_keywords=("scam",) if topic == PublishTopic.SCAM_ALERT else (),
-                topic=topic.value,
+                extra_keywords=("scam",) if eff_topic == PublishTopic.SCAM_ALERT else (),
+                topic=eff_topic.value,
                 match_kind=str(payload.get("match_kind", "")),
                 match_value=str(payload.get("match_value", "")),
             )
