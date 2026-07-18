@@ -50,6 +50,13 @@ class MistralArticleFields:
     # deterministic keyword classifier disabled 2026-07-17) — None unless the
     # writer actually called the tool this compose.
     breaking_reason: str | None = None
+    # Writer-confirmed alert class ("scam_alert"/"network_incident" via the
+    # confirm_alert_topic tool) — None unless confirmed. The keyword topic
+    # classifier still routes queue rows, but reader-facing alert tags and
+    # the scam-topic match-key carve-out require this confirmation
+    # (2026-07-18: the Foundation's own homepage rebrand got tagged
+    # scam-alert off a research-paper blurb mentioning "malicious servers").
+    confirmed_alert: str | None = None
 
 
 # The single hardest accuracy rule. The small model, told to write full-depth,
@@ -128,6 +135,11 @@ def _writing_guidelines(today: str) -> str:
         "but DO explain technology the story actually rests on.\n"
         "- Concrete Scenarios: Translate abstract blockchain concepts into concrete "
         "operational scenarios to make the implications vivid for the reader.\n"
+        "- Diff noise is not news: mechanical artifacts in a page diff — canonical "
+        "tags, hostname capitalization, tracking parameters, CSS/asset renames — "
+        "are never 'substantive updates'. Report only changes a reader could act "
+        "on or care about; if a diff line needs the word 'normalizing' to sound "
+        "meaningful, drop it.\n"
         "- Audience: Intelligent general readers who are NOT crypto specialists. "
         "Briefly explain blockchain/DeFi/Algorand jargon in plain language on first "
         "use, spell out acronyms once, and never assume prior crypto knowledge.\n"
@@ -971,7 +983,27 @@ def _review_and_revise(
                 logger.warning("chain-entity check failed during revision", exc_info=True)
         if chain_fixable:
             review["chain_entities"] = chain_fixable
-        fixable = schema_fixable + quality_fixable + link_fixable + chain_fixable
+        # Unattributed-authority feedback: "industry research suggests" /
+        # "experts say" constructions force a revision naming the phrase, so
+        # the writer can cite its actual trace source or delete the claim —
+        # the post-hoc gate can only excise the sentence (2026-07-18: a
+        # fabricated "10-100x slower to verify" Falcon benchmark shipped
+        # wearing exactly this costume in a pre-release draft).
+        authority_fixable: list[str] = []
+        from app.core.config import AUTHORITY_GATE_ENABLED
+
+        if AUTHORITY_GATE_ENABLED:
+            try:
+                from app.modules.newspaper.authority_gate import authority_revision_issues
+
+                authority_fixable = authority_revision_issues(body)
+            except Exception:
+                logger.warning("authority-phrase check failed during revision", exc_info=True)
+        if authority_fixable:
+            review["unattributed_authority"] = authority_fixable
+        fixable = (
+            schema_fixable + quality_fixable + link_fixable + chain_fixable + authority_fixable
+        )
 
         grade_val = review.get("grade")
         score = float(grade_val) if isinstance(grade_val, int | float) else 0.0
@@ -1445,6 +1477,7 @@ def _parse_article_fields(payload: dict[str, Any]) -> MistralArticleFields:
         tags=tuple(tags[:6]),
         heuristic_grade=payload.get("_heuristic_grade"),
         breaking_reason=payload.get("_breaking_reason"),
+        confirmed_alert=payload.get("_confirmed_alert"),
     )
 
 
@@ -1868,6 +1901,13 @@ def _compose_via_writer_tools_locked(
             payload = link_and_verify_chain_entities(
                 payload, trace, extra_texts=[user, research_user or ""]
             )
+            # Authority backstop: any "experts say"/"industry research
+            # suggests" sentence the revision loop didn't fix is excised —
+            # unattributable by construction, and the one that shipped
+            # (2026-07-18 quantum draft) was a fabricated benchmark.
+            from app.modules.newspaper.authority_gate import excise_unattributed_authority
+
+            payload = excise_unattributed_authority(payload)
             # Writer-declared breaking news (replaces the deterministic keyword
             # classifier, disabled 2026-07-17): scanned from the trace like the
             # gates above, since mark_breaking_news never mutates the draft —
@@ -1877,6 +1917,15 @@ def _compose_via_writer_tools_locked(
             breaking_reason = breaking_reason_from_trace(trace)
             if breaking_reason is not None:
                 payload["_breaking_reason"] = breaking_reason
+            # Writer-confirmed alert class (confirm_alert_topic tool) — same
+            # post-hoc trace scan; the publish gate uses it to decide whether
+            # a keyword-routed scam/incident topic earns its reader-facing
+            # tag and match-key carve-out.
+            from app.modules.ai.alert_topic_tool import confirmed_alert_from_trace
+
+            confirmed_alert = confirmed_alert_from_trace(trace)
+            if confirmed_alert is not None:
+                payload["_confirmed_alert"] = confirmed_alert
             raw = _json.dumps(payload)
             _duration_ms = int((_time.monotonic() - _t0) * 1000)
             try:

@@ -465,6 +465,13 @@ QUOTE_GATE_ENABLED = env_bool("QUOTE_GATE_ENABLED", True)
 # supply" for a holding the chain says is 25.08% — a clickable explorer link
 # and a deterministic resolve of the same id makes that class visible).
 CHAIN_ENTITY_GATE_ENABLED = env_bool("CHAIN_ENTITY_GATE_ENABLED", True)
+# Unattributed appeals to authority ("industry-wide research suggests",
+# "experts say", "studies show") are unattributable by construction — a real
+# claim has a citable source in the writer's own research trace. Findings go
+# to the revision loop first; survivors are excised sentence-wise (2026-07-18:
+# a pre-release draft asserted a fabricated "10-100x slower to verify" Falcon
+# benchmark laundered through "industry-wide research").
+AUTHORITY_GATE_ENABLED = env_bool("AUTHORITY_GATE_ENABLED", True)
 # Stop composing review-bound candidates once pending_feed_queue already holds
 # this many approved articles awaiting paced release (2026-07-16: auto-approve
 # → backlog bypassed the 1-slot review throttle, so hourly drains composed 6
