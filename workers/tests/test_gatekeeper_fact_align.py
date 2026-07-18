@@ -147,3 +147,54 @@ def test_source_timeliness_stale_pr_vs_fresh() -> None:
 
 def test_source_timeliness_unknown_is_neutral() -> None:
     assert fa.source_timeliness_score(page_text="Algorand wallet features.") == 0.5
+
+
+# --- unit-class widening (2026-07-18, quantum-rebrand incident) -------------
+# The draft asserted "1,024-bit keys for Falcon-1024" and a fabricated
+# "10-100x slower to verify" benchmark; the trace held the Foundation's real
+# size table ("Falcon-1024 1793 ~1280", Ed25519 32/64). Percent-class
+# isolation existed; bits/bytes/multiplier did not, so plain-number
+# collisions ("Falcon-1024" the identifier) could ground the invented
+# "1,024-bit" claim.
+
+QUANTUM_TRACE = (
+    "The key sizes of both schemes are several times larger than Ed25519: "
+    "Scheme Public key size (bytes) Signature size (bytes) "
+    "Ed25519 32 64 Falcon-512 897 ~640 Falcon-1024 1793 ~1280"
+)
+
+
+def test_identifier_number_never_grounds_bit_claim():
+    """"Falcon-1024" is an identifier, not a key size — it must not ground
+    the fabricated "1,024-bit keys" claim."""
+    r = fa.numeric_entailment_score(QUANTUM_TRACE, "Falcon uses 1,024-bit keys.")
+    assert r.grounded == 0
+    assert any("bit" in u for u in r.ungrounded)
+
+
+def test_fabricated_multiplier_is_ungrounded_even_with_bare_matches():
+    trace = QUANTUM_TRACE + " Throughput factor 100 was mentioned somewhere."
+    r = fa.numeric_entailment_score(trace, "Verification is 100x slower.")
+    assert any(u.endswith("x") for u in r.ungrounded)
+
+
+def test_true_byte_claim_grounded_by_bare_table_numbers():
+    """Trace tool output carries byte sizes as bare table numbers — a true
+    "1,793-byte" claim is genuinely grounded by them (bytes stays
+    plain-compatible, unlike bits/multiplier)."""
+    r = fa.numeric_entailment_score(QUANTUM_TRACE, "Falcon-1024 public keys are 1,793-byte.")
+    # claims: 1024 (identifier, grounded by trace's own Falcon-1024) and
+    # 1,793-byte (grounded by the bare 1793 in the table)
+    assert r.ungrounded == ()
+
+
+def test_byte_trace_grounds_byte_claim_same_class():
+    r = fa.numeric_entailment_score(
+        "signature is 640 bytes", "The signature weighs 640 bytes."
+    )
+    assert r.ungrounded == ()
+
+
+def test_percent_isolation_unchanged_by_widening():
+    r = fa.numeric_entailment_score("value 50 appears", "growth was 50%")
+    assert r.grounded == 0

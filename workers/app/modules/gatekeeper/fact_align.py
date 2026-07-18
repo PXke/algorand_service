@@ -36,9 +36,10 @@ _NUM_RE = re.compile(
     r"""
     (?P<cur>[$€£]|\b(?:USD|ALGO|usd|algo)\s+)?      # optional leading currency
     (?P<num>\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)        # 50,000 | 50000 | 1.5
-    \s?
-    # magnitude word/letter must not run into a following word ("T" of "TPS")
-    (?P<suf>(?:billion|million|thousand|trillion|bn|mn|[kmbt])(?![A-Za-z])|%)?
+    [\s-]?                                          # "1,793-byte" hyphen form
+    # magnitude word/letter must not run into a following word ("T" of "TPS");
+    # bytes/bits/x are unit suffixes (class markers), not magnitudes
+    (?P<suf>(?:billion|million|thousand|trillion|bn|mn|bytes?|bits?|[kmbt]|x)(?![A-Za-z])|%)?
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -63,6 +64,13 @@ class Quantity:
 def _unit_class(cur: str | None, suf: str | None) -> str:
     if suf == "%":
         return "percent"
+    low = (suf or "").lower()
+    if low in ("byte", "bytes"):
+        return "bytes"
+    if low in ("bit", "bits"):
+        return "bits"
+    if low == "x":
+        return "multiplier"
     if cur:
         return "currency"
     return "plain"
@@ -82,6 +90,7 @@ def extract_numbers(text: str) -> list[Quantity]:
             continue
         suf = (m.group("suf") or "").lower()
         if suf and suf != "%":
+            # bytes/bits/x are class markers, not magnitudes — .get default 1.0
             base *= _MULTIPLIER.get(suf, 1.0)
         out.append(
             Quantity(
@@ -110,12 +119,33 @@ def extract_entities(text: str) -> list[str]:
     return list(seen)
 
 
+# Classes a claim in the row class may be grounded by (2026-07-18, quantum
+# incident): percent stays fully isolated (a bare 50 never grounds "50%").
+# bits and multiplier are isolated too — that's where decorative fabrication
+# lives, and plain-number collisions are exactly the false grounding to stop:
+# "Falcon-1024" (an identifier) must never ground an invented "1,024-bit
+# keys" claim, and a stray bare 100 must never ground a fabricated "100x"
+# benchmark. bytes stays plain-compatible: trace tool output carries byte
+# sizes as bare table numbers ("Falcon-1024 1793 ~1280"), so a true
+# "1,793-byte" claim is genuinely grounded by them. The cost (a rare
+# coincidental magnitude match) is far below the cost of flagging every true
+# byte figure. Currency stays plain-compatible for the same trace-JSON
+# reason (a price rides as ``0.18``).
+_COMPATIBLE: dict[str, frozenset[str]] = {
+    "plain": frozenset({"plain", "currency", "bytes"}),
+    "currency": frozenset({"currency", "plain"}),
+    "bytes": frozenset({"bytes", "plain"}),
+    "percent": frozenset({"percent"}),
+    "bits": frozenset({"bits"}),
+    "multiplier": frozenset({"multiplier"}),
+}
+
+
 def _matches(a: Quantity, b: Quantity, tol: float) -> bool:
-    """Two quantities entail each other: compatible unit and within ``tol``
-    relative difference (absolute when one side is ~0). Currency and plain are
-    compatible (trace JSON carries bare numbers, e.g. a price of ``0.18``);
-    percent is isolated so ``50`` never grounds ``50%``."""
-    if (a.unit == "percent") != (b.unit == "percent"):
+    """Two quantities entail each other: compatible unit class (see
+    ``_COMPATIBLE``) and within ``tol`` relative difference (absolute when one
+    side is ~0)."""
+    if b.unit not in _COMPATIBLE.get(a.unit, frozenset({a.unit})):
         return False
     scale = max(abs(a.value), abs(b.value))
     if scale < 1e-9:
