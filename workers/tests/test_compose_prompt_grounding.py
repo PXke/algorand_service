@@ -212,6 +212,26 @@ def test_technical_stakes_bridges_algorand_layer1():
     assert "Pure Proof-of-Stake" in guidelines
 
 
+def test_technical_stakes_bridge_is_relevance_gated():
+    """Root-caused 2026-07-18 on the live D13.co article: the old 'if the
+    source lacks technical depth you MUST use expert knowledge to explain
+    theoretical mechanisms' wording made the writer bolt state proofs onto a
+    wallet-phishing post-mortem (state proofs don't fix key theft) — the
+    grader's technical_depth dimension then rewarded exactly that filler.
+    Same failure produced the UNDP/Stellar piece's speculative 'where
+    Algorand fits' padding. The bridge must be relevance-gated: skip it
+    when no mechanic is genuinely implicated, never manufacture one."""
+    guidelines = mc._writing_guidelines("2026-07-09")
+    assert "RELEVANCE GATES THE BRIDGE" in guidelines
+    assert "state proofs do not fix wallet phishing" in guidelines
+    assert "skip the bridge rather than" in guidelines
+    # The expert-knowledge license survives (thin sources still get depth —
+    # see test_stakes_rule_allows_algorand_expert_knowledge) but the
+    # always-bridge MANDATE is gone: explaining is permitted, not required.
+    assert "MUST use your expert knowledge" not in guidelines
+    assert "expert knowledge of Algorand" in guidelines
+
+
 def test_writing_guidelines_bans_cross_section_restatement():
     """Root-caused 2026-07-15 on a real NFT-marketplace article: 'fees are
     undisclosed' and 'AlgoSeas volume is self-reported/unverified' each

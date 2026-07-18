@@ -206,3 +206,24 @@ def test_grade_failure_falls_back_to_revision_trigger(monkeypatch) -> None:
     assert result["critical_distance"] == 2
     assert result["issues"]
     assert quality_needs_revision(result, min_score=3)
+
+
+def test_rubric_technical_depth_is_relevance_gated() -> None:
+    """Root-caused 2026-07-18 on the live D13.co article: the rubric's old
+    technical_depth wording ('bridges the story to Algorand layer-1
+    mechanics ... state proofs, etc.') made the grader emit 'add more
+    specific Algorand layer-1 mechanics (e.g. PPoS, state proofs)' as a fix
+    — and the writer obeyed, inserting a state-proofs non sequitur into a
+    wallet-phishing post-mortem. Relevance must gate the dimension, and the
+    grader must never prescribe adding mechanics."""
+    from app.modules.newspaper.article_quality_llm import (
+        _FALLBACK_QUALITY,
+        _QUALITY_RUBRIC,
+    )
+
+    assert "RELEVANCE GATES THIS SCORE" in _QUALITY_RUBRIC
+    assert "Never suggest 'add more layer-1 mechanics'" in _QUALITY_RUBRIC
+    assert "wallet-phishing post-mortem" in _QUALITY_RUBRIC
+    # Fallback issues must not carry the generic add-mechanics instruction.
+    joined = " ".join(_FALLBACK_QUALITY["issues"])
+    assert "THIS story actually involves" in joined

@@ -13,9 +13,13 @@ _QUALITY_RUBRIC = (
     "- narrative_synthesis: cohesive journalism weaving findings together — NOT "
     "comma-separated feature dumps, NOT generic press-release tone, NOT dictionary "
     "definitions of curriculum pillars or feature lists.\n"
-    "- technical_depth: bridges the story to Algorand layer-1 mechanics (throughput, "
-    "consensus, ASA/tokenization, state proofs, etc.) and names the legacy friction "
-    "being solved — NOT foundation name-drops without explaining why Algorand fits.\n"
+    "- technical_depth: when a layer-1 mechanic genuinely played a role in the "
+    "story's events, is it named and explained (with the legacy friction it "
+    "solves)? RELEVANCE GATES THIS SCORE: a mechanic that did not bear on the "
+    "story (e.g. citing state proofs in a wallet-phishing post-mortem, or a "
+    "PPoS explainer in a partnership piece) is filler and scores LOW — the same "
+    "as a foundation name-drop. Never suggest 'add more layer-1 mechanics' as a "
+    "fix; suggest explaining the mechanics already implicated by the story.\n"
     "- critical_distance: does the draft apply independent scrutiny to a company's "
     "or project's own claims, or does it just restate their marketing framing as "
     "fact? A subject with an obvious conflict of interest (e.g. a centralized "
@@ -53,8 +57,9 @@ _FALLBACK_QUALITY = {
     "issues": [
         "quality rubric could not be parsed — weave facts into connected journalism, "
         "not dictionary-style summaries",
-        "explain Algorand layer-1 mechanics vs legacy friction; put multi-item data "
-        "in a Markdown table (Concept / Real-World Implication columns)",
+        "explain the Algorand layer-1 mechanics THIS story actually involves "
+        "(never bolt on unrelated ones); put multi-item data in a Markdown "
+        "table (Concept / Real-World Implication columns)",
         "name the actual risk/tradeoff instead of just relaying the subject's own "
         "marketing framing",
     ],
