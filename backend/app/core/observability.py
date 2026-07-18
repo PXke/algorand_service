@@ -11,14 +11,14 @@ from __future__ import annotations
 import logging
 import os
 
-_DEFAULT_KEY = "b83be2212bf6cbca2e5abc3510f91210"
-
 logger = logging.getLogger(__name__)
 
 
 def init_bugsnag(*, project_root: str = "", release_stage: str = "prod") -> None:
     try:
-        key = os.getenv("BUGSNAG_API_KEY", _DEFAULT_KEY).strip()
+        # Opt-in: reporting only happens where the deploy env provides the key
+        # (prod shared env). No key baked in — dev shells and test runs stay silent.
+        key = os.getenv("BUGSNAG_API_KEY", "").strip()
         if not key:
             return
         import bugsnag

@@ -23,6 +23,14 @@ def test_dashboard_includes_articles_tile(monkeypatch) -> None:
         "app.modules.metrics.services.dashboard_service.fetch_algod_status",
         lambda **kwargs: {"last-round": 12345, "time-since-last-round": 3_000_000_000},
     )
+    monkeypatch.setattr(
+        "app.modules.metrics.services.price_service.load_price_brief",
+        lambda asset_id: None,
+    )
+    monkeypatch.setattr(
+        "app.modules.metrics.services.dashboard_service.load_latest_price_sample",
+        lambda asset_id: None,
+    )
 
     service = MetricsDashboardService(news_service=news)
     result = service.get_dashboard(asset_id="algorand")

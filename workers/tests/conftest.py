@@ -5,7 +5,42 @@ and only reach for FakeCassandraResult/FakeRedis as building blocks."""
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# Tests must never report to Bugsnag: celery_app configures it at import time
+# with a hardcoded default key (release_stage "prod") and attaches an ERROR-log
+# handler to the root logger, so every error-path unit test shipped a prod
+# event. An empty key makes _init_bugsnag return before configuring anything;
+# set here so it is in place before any test imports celery_app.
+os.environ["BUGSNAG_API_KEY"] = ""
+
+
+def _install_no_network_guard() -> None:
+    """Unit tests must never open real sockets — before this guard, tests were
+    quietly dialing live Redis (:6379), Cassandra (:9042), and in one case the
+    public internet. Any connect fails with ConnectionRefusedError naming the
+    target — the same failure mode as "service not running", so code under test
+    that deliberately exercises a backend-down path behaves as before, just
+    without a real connection attempt. Installed process-wide at conftest
+    import (not a per-test fixture) so driver background threads — e.g. the
+    Cassandra reconnector — stay blocked between tests too. A test that trips
+    this should fake the client at its seam (see fake_redis /
+    fake_cassandra_session below)."""
+    import errno
+    import socket
+
+    def _blocked_connect(self, address):
+        raise ConnectionRefusedError(
+            errno.ECONNREFUSED,
+            f"unit test attempted a real network connection to {address}",
+        )
+
+    socket.socket.connect = _blocked_connect
+
+
+_install_no_network_guard()
 
 
 class FakeRedis:

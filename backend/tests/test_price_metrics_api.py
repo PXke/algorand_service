@@ -31,6 +31,10 @@ def test_price_metrics_returns_brief(monkeypatch) -> None:
         "app.modules.metrics.services.price_service.load_price_brief",
         lambda asset_id: brief,
     )
+    monkeypatch.setattr(
+        "app.modules.metrics.services.price_service.load_latest_price_sample",
+        lambda asset_id: None,
+    )
     result = PriceMetricsService().get_spot()
     assert result.available is True
     assert result.price_usd == 0.25

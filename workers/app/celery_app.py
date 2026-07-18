@@ -184,7 +184,9 @@ import app.core.task_timing  # noqa: E402, F401
 def _init_bugsnag() -> None:
     """Bugsnag for Celery: task-failure signal + ERROR-log handler."""
     try:
-        key = os.getenv("BUGSNAG_API_KEY", "b83be2212bf6cbca2e5abc3510f91210").strip()
+        # Opt-in: reporting only happens where the deploy env provides the key
+        # (prod shared env). No key baked in — dev shells and test runs stay silent.
+        key = os.getenv("BUGSNAG_API_KEY", "").strip()
         if not key:
             return
         import logging
