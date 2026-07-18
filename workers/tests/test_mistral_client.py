@@ -143,3 +143,57 @@ def test_chat_completion_raises_on_http_error() -> None:
             client.chat_completion([{"role": "user", "content": "hi"}])
     finally:
         mistral_module.httpx.Client = original
+
+
+def test_exhausted_tool_loop_skips_final_completion_when_told(monkeypatch) -> None:
+    """Research/gap-fill callers run chat_with_tools for its tool side-effects
+    (the trace) and discard the return value. Confirmed 2026-07-14: a
+    gap-fill pass ran out of rounds and the exhaustion fallback paid for a
+    full 'write the final JSON article' completion nobody read. With
+    finalize_on_exhaustion=False the loop returns without that extra call."""
+    client = MistralClient(api_key="k", model="m")
+    calls = {"n": 0}
+
+    def _fake_post(payload):
+        calls["n"] += 1
+        # Always demand another tool round so the loop exhausts max_rounds.
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": f"c{calls['n']}",
+                                "function": {
+                                    "name": "probe",
+                                    "arguments": json.dumps({"i": calls["n"]}),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(client, "_post", _fake_post)
+    finalized = {"n": 0}
+    monkeypatch.setattr(
+        client,
+        "chat_completion",
+        lambda *a, **k: finalized.__setitem__("n", finalized["n"] + 1) or "{}",
+    )
+
+    trace: list[dict] = []
+    out = client.chat_with_tools(
+        [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+        tools=[{"type": "function", "function": {"name": "probe", "parameters": {}}}],
+        handlers={"probe": lambda **kw: {"ok": True}},
+        max_rounds=2,
+        trace=trace,
+        finalize_on_exhaustion=False,
+    )
+    assert finalized["n"] == 0  # no discarded article completion
+    assert len(trace) == 2  # the tool rounds themselves still ran
+    assert isinstance(out, str)

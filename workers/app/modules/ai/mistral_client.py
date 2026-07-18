@@ -408,6 +408,7 @@ class MistralClient:
         debug: dict[str, Any] | None = None,
         require_tool: str | None = None,
         context_tokens: int | None = None,
+        finalize_on_exhaustion: bool = True,
     ) -> str:
         """Agentic loop: let the model call the provided tools, execute them,
         feed results back, and return the final assistant message content.
@@ -592,6 +593,14 @@ class MistralClient:
         if debug is not None:
             debug["rounds"] = rounds
             debug["exhausted"] = True
+        # Research/gap-fill callers invoke this loop for its tool side-effects
+        # (the trace) and DISCARD the return value — burning a full completion
+        # asking the research model to "write the final JSON article" on
+        # exhaustion was pure waste (confirmed 2026-07-14: a gap-fill pass ran
+        # out of rounds and paid for an article nobody read). Those call sites
+        # pass finalize_on_exhaustion=False.
+        if not finalize_on_exhaustion:
+            return last_content
         return self.chat_completion(
             [*convo, {"role": "user", "content": "Now write the final JSON article."}],
             json_object=True,

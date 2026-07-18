@@ -1757,6 +1757,10 @@ def _compose_via_writer_tools_locked(
                     debug=debug,
                     temperature=MISTRAL_TEMP_RESEARCH,
                     require_tool=None,
+                    # Research runs for its tool side-effects (the trace); the
+                    # return value is discarded — never pay for a final
+                    # article completion on round exhaustion.
+                    finalize_on_exhaustion=False,
                 )
                 # Research FLOOR: if it stopped too early (the exact failure where
                 # it reads an existing profile and quits), send it back to dig
@@ -1786,6 +1790,7 @@ def _compose_via_writer_tools_locked(
                             debug=debug,
                             temperature=MISTRAL_TEMP_RESEARCH,
                             require_tool=None,
+                            finalize_on_exhaustion=False,
                         )
                 # Stage 1b — synthesize a structured Research Digest handoff so Stage 2
                 # grounds on high-signal facts, not raw tool JSON.
@@ -1816,6 +1821,9 @@ def _compose_via_writer_tools_locked(
                             temperature=MISTRAL_TEMP_RESEARCH,
                             require_tool=None,
                             max_rounds=DIGEST_GAP_FILL_MAX_ROUNDS,
+                            # The 2026-07-14 gap-fill pass ran out of rounds
+                            # here and burned a full discarded article write.
+                            finalize_on_exhaustion=False,
                         )
                         digest = _synthesize_research_digest(
                             trace=trace, research_context=stage1_user
