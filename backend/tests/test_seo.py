@@ -101,6 +101,19 @@ def test_render_article_head_has_core_tags() -> None:
     assert "flutter-first-frame" in body
 
 
+def test_ssr_script_restores_server_title_after_flutter_boot() -> None:
+    """Flutter web's MaterialApp(title:) overwrites document.title with the
+    static app name during its first build, so rendering crawlers (Bing,
+    Google WRS) saw one generic title on every route (2026-07-09 Bing
+    audit). The first-frame script must capture the server-sent title at
+    parse time and restore it after Flutter paints."""
+    body = render.ssr_container("<h1>x</h1>")
+    assert "var pxkeSsrTitle=document.title" in body
+    assert "document.title=pxkeSsrTitle" in body
+    # Restore must run AFTER Flutter's own title write (post-first-frame).
+    assert body.index("flutter-first-frame") < body.index("document.title=pxkeSsrTitle")
+
+
 def test_render_article_hreflang_for_translations() -> None:
     head, body = render.render_article(
         _article(),

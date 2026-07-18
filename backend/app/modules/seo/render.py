@@ -288,10 +288,20 @@ _SSR_LOADING = (
 # highlights invisible duplicate matches. Remove the SSR shell and the embedded
 # feed JSON once Flutter owns the page; crawlers still get the full HTML in the
 # initial response and JSON-LD in <head>.
+# The title restore below exists because Flutter web's MaterialApp(title:)
+# sets document.title to the static app name during its first build,
+# clobbering the per-route <title> this module injected — so any crawler
+# that RENDERS the page (Bing's does, Google's WRS does) saw one generic
+# title site-wide (flagged in the 2026-07-09 Bing audit). Flutter only sets
+# it once at boot (the Title widget is static), so capturing the server-sent
+# value at parse time and restoring it after first frame wins durably.
 _SSR_REMOVE_SCRIPT = (
-    "<script>window.addEventListener('flutter-first-frame',function(){"
+    "<script>var pxkeSsrTitle=document.title;"
+    "window.addEventListener('flutter-first-frame',function(){"
     "var b=document.getElementById('ssr-body');b&&b.remove();"
-    "var f=document.getElementById('pxke-ssr-feed');f&&f.remove();});</script>"
+    "var f=document.getElementById('pxke-ssr-feed');f&&f.remove();"
+    "setTimeout(function(){if(pxkeSsrTitle){document.title=pxkeSsrTitle;}},0);});"
+    "</script>"
 )
 
 
