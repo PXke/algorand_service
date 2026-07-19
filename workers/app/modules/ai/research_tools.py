@@ -587,6 +587,24 @@ def _fetch_failure_hint(url: str, error: str, *, status_code: int | None = None)
             "the page is gone — fetch_archive_text can read a Wayback Machine "
             "snapshot of it if the historical content matters"
         )
+    low = error.lower()
+    if (
+        "dns resolution failed" in low
+        or "name or service not known" in low
+        or "nodename nor servname" in low
+        or "no address associated with hostname" in low
+    ):
+        # The domain itself does not resolve — a much stronger signal than a 404
+        # that the project is defunct/abandoned. A prod incident (2026-07-19) had
+        # the writer recommend MyAlgo Wallet as a live wallet even though
+        # myalgo.com failed to resolve mid-research: the terse error alone was
+        # ignored, so state the implication as an instruction.
+        return (
+            "this domain does not resolve — the project is likely DEFUNCT or "
+            "abandoned. Do NOT present it as an active, current, or recommended "
+            "service and do not link it. If it still matters, use search_web to "
+            "confirm whether it shut down, and if so say so explicitly"
+        )
     return ""
 
 

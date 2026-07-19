@@ -165,10 +165,22 @@ def _build_beat_schedule() -> dict:
             "task": "app.tasks.newspaper.poll_mail_inbox",
             "schedule": float(os.getenv("MAIL_POLL_SECONDS", "300")),
         }
-    schedule["scan-editorial-brief-schedule"] = {
-        "task": "app.tasks.newspaper.scan_editorial_brief_schedule",
-        "schedule": float(os.getenv("EDITORIAL_BRIEF_SCAN_SECONDS", "3600")),
-    }
+    # Editorial-brief recurrence (auto-assign never-run briefs + cadence
+    # refresh) is OFF by default: it silently regenerated standing briefs with
+    # no operator action (a 30-day brief re-ran and republished on its own,
+    # 2026-07-19). Briefs now only compose when explicitly triggered via the
+    # admin API. Set EDITORIAL_BRIEF_SCAN_ENABLED=true in workers.env to restore
+    # the recurring beat.
+    if os.getenv("EDITORIAL_BRIEF_SCAN_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        schedule["scan-editorial-brief-schedule"] = {
+            "task": "app.tasks.newspaper.scan_editorial_brief_schedule",
+            "schedule": float(os.getenv("EDITORIAL_BRIEF_SCAN_SECONDS", "3600")),
+        }
     return schedule
 
 

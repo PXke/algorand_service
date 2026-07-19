@@ -75,3 +75,24 @@ def test_non_http_exception_has_no_status_code(monkeypatch):
 
     assert "status_code" not in result
     assert "error" in result
+
+
+def test_dns_failure_flags_domain_as_defunct(monkeypatch):
+    """A non-resolving domain (the MyAlgo incident, 2026-07-19) must produce a
+    strong 'defunct — do not recommend' hint, not just a terse error the writer
+    can ignore."""
+    from app.core.net_guard import UnsafeUrlError
+
+    url = "https://myalgo.com/"
+
+    def _boom(*a, **k):
+        raise UnsafeUrlError("dns resolution failed for myalgo.com")
+
+    monkeypatch.setattr("app.modules.ai.research_tools._guarded_get", _boom)
+
+    result = _tool_fetch_url(url)
+
+    assert "status_code" not in result
+    hint = result.get("hint", "")
+    assert "DEFUNCT" in hint
+    assert "do not link" in hint.lower()
