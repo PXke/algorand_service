@@ -1888,6 +1888,15 @@ def _compose_via_writer_tools_locked(
             # body doesn't already cite, so deep links survive into the published
             # article (lifts citation density; preserves existing prose).
             payload = append_reference_block(payload, trace)
+            # Defunct-entity veto (MUST precede the link-gate delinker below, so
+            # it still sees the writer's original links): if the body links any
+            # domain that no longer resolves to a usable address — whether the
+            # research fetched it or the writer recommended it blind — hold the
+            # whole draft for review. Delinking can't undo a defunct entity
+            # recommended in prose (MyAlgo incident 2026-07-19).
+            from app.modules.newspaper.defunct_entity_gate import flag_defunct_entities
+
+            payload = flag_defunct_entities(payload, trace)
             # Deterministic link gate: delink body urls the research never
             # surfaced and that don't resolve live (invented-url pattern the
             # numeric gatekeeper can't see — RandGallery incident 2026-07-16).
@@ -1939,13 +1948,6 @@ def _compose_via_writer_tools_locked(
             confirmed_alert = confirmed_alert_from_trace(trace)
             if confirmed_alert is not None:
                 payload["_confirmed_alert"] = confirmed_alert
-            # Defunct-entity veto: if the body links a domain the writer's own
-            # research recorded as DNS-unresolvable (and it still is), hold the
-            # draft for review — the delink gate above can't undo a defunct
-            # entity recommended in prose (MyAlgo incident 2026-07-19).
-            from app.modules.newspaper.defunct_entity_gate import flag_defunct_entities
-
-            payload = flag_defunct_entities(payload, trace)
             raw = _json.dumps(payload)
             _duration_ms = int((_time.monotonic() - _t0) * 1000)
             try:

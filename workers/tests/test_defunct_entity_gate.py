@@ -1,9 +1,12 @@
-"""The defunct-entity gate holds a draft for review when it links a domain the
-research trace recorded as DNS-unresolvable and that still does not resolve —
-the MyAlgo incident (2026-07-19). It must NOT fire on prose-only mentions, on
-links the research fetched successfully, or on domains that have since recovered."""
+"""The defunct-entity gate holds a draft for review when it links a domain that
+does not resolve to a usable address — actively DNS-checked at gate time, so it
+fires whether the writer fetched the domain in research (the MyAlgo incident,
+2026-07-19) or recommended it blind from memory. It must NOT fire on prose-only
+mentions, on live links, or on a transient resolver hiccup."""
 
 from __future__ import annotations
+
+import socket
 
 import pytest
 
@@ -12,8 +15,8 @@ from app.modules.newspaper import defunct_entity_gate as gate
 
 @pytest.fixture
 def _dead_hosts(monkeypatch):
-    """Make only the named hosts fail DNS at gate-time re-check; everything else
-    resolves. Returns a mutable set the test can adjust."""
+    """Make only the named hosts read as unreachable; everything else resolves.
+    Patches the injectable _resolves seam. Returns a mutable set."""
     dead: set[str] = set()
 
     def fake_resolves(host: str) -> bool:
@@ -23,74 +26,90 @@ def _dead_hosts(monkeypatch):
     return dead
 
 
-# A trace shaped like the real one: a fetch_url tool result carrying the
-# net_guard DNS-failure error string.
-def _trace_with_dns_failure(host: str) -> list[dict]:
-    return [
-        {"role": "assistant", "content": "let me check the wallets"},
-        {"role": "tool", "name": "fetch_url",
-         "content": f'{{"url": "https://{host}/", "error": "dns resolution failed for {host}"}}'},
-    ]
-
-
 def test_fires_on_linked_dead_domain(_dead_hosts):
     _dead_hosts.add("wallet.myalgo.com")
     body = "Supported wallets: [Pera](https://perawallet.app) and [MyAlgo](https://wallet.myalgo.com)."
-    trace = _trace_with_dns_failure("myalgo.com")  # research fetched the apex
-
-    dead = gate.defunct_linked_domains(body, trace)
-
-    assert dead == ["wallet.myalgo.com"]  # subdomain matched apex via registrable
+    assert gate.defunct_linked_domains(body) == ["wallet.myalgo.com"]
 
 
-def test_no_fire_when_domain_recovered(_dead_hosts):
-    # Research saw a DNS failure, but the host resolves again now (transient blip)
-    # — must not hold the article.
-    body = "See [MyAlgo](https://wallet.myalgo.com)."
-    trace = _trace_with_dns_failure("myalgo.com")
+def test_fires_without_any_trace_signal(_dead_hosts):
+    # The stale-memory case this enhancement targets: the writer linked a dead
+    # domain it never fetched, so there is NO trace DNS-failure — the active
+    # lookup alone must still catch it.
+    _dead_hosts.add("deadproject.xyz")
+    body = "Try [DeadProject](https://deadproject.xyz) for staking."
+    assert gate.defunct_linked_domains(body) == ["deadproject.xyz"]
 
-    assert gate.defunct_linked_domains(body, trace) == []
+
+def test_no_fire_when_all_links_resolve(_dead_hosts):
+    body = "See [Pera](https://perawallet.app) and [Defly](https://defly.app)."
+    assert gate.defunct_linked_domains(body) == []
 
 
 def test_no_fire_on_prose_only_mention(_dead_hosts):
-    # The wallet round-up case: mentions MyAlgo and links only a LIVE source
-    # about its shutdown — the dead domain is never linked, so no hold.
+    # A wallet round-up that mentions MyAlgo but links only a LIVE source about
+    # its shutdown — the dead domain is never linked, so no hold.
     _dead_hosts.add("wallet.myalgo.com")
     body = (
         "MyAlgo Wallet was sunset in 2024; see "
         "[Ledger's notice](https://support.ledger.com/article/myalgo)."
     )
-    trace = _trace_with_dns_failure("myalgo.com")
-
-    assert gate.defunct_linked_domains(body, trace) == []
+    assert gate.defunct_linked_domains(body) == []
 
 
-def test_no_fire_without_trace_failure(_dead_hosts):
-    # Domain is dead now, but the research never recorded a DNS failure for it —
-    # out of scope for THIS gate (that is the link gate's delink job).
+def test_dedupes_repeated_dead_host(_dead_hosts):
     _dead_hosts.add("wallet.myalgo.com")
-    body = "See [MyAlgo](https://wallet.myalgo.com)."
-    assert gate.defunct_linked_domains(body, trace=[]) == []
+    body = "[a](https://wallet.myalgo.com/x) then [b](https://wallet.myalgo.com/y)."
+    assert gate.defunct_linked_domains(body) == ["wallet.myalgo.com"]
 
 
-def test_flag_sets_payload_signal(monkeypatch, _dead_hosts):
-    monkeypatch.setattr(
-        "app.core.config.DEFUNCT_ENTITY_GATE_ENABLED", True, raising=False
-    )
+def test_flag_sets_payload_signal_and_reason(monkeypatch, _dead_hosts):
+    monkeypatch.setattr("app.core.config.DEFUNCT_ENTITY_GATE_ENABLED", True, raising=False)
     _dead_hosts.add("wallet.myalgo.com")
     payload = {"body": "Use [MyAlgo](https://wallet.myalgo.com)."}
-    out = gate.flag_defunct_entities(payload, _trace_with_dns_failure("myalgo.com"))
+    # A trace DNS-failure for the same entity should be noted in the reason.
+    trace = [{"role": "tool", "name": "fetch_url",
+              "content": '{"url": "https://wallet.myalgo.com/", "error": "dns resolution failed for wallet.myalgo.com"}'}]
+    out = gate.flag_defunct_entities(payload, trace)
 
     assert out["_defunct_domains"] == ["wallet.myalgo.com"]
     assert "wallet.myalgo.com" in out["_hold_reason"]
+    assert "research already flagged" in out["_hold_reason"]
 
 
 def test_flag_noop_when_disabled(monkeypatch, _dead_hosts):
-    monkeypatch.setattr(
-        "app.core.config.DEFUNCT_ENTITY_GATE_ENABLED", False, raising=False
-    )
+    monkeypatch.setattr("app.core.config.DEFUNCT_ENTITY_GATE_ENABLED", False, raising=False)
     _dead_hosts.add("wallet.myalgo.com")
     payload = {"body": "Use [MyAlgo](https://wallet.myalgo.com)."}
-    out = gate.flag_defunct_entities(payload, _trace_with_dns_failure("myalgo.com"))
+    assert "_defunct_domains" not in gate.flag_defunct_entities(payload, None)
 
-    assert "_defunct_domains" not in out
+
+# --- the real resolver's errno logic (no mock of _resolves) -------------------
+
+def _raise_gaierror(errno):
+    def _boom(*a, **k):
+        raise socket.gaierror(errno, "test")
+    return _boom
+
+
+def test_resolve_blocking_dead_on_no_address(monkeypatch):
+    # EAI_NODATA is the real MyAlgo case: name exists, no A/AAAA record.
+    monkeypatch.setattr(socket, "getaddrinfo", _raise_gaierror(socket.EAI_NODATA))
+    assert gate._resolve_blocking("wallet.myalgo.com") is False
+
+
+def test_resolve_blocking_dead_on_unknown_name(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", _raise_gaierror(socket.EAI_NONAME))
+    assert gate._resolve_blocking("nope.invalid") is False
+
+
+def test_resolve_blocking_alive_on_transient_failure(monkeypatch):
+    # EAI_AGAIN is a transient resolver failure — must read as ALIVE so a blip
+    # never holds a good article.
+    monkeypatch.setattr(socket, "getaddrinfo", _raise_gaierror(socket.EAI_AGAIN))
+    assert gate._resolve_blocking("perawallet.app") is True
+
+
+def test_resolve_blocking_alive_when_resolves(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("1.2.3.4", 0))])
+    assert gate._resolve_blocking("perawallet.app") is True

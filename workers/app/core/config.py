@@ -455,13 +455,14 @@ URL_REJECT_COOLDOWN_TTL = env_int("URL_REJECT_COOLDOWN_TTL", 604800)
 # live (2026-07-16: the writer decorated real project names with invented
 # urls — downbad.art, alchemon.com — that the numeric gatekeeper can't see).
 LINK_GATE_ENABLED = env_bool("LINK_GATE_ENABLED", True)
-# Hold-for-review veto: an article that LINKS a domain the writer's own research
-# recorded as DNS-unresolvable — and that still doesn't resolve at gate time — is
-# diverted to human review instead of auto-publishing (2026-07-19: recommended
-# MyAlgo Wallet, defunct since 2023, after myalgo.com failed to resolve during
-# research). Unlike the link gate (which only delinks untraced dead urls), this
-# targets the faithfulness failure of citing an entity the writer was TOLD is
-# gone — so it holds the whole draft, since the prose itself is likely wrong.
+# Hold-for-review veto: an article that LINKS any domain which no longer
+# resolves to a usable address is diverted to human review instead of
+# auto-publishing (2026-07-19: recommended MyAlgo Wallet, defunct since 2023).
+# Actively DNS-checks every linked domain at gate time — catching both an entity
+# the research fetched-and-failed AND one the writer recommended blind from stale
+# training memory (no research signal at all). Unlike the link gate (which only
+# delinks untraced dead urls), this holds the whole draft, since a defunct entity
+# recommended in prose survives delinking.
 DEFUNCT_ENTITY_GATE_ENABLED = env_bool("DEFUNCT_ENTITY_GATE_ENABLED", True)
 # De-quote body quotations (4+ words) that aren't verbatim in the research
 # trace / compose input (2026-07-16: a draft attributed an invented phrase in
