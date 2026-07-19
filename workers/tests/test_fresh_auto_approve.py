@@ -106,3 +106,23 @@ def test_gatekeeper_disabled_entirely_does_not_block() -> None:
     assert _fresh_auto_approve_decision(
         enabled=True, grade=9.0, floor=_FLOOR, title=_GOOD_TITLE, gate_ok=gate_ok
     )
+
+
+def test_defunct_domain_blocks_auto_approve_before_any_grading() -> None:
+    """A defunct-entity hit must fail auto-approve closed on its own — the real
+    _fresh_auto_approve_passes short-circuits BEFORE grading/gatekeeper (which
+    can pass on a draft recommending a dead entity, as the MyAlgo draft did), so
+    this call touches no Cassandra/Mistral. Guards the auto-approve bypass that
+    would otherwise re-open a held defunct draft (2026-07-19)."""
+    from app.modules.newspaper.tasks.publish_tasks import _fresh_auto_approve_passes
+
+    passed, meta = _fresh_auto_approve_passes(
+        title=_GOOD_TITLE,
+        body="Use [MyAlgo](https://wallet.myalgo.com).",
+        page_text="wallets",
+        source_url="editorial://brief/x",
+        defunct_domains=("wallet.myalgo.com",),
+    )
+    assert passed is False
+    assert meta["auto_applied"] == "0"
+    assert "wallet.myalgo.com" in meta["defunct_domains"]

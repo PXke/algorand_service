@@ -443,7 +443,8 @@ def _quality_floor_fails(heuristic_grade: dict | None) -> bool:
 
 
 def _fresh_auto_approve_passes(
-    *, title: str, body: str, page_text: str, source_url: str
+    *, title: str, body: str, page_text: str, source_url: str,
+    defunct_domains: tuple[str, ...] = (),
 ) -> tuple[bool, dict[str, str]]:
     """Strict autonomous-approve gate for content that would otherwise wait for
     a human review click (owner decision 2026-07-12), mirroring
@@ -459,6 +460,14 @@ def _fresh_auto_approve_passes(
     from app.core import config as worker_config
 
     meta: dict[str, str] = {}
+    # A defunct-entity hit blocks auto-approve unconditionally: the grade,
+    # headline and gatekeeper checks below can all pass on a draft that
+    # recommends a dead entity (the MyAlgo draft graded fine), so this must be
+    # its own hard fail, not something the AND-gate could clear.
+    if defunct_domains:
+        meta["auto_applied"] = "0"
+        meta["defunct_domains"] = ",".join(defunct_domains[:5])
+        return False, meta
     grade_value: float | None = None
     try:
         from app.modules.newspaper.article_grader import grade_article_draft
@@ -847,13 +856,27 @@ def publish_from_queued_row(
     # Quality veto on the auto-publish path: a draft Classifier A would send
     # straight to the feed is diverted into the human-review path below when the
     # deterministic gatekeeper fails under GATEKEEPER_ENFORCE (default off).
-    gate_enforced_review = _gate_enforces_review(
-        clf_decision=clf_decision,
-        title=composed.title,
-        body=composed.body,
-        page_text=page_text_for_clf,
-        source_url=row.scrape_url,
-    ) or _quality_floor_fails(getattr(composed, "heuristic_grade", None))
+    # A defunct-entity hit (body links a domain the research proved unreachable)
+    # is a hard divert regardless of grade — the prose likely recommends
+    # something dead, which a human must judge (MyAlgo incident 2026-07-19).
+    defunct_domains = tuple(getattr(composed, "defunct_domains", ()) or ())
+    gate_enforced_review = (
+        _gate_enforces_review(
+            clf_decision=clf_decision,
+            title=composed.title,
+            body=composed.body,
+            page_text=page_text_for_clf,
+            source_url=row.scrape_url,
+        )
+        or _quality_floor_fails(getattr(composed, "heuristic_grade", None))
+        or bool(defunct_domains)
+    )
+    if defunct_domains:
+        logger.warning(
+            "defunct-entity gate diverting %s to review — dead linked domain(s): %s",
+            row.scrape_url,
+            ", ".join(defunct_domains),
+        )
 
     # Resolve a hero/brand image when the upstream payload carried none, so both
     # the feed tile and the social/OG card show real artwork (best-effort). A
@@ -898,6 +921,7 @@ def publish_from_queued_row(
             body=composed.body,
             page_text=page_text_for_clf,
             source_url=row.scrape_url,
+            defunct_domains=defunct_domains,
         )
         if fresh_auto_approved:
             # An auto-approved article is approved, not exempt from cadence:

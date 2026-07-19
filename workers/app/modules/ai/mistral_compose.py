@@ -57,6 +57,10 @@ class MistralArticleFields:
     # (2026-07-18: the Foundation's own homepage rebrand got tagged
     # scam-alert off a research-paper blurb mentioning "malicious servers").
     confirmed_alert: str | None = None
+    # Body links a domain the research recorded as DNS-unresolvable and that
+    # still doesn't resolve (defunct_entity_gate) — non-empty forces the draft
+    # into human review instead of auto-publishing (MyAlgo incident 2026-07-19).
+    defunct_domains: tuple[str, ...] = ()
 
 
 # The single hardest accuracy rule. The small model, told to write full-depth,
@@ -1478,6 +1482,7 @@ def _parse_article_fields(payload: dict[str, Any]) -> MistralArticleFields:
         heuristic_grade=payload.get("_heuristic_grade"),
         breaking_reason=payload.get("_breaking_reason"),
         confirmed_alert=payload.get("_confirmed_alert"),
+        defunct_domains=tuple(payload.get("_defunct_domains") or ()),
     )
 
 
@@ -1934,6 +1939,13 @@ def _compose_via_writer_tools_locked(
             confirmed_alert = confirmed_alert_from_trace(trace)
             if confirmed_alert is not None:
                 payload["_confirmed_alert"] = confirmed_alert
+            # Defunct-entity veto: if the body links a domain the writer's own
+            # research recorded as DNS-unresolvable (and it still is), hold the
+            # draft for review — the delink gate above can't undo a defunct
+            # entity recommended in prose (MyAlgo incident 2026-07-19).
+            from app.modules.newspaper.defunct_entity_gate import flag_defunct_entities
+
+            payload = flag_defunct_entities(payload, trace)
             raw = _json.dumps(payload)
             _duration_ms = int((_time.monotonic() - _t0) * 1000)
             try:
