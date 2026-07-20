@@ -556,7 +556,7 @@ class MistralClient:
                         result = handler(**args) if handler else {"error": f"unknown tool {name}"}
                     except StorySpikedError as spike:
                         # The one tool "failure" that MUST abort the article —
-                        # spike_story is the writer refusing to compose at all.
+                        # abort_article is the writer refusing to compose at all.
                         # Record it in the trace first so the session shows the
                         # writer's own reasoning, then let it escape the loop.
                         if trace is not None:

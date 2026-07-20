@@ -2044,7 +2044,7 @@ def _compose_via_writer_tools_locked(
                 logger.warning("failed to record tool-insights session", exc_info=True)
             return _parse_article_fields(payload)
         except StorySpikedError as spike:
-            # The writer refused the story (spike_story tool) — a judgment,
+            # The writer refused the story (abort_article tool) — a judgment,
             # not a failure. MUST be caught before the generic Exception
             # below: falling through would trigger the ungrounded single-shot
             # fallback, i.e. compose exactly the evidence-free article the

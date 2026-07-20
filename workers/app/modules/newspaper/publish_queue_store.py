@@ -34,7 +34,7 @@ TERMINAL_OUTCOMES = frozenset(
         "approved_backlog",
         "duplicate",
         "duplicate_review_pending",
-        # The writer itself declined to compose (spike_story) — a deliberate
+        # The writer itself declined to compose (abort_article) — a deliberate
         # judgment, not a transient failure. Retrying next beat would just
         # re-spend tokens re-researching the same dead subject; resolved like
         # "duplicate" so the row doesn't loop. An admin can still trigger a

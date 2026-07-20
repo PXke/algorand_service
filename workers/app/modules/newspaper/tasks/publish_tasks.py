@@ -817,7 +817,7 @@ def publish_from_queued_row(
     except ComposeBusyError:
         return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
     except StorySpikedError as spike:
-        # The writer refused to compose this story (spike_story tool) — a
+        # The writer refused to compose this story (abort_article tool) — a
         # judgment call, resolved cleanly (no retry this cycle). An admin can
         # still recompose manually to override.
         logger.info(

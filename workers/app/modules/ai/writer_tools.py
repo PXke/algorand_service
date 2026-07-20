@@ -745,12 +745,12 @@ def all_tools(
     except Exception:
         logger.warning("failed to load chain tools", exc_info=True)
     try:
-        from app.modules.ai.story_spike import SPIKE_STORY_SCHEMA, spike_story_handler
+        from app.modules.ai.story_spike import ABORT_ARTICLE_SCHEMA, abort_article_handler
 
-        schemas.append(SPIKE_STORY_SCHEMA)
-        handlers["spike_story"] = spike_story_handler
+        schemas.append(ABORT_ARTICLE_SCHEMA)
+        handlers["abort_article"] = abort_article_handler
     except Exception:
-        logger.warning("failed to load spike_story tool", exc_info=True)
+        logger.warning("failed to load abort_article tool", exc_info=True)
     try:
         from app.modules.ai.breaking_news_tool import (
             MARK_BREAKING_NEWS_SCHEMA,

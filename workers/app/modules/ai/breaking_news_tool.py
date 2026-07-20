@@ -12,7 +12,7 @@ Owner decision: if BREAKING is going to exist at all, the WRITER decides,
 having actually read and researched the material — not a page-text substring
 scan run before compose even starts. mark_breaking_news is that judgment
 call, made available throughout research and writing like the other
-self-report tools (report_compose_issue, spike_story).
+self-report tools (report_compose_issue, abort_article).
 """
 
 from __future__ import annotations
