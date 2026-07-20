@@ -123,6 +123,14 @@ def test_comma_number_that_looks_like_year_still_checked():
     assert "2,000" in claims
 
 
+def test_date_day_not_a_count():
+    # "June 12, 2027 ... validators" — the day in a written date must not be
+    # flagged by grabbing a nearby count noun across the date (real false
+    # positive from the birthday-site session).
+    body = "A countdown to June 12, 2027 celebrates the network's validators."
+    assert gate.find_unsourced_specifics(body, _trace("")) == []
+
+
 def test_number_grounded_only_near_its_own_noun():
     # The digit-run "70" IS in the corpus, but only as an unrelated value (a
     # pixel size) — not near "events". A count is grounded only in context, so

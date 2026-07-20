@@ -174,6 +174,12 @@ def _numeric_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
         # which this pattern (no comma) does not match — so we keep those.
         if re.fullmatch(r"(?:19|20)\d\d", tok.strip(".,:;!?()+")):
             continue
+        # A day inside a written date ("June 12, 2027") — the number is followed
+        # by ", <year>". Not a count; skip so it can't grab a nearby noun via the
+        # proximity window (the "12, … validators" false positive, birthday site).
+        nxt = lowered[i + 1] if i + 1 < len(lowered) else ""
+        if tok.rstrip(",").isdigit() and re.fullmatch(r"(?:19|20)\d\d", nxt):
+            continue
         # Only a claim when a COUNT noun sits within a few words — this excludes
         # protocol names (x402), years (2027) and version strings, which have no
         # count noun beside them. Financial nouns (TVL, valuation) are omitted:
