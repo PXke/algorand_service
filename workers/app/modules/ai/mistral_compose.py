@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # guidelines, _ARTICLE_FORMAT_RULES, recency/profile rules, etc). Stamped onto
 # every stored article so analytics can correlate a prompt edit with a shift in
 # grades/engagement instead of guessing from deploy timestamps.
-PROMPT_VERSION = "2026-07-16b"
+PROMPT_VERSION = "2026-07-20"
 
 
 @dataclass(frozen=True)
@@ -157,6 +157,17 @@ def _writing_guidelines(today: str) -> str:
         "- Accuracy: Use only facts from the source material; never invent quotes, "
         "numbers, or on-chain events. Never put raw transaction IDs, round numbers, "
         "or 'Service:' labels in the body.\n"
+        "- NO UNSOURCED SPECIFICS: Adoption and traction claims — counts of users, "
+        "issuers, customers, holders, developers, wallets, events, hackathons, or "
+        "integrations; TVL, funding raised, valuation, revenue; and named partners, "
+        "backers, or investors — are only permitted if that exact figure or name is "
+        "visible in a tool result. Do NOT supply a plausible number or a likely "
+        "partner from your own knowledge. Crucially, ABSENCE IS DATA: if a site's "
+        "usage counters read 0 (including '0+', '0K+') or a 'partners'/'customers'/"
+        "'backers' section is empty, that zero or emptiness is the fact — report that "
+        "the metrics are unpublished or the counters read zero, or omit the claim "
+        "entirely. Never overwrite an observed zero or an empty section with an "
+        "impressive figure or a partner name you did not see in the sources.\n"
         "- STRICT QUOTE GROUNDING: Never include a quotation unless that exact "
         "word-for-word text is visible in a tool result.\n"
     )
@@ -1930,6 +1941,17 @@ def _compose_via_writer_tools_locked(
             from app.modules.newspaper.authority_gate import excise_unattributed_authority
 
             payload = excise_unattributed_authority(payload)
+            # Unsourced-specifics gate (read-only for now): record hard specifics
+            # — traction/funding numbers, named partners/backers — that don't
+            # trace to a fetched tool result, so we can measure extraction
+            # precision before enforcing. Catches the GoPlausible class (fetched
+            # zero-counters overwritten with "1,000 issuers / 70+ events /
+            # Borderless Capital") that every other gate misses.
+            from app.modules.newspaper.unsourced_specifics_gate import flag_unsourced_specifics
+
+            payload = flag_unsourced_specifics(
+                payload, trace, extra_texts=[user, research_user or ""]
+            )
             # Writer-declared breaking news (replaces the deterministic keyword
             # classifier, disabled 2026-07-17): scanned from the trace like the
             # gates above, since mark_breaking_news never mutates the draft —

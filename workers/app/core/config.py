@@ -481,6 +481,16 @@ CHAIN_ENTITY_GATE_ENABLED = env_bool("CHAIN_ENTITY_GATE_ENABLED", True)
 # a pre-release draft asserted a fabricated "10-100x slower to verify" Falcon
 # benchmark laundered through "industry-wide research").
 AUTHORITY_GATE_ENABLED = env_bool("AUTHORITY_GATE_ENABLED", True)
+# Unsourced-specifics gate: hard traction/funding claims (issuer/user/event
+# counts, TVL, $ amounts, named partners/backers) must trace to a fetched tool
+# result. Two incidents motivate it: MyAlgo (defunct entity recommended) and
+# GoPlausible 2026-07-20 (fetched stat-counters read ZERO / partners empty, the
+# draft overwrote them with "1,000 issuers / 70+ events / Borderless Capital").
+# ENABLED runs the scan and RECORDS findings (payload['_unsourced_specifics'])
+# for tuning; ENFORCE additionally acts on them (revision feedback / hold). Ships
+# read-only: ENABLED on to gather precision data, ENFORCE off until tuned.
+UNSOURCED_SPECIFICS_GATE_ENABLED = env_bool("UNSOURCED_SPECIFICS_GATE_ENABLED", True)
+UNSOURCED_SPECIFICS_GATE_ENFORCE = env_bool("UNSOURCED_SPECIFICS_GATE_ENFORCE", False)
 # Stop composing review-bound candidates once pending_feed_queue already holds
 # this many approved articles awaiting paced release (2026-07-16: auto-approve
 # → backlog bypassed the 1-slot review throttle, so hourly drains composed 6
