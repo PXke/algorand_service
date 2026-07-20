@@ -158,6 +158,29 @@ def _novelty_collapsed(row) -> bool:
     return closest_sim >= config.NOVELTY_MAX_SIMILARITY
 
 
+def _brief_archived(row) -> bool:
+    """True when this row is an editorial-brief assignment whose brief is no
+    longer active (archived/deactivated since it was enqueued). Archiving a brief
+    does NOT purge its already-queued assignment, so without this a retired brief
+    still composes once when the drain reaches its stale row — 2026-07-20: an
+    archived duplicate wallet brief drained and AUTO-PUBLISHED a wrong article.
+    Fails open (compose) on any lookup error — a transient blip must not silently
+    drop legitimate assignments."""
+    payload = row.payload or {}
+    if payload.get("source_kind") != "editorial_assignment":
+        return False
+    brief_id = str(payload.get("brief_id", "")).strip()
+    if not brief_id:
+        return False
+    try:
+        from app.modules.newspaper.editorial_assignment import get_brief
+
+        brief = get_brief(brief_id)
+    except Exception:
+        return False
+    return brief is not None and brief.status != "active"
+
+
 @dataclass(frozen=True)
 class _DrainGate:
     """One pre-compose veto in the standard drain: ``check(row)`` True means the
@@ -175,6 +198,9 @@ class _DrainGate:
 # review draft still re-covers the same project), and novelty runs last so a
 # capped/cooling row doesn't spend a Typesense query.
 _PRE_COMPOSE_GATES: tuple[_DrainGate, ...] = (
+    # First: an assignment for a brief that's since been archived must never
+    # compose — cheap, decisive, and drops the stale row out of pending.
+    _DrainGate("brief_archived", _brief_archived, mark_status="expired"),
     _DrainGate("domain_capped", _domain_capped, mark_status="deferred"),
     _DrainGate("domain_cooldown", _domain_in_cooldown),
     _DrainGate("service_cooldown", _service_in_cooldown),
