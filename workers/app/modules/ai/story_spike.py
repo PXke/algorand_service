@@ -85,5 +85,31 @@ SPIKE_STORY_SCHEMA: dict[str, Any] = {
 }
 
 
+# The writer sometimes calls spike_story to NARRATE a decision NOT to spike
+# ("No spike needed. I have verified six wallets…"), misusing a terminal tool as
+# commentary — which threw away a fully-researched, correct article (Pera Wallet
+# recompose, 2026-07-20: it had verified Pera is actively developed, then aborted
+# on a "no spike needed" spike call). A self-negating spike must NOT abort.
+_NON_SPIKE_MARKERS = (
+    "no spike", "not spike", "don't spike", "do not spike", "no need to spike",
+    "spike is not needed", "spike not needed", "no spiking", "should not spike",
+    "won't spike", "will not spike",
+)
+
+
 def spike_story_handler(category: str = "", reason: str = "", **_: Any) -> dict[str, Any]:
+    low = (reason or "").strip().lower()
+    if any(m in low for m in _NON_SPIKE_MARKERS):
+        # Not a real spike — the reason negates it. Return a corrective nudge so
+        # the agentic loop continues and the writer writes the article instead of
+        # discarding it.
+        return {
+            "spiked": False,
+            "note": (
+                "You called spike_story but your reason says a spike is NOT needed. "
+                "spike_story ABORTS the article and is terminal — only call it when "
+                "there is genuinely no story. You appear to have enough verified "
+                "material, so do NOT spike: write the full article now."
+            ),
+        }
     raise StorySpikedError(reason, category)

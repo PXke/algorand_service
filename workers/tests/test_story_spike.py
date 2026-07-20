@@ -103,3 +103,32 @@ def test_chat_with_tools_reraises_spike_and_records_trace(monkeypatch) -> None:
     assert spike_entry["tool"] == "spike_story"
     assert spike_entry["result"]["spiked"] is True
     assert spike_entry["result"]["category"] == "dead_project"
+
+
+# --- a self-negating spike must NOT abort (Pera Wallet recompose, 2026-07-20) ---
+def test_no_spike_needed_reason_does_not_abort() -> None:
+    """The writer misused spike_story to narrate 'No spike needed' and threw away
+    a correct article. A reason that negates the spike returns a nudge instead."""
+    out = spike_story_handler(
+        category="insufficient_sources",
+        reason="No spike needed. I have verified six distinct wallet ecosystems.",
+    )
+    assert out["spiked"] is False
+    assert "write the full article" in out["note"].lower()
+
+
+@pytest.mark.parametrize("reason", [
+    "No spike needed here.",
+    "I will not spike this — the project is clearly active.",
+    "Do not spike; enough sources verified.",
+])
+def test_various_negations_do_not_abort(reason) -> None:
+    out = spike_story_handler(category="not_newsworthy", reason=reason)
+    assert out["spiked"] is False
+
+
+def test_genuine_spike_still_aborts() -> None:
+    # a real dead-project reason (no negation) must still spike
+    with pytest.raises(StorySpikedError):
+        spike_story_handler(category="dead_project",
+                            reason="asset minted 2021, 12 holders, last transfer 2024, template site")
