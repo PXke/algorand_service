@@ -347,12 +347,60 @@ def _github_owner_repos(owner: str) -> dict[str, Any]:
                 "description": (r.get("description") or "")[:160],
                 "stars": r.get("stargazers_count"),
                 "pushed_at": r.get("pushed_at"),
+                "archived": bool(r.get("archived")),
             }
             for r in repos
             if isinstance(r, dict)
         ][:8],
         "hint": "call github_activity again with one of these 'owner/name' repos",
     }
+
+
+def _owner_liveness(owner: str, *, exclude: str = "", recent_days: int = 120) -> dict[str, Any]:
+    """Is the OWNER still shipping code in NON-archived repos? This is the
+    liveness signal a single archived repo cannot give.
+
+    Root cause of a mis-published article (2026-07-20): the writer saw
+    `perawallet/pera-wallet` was archived and declared Pera Wallet — the most-used
+    Algorand wallet — defunct, telling readers to migrate away. But the SAME owner
+    had `perawallet/pera-react-native` pushed that very day: the repo was
+    superseded, not the product discontinued. A domain check can't catch this (the
+    site resolves fine); the owner's other repos are the tell."""
+    from datetime import UTC, datetime, timedelta
+
+    listing = _github_owner_repos(owner)
+    repos = listing.get("repos") or []
+    cutoff = datetime.now(UTC) - timedelta(days=recent_days)
+    active: list[dict[str, Any]] = []
+    for r in repos:
+        if r.get("archived"):
+            continue
+        if exclude and (r.get("repo") or "").lower() == exclude.lower():
+            continue
+        pushed = r.get("pushed_at") or ""
+        try:
+            dt = datetime.fromisoformat(pushed.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt >= cutoff:
+            active.append({"repo": r.get("repo"), "pushed_at": pushed, "stars": r.get("stars")})
+    active.sort(key=lambda x: x["pushed_at"] or "", reverse=True)
+    if active:
+        verdict = (
+            f"OWNER STILL ACTIVE: '{owner}' has {len(active)} non-archived repo(s) "
+            f"pushed in the last {recent_days} days (most recent: {active[0]['repo']} "
+            f"@ {active[0]['pushed_at']}). An archived repo under this owner is most "
+            "likely SUPERSEDED or migrated, NOT the project being discontinued — do "
+            "NOT report the project as defunct or tell users to migrate away without "
+            "first checking the active repo(s) above."
+        )
+    else:
+        verdict = (
+            f"'{owner}' shows no recently-pushed non-archived repos either — the "
+            "project may genuinely be dormant, but confirm via its site/announcements "
+            "before calling it defunct."
+        )
+    return {"owner": owner, "active_repos": active[:8], "verdict": verdict}
 
 
 def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
@@ -390,6 +438,12 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
             pushed_at=meta.get("pushed_at"),
             archived=meta.get("archived"),
         )
+        # An archived repo is NOT a dead project — check whether the OWNER is
+        # still shipping code in other repos (the repo may have been superseded
+        # or migrated). Without this the writer over-concludes "defunct" from a
+        # single archived repo (Pera Wallet incident 2026-07-20).
+        if meta.get("archived"):
+            out["owner_liveness"] = _owner_liveness(slug.split("/")[0], exclude=slug)
     except Exception as exc:
         return {"repo": slug, "error": str(exc)[:200]}
     try:
@@ -1275,7 +1329,12 @@ _GITHUB_SCHEMA = {
             "commits, and top contributors) — use to report shipped updates, version "
             "launches, dev momentum, or who actually builds a project. Pass "
             "'owner/name' or a github.com URL; passing just an owner/org lists its "
-            "repositories so you can pick one."
+            "repositories so you can pick one. IMPORTANT: an 'archived: true' repo "
+            "does NOT mean the project is dead — projects routinely archive an old "
+            "repo after migrating. When a repo is archived this returns "
+            "'owner_liveness' showing the owner's OTHER repos; if the owner is still "
+            "pushing elsewhere, the project is alive (superseded repo), so never call "
+            "it defunct or tell readers to migrate away on the archived flag alone."
         ),
         "parameters": {
             "type": "object",

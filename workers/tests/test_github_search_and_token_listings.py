@@ -24,6 +24,65 @@ def _json_response(url: str, status_code: int, payload) -> httpx.Response:
     )
 
 
+def test_owner_liveness_flags_active_owner(monkeypatch):
+    """An archived repo under an owner still pushing to other repos = superseded,
+    not defunct (the Pera Wallet case)."""
+    from datetime import UTC, datetime, timedelta
+
+    recent = (datetime.now(UTC) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    monkeypatch.setattr(research_tools, "_github_owner_repos", lambda owner: {
+        "owner": owner,
+        "repos": [
+            {"repo": "perawallet/pera-wallet", "pushed_at": "2024-08-26T00:00:00Z",
+             "stars": 200, "archived": True},
+            {"repo": "perawallet/pera-react-native", "pushed_at": recent,
+             "stars": 40, "archived": False},
+        ],
+    })
+    out = research_tools._owner_liveness("perawallet", exclude="perawallet/pera-wallet")
+    assert "OWNER STILL ACTIVE" in out["verdict"]
+    assert out["active_repos"] and out["active_repos"][0]["repo"] == "perawallet/pera-react-native"
+
+
+def test_owner_liveness_dormant_when_no_recent(monkeypatch):
+    monkeypatch.setattr(research_tools, "_github_owner_repos", lambda owner: {
+        "owner": owner,
+        "repos": [{"repo": "x/old", "pushed_at": "2020-01-01T00:00:00Z",
+                   "stars": 1, "archived": False}],
+    })
+    out = research_tools._owner_liveness("x")
+    assert "dormant" in out["verdict"].lower()
+    assert out["active_repos"] == []
+
+
+def test_github_activity_archived_repo_attaches_owner_liveness(monkeypatch):
+    """An archived repo returns owner_liveness so the writer can't conclude the
+    project is dead from the archived flag alone."""
+    from datetime import UTC, datetime, timedelta
+
+    recent = (datetime.now(UTC) - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+
+    def fake_get(url, **kw):
+        if url.endswith("/repos/perawallet/pera-wallet"):
+            return _json_response(url, 200, {"description": "old monorepo",
+                                             "stargazers_count": 200,
+                                             "pushed_at": "2024-08-26T00:00:00Z",
+                                             "archived": True})
+        if "/users/perawallet/repos" in url:
+            return _json_response(url, 200, [
+                {"full_name": "perawallet/pera-react-native", "description": "app",
+                 "stargazers_count": 40, "pushed_at": recent, "archived": False},
+            ])
+        # releases / commits / contributors
+        return _json_response(url, 200, [])
+
+    monkeypatch.setattr(research_tools, "_guarded_get", fake_get)
+    out = research_tools._tool_github_activity("perawallet/pera-wallet")
+    assert out["archived"] is True
+    assert "owner_liveness" in out
+    assert "OWNER STILL ACTIVE" in out["owner_liveness"]["verdict"]
+
+
 def test_github_repository_search_returns_candidates(monkeypatch):
     monkeypatch.setattr(
         research_tools,
