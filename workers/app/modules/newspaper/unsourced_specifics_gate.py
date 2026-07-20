@@ -104,7 +104,9 @@ def _ground_corpus(trace: list[dict] | None, extra_texts: list[str]) -> str:
 
 
 def _corpus_digit_runs(corpus: str) -> set[str]:
-    return set(_DIGIT_RUN_RE.findall(corpus))
+    # Strip thousands separators so a corpus "5,000" (runs 5 + 000) matches a
+    # claim normalised to "5000" — both sides drop commas before run extraction.
+    return set(_DIGIT_RUN_RE.findall(corpus.replace(",", "")))
 
 
 def _tokens(text: str) -> list[str]:
@@ -127,29 +129,32 @@ def _numeric_findings(body: str, corpus: str, corpus_digits: set[str]) -> list[d
         digits = "".join(_DIGIT_RUN_RE.findall(tok.replace(",", "")))
         if not digits:
             continue
-        is_money = tok.strip().startswith("$")
-        # A bare decimal (2.2, 2.8) is a version/ratio/block-time, never a
-        # headcount — traction counts are integers, currency, or magnitude
-        # (K/M/B). Skip decimals unless they carry $ or a magnitude suffix.
-        if "." in tok and not is_money and not re.search(r"[kmb]", tok, re.I):
+        # v1 scope = discrete COUNTS. Currency figures ($ prices, TVL, volumes)
+        # come from live market/chain tools and are reformatted/rounded in the
+        # body (0.083787 → 0.0838), so literal digit-matching false-positives on
+        # grounded data; neither fabrication incident involved currency. Out of
+        # scope — skip. (Chain/on-chain values are covered by chain_entity_gate.)
+        if tok.strip().startswith("$"):
             continue
-        # traction/funding noun within a small window either side
+        # A bare decimal (2.2, 2.8) is a version/ratio/block-time, never a
+        # headcount — traction counts are integers or magnitude (K/M/B). Skip
+        # decimals unless they carry a magnitude suffix.
+        if "." in tok and not re.search(r"[kmb]", tok, re.I):
+            continue
+        # Only a claim when a traction/funding noun sits within a few words —
+        # this is what excludes protocol names (x402), years (2027) and version
+        # strings, which have no traction noun beside them.
         window = set(lowered[max(0, i - 3): i]) | set(lowered[i + 1: i + 4])
         near_noun = bool(window & _CLAIM_NOUNS)
-        if not (near_noun or is_money):
-            continue
-        # a lone year (1900-2099) with no traction noun beside it is not a claim
-        if not near_noun and is_money is False:
+        if not near_noun:
             continue
         if digits in corpus_digits:
             continue  # grounded
-        # money amounts: also accept if the digit-run appears at all in corpus
-        key = digits + ("$" if is_money else "")
-        if key in seen:
+        if digits in seen:
             continue
-        seen.add(key)
+        seen.add(digits)
         noun = next((w for w in (list(lowered[i + 1: i + 4]) + list(lowered[max(0, i - 3): i]))
-                     if w in _CLAIM_NOUNS), "$" if is_money else "")
+                     if w in _CLAIM_NOUNS), "")
         out.append({"kind": "numeric", "claim": tok, "context": noun})
     return out
 

@@ -37,10 +37,18 @@ def test_flags_fabricated_named_partner():
 # --------------------------------------------------------------------------- #
 # grounded specifics must NOT flag
 # --------------------------------------------------------------------------- #
-def test_grounded_number_passes():
-    corpus = _trace("DorkFi has reached $206K in TVL across its vaults.")
-    body = "DorkFi unlocks on-chain credit with $206K TVL."
+def test_grounded_count_passes():
+    corpus = _trace("The DAO now counts 5,000 members after its latest drive.")
+    body = "The DAO has grown to 5,000 members."
     assert gate.find_unsourced_specifics(body, corpus) == []
+
+
+def test_currency_out_of_scope():
+    # $ figures are live market/TVL data (reformatted → false positives) and
+    # neither incident involved currency: v1 ignores them entirely.
+    corpus = _trace("nothing about money here")
+    body = "DorkFi reports $206K TVL and a token price of $0.0838."
+    assert [f for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "numeric"] == []
 
 
 def test_grounded_partner_passes():
