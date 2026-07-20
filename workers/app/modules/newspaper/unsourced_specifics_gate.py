@@ -103,19 +103,38 @@ def _ground_corpus(trace: list[dict] | None, extra_texts: list[str]) -> str:
     return " ".join(parts)
 
 
-def _corpus_digit_runs(corpus: str) -> set[str]:
-    # Strip thousands separators so a corpus "5,000" (runs 5 + 000) matches a
-    # claim normalised to "5000" — both sides drop commas before run extraction.
-    return set(_DIGIT_RUN_RE.findall(corpus.replace(",", "")))
-
-
 def _tokens(text: str) -> list[str]:
     return _WORD_RE.findall(text)
 
 
-def _numeric_findings(body: str, corpus: str, corpus_digits: set[str]) -> list[dict[str, str]]:
-    """Numbers adjacent to a traction/funding noun (or a $ amount) whose digit-run
-    is not present in the ground corpus."""
+def _stem(noun: str) -> str:
+    """Crude singularisation so a claim 'issuers' matches corpus 'issuer'."""
+    if noun.endswith("ies") and len(noun) > 4:
+        return noun[:-3] + "y"
+    if noun.endswith("s") and len(noun) > 3:
+        return noun[:-1]
+    return noun
+
+
+def _number_grounded(digits: str, noun: str, corpus_ctx: str) -> bool:
+    """A count is grounded only if its digit-run appears NEAR its own noun in the
+    corpus — not merely somewhere in it. A bare digit-run match is far too weak:
+    common runs like '70' or '1000' turn up in almost any fetched page (a 70px
+    style, a 1000ms timing, a URL id), which would spuriously ground a fabricated
+    'issued to 1,000 issuers'. Require the number and the (stemmed) noun to
+    co-occur within a short window, in either order."""
+    if not noun:
+        return digits in set(_DIGIT_RUN_RE.findall(corpus_ctx))
+    stem = re.escape(_stem(noun))
+    d = re.escape(digits)
+    pat = re.compile(rf"{d}\D{{0,40}}{stem}|{stem}\D{{0,40}}{d}")
+    return bool(pat.search(corpus_ctx))
+
+
+def _numeric_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
+    """Count-shaped numbers adjacent to a traction/funding noun whose value is not
+    grounded (near its noun) in the corpus. ``corpus_ctx`` is the folded,
+    comma-stripped ground corpus."""
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     tokens = _tokens(body)
@@ -123,8 +142,7 @@ def _numeric_findings(body: str, corpus: str, corpus_digits: set[str]) -> list[d
     # matches the noun set; the numeric token itself is read from `tokens`.
     lowered = [t.strip(".,:;!?()").lower() for t in tokens]
     for i, tok in enumerate(tokens):
-        m = _NUM_RE.fullmatch(tok)
-        if not m:
+        if not _NUM_RE.fullmatch(tok):
             continue
         digits = "".join(_DIGIT_RUN_RE.findall(tok.replace(",", "")))
         if not digits:
@@ -144,17 +162,16 @@ def _numeric_findings(body: str, corpus: str, corpus_digits: set[str]) -> list[d
         # Only a claim when a traction/funding noun sits within a few words —
         # this is what excludes protocol names (x402), years (2027) and version
         # strings, which have no traction noun beside them.
-        window = set(lowered[max(0, i - 3): i]) | set(lowered[i + 1: i + 4])
-        near_noun = bool(window & _CLAIM_NOUNS)
-        if not near_noun:
-            continue
-        if digits in corpus_digits:
-            continue  # grounded
-        if digits in seen:
-            continue
-        seen.add(digits)
         noun = next((w for w in (list(lowered[i + 1: i + 4]) + list(lowered[max(0, i - 3): i]))
                      if w in _CLAIM_NOUNS), "")
+        if not noun:
+            continue
+        if _number_grounded(digits, noun, corpus_ctx):
+            continue
+        key = f"{digits}:{noun}"
+        if key in seen:
+            continue
+        seen.add(key)
         out.append({"kind": "numeric", "claim": tok, "context": noun})
     return out
 
@@ -191,9 +208,11 @@ def find_unsourced_specifics(
     if not body:
         return []
     corpus = _ground_corpus(trace, list(extra_texts or []))
-    corpus_digits = _corpus_digit_runs(corpus)
+    # Comma-stripped + folded, so a claim's normalised digit-run ("5000") can be
+    # matched near its noun and "5,000 members" in the corpus still grounds it.
+    corpus_ctx = _fold(corpus.replace(",", ""))
     corpus_folded = _fold(corpus)
-    findings = _numeric_findings(body, corpus, corpus_digits)
+    findings = _numeric_findings(body, corpus_ctx)
     findings += _named_findings(body, corpus_folded)
     return findings
 

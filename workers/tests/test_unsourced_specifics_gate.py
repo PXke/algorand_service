@@ -73,6 +73,23 @@ def test_non_traction_numbers_ignored(body):
     assert gate.find_unsourced_specifics(body, _trace("")) == []
 
 
+def test_number_grounded_only_near_its_own_noun():
+    # The digit-run "70" IS in the corpus, but only as an unrelated value (a
+    # pixel size) — not near "events". A count is grounded only in context, so
+    # this must still flag. (This is the exact flaw the prod tuning pass found:
+    # bare digit-run matching spuriously grounded GoPlausible's fabricated "70".)
+    corpus = _trace("Hero image uses a 70px margin. The site lists 0+ events.")
+    body = "The project has run 70 events this year."
+    claims = [f["claim"] for f in gate.find_unsourced_specifics(body, corpus)]
+    assert "70" in claims
+
+
+def test_number_grounded_when_near_noun_in_corpus():
+    corpus = _trace("The platform reports 1,200 issuers onboarded to date.")
+    body = "It now serves 1,200 issuers."
+    assert gate.find_unsourced_specifics(body, corpus) == []
+
+
 def test_digit_run_not_partial_matched():
     # "70" must NOT be considered grounded just because the corpus contains 1970.
     corpus = _trace("Founded reference to the year 1970 somewhere.")
