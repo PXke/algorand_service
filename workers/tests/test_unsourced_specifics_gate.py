@@ -184,6 +184,28 @@ def test_flag_noop_when_disabled(monkeypatch):
     assert "_unsourced_specifics" not in gate.flag_unsourced_specifics(payload, _trace(""))
 
 
+def test_revision_issues_name_each_specific(monkeypatch):
+    monkeypatch.setattr("app.core.config.UNSOURCED_SPECIFICS_GATE_ENABLED", True, raising=False)
+    body = "It has over 1,000 issuers and partners with Borderless Capital."
+    issues = gate.unsourced_specifics_revision_issues(body, _trace("nothing relevant"))
+    joined = " ".join(issues)
+    assert "1,000" in joined and "Borderless Capital" in joined
+    # instruction tells the writer to remove/correct, not to fetch (reviser has no tools)
+    assert "remove it" in joined and "counter reads 0" in joined
+
+
+def test_revision_issues_empty_when_grounded(monkeypatch):
+    monkeypatch.setattr("app.core.config.UNSOURCED_SPECIFICS_GATE_ENABLED", True, raising=False)
+    body = "It has 1,200 issuers."
+    assert gate.unsourced_specifics_revision_issues(body, _trace("reported 1,200 issuers")) == []
+
+
+def test_revision_issues_noop_when_disabled(monkeypatch):
+    monkeypatch.setattr("app.core.config.UNSOURCED_SPECIFICS_GATE_ENABLED", False, raising=False)
+    body = "It has over 1,000 issuers."
+    assert gate.unsourced_specifics_revision_issues(body, _trace("")) == []
+
+
 def test_clean_body_no_findings():
     corpus = _trace("Pera and Defly are the leading wallets.")
     payload = {"body": "Pera and Defly are the leading Algorand wallets."}

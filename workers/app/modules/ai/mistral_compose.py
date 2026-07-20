@@ -1021,8 +1021,30 @@ def _review_and_revise(
                 logger.warning("authority-phrase check failed during revision", exc_info=True)
         if authority_fixable:
             review["unattributed_authority"] = authority_fixable
+        # Unsourced-specifics feedback: a traction/funding count or named partner
+        # that isn't in the research is fed back so the writer removes or corrects
+        # it here — better than the post-hoc gate holding the whole draft for a
+        # human (GoPlausible 2026-07-20). The hold stays as the backstop for
+        # anything that survives revision.
+        unsourced_fixable: list[str] = []
+        from app.core.config import UNSOURCED_SPECIFICS_GATE_ENABLED
+
+        if UNSOURCED_SPECIFICS_GATE_ENABLED:
+            try:
+                from app.modules.newspaper.unsourced_specifics_gate import (
+                    unsourced_specifics_revision_issues,
+                )
+
+                unsourced_fixable = unsourced_specifics_revision_issues(
+                    body, trace, extra_texts=[gen_user]
+                )
+            except Exception:
+                logger.warning("unsourced-specifics check failed during revision", exc_info=True)
+        if unsourced_fixable:
+            review["unsourced_specifics"] = unsourced_fixable
         fixable = (
-            schema_fixable + quality_fixable + link_fixable + chain_fixable + authority_fixable
+            schema_fixable + quality_fixable + link_fixable + chain_fixable
+            + authority_fixable + unsourced_fixable
         )
 
         grade_val = review.get("grade")

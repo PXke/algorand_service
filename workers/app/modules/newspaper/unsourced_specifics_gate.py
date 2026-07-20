@@ -302,6 +302,43 @@ def find_unsourced_specifics(
     return findings
 
 
+def unsourced_specifics_revision_issues(
+    body: str,
+    trace: list[dict] | None,
+    *,
+    extra_texts: list[str] | None = None,
+) -> list[str]:
+    """Human-readable revision instructions for each unsourced specific, for the
+    in-loop revision pass (like authority/chain/link feedback). Lets the writer —
+    which read the research — remove or CORRECT the claim before the post-hoc
+    gate has to hold it. The reviser has no tools, only the research digest, so
+    the instruction is 'remove or correct to what your sources show', not 'go
+    fetch it'. Gated by ENABLED (this is non-destructive guidance); the ENFORCE
+    hold remains the backstop for anything that survives revision."""
+    from app.core.config import UNSOURCED_SPECIFICS_GATE_ENABLED
+
+    if not UNSOURCED_SPECIFICS_GATE_ENABLED or not body:
+        return []
+    try:
+        findings = find_unsourced_specifics(body, trace, extra_texts=extra_texts)
+    except Exception:
+        logger.warning("unsourced-specifics revision scan failed", exc_info=True)
+        return []
+    issues: list[str] = []
+    for f in findings:
+        label = f["claim"]
+        if f["context"] and f["kind"] != "named":
+            label = f"{f['claim']} {f['context']}"
+        what = "named partner/backer" if f["kind"] == "named" else "figure"
+        issues.append(
+            f'unsourced specific: the {what} "{label}" does not appear anywhere in '
+            "your research — remove it, or correct it to exactly what your sources "
+            "show (if a counter reads 0/0+/0K+ or a section is empty, report that; "
+            "never substitute a plausible number or name)"
+        )
+    return issues
+
+
 def flag_unsourced_specifics(
     payload: dict[str, Any],
     trace: list[dict] | None,
