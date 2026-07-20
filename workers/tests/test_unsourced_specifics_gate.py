@@ -64,16 +64,24 @@ def test_grounded_funding_passes():
     assert [f for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "funding"] == []
 
 
-def test_flags_fabricated_percentage():
-    corpus = _trace("The token launched on mainnet.")
-    body = "A single wallet controls 40% of the circulating supply."
+def test_flags_fabricated_percentage_on_traction_noun():
+    corpus = _trace("The wallet launched a new onboarding flow.")
+    body = "Fully 60% of users completed the new onboarding flow."
     pct = {f["claim"] for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "percent"}
-    assert "40%" in pct
+    assert "60%" in pct
 
 
 def test_grounded_percentage_passes():
-    corpus = _trace("On-chain data shows the top holder owns 40% of the supply.")
-    body = "The top holder owns 40% of the supply."
+    corpus = _trace("A survey found 60% of users completed onboarding.")
+    body = "60% of users completed onboarding."
+    assert [f for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "percent"] == []
+
+
+def test_onchain_share_percentage_left_to_chain_entity_gate():
+    # % of supply/market is on-chain data and chain_entity_gate's job — this gate
+    # deliberately does not flag it (it was the dominant false-positive class).
+    corpus = _trace("no on-chain figures fetched")
+    body = "A single address holds 40% of the supply and 5.5% of the market."
     assert [f for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "percent"] == []
 
 

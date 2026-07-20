@@ -60,12 +60,12 @@ _FUNDING_NOUNS = {
     "raised", "raise", "funding", "seed", "round", "valuation", "grant",
     "grants", "investment", "backing", "backed", "led",
 }
-# Ownership/share nouns a percentage attaches to ("40% of the supply",
-# "controls 12% of holders") — plus the traction nouns (e.g. "70% of users").
-_PCT_NOUNS = _TRACTION_NOUNS | {
-    "supply", "holders", "holder", "stake", "ownership", "share", "shares",
-    "market", "dominance", "circulating", "float",
-}
+# Percentages attach only to TRACTION nouns here ("70% of users churned").
+# On-chain SHARE percentages (of supply / holders / market) are deliberately
+# excluded: the read-only tuning pass showed they are live on-chain data (compx
+# et al., reformatted → false positives) and they are already chain_entity_gate's
+# job (it resolves the cited asset/address and verifies the true share on-chain).
+_PCT_NOUNS = _TRACTION_NOUNS
 # A percentage token: 40%, 12.5%.
 _PCT_TOKEN_RE = re.compile(r"\d[\d,]*(?:\.\d+)?%")
 
