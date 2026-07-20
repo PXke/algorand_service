@@ -108,3 +108,86 @@ def test_gatekeeper_disabled_entirely_does_not_block() -> None:
     assert _auto_apply_decision(
         enabled=True, grade=9.0, floor=8.0, title=_GOOD_TITLE, gate_ok=gate_ok
     )
+
+
+# --- recompose seeds from the ORIGINAL INPUT (brief), not the prior OUTPUT ----
+def test_recompose_editorial_composes_from_brief_not_prior_body(monkeypatch):
+    """An editorial-brief recompose must re-run the assignment from the BRIEF
+    (fresh research), not synthesize from the prior article body — which would
+    re-launder a wrong premise (Pera Wallet incident 2026-07-20)."""
+    from types import SimpleNamespace
+
+    import pytest
+
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    art = SimpleNamespace(
+        service_id="svc", source_url="editorial://brief/abc123",
+        body="Pera Wallet is defunct and archived.", title="Wrong old title",
+        tags=[], summary="s",
+    )
+    monkeypatch.setattr("app.modules.newspaper.article_store.get_article", lambda aid: art)
+    brief = SimpleNamespace(
+        brief_id="abc123", title="Algorand Wallets Guide",
+        body_markdown="Compare the active Algorand wallets.", keywords="wallet,algorand",
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.editorial_assignment.get_brief", lambda bid: brief
+    )
+
+    captured: dict = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_compose(**kw):
+        captured.update(kw)
+        raise _Stop()
+
+    monkeypatch.setattr(pt, "compose_scrape_article", _fake_compose)
+
+    with pytest.raises(_Stop):
+        pt.recompose_published.run("11111111-1111-1111-1111-111111111111")
+
+    assert captured["publish_topic"] == pt.PublishTopic.EDITORIAL_ASSIGNMENT
+    # seeded from the brief, NOT the prior (wrong) article body
+    assert captured["page_text"] == "Compare the active Algorand wallets."
+    assert "defunct" not in captured["page_text"]
+    assert captured["page_title"] == "Algorand Wallets Guide"
+    assert captured["keywords"] == "wallet,algorand"
+
+
+def test_recompose_web_article_still_uses_generic_path(monkeypatch):
+    """A normal web article recompose is unchanged: generic topic, no brief."""
+    from types import SimpleNamespace
+
+    import pytest
+
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    art = SimpleNamespace(
+        service_id="svc", source_url="https://example.com/x",
+        body="body", title="t", tags=[], summary="s",
+    )
+    monkeypatch.setattr("app.modules.newspaper.article_store.get_article", lambda aid: art)
+    # make the re-scrape a no-op so page_text stays the stored body
+    monkeypatch.setattr(pt, "get_scraper_for_url",
+                        lambda url: SimpleNamespace(scrape=lambda **kw: (_ for _ in ()).throw(RuntimeError("skip"))))
+
+    captured: dict = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_compose(**kw):
+        captured.update(kw)
+        raise _Stop()
+
+    monkeypatch.setattr(pt, "compose_scrape_article", _fake_compose)
+    monkeypatch.setattr(pt.worker_config if hasattr(pt, "worker_config") else pt,
+                        "SERVICE_CONTEXT_ENABLED", False, raising=False)
+
+    with pytest.raises(_Stop):
+        pt.recompose_published.run("22222222-2222-2222-2222-222222222222")
+
+    assert captured["publish_topic"] == pt.PublishTopic.GENERIC

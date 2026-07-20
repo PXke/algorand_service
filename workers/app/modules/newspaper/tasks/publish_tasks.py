@@ -1935,19 +1935,48 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
                 exc_info=True,
             )
 
+    # Recompose from the ORIGINAL INPUT, not the prior OUTPUT. An editorial-brief
+    # article has no page to re-scrape, so the generic path below would hand the
+    # writer its OWN previous article body as "source material" and it just
+    # re-launders whatever was in it — including a wrong premise (Pera Wallet
+    # incident 2026-07-20: two recomposes kept declaring Pera defunct because the
+    # prior draft said so, never re-checking). Re-run the assignment from the
+    # brief itself so the writer researches the topic from scratch.
+    brief_for_recompose = None
+    if source_url.lower().startswith("editorial://brief/"):
+        from app.modules.newspaper.editorial_assignment import get_brief
+
+        brief_for_recompose = get_brief(source_url.rsplit("/", 1)[-1])
+
     try:
-        composed = compose_scrape_article(
-            service_name=service_id or source_url or "archive",
-            source_url=source_url or f"article:{article_id}",
-            page_title=page_title,
-            page_text=page_text,
-            txid=f"recompose-{article_id[:12]}",
-            round_num=0,
-            diff=None,
-            is_first_snapshot=True,
-            publish_kind=PublishKind.SERVICE_DISCOVERY,
-            publish_topic=PublishTopic.GENERIC,
-        )
+        if brief_for_recompose is not None:
+            composed = compose_scrape_article(
+                service_name=service_id or "editorial",
+                source_url=source_url,
+                page_title=brief_for_recompose.title,
+                page_text=brief_for_recompose.body_markdown,
+                keywords=brief_for_recompose.keywords,
+                brief_id=brief_for_recompose.brief_id,
+                txid=f"recompose-{article_id[:12]}",
+                round_num=0,
+                diff=None,
+                is_first_snapshot=True,
+                publish_kind=PublishKind.SERVICE_DISCOVERY,
+                publish_topic=PublishTopic.EDITORIAL_ASSIGNMENT,
+            )
+        else:
+            composed = compose_scrape_article(
+                service_name=service_id or source_url or "archive",
+                source_url=source_url or f"article:{article_id}",
+                page_title=page_title,
+                page_text=page_text,
+                txid=f"recompose-{article_id[:12]}",
+                round_num=0,
+                diff=None,
+                is_first_snapshot=True,
+                publish_kind=PublishKind.SERVICE_DISCOVERY,
+                publish_topic=PublishTopic.GENERIC,
+            )
     except ComposeBusyError as exc:
         # The global compose lock is held (a drain compose, or a sibling
         # archive-refresh task — the worker runs concurrency=4, so batched
