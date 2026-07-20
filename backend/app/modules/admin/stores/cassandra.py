@@ -1387,7 +1387,14 @@ class AdminCassandraStore:
             ]
             if not categories and is_content_category(detail.category):
                 categories = [normalize_content_category(detail.category)]
-            parsed_rows.append((detail, article_id, confidence, grade, grade_detail, categories))
+            # Why this draft was diverted, for the review card: which gate held it
+            # and the specific reason (dead domain / unsourced specifics).
+            diverted_by = str(parsed.get("diverted_by", "") or meta.get("diverted_by", "") or "")
+            hold_reason = str(parsed.get("hold_reason", "") or meta.get("hold_reason", "") or "")
+            parsed_rows.append(
+                (detail, article_id, confidence, grade, grade_detail, categories,
+                 diverted_by, hold_reason)
+            )
 
         # Phase 2: batch-fetch the referenced articles concurrently (was a second
         # sequential SELECT per row).
@@ -1409,7 +1416,8 @@ class AdminCassandraStore:
                     article_by_id[str(a.article_id)] = a
 
         items: list[dict] = []
-        for detail, article_id, confidence, grade, grade_detail, categories in parsed_rows:
+        for (detail, article_id, confidence, grade, grade_detail, categories,
+             diverted_by, hold_reason) in parsed_rows:
             a = article_by_id.get(article_id)
             items.append(
                 {
@@ -1425,6 +1433,8 @@ class AdminCassandraStore:
                     "confidence": confidence,
                     "grade": grade,
                     "grade_detail": grade_detail,
+                    "diverted_by": diverted_by,
+                    "hold_reason": hold_reason,
                     "article_title": (a.title or "") if a else "",
                     "article_summary": (a.summary or "") if a else "",
                     "service_id": (a.service_id or "") if a else "",

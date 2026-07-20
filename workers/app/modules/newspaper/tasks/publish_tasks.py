@@ -898,6 +898,15 @@ def publish_from_queued_row(
             row.scrape_url,
             unsourced_hold_reason,
         )
+    # Human-readable divert reason for the review card, so a reviewer sees WHAT
+    # tripped the hold (which dead domain / which unsourced specifics) instead of
+    # a bare "diverted_by: gatekeeper" and having to re-read the whole draft.
+    _hold_reasons: list[str] = []
+    if defunct_domains:
+        _hold_reasons.append("dead linked domain(s): " + ", ".join(defunct_domains[:5]))
+    if unsourced_hold_reason:
+        _hold_reasons.append(unsourced_hold_reason)
+    hold_reason = "; ".join(_hold_reasons)
 
     # Resolve a hero/brand image when the upstream payload carried none, so both
     # the feed tile and the social/OG card show real artwork (best-effort). A
@@ -1098,6 +1107,7 @@ def publish_from_queued_row(
                     # here, every recomposed article silently lost its image.
                     "og_image": image_field,
                     "service_id": row.service_id,
+                    **({"hold_reason": hold_reason[:400]} if hold_reason else {}),
                     **grade_meta,
                 },
             )

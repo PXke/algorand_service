@@ -615,6 +615,42 @@ class _ClassifierFeedbackTabState extends ConsumerState<ClassifierFeedbackTab> {
             const SizedBox(height: 10),
             _gradeBadge(theme, colors, item),
           ],
+          if ((item['hold_reason'] as String? ?? '').isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.errorContainer,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.flag_outlined,
+                          size: 14, color: theme.colorScheme.onErrorContainer),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Held by ${(item['diverted_by'] as String? ?? 'gate').isEmpty ? 'gate' : item['diverted_by']}',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: theme.colorScheme.onErrorContainer,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    item['hold_reason'] as String? ?? '',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.onErrorContainer),
+                  ),
+                ],
+              ),
+            ),
+          ],
           if ((item['article_title'] as String? ?? '').isNotEmpty) ...[
             const SizedBox(height: 12),
             Container(
