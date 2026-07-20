@@ -445,6 +445,7 @@ def _quality_floor_fails(heuristic_grade: dict | None) -> bool:
 def _fresh_auto_approve_passes(
     *, title: str, body: str, page_text: str, source_url: str,
     defunct_domains: tuple[str, ...] = (),
+    unsourced_hold_reason: str = "",
 ) -> tuple[bool, dict[str, str]]:
     """Strict autonomous-approve gate for content that would otherwise wait for
     a human review click (owner decision 2026-07-12), mirroring
@@ -467,6 +468,14 @@ def _fresh_auto_approve_passes(
     if defunct_domains:
         meta["auto_applied"] = "0"
         meta["defunct_domains"] = ",".join(defunct_domains[:5])
+        return False, meta
+    # Same reasoning for unsourced specifics: grade/headline/gatekeeper can all
+    # pass on a draft asserting a fabricated "1,000 issuers" (they can't see the
+    # research trace), so this is its own hard fail, not something the AND-gate
+    # below could clear back to auto-approve.
+    if unsourced_hold_reason:
+        meta["auto_applied"] = "0"
+        meta["unsourced_hold_reason"] = unsourced_hold_reason[:200]
         return False, meta
     grade_value: float | None = None
     try:
@@ -860,6 +869,11 @@ def publish_from_queued_row(
     # is a hard divert regardless of grade — the prose likely recommends
     # something dead, which a human must judge (MyAlgo incident 2026-07-19).
     defunct_domains = tuple(getattr(composed, "defunct_domains", ()) or ())
+    # Unsourced hard specifics (fabricated traction/funding counts or named
+    # partners not in the research) are a hard divert too — a human must judge
+    # whether the specific is real-but-unsourced or invented (GoPlausible
+    # incident 2026-07-20). Empty unless unsourced_specifics_gate ENFORCE is on.
+    unsourced_hold_reason = str(getattr(composed, "unsourced_hold_reason", "") or "")
     gate_enforced_review = (
         _gate_enforces_review(
             clf_decision=clf_decision,
@@ -870,12 +884,19 @@ def publish_from_queued_row(
         )
         or _quality_floor_fails(getattr(composed, "heuristic_grade", None))
         or bool(defunct_domains)
+        or bool(unsourced_hold_reason)
     )
     if defunct_domains:
         logger.warning(
             "defunct-entity gate diverting %s to review — dead linked domain(s): %s",
             row.scrape_url,
             ", ".join(defunct_domains),
+        )
+    if unsourced_hold_reason:
+        logger.warning(
+            "unsourced-specifics gate diverting %s to review — %s",
+            row.scrape_url,
+            unsourced_hold_reason,
         )
 
     # Resolve a hero/brand image when the upstream payload carried none, so both
@@ -922,6 +943,7 @@ def publish_from_queued_row(
             page_text=page_text_for_clf,
             source_url=row.scrape_url,
             defunct_domains=defunct_domains,
+            unsourced_hold_reason=unsourced_hold_reason,
         )
         if fresh_auto_approved:
             # An auto-approved article is approved, not exempt from cadence:

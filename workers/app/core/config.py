@@ -486,11 +486,17 @@ AUTHORITY_GATE_ENABLED = env_bool("AUTHORITY_GATE_ENABLED", True)
 # result. Two incidents motivate it: MyAlgo (defunct entity recommended) and
 # GoPlausible 2026-07-20 (fetched stat-counters read ZERO / partners empty, the
 # draft overwrote them with "1,000 issuers / 70+ events / Borderless Capital").
-# ENABLED runs the scan and RECORDS findings (payload['_unsourced_specifics'])
-# for tuning; ENFORCE additionally acts on them (revision feedback / hold). Ships
-# read-only: ENABLED on to gather precision data, ENFORCE off until tuned.
+# ENABLED runs the scan and RECORDS findings (payload['_unsourced_specifics']);
+# ENFORCE additionally diverts a flagged draft to human review (sets
+# _unsourced_hold_reason → gate_enforced_review + fails fresh auto-approve
+# closed, mirroring the defunct-entity gate). Enforcement enabled 2026-07-20
+# after a read-only tuning pass over 37 real sessions showed clean precision
+# (only fabricated counts/partners + one unsourced funding round flagged, no
+# clear false positives). A hold (not auto-rewrite) is deliberate: some flagged
+# specifics are real-but-unsourced (e.g. a genuine funding round the writer
+# didn't fetch), which a human keeps and a machine rewrite would wrongly strip.
 UNSOURCED_SPECIFICS_GATE_ENABLED = env_bool("UNSOURCED_SPECIFICS_GATE_ENABLED", True)
-UNSOURCED_SPECIFICS_GATE_ENFORCE = env_bool("UNSOURCED_SPECIFICS_GATE_ENFORCE", False)
+UNSOURCED_SPECIFICS_GATE_ENFORCE = env_bool("UNSOURCED_SPECIFICS_GATE_ENFORCE", True)
 # Stop composing review-bound candidates once pending_feed_queue already holds
 # this many approved articles awaiting paced release (2026-07-16: auto-approve
 # → backlog bypassed the 1-slot review throttle, so hourly drains composed 6

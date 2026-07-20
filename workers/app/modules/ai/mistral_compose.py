@@ -61,6 +61,11 @@ class MistralArticleFields:
     # still doesn't resolve (defunct_entity_gate) — non-empty forces the draft
     # into human review instead of auto-publishing (MyAlgo incident 2026-07-19).
     defunct_domains: tuple[str, ...] = ()
+    # Unsourced hard specifics (traction/funding counts, named partners) not
+    # grounded in the research (unsourced_specifics_gate, ENFORCE mode) — a
+    # non-empty reason forces the draft into human review instead of
+    # auto-publishing (GoPlausible incident 2026-07-20).
+    unsourced_hold_reason: str = ""
 
 
 # The single hardest accuracy rule. The small model, told to write full-depth,
@@ -1494,6 +1499,7 @@ def _parse_article_fields(payload: dict[str, Any]) -> MistralArticleFields:
         breaking_reason=payload.get("_breaking_reason"),
         confirmed_alert=payload.get("_confirmed_alert"),
         defunct_domains=tuple(payload.get("_defunct_domains") or ()),
+        unsourced_hold_reason=str(payload.get("_unsourced_hold_reason") or ""),
     )
 
 

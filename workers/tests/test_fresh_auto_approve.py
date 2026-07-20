@@ -126,3 +126,23 @@ def test_defunct_domain_blocks_auto_approve_before_any_grading() -> None:
     assert passed is False
     assert meta["auto_applied"] == "0"
     assert "wallet.myalgo.com" in meta["defunct_domains"]
+
+
+def test_unsourced_specifics_block_auto_approve_before_any_grading() -> None:
+    """An unsourced-specifics hold must fail auto-approve closed on its own too:
+    grade/headline/gatekeeper can't see the research trace, so a draft asserting a
+    fabricated "1,000 issuers" would otherwise clear the AND-gate and re-open the
+    hold (GoPlausible incident 2026-07-20). Short-circuits before any grading, so
+    no Cassandra/Mistral is touched."""
+    from app.modules.newspaper.tasks.publish_tasks import _fresh_auto_approve_passes
+
+    passed, meta = _fresh_auto_approve_passes(
+        title=_GOOD_TITLE,
+        body="The platform has over 1,000 issuers.",
+        page_text="platform",
+        source_url="editorial://brief/x",
+        unsourced_hold_reason="unsourced hard specifics not in research: 1,000 (issuers)",
+    )
+    assert passed is False
+    assert meta["auto_applied"] == "0"
+    assert "1,000" in meta["unsourced_hold_reason"]
