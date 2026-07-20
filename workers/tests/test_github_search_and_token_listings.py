@@ -83,6 +83,38 @@ def test_github_activity_archived_repo_attaches_owner_liveness(monkeypatch):
     assert "OWNER STILL ACTIVE" in out["owner_liveness"]["verdict"]
 
 
+def test_fetch_url_archived_github_page_gets_owner_liveness(monkeypatch):
+    """A raw fetch_url of an archived github repo page must carry owner_liveness —
+    the path the writer actually took in the Pera incident."""
+    monkeypatch.setattr(research_tools, "_owner_liveness", lambda owner, **kw: {
+        "owner": owner, "active_repos": [{"repo": f"{owner}/new-app"}],
+        "verdict": "OWNER STILL ACTIVE: do NOT report the project as defunct.",
+    })
+    result = {"url": "https://github.com/perawallet/pera-wallet",
+              "title": "GitHub - perawallet/pera-wallet",
+              "text": "This repository was archived by the owner on Oct 15, 2025."}
+    out = research_tools._augment_github_archived(result["url"], result)
+    assert "owner_liveness" in out
+    assert out["text"].startswith("[ARCHIVED-REPO CHECK] OWNER STILL ACTIVE")
+
+
+def test_fetch_url_non_archived_github_page_untouched(monkeypatch):
+    called = {"n": 0}
+    monkeypatch.setattr(research_tools, "_owner_liveness",
+                        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or {})
+    result = {"url": "https://github.com/perawallet/pera-react-native",
+              "text": "An actively maintained Algorand wallet."}
+    out = research_tools._augment_github_archived(result["url"], result)
+    assert "owner_liveness" not in out
+    assert called["n"] == 0  # no liveness lookup when not archived
+
+
+def test_fetch_url_non_github_url_untouched():
+    result = {"url": "https://example.com/x", "text": "repository was archived somewhere"}
+    out = research_tools._augment_github_archived(result["url"], result)
+    assert "owner_liveness" not in out
+
+
 def test_github_repository_search_returns_candidates(monkeypatch):
     monkeypatch.setattr(
         research_tools,

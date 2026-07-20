@@ -836,6 +836,39 @@ def _fetch_url_internal(
     )
 
 
+_GITHUB_REPO_URL_RE = re.compile(r"github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)", re.I)
+_GITHUB_RESERVED_OWNERS = {
+    "orgs", "topics", "search", "features", "about", "sponsors", "marketplace",
+    "settings", "pulls", "issues", "notifications", "explore", "collections",
+}
+
+
+def _augment_github_archived(url: str, result: dict[str, Any]) -> dict[str, Any]:
+    """When fetch_url lands on a github.com/<owner>/<repo> page that shows the
+    'repository was archived' notice, attach the OWNER's liveness so the writer
+    can't conclude the whole project is dead from the page alone. Same signal as
+    github_activity, but on the path the writer actually took (a raw page fetch)
+    in the Pera Wallet incident (2026-07-20). Fail-open."""
+    m = _GITHUB_REPO_URL_RE.search(url or "")
+    if not m:
+        return result
+    owner, repo = m.group(1), m.group(2)
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    if owner.lower() in _GITHUB_RESERVED_OWNERS:
+        return result
+    text = result.get("text") if isinstance(result.get("text"), str) else ""
+    low = text.lower()
+    if "repository was archived" not in low and "repository has been archived" not in low:
+        return result
+    liveness = _owner_liveness(owner, exclude=f"{owner}/{repo}")
+    result["owner_liveness"] = liveness
+    # Prepend the verdict so a writer skimming the page text cannot miss it — the
+    # archived notice is prominent, this must be at least as prominent.
+    result["text"] = "[ARCHIVED-REPO CHECK] " + liveness.get("verdict", "") + "\n\n" + text
+    return result
+
+
 def _tool_fetch_url(
     url: str,
     max_chars: int = 6000,
@@ -845,7 +878,12 @@ def _tool_fetch_url(
     raw = _fetch_url_internal(url, max_chars=max_chars, offset=offset)
     if raw.get("error"):
         return raw
-    return _publicize_fetch_result(raw)
+    result = _publicize_fetch_result(raw)
+    try:
+        result = _augment_github_archived(url, result)
+    except Exception:
+        logger.debug("github-archived augmentation failed", exc_info=True)
+    return result
 
 
 def _tool_get_defi_tvl(protocol: str = "") -> dict[str, Any]:
