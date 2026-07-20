@@ -43,12 +43,38 @@ def test_grounded_count_passes():
     assert gate.find_unsourced_specifics(body, corpus) == []
 
 
-def test_currency_out_of_scope():
-    # $ figures are live market/TVL data (reformatted → false positives) and
-    # neither incident involved currency: v1 ignores them entirely.
+def test_price_and_tvl_currency_ignored():
+    # Live market figures (price, TVL) come from live tools and are reformatted;
+    # only a FUNDING event makes a $ figure a checkable claim, so these are out.
     corpus = _trace("nothing about money here")
     body = "DorkFi reports $206K TVL and a token price of $0.0838."
-    assert [f for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "numeric"] == []
+    assert gate.find_unsourced_specifics(body, corpus) == []
+
+
+def test_flags_fabricated_funding():
+    corpus = _trace("The team shipped a testnet vault.")  # no funding figure
+    body = "The project raised $5M in a seed round led by unnamed backers."
+    funding = {f["claim"] for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "funding"}
+    assert "$5M" in funding
+
+
+def test_grounded_funding_passes():
+    corpus = _trace("Announcement: the project raised $5M in seed funding this week.")
+    body = "The project raised $5M in seed funding."
+    assert [f for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "funding"] == []
+
+
+def test_flags_fabricated_percentage():
+    corpus = _trace("The token launched on mainnet.")
+    body = "A single wallet controls 40% of the circulating supply."
+    pct = {f["claim"] for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "percent"}
+    assert "40%" in pct
+
+
+def test_grounded_percentage_passes():
+    corpus = _trace("On-chain data shows the top holder owns 40% of the supply.")
+    body = "The top holder owns 40% of the supply."
+    assert [f for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "percent"] == []
 
 
 def test_grounded_partner_passes():
@@ -71,6 +97,22 @@ def test_grounded_partner_passes():
 def test_non_traction_numbers_ignored(body):
     # empty corpus: if any of these flagged, it would flag here.
     assert gate.find_unsourced_specifics(body, _trace("")) == []
+
+
+@pytest.mark.parametrize("body", [
+    "The 2019 validators secured the launch.",       # year beside a count noun
+    "MyAlgo was sunset in 2023, and wallet users moved on.",
+    "By 2026, the project had many contributors.",
+])
+def test_bare_year_not_a_count(body):
+    assert gate.find_unsourced_specifics(body, _trace("")) == []
+
+
+def test_comma_number_that_looks_like_year_still_checked():
+    # "2,000 users" is a count (written with a separator), not the year 2000.
+    body = "It onboarded 2,000 users last quarter."
+    claims = [f["claim"] for f in gate.find_unsourced_specifics(body, _trace("no numbers"))]
+    assert "2,000" in claims
 
 
 def test_number_grounded_only_near_its_own_noun():

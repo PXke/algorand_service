@@ -53,12 +53,21 @@ _TRACTION_NOUNS = {
     "follower", "followers", "community", "communities", "merchant",
     "merchants", "participant", "participants",
 }
-# Funding / financial-scale nouns.
+# Discrete FUNDING-EVENT nouns — a raise/round is announced as a round figure
+# ("$5M seed"), unlike live price/TVL, so a currency amount beside one is a
+# checkable claim. Deliberately excludes price/tvl/volume (live, reformatted).
 _FUNDING_NOUNS = {
-    "raised", "funding", "valuation", "revenue", "arr", "tvl", "treasury",
-    "grant", "grants", "seed", "round", "backers", "investment",
+    "raised", "raise", "funding", "seed", "round", "valuation", "grant",
+    "grants", "investment", "backing", "backed", "led",
 }
-_CLAIM_NOUNS = _TRACTION_NOUNS | _FUNDING_NOUNS
+# Ownership/share nouns a percentage attaches to ("40% of the supply",
+# "controls 12% of holders") — plus the traction nouns (e.g. "70% of users").
+_PCT_NOUNS = _TRACTION_NOUNS | {
+    "supply", "holders", "holder", "stake", "ownership", "share", "shares",
+    "market", "dominance", "circulating", "float",
+}
+# A percentage token: 40%, 12.5%.
+_PCT_TOKEN_RE = re.compile(r"\d[\d,]*(?:\.\d+)?%")
 
 # A number token: optional $, digits with thousands separators, optional decimal,
 # optional K/M/B or word multiplier, optional trailing +.
@@ -159,11 +168,18 @@ def _numeric_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
         # decimals unless they carry a magnitude suffix.
         if "." in tok and not re.search(r"[kmb]", tok, re.I):
             continue
-        # Only a claim when a traction/funding noun sits within a few words —
-        # this is what excludes protocol names (x402), years (2027) and version
-        # strings, which have no traction noun beside them.
+        # A bare 4-digit year (1900-2099) is a date, not a count, even when it
+        # sits next to a traction noun ("the 2019 validators", "sunset in 2023").
+        # Counts of this magnitude are written with a separator ("2,000 users"),
+        # which this pattern (no comma) does not match — so we keep those.
+        if re.fullmatch(r"(?:19|20)\d\d", tok.strip(".,:;!?()+")):
+            continue
+        # Only a claim when a COUNT noun sits within a few words — this excludes
+        # protocol names (x402), years (2027) and version strings, which have no
+        # count noun beside them. Financial nouns (TVL, valuation) are omitted:
+        # currency is out of v1 scope, and raw TVL integers were pure noise.
         noun = next((w for w in (list(lowered[i + 1: i + 4]) + list(lowered[max(0, i - 3): i]))
-                     if w in _CLAIM_NOUNS), "")
+                     if w in _TRACTION_NOUNS), "")
         if not noun:
             continue
         if _number_grounded(digits, noun, corpus_ctx):
@@ -173,6 +189,67 @@ def _numeric_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
             continue
         seen.add(key)
         out.append({"kind": "numeric", "claim": tok, "context": noun})
+    return out
+
+
+def _noun_near(lowered: list[str], i: int, noun_set: set[str]) -> str:
+    """First noun from noun_set within ±3 tokens of position i (after-side first).
+    A proximity window, not a next-token check, so an adjective or a compound
+    ('1,000 verified issuers', '70+ events and hackathons') doesn't break the
+    association."""
+    for w in list(lowered[i + 1: i + 4]) + list(lowered[max(0, i - 3): i]):
+        if w in noun_set:
+            return w
+    return ""
+
+
+def _funding_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
+    """Currency amounts beside a discrete funding-event noun (raised/seed/round/
+    valuation…) whose value isn't grounded near that noun. Currency near price/
+    TVL is still ignored — only a funding EVENT makes a $ figure a checkable
+    one-off claim."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    tokens = _tokens(body)
+    lowered = [t.strip(".,:;!?()").lower() for t in tokens]
+    for i, tok in enumerate(tokens):
+        if not tok.strip().startswith("$") or not _NUM_RE.fullmatch(tok):
+            continue
+        digits = "".join(_DIGIT_RUN_RE.findall(tok.replace(",", "")))
+        if not digits:
+            continue
+        noun = _noun_near(lowered, i, _FUNDING_NOUNS)
+        if not noun or _number_grounded(digits, noun, corpus_ctx):
+            continue
+        key = f"{digits}:{noun}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"kind": "funding", "claim": tok, "context": noun})
+    return out
+
+
+def _percent_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
+    """Percentages beside an ownership/traction noun ('40% of the supply', '70%
+    of holders') whose value isn't grounded near that noun."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    tokens = _tokens(body)
+    lowered = [t.strip(".,:;!?()").lower() for t in tokens]
+    for i, tok in enumerate(tokens):
+        if not _PCT_TOKEN_RE.fullmatch(tok.strip(".,:;!?()")):
+            continue
+        digits = "".join(_DIGIT_RUN_RE.findall(tok.replace(",", "")))
+        if not digits:
+            continue
+        noun = _noun_near(lowered, i, _PCT_NOUNS)
+        if not noun or _number_grounded(digits, noun, corpus_ctx):
+            continue
+        key = f"{digits}:{noun}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"kind": "percent", "claim": tok.strip(".,:;!?()"), "context": noun})
     return out
 
 
@@ -213,6 +290,8 @@ def find_unsourced_specifics(
     corpus_ctx = _fold(corpus.replace(",", ""))
     corpus_folded = _fold(corpus)
     findings = _numeric_findings(body, corpus_ctx)
+    findings += _funding_findings(body, corpus_ctx)
+    findings += _percent_findings(body, corpus_ctx)
     findings += _named_findings(body, corpus_folded)
     return findings
 
