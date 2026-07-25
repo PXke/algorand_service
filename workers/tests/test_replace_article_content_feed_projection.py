@@ -17,15 +17,18 @@ look like a server-side caching bug.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
+
+import pytest
 
 from app.modules.newspaper.article_store import replace_article_content
 
-_OLD_PUBLISHED_AT = datetime(2026, 6, 14, 18, 52, 10, 629000)
+_OLD_PUBLISHED_AT = datetime(2026, 6, 14, 18, 52, 10, 629000, tzinfo=UTC)
 
 
-def _article_row(aid) -> MagicMock:
+def _article_row(aid: UUID) -> MagicMock:
     row = MagicMock()
     row.article_id = aid
     row.service_id = "editorial-brief:53016f2f"
@@ -43,13 +46,11 @@ def _article_row(aid) -> MagicMock:
     return row
 
 
-def _run_replace(monkeypatch, row) -> tuple[object, MagicMock]:
+def _run_replace(monkeypatch: pytest.MonkeyPatch, row: Any) -> tuple[object, MagicMock]:  # noqa: ANN401 -- duck-typed Cassandra row/result
     # Resolve _Stmt descriptors to their raw CQL so calls are identifiable.
     monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
     session = MagicMock()
-    monkeypatch.setattr(
-        "app.core.cassandra.get_cassandra_session", lambda: session
-    )
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: session)
     session.execute.return_value.one.return_value = row
     result = replace_article_content(
         article_id=str(row.article_id),
@@ -70,13 +71,12 @@ def _calls_matching(session: MagicMock, prefix: str) -> list[tuple]:
     ]
 
 
-def test_replace_deletes_old_feed_row_at_full_precision(monkeypatch) -> None:
+def test_replace_deletes_old_feed_row_at_full_precision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deletes the old feed row keyed by its original full-precision published_at, not a reconstructed epoch."""
     aid = uuid4()
     _, session = _run_replace(monkeypatch, _article_row(aid))
 
-    deletes = _calls_matching(
-        session, "DELETE FROM algorand_platform.articles_feed"
-    )
+    deletes = _calls_matching(session, "DELETE FROM algorand_platform.articles_feed")
     assert len(deletes) == 1
     _, params = deletes[0]
     # Old bucket + the RAW full-precision timestamp (never epoch-reconstructed).
@@ -84,15 +84,14 @@ def test_replace_deletes_old_feed_row_at_full_precision(monkeypatch) -> None:
 
 
 def test_replace_inserts_complete_feed_row_at_new_published_at(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Inserts a complete feed row (service_id, source_url, updated_at, first_published_at) at the new published_at."""
     aid = uuid4()
     new_published_at, session = _run_replace(monkeypatch, _article_row(aid))
     assert new_published_at is not None
 
-    inserts = _calls_matching(
-        session, "INSERT INTO algorand_platform.articles_feed"
-    )
+    inserts = _calls_matching(session, "INSERT INTO algorand_platform.articles_feed")
     assert len(inserts) == 1
     stmt, params = inserts[0]
     # Every projection column must be present — a partial row is a phantom
@@ -110,7 +109,8 @@ def test_replace_inserts_complete_feed_row_at_new_published_at(
     assert params[9] == _OLD_PUBLISHED_AT
 
 
-def test_replace_restamps_published_at_to_apply_time(monkeypatch) -> None:
+def test_replace_restamps_published_at_to_apply_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restamps published_at to the recompose apply time while preserving the original first_published_at."""
     aid = uuid4()
     before = datetime.now(tz=UTC)
     new_published_at, session = _run_replace(monkeypatch, _article_row(aid))
@@ -119,9 +119,7 @@ def test_replace_restamps_published_at_to_apply_time(monkeypatch) -> None:
     assert new_published_at is not None
     assert before <= new_published_at <= after
 
-    updates = _calls_matching(
-        session, "UPDATE algorand_platform.articles_by_id SET title"
-    )
+    updates = _calls_matching(session, "UPDATE algorand_platform.articles_by_id SET title")
     assert len(updates) == 1
     stmt, params = updates[0]
     assert "published_at = ?" in stmt
@@ -133,72 +131,66 @@ def test_replace_restamps_published_at_to_apply_time(monkeypatch) -> None:
 
 
 def test_second_recompose_preserves_original_first_published_at(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """first_published_at is set ONCE (first recompose) and carried verbatim
-    afterwards — a weekly refresh chain must not walk the original date
-    forward one recompose at a time."""
+    """first_published_at is set ONCE (first recompose) and carried verbatim afterwards — a weekly refresh chain must not walk the original date forward one recompose at a time."""
     aid = uuid4()
     row = _article_row(aid)
-    original = datetime(2026, 5, 1, 12, 0, 0, 111000)
+    original = datetime(2026, 5, 1, 12, 0, 0, 111000, tzinfo=UTC)
     row.first_published_at = original  # already recomposed once before
     _, session = _run_replace(monkeypatch, row)
 
-    inserts = _calls_matching(
-        session, "INSERT INTO algorand_platform.articles_feed"
-    )
+    inserts = _calls_matching(session, "INSERT INTO algorand_platform.articles_feed")
     assert inserts[0][1][9] == original
-    updates = _calls_matching(
-        session, "UPDATE algorand_platform.articles_by_id SET title"
-    )
+    updates = _calls_matching(session, "UPDATE algorand_platform.articles_by_id SET title")
     assert updates[0][1][6] == original
 
 
-def test_daily_cap_ignores_recompose_republishes(monkeypatch) -> None:
-    """A recomposed article re-enters today's published_at window but must
-    not consume a daily publish slot — count by first_published_at."""
+def test_daily_cap_ignores_recompose_republishes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recomposed article re-enters today's published_at window but must not consume a daily publish slot — count by first_published_at."""
     from app.modules.newspaper import article_store
 
     day_start = 1_784_073_600  # 2026-07-14 00:00 UTC
     rows = [
         # Genuinely new article today.
         article_store.FeedArticleRow(
-            article_id="a", service_id="s1", title="t", summary="",
+            article_id="a",
+            service_id="s1",
+            title="t",
+            summary="",
             published_at_epoch=day_start + 3600,
         ),
         # Recomposed today, FIRST published two weeks ago — not a new publish.
         article_store.FeedArticleRow(
-            article_id="b", service_id="s2", title="t", summary="",
+            article_id="b",
+            service_id="s2",
+            title="t",
+            summary="",
             published_at_epoch=day_start + 7200,
             first_published_at_epoch=day_start - 14 * 86400,
         ),
         # Old article, untouched.
         article_store.FeedArticleRow(
-            article_id="c", service_id="s3", title="t", summary="",
+            article_id="c",
+            service_id="s3",
+            title="t",
+            summary="",
             published_at_epoch=day_start - 86400,
         ),
     ]
-    monkeypatch.setattr(
-        article_store, "list_feed_articles", lambda *, limit=500: rows
-    )
-    assert (
-        article_store.count_articles_published_on_utc_day(
-            day_start_epoch=day_start
-        )
-        == 1
-    )
+    monkeypatch.setattr(article_store, "list_feed_articles", lambda *, limit=500: rows)  # noqa: ARG005 -- name must match the real callee's keyword arg
+    assert article_store.count_articles_published_on_utc_day(day_start_epoch=day_start) == 1
 
 
 def test_replace_feed_insert_binds_null_for_empty_source_url(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Binds source_url back to None on the feed insert when it was coerced to an empty string."""
     aid = uuid4()
     row = _article_row(aid)
     row.source_url = None  # get_article coerces to "" — must bind back to None
     _, session = _run_replace(monkeypatch, row)
 
-    inserts = _calls_matching(
-        session, "INSERT INTO algorand_platform.articles_feed"
-    )
+    inserts = _calls_matching(session, "INSERT INTO algorand_platform.articles_feed")
     assert len(inserts) == 1
     assert inserts[0][1][8] is None  # source_url

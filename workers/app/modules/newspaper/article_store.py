@@ -1,3 +1,5 @@
+"""Cassandra reads/writes for published article rows."""
+
 from __future__ import annotations
 
 import logging
@@ -14,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class FeedArticleRow:
+    """One article row as it appears in the feed projection."""
     article_id: str
     service_id: str
     title: str
@@ -28,6 +31,7 @@ class FeedArticleRow:
 
 @dataclass(frozen=True)
 class ArticleDetail:
+    """Full article detail for the article-detail route."""
     article_id: str
     service_id: str
     title: str
@@ -43,6 +47,7 @@ class ArticleDetail:
 
 
 def get_article(article_id: str) -> ArticleDetail | None:
+    """Load the full detail row for a published article, or None if not found."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
 
@@ -73,6 +78,7 @@ def get_article(article_id: str) -> ArticleDetail | None:
 
 
 def article_exists(article_id: str | UUID) -> bool:
+    """True when an article with this id has been published."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
 
@@ -86,6 +92,7 @@ def article_exists(article_id: str | UUID) -> bool:
 
 
 def count_articles_for_service(service_id: str, *, limit: int = 500) -> int:
+    """Count how many of the most recent feed articles belong to this service."""
     return sum(1 for row in list_feed_articles(limit=limit) if row.service_id == service_id)
 
 
@@ -94,7 +101,8 @@ def count_articles_published_on_utc_day(*, day_start_epoch: int, limit: int = 50
 
     Uses first_published_at when present: a recompose re-publish re-stamps
     published_at to the apply time, and counting the refresh as a new publish
-    would burn a real slot out of the daily cap."""
+    would burn a real slot out of the daily cap.
+    """
     return sum(
         1
         for row in list_feed_articles(limit=limit)
@@ -138,7 +146,10 @@ def count_feed_articles_with_tag_on_day(
     return count
 
 
-def list_feed_articles(*, bucket: str = NEWS_FEED_BUCKET, limit: int = 100) -> list[FeedArticleRow]:
+def list_feed_articles(
+    *, _bucket: str = NEWS_FEED_BUCKET, limit: int = 100
+) -> list[FeedArticleRow]:
+    """Return the most recent feed articles across the trailing 18 monthly buckets."""
     from datetime import UTC, datetime
 
     from app.core.cassandra import execute_parallel_with_args
@@ -200,8 +211,8 @@ def insert_stored_article(
     image_url: str = "",
     prompt_version: str = "",
 ) -> tuple[str, bool]:
-    """
-    Store article in articles_by_id; optionally publish to articles_feed.
+    """Store article in articles_by_id; optionally publish to articles_feed.
+
     Returns (article_id, feed_published).
     """
     from app.core.cassandra import get_cassandra_session
@@ -263,6 +274,7 @@ def insert_article(
     image_url: str = "",
     prompt_version: str = "",
 ) -> str:
+    """Insert a new article and publish it to the feed, returning the article id."""
     aid, _ = insert_stored_article(
         service_id=service_id,
         title=title,
@@ -294,7 +306,8 @@ def update_article(
     from articles_by_id and reuse it verbatim (see update_article_image). This
     function used to reconstruct it from the seconds-truncated epoch, which
     upserts a phantom feed row with null service_id/title that 500s the feed.
-    Also stamps updated_at so the revision surfaces as dateModified."""
+    Also stamps updated_at so the revision surfaces as dateModified.
+    """
     from app.core.cassandra import get_cassandra_session
 
     existing = get_article(article_id)
@@ -321,9 +334,7 @@ def update_article(
         tag_list = [*tag_list, "updated"]
 
     updated_at = datetime.now(tz=UTC)
-    session.execute(
-        ArticleStmts.UPDATE, (title, summary, body, tag_list, updated_at, aid)
-    )
+    session.execute(ArticleStmts.UPDATE, (title, summary, body, tag_list, updated_at, aid))
     # Complete feed row, not a partial one: this INSERT is an upsert, and on a
     # deleted feed row a partial write resurrects a degraded article (no image/
     # source). Harmless on live rows — Cassandra INSERT leaves unlisted columns
@@ -360,10 +371,7 @@ def replace_article_content(
     tags: list[str],
     image_url: str,
 ) -> datetime | None:
-    """Swap a published article's content in place (approved recompose): same
-    article_id, same URL — new prose, tags and art, with stale translations
-    cleared (the translation of the OLD prose must not keep serving;
-    re-enqueue after this). Returns the new published_at, or None on failure.
+    """Swap a published article's content in place (approved recompose): same article_id, same URL — new prose, tags and art, with stale translations cleared (the translation of the OLD prose must not keep serving; re-enqueue after this). Returns the new published_at, or None on failure.
 
     Recompose is a RE-publish (owner policy 2026-07-15): published_at is
     re-stamped to the apply time so the refreshed story returns to the top of
@@ -372,7 +380,8 @@ def replace_article_content(
     full-precision timestamp, never reconstructed from an epoch) is deleted
     and a COMPLETE new row inserted. Never a partial feed upsert here — one
     resurrected a deleted row without service_id and the feed API's defensive
-    filter silently hid the article (incident 2026-07-15)."""
+    filter silently hid the article (incident 2026-07-15).
+    """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
 
@@ -399,9 +408,7 @@ def replace_article_content(
         (title, summary, body, tags, image, now, first_published_at, now, aid),
     )
     session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (aid,))
-    session.execute(
-        FeedStmts.DELETE, (feed_month(old_published_at), old_published_at, aid)
-    )
+    session.execute(FeedStmts.DELETE, (feed_month(old_published_at), old_published_at, aid))
     session.execute(
         FeedStmts.INSERT_FULL,
         (
@@ -423,12 +430,14 @@ def replace_article_content(
 
 def update_article_image(article_id: str, image_url: str) -> bool:
     """Set an article's image_url in both the detail row and the feed projection.
+
     Used to backfill stories that published without a hero image.
 
     NOTE: the feed PK includes published_at at FULL (ms) precision — we read the
     raw timestamp from articles_by_id and reuse it verbatim. Reconstructing it
     from a seconds-truncated epoch would miss the real clustering key and upsert a
-    phantom row with null service_id/title (which then 500s the feed)."""
+    phantom row with null service_id/title (which then 500s the feed).
+    """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
 
@@ -499,6 +508,7 @@ def record_service_event(
     match_kind: str,
     match_value: str,
 ) -> None:
+    """Record a chain-matched service event (address/app/asset hit) for the watch feed."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ServiceEventStmts
 
@@ -516,11 +526,13 @@ def record_service_event(
         ),
     )
 
+
 def update_article_translations(article_id: str, translations: dict[str, str]) -> bool:
     """Update article translations map; refresh feed row at original published_at."""
+    from uuid import UUID
+
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
-    from uuid import UUID
 
     try:
         aid = UUID(article_id)
@@ -535,9 +547,7 @@ def update_article_translations(article_id: str, translations: dict[str, str]) -
         return False
     published_at = row.published_at
 
-    detail_result = session.execute(
-        ArticleStmts.UPDATE_TRANSLATIONS, (translations, aid)
-    )
+    detail_result = session.execute(ArticleStmts.UPDATE_TRANSLATIONS, (translations, aid))
     if not detail_result.was_applied:
         # Article deleted after this translation was enqueued — dropping the
         # write is correct (a plain upsert resurrected phantom rows).

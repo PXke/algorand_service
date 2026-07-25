@@ -1,3 +1,5 @@
+"""Celery app wiring: broker/backend config, beat schedule, Bugsnag, and prefork-safety hooks."""
+
 import os
 
 from celery import Celery
@@ -26,11 +28,8 @@ celery_app.conf.task_time_limit = int(os.getenv("CELERY_TASK_TIME_LIMIT", "1860"
 
 
 @worker_process_init.connect
-def _reset_cassandra_session(**_kwargs):
-    """cassandra-driver sessions don't survive prefork: the driver's IO event
-    loop thread stays in the parent, so a forked child inheriting the cached
-    session blocks forever on its first query. Drop the cache so every child
-    opens its own connection."""
+def _reset_cassandra_session(**_kwargs: object) -> None:
+    """cassandra-driver sessions don't survive prefork: the driver's IO event loop thread stays in the parent, so a forked child inheriting the cached session blocks forever on its first query. Drop the cache so every child opens its own connection."""
     from app.core.cassandra import get_cassandra_session
 
     get_cassandra_session.cache_clear()
@@ -61,6 +60,8 @@ celery_app.conf.imports = (
     "app.tasks.metrics",
     "app.tasks.gatekeeper",
 )
+
+
 def _build_beat_schedule() -> dict:
     schedule = {}
     if is_crawler_enabled(CrawlerType.CHAIN):
@@ -86,10 +87,11 @@ def _build_beat_schedule() -> dict:
     # spaced way out — workers stay idle until you accept something.
     schedule["drain-url-queue"] = {
         "task": "app.tasks.crawler.drain_url_queue",
-        # Default ~1 page / 10s: gentle on any single domain, yet clears a new
-        # domain's 20-page initial harvest in ~3 min (vs the old 5/hour).
+        # Default 10 pages / 10s: clears a new domain's 20-page initial harvest
+        # in one tick, and a large backlog (e.g. an admin-approval bulk
+        # backfill) in minutes instead of hours (bumped from 1/tick 2026-07-21).
         "schedule": float(os.getenv("URL_QUEUE_DRAIN_SECONDS", "10")),
-        "kwargs": {"max_items": int(os.getenv("URL_QUEUE_DRAIN_BATCH", "1"))},
+        "kwargs": {"max_items": int(os.getenv("URL_QUEUE_DRAIN_BATCH", "10"))},
     }
     schedule["retrain-publish-classifier"] = {
         "task": "app.tasks.crawler.retrain_publish_classifier",

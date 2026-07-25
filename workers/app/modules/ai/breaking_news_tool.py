@@ -58,15 +58,13 @@ MARK_BREAKING_NEWS_SCHEMA: dict[str, Any] = {
 }
 
 
-def mark_breaking_news_handler(reason: str = "", **_: Any) -> dict[str, Any]:
+def mark_breaking_news_handler(reason: str = "", **_: object) -> dict[str, Any]:
+    """Record the writer's mark_breaking_news tool call and its stated reason."""
     return {"marked_breaking": True, "reason": (reason or "").strip()[:400]}
 
 
 def breaking_reason_from_trace(trace: list[dict] | None) -> str | None:
-    """Last mark_breaking_news call's reason, or None if never called. Scanned
-    post-hoc (like the dead-link/chain-entity gates) rather than threaded
-    through a mutable context — the tool never blocks or mutates the draft,
-    it only needs to be visible to the caller once compose finishes."""
+    """Last mark_breaking_news call's reason, or None if never called. Scanned post-hoc (like the dead-link/chain-entity gates) rather than threaded through a mutable context — the tool never blocks or mutates the draft, it only needs to be visible to the caller once compose finishes."""
     reason: str | None = None
     for entry in trace or ():
         if entry.get("tool") != "mark_breaking_news":

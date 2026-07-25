@@ -1,13 +1,16 @@
+"""HTTP routes for the price-metrics dashboard."""
+
 from __future__ import annotations
 
-from robyn import Request
+from robyn import Request, Robyn
 
 from app.core import serialization
 from app.modules.metrics.services.dashboard_service import MetricsDashboardService
 from app.modules.metrics.services.price_service import PriceMetricsService
 
 
-def register_metrics_routes(app) -> None:
+def register_metrics_routes(app: Robyn) -> None:
+    """Attach the price-metrics dashboard endpoints to the Robyn app."""
     service = PriceMetricsService()
     dashboard = MetricsDashboardService()
 
@@ -18,15 +21,19 @@ def register_metrics_routes(app) -> None:
 
     @app.get("/api/v1/metrics/price/history")
     async def price_history(request: Request) -> dict:
-        """~Hourly (epoch, price) points for the front-page sparkline. Cached:
-        the sampler writes about once an hour, so minutes-stale is invisible."""
+        """~Hourly (epoch, price) points for the front-page sparkline.
+
+        Cached: the sampler writes about once an hour, so minutes-stale is invisible.
+        """
         from app.core.cache import cached_json
         from app.core.config import settings
         from app.modules.metrics.stores.cassandra import load_price_history
 
         asset_id = (
-            request.query_params.get("asset_id", None) or settings.price_metrics_asset_id
-        ).strip().lower()
+            (request.query_params.get("asset_id", None) or settings.price_metrics_asset_id)
+            .strip()
+            .lower()
+        )
 
         def compute() -> dict:
             points = load_price_history(asset_id)

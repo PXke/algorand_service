@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +32,7 @@ _bsky_token_cache: dict[str, float | str] = {}
 
 
 def _tool_search_web(query: str, limit: int = 6) -> dict[str, Any]:
-    """General web search via SearXNG: titles, URLs and snippets a journalist
-    would skim before writing. Use to discover sources and context you were not
-    handed; then fetch the most relevant URL with the safe fetch tool. Also
-    queries news-specific engines (Bing News, DuckDuckGo News, Google News) for
-    a real publish-date signal — general engines rarely return one at all."""
+    """General web search via SearXNG: titles, URLs and snippets a journalist would skim before writing. Use to discover sources and context you were not handed; then fetch the most relevant URL with the safe fetch tool. Also queries news-specific engines (Bing News, DuckDuckGo News, Google News) for a real publish-date signal — general engines rarely return one at all."""
     import httpx
 
     from app.core.config import SEARXNG_URL
@@ -63,19 +62,16 @@ def _tool_search_web(query: str, limit: int = 6) -> dict[str, Any]:
     # general engines (Bing/DuckDuckGo web) almost never do — surface whichever
     # results actually have one first, so a freshness-sensitive story doesn't
     # lose its few dated hits to the 12-result truncation below.
-    ranked = sorted(
-        data.get("results") or [], key=lambda r: 0 if r.get("publishedDate") else 1
-    )
-    results = []
-    for r in ranked[:n]:
-        results.append(
-            {
-                "title": (r.get("title") or "")[:200],
-                "url": r.get("url") or "",
-                "snippet": (r.get("content") or "")[:300],
-                "published_date": r.get("publishedDate") or None,
-            }
-        )
+    ranked = sorted(data.get("results") or [], key=lambda r: 0 if r.get("publishedDate") else 1)
+    results = [
+        {
+            "title": (r.get("title") or "")[:200],
+            "url": r.get("url") or "",
+            "snippet": (r.get("content") or "")[:300],
+            "published_date": r.get("publishedDate") or None,
+        }
+        for r in ranked[:n]
+    ]
     out: dict[str, Any] = {"query": query, "count": len(results), "results": results}
     # SearXNG's own query-refinement hints (e.g. a likely spelling correction
     # or a related term) — previously fetched and silently discarded. Surface
@@ -120,9 +116,7 @@ def _bsky_access_token() -> str:
 
 
 def _tool_search_bluesky(query: str, limit: int = 10) -> dict[str, Any]:
-    """Recent public Bluesky posts matching a query — community sentiment and
-    discussion. Returns post text + engagement so the writer judges the mood;
-    a post is social opinion, never cited as established fact."""
+    """Recent public Bluesky posts matching a query — community sentiment and discussion. Returns post text + engagement so the writer judges the mood; a post is social opinion, never cited as established fact."""
     from app.core.net_guard import guarded_get
 
     q = (query or "").strip()
@@ -215,7 +209,7 @@ _BLUESKY_SCHEMA = {
 
 def _guarded_get(
     url: str, *, headers: dict | None = None, params: dict | None = None, timeout: float = 12.0
-):
+) -> httpx.Response:
     """SSRF-guarded GET for external / LLM-supplied URLs (revalidates each redirect)."""
     from app.core.net_guard import guarded_get
 
@@ -231,11 +225,8 @@ _FETCH_BACKOFF_MAX_SECONDS = 60.0
 _FETCH_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
-def _fetch_backoff_seconds(attempt: int, resp: Any = None) -> float:
-    """Backoff before retrying after `attempt` (0-based) fails. A 429 means the
-    server is actively throttling us, so it honors Retry-After when sent and
-    otherwise backs off harder than the plain exponential schedule used for
-    transient network errors / 5xx."""
+def _fetch_backoff_seconds(attempt: int, resp: httpx.Response | None = None) -> float:
+    """Backoff before retrying after `attempt` (0-based) fails. A 429 means the server is actively throttling us, so it honors Retry-After when sent and otherwise backs off harder than the plain exponential schedule used for transient network errors / 5xx."""
     if resp is not None and getattr(resp, "status_code", None) == 429:
         from app.modules.ai.mistral_client import _retry_after_seconds
 
@@ -246,11 +237,10 @@ def _fetch_backoff_seconds(attempt: int, resp: Any = None) -> float:
     return min(_FETCH_BACKOFF_MAX_SECONDS, _FETCH_BACKOFF_BASE_SECONDS * (2**attempt))
 
 
-def _guarded_get_with_retry(url: str, *, headers: dict | None = None, timeout: float = 12.0):
-    """`_guarded_get` with retry: transient network errors and 429/5xx responses
-    get up to 5 attempts with exponential backoff, capped at 60s per wait (429
-    backs off harder, honoring Retry-After when the server sends one). SSRF
-    rejections and real 4xx responses are permanent, so they fail immediately."""
+def _guarded_get_with_retry(
+    url: str, *, headers: dict | None = None, timeout: float = 12.0
+) -> httpx.Response:
+    """`_guarded_get` with retry: transient network errors and 429/5xx responses get up to 5 attempts with exponential backoff, capped at 60s per wait (429 backs off harder, honoring Retry-After when the server sends one). SSRF rejections and real 4xx responses are permanent, so they fail immediately."""
     import time
 
     from app.core.net_guard import UnsafeUrlError
@@ -279,11 +269,9 @@ def _guarded_get_with_retry(url: str, *, headers: dict | None = None, timeout: f
 
 
 def _guarded_post(
-    url: str, *, json: Any = None, headers: dict | None = None, timeout: float = 12.0
-):
-    """SSRF-guarded POST for a known external JSON API. Validates the host is
-    public and does NOT follow redirects (so it can't be bounced to an internal
-    one). Used for fixed endpoints we choose, not LLM-supplied URLs."""
+    url: str, *, json: Any = None, headers: dict | None = None, timeout: float = 12.0  # noqa: ANN401 -- arbitrary JSON POST body
+) -> httpx.Response:
+    """SSRF-guarded POST for a known external JSON API. Validates the host is public and does NOT follow redirects (so it can't be bounced to an internal one). Used for fixed endpoints we choose, not LLM-supplied URLs."""
     import httpx
 
     from app.core.net_guard import assert_public_url
@@ -296,14 +284,10 @@ def _guarded_post(
         return client.post(url, json=json, headers=h)
 
 
-def _github_get(url: str, *, params: dict | None = None, timeout: float | None = None):
-    """GET against the GitHub API with GITHUB_TOKEN when set — but never let a
-    dead token take a tool down. GitHub answers 401 to ANY request carrying a
-    revoked/expired token, while the same request unauthenticated succeeds
-    (just rate-limited harder). Root-caused 2026-07-16: the prod token expired
-    and github_repository_search started returning '401 Unauthorized' verbatim
-    into research traces; on 401-with-token this logs loudly and retries once
-    without the Authorization header."""
+def _github_get(
+    url: str, *, params: dict | None = None, timeout: float | None = None
+) -> httpx.Response:
+    """GET against the GitHub API with GITHUB_TOKEN when set — but never let a dead token take a tool down. GitHub answers 401 to ANY request carrying a revoked/expired token, while the same request unauthenticated succeeds (just rate-limited harder). Root-caused 2026-07-16: the prod token expired and github_repository_search started returning '401 Unauthorized' verbatim into research traces; on 401-with-token this logs loudly and retries once without the Authorization header."""
     import os
 
     headers = {"Accept": "application/vnd.github+json"}
@@ -325,9 +309,7 @@ def _github_get(url: str, *, params: dict | None = None, timeout: float | None =
 
 
 def _github_owner_repos(owner: str) -> dict[str, Any]:
-    """Repo list for a GitHub org/user, most recently pushed first — returned when
-    the model passes an owner instead of owner/name (the top prod failure mode for
-    this tool), so it can pick a repo and call again instead of dead-ending."""
+    """Repo list for a GitHub org/user, most recently pushed first — returned when the model passes an owner instead of owner/name (the top prod failure mode for this tool), so it can pick a repo and call again instead of dead-ending."""
     try:
         resp = _github_get(
             f"https://api.github.com/users/{owner}/repos",
@@ -357,15 +339,15 @@ def _github_owner_repos(owner: str) -> dict[str, Any]:
 
 
 def _owner_liveness(owner: str, *, exclude: str = "", recent_days: int = 120) -> dict[str, Any]:
-    """Is the OWNER still shipping code in NON-archived repos? This is the
-    liveness signal a single archived repo cannot give.
+    """Is the OWNER still shipping code in NON-archived repos? This is the liveness signal a single archived repo cannot give.
 
     Root cause of a mis-published article (2026-07-20): the writer saw
     `perawallet/pera-wallet` was archived and declared Pera Wallet — the most-used
     Algorand wallet — defunct, telling readers to migrate away. But the SAME owner
     had `perawallet/pera-react-native` pushed that very day: the repo was
     superseded, not the product discontinued. A domain check can't catch this (the
-    site resolves fine); the owner's other repos are the tell."""
+    site resolves fine); the owner's other repos are the tell.
+    """
     from datetime import UTC, datetime, timedelta
 
     listing = _github_owner_repos(owner)
@@ -405,7 +387,9 @@ def _owner_liveness(owner: str, *, exclude: str = "", recent_days: int = 120) ->
 
 def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
     """Recent activity for a GitHub repo: metadata, latest releases and commits.
-    Accepts 'owner/name' or a github.com URL; a bare owner/org lists its repos."""
+
+    Accepts 'owner/name' or a github.com URL; a bare owner/org lists its repos.
+    """
     slug = (repo or "").strip().rstrip("/")
     if "github.com/" in slug:
         slug = slug.split("github.com/", 1)[1]
@@ -497,10 +481,7 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
 
 
 def _tool_github_repository_search(query: str, limit: int = 5) -> dict[str, Any]:
-    """Search ALL of GitHub for repos matching a keyword query — use this when
-    github_activity's owner/repo guess 404s and you don't know the real owner
-    (e.g. a project's site names it but not its GitHub org). Not scoped to one
-    owner, unlike github_activity's owner-repo-listing fallback."""
+    """Search ALL of GitHub for repos matching a keyword query — use this when github_activity's owner/repo guess 404s and you don't know the real owner (e.g. a project's site names it but not its GitHub org). Not scoped to one owner, unlike github_activity's owner-repo-listing fallback."""
     q = (query or "").strip()
     if not q:
         return {"error": "query must not be empty"}
@@ -531,12 +512,8 @@ def _tool_github_repository_search(query: str, limit: int = 5) -> dict[str, Any]
     }
 
 
-def _tool_search_token_listings(asset_id: Any) -> dict[str, Any]:
-    """Whether an Algorand ASA is actually listed/tradeable on the two biggest
-    Algorand DEXs (Tinyman, Pact) — real liquidity, price, and 24h/7d volume in
-    USD, or confirmation it's NOT listed anywhere. Use this instead of assuming
-    a token trades just because it exists; a real supply with zero listings
-    is itself a notable fact worth reporting."""
+def _tool_search_token_listings(asset_id: int | str) -> dict[str, Any]:
+    """Whether an Algorand ASA is actually listed/tradeable on the two biggest Algorand DEXs (Tinyman, Pact) — real liquidity, price, and 24h/7d volume in USD, or confirmation it's NOT listed anywhere. Use this instead of assuming a token trades just because it exists; a real supply with zero listings is itself a notable fact worth reporting."""
     aid = str(asset_id).strip()
     if not aid.isdigit():
         return {"error": "asset_id must be a numeric ASA id"}
@@ -594,14 +571,14 @@ def _tool_search_token_listings(asset_id: Any) -> dict[str, Any]:
 
 
 def _fetch_failure_hint(url: str, error: str, *, status_code: int | None = None) -> str:
-    """Steer the writer to the dedicated tool (or a different strategy) for
-    fetches that failed in a known way.
+    """Steer the writer to the dedicated tool (or a different strategy) for fetches that failed in a known way.
 
     Prod transcripts show the model repeatedly fetch_url-ing medium.com (403) and
     reddit.com (403) while the purpose-built tools sit unused — a hint inside the
     error result is followed far more reliably than a schema description. The
     status_code checks come first since they're precise (host checks below are
-    best-effort text matching that a 401/403/429/5xx would otherwise fall through)."""
+    best-effort text matching that a 401/403/429/5xx would otherwise fall through).
+    """
     from urllib.parse import urlsplit
 
     host = urlsplit(url).netloc.lower()
@@ -838,17 +815,24 @@ def _fetch_url_internal(
 
 _GITHUB_REPO_URL_RE = re.compile(r"github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)", re.I)
 _GITHUB_RESERVED_OWNERS = {
-    "orgs", "topics", "search", "features", "about", "sponsors", "marketplace",
-    "settings", "pulls", "issues", "notifications", "explore", "collections",
+    "orgs",
+    "topics",
+    "search",
+    "features",
+    "about",
+    "sponsors",
+    "marketplace",
+    "settings",
+    "pulls",
+    "issues",
+    "notifications",
+    "explore",
+    "collections",
 }
 
 
 def _augment_github_archived(url: str, result: dict[str, Any]) -> dict[str, Any]:
-    """When fetch_url lands on a github.com/<owner>/<repo> page that shows the
-    'repository was archived' notice, attach the OWNER's liveness so the writer
-    can't conclude the whole project is dead from the page alone. Same signal as
-    github_activity, but on the path the writer actually took (a raw page fetch)
-    in the Pera Wallet incident (2026-07-20). Fail-open."""
+    """When fetch_url lands on a github.com/<owner>/<repo> page that shows the 'repository was archived' notice, attach the OWNER's liveness so the writer can't conclude the whole project is dead from the page alone. Same signal as github_activity, but on the path the writer actually took (a raw page fetch) in the Pera Wallet incident (2026-07-20). Fail-open."""
     m = _GITHUB_REPO_URL_RE.search(url or "")
     if not m:
         return result
@@ -887,8 +871,7 @@ def _tool_fetch_url(
 
 
 def _tool_get_defi_tvl(protocol: str = "") -> dict[str, Any]:
-    """Current DeFi TVL from DeFiLlama (USD). No protocol → Algorand chain TVL;
-    a protocol slug (e.g. 'tinyman', 'folks-finance', 'pact') → that protocol's TVL."""
+    """Current DeFi TVL from DeFiLlama (USD). No protocol → Algorand chain TVL; a protocol slug (e.g. 'tinyman', 'folks-finance', 'pact') → that protocol's TVL."""
     p = (protocol or "").strip().lower().replace(" ", "-")
     try:
         if p:
@@ -917,11 +900,7 @@ _node_stats_cache: dict[str, Any] = {}
 
 
 def _tool_get_node_stats() -> dict[str, Any]:
-    """Algorand mainnet NODE telemetry from Nodely's public dashboard: the latest
-    daily estimate of full-time running nodes (Chao-1) plus the recent trend, for
-    network decentralization / participation-scale context. This is a NODE count
-    (off-chain telemetry, source g.nodely.io); for on-chain online STAKE use the
-    get_consensus_stats tool."""
+    """Algorand mainnet NODE telemetry from Nodely's public dashboard: the latest daily estimate of full-time running nodes (Chao-1) plus the recent trend, for network decentralization / participation-scale context. This is a NODE count (off-chain telemetry, source g.nodely.io); for on-chain online STAKE use the get_consensus_stats tool."""
     import time
 
     now = time.time()
@@ -985,13 +964,7 @@ def _tool_get_node_stats() -> dict[str, Any]:
 
 
 def _tool_discourse_forum(forum_url: str, limit: int = 10, query: str = "") -> dict[str, Any]:
-    """Live activity from a Discourse community forum (most crypto project forums,
-    incl. Folks Finance) via its public JSON API — site stats, top categories, and
-    recent topics with reply/view counts. Pass ``query`` to search the forum's
-    public /search.json instead of listing latest topics (prod writers kept
-    wanting 'search the Algorand forum for <project>', which latest-topics can't
-    answer). Read this instead of a static page snapshot to gauge what the
-    community is actually discussing right now."""
+    """Live activity from a Discourse community forum (most crypto project forums, incl. Folks Finance) via its public JSON API — site stats, top categories, and recent topics with reply/view counts. Pass ``query`` to search the forum's public /search.json instead of listing latest topics (prod writers kept wanting 'search the Algorand forum for <project>', which latest-topics can't answer). Read this instead of a static page snapshot to gauge what the community is actually discussing right now."""
     from urllib.parse import urlsplit
 
     raw = (forum_url or "").strip()
@@ -1039,8 +1012,7 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10, query: str = "") -> d
         out["query"] = q
         try:
             data = (
-                _guarded_get(f"{base}/search.json", headers=hdr, params={"q": q[:200]}).json()
-                or {}
+                _guarded_get(f"{base}/search.json", headers=hdr, params={"q": q[:200]}).json() or {}
             )
             topics_by_id = {
                 t.get("id"): t for t in data.get("topics", []) or [] if isinstance(t, dict)
@@ -1132,10 +1104,7 @@ def _normalize_repo_slug(repo: str) -> str:
 
 
 def _tool_github_repo_contents(repo: str, path: str = "", ref: str = "") -> dict[str, Any]:
-    """Inspect a GitHub repo's files via the contents API. Empty path → root
-    directory listing; a directory path → its entries; a file path → the file's
-    decoded text. Use to READ smart-contract source and judge what a project
-    actually shipped (github_activity only gives metadata). GITHUB_TOKEN optional."""
+    """Inspect a GitHub repo's files via the contents API. Empty path → root directory listing; a directory path → its entries; a file path → the file's decoded text. Use to READ smart-contract source and judge what a project actually shipped (github_activity only gives metadata). GITHUB_TOKEN optional."""
     import base64
 
     slug = _normalize_repo_slug(repo)
@@ -1147,9 +1116,7 @@ def _tool_github_repo_contents(repo: str, path: str = "", ref: str = "") -> dict
     p = (path or "").strip().lstrip("/")
     params = {"ref": ref.strip()} if ref and ref.strip() else None
     try:
-        resp = _github_get(
-            f"https://api.github.com/repos/{slug}/contents/{p}", params=params
-        )
+        resp = _github_get(f"https://api.github.com/repos/{slug}/contents/{p}", params=params)
         if resp.status_code == 404:
             return {"repo": slug, "path": p, "error": "path not found"}
         resp.raise_for_status()
@@ -1189,10 +1156,7 @@ def _tool_github_repo_contents(repo: str, path: str = "", ref: str = "") -> dict
 
 
 def _tool_medium_articles(source: str, limit: int = 15) -> dict[str, Any]:
-    """List a Medium author's or publication's recent articles via its public RSS
-    feed (no auth). Accepts an @handle, a medium.com URL, or a Medium-backed custom
-    domain (e.g. algonaut.space). Returns title, link, published date and tags — use
-    to quantify a blog's output and spot cross-posting patterns."""
+    """List a Medium author's or publication's recent articles via its public RSS feed (no auth). Accepts an @handle, a medium.com URL, or a Medium-backed custom domain (e.g. algonaut.space). Returns title, link, published date and tags — use to quantify a blog's output and spot cross-posting patterns."""
     from urllib.parse import urlsplit
 
     from lxml import etree
@@ -1249,13 +1213,8 @@ def _tool_medium_articles(source: str, limit: int = 15) -> dict[str, Any]:
     return {"feed": feed_url, "count": len(articles), "articles": articles}
 
 
-def _tool_reddit_history(user: str, kind: str = "submitted", limit: int = 15) -> dict[str, Any]:
-    """PHASED OUT (owner decision 2026-07-16): reddit blocks this server's IP
-    outright — every live call 403'd in prod traces (both compose sessions
-    audited on 2026-07-15 burned a call each discovering this). The tool is no
-    longer offered in the schema list; this stub stays registered so any
-    cached/replayed prompt that still names it gets a truthful answer with
-    ZERO network round-trips instead of a guaranteed 403."""
+def _tool_reddit_history(user: str, _kind: str = "submitted", _limit: int = 15) -> dict[str, Any]:
+    """PHASED OUT (owner decision 2026-07-16): reddit blocks this server's IP outright — every live call 403'd in prod traces (both compose sessions audited on 2026-07-15 burned a call each discovering this). The tool is no longer offered in the schema list; this stub stays registered so any cached/replayed prompt that still names it gets a truthful answer with ZERO network round-trips instead of a guaranteed 403."""
     return {
         "user": (user or "").strip(),
         "error": "reddit blocks requests from this server — no reddit data is "
@@ -1270,7 +1229,9 @@ _XGOV_API = "https://api.github.com/repos/algorandfoundation/xGov/contents"
 
 def _xgov_frontmatter(md: str) -> dict[str, str]:
     """The `--- key: value ---` header every xGov proposal file starts with.
-    Flat string values only — no YAML dependency needed."""
+
+    Flat string values only — no YAML dependency needed.
+    """
     lines = (md or "").splitlines()
     if not lines or lines[0].strip() != "---":
         return {}
@@ -1291,11 +1252,7 @@ def _xgov_abstract(md: str) -> str:
 
 
 def _tool_xgov_proposal(proposal_id: int = 0, limit: int = 8) -> dict[str, Any]:
-    """Status of Algorand xGov grant proposals from the canonical
-    algorandfoundation/xGov repo: frontmatter (title, author, amount_requested,
-    category, status Draft/Final/Approved/Rejected/Withdrawn, forum link) plus an
-    abstract snippet. With proposal_id, one proposal in full; without, the
-    newest proposals' summaries."""
+    """Status of Algorand xGov grant proposals from the canonical algorandfoundation/xGov repo: frontmatter (title, author, amount_requested, category, status Draft/Final/Approved/Rejected/Withdrawn, forum link) plus an abstract snippet. With proposal_id, one proposal in full; without, the newest proposals' summaries."""
 
     def _fetch_one(pid: int, with_abstract: bool) -> dict[str, Any] | None:
         try:
@@ -1604,7 +1561,10 @@ _XGOV_SCHEMA = {
                     "type": "integer",
                     "description": "xGov proposal number (e.g. 100); omit to list newest",
                 },
-                "limit": {"type": "integer", "description": "1-10 proposals when listing, default 8"},
+                "limit": {
+                    "type": "integer",
+                    "description": "1-10 proposals when listing, default 8",
+                },
             },
             "required": [],
         },

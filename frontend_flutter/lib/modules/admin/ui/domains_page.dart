@@ -32,6 +32,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
   final Set<String> _busy = {};
   final _addDomainController = TextEditingController();
   bool _addAsSeed = false;
+  bool _addSinglePageOnly = false;
   bool _adding = false;
 
   @override
@@ -68,6 +69,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
         domain: domain,
         isRelevant: true,
         asSeed: _addAsSeed,
+        singlePageOnly: _addSinglePageOnly,
       );
       _addDomainController.clear();
       await _load();
@@ -123,6 +125,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
     Map<String, dynamic> item, {
     required bool relevant,
     bool asSeed = true,
+    bool singlePageOnly = false,
   }) async {
     final wallet = ref.read(sessionStateProvider).walletAddress;
     final domain = item['domain']?.toString() ?? '';
@@ -135,6 +138,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
         domain: domain,
         isRelevant: makeRelevant,
         asSeed: asSeed,
+        singlePageOnly: singlePageOnly,
       );
       await _load();
       if (!mounted) return;
@@ -247,13 +251,28 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
                 ],
               ),
               CheckboxListTile(
+                // Irrelevant once single_page_only is set — that mode never
+                // creates a monitored source regardless of this value.
                 value: _addAsSeed,
-                onChanged: (v) => setState(() => _addAsSeed = v ?? false),
+                onChanged: _addSinglePageOnly
+                    ? null
+                    : (v) => setState(() => _addAsSeed = v ?? false),
                 controlAffinity: ListTileControlAffinity.leading,
                 dense: true,
                 contentPadding: EdgeInsets.zero,
                 title: Text(
                   l10n.domainsAddAsSeed,
+                  style: theme.textTheme.bodySmall,
+                ),
+              ),
+              CheckboxListTile(
+                value: _addSinglePageOnly,
+                onChanged: (v) => setState(() => _addSinglePageOnly = v ?? false),
+                controlAffinity: ListTileControlAffinity.leading,
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(
+                  l10n.domainsAddSinglePageOnly,
                   style: theme.textTheme.bodySmall,
                 ),
               ),
@@ -388,6 +407,26 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
     );
   }
 
+  Widget _possibleServiceChip(ThemeData theme) {
+    const color = Color(0xFF8E24AA);
+    final l10n = context.l10n;
+    return Tooltip(
+      message: l10n.domainsPossibleServiceHint,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: color.withValues(alpha: 0.4)),
+        ),
+        child: Text(
+          l10n.domainsPossibleService,
+          style: theme.textTheme.labelSmall?.copyWith(color: color, fontWeight: FontWeight.w700),
+        ),
+      ),
+    );
+  }
+
   Widget _domainCard(ThemeData theme, AppThemeColors colors, Map<String, dynamic> item) {
     final l10n = context.l10n;
     final domain = item['domain']?.toString() ?? '';
@@ -396,6 +435,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
     final pendingUrl = item['pending_url']?.toString() ?? '';
     final score = (item['relevance_score'] as num?)?.toDouble() ?? 0;
     final category = item['category']?.toString() ?? '';
+    final possibleService = item['possible_service'] == true;
     final lastCrawled = (item['last_crawled_at']?.toString() ?? '').split('T').first;
     final pagesCrawled = (item['pages_crawled'] as num?)?.toInt() ?? 0;
     final busy = _busy.contains(domain);
@@ -453,6 +493,10 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
                           item['content_relevance_reasons'] as String? ?? ''),
                   child: _relevanceChip(theme, (item['content_relevance'] as num).toDouble()),
                 ),
+              ],
+              if (possibleService) ...[
+                const SizedBox(width: 6),
+                _possibleServiceChip(theme),
               ],
               const SizedBox(width: 6),
               Icon(Icons.open_in_new, size: 18, color: colors.muted),
@@ -542,6 +586,14 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
                       busy ? null : () => _set(item, relevant: true, asSeed: false),
                   style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact),
                   child: Text(l10n.domainsCrawlOnce),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  onPressed: busy
+                      ? null
+                      : () => _set(item, relevant: true, asSeed: false, singlePageOnly: true),
+                  style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact),
+                  child: Text(l10n.domainsAddSinglePageOnly),
                 ),
                 const SizedBox(width: 8),
                 FilledButton.tonal(

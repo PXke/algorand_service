@@ -1,4 +1,4 @@
-"""Tool-registry behaviors driven by prod compose-session findings:
+"""Tool-registry behaviors driven by prod compose-session findings.
 
 - fetch_url failures on hosts with a dedicated tool must steer the writer there
   via a `hint` in the error payload (the model routed around medium/reddit tools
@@ -8,11 +8,19 @@
 - github_activity given a bare owner/org must list repos, not error.
 """
 
-from app.modules.ai.research_tools import _fetch_failure_hint, _tool_fetch_url, _tool_github_activity
+from typing import Any, ClassVar
+
+import pytest
+
+from app.modules.ai.research_tools import (
+    _fetch_failure_hint,
+    _tool_fetch_url,
+    _tool_github_activity,
+)
 from app.modules.ai.writer_tools import all_tools
 
 
-def _names(schemas) -> set[str]:
+def _names(schemas: list[dict]) -> set[str]:
     return {s["function"]["name"] for s in schemas}
 
 
@@ -33,10 +41,7 @@ def test_fetch_hint_steers_medium_and_reddit_to_dedicated_tools() -> None:
 
 
 def test_reddit_tool_is_not_offered_but_stub_answers_without_network() -> None:
-    """Phased out 2026-07-16: reddit hard-blocks this server's IP, so offering
-    the tool burned one guaranteed-403 call per compose session. No schema is
-    registered anymore; the stub handler stays for stale references and must
-    answer without any network round-trip."""
+    """Phased out 2026-07-16: reddit hard-blocks this server's IP, so offering the tool burned one guaranteed-403 call per compose session. No schema is registered anymore; the stub handler stays for stale references and must answer without any network round-trip."""
     from app.modules.ai.research_tools import _tool_reddit_history
     from app.modules.ai.research_tools import research_tools as research_tools_fn
 
@@ -55,7 +60,7 @@ def test_fetch_hint_suggests_archive_for_gone_pages_only() -> None:
     assert _fetch_failure_hint("https://example.com", "timeout") == ""
 
 
-def test_entity_osint_tools_gated_to_investigative_lanes(monkeypatch) -> None:
+def test_entity_osint_tools_gated_to_investigative_lanes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENCORPORATES_API_TOKEN", "tok")
     generic, _ = all_tools(topic="generic")
     scam, _ = all_tools(topic="scam_alert")
@@ -74,7 +79,7 @@ def test_entity_osint_tools_gated_to_investigative_lanes(monkeypatch) -> None:
     assert "fetch_archive_text" in _names(generic)
 
 
-def test_corporate_registry_needs_token(monkeypatch) -> None:
+def test_corporate_registry_needs_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENCORPORATES_API_TOKEN", raising=False)
     schemas, handlers = all_tools(topic="scam_alert")
     assert "query_corporate_registry" not in _names(schemas)
@@ -82,7 +87,7 @@ def test_corporate_registry_needs_token(monkeypatch) -> None:
     assert "search_leak_databases" in _names(schemas)
 
 
-def test_github_activity_bare_owner_lists_repos(monkeypatch) -> None:
+def test_github_activity_bare_owner_lists_repos(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.modules.ai.research_tools as rt
 
     class _Resp:
@@ -93,7 +98,7 @@ def test_github_activity_bare_owner_lists_repos(monkeypatch) -> None:
             return None
 
         @staticmethod
-        def json():
+        def json() -> list[dict[str, str | int]]:
             return [
                 {
                     "full_name": "AlgoNode/nodely-docs",
@@ -105,7 +110,7 @@ def test_github_activity_bare_owner_lists_repos(monkeypatch) -> None:
 
     seen = {}
 
-    def fake_get(url, **kwargs):
+    def fake_get(url: str, **_kwargs: object) -> Any:  # noqa: ANN401 -- test double / fake response
         seen["url"] = url
         return _Resp()
 
@@ -116,16 +121,14 @@ def test_github_activity_bare_owner_lists_repos(monkeypatch) -> None:
     assert "owner/name" in out["hint"]
 
 
-def test_fetch_url_escalates_to_browser_on_thin_spa_shell(monkeypatch) -> None:
-    """A React/Vue shell (or a 'please enable JavaScript' fallback page) reads
-    as ~empty over plain HTTP — the tool must retry with the Playwright
-    renderer instead of reporting the shell as the page's real content."""
+def test_fetch_url_escalates_to_browser_on_thin_spa_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A React/Vue shell (or a 'please enable JavaScript' fallback page) reads as ~empty over plain HTTP — the tool must retry with the Playwright renderer instead of reporting the shell as the page's real content."""
     import app.modules.ai.research_tools as rt
     from app.modules.scraper.core.base import ScrapeResult
 
     class _Resp:
         status_code = 200
-        headers = {"content-type": "text/html"}
+        headers: ClassVar[dict[str, str]] = {"content-type": "text/html"}
         url = "https://example.com/play"
         text = '<html><body><div id="root"></div><script src="app.js"></script></body></html>'
 
@@ -133,10 +136,8 @@ def test_fetch_url_escalates_to_browser_on_thin_spa_shell(monkeypatch) -> None:
         def raise_for_status() -> None:
             return None
 
-    monkeypatch.setattr(rt, "_guarded_get", lambda *a, **k: _Resp())
-    monkeypatch.setattr(
-        "app.modules.scraper.crawler_registry.is_web_spa_enabled", lambda: True
-    )
+    monkeypatch.setattr(rt, "_guarded_get", lambda *_a, **_k: _Resp())
+    monkeypatch.setattr("app.modules.scraper.crawler_registry.is_web_spa_enabled", lambda: True)
 
     rendered = ScrapeResult(
         source_id="research-fetch_url",
@@ -148,7 +149,7 @@ def test_fetch_url_escalates_to_browser_on_thin_spa_shell(monkeypatch) -> None:
     )
 
     class _FakeBrowserScraper:
-        def scrape(self, url, source_id):
+        def scrape(self, _url: str, _source_id: str) -> ScrapeResult:
             return rendered
 
     monkeypatch.setattr(

@@ -35,6 +35,7 @@ class StorySpikedError(Exception):
     """The writer declined to compose this story. Not a failure — a judgment."""
 
     def __init__(self, reason: str, category: str = "not_newsworthy") -> None:
+        """Cap the reason to 500 chars and fall back to "not_newsworthy" for an unknown category."""
         self.reason = (reason or "").strip()[:500]
         self.category = category if category in SPIKE_CATEGORIES else "not_newsworthy"
         super().__init__(f"{self.category}: {self.reason}")
@@ -99,16 +100,33 @@ SPIKE_STORY_SCHEMA = ABORT_ARTICLE_SCHEMA
 # on a "no spike needed" call). A self-negating abort must NOT terminate. Covers
 # both the old "spike" wording and the new "abort" wording.
 _NON_ABORT_MARKERS = (
-    "no spike", "not spike", "don't spike", "do not spike", "no need to spike",
-    "spike is not needed", "spike not needed", "no spiking", "should not spike",
-    "won't spike", "will not spike",
-    "no abort", "not abort", "don't abort", "do not abort", "no need to abort",
-    "abort is not needed", "abort not needed", "no aborting", "should not abort",
-    "won't abort", "will not abort",
+    "no spike",
+    "not spike",
+    "don't spike",
+    "do not spike",
+    "no need to spike",
+    "spike is not needed",
+    "spike not needed",
+    "no spiking",
+    "should not spike",
+    "won't spike",
+    "will not spike",
+    "no abort",
+    "not abort",
+    "don't abort",
+    "do not abort",
+    "no need to abort",
+    "abort is not needed",
+    "abort not needed",
+    "no aborting",
+    "should not abort",
+    "won't abort",
+    "will not abort",
 )
 
 
-def abort_article_handler(category: str = "", reason: str = "", **_: Any) -> dict[str, Any]:
+def abort_article_handler(category: str = "", reason: str = "", **_: object) -> dict[str, Any]:
+    """Raise StorySpikedError to terminate the compose, unless the reason self-negates the abort."""
     low = (reason or "").strip().lower()
     if any(m in low for m in _NON_ABORT_MARKERS):
         # Not a real abort — the reason negates it. Return a corrective nudge so

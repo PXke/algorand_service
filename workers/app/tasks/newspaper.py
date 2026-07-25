@@ -1,3 +1,5 @@
+"""Task registry import: newspaper (compose/publish) Celery tasks."""
+
 from app.modules.newspaper.tasks.distribution_tasks import distribute_article
 from app.modules.newspaper.tasks.mistral_diff_tasks import check_and_publish_mistral_on_diff
 from app.modules.newspaper.tasks.price_analysis_tasks import (

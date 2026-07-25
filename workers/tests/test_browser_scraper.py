@@ -1,3 +1,5 @@
+"""Browser-backed scrape happy path and unresolved-URL handling."""
+
 from unittest.mock import patch
 
 import pytest
@@ -6,7 +8,7 @@ from app.modules.scraper.core.browser_scrape import BrowserPageResult, BrowserSc
 from app.modules.scraper.core.browser_scraper import BrowserScraper
 
 
-def test_browser_scraper_happy_path():
+def test_browser_scraper_happy_path() -> None:
     page = BrowserPageResult(
         title="Roadmap",
         text=(
@@ -29,6 +31,6 @@ def test_browser_scraper_happy_path():
     assert result.content_hash
 
 
-def test_browser_scraper_unresolved_url():
+def test_browser_scraper_unresolved_url() -> None:
     with pytest.raises(BrowserScrapeError, match="cannot resolve"):
         BrowserScraper().scrape("not-a-url", "svc-1")

@@ -1,5 +1,4 @@
-"""Token-aware context management: structure-preserving tool-result capping and
-oldest-first eliding when the conversation nears the model's context window."""
+"""Token-aware context management: structure-preserving tool-result capping and oldest-first eliding when the conversation nears the model's context window."""
 
 from __future__ import annotations
 
@@ -14,17 +13,20 @@ from app.modules.ai.token_budget import (
 
 
 def test_estimate_tokens_scales_with_length() -> None:
+    """Token estimate is 0 for empty text and grows with text length."""
     assert estimate_tokens("") == 0
     assert estimate_tokens("a" * 320) > estimate_tokens("a" * 32)
 
 
 def test_serialize_small_result_is_untouched() -> None:
+    """A tool result already under max_chars serializes unchanged."""
     result = {"url": "https://x.io", "text": "short body", "links": [{"url": "https://y.io"}]}
     out = serialize_tool_result(result, max_chars=10_000)
     assert json.loads(out) == result  # full, valid, unchanged
 
 
 def test_serialize_big_result_trims_text_but_keeps_links() -> None:
+    """Trims an oversized tool result's text field to fit max_chars while keeping it valid JSON and preserving high-signal fields like links."""
     result = {
         "url": "https://x.io",
         "title": "XBTO expands",
@@ -46,6 +48,7 @@ def test_serialize_big_result_trims_text_but_keeps_links() -> None:
 
 
 def test_fit_elides_oldest_tool_results_first() -> None:
+    """Elides the oldest tool result first to fit budget, keeping the newest and non-tool roles intact."""
     convo = [
         {"role": "system", "content": "S" * 400},
         {"role": "user", "content": "U" * 400},
@@ -64,6 +67,7 @@ def test_fit_elides_oldest_tool_results_first() -> None:
 
 
 def test_fit_noop_when_under_budget() -> None:
+    """Leaves the conversation untouched when it's already under the token budget."""
     convo = [{"role": "tool", "name": "t", "content": "small"}]
     snapshot = [dict(m) for m in convo]
     fit_messages_to_budget(convo, budget_tokens=10_000)

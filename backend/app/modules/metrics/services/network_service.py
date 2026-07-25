@@ -1,3 +1,5 @@
+"""Live algod node status for the network-health tile."""
+
 from __future__ import annotations
 
 import logging

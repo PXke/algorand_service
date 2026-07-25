@@ -26,6 +26,9 @@ VECTORS = [
     ("https://example.com", "example.com"),
     # Multi-label public suffix keeps the registrable label.
     ("https://blog.example.co.uk", "example.co.uk"),
+    # Japan's non-co.jp category suffixes need the same treatment (2026-07-21:
+    # a JVCEA citation collapsed to the meaningless "or.jp" registry category).
+    ("https://jvcea.or.jp/x", "jvcea.or.jp"),
     # Platform suffixes keep the publisher subdomain (distinct sources).
     ("https://foo.medium.com", "foo.medium.com"),
     ("https://medium.com", "medium.com"),

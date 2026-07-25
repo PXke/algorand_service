@@ -1,6 +1,10 @@
+"""Shared Cassandra session, prepared-statement cache, and concurrent-execute helpers."""
+
 from __future__ import annotations
 
+from collections.abc import Sequence
 from functools import lru_cache
+from typing import TYPE_CHECKING, Any
 
 from app.core.config import (
     CASSANDRA_HOSTS,
@@ -10,9 +14,14 @@ from app.core.config import (
     CASSANDRA_USERNAME,
 )
 
+if TYPE_CHECKING:
+    from cassandra.cluster import Session as CassandraSession
+    from cassandra.query import PreparedStatement
+
 
 @lru_cache(maxsize=1)
-def get_cassandra_session():
+def get_cassandra_session() -> CassandraSession:
+    """Build (once per process) and return the shared Cassandra cluster session."""
     from cassandra.auth import PlainTextAuthProvider
     from cassandra.cluster import EXEC_PROFILE_DEFAULT, Cluster, ExecutionProfile
     from cassandra.io.libevreactor import LibevConnection
@@ -53,20 +62,18 @@ def get_cassandra_session():
 
 
 @lru_cache(maxsize=512)
-def prepare_cached(cql: str):
-    """Prepare a statement once and reuse it (the driver caches the server-side
-    plan and enables token-aware routing for it). Use `?` placeholders, not `%s`.
-    Safe to call on hot paths — preparation happens only on the first call per
-    unique CQL string. This is the mechanism behind the statement registry in
-    `app.core.statements`; prefer the named registry entries at call sites."""
+def prepare_cached(cql: str) -> PreparedStatement:
+    """Prepare a statement once and reuse it (the driver caches the server-side plan and enables token-aware routing for it). Use `?` placeholders, not `%s`. Safe to call on hot paths — preparation happens only on the first call per unique CQL string. This is the mechanism behind the statement registry in `app.core.statements`; prefer the named registry entries at call sites."""
     return get_cassandra_session().prepare(cql)
 
 
-def execute_parallel(statements_and_params, *, concurrency: int = 32, raise_on_error: bool = True):
-    """Run heterogeneous (statement, params) pairs concurrently against the shared
-    session; results come back in input order as a list of (success, result_or_exc)
-    tuples. Use for independent queries that would otherwise run in a sequential
-    loop (per-bucket / per-day fan-outs)."""
+def execute_parallel(
+    statements_and_params: Sequence[tuple[PreparedStatement | str, Sequence]],
+    *,
+    concurrency: int = 32,
+    raise_on_error: bool = True,
+) -> list[tuple[bool, Any]]:
+    """Run heterogeneous (statement, params) pairs concurrently against the shared session; results come back in input order as a list of (success, result_or_exc) tuples. Use for independent queries that would otherwise run in a sequential loop (per-bucket / per-day fan-outs)."""
     from cassandra.concurrent import execute_concurrent
 
     return execute_concurrent(
@@ -78,10 +85,13 @@ def execute_parallel(statements_and_params, *, concurrency: int = 32, raise_on_e
 
 
 def execute_parallel_with_args(
-    statement, args_seq, *, concurrency: int = 32, raise_on_error: bool = True
-):
-    """Run ONE statement concurrently over many parameter tuples; results in input
-    order as (success, result_or_exc) tuples."""
+    statement: PreparedStatement,
+    args_seq: Sequence[Sequence],
+    *,
+    concurrency: int = 32,
+    raise_on_error: bool = True,
+) -> list[tuple[bool, Any]]:
+    """Run ONE statement concurrently over many parameter tuples; results in input order as (success, result_or_exc) tuples."""
     from cassandra.concurrent import execute_concurrent_with_args
 
     return execute_concurrent_with_args(

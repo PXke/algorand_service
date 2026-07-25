@@ -1,8 +1,4 @@
-"""Fan out an article to every enabled social channel. Each channel is
-independent — one failing (bad credentials, rate limit, network hiccup)
-never blocks or affects another. Never raises: distribution is a best-effort
-side effect of publishing, not part of the publish transaction itself.
-"""
+"""Fan out an article to every enabled social channel. Each channel is independent — one failing (bad credentials, rate limit, network hiccup) never blocks or affects another. Never raises: distribution is a best-effort side effect of publishing, not part of the publish transaction itself."""
 
 from __future__ import annotations
 
@@ -23,9 +19,7 @@ def _build_distributors() -> list[SocialDistributor]:
         BlueskyDistributor(
             handle=config.BLUESKY_IDENTIFIER, app_password=config.BLUESKY_APP_PASSWORD
         ),
-        TelegramDistributor(
-            bot_token=config.TELEGRAM_BOT_TOKEN, chat_id=config.TELEGRAM_CHAT_ID
-        ),
+        TelegramDistributor(bot_token=config.TELEGRAM_BOT_TOKEN, chat_id=config.TELEGRAM_CHAT_ID),
         MastodonDistributor(
             instance_url=config.MASTODON_INSTANCE_URL,
             access_token=config.MASTODON_ACCESS_TOKEN,
@@ -35,9 +29,11 @@ def _build_distributors() -> list[SocialDistributor]:
 
 def distribute(share: ArticleShare) -> list[DistributionResult]:
     """Post `share` to every distributor that has credentials configured.
+
     Returns one DistributionResult per attempted (enabled) channel — a
     channel with no credentials is silently skipped, not reported as a
-    failure, since "not configured" isn't an error state."""
+    failure, since "not configured" isn't an error state.
+    """
     results: list[DistributionResult] = []
     for distributor in _build_distributors():
         if not distributor.enabled:

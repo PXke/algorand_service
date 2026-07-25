@@ -41,8 +41,7 @@ def estimate_tokens(text: str) -> int:
 
 
 def estimate_message_tokens(messages: list[dict[str, Any]]) -> int:
-    """Approximate total tokens of a chat conversation: content + serialized
-    tool-call arguments + a small per-message envelope."""
+    """Approximate total tokens of a chat conversation: content + serialized tool-call arguments + a small per-message envelope."""
     total = 0
     for m in messages:
         total += _MESSAGE_OVERHEAD_TOKENS
@@ -56,12 +55,8 @@ def estimate_message_tokens(messages: list[dict[str, Any]]) -> int:
     return total
 
 
-def serialize_tool_result(result: Any, max_chars: int) -> str:
-    """JSON-serialize a tool result capped at ``max_chars`` WITHOUT mangling the
-    structure: if it's too big, trim only the single longest string field (e.g. a
-    page's `text`/`body`) and keep everything else, so `links`, `url`, and `title`
-    still reach the model. Replaces the old ``json.dumps(result)[:N]`` that cut
-    mid-string into invalid JSON and dropped trailing fields."""
+def serialize_tool_result(result: Any, max_chars: int) -> str:  # noqa: ANN401 -- arbitrary tool-result shape
+    """JSON-serialize a tool result capped at ``max_chars`` WITHOUT mangling the structure: if it's too big, trim only the single longest string field (e.g. a page's `text`/`body`) and keep everything else, so `links`, `url`, and `title` still reach the model. Replaces the old ``json.dumps(result)[:N]`` that cut mid-string into invalid JSON and dropped trailing fields."""
     blob = json.dumps(result)
     if len(blob) <= max_chars:
         return blob
@@ -97,14 +92,12 @@ def serialize_tool_result(result: Any, max_chars: int) -> str:
 
 
 def fit_messages_to_budget(messages: list[dict[str, Any]], budget_tokens: int) -> int:
-    """Shrink a conversation IN PLACE to fit ``budget_tokens`` by eliding the
-    OLDEST tool-result messages first (content → a short placeholder). System,
-    user and assistant messages (the source material, the instructions, and the
-    evolving draft) are never touched. Returns the post-trim token estimate.
+    """Shrink a conversation IN PLACE to fit ``budget_tokens`` by eliding the OLDEST tool-result messages first (content → a short placeholder). System, user and assistant messages (the source material, the instructions, and the evolving draft) are never touched. Returns the post-trim token estimate.
 
     In place so a caller holding the same list (e.g. a live debug transcript)
     stays consistent; eliding rather than mid-cutting keeps each tool message
-    valid JSON."""
+    valid JSON.
+    """
     total = estimate_message_tokens(messages)
     if total <= budget_tokens:
         return total

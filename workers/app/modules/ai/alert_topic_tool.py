@@ -1,5 +1,4 @@
-"""Writer-confirmed alert topics: keyword topic classification demotes to a
-routing hint; the reader-facing consequences require the writer's judgment.
+"""Writer-confirmed alert topics: keyword topic classification demotes to a routing hint; the reader-facing consequences require the writer's judgment.
 
 Root-caused 2026-07-18: classify_publish_topic's context+alarm heuristic
 tagged the Algorand Foundation's own homepage rebrand as SCAM_ALERT — the
@@ -63,7 +62,8 @@ CONFIRM_ALERT_TOPIC_SCHEMA: dict[str, Any] = {
 }
 
 
-def confirm_alert_topic_handler(kind: str = "", reason: str = "", **_: Any) -> dict[str, Any]:
+def confirm_alert_topic_handler(kind: str = "", reason: str = "", **_: object) -> dict[str, Any]:
+    """Validate and record the writer's confirm_alert_topic tool call."""
     kind = (kind or "").strip().lower()
     if kind not in ALERT_KINDS:
         return {"confirmed": False, "error": f"kind must be one of {ALERT_KINDS}"}
@@ -72,7 +72,9 @@ def confirm_alert_topic_handler(kind: str = "", reason: str = "", **_: Any) -> d
 
 def confirmed_alert_from_trace(trace: list[dict] | None) -> str | None:
     """Last confirmed alert kind, or None if the writer never confirmed one.
-    Post-hoc trace scan, same shape as breaking_reason_from_trace."""
+
+    Post-hoc trace scan, same shape as breaking_reason_from_trace.
+    """
     kind: str | None = None
     for entry in trace or ():
         if entry.get("tool") != "confirm_alert_topic":

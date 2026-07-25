@@ -1,9 +1,11 @@
+"""HTTP routes for pushing external ingest signals into the pipeline."""
+
 from __future__ import annotations
 
 import secrets
 
 import msgspec
-from robyn import Request, Response
+from robyn import Request, Response, Robyn
 
 from app.core import serialization
 from app.core.config import settings
@@ -32,7 +34,8 @@ def _check_ingest_auth(request: Request) -> Response | None:
     return None
 
 
-def register_ingest_routes(app) -> None:
+def register_ingest_routes(app: Robyn) -> None:
+    """Register the external ingest-signal endpoint on the app."""
     @app.post("/api/v1/ingest/signal")
     async def ingest_signal(request: Request) -> Response:
         denied = _check_ingest_auth(request)

@@ -20,10 +20,11 @@ from app.modules.gatekeeper.fact_align import numeric_entailment_score
 
 @dataclass(frozen=True)
 class DeterministicGate:
-    factuality_score: float          # grounded fraction of numeric claims
+    """The deterministic factuality/completeness gate's verdict."""
+    factuality_score: float  # grounded fraction of numeric claims
     completeness_passed: bool
-    passed: bool                     # overall, given the configured threshold
-    reasons: tuple[str, ...] = ()    # human-readable failure reasons
+    passed: bool  # overall, given the configured threshold
+    reasons: tuple[str, ...] = ()  # human-readable failure reasons
     ungrounded: tuple[str, ...] = ()
     failed_rules: tuple[str, ...] = ()
 
@@ -39,6 +40,7 @@ class DeterministicGate:
 
 @dataclass(frozen=True)
 class GateConfig:
+    """Thresholds for the deterministic gate."""
     fact_min: float = 0.80
     enforce: bool = False
 
@@ -81,22 +83,15 @@ _SCORER: dict[str, object] = {}
 
 
 def quality_proba(*, title: str, body: str, source_url: str = "") -> float | None:
-    """P(good article) from the trained ModernBERT quality head, or None when
-    GATEKEEPER_QUALITY_LIVE is off, no trained model exists, or the ML stack is
-    absent (caller falls back to the sklearn grader, then the heuristic floor).
-    The flag is separate from checkpoint existence: a quality-only checkpoint can
-    be trained well before there's a gold-run corpus for factuality/tone, so
-    serving it live is an explicit opt-in, not automatic on file presence. The
-    scorer is cached per path — loading ModernBERT per article would be far too
-    slow."""
+    """P(good article) from the trained ModernBERT quality head, or None when GATEKEEPER_QUALITY_LIVE is off, no trained model exists, or the ML stack is absent (caller falls back to the sklearn grader, then the heuristic floor). The flag is separate from checkpoint existence: a quality-only checkpoint can be trained well before there's a gold-run corpus for factuality/tone, so serving it live is an explicit opt-in, not automatic on file presence. The scorer is cached per path — loading ModernBERT per article would be far too slow."""
     try:
-        import os
+        from pathlib import Path
 
         from app.core.config import GATEKEEPER_MODEL_PATH, GATEKEEPER_QUALITY_LIVE
 
         if not GATEKEEPER_QUALITY_LIVE:
             return None
-        if not GATEKEEPER_MODEL_PATH or not os.path.exists(GATEKEEPER_MODEL_PATH):
+        if not GATEKEEPER_MODEL_PATH or not Path(GATEKEEPER_MODEL_PATH).exists():
             return None
         from app.modules.gatekeeper.inference import GatekeeperScorer, quality_grade
         from app.modules.gatekeeper.model import build_input
@@ -114,13 +109,8 @@ def quality_proba(*, title: str, body: str, source_url: str = "") -> float | Non
         return None
 
 
-def gate_draft(
-    *, source_text: str, article_text: str, service_id: str
-) -> DeterministicGate | None:
-    """Convenience wrapper for the publish task: loads the trace by service_id,
-    reads config, runs the gate. Returns None when disabled or on any error
-    (shadow-safe). The caller enforces only when ``GATEKEEPER_ENFORCE`` and
-    ``not result.passed``."""
+def gate_draft(*, source_text: str, article_text: str, service_id: str) -> DeterministicGate | None:
+    """Convenience wrapper for the publish task: loads the trace by service_id, reads config, runs the gate. Returns None when disabled or on any error (shadow-safe). The caller enforces only when ``GATEKEEPER_ENFORCE`` and ``not result.passed``."""
     try:
         from app.core.config import (
             GATEKEEPER_ENABLED,
@@ -134,7 +124,9 @@ def gate_draft(
 
         trace = load_investigation_trace(service_id)
         return run_deterministic_gate(
-            source_text, trace, article_text,
+            source_text,
+            trace,
+            article_text,
             GateConfig(fact_min=GATEKEEPER_FACT_MIN, enforce=GATEKEEPER_ENFORCE),
         )
     except Exception:

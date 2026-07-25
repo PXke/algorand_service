@@ -20,8 +20,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 from collections import Counter
+from collections.abc import Iterator
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # compose_sessions has a single 'all' bucket (see 029_compose_sessions.cql); the
 # transcript writer uses the same constant.
@@ -56,11 +61,11 @@ def _known_tools() -> set[str]:
         schemas, _ = all_tools(context=None)
         return {s["function"]["name"] for s in schemas if s.get("function")}
     except Exception as exc:  # pragma: no cover - env-dependent
-        print(f"  (could not load live tool registry: {exc}; DEAD-tools skipped)")
+        logger.warning("could not load live tool registry: %s; DEAD-tools skipped", exc)
         return set()
 
 
-def _iter_sessions(limit: int):
+def _iter_sessions(limit: int) -> Iterator[Any]:
     from cassandra.query import SimpleStatement
 
     from app.core.cassandra import get_cassandra_session
@@ -78,8 +83,7 @@ def _iter_sessions(limit: int):
 
 
 def _result_is_error(content: str) -> bool:
-    """A role='tool' message's content is the json.dumps'd result (truncated to
-    4000 chars). Errored handlers return {"error": ...}; detect that robustly."""
+    """A role='tool' message's content is the json.dumps'd result (truncated to 4000 chars). Errored handlers return {"error": ...}; detect that robustly."""
     if not content:
         return False
     try:
@@ -92,6 +96,7 @@ def _result_is_error(content: str) -> bool:
 
 
 def main() -> None:
+    """CLI entrypoint: scan recent compose sessions and print tool-usage/error stats."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--limit", type=int, default=2000, help="max sessions to scan (newest first)")
     args = ap.parse_args()
@@ -151,37 +156,41 @@ def main() -> None:
                 onchain_examples.append(f"    {ts}  [{', '.join(hits)}]  {src}")
 
     # ---- report ----------------------------------------------------------
-    print(f"\nScanned {n_sessions} compose sessions  ({n_failed_status} non-ok status)")
-    print("Models: " + ", ".join(f"{m}={c}" for m, c in by_model.most_common()))
+    logger.info("\nScanned %d compose sessions  (%d non-ok status)", n_sessions, n_failed_status)
+    logger.info("Models: %s", ", ".join(f"{m}={c}" for m, c in by_model.most_common()))
 
-    print("\n== TOOL USAGE (calls, errors, error-rate) ==")
+    logger.info("\n== TOOL USAGE (calls, errors, error-rate) ==")
     if not calls:
-        print("  no tool calls recorded")
+        logger.info("  no tool calls recorded")
     for name, c in calls.most_common():
         e = errors.get(name, 0)
         rate = f"{100 * e / c:4.0f}%" if c else "  - "
-        print(f"  {name:28s} {c:6d} calls  {e:5d} err  {rate}")
+        logger.info("  %-28s %6d calls  %5d err  %s", name, c, e, rate)
     # tools that ONLY appear as errored results (rare) still show via errors map
     for name in sorted(set(errors) - set(calls)):
-        print(f"  {name:28s} {'-':>6}        {errors[name]:5d} err  (results only)")
+        logger.info("  %-28s %6s        %5d err  (results only)", name, "-", errors[name])
 
     if known:
         dead = sorted(known - set(calls))
-        print("\n== DEAD TOOLS (registered, never called) ==")
-        print("  " + (", ".join(dead) if dead else "none — every registered tool was used"))
+        logger.info("\n== DEAD TOOLS (registered, never called) ==")
+        logger.info("  %s", ", ".join(dead) if dead else "none — every registered tool was used")
 
-    print("\n== SILENT ON-CHAIN DEMAND ==")
-    print(f"  {onchain_refs} stories reference an on-chain id in the body")
-    print(
-        f"  {onchain_verified} of those used an on-chain tool "
-        f"({len(_ONCHAIN_TOOLS)} such tools exist)"
+    logger.info("\n== SILENT ON-CHAIN DEMAND ==")
+    logger.info("  %d stories reference an on-chain id in the body", onchain_refs)
+    logger.info(
+        "  %d of those used an on-chain tool (%d such tools exist)",
+        onchain_verified,
+        len(_ONCHAIN_TOOLS),
     )
     unverified = onchain_refs - onchain_verified
-    print(f"  -> {unverified} stories wrote about on-chain entities with NO way to verify them")
+    logger.info(
+        "  -> %d stories wrote about on-chain entities with NO way to verify them", unverified
+    )
     if onchain_examples:
-        print("  examples (date, what was referenced, source):")
-        print("\n".join(onchain_examples))
+        logger.info("  examples (date, what was referenced, source):")
+        logger.info("%s", "\n".join(onchain_examples))
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

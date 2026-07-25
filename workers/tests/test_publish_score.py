@@ -1,11 +1,16 @@
+"""Priority scoring: trust, novelty, urgency, and noise components."""
+
 from datetime import date
+
+import pytest
 
 from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
 from app.modules.newspaper.publish_score import compute_priority
 from app.modules.newspaper.source_trust import source_trust_bonus
 
 
-def test_official_mail_high_trust(monkeypatch) -> None:
+def test_official_mail_high_trust(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Grants a high trust bonus for mail from a configured official domain."""
     monkeypatch.setattr(
         "app.modules.newspaper.source_trust.config.OFFICIAL_MAIL_FROM_DOMAINS",
         "algorand.foundation",
@@ -18,6 +23,7 @@ def test_official_mail_high_trust(monkeypatch) -> None:
 
 
 def test_relevant_page_outranks_offtopic() -> None:
+    """Ranks an on-topic Algorand page above an off-topic one on relevance and total score."""
     # Selection is driven by relevance (+ novelty/timeliness when scored): an
     # on-topic Algorand page must outrank an off-topic one.
     relevant = compute_priority(
@@ -39,6 +45,7 @@ def test_relevant_page_outranks_offtopic() -> None:
 
 
 def test_priority_components_sum_for_updates() -> None:
+    """Sums the ranked components, subtracts the noise penalty, then scales by the novelty factor."""
     # For content updates the total is the sum of the ranked components, minus
     # the (now live) thin-content noise penalty — heuristic sub-scores
     # (topic_base/trust/service_weight/urgency) are reported but not ranked.
@@ -53,8 +60,7 @@ def test_priority_components_sum_for_updates() -> None:
         timeliness=0.6,
     )
     components = (
-        b.relevance_bonus + b.novelty_bonus + b.timeliness_bonus
-        + b.diff_bonus + b.announce_bonus
+        b.relevance_bonus + b.novelty_bonus + b.timeliness_bonus + b.diff_bonus + b.announce_bonus
     )
     # 3 added lines (<5) + short page_text (<200 chars) both trip the noise
     # penalty here, so it must be nonzero and actually subtracted.
@@ -67,17 +73,18 @@ def test_priority_components_sum_for_updates() -> None:
 
 
 def test_noise_penalty_actually_lowers_total() -> None:
+    """Confirms the noise penalty actually subtracts from the total, not just a displayed number."""
     # The zk-colorsort case: a barely-there page and a thin diff must actually
     # cost points, not just display a "noise_penalty" number that does nothing.
-    kwargs = dict(
-        topic=PublishTopic.CONTENT_UPDATE,
-        publish_kind=PublishKind.CONTENT_UPDATE,
-        page_title="Update",
-        source_kind="web",
-        relevance=0.31,
-        novelty=1.0,
-        timeliness=1.0,
-    )
+    kwargs = {
+        "topic": PublishTopic.CONTENT_UPDATE,
+        "publish_kind": PublishKind.CONTENT_UPDATE,
+        "page_title": "Update",
+        "source_kind": "web",
+        "relevance": 0.31,
+        "novelty": 1.0,
+        "timeliness": 1.0,
+    }
     thin = compute_priority(
         **kwargs,
         page_text="Last updated: July 6, 2026.",
@@ -94,30 +101,28 @@ def test_noise_penalty_actually_lowers_total() -> None:
 
 
 def test_confident_classifier_reject_crushes_total_near_zero() -> None:
+    """Lets a confident classifier "don't publish" verdict sink the total, not merely halve it."""
     # A confident "don't publish" verdict must be able to sink a candidate
     # below real competitors, not just halve it.
-    kwargs = dict(
-        topic=PublishTopic.CONTENT_UPDATE,
-        publish_kind=PublishKind.CONTENT_UPDATE,
-        page_title="Update",
-        page_text="Algorand mainnet update with substantive real content here.",
-        diff="+++ a\n" + "\n".join(f"+ line {i}" for i in range(10)),
-        source_kind="web",
-        relevance=0.9,
-        novelty=1.0,
-        timeliness=1.0,
-    )
+    kwargs = {
+        "topic": PublishTopic.CONTENT_UPDATE,
+        "publish_kind": PublishKind.CONTENT_UPDATE,
+        "page_title": "Update",
+        "page_text": "Algorand mainnet update with substantive real content here.",
+        "diff": "+++ a\n" + "\n".join(f"+ line {i}" for i in range(10)),
+        "source_kind": "web",
+        "relevance": 0.9,
+        "novelty": 1.0,
+        "timeliness": 1.0,
+    }
     neutral = compute_priority(**kwargs)
-    demoted = compute_priority(
-        **kwargs, classifier_publish=False, classifier_confidence=1.0
-    )
+    demoted = compute_priority(**kwargs, classifier_publish=False, classifier_confidence=1.0)
     # Full confidence must crush toward zero, not merely halve the total.
     assert demoted.total <= round(neutral.total * 0.1)
 
 
 def test_zero_novelty_suppresses_high_relevance_repeat() -> None:
-    """An already-covered story (novelty 0) must sink below a modest fresh one,
-    even from a maximally relevant source — the Defly-repeat case."""
+    """An already-covered story (novelty 0) must sink below a modest fresh one, even from a maximally relevant source — the Defly-repeat case."""
     repeat = compute_priority(
         topic=PublishTopic.CONTENT_UPDATE,
         publish_kind=PublishKind.CONTENT_UPDATE,
@@ -182,8 +187,7 @@ def test_fresh_story_outranks_stale_pr_at_equal_relevance() -> None:
 
 
 def test_seo_spam_forfeits_timeliness_and_announce() -> None:
-    """A price-prediction farm page keeps relevance but earns no freshness or
-    announcement credit — real news at equal relevance must outrank it."""
+    """A price-prediction farm page keeps relevance but earns no freshness or announcement credit — real news at equal relevance must outrank it."""
     spam = compute_priority(
         topic=PublishTopic.NEW_SERVICE,
         publish_kind=PublishKind.CONTENT_UPDATE,
@@ -206,15 +210,16 @@ def test_seo_spam_forfeits_timeliness_and_announce() -> None:
         novelty=1.0,
         timeliness=0.5,
     )
-    assert spam.seo_spam and not news.seo_spam
-    assert spam.timeliness_bonus == 0 and spam.announce_bonus == 0
+    assert spam.seo_spam
+    assert not news.seo_spam
+    assert spam.timeliness_bonus == 0
+    assert spam.announce_bonus == 0
     assert news.announce_bonus > 0  # "Brings" is announcement-shaped
     assert news.total > spam.total
 
 
 def test_discovery_is_flat_and_below_substantive_update() -> None:
-    """Discoveries score flat relevance-scaled points (one shot each); a real
-    diff-driven update at similar relevance must outrank them."""
+    """Discoveries score flat relevance-scaled points (one shot each); a real diff-driven update at similar relevance must outrank them."""
     discovery = compute_priority(
         topic=PublishTopic.NEW_SERVICE,
         publish_kind=PublishKind.SERVICE_DISCOVERY,
@@ -244,27 +249,21 @@ def test_discovery_is_flat_and_below_substantive_update() -> None:
 
 def test_classifier_verdict_nudges_priority() -> None:
     """Confident learned verdicts adjust rank; None (training mode) is inert."""
-    kwargs = dict(
-        topic=PublishTopic.CONTENT_UPDATE,
-        publish_kind=PublishKind.CONTENT_UPDATE,
-        page_title="Update",
-        page_text="Algorand mainnet update.",
-        diff=None,
-        source_kind="web",
-        relevance=0.5,
-        novelty=1.0,
-        timeliness=0.5,
-    )
+    kwargs = {
+        "topic": PublishTopic.CONTENT_UPDATE,
+        "publish_kind": PublishKind.CONTENT_UPDATE,
+        "page_title": "Update",
+        "page_text": "Algorand mainnet update.",
+        "diff": None,
+        "source_kind": "web",
+        "relevance": 0.5,
+        "novelty": 1.0,
+        "timeliness": 0.5,
+    }
     neutral = compute_priority(**kwargs)
-    boosted = compute_priority(
-        **kwargs, classifier_publish=True, classifier_confidence=0.9
-    )
-    demoted = compute_priority(
-        **kwargs, classifier_publish=False, classifier_confidence=0.9
-    )
-    inert = compute_priority(
-        **kwargs, classifier_publish=None, classifier_confidence=0.9
-    )
+    boosted = compute_priority(**kwargs, classifier_publish=True, classifier_confidence=0.9)
+    demoted = compute_priority(**kwargs, classifier_publish=False, classifier_confidence=0.9)
+    inert = compute_priority(**kwargs, classifier_publish=None, classifier_confidence=0.9)
     assert boosted.total > neutral.total
     assert demoted.total < neutral.total
     assert inert.total == neutral.total
@@ -272,6 +271,7 @@ def test_classifier_verdict_nudges_priority() -> None:
 
 
 def test_sdk_topic_base_high() -> None:
+    """Gives an SDK release a high topic_base score."""
     breakdown = compute_priority(
         topic=PublishTopic.SDK_RELEASE,
         publish_kind=PublishKind.CONTENT_UPDATE,

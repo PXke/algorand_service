@@ -56,10 +56,7 @@ _MAX_EXCISED_SENTENCE_CHARS = 500
 
 
 def find_unattributed_authority(body: str) -> list[str]:
-    """Matched authority phrases, deduplicated, lowercase. Overlapping matches
-    collapse to the earliest pattern's span ("industry-wide research suggests"
-    is one finding, not also a "research suggests" finding inside it) so one
-    weasel construction produces one revision-feedback line."""
+    """Matched authority phrases, deduplicated, lowercase. Overlapping matches collapse to the earliest pattern's span ("industry-wide research suggests" is one finding, not also a "research suggests" finding inside it) so one weasel construction produces one revision-feedback line."""
     spans: list[tuple[int, int]] = []
     found: list[str] = []
     seen: set[str] = set()
@@ -77,8 +74,7 @@ def find_unattributed_authority(body: str) -> list[str]:
 
 
 def authority_revision_issues(body: str) -> list[str]:
-    """Revision-loop feedback lines, one per finding — same contract as the
-    dead-link / chain-entity feedback in _review_and_revise."""
+    """Revision-loop feedback lines, one per finding — same contract as the dead-link / chain-entity feedback in _review_and_revise."""
     return [
         f"unattributed authority: '{phrase}' — a claim only counts if YOUR "
         "research trace holds its source; name that specific source in the "
@@ -89,9 +85,7 @@ def authority_revision_issues(body: str) -> list[str]:
 
 
 def _excise_from_prose(body: str, removed: list[str]) -> str:
-    """Remove whole sentences still carrying an authority phrase. Markdown
-    structure lines (headings, tables, lists, images) are never touched —
-    the phrases live in prose, and structural edits aren't worth the risk."""
+    """Remove whole sentences still carrying an authority phrase. Markdown structure lines (headings, tables, lists, images) are never touched — the phrases live in prose, and structural edits aren't worth the risk."""
     out_lines: list[str] = []
     for line in body.split("\n"):
         stripped = line.lstrip()
@@ -113,8 +107,10 @@ def _excise_from_prose(body: str, removed: list[str]) -> str:
 
 def excise_unattributed_authority(payload: dict[str, Any]) -> dict[str, Any]:
     """Post-revision backstop: excise sentences the writer didn't fix.
+
     Mutates and returns payload; removals recorded under
-    payload['_authority_removed'] so the final_output stays auditable."""
+    payload['_authority_removed'] so the final_output stays auditable.
+    """
     from app.core.config import AUTHORITY_GATE_ENABLED
 
     if not AUTHORITY_GATE_ENABLED:

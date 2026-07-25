@@ -45,8 +45,7 @@ _SOURCES_HEADING_RE = re.compile(r"(?im)^#{1,6}\s*(sources?|references?)\b")
 
 
 def homepage_from_service_id(service_id: str | None) -> str:
-    """Reconstruct a source homepage from a service_id slug (dots slugified to
-    dashes, e.g. "perawallet-app" -> "https://perawallet.app"). "" if implausible."""
+    """Reconstruct a source homepage from a service_id slug (dots slugified to dashes, e.g. "perawallet-app" -> "https://perawallet.app"). "" if implausible."""
     sid = (service_id or "").strip().lower()
     if not sid or "-" not in sid or not re.fullmatch(r"[a-z0-9.-]+", sid):
         return ""
@@ -83,8 +82,7 @@ def resolve_source_images(
     service_id: str | None,
     validate: _Validator | None = None,
 ) -> tuple[str, str]:
-    """(og_image, logo_image): the first share image and first brand icon found
-    across the candidate URLs. Best-effort — returns ("", "") on any failure.
+    """(og_image, logo_image): the first share image and first brand icon found across the candidate URLs. Best-effort — returns ("", "") on any failure.
 
     When ``validate`` is given, every candidate is validated BEFORE being
     accepted, so a declared-but-dead og:image (404 artwork, hung IPFS gateway)
@@ -93,7 +91,8 @@ def resolve_source_images(
     on the dead nftstorage.link gateway; both articles published imageless
     while their cited Sources links advertised perfectly fetchable images
     that this early-stop skipped and the caller's post-hoc validation could
-    no longer recover."""
+    no longer recover.
+    """
     og, logo = "", ""
     for url in candidate_urls(source_url=source_url, service_id=service_id):
         try:
@@ -112,11 +111,7 @@ def resolve_source_images(
 
 
 def source_urls_from_body(body: str, limit: int = 4) -> list[str]:
-    """Cited http(s) links from the article's Sources/References section (the
-    writer appends every fetched research URL there — reference_block.py),
-    falling back to all body links when no such section exists. This is the
-    image path for lanes whose source_url isn't fetchable (editorial://brief/…,
-    mail://message/…) and whose service_id isn't a domain slug."""
+    """Cited http(s) links from the article's Sources/References section (the writer appends every fetched research URL there — reference_block.py), falling back to all body links when no such section exists. This is the image path for lanes whose source_url isn't fetchable (editorial://brief/…, mail://message/…) and whose service_id isn't a domain slug."""
     text = body or ""
     heading = _SOURCES_HEADING_RE.search(text)
     if heading:
@@ -142,10 +137,12 @@ def resolve_article_images(
     validate: _Validator | None = None,
 ) -> tuple[str, str]:
     """resolve_source_images, then fall back to the article's own cited links.
+
     Best-effort — returns ("", "") when nothing anywhere advertises an image.
 
     Pass ``validate`` so dead declared images are rejected mid-search and the
-    cited-links fallback still runs (see resolve_source_images)."""
+    cited-links fallback still runs (see resolve_source_images).
+    """
     og, logo = resolve_source_images(
         source_url=source_url, service_id=service_id, validate=validate
     )

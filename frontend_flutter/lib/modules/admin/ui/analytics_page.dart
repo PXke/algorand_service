@@ -14,11 +14,12 @@ import '../../../core/ui/page_content.dart';
 import '../../../core/providers/session_providers.dart';
 
 /// Admin tab: first-party traffic analytics, recorded server-side from the SSR
-/// document routes (no client JS). Shows pageviews split human vs bot, the top
-/// pages, and the top referrers — so you can see when Ecosia/Bing/etc. send
-/// traffic — over a configurable window. The '(direct)' bucket is broken down
-/// by UA class plus a short-lived raw sample, to tell dark-social/bookmark
-/// traffic apart from scripts that slip past the bot filter.
+/// document routes (no client JS). Bot/scraper traffic is filtered out at
+/// record time, so everything here is human-only: pageviews, top pages, and
+/// top referrers — so you can see when Ecosia/Bing/etc. send traffic — over a
+/// configurable window. The '(direct)' bucket is broken down by UA class plus
+/// a short-lived raw sample, to tell dark-social/bookmark traffic apart from
+/// scripts that slip past the bot filter.
 class AnalyticsTab extends ConsumerStatefulWidget {
   const AnalyticsTab({super.key});
 
@@ -38,7 +39,6 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
     'Acquisition',
     'Content',
     'Audience',
-    'Crawlers',
   ];
 
   @override
@@ -161,10 +161,13 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
           ]),
           _rankTable(theme, colors, 'Campaigns (utm / ref tags)',
               data['campaigns'], 'campaign'),
+          _referrersOverTime(theme, colors, data['referrers_daily']),
           _rankTable(theme, colors, 'Top referrers', data['top_referrers'], 'referrer'),
           _rankTable(theme, colors, 'Top referrers (full URL)',
               data['top_referrer_urls'], 'referrer_url', linkExternal: true),
           _referrerPaths(theme, colors, data['referrer_paths']),
+          _articleReferrers(theme, colors, data['article_referrers']),
+          _referrerArticles(theme, colors, data['referrer_articles']),
           _rankTable(theme, colors, 'Direct breakdown (UA class)',
               data['direct_uaclass'], 'ua_class'),
           _directSamples(theme, colors, data['direct_samples']),
@@ -192,12 +195,6 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
           _sessionsChart(theme, colors, data['sessions_daily']),
           _hourChart(theme, colors, data['hours']),
           _countries(theme, colors, data['geo']),
-        ];
-        break;
-      case 'Crawlers':
-        sections = [
-          _aiCrawler(theme, colors, data['ai_crawler']),
-          _rankTable(theme, colors, 'All crawlers', data['top_bots'], 'bot'),
         ];
         break;
       case 'Overview':
@@ -239,6 +236,138 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
               for (final r in list)
                 _referrerPathRow(theme, colors, r as Map),
             ],
+    );
+  }
+
+  /// Which referrers drove traffic to each article — one row per article
+  /// (unlike _referrerPaths' flat top-N pairs list, which mixes in Home /
+  /// section pages and only shows one pairing at a time).
+  Widget _articleReferrers(ThemeData theme, dynamic colors, dynamic rows) {
+    final list = (rows as List?) ?? const [];
+    return _section(
+      theme,
+      colors,
+      'Article traffic sources',
+      list.isEmpty
+          ? [Text('No data yet', style: theme.textTheme.bodySmall)]
+          : [
+              for (final r in list) _articleReferrerRow(theme, colors, r as Map),
+            ],
+    );
+  }
+
+  Widget _articleReferrerRow(ThemeData theme, dynamic colors, Map r) {
+    final label = r['label']?.toString() ?? r['path']?.toString() ?? '';
+    final views = (r['views'] as num?)?.toInt() ?? 0;
+    final referrers = (r['referrers'] as List?) ?? const [];
+    final accent = theme.colorScheme.primary;
+    return InkWell(
+      onTap: () => _openPath(r['path']?.toString()),
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyMedium?.copyWith(color: accent)),
+                  const SizedBox(height: 3),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 2,
+                    children: [
+                      for (final ref in referrers)
+                        Text(
+                          '${(ref as Map)['referrer']} · ${ref['views']}',
+                          style: theme.textTheme.labelSmall
+                              ?.copyWith(color: colors.muted),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text('$views',
+                style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The mirror of _articleReferrers: one collapsible group per referrer,
+  /// expanding to its top 20 articles.
+  Widget _referrerArticles(ThemeData theme, dynamic colors, dynamic rows) {
+    final list = (rows as List?) ?? const [];
+    return _section(
+      theme,
+      colors,
+      'Articles by referrer',
+      list.isEmpty
+          ? [Text('No data yet', style: theme.textTheme.bodySmall)]
+          : [
+              for (final r in list) _referrerArticleGroup(theme, colors, r as Map),
+            ],
+    );
+  }
+
+  Widget _referrerArticleGroup(ThemeData theme, dynamic colors, Map r) {
+    final referrer = r['referrer']?.toString() ?? '';
+    final views = (r['views'] as num?)?.toInt() ?? 0;
+    final articles = (r['articles'] as List?) ?? const [];
+    return Theme(
+      data: theme.copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: const EdgeInsets.only(left: 14, bottom: 8),
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(referrer,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+            ),
+            const SizedBox(width: 8),
+            Text('$views',
+                style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700)),
+          ],
+        ),
+        children: [
+          for (final art in articles) _referrerArticleRow(theme, colors, art as Map),
+        ],
+      ),
+    );
+  }
+
+  Widget _referrerArticleRow(ThemeData theme, dynamic colors, Map art) {
+    return InkWell(
+      onTap: () => _openPath(art['path']?.toString()),
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(art['label']?.toString() ?? '',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.primary)),
+            ),
+            const SizedBox(width: 8),
+            Text('${art['views']}',
+                style: theme.textTheme.labelSmall?.copyWith(color: colors.muted)),
+          ],
+        ),
+      ),
     );
   }
 
@@ -360,25 +489,18 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
     final totals = (data['totals'] as Map?) ?? const {};
     final prev = (data['prev_totals'] as Map?) ?? const {};
     final human = (totals['human'] as num?)?.toInt() ?? 0;
-    final bot = (totals['bot'] as num?)?.toInt() ?? 0;
     final humanUnique = (totals['human_unique'] as num?)?.toInt() ?? 0;
     final prevHuman = (prev['human'] as num?)?.toInt() ?? 0;
-    final prevBot = (prev['bot'] as num?)?.toInt() ?? 0;
     final prevHumanUnique = (prev['human_unique'] as num?)?.toInt() ?? 0;
-    final total = human + bot;
-    final share = total == 0 ? 0.0 : human / total;
 
     final sessions = (data['sessions'] as Map?) ?? const {};
     final sessTotal = (sessions['total'] as num?)?.toInt() ?? 0;
     final returningRate = (sessions['returning_rate'] as num?)?.toDouble() ?? 0.0;
     final pagesPerVisit = (sessions['pages_per_visit'] as num?)?.toDouble() ?? 0.0;
-    // Sessions that never got a confirmed 2nd hit — a bot-likelihood signal
-    // (UA denylist alone misses a scraper spoofing a browser UA), not a hard
-    // filter: plenty of genuine one-and-done readers land in here too.
+    // Sessions that never got a confirmed 2nd hit — a cheap engagement signal,
+    // not a hard filter: plenty of genuine one-and-done readers land in here.
     final bounceRate = (sessions['bounce_rate'] as num?)?.toDouble() ?? 0.0;
     final prevSessions = (prev['sessions'] as num?)?.toInt() ?? 0;
-    final ai = (data['ai_crawler'] as Map?) ?? const {};
-    final aiShare = (ai['share_of_bots'] as num?)?.toDouble() ?? 0.0;
 
     return LayoutBuilder(builder: (context, constraints) {
       // Reflow the stat cards instead of overflowing on narrow widths: aim for 4
@@ -386,42 +508,27 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
       final perRow = constraints.maxWidth < 720 ? 2 : 4;
       final cardWidth =
           (constraints.maxWidth - 16 * (perRow - 1)) / perRow;
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      return Wrap(
+        spacing: 16,
+        runSpacing: 16,
         children: [
-          Wrap(
-            spacing: 16,
-            runSpacing: 16,
-            children: [
-              _statCard(theme, colors, 'Human views', human, Icons.person_outline,
-                  width: cardWidth, delta: _delta(human, prevHuman)),
-              _statCard(theme, colors, 'Unique visitors', humanUnique,
-                  Icons.groups_outlined,
-                  width: cardWidth, delta: _delta(humanUnique, prevHumanUnique)),
-              _statCard(theme, colors, 'Visits', sessTotal, Icons.login_outlined,
-                  width: cardWidth, delta: _delta(sessTotal, prevSessions)),
-              _statCard(theme, colors, 'Returning', sessTotal,
-                  Icons.replay_outlined,
-                  width: cardWidth, valueText: '${(returningRate * 100).round()}%'),
-              _statCard(theme, colors, 'Pages / visit', sessTotal,
-                  Icons.auto_stories_outlined,
-                  width: cardWidth,
-                  valueText: pagesPerVisit.toStringAsFixed(1)),
-              _statCard(theme, colors, 'Likely single-hit', sessTotal,
-                  Icons.help_outline,
-                  width: cardWidth, valueText: '${(bounceRate * 100).round()}%'),
-              _statCard(theme, colors, 'Bot views', bot, Icons.smart_toy_outlined,
-                  width: cardWidth, delta: _delta(bot, prevBot)),
-              _statCard(theme, colors, 'AI-crawler share', bot,
-                  Icons.auto_awesome_outlined,
-                  width: cardWidth, valueText: '${(aiShare * 100).round()}%'),
-              _statCard(theme, colors, 'Human share', human,
-                  Icons.pie_chart_outline,
-                  width: cardWidth, valueText: '${(share * 100).round()}%'),
-            ],
-          ),
-          const SizedBox(height: 12),
-          _splitBar(theme, colors, share),
+          _statCard(theme, colors, 'Human views', human, Icons.person_outline,
+              width: cardWidth, delta: _delta(human, prevHuman)),
+          _statCard(theme, colors, 'Unique visitors', humanUnique,
+              Icons.groups_outlined,
+              width: cardWidth, delta: _delta(humanUnique, prevHumanUnique)),
+          _statCard(theme, colors, 'Visits', sessTotal, Icons.login_outlined,
+              width: cardWidth, delta: _delta(sessTotal, prevSessions)),
+          _statCard(theme, colors, 'Returning', sessTotal,
+              Icons.replay_outlined,
+              width: cardWidth, valueText: '${(returningRate * 100).round()}%'),
+          _statCard(theme, colors, 'Pages / visit', sessTotal,
+              Icons.auto_stories_outlined,
+              width: cardWidth,
+              valueText: pagesPerVisit.toStringAsFixed(1)),
+          _statCard(theme, colors, 'Likely single-hit', sessTotal,
+              Icons.help_outline,
+              width: cardWidth, valueText: '${(bounceRate * 100).round()}%'),
         ],
       );
     });
@@ -431,29 +538,6 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
   double? _delta(int current, int previous) {
     if (previous <= 0) return null;
     return (current - previous) / previous * 100;
-  }
-
-  Widget _splitBar(ThemeData theme, dynamic colors, double humanShare) {
-    final accent = theme.colorScheme.primary;
-    return Tooltip(
-      message: '${(humanShare * 100).round()}% human · '
-          '${(100 - humanShare * 100).round()}% bot',
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(4),
-        child: Row(
-          children: [
-            Expanded(
-              flex: math.max(0, (humanShare * 1000).round()),
-              child: Container(height: 6, color: accent),
-            ),
-            Expanded(
-              flex: math.max(0, ((1 - humanShare) * 1000).round()),
-              child: Container(height: 6, color: colors.muted.withValues(alpha: 0.35)),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   Widget _statCard(ThemeData theme, dynamic colors, String label, int value, IconData icon,
@@ -514,13 +598,11 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
           [Text('No data yet', style: theme.textTheme.bodySmall)]);
     }
     final accent = theme.colorScheme.primary;
-    final botColor = colors.muted.withValues(alpha: 0.45);
 
     double maxY = 1;
     for (final row in daily) {
       final h = ((row as Map)['human'] as num?)?.toDouble() ?? 0;
-      final b = (row['bot'] as num?)?.toDouble() ?? 0;
-      maxY = math.max(maxY, math.max(h, b));
+      maxY = math.max(maxY, h);
     }
     final labels = [
       for (final r in daily) ((r as Map)['day']?.toString() ?? '').replaceFirst('${DateTime.now().year}-', '')
@@ -529,15 +611,7 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Text('By day', style: theme.textTheme.titleMedium),
-            const Spacer(),
-            _legendDot(theme, accent, 'Human'),
-            const SizedBox(width: 12),
-            _legendDot(theme, botColor, 'Bot'),
-          ],
-        ),
+        Text('By day', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
         Container(
           decoration: BoxDecoration(
@@ -590,12 +664,6 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
                         BarChartRodData(
                           toY: ((daily[i] as Map)['human'] as num?)?.toDouble() ?? 0,
                           color: accent,
-                          width: 6,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                        BarChartRodData(
-                          toY: ((daily[i] as Map)['bot'] as num?)?.toDouble() ?? 0,
-                          color: botColor,
                           width: 6,
                           borderRadius: BorderRadius.circular(2),
                         ),
@@ -946,18 +1014,51 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
     );
   }
 
-  // ── AI-crawler visibility (Crawlers) ───────────────────────────────────────
-
-  Widget _aiCrawler(ThemeData theme, dynamic colors, dynamic ai) {
-    final m = (ai as Map?) ?? const {};
-    final views = (m['views'] as num?)?.toInt() ?? 0;
-    final share = (m['share_of_bots'] as num?)?.toDouble() ?? 0.0;
+  /// Stacked-bar trend of the top referrers by day (+ 'Other' rollup for
+  /// everything past the top few) — top_referrers only gives a single
+  /// window-wide ranking, this shows how the mix shifts day to day.
+  Widget _referrersOverTime(ThemeData theme, dynamic colors, dynamic referrersDaily) {
+    final m = (referrersDaily as Map?) ?? const {};
+    final referrers = ((m['referrers'] as List?) ?? const []).cast<String>();
     final daily = (m['daily'] as List?) ?? const [];
-    final accent = theme.colorScheme.primary;
+    if (referrers.isEmpty || daily.isEmpty) {
+      return _section(theme, colors, 'Referrers over time',
+          [Text('No data yet', style: theme.textTheme.bodySmall)]);
+    }
+    final palette = _palette(theme);
+    final colorFor = <String, Color>{
+      for (var i = 0; i < referrers.length; i++) referrers[i]: palette[i % palette.length],
+    };
+
+    double maxY = 1;
+    for (final row in daily) {
+      final total = referrers.fold<double>(
+          0, (sum, r) => sum + (((row as Map)[r] as num?)?.toDouble() ?? 0));
+      maxY = math.max(maxY, total);
+    }
+    final labels = [
+      for (final r in daily)
+        ((r as Map)['day']?.toString() ?? '')
+            .replaceFirst('${DateTime.now().year}-', '')
+    ];
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('AI crawlers', style: theme.textTheme.titleMedium),
+        Row(
+          children: [
+            Text('Referrers over time', style: theme.textTheme.titleMedium),
+            const Spacer(),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 12,
+          runSpacing: 6,
+          children: [
+            for (final r in referrers) _legendDot(theme, colorFor[r]!, r),
+          ],
+        ),
         const SizedBox(height: 8),
         Container(
           decoration: BoxDecoration(
@@ -965,34 +1066,70 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: colors.border),
           ),
-          padding: const EdgeInsets.all(16),
-          child: Row(
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(children: [
-                    Icon(Icons.auto_awesome_outlined, size: 16, color: colors.muted),
-                    const SizedBox(width: 6),
-                    Text('GPTBot · ClaudeBot · Perplexity · CCBot · Bytespider',
-                        style:
-                            theme.textTheme.labelSmall?.copyWith(color: colors.muted)),
-                  ]),
-                  const SizedBox(height: 8),
-                  Text('$views', style: theme.textTheme.headlineSmall),
-                  Text('${(share * 100).round()}% of bot traffic',
-                      style:
-                          theme.textTheme.bodySmall?.copyWith(color: colors.muted)),
+          padding: const EdgeInsets.fromLTRB(8, 16, 16, 8),
+          child: SizedBox(
+            height: 200,
+            child: BarChart(
+              BarChartData(
+                maxY: maxY * 1.15,
+                alignment: BarChartAlignment.spaceAround,
+                gridData: FlGridData(
+                  show: true,
+                  drawVerticalLine: false,
+                  getDrawingHorizontalLine: (v) =>
+                      FlLine(color: colors.border, strokeWidth: 0.6),
+                ),
+                borderData: FlBorderData(show: false),
+                titlesData: FlTitlesData(
+                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  leftTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: true, reservedSize: 34)),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 24,
+                      getTitlesWidget: (value, meta) {
+                        final i = value.toInt();
+                        if (i < 0 || i >= labels.length) return const SizedBox.shrink();
+                        if (labels.length > 7 && i % 2 != 0) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(labels[i],
+                              style: TextStyle(fontSize: 10, color: colors.muted)),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                barGroups: [
+                  for (int i = 0; i < daily.length; i++)
+                    BarChartGroupData(
+                      x: i,
+                      barRods: [
+                        BarChartRodData(
+                          toY: referrers.fold<double>(
+                              0,
+                              (sum, r) =>
+                                  sum + (((daily[i] as Map)[r] as num?)?.toDouble() ?? 0)),
+                          width: 9,
+                          borderRadius: BorderRadius.circular(2),
+                          rodStackItems: () {
+                            final items = <BarChartRodStackItem>[];
+                            double from = 0;
+                            for (final r in referrers) {
+                              final v = ((daily[i] as Map)[r] as num?)?.toDouble() ?? 0;
+                              items.add(BarChartRodStackItem(from, from + v, colorFor[r]!));
+                              from += v;
+                            }
+                            return items;
+                          }(),
+                        ),
+                      ],
+                    ),
                 ],
               ),
-              const SizedBox(width: 20),
-              Expanded(
-                child: SizedBox(
-                  height: 70,
-                  child: _sparkline(daily, accent),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       ],
@@ -1218,23 +1355,14 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
     );
   }
 
-  /// Top pages with a human/bot split per page (clickable to open the page).
+  /// Top pages by human views (clickable to open the page).
   Widget _topPages(ThemeData theme, dynamic colors, dynamic rows) {
     final list = (rows as List?) ?? const [];
     final accent = theme.colorScheme.primary;
-    final botColor = colors.muted.withValues(alpha: 0.7);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Text('Top pages', style: theme.textTheme.titleMedium),
-            const Spacer(),
-            _legendDot(theme, accent, 'Human'),
-            const SizedBox(width: 12),
-            _legendDot(theme, botColor, 'Bot'),
-          ],
-        ),
+        Text('Top pages', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
         Container(
           decoration: BoxDecoration(
@@ -1251,10 +1379,8 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
                       _pageRow(
                         theme,
                         accent,
-                        botColor,
                         (r as Map)['label']?.toString() ?? r['path']?.toString() ?? '',
-                        (r['human'] as num?)?.toInt() ?? 0,
-                        (r['bot'] as num?)?.toInt() ?? 0,
+                        (r['views'] as num?)?.toInt() ?? 0,
                         () => _openPath(r['path']?.toString()),
                       ),
                   ],
@@ -1264,15 +1390,8 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
     );
   }
 
-  Widget _pageRow(ThemeData theme, Color accent, Color botColor, String label,
-      int human, int bot, VoidCallback onTap) {
-    Widget count(int v, Color color) => SizedBox(
-          width: 44,
-          child: Text('$v',
-              textAlign: TextAlign.right,
-              style: theme.textTheme.bodyMedium
-                  ?.copyWith(fontWeight: FontWeight.w700, color: color)),
-        );
+  Widget _pageRow(
+      ThemeData theme, Color accent, String label, int views, VoidCallback onTap) {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(6),
@@ -1287,8 +1406,13 @@ class _AnalyticsTabState extends ConsumerState<AnalyticsTab> {
                   style: theme.textTheme.bodyMedium?.copyWith(color: accent)),
             ),
             const SizedBox(width: 12),
-            count(human, accent),
-            count(bot, botColor),
+            SizedBox(
+              width: 44,
+              child: Text('$views',
+                  textAlign: TextAlign.right,
+                  style: theme.textTheme.bodyMedium
+                      ?.copyWith(fontWeight: FontWeight.w700, color: accent)),
+            ),
           ],
         ),
       ),

@@ -18,15 +18,27 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
+
+
+def _today() -> date:
+    """UTC calendar date "today" — DTZ011 wants tz-aware, not system-local."""
+    return datetime.now(tz=UTC).date()
+
 
 # Multipliers for magnitude suffixes/words. Order in the alternation matters:
 # longer words must precede their prefixes ("billion" before "b").
 _MULTIPLIER = {
-    "k": 1e3, "thousand": 1e3,
-    "m": 1e6, "mn": 1e6, "million": 1e6,
-    "b": 1e9, "bn": 1e9, "billion": 1e9,
-    "t": 1e12, "trillion": 1e12,
+    "k": 1e3,
+    "thousand": 1e3,
+    "m": 1e6,
+    "mn": 1e6,
+    "million": 1e6,
+    "b": 1e9,
+    "bn": 1e9,
+    "billion": 1e9,
+    "t": 1e12,
+    "trillion": 1e12,
 }
 
 # A money symbol or "USD"/"ALGO" makes a number a *currency* quantity; "%" makes
@@ -54,9 +66,10 @@ _ENTITY_RE = re.compile(
 
 @dataclass(frozen=True)
 class Quantity:
-    value: float          # normalized magnitude (suffix applied)
-    unit: str             # "currency" | "percent" | "plain"
-    raw: str              # exact source substring
+    """One numeric claim extracted from article text."""
+    value: float  # normalized magnitude (suffix applied)
+    unit: str  # "currency" | "percent" | "plain"
+    raw: str  # exact source substring
     start: int
     end: int
 
@@ -79,7 +92,8 @@ def _unit_class(cur: str | None, suf: str | None) -> str:
 def extract_numbers(text: str) -> list[Quantity]:
     """All numeric quantities in ``text``, magnitude-normalized and unit-tagged.
 
-    "$1.5M" -> Quantity(1_500_000.0, "currency"); "12%" -> (12.0, "percent")."""
+    "$1.5M" -> Quantity(1_500_000.0, "currency"); "12%" -> (12.0, "percent").
+    """
     if not text:
         return []
     out: list[Quantity] = []
@@ -108,7 +122,8 @@ def extract_entities(text: str) -> list[str]:
     """Candidate proper-noun / ticker / domain strings (deduped, order-preserved).
 
     Filters single stop-capitalized words that start sentences from carrying too
-    much weight is left to callers; this stays permissive on purpose."""
+    much weight is left to callers; this stays permissive on purpose.
+    """
     if not text:
         return []
     seen: dict[str, None] = {}
@@ -142,9 +157,7 @@ _COMPATIBLE: dict[str, frozenset[str]] = {
 
 
 def _matches(a: Quantity, b: Quantity, tol: float) -> bool:
-    """Two quantities entail each other: compatible unit class (see
-    ``_COMPATIBLE``) and within ``tol`` relative difference (absolute when one
-    side is ~0)."""
+    """Two quantities entail each other: compatible unit class (see ``_COMPATIBLE``) and within ``tol`` relative difference (absolute when one side is ~0)."""
     if b.unit not in _COMPATIBLE.get(a.unit, frozenset({a.unit})):
         return False
     scale = max(abs(a.value), abs(b.value))
@@ -155,9 +168,10 @@ def _matches(a: Quantity, b: Quantity, tol: float) -> bool:
 
 @dataclass(frozen=True)
 class EntailmentResult:
-    score: float                 # grounded fraction in [0,1] (1.0 when no claims)
-    total: int                   # numeric claims found in the article
-    grounded: int                # claims with a matching trace anchor
+    """Fraction of an article's numeric claims grounded in the trace."""
+    score: float  # grounded fraction in [0,1] (1.0 when no claims)
+    total: int  # numeric claims found in the article
+    grounded: int  # claims with a matching trace anchor
     ungrounded: tuple[str, ...]  # raw article numbers with no anchor (fabrication risk)
 
 
@@ -170,7 +184,8 @@ def numeric_entailment_score(
     difference of a trace number counts as grounded (rounding/derivation is
     acceptable). Numbers beyond every trace anchor are reported as
     ``ungrounded`` — the deterministic signal for invented or drifted figures.
-    An article with no numbers is vacuously grounded (score 1.0)."""
+    An article with no numbers is vacuously grounded (score 1.0).
+    """
     anchors = extract_numbers(trace_text)
     claims = extract_numbers(article_text)
     if not claims:
@@ -192,9 +207,24 @@ def numeric_entailment_score(
 
 # --- date extraction → content recency ------------------------------------
 _MONTHS = {
-    m: i for i, m in enumerate(
-        ["january", "february", "march", "april", "may", "june", "july",
-         "august", "september", "october", "november", "december"], start=1)
+    m: i
+    for i, m in enumerate(
+        [
+            "january",
+            "february",
+            "march",
+            "april",
+            "may",
+            "june",
+            "july",
+            "august",
+            "september",
+            "october",
+            "november",
+            "december",
+        ],
+        start=1,
+    )
 }
 _MONTHS.update({m[:3]: i for m, i in list(_MONTHS.items())})
 
@@ -219,10 +249,11 @@ def extract_dates(text: str, *, min_year: int = 1990, max_year: int | None = Non
     Handles ISO (2026-06-18), slashed (18/06/2026), and month-name forms
     ("June 2026", "18 June 2026", "June 18, 2026"). Slashed dates are read as
     DAY/MONTH/YEAR, falling back to MONTH/DAY when the first field is > 12.
-    Years outside [min_year, today+1] are dropped as noise."""
+    Years outside [min_year, today+1] are dropped as noise.
+    """
     if not text:
         return []
-    cap = (max_year or date.today().year) + 1
+    cap = (max_year or _today().year) + 1
     out: list[date] = []
 
     def keep(d: date | None) -> None:
@@ -233,11 +264,11 @@ def extract_dates(text: str, *, min_year: int = 1990, max_year: int | None = Non
         keep(_safe_date(int(m[1]), int(m[2]), int(m[3])))
     for m in _SLASH_RE.finditer(text):
         a, b, y = int(m[1]), int(m[2]), int(m[3])
-        if a > 12 >= b:          # unambiguously DAY/MONTH
+        if a > 12 >= b:  # unambiguously DAY/MONTH
             keep(_safe_date(y, b, a))
-        elif b > 12 >= a:        # unambiguously MONTH/DAY
+        elif b > 12 >= a:  # unambiguously MONTH/DAY
             keep(_safe_date(y, a, b))
-        else:                    # ambiguous → DAY/MONTH (platform locale)
+        else:  # ambiguous → DAY/MONTH (platform locale)
             keep(_safe_date(y, b, a))
     for m in _MDY_RE.finditer(text):
         keep(_safe_date(int(m[3]), _MONTHS[m[1].lower()], int(m[2])))
@@ -252,8 +283,7 @@ _LEAD_CHARS = 500
 
 
 def _past_event_dates(text: str, *, today: date) -> list[date]:
-    """Dates mentioned in ``text`` that are today or earlier — roadmap/future
-    mentions are excluded so they do not inflate timeliness."""
+    """Dates mentioned in ``text`` that are today or earlier — roadmap/future mentions are excluded so they do not inflate timeliness."""
     return [d for d in extract_dates(text) if d <= today]
 
 
@@ -267,10 +297,11 @@ def event_anchor_date(
     """Best guess at when the *story* happened — not forward-looking roadmap dates.
 
     Priority: (1) structured page ``published_at`` metadata, (2) the most recent
-    past-or-present date in the title + lead."""
+    past-or-present date in the title + lead.
+    """
     from app.modules.scraper.core.page_metadata import parse_published_date
 
-    today = today or date.today()
+    today = today or _today()
     meta = parse_published_date(published_at)
     if meta is not None:
         return meta
@@ -291,7 +322,7 @@ def _timeliness_from_anchor(
 ) -> float:
     if anchor is None:
         return unknown_prior
-    today = today or date.today()
+    today = today or _today()
     age = (today - anchor).days
     if age <= 0:
         return 1.0
@@ -310,7 +341,8 @@ def source_timeliness_score(
     """0.0 = very stale, 1.0 = fresh. Used for publish-queue priority.
 
     ``unknown_prior`` applies when no anchor date can be inferred (typically 0.5
-    so undated landing pages are neither boosted nor heavily penalized)."""
+    so undated landing pages are neither boosted nor heavily penalized).
+    """
     if stale_days is None:
         from app.core.config import PAGE_STALE_MAX_AGE_DAYS
 
@@ -336,8 +368,9 @@ def content_recency_score(
 
     Ignores forward-looking roadmap dates (unlike the old max-all-dates rule).
     Returns None when the text names no parseable past date, so the caller can
-    apply a neutral prior."""
-    today = today or date.today()
+    apply a neutral prior.
+    """
+    today = today or _today()
     past = _past_event_dates(text, today=today)
     if not past:
         return None

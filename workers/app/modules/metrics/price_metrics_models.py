@@ -1,3 +1,5 @@
+"""Data models for price ticks, samples, window stats, and briefs."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +8,7 @@ from datetime import datetime
 
 @dataclass(frozen=True)
 class PriceTick:
+    """One fetched spot-price reading."""
     asset_id: str
     asset_name: str
     currency: str
@@ -19,6 +22,7 @@ class PriceTick:
 
 @dataclass(frozen=True)
 class PriceSampleRow:
+    """One stored price sample row."""
     asset_id: str
     collected_at: datetime
     price_usd: float
@@ -31,6 +35,7 @@ class PriceSampleRow:
 
 @dataclass(frozen=True)
 class WindowStats:
+    """Aggregated price stats over one time window."""
     label: str
     sample_count: int
     price_min: float
@@ -43,6 +48,7 @@ class WindowStats:
 
 @dataclass(frozen=True)
 class PriceMetricsBrief:
+    """A windowed price-stats snapshot ready for storage/display."""
     asset_id: str
     asset_name: str
     currency: str

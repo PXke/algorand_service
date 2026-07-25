@@ -1,3 +1,5 @@
+"""Keyword-based relevance scoring for crawled pages."""
+
 from __future__ import annotations
 
 import re
@@ -32,8 +34,33 @@ KNOWN_DOMAINS: frozenset[str] = frozenset(
         # with zero chain mentions in the served HTML — preview-scored 0 and
         # sat in the pending frontier pool.
         "lofty.ai",
+        # ZeroSignal (private AI chat, settled per-request on Algorand): the
+        # Algorand connection is only ever stated on ITS DISCOVERER's page
+        # (txnlab.dev) — checked all 6 crawled pages of zerosignal.ai itself
+        # (home, /chat, /login, /recover, /dev/calculator, /dev/analytics),
+        # zero mentions of "algorand" anywhere, no explorer links either.
+        # Owner-confirmed relevant (2026-07-22).
+        "zerosignal.ai",
+        # dark-coin.com: an NFT game powered by dark-coin.io, on Algorand —
+        # owner-confirmed (2026-07-22); the .com marketing site doesn't state
+        # the chain itself.
+        "dark-coin.com",
+        "dark-coin.io",
+        # Sow & Reap: introduced on r/AlgorandOfficial and other official
+        # Algorand channels, but not stated on sowandreap.in's own pages —
+        # owner-confirmed (2026-07-22).
+        "sowandreap.in",
     }
 )
+
+# Algorand block explorers — a page that links to a SPECIFIC asset/account
+# there (not just uses the word) is about as strong a relevance signal as
+# exists, and catches multi-chain services whose own prose never says
+# "Algorand" at all: quantoz.com's EURQ product page links straight to its
+# allo.info ASA page but the word "algorand" appears nowhere in the page's own
+# visible text — EURQ is also issued on Ethereum/XRPL/Stellar/Xahau, so the
+# marketing copy stays chain-agnostic (2026-07-21).
+EXPLORER_DOMAINS: frozenset[str] = frozenset({"allo.info", "explorer.perawallet.app"})
 
 POSITIVE_KEYWORDS: tuple[str, ...] = (
     "algorand",
@@ -63,9 +90,9 @@ POSITIVE_KEYWORDS: tuple[str, ...] = (
     "hesabpay",
 )
 
+
 def _ecosystem_listed() -> frozenset[str]:
-    """Directory-listed domains from the crawler's sync (cached there); the
-    classifier must keep working with no DB, so failures mean 'no extras'."""
+    """Directory-listed domains from the crawler's sync (cached there); the classifier must keep working with no DB, so failures mean 'no extras'."""
     try:
         from app.modules.crawler.ecosystem_sync import ecosystem_listed_domains
 
@@ -103,6 +130,7 @@ def seo_spam_hits(text: str) -> int:
         return 0
     return sum(1 for pat in SEO_SPAM_PATTERNS if pat.search(text))
 
+
 DEFAULT_THRESHOLD = 0.35
 
 # The single source of Algorand keyword truth for crude hit-counting (storage
@@ -111,25 +139,34 @@ DEFAULT_THRESHOLD = 0.35
 # that the two ad-hoc keyword lists in publish_classifier used to do. score_page
 # keeps its own phrase-tuned POSITIVE_KEYWORDS for the weighted 0-1 classifier.
 RELEVANCE_KEYWORDS: tuple[str, ...] = (
-    "algorand", "algo", "asa", "defi", "mainnet", "testnet",
-    "microalgo", "ppos", "algod",
+    "algorand",
+    "algo",
+    "asa",
+    "defi",
+    "mainnet",
+    "testnet",
+    "microalgo",
+    "ppos",
+    "algod",
 )
 _RELEVANCE_KEYWORD_RE: tuple[re.Pattern[str], ...] = tuple(
     re.compile(rf"\b{kw}\b", re.IGNORECASE) for kw in RELEVANCE_KEYWORDS
 )
 
 
+_KEYWORD_FAMILY_CAP = 3
+
+
 def keyword_hits(text: str) -> int:
-    """Count of distinct on-topic keyword families present in ``text`` (word-
-    boundary matched, so no algorithm/nasa false positives). One shared helper so
-    the storage score and the quality gate can't drift apart again."""
+    """Weighted on-topic keyword signal in ``text`` (word-boundary matched, so no algorithm/nasa false positives). Each family contributes its OCCURRENCE count, capped at ``_KEYWORD_FAMILY_CAP`` so one repeated term can't inflate the score without bound — but a page that says "Algorand" repeatedly now scores above one that name-drops it once, instead of both being flattened to the same single point. Root-caused 2026-07-24: urvote.ca's homepage says "Algorand" 2+ times in body copy (built-on-Algorand blurb, Startup Challenge mention) and nothing else on the family list, so the old presence-only count gave it 1 point regardless — same as a single incidental mention — and it failed the quality floor despite being genuinely, specifically Algorand-related. One shared helper so the storage score and the quality gate can't drift apart again."""
     if not text:
         return 0
-    return sum(1 for pat in _RELEVANCE_KEYWORD_RE if pat.search(text))
+    return sum(min(len(pat.findall(text)), _KEYWORD_FAMILY_CAP) for pat in _RELEVANCE_KEYWORD_RE)
 
 
 @dataclass(frozen=True)
 class ClassifierResult:
+    """One page's keyword-relevance scoring result."""
     score: float
     in_scope: bool
     reasons: tuple[str, ...]
@@ -143,11 +180,27 @@ def _hostname(url: str) -> str:
     return host
 
 
-def score_page(*, url: str, text: str, threshold: float = DEFAULT_THRESHOLD) -> ClassifierResult:
+def score_page(
+    *,
+    url: str,
+    text: str,
+    outbound_links: tuple[str, ...] = (),
+    threshold: float = DEFAULT_THRESHOLD,
+) -> ClassifierResult:
+    """Score a crawled page's relevance and decide whether it's in-scope for the frontier."""
     reasons: list[str] = []
     score = 0.0
     host = _hostname(url)
     lowered = text.lower()
+
+    for link in outbound_links:
+        link_host = _hostname(link)
+        if link_host and any(
+            link_host == d or link_host.endswith(f".{d}") for d in EXPLORER_DOMAINS
+        ):
+            score += 0.5
+            reasons.append(f"links_to_explorer:{link_host}")
+            break
 
     if host:
         for domain in KNOWN_DOMAINS:
@@ -168,7 +221,12 @@ def score_page(*, url: str, text: str, threshold: float = DEFAULT_THRESHOLD) -> 
                     reasons.append(f"ecosystem_domain:{domain}")
                     break
 
-    keyword_hits = sum(1 for kw in POSITIVE_KEYWORDS if kw in lowered)
+    # Weighted like keyword_hits() below: each phrase contributes its
+    # occurrence count (capped so one repeated phrase can't dominate), not
+    # just presence/absence — a page repeating "algorand" several times in
+    # body copy should outscore one that name-drops it once, same fix as
+    # the quality-floor gate (urvote.ca, 2026-07-24).
+    keyword_hits = sum(min(lowered.count(kw), _KEYWORD_FAMILY_CAP) for kw in POSITIVE_KEYWORDS)
     if keyword_hits:
         score += min(0.5, keyword_hits * 0.08)
         reasons.append(f"keywords:{keyword_hits}")

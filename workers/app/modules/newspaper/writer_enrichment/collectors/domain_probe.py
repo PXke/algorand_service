@@ -1,3 +1,5 @@
+"""Probe a service's primary domain for liveness before composing."""
+
 from __future__ import annotations
 
 import logging
@@ -11,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 
 def probe_domain(domain: str, *, timeout: float = 12.0) -> dict[str, Any]:
-    """
-    Safe surface check: HTTPS reachability + response headers (no page JS execution).
+    """Safe surface check: HTTPS reachability + response headers (no page JS execution).
+
     WHOIS / company registry → phase 3 (external API).
     """
     host = domain.strip().lower().removeprefix("www.")
@@ -62,6 +64,7 @@ def probe_domain(domain: str, *, timeout: float = 12.0) -> dict[str, Any]:
 
 
 def primary_domain_from_source(source_url: str, page_text: str) -> str:
+    """Resolve the primary domain from the source URL, falling back to the page text."""
     if source_url.startswith("http"):
         try:
             return urlparse(source_url).netloc.lower().removeprefix("www.")

@@ -1,4 +1,8 @@
+"""Compose-article routing to Mistral and its no-fallback failure behavior."""
+
 from __future__ import annotations
+
+from typing import Any, Never
 
 import pytest
 
@@ -7,10 +11,8 @@ from app.modules.newspaper.article_composer import compose_scrape_article
 from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
 
 
-def test_compose_scrape_raises_when_mistral_not_configured(monkeypatch) -> None:
-    """No template fallback exists (owner decision 2026-07-14) — every
-    compose requires Mistral now, whether or not the caller ever set the
-    now-vestigial mistral_only flag."""
+def test_compose_scrape_raises_when_mistral_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No template fallback exists (owner decision 2026-07-14) — every compose requires Mistral now, whether or not the caller ever set the now-vestigial mistral_only flag."""
     import app.core.config as config
 
     monkeypatch.setattr(config, "MISTRAL_ENABLED", False)
@@ -30,7 +32,8 @@ def test_compose_scrape_raises_when_mistral_not_configured(monkeypatch) -> None:
         )
 
 
-def test_compose_scrape_uses_mistral_when_configured(monkeypatch) -> None:
+def test_compose_scrape_uses_mistral_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Routes composition through Mistral and returns its title/summary/body when configured."""
     import app.core.config as config
     import app.modules.newspaper.article_composer as composer_module
 
@@ -42,7 +45,7 @@ def test_compose_scrape_uses_mistral_when_configured(monkeypatch) -> None:
         summary = "AI Summary"
         body = "# AI Body"
 
-    def fake_mistral(**kwargs):
+    def fake_mistral(**_kwargs: object) -> Any:  # noqa: ANN401 -- test double / fake response
         return FakeFields()
 
     monkeypatch.setattr(composer_module, "compose_scrape_article_mistral", fake_mistral)
@@ -62,19 +65,17 @@ def test_compose_scrape_uses_mistral_when_configured(monkeypatch) -> None:
     assert result.title == "AI Title"
 
 
-def test_compose_scrape_raises_on_mistral_error_no_fallback(monkeypatch) -> None:
-    """No template fallback exists — a Mistral failure must propagate as
-    MistralError so callers can cleanly skip (see
-    publish_from_queued_row/recompose_review/recompose_published, which
-    already catch MistralError and return a {"status": ...} dict before any
-    DB write happens)."""
+def test_compose_scrape_raises_on_mistral_error_no_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No template fallback exists — a Mistral failure must propagate as MistralError so callers can cleanly skip (see publish_from_queued_row/recompose_review/recompose_published, which already catch MistralError and return a {"status": ...} dict before any DB write happens)."""
     import app.core.config as config
     import app.modules.newspaper.article_composer as composer_module
 
     monkeypatch.setattr(config, "MISTRAL_ENABLED", True)
     monkeypatch.setattr(config, "MISTRAL_API_KEY", "key")
 
-    def fail_mistral(**kwargs):
+    def fail_mistral(**_kwargs: object) -> Never:
         raise MistralError("api down")
 
     monkeypatch.setattr(composer_module, "compose_scrape_article_mistral", fail_mistral)
@@ -93,10 +94,10 @@ def test_compose_scrape_raises_on_mistral_error_no_fallback(monkeypatch) -> None
         )
 
 
-def test_compose_scrape_folds_transcript_into_page_text_for_non_recap(monkeypatch) -> None:
-    """transcript_text was previously accepted but silently dropped for every
-    topic except COMMUNITY_RECAP — the local YouTube pipeline needs it to
-    reach the general writer path too."""
+def test_compose_scrape_folds_transcript_into_page_text_for_non_recap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """transcript_text was previously accepted but silently dropped for every topic except COMMUNITY_RECAP — the local YouTube pipeline needs it to reach the general writer path too."""
     import app.core.config as config
     import app.modules.newspaper.article_composer as composer_module
 
@@ -111,7 +112,7 @@ def test_compose_scrape_folds_transcript_into_page_text_for_non_recap(monkeypatc
         summary = "Summary"
         body = "Body"
 
-    def fake_mistral(**kwargs):
+    def fake_mistral(**kwargs: object) -> Any:  # noqa: ANN401 -- test double / fake response
         captured.update(kwargs)
         return FakeFields()
 
@@ -134,11 +135,10 @@ def test_compose_scrape_folds_transcript_into_page_text_for_non_recap(monkeypatc
     assert "the video said something important" in captured["page_text"]
 
 
-def test_compose_scrape_recap_topic_does_not_double_fold_transcript(monkeypatch) -> None:
-    """COMMUNITY_RECAP routes to compose_recap_from_transcript_mistral (which
-    takes transcript_text as its own dedicated param, not page_text) — it
-    must never fall through to the generic compose_scrape_article_mistral
-    path, which is the only place the page_text transcript-fold applies."""
+def test_compose_scrape_recap_topic_does_not_double_fold_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """COMMUNITY_RECAP routes to compose_recap_from_transcript_mistral (which takes transcript_text as its own dedicated param, not page_text) — it must never fall through to the generic compose_scrape_article_mistral path, which is the only place the page_text transcript-fold applies."""
     import app.core.config as config
     import app.modules.newspaper.article_composer as composer_module
 
@@ -152,11 +152,11 @@ def test_compose_scrape_recap_topic_does_not_double_fold_transcript(monkeypatch)
         summary = "Summary"
         body = "Body"
 
-    def fake_recap_mistral(**kwargs):
+    def fake_recap_mistral(**kwargs: object) -> Any:  # noqa: ANN401 -- test double / fake response
         captured.update(kwargs)
         return FakeFields()
 
-    def fail_generic_mistral(**kwargs):
+    def fail_generic_mistral(**_kwargs: object) -> Never:
         raise AssertionError("must not fall through to the generic scrape compose")
 
     monkeypatch.setattr(

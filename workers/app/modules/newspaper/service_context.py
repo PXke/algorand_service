@@ -11,8 +11,10 @@ Stability matters more than completeness: sections are ordered by URL (never
 by recency) and trimmed to fixed sizes, so two aggregates built a week apart
 differ only where the SERVICE's content differs.
 """
+
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
@@ -22,6 +24,7 @@ from app.modules.pipeline.core.diffing import normalize_text
 
 @dataclass(frozen=True)
 class ContextPage:
+    """One page's content aggregated into a service-watch snapshot."""
     url: str
     title: str
     body: str
@@ -32,10 +35,7 @@ def _norm_url(url: str) -> str:
 
 
 def _hosts_for_service(service_id: str, entry_url: str) -> list[str]:
-    """Hosts whose harvested pages belong to this service's aggregate: each
-    web-source domain, its www. twin, the exact hosts of the source URLs, and
-    the entry URL's host. (Harvest partitions key on the raw netloc, so a
-    registrable domain needs its host variants enumerated.)"""
+    """Hosts whose harvested pages belong to this service's aggregate: each web-source domain, its www. twin, the exact hosts of the source URLs, and the entry URL's host. (Harvest partitions key on the raw netloc, so a registrable domain needs its host variants enumerated.)."""
     from app.modules.newspaper.service_sources import list_sources
 
     hosts: set[str] = set()
@@ -61,7 +61,7 @@ def _recent_harvested_pages(
     from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
     from app.core.statements import CrawledPageStmts
 
-    session = get_cassandra_session()
+    get_cassandra_session()
     cutoff = datetime.now(tz=UTC) - timedelta(days=max_age_days)
     excluded = _norm_url(exclude_url)
 
@@ -105,9 +105,7 @@ def _recent_harvested_pages(
 def _fair_share_by_host(
     candidates: list[tuple[datetime, object, str, str]], *, max_pages: int
 ) -> list[tuple[datetime, object, str, str]]:
-    """Round-robin newest-first across hosts (hosts iterated in name order for
-    determinism): every host lands its freshest pages before any host lands
-    its second-freshest."""
+    """Round-robin newest-first across hosts (hosts iterated in name order for determinism): every host lands its freshest pages before any host lands its second-freshest."""
     by_host: dict[str, list[tuple[datetime, object, str, str]]] = {}
     for cand in candidates:
         host = (urlparse(cand[2]).netloc or "").lower()
@@ -143,11 +141,7 @@ def build_service_context(
     entry_text: str,
     pages: list[ContextPage] | None = None,
 ) -> str:
-    """The service's aggregate text: entry page first, then harvested pages in
-    URL order, capped at SERVICE_CONTEXT_MAX_CHARS. Falls back to the entry
-    page alone when the service has no harvest yet (new domain, first poll) —
-    behaviourally identical to the old single-page watch. ``pages`` is
-    injectable for tests."""
+    """The service's aggregate text: entry page first, then harvested pages in URL order, capped at SERVICE_CONTEXT_MAX_CHARS. Falls back to the entry page alone when the service has no harvest yet (new domain, first poll) — behaviourally identical to the old single-page watch. ``pages`` is injectable for tests."""
     from app.core.config import (
         SERVICE_CONTEXT_MAX_AGE_DAYS,
         SERVICE_CONTEXT_MAX_CHARS,
@@ -176,8 +170,10 @@ def build_service_context(
     )
     # URL order for LAYOUT (selection was by recency): the aggregate — and so
     # its snapshot hash — must be stable across polls when content is unchanged.
-    for page in sorted(pages, key=lambda p: _norm_url(p.url)):
-        parts.append(_section(page, per_page_chars=SERVICE_CONTEXT_PER_PAGE_CHARS))
+    parts.extend(
+        _section(page, per_page_chars=SERVICE_CONTEXT_PER_PAGE_CHARS)
+        for page in sorted(pages, key=lambda p: _norm_url(p.url))
+    )
     out: list[str] = []
     used = 0
     for part in parts:
@@ -189,10 +185,7 @@ def build_service_context(
 
 
 def refresh_service_pages(service_id: str, *, entry_url: str, limit: int = 8) -> int:
-    """Re-queue the aggregate's page URLs for a fresh crawl so next week's
-    aggregate reflects current content (the frontier only revisits a URL when
-    something links to it again — a watched service shouldn't depend on that).
-    Per-URL cooldown and domain budgets still apply inside enqueue_url."""
+    """Re-queue the aggregate's page URLs for a fresh crawl so next week's aggregate reflects current content (the frontier only revisits a URL when something links to it again — a watched service shouldn't depend on that). Per-URL cooldown and domain budgets still apply inside enqueue_url."""
     from app.core.config import (
         SERVICE_CONTEXT_MAX_AGE_DAYS,
         SERVICE_CONTEXT_MAX_PAGES,
@@ -205,13 +198,17 @@ def refresh_service_pages(service_id: str, *, entry_url: str, limit: int = 8) ->
     # algorand.com, docs.): the beat only scrapes the registry entry URL, so
     # these must be seeded into the crawl queue or their hosts never get
     # harvested and never enter the aggregate.
-    try:
-        for source in list_sources(service_id):
-            if source.enabled and source.source_type == "web" and source.url:
-                if _norm_url(source.url) != _norm_url(entry_url):
-                    urls.append(source.url)
-    except Exception:
-        pass
+    with contextlib.suppress(Exception):
+        urls.extend(
+            source.url
+            for source in list_sources(service_id)
+            if (
+                source.enabled
+                and source.source_type == "web"
+                and source.url
+                and _norm_url(source.url) != _norm_url(entry_url)
+            )
+        )
     try:
         hosts = _hosts_for_service(service_id, entry_url)
         pages = _recent_harvested_pages(

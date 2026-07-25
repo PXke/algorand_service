@@ -1,3 +1,5 @@
+"""Parse payment details out of a signed transaction's JSON."""
+
 from __future__ import annotations
 
 import json

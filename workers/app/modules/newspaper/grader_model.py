@@ -1,15 +1,11 @@
-"""Learned article grader: logistic regression on the captured grade dimensions
-→ P(approved). Trains from `classifier_feedback` rows whose metadata snapshotted
-the grade dimensions (see admin _grade_meta_for_review). Until there's enough
-balanced data it stays untrained and the heuristic weighted sum is used — so it
-starts rough and visibly improves as labels accumulate.
-"""
+"""Learned article grader: logistic regression on the captured grade dimensions → P(approved). Trains from `classifier_feedback` rows whose metadata snapshotted the grade dimensions (see admin _grade_meta_for_review). Until there's enough balanced data it stays untrained and the heuristic weighted sum is used — so it starts rough and visibly improves as labels accumulate."""
 
 from __future__ import annotations
 
 import json
 import pickle
 from pathlib import Path
+from typing import Any
 
 # Fixed feature order — MUST match grade_article_draft's subscores keys.
 # The sklearn grader is retired from the grade path (the ModernBERT quality head
@@ -29,7 +25,7 @@ def _model_path() -> Path:
     return Path(GRADER_MODEL_PATH)
 
 
-def _load_model():
+def _load_model() -> Any | None:  # noqa: ANN401 -- pickled payload shape varies (bare estimator or {"vectorizer","model"} dict)
     path = _model_path()
     if not path.exists():
         return None
@@ -50,7 +46,8 @@ def predict_publish_proba(subscores: dict, text: str = "") -> float | None:
     Two model shapes are supported: a plain scalar model (legacy: 7 subscores
     only) and a text-aware model (dict with a fitted ``vectorizer`` — TF-IDF of
     the article body hstacked with the subscores), so the grader can learn from
-    the article's actual words, not just the heuristic dimension scores."""
+    the article's actual words, not just the heuristic dimension scores.
+    """
     model = _load_model()
     if model is None:
         return None
@@ -68,16 +65,12 @@ def predict_publish_proba(subscores: dict, text: str = "") -> float | None:
 
 
 def _training_rows(limit: int) -> tuple[list[list[float]], list[str], list[int]]:
-    """Pull (scalar_features, article_text, label) from classifier_feedback rows
-    that captured the grade dimensions. ``article_text`` is "" for rows labelled
-    before article-text capture (2026-06-18) — those train scalar-only."""
+    """Pull (scalar_features, article_text, label) from classifier_feedback rows that captured the grade dimensions. ``article_text`` is "" for rows labelled before article-text capture (2026-06-18) — those train scalar-only."""
     from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
     from app.core.statements import ClassifierFeedbackStmts
 
     session = get_cassandra_session()
-    index = list(
-        session.execute(ClassifierFeedbackStmts.LIST_IDS, ("main", limit))
-    )
+    index = list(session.execute(ClassifierFeedbackStmts.LIST_IDS, ("main", limit)))
     scalars: list[list[float]] = []
     texts: list[str] = []
     y: list[int] = []
@@ -110,9 +103,7 @@ def _training_rows(limit: int) -> tuple[list[list[float]], list[str], list[int]]
 
 
 def train_grader(*, limit: int = 1000) -> dict:
-    """Retrain the learned grader from captured feedback. No-op (keeps heuristic)
-    until there are enough samples with both classes present. Goes text-aware
-    once enough rows carry the article body, else stays scalar-only."""
+    """Retrain the learned grader from captured feedback. No-op (keeps heuristic) until there are enough samples with both classes present. Goes text-aware once enough rows carry the article body, else stays scalar-only."""
     from app.core.config import GRADER_MIN_SAMPLES, GRADER_TEXT_MIN_SAMPLES
 
     scalars, texts, y = _training_rows(limit)
@@ -154,7 +145,7 @@ def train_grader(*, limit: int = 1000) -> dict:
             with path.open("wb") as fh:
                 pickle.dump({"vectorizer": vectorizer, "model": model, "version": 3}, fh)
             # Report the scalar-dimension coefficients (the tail of the vector).
-            tail = model.coef_[0][-len(FEATURE_ORDER):]
+            tail = model.coef_[0][-len(FEATURE_ORDER) :]
             weights = dict(zip(FEATURE_ORDER, (round(float(c), 3) for c in tail), strict=False))
             return {
                 "status": "trained",

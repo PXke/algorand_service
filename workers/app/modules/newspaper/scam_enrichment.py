@@ -1,3 +1,5 @@
+"""Extract addresses/domains and gather context for scam/incident articles."""
+
 from __future__ import annotations
 
 import re
@@ -29,6 +31,7 @@ def _defang_text(text: str) -> str:
 
 
 def extract_algorand_addresses(page_text: str) -> list[str]:
+    """Pull unique 58-char Algorand addresses out of the text, order preserved."""
     seen: set[str] = set()
     out: list[str] = []
     for match in _ALGO_ADDRESS.finditer(page_text.upper()):
@@ -40,6 +43,7 @@ def extract_algorand_addresses(page_text: str) -> list[str]:
 
 
 def extract_domains_and_urls(page_text: str) -> tuple[list[str], list[str]]:
+    """Extract (URLs, host domains) from text, de-defanging obfuscated dots first."""
     normalized = _defang_text(page_text)
     urls = re.findall(r"https?://[^\s\])>\"']+", normalized)
     domains: list[str] = []
@@ -60,9 +64,8 @@ def extract_domains_and_urls(page_text: str) -> tuple[list[str], list[str]]:
     return urls, domains
 
 
-def gather_scam_enrichment(page_text: str, *, source_url: str = "") -> ScamEnrichmentContext:
-    """
-    Cross-reference scam alerts before composition.
+def gather_scam_enrichment(page_text: str, *, source_url: str = "") -> ScamEnrichmentContext:  # noqa: ARG001 -- name must match the real callee's keyword arg
+    """Cross-reference scam alerts before composition.
 
     Today: extract domains/URLs only (no live fetch — avoids publishing from unverified
     malicious pages). Next: allowlisted safe preview fetch + search API + Typesense.
@@ -77,8 +80,7 @@ def gather_scam_enrichment(page_text: str, *, source_url: str = "") -> ScamEnric
     if not SCAM_ENRICHMENT_ENABLED:
         if domains:
             notes.append(
-                "enrichment_disabled: domains noted for manual review — "
-                + ", ".join(domains[:8])
+                "enrichment_disabled: domains noted for manual review — " + ", ".join(domains[:8])
             )
         return ScamEnrichmentContext(
             mentioned_urls=tuple(urls[:20]),
@@ -97,6 +99,7 @@ def gather_scam_enrichment(page_text: str, *, source_url: str = "") -> ScamEnric
 
 
 def format_enrichment_for_prompt(ctx: ScamEnrichmentContext) -> str:
+    """Render a ScamEnrichmentContext as a markdown block for the writer prompt."""
     lines = ["## Verification context (do not repeat scam instructions verbatim)"]
     if ctx.mentioned_domains:
         lines.append("Domains mentioned: " + ", ".join(ctx.mentioned_domains))

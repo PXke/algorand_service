@@ -35,9 +35,7 @@ def _require_uniform(rows: Iterable[AuditRow]) -> list[AuditRow]:
 def estimate_base_fail_rate(
     rows: Iterable[AuditRow], *, threshold: float = 0.5
 ) -> dict[str, float]:
-    """P(failure) from UNIFORM rows only. A row is a failure when its annotator
-    soft label crosses ``threshold`` (failure == low quality). Stratified rows
-    are silently excluded; provenance-less rows raise."""
+    """P(failure) from UNIFORM rows only. A row is a failure when its annotator soft label crosses ``threshold`` (failure == low quality). Stratified rows are silently excluded; provenance-less rows raise."""
     uni = _require_uniform(rows)
     n = len(uni)
     if n == 0:
@@ -51,25 +49,22 @@ def estimate_base_fail_rate(
     }
 
 
-def estimate_composition(
-    rows: Iterable[AuditRow], *, threshold: float = 0.5
-) -> dict[str, float]:
-    """Error-type mix among FAILURES, pooled across uniform + stratified rows via
-    inverse-probability weighting. This may use stratified rows (it needs the
-    rare failures) — but it never touches the base rate. Returns a normalized
-    histogram over taxonomy tags."""
+def estimate_composition(rows: Iterable[AuditRow], *, threshold: float = 0.5) -> dict[str, float]:
+    """Error-type mix among FAILURES, pooled across uniform + stratified rows via inverse-probability weighting. This may use stratified rows (it needs the rare failures) — but it never touches the base rate. Returns a normalized histogram over taxonomy tags."""
     weighted: dict[str, float] = {}
     total = 0.0
     for r in rows:
         if r.get("selected_by") is None:
             raise FirewallError("audit row missing selected_by; refusing to estimate")
-        is_fail = (float(r.get("label_factuality", 1.0)) < threshold
-                   or float(r.get("label_tone", 1.0)) < threshold)
+        is_fail = (
+            float(r.get("label_factuality", 1.0)) < threshold
+            or float(r.get("label_tone", 1.0)) < threshold
+        )
         if not is_fail:
             continue
         prob = float(r.get("selection_prob", 1.0)) or 1.0
         w = 1.0 / prob  # inverse-probability weight
-        for tag in (r.get("error_types") or []):  # type: ignore[union-attr]
+        for tag in r.get("error_types") or []:  # type: ignore[union-attr]
             weighted[str(tag)] = weighted.get(str(tag), 0.0) + w
             total += w
     if total <= 0:

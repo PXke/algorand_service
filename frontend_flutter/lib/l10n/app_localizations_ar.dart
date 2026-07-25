@@ -982,7 +982,18 @@ class AppLocalizationsAr extends AppLocalizations {
   String get domainsAddAsSeed => 'إضافة كمصدر دائم';
 
   @override
+  String get domainsAddSinglePageOnly =>
+      'هذه الصفحة فقط (استشهاد فقط، دون زحف الموقع)';
+
+  @override
   String get domainsScoreUnexplained => 'تفصيل النتيجة غير متاح';
+
+  @override
+  String get domainsPossibleService => 'خدمة محتملة؟';
+
+  @override
+  String get domainsPossibleServiceHint =>
+      'نتيجة جيدة لكن مصنّف كأخبار/عام — قد يكون منتجًا حقيقيًا وليس مجرد مصدر استشهاد. فكر في \"الموافقة والاستكشاف\" بدلاً من \"الزحف مرة واحدة\".';
 
   @override
   String get paginationPrevious => 'السابق';

@@ -1,3 +1,5 @@
+"""IMAP-backed mail inbox scraper."""
+
 from __future__ import annotations
 
 import contextlib
@@ -17,10 +19,12 @@ from app.modules.scraper.core.base import BaseScraper, ScrapeResult
 
 
 class MailScraperError(Exception):
+    """Raised when the mail inbox can't be read."""
     pass
 
 
 def decode_mime_header(value: str | None) -> str:
+    """Decode an RFC 2047 MIME-encoded email header into a plain string."""
     if not value:
         return ""
     parts = decode_header(value)
@@ -36,7 +40,8 @@ def decode_mime_header(value: str | None) -> str:
 class MailMessageScraper(BaseScraper):
     """Scrape a single mail://message/{uid} item (body fetched via IMAP in poll task)."""
 
-    def scrape(self, url: str, source_id: str) -> ScrapeResult:
+    def scrape(self, _url: str, _source_id: str) -> ScrapeResult:
+        """Always raises: mail items need a pre-fetched body from the IMAP poll task, not a URL fetch."""
         msg = "MailScraper requires pre-fetched body; use mail poll task"
         raise MailScraperError(msg)
 
@@ -100,6 +105,7 @@ def mail_message_result(
     subject: str,
     text: str,
 ) -> ScrapeResult:
+    """Build the ScrapeResult for a single fetched mail message."""
     url = f"mail://message/{uid}"
     content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return ScrapeResult(

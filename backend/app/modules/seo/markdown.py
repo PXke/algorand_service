@@ -19,8 +19,7 @@ _IMAGE = re.compile(r"!\[([^\]]*)\]\((https?://[^\s)]+)\)")
 
 
 def _inline(text: str) -> str:
-    """Escape then apply inline Markdown. Links/code use placeholders so their
-    inner text is not re-escaped or re-matched."""
+    """Escape then apply inline Markdown. Links/code use placeholders so their inner text is not re-escaped or re-matched."""
     out = html.escape(text, quote=False)
     out = _IMAGE.sub(
         lambda m: (
@@ -38,8 +37,7 @@ def _inline(text: str) -> str:
     )
     out = _INLINE_CODE.sub(lambda m: f"<code>{m.group(1)}</code>", out)
     out = _BOLD.sub(lambda m: f"<strong>{m.group(1)}</strong>", out)
-    out = _ITALIC.sub(lambda m: f"<em>{m.group(1)}</em>", out)
-    return out
+    return _ITALIC.sub(lambda m: f"<em>{m.group(1)}</em>", out)
 
 
 def _is_table_separator(cells: list[str]) -> bool:
@@ -60,17 +58,15 @@ def _table_html(rows: list[str]) -> str:
         cells = "".join(f"<th>{_inline(c)}</th>" for c in header)
         out.append(f"<thead><tr>{cells}</tr></thead>")
     out.append("<tbody>")
-    for cells in parsed:
-        out.append("<tr>" + "".join(f"<td>{_inline(c)}</td>" for c in cells) + "</tr>")
+    out.extend(
+        "<tr>" + "".join(f"<td>{_inline(c)}</td>" for c in cells) + "</tr>" for cells in parsed
+    )
     out.append("</tbody></table>")
     return "".join(out)
 
 
 def _fence_html(info: str, lines: list[str]) -> str:
-    """A fenced block. ``chart`` fences carry the platform's chart JSON — the
-    Flutter app draws them, so the SSR body keeps only a readable caption (raw
-    JSON in the visible body / articleBody reads as broken output to crawlers).
-    Any other fence renders as an ordinary code block."""
+    """A fenced block. ``chart`` fences carry the platform's chart JSON — the Flutter app draws them, so the SSR body keeps only a readable caption (raw JSON in the visible body / articleBody reads as broken output to crawlers). Any other fence renders as an ordinary code block."""
     if info == "chart":
         title = ""
         try:
@@ -85,9 +81,7 @@ def _fence_html(info: str, lines: list[str]) -> str:
 
 
 def md_to_html(md: str) -> str:
-    """Block-level Markdown -> HTML covering headings, lists, tables, fenced
-    blocks (charts get a caption, not raw JSON), blockquotes, rules and
-    paragraphs."""
+    """Block-level Markdown -> HTML covering headings, lists, tables, fenced blocks (charts get a caption, not raw JSON), blockquotes, rules and paragraphs."""
     lines = (md or "").replace("\r\n", "\n").split("\n")
     out: list[str] = []
     list_tag: str | None = None  # "ul" | "ol" while inside a list
@@ -182,8 +176,7 @@ def md_to_html(md: str) -> str:
 
 
 def md_to_text(md: str) -> str:
-    """Strip Markdown to readable plain text (for meta descriptions and the
-    JSON-LD articleBody)."""
+    """Strip Markdown to readable plain text (for meta descriptions and the JSON-LD articleBody)."""
     text = md or ""
     # Chart fences carry JSON for the app's chart widget — data, not prose.
     text = re.sub(r"```chart\b.*?(```|\Z)", "", text, flags=re.DOTALL)

@@ -27,10 +27,16 @@ from app.modules.gatekeeper.profile import AnnotatedSample
 
 # Closed taxonomy. Tier-2 labels outside this set are treated as "unclassified"
 # (the novel-failure-mode canary) rather than silently trusted.
-FACTUALITY_TYPES = frozenset({
-    "numeric_drift", "unsupported_elaboration", "entity_swap",
-    "cross_contamination", "relational_hallucination", "temporal_collapse",
-})
+FACTUALITY_TYPES = frozenset(
+    {
+        "numeric_drift",
+        "unsupported_elaboration",
+        "entity_swap",
+        "cross_contamination",
+        "relational_hallucination",
+        "temporal_collapse",
+    }
+)
 TONE_TYPES = frozenset({"hype", "speculative_tone", "clickbait"})
 TAXONOMY = FACTUALITY_TYPES | TONE_TYPES
 
@@ -40,6 +46,7 @@ ClassifyFn = Callable[[str, str, str], dict]
 
 @dataclass(frozen=True)
 class Tier1Annotation:
+    """Deterministic (rule-based) numeric-grounding annotation."""
     factuality_fail: bool
     error_types: tuple[str, ...]
     severities: dict[str, float]
@@ -49,20 +56,23 @@ class Tier1Annotation:
 
 @dataclass(frozen=True)
 class Tier2Annotation:
+    """LLM-judged annotation, unioned with the Tier-1 result."""
     factuality_fail: bool
     tone_fail: bool
     error_types: tuple[str, ...]
     severities: dict[str, float]
-    unclassified: bool        # the LLM saw a failure it couldn't map to TAXONOMY
+    unclassified: bool  # the LLM saw a failure it couldn't map to TAXONOMY
     confidence: float
 
 
 def tier1_annotate(
-    source_text: str, trace_text: str, article_text: str, *, fact_min: float = 0.80
+    source_text: str,  # noqa: ARG001 -- name must match the real callee's keyword arg
+    trace_text: str,
+    article_text: str,
+    *,
+    fact_min: float = 0.80,
 ) -> Tier1Annotation:
-    """Deterministic numeric grounding. Ungrounded figures are tagged
-    ``unsupported_elaboration`` (the dominant real mode); Tier 2 may refine that
-    to ``numeric_drift`` when it can tell a perturbed value from an invented one."""
+    """Deterministic numeric grounding. Ungrounded figures are tagged ``unsupported_elaboration`` (the dominant real mode); Tier 2 may refine that to ``numeric_drift`` when it can tell a perturbed value from an invented one."""
     fact = numeric_entailment_score(trace_text, article_text)
     fail = fact.score < fact_min
     error_types: tuple[str, ...] = ()
@@ -80,18 +90,18 @@ def tier1_annotate(
 
 
 def _coerce_tier2(raw: dict) -> Tier2Annotation:
-    """Defensively parse the LLM's JSON. Expected schema (all optional):
-    {factuality_fail: bool, tone_fail: bool, error_types: [str],
-     severities: {str: 0..1}, unclassified: bool, confidence: 0..1}.
-    Labels outside TAXONOMY are dropped and flip ``unclassified`` on."""
+    """Defensively parse the LLM's JSON.
+
+    Expected schema (all optional): {factuality_fail: bool, tone_fail: bool,
+    error_types: [str], severities: {str: 0..1}, unclassified: bool,
+    confidence: 0..1}. Labels outside TAXONOMY are dropped and flip
+    ``unclassified`` on.
+    """
     reported = [str(t) for t in (raw.get("error_types") or [])]
     known = tuple(t for t in reported if t in TAXONOMY)
     unknown = [t for t in reported if t not in TAXONOMY]
     raw_sev = raw.get("severities") or {}
-    severities = {
-        t: max(0.0, min(1.0, float(raw_sev.get(t, 0.7))))
-        for t in known
-    }
+    severities = {t: max(0.0, min(1.0, float(raw_sev.get(t, 0.7)))) for t in known}
     return Tier2Annotation(
         factuality_fail=bool(raw.get("factuality_fail", any(t in FACTUALITY_TYPES for t in known))),
         tone_fail=bool(raw.get("tone_fail", any(t in TONE_TYPES for t in known))),
@@ -105,8 +115,7 @@ def _coerce_tier2(raw: dict) -> Tier2Annotation:
 def tier2_annotate(
     source_text: str, trace_text: str, article_text: str, classify: ClassifyFn
 ) -> Tier2Annotation | None:
-    """Run the injected LLM classifier. Returns None on any failure so the
-    caller falls back to Tier-1-only labels."""
+    """Run the injected LLM classifier. Returns None on any failure so the caller falls back to Tier-1-only labels."""
     try:
         raw = classify(source_text, trace_text, article_text)
         return _coerce_tier2(raw if isinstance(raw, dict) else {})
@@ -123,8 +132,7 @@ def annotate(
     fact_min: float = 0.80,
     sample_source: str = "devtrace",
 ) -> AnnotatedSample:
-    """Full annotation -> a Layer-1 ``AnnotatedSample``. Tier-1 is authoritative
-    for numeric grounding; Tier-2 unions in semantic + tone findings."""
+    """Full annotation -> a Layer-1 ``AnnotatedSample``. Tier-1 is authoritative for numeric grounding; Tier-2 unions in semantic + tone findings."""
     t1 = tier1_annotate(source_text, trace_text, article_text, fact_min=fact_min)
     error_types = set(t1.error_types)
     severities = dict(t1.severities)
@@ -164,9 +172,7 @@ _TIER2_SYSTEM = (
 
 
 def mistral_classifier(*, max_tokens: int = 600) -> ClassifyFn:
-    """Production Tier-2 adapter: a ``classify`` callable backed by the Mistral
-    client at temperature 0.0 (diagnostic, not creative). Lazy so importing this
-    module never pulls the client."""
+    """Production Tier-2 adapter: a ``classify`` callable backed by the Mistral client at temperature 0.0 (diagnostic, not creative). Lazy so importing this module never pulls the client."""
     from app.modules.ai.mistral_client import get_mistral_client
 
     client = get_mistral_client()

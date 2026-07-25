@@ -1,3 +1,5 @@
+"""Fetch and cache a weekly ALGO price snapshot for the digest."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,6 +12,7 @@ COINGECKO_API = "https://api.coingecko.com/api/v3"
 
 @dataclass(frozen=True)
 class WeeklyPriceSnapshot:
+    """One week's ALGO price snapshot for the digest."""
     asset_id: str
     asset_name: str
     currency: str
@@ -22,6 +25,7 @@ class WeeklyPriceSnapshot:
 
 
 class PriceAnalysisError(Exception):
+    """Raised when the weekly price snapshot can't be fetched."""
     pass
 
 
@@ -64,7 +68,8 @@ def fetch_weekly_price(
     """7-day market chart from CoinGecko (public API, no key required).
 
     Cached in Redis for COINGECKO_WEEKLY_CACHE_TTL (the 7d chart barely moves
-    within an hour); a last-good copy is served if CoinGecko errors."""
+    within an hour); a last-good copy is served if CoinGecko errors.
+    """
     from app.core.config import COINGECKO_STALE_TTL, COINGECKO_WEEKLY_CACHE_TTL
     from app.modules.metrics import coingecko_cache as cache
 

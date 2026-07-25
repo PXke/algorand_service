@@ -1,20 +1,70 @@
+"""Per-domain crawl budget, cooldown, and frontier (approve/reject) status."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    import redis
 
 # Multi-label public suffixes — keep one extra label so the registrable domain
 # is right (example.co.uk, not co.uk). Not exhaustive; covers the common ones
 # (we don't ship the full Public Suffix List / tldextract).
-_MULTI_LABEL_SUFFIXES = frozenset({
-    "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk", "ltd.uk", "plc.uk",
-    "co.jp", "co.kr", "co.za", "co.nz", "co.in", "co.il", "co.id", "co.th",
-    "com.au", "com.br", "com.mx", "com.tr", "com.cn", "com.sg", "com.hk",
-    "com.tw", "com.ar", "com.co", "com.ua", "com.pl", "com.ng",
-    # India academic/gov public suffixes (one entity per subdomain).
-    "ac.in", "edu.in", "gov.in", "res.in", "nic.in", "org.in", "net.in",
-})
+_MULTI_LABEL_SUFFIXES = frozenset(
+    {
+        "co.uk",
+        "org.uk",
+        "gov.uk",
+        "ac.uk",
+        "me.uk",
+        "ltd.uk",
+        "plc.uk",
+        "co.jp",
+        "co.kr",
+        "co.za",
+        "co.nz",
+        "co.in",
+        "co.il",
+        "co.id",
+        "co.th",
+        "com.au",
+        "com.br",
+        "com.mx",
+        "com.tr",
+        "com.cn",
+        "com.sg",
+        "com.hk",
+        "com.tw",
+        "com.ar",
+        "com.co",
+        "com.ua",
+        "com.pl",
+        "com.ng",
+        # India academic/gov public suffixes (one entity per subdomain).
+        "ac.in",
+        "edu.in",
+        "gov.in",
+        "res.in",
+        "nic.in",
+        "org.in",
+        "net.in",
+        # Japan's other JPRS category second-level domains (co.jp above covers
+        # only companies) — without these, e.g. a nonprofit's real domain
+        # "jvcea.or.jp" collapses to the registry category itself, "or.jp", a
+        # meaningless non-domain (root-caused 2026-07-21: a JVCEA citation link
+        # ended up filed under a fake "or.jp" domain_tracking row).
+        "or.jp",
+        "ne.jp",
+        "ac.jp",
+        "ad.jp",
+        "ed.jp",
+        "go.jp",
+        "gr.jp",
+        "lg.jp",
+    }
+)
 
 # Platform / hosting suffixes where the SUBDOMAIN is the real identity
 # (foo.medium.com and bar.medium.com are different publishers). Treated like a
@@ -22,16 +72,39 @@ _MULTI_LABEL_SUFFIXES = frozenset({
 # one "medium.com" source. Keep in sync with the backend admin store copy
 # (AdminCassandraStore._domain_from_url); parity guarded by
 # test_domain_from_url_parity.py in both services.
-_PLATFORM_SUFFIXES = frozenset({
-    "medium.com", "substack.com", "blogspot.com", "wordpress.com", "ghost.io",
-    "github.io", "gitbook.io", "gitbook.com", "notion.site", "super.site",
-    "netlify.app", "vercel.app", "pages.dev", "web.app", "firebaseapp.com",
-    "herokuapp.com", "onrender.com", "readthedocs.io", "ipfs.io", "w3s.link",
-    "fleek.co", "surge.sh", "webflow.io", "wixsite.com", "replit.app", "repl.co",
-})
+_PLATFORM_SUFFIXES = frozenset(
+    {
+        "medium.com",
+        "substack.com",
+        "blogspot.com",
+        "wordpress.com",
+        "ghost.io",
+        "github.io",
+        "gitbook.io",
+        "gitbook.com",
+        "notion.site",
+        "super.site",
+        "netlify.app",
+        "vercel.app",
+        "pages.dev",
+        "web.app",
+        "firebaseapp.com",
+        "herokuapp.com",
+        "onrender.com",
+        "readthedocs.io",
+        "ipfs.io",
+        "w3s.link",
+        "fleek.co",
+        "surge.sh",
+        "webflow.io",
+        "wixsite.com",
+        "replit.app",
+        "repl.co",
+    }
+)
 
 
-def _crawl_budget_client():
+def _crawl_budget_client() -> redis.Redis:
     import redis
 
     from app.core.config import REDIS_URL
@@ -44,8 +117,7 @@ def _crawl_budget_key(domain: str) -> str:
 
 
 def record_domain_crawl(domain: str) -> int:
-    """Count one fetched page for a domain in the rolling window; returns the
-    new total. Best-effort — Redis down means no increment (fail-open)."""
+    """Count one fetched page for a domain in the rolling window; returns the new total. Best-effort — Redis down means no increment (fail-open)."""
     if not domain:
         return 0
     from app.core.config import CRAWL_PAGECOUNT_TTL
@@ -62,7 +134,9 @@ def record_domain_crawl(domain: str) -> int:
 
 def domain_crawl_count(domain: str) -> int:
     """Pages fetched for a domain in the current rolling window (0 if unknown).
-    Fails open (returns 0 = under budget) so a Redis outage never blocks crawl."""
+
+    Fails open (returns 0 = under budget) so a Redis outage never blocks crawl.
+    """
     if not domain:
         return 0
     try:
@@ -73,6 +147,7 @@ def domain_crawl_count(domain: str) -> int:
 
 
 def domain_crawl_budget_exhausted(domain: str) -> bool:
+    """Return whether a domain has hit its per-day crawl page budget."""
     from app.core.config import CRAWL_MAX_PAGES_PER_DOMAIN
 
     return domain_crawl_count(domain) >= CRAWL_MAX_PAGES_PER_DOMAIN
@@ -87,9 +162,7 @@ def _compose_cooldown_key(domain: str) -> str:
 
 
 def record_domain_compose(domain: str) -> int:
-    """Count one NEW article compose for a domain in the rolling day, and stamp a
-    cooldown so the same domain isn't composed again until it expires (diversity
-    spacing — see domain_in_cooldown)."""
+    """Count one NEW article compose for a domain in the rolling day, and stamp a cooldown so the same domain isn't composed again until it expires (diversity spacing — see domain_in_cooldown)."""
     if not domain:
         return 0
     from app.core.config import COMPOSE_DAILY_TTL, COMPOSE_DOMAIN_COOLDOWN_HOURS
@@ -100,9 +173,7 @@ def record_domain_compose(domain: str) -> int:
         if total == 1:
             client.expire(_compose_key(domain), COMPOSE_DAILY_TTL)
         if COMPOSE_DOMAIN_COOLDOWN_HOURS > 0:
-            client.set(
-                _compose_cooldown_key(domain), "1", ex=COMPOSE_DOMAIN_COOLDOWN_HOURS * 3600
-            )
+            client.set(_compose_cooldown_key(domain), "1", ex=COMPOSE_DOMAIN_COOLDOWN_HOURS * 3600)
         return total
     except Exception:
         return 0
@@ -110,9 +181,11 @@ def record_domain_compose(domain: str) -> int:
 
 def domain_in_cooldown(domain: str) -> bool:
     """True when this domain published/composed within COMPOSE_DOMAIN_COOLDOWN_HOURS.
+
     A presence-with-TTL check (the key is set on each compose and self-expires), so
     it spaces successive articles from one registrable domain. Fails open (Redis
-    down → not in cooldown) so an outage never blocks publishing."""
+    down → not in cooldown) so an outage never blocks publishing.
+    """
     if not domain:
         return False
     from app.core.config import COMPOSE_DOMAIN_COOLDOWN_HOURS
@@ -130,9 +203,7 @@ def _service_cooldown_key(service_id: str) -> str:
 
 
 def record_service_compose(service_id: str) -> None:
-    """Stamp a per-service cooldown alongside the per-domain one (see
-    record_domain_compose) — this is the key that still catches a repeat when
-    the project's two domains don't collapse to one registrable domain."""
+    """Stamp a per-service cooldown alongside the per-domain one (see record_domain_compose) — this is the key that still catches a repeat when the project's two domains don't collapse to one registrable domain."""
     if not service_id:
         return
     from app.core.config import COMPOSE_SERVICE_COOLDOWN_HOURS
@@ -148,11 +219,7 @@ def record_service_compose(service_id: str) -> None:
 
 
 def service_in_cooldown(service_id: str) -> bool:
-    """True when this SERVICE (any of its domains) published/composed within
-    COMPOSE_SERVICE_COOLDOWN_HOURS. Complements domain_in_cooldown for a project
-    whose domains don't share a registrable domain (e.g. a Medium blog plus its
-    own site) — the per-domain cooldown can't see across those on its own.
-    Fails open (Redis down -> not in cooldown)."""
+    """True when this SERVICE (any of its domains) published/composed within COMPOSE_SERVICE_COOLDOWN_HOURS. Complements domain_in_cooldown for a project whose domains don't share a registrable domain (e.g. a Medium blog plus its own site) — the per-domain cooldown can't see across those on its own. Fails open (Redis down -> not in cooldown)."""
     if not service_id:
         return False
     from app.core.config import COMPOSE_SERVICE_COOLDOWN_HOURS
@@ -167,7 +234,9 @@ def service_in_cooldown(service_id: str) -> bool:
 
 def domain_compose_cap_reached(domain: str) -> bool:
     """True when a domain already composed its daily quota — skip re-composing.
-    Fails open (Redis down → not capped) so an outage never blocks publishing."""
+
+    Fails open (Redis down → not capped) so an outage never blocks publishing.
+    """
     if not domain:
         return False
     from app.core.config import COMPOSE_MAX_PER_DOMAIN_PER_DAY
@@ -185,11 +254,7 @@ def _auto_approved_key(day: str) -> str:
 
 
 def record_domain_auto_approved(domain: str) -> None:
-    """Tally a score-gated frontier auto-approve in a per-day Redis SET, so the
-    admin can see what the frontier approved without a human. A SET (not a plain
-    counter) so the admin also gets the domain list and re-approving the same
-    domain isn't double-counted. Best-effort — Redis down is a no-op (the approve
-    itself still happened). The backend admin reads the same key for today."""
+    """Tally a score-gated frontier auto-approve in a per-day Redis SET, so the admin can see what the frontier approved without a human. A SET (not a plain counter) so the admin also gets the domain list and re-approving the same domain isn't double-counted. Best-effort — Redis down is a no-op (the approve itself still happened). The backend admin reads the same key for today."""
     if not domain:
         return
     from datetime import UTC, datetime
@@ -209,6 +274,7 @@ def record_domain_auto_approved(domain: str) -> None:
 # Both services must point REDIS_URL / settings.redis_url at the same Redis DB
 # (they share the default db 0).
 def reject_cooldown_key(url: str) -> str:
+    """Build the Redis key tracking an admin-rejected URL's cooldown."""
     import hashlib
 
     digest = hashlib.sha1((url or "").strip().lower().encode("utf-8")).hexdigest()
@@ -217,7 +283,9 @@ def reject_cooldown_key(url: str) -> str:
 
 def url_recently_rejected(url: str) -> bool:
     """True when this URL was rejected in review within the cooldown window.
-    Fails open (Redis down → not suppressed)."""
+
+    Fails open (Redis down → not suppressed).
+    """
     if not url:
         return False
     try:
@@ -254,6 +322,7 @@ def domain_from_url(url: str) -> str:
 
 
 def get_domain_status(domain: str) -> dict[str, Any] | None:
+    """Fetch a domain's tracked crawl status row, or None if never tracked."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import DomainTrackingStmts
 
@@ -273,6 +342,29 @@ def get_domain_status(domain: str) -> dict[str, Any] | None:
         "metadata": dict(row.metadata or {}),
         "frontier_status": getattr(row, "frontier_status", None) or "",
     }
+
+
+def is_admin_approved_domain(domain: str) -> bool:
+    """Whether an admin explicitly approved this domain (vs. auto-discovery).
+
+    An explicit human relevance call should outrank the automated per-page
+    heuristics built for anonymous discovery — a legitimate ecosystem partner's
+    homepage can easily read as "low content quality" (thin on keywords) or
+    lose out to an unrelated domain's crawl budget, neither of which the admin
+    who approved it was ever asking the system to second-guess (root-caused
+    2026-07-21: 71 admin-approved domains sat with zero crawled pages, and
+    even after fixing the enqueue bug, most of the backfill was rejected by
+    these same two gates). Fails closed (not admin-approved) on any lookup
+    error — a Cassandra hiccup must degrade to the normal automated gates,
+    never crash the crawl/index task calling this.
+    """
+    try:
+        status = get_domain_status(domain)
+    except Exception:
+        return False
+    if status is None:
+        return False
+    return status["metadata"].get("frontier_set_by_admin") == "true"
 
 
 def should_recrawl_domain(domain: str) -> bool:
@@ -381,23 +473,54 @@ def update_domain_status(
 # Generic platforms that are never Algorand-news frontiers — visiting them from
 # a discovered link is always a dead end. Admin rejects extend this dynamically
 # via domain_tracking.is_relevant=False.
-_DEAD_END_DOMAINS = frozenset({
-    "amazon.com", "google.com", "youtube.com", "facebook.com", "twitter.com",
-    "x.com", "instagram.com", "linkedin.com", "tiktok.com", "apple.com",
-    "microsoft.com", "netflix.com", "play.google.com", "apps.apple.com",
-    "reddit.com", "discord.com", "discord.gg", "t.me", "wikipedia.org",
-})
+_DEAD_END_DOMAINS = frozenset(
+    {
+        "amazon.com",
+        "google.com",
+        "youtube.com",
+        "facebook.com",
+        "twitter.com",
+        "x.com",
+        "instagram.com",
+        "linkedin.com",
+        "tiktok.com",
+        "apple.com",
+        "microsoft.com",
+        "netflix.com",
+        "play.google.com",
+        "apps.apple.com",
+        "reddit.com",
+        "discord.com",
+        "discord.gg",
+        "t.me",
+        "wikipedia.org",
+    }
+)
 
 # Core Algorand ecosystem domains that must NEVER be AUTO-rejected. A thin/
 # marketing preview can score ~0 even for the foundation's own site, so preview
 # score alone is unsafe — these (and any domain whose name itself carries an
 # Algorand signal) are always held for human review instead of auto-rejected.
-_PROTECTED_DOMAINS = frozenset({
-    "algorand.co", "algorand.com", "algorand.foundation", "algorand.org",
-    "algorandtechnologies.com", "perawallet.app", "defly.app", "tinyman.org",
-    "folks.finance", "vestige.fi", "algokit.io", "nodely.io", "algonode.io",
-    "allo.info", "lora.algokit.io", "goalseeker.app",
-})
+_PROTECTED_DOMAINS = frozenset(
+    {
+        "algorand.co",
+        "algorand.com",
+        "algorand.foundation",
+        "algorand.org",
+        "algorandtechnologies.com",
+        "perawallet.app",
+        "defly.app",
+        "tinyman.org",
+        "folks.finance",
+        "vestige.fi",
+        "algokit.io",
+        "nodely.io",
+        "algonode.io",
+        "allo.info",
+        "lora.algokit.io",
+        "goalseeker.app",
+    }
+)
 
 
 # First labels that look Algorand-ish but aren't. Protection is deliberately
@@ -405,15 +528,19 @@ _PROTECTED_DOMAINS = frozenset({
 # wrongly AUTO-rejecting a real project — the pact.fi/perawallet incident — is far
 # worse than holding one extra off-topic domain for human review. So we only carve
 # out the clearest English false positives rather than narrowing the prefix rule.
-_ALGO_PREFIX_FALSE_POSITIVES = frozenset({
-    "algorithm", "algorithms", "algorithmic", "algospeak", "algorhythm",
-})
+_ALGO_PREFIX_FALSE_POSITIVES = frozenset(
+    {
+        "algorithm",
+        "algorithms",
+        "algorithmic",
+        "algospeak",
+        "algorhythm",
+    }
+)
 
 
 def is_protected_domain(domain: str) -> bool:
-    """True for domains we must never AUTO-reject (only a human may dead-end them):
-    the core allowlist, plus any domain whose registrable name carries an Algorand
-    signal — the domain name is the safety net when the preview text scores low."""
+    """True for domains we must never AUTO-reject (only a human may dead-end them): the core allowlist, plus any domain whose registrable name carries an Algorand signal — the domain name is the safety net when the preview text scores low."""
     d = (domain or "").lower().strip().strip(".")
     if not d:
         return False
@@ -427,7 +554,9 @@ def is_protected_domain(domain: str) -> bool:
 
 def _is_blocklisted(domain: str) -> bool:
     """Hard generic-platform blocklist (_DEAD_END_DOMAINS + FRONTIER_BLOCKLIST_EXTRA).
-    Pure string check on the domain and its parent suffixes — no DB read."""
+
+    Pure string check on the domain and its parent suffixes — no DB read.
+    """
     from app.core.config import FRONTIER_BLOCKLIST_EXTRA
 
     if not domain:
@@ -439,9 +568,7 @@ def _is_blocklisted(domain: str) -> bool:
 
 
 def is_dead_end_domain(domain: str) -> bool:
-    """Frontier gate: True when discovered links to this domain should not be
-    followed — blocklisted platform, or a domain the relevance classifier /
-    admin feedback already marked irrelevant."""
+    """Frontier gate: True when discovered links to this domain should not be followed — blocklisted platform, or a domain the relevance classifier / admin feedback already marked irrelevant."""
     if _is_blocklisted(domain):
         return True
     status = get_domain_status(domain)
@@ -454,7 +581,8 @@ def evaluate_frontier_link(domain: str) -> tuple[str, bool]:
     Folds is_dead_end_domain + frontier_status into ONE get_domain_status call
     (they were querying the same row twice per link). state is
     'unknown' | 'pending' | 'approved' | 'dead_end'; dead_end is True when the
-    link must NOT be followed (blocklisted, or marked irrelevant)."""
+    link must NOT be followed (blocklisted, or marked irrelevant).
+    """
     if _is_blocklisted(domain):
         return "dead_end", True
     status = get_domain_status(domain)
@@ -490,21 +618,15 @@ def frontier_status(domain: str) -> str:
 
 
 def ensure_monitored_service(domain: str, *, scrape_url: str = "") -> bool:
-    """Approved domain → monitored source in service_registry, so the weekly
-    diff beat watches it and its evolution can become update articles. Worker-
-    side mirror of the backend admin-approve bridge (admin_set_domain); without
-    it, auto-approved domains were crawled for the research corpus but could
-    never produce a publish candidate. Never overwrites an existing row (the
-    admin may have customised it), and never spawns a service for a domain some
-    service already owns (e.g. after an admin merge). Returns True when a new
-    service was created.
+    """Approved domain → monitored source in service_registry, so the weekly diff beat watches it and its evolution can become update articles. Worker- side mirror of the backend admin-approve bridge (admin_set_domain); without it, auto-approved domains were crawled for the research corpus but could never produce a publish candidate. Never overwrites an existing row (the admin may have customised it), and never spawns a service for a domain some service already owns (e.g. after an admin merge). Returns True when a new service was created.
 
     Never claims bsky.app: it's a shared platform host (every monitored
     Bluesky account resolves to the same registrable domain), so a random
     backlink to someone's profile discovered by the frontier must not spawn or
     silently repoint a "bsky.app" service — that already happened once (the
     NFDomains account got auto-approved as a generic domain named "bsky.app"
-    before the dedicated Bluesky lane existed)."""
+    before the dedicated Bluesky lane existed).
+    """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ServiceRegistryStmts
     from app.modules.newspaper.service_sources import add_web_source, service_for_domain
@@ -547,10 +669,7 @@ def register_pending_domain(
     preview: dict[str, str] | None = None,
     approved: bool = False,
 ) -> None:
-    """Record a newly met domain. By default HOLD it pending for admin review;
-    when ``approved`` (score-gated frontier auto-approve) mark it approved so the
-    one-hop frontier explores it immediately. Never used to auto-reject — a
-    below-threshold domain is still registered pending, not dead-ended."""
+    """Record a newly met domain. By default HOLD it pending for admin review; when ``approved`` (score-gated frontier auto-approve) mark it approved so the one-hop frontier explores it immediately. Never used to auto-reject — a below-threshold domain is still registered pending, not dead-ended."""
     from datetime import UTC, datetime
 
     from app.core.cassandra import get_cassandra_session

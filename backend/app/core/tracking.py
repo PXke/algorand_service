@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 _OPT_OUT_COOKIE = "pxke_no_track=1"
 
@@ -17,4 +18,5 @@ def _cookie_from_headers(headers: Mapping[str, Any]) -> str:
 
 
 def tracking_opted_out_from_headers(headers: Mapping[str, Any]) -> bool:
+    """True when the request headers carry the admin-wallet analytics opt-out cookie."""
     return tracking_opted_out_from_cookie(_cookie_from_headers(headers))

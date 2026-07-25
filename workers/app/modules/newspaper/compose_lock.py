@@ -12,8 +12,12 @@ import json
 import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from app.core.redis_lock import acquire, release
+
+if TYPE_CHECKING:
+    import redis
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +35,13 @@ class ComposeBusyError(Exception):
     """Raised when another compose already holds the global writer lock."""
 
     def __init__(self, key: str = COMPOSE_LOCK_KEY, status: dict | None = None) -> None:
+        """Carry the lock key and, if known, the current holder's metadata."""
         self.key = key
         self.status = status  # holder metadata (label/started_at/task_id), if known
         super().__init__(key)
 
 
-def _redis_client():
+def _redis_client() -> redis.Redis:
     import redis
 
     from app.core.config import REDIS_URL
@@ -45,10 +50,7 @@ def _redis_client():
 
 
 def _current_task_id() -> str:
-    """Celery task id of the caller, if compose_lock() is being used from
-    inside an actual task (not a one-off manual/SSH script invocation —
-    those have no task context, so this returns "" and such runs simply
-    can't be auto-reclaimed by a later caller if they stall)."""
+    """Celery task id of the caller, if compose_lock() is being used from inside an actual task (not a one-off manual/SSH script invocation — those have no task context, so this returns "" and such runs simply can't be auto-reclaimed by a later caller if they stall)."""
     try:
         from celery import current_task
 
@@ -70,11 +72,7 @@ def _write_meta(label: str, task_id: str) -> None:
 
 
 def get_compose_lock_status() -> dict | None:
-    """Best-effort snapshot of who holds the compose lock and since when —
-    for admin visibility, so "why isn't anything happening" is a one-line
-    check instead of cross-referencing compose_sessions by hand (as this
-    was diagnosed manually in prod on 2026-07-13). None if the lock isn't
-    currently held or Redis is unreachable."""
+    """Best-effort snapshot of who holds the compose lock and since when — for admin visibility, so "why isn't anything happening" is a one-line check instead of cross-referencing compose_sessions by hand (as this was diagnosed manually in prod on 2026-07-13). None if the lock isn't currently held or Redis is unreachable."""
     try:
         client = _redis_client()
         ttl = client.ttl(_RAW_LOCK_KEY)
@@ -92,11 +90,7 @@ def get_compose_lock_status() -> dict | None:
 
 
 def _holder_is_dead(meta: dict) -> bool:
-    """True ONLY when we can positively confirm the recorded holder task is
-    no longer running. Any uncertainty at all (no task_id recorded, still
-    within the minimum age floor, Celery inspect() failing or timing out)
-    returns False — this must never reclaim on a hunch, since two writer
-    loops running concurrently is exactly what this lock exists to prevent."""
+    """True ONLY when we can positively confirm the recorded holder task is no longer running. Any uncertainty at all (no task_id recorded, still within the minimum age floor, Celery inspect() failing or timing out) returns False — this must never reclaim on a hunch, since two writer loops running concurrently is exactly what this lock exists to prevent."""
     task_id = meta.get("task_id")
     started_at = meta.get("started_at")
     if not task_id or not started_at:
@@ -122,7 +116,9 @@ def _holder_is_dead(meta: dict) -> bool:
 
 def _try_reclaim() -> bool:
     """Force-clear the lock iff its recorded holder is positively dead.
-    Returns True if it reclaimed (caller should retry acquire())."""
+
+    Returns True if it reclaimed (caller should retry acquire()).
+    """
     status = get_compose_lock_status()
     if not status or not _holder_is_dead(status):
         return False
@@ -130,7 +126,9 @@ def _try_reclaim() -> bool:
         "compose lock held by dead task %s (label=%r, age~%ss) — reclaiming; "
         "likely a worker restart (e.g. a deploy) killed it mid-compose without "
         "releasing the lock (hit in prod 2026-07-13)",
-        status.get("task_id"), status.get("label"), status.get("ttl_seconds"),
+        status.get("task_id"),
+        status.get("label"),
+        status.get("ttl_seconds"),
     )
     with contextlib.suppress(Exception):
         client = _redis_client()
@@ -148,7 +146,8 @@ def compose_lock(label: str = "") -> Iterator[None]:
     is already held, makes ONE attempt to reclaim it, but only when the
     recorded holder is positively confirmed dead (see _holder_is_dead) —
     otherwise raises ComposeBusyError exactly as before, carrying the
-    holder's status for the caller to log/report."""
+    holder's status for the caller to log/report.
+    """
     token = acquire(COMPOSE_LOCK_KEY, COMPOSE_LOCK_TTL)
     if token is None and _try_reclaim():
         token = acquire(COMPOSE_LOCK_KEY, COMPOSE_LOCK_TTL)

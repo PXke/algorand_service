@@ -1,3 +1,5 @@
+"""Canonical content-category values shared by the classifier and admin UI."""
+
 from __future__ import annotations
 
 CONTENT_CATEGORIES: tuple[str, ...] = (
@@ -38,6 +40,7 @@ def normalize_content_category(value: str | None, *, default: str = "generic") -
 
 
 def is_content_category(value: str | None) -> bool:
+    """Return whether value normalizes to a known content category."""
     raw = (value or "").strip().lower().replace(" ", "_")
     if not raw:
         return False

@@ -1,3 +1,5 @@
+"""Celery task that polls monitored Bluesky accounts."""
+
 from __future__ import annotations
 
 from app.celery_app import celery_app
@@ -5,6 +7,7 @@ from app.modules.chain_tail.registry_cache import clear_registry_cache, load_ena
 from app.modules.newspaper.ingest_signal import ingest_publish_signal
 from app.modules.newspaper.snapshot_store import get_latest_snapshot, source_id_for_service
 from app.modules.scraper.core.bluesky_scraper import (
+    BlueskyPost,
     fetch_author_posts,
     is_bluesky_scrape_url,
 )
@@ -12,10 +15,8 @@ from app.modules.scraper.crawler_registry import is_crawler_enabled
 from app.modules.scraper.crawler_types import CrawlerType
 
 
-def _enqueue_post_links(post) -> None:
-    """Mention-based discovery: a monitored account linking a site is a lead —
-    feed it to the crawl frontier (unknown domains land pending as usual).
-    Best-effort; never blocks the post ingest."""
+def _enqueue_post_links(post: BlueskyPost) -> None:
+    """Mention-based discovery: a monitored account linking a site is a lead — feed it to the crawl frontier (unknown domains land pending as usual). Best-effort; never blocks the post ingest."""
     from urllib.parse import urlparse
 
     from app.modules.crawler.ecosystem_sync import _skippable
@@ -33,11 +34,7 @@ def _enqueue_post_links(post) -> None:
 
 @celery_app.task(name="app.tasks.scrape.poll_bluesky_sources")
 def poll_bluesky_sources() -> dict[str, object]:
-    """Per-post ingest of Bluesky accounts registered as services (scrape_url is
-    a bsky.app profile URL). One signal per original post, each with its own
-    ``service_id`` (``<service>:<rkey>``) so a re-poll hits the snapshot dedup
-    and returns ``unchanged`` — no separate seen-store. Public AppView, no auth.
-    """
+    """Per-post ingest of Bluesky accounts registered as services (scrape_url is a bsky.app profile URL). One signal per original post, each with its own ``service_id`` (``<service>:<rkey>``) so a re-poll hits the snapshot dedup and returns ``unchanged`` — no separate seen-store. Public AppView, no auth."""
     if not is_crawler_enabled(CrawlerType.BLUESKY):
         return {"status": "skipped", "reason": "crawler_bluesky_disabled", "sources": 0}
 
@@ -45,9 +42,7 @@ def poll_bluesky_sources() -> dict[str, object]:
 
     clear_registry_cache()
     entries = [
-        e
-        for e in load_enabled_services()
-        if e.scrape_url and is_bluesky_scrape_url(e.scrape_url)
+        e for e in load_enabled_services() if e.scrape_url and is_bluesky_scrape_url(e.scrape_url)
     ]
 
     new_posts = 0

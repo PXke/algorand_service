@@ -1,3 +1,5 @@
+"""Upvoting a suggestion requires a valid, non-duplicate wallet signature."""
+
 from __future__ import annotations
 
 import pytest
@@ -17,6 +19,7 @@ def _always_invalid(_wallet: str, _message: str, _signature: str) -> bool:
 
 
 def test_upvote_success() -> None:
+    """Records an upvote and returns an incremented upvote_count for a valid signature."""
     wallet = "W" * 58
     store = InMemorySuggestionStore()
     suggestion_id = "s-1"
@@ -46,6 +49,7 @@ def test_upvote_success() -> None:
 
 
 def test_upvote_invalid_signature() -> None:
+    """Rejects a signature that doesn't match the claimed wallet."""
     wallet = "W" * 58
     store = InMemorySuggestionStore()
     suggestion_id = "s-invalid"
@@ -75,6 +79,7 @@ def test_upvote_invalid_signature() -> None:
 
 
 def test_upvote_duplicate() -> None:
+    """Rejects a second upvote from the same wallet on the same suggestion."""
     wallet = "W" * 58
     store = InMemorySuggestionStore()
     suggestion_id = "s-2"

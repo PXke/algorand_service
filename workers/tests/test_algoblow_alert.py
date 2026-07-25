@@ -1,4 +1,8 @@
+"""AlgoBlow scam alerts classify as breaking tier and extract domains/addresses."""
+
 from pathlib import Path
+
+import pytest
 
 from app.modules.newspaper.publish_policy import (
     PublishKind,
@@ -24,7 +28,8 @@ VICTIM_ADDRS = [
 ]
 
 
-def test_algoblow_classified_scam_breaking(monkeypatch):
+def test_algoblow_classified_scam_breaking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Classifies the AlgoBlow alert as scam_alert/breaking tier when BREAKING_TIER_ENABLED is on."""
     # BREAKING_TIER_ENABLED defaults off (2026-07-17) — this pins the
     # underlying keyword logic for when it's re-enabled; topic classification
     # itself (asserted below) is unaffected and still forces human review.
@@ -39,7 +44,8 @@ def test_algoblow_classified_scam_breaking(monkeypatch):
     assert classify_publish_tier(topic=topic, page_text=D13_TEXT) == PublishTier.BREAKING
 
 
-def test_algoblow_stays_standard_tier_while_breaking_disabled():
+def test_algoblow_stays_standard_tier_while_breaking_disabled() -> None:
+    """Still tags the AlgoBlow alert as scam_alert but keeps it standard tier while the breaking flag is off."""
     topic = classify_publish_topic(
         page_text=D13_TEXT,
         diff=None,
@@ -50,14 +56,16 @@ def test_algoblow_stays_standard_tier_while_breaking_disabled():
     assert classify_publish_tier(topic=topic, page_text=D13_TEXT) == PublishTier.STANDARD
 
 
-def test_algoblow_extracts_domain_and_addresses():
+def test_algoblow_extracts_domain_and_addresses() -> None:
+    """Extracts the algoblow.com domain and all four victim addresses from the alert text."""
     _urls, domains = extract_domains_and_urls(D13_TEXT)
     assert "algoblow.com" in domains
     addrs = extract_algorand_addresses(D13_TEXT)
     assert addrs == VICTIM_ADDRS
 
 
-def test_algoblow_scam_enrichment_bundle():
+def test_algoblow_scam_enrichment_bundle() -> None:
+    """Builds a scam-enrichment context with the domain, addresses, and a rekey fetch note."""
     ctx = gather_scam_enrichment(D13_TEXT, source_url="push://community/d13-algoblow")
     assert "algoblow.com" in ctx.mentioned_domains
     assert len(ctx.mentioned_algo_addresses) == 4

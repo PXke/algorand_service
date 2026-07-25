@@ -1,3 +1,5 @@
+"""Weekly digest id stability and week-key computation."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime

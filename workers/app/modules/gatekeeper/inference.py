@@ -26,8 +26,7 @@ _EPS = 1e-6
 
 
 def logit_adjustment(base_fail_rate: float) -> float:
-    """Log-odds of the true production prior. Negative for rare failures
-    (base_fail_rate < 0.5), pulling probabilities down — fewer false rejects."""
+    """Log-odds of the true production prior. Negative for rare failures (base_fail_rate < 0.5), pulling probabilities down — fewer false rejects."""
     p = min(max(base_fail_rate, _EPS), 1.0 - _EPS)
     return math.log(p / (1.0 - p))
 
@@ -41,14 +40,14 @@ def _sigmoid(z: float) -> float:
 
 
 def calibrate(raw_logit: float, base_fail_rate: float) -> float:
-    """Convert a balanced-trained raw logit to the production-calibrated
-    probability of failure under the current base rate."""
+    """Convert a balanced-trained raw logit to the production-calibrated probability of failure under the current base rate."""
     return _sigmoid(raw_logit + logit_adjustment(base_fail_rate))
 
 
 @dataclass(frozen=True)
 class GateDecision:
-    decision: str          # ROUTE | DROP_FACTUALITY | DROP_TONE | RETRY_COMPLETENESS
+    """The gatekeeper's routing decision for one draft."""
+    decision: str  # ROUTE | DROP_FACTUALITY | DROP_TONE | RETRY_COMPLETENESS
     prob_factuality: float
     prob_tone: float
     raw_factuality: float
@@ -67,9 +66,7 @@ def decide(
     threshold_tone: float,
     completeness_passed: bool,
 ) -> GateDecision:
-    """Full gate logic from raw head logits. Deterministic completeness is
-    checked first (cheap, and routes to self-correction rather than a hard drop);
-    factuality is the hard gate; tone last."""
+    """Full gate logic from raw head logits. Deterministic completeness is checked first (cheap, and routes to self-correction rather than a hard drop); factuality is the hard gate; tone last."""
     c_f = logit_adjustment(base_fail_rate_factuality)
     c_t = logit_adjustment(base_fail_rate_tone)
     p_f = _sigmoid(raw_factuality + c_f)
@@ -86,18 +83,20 @@ def decide(
 
     return GateDecision(
         decision=decision,
-        prob_factuality=p_f, prob_tone=p_t,
-        raw_factuality=raw_factuality, raw_tone=raw_tone,
-        c_factuality=c_f, c_tone=c_t,
+        prob_factuality=p_f,
+        prob_tone=p_t,
+        raw_factuality=raw_factuality,
+        raw_tone=raw_tone,
+        c_factuality=c_f,
+        c_tone=c_t,
     )
 
 
 class GatekeeperScorer:
-    """Lazy torch-backed scorer: loads the model once, returns raw head logits
-    for a built input string. Kept thin so ``decide``/``calibrate`` stay
-    torch-free and testable."""
+    """Lazy torch-backed scorer: loads the model once, returns raw head logits for a built input string. Kept thin so ``decide``/``calibrate`` stay torch-free and testable."""
 
-    def __init__(self, model_path: str, model_name: str | None = None):
+    def __init__(self, model_path: str, model_name: str | None = None) -> None:
+        """Store the checkpoint path and base model name; the model itself loads lazily on first use."""
         self._model_path = model_path
         self._model_name = model_name
         self._model: Any = None
@@ -126,9 +125,7 @@ class GatekeeperScorer:
         self._ensure_loaded()
         import torch
 
-        enc = self._tok(
-            input_text, truncation=True, max_length=max_length, return_tensors="pt"
-        )
+        enc = self._tok(input_text, truncation=True, max_length=max_length, return_tensors="pt")
         with torch.inference_mode():
             out = self._model(enc["input_ids"], enc["attention_mask"])
         return {
@@ -140,7 +137,5 @@ class GatekeeperScorer:
 
 
 def quality_grade(raw_quality: float) -> float:
-    """P(good article) from the quality head — a 0..1 grade, NOT a rare-event
-    gate, so no class-prior shift is applied (unlike factuality/tone). Multiply
-    by 10 for the 0-10 grade the reviewer sees."""
+    """P(good article) from the quality head — a 0..1 grade, NOT a rare-event gate, so no class-prior shift is applied (unlike factuality/tone). Multiply by 10 for the 0-10 grade the reviewer sees."""
     return _sigmoid(raw_quality)

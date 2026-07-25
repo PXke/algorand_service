@@ -1,3 +1,5 @@
+"""Storage interface for articles."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +8,7 @@ from typing import Protocol
 
 @dataclass
 class StoredArticle:
+    """A stored article's full data."""
     article_id: str
     service_id: str
     title: str
@@ -27,8 +30,15 @@ class StoredArticle:
 
 
 class ArticleStore(Protocol):
-    def insert(self, article: StoredArticle, *, feed_bucket: str = "main") -> None: ...
+    """Storage interface for articles."""
+    def insert(self, article: StoredArticle, *, feed_bucket: str = "main") -> None:
+        """Insert a new article and its feed row."""
+        ...
 
-    def list_feed(self, *, feed_bucket: str = "main", limit: int = 50) -> list[StoredArticle]: ...
+    def list_feed(self, *, feed_bucket: str = "main", limit: int = 50) -> list[StoredArticle]:
+        """List recent feed rows, newest first."""
+        ...
 
-    def get(self, article_id: str) -> StoredArticle | None: ...
+    def get(self, article_id: str) -> StoredArticle | None:
+        """Fetch one article by id, or None if it does not exist."""
+        ...

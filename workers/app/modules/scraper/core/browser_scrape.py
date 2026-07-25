@@ -1,10 +1,16 @@
+"""Playwright-backed page fetch and visible-text extraction."""
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from app.core import config
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Page
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +32,7 @@ _LOGIN_MARKERS = (
 
 @dataclass(frozen=True)
 class BrowserPageResult:
+    """A Playwright-fetched page's extracted content."""
     title: str
     text: str
     final_url: str
@@ -34,6 +41,7 @@ class BrowserPageResult:
 
 
 class BrowserScrapeError(Exception):
+    """Raised when a browser-backed fetch fails."""
     pass
 
 
@@ -44,8 +52,8 @@ def fetch_page(
     timeout_ms: int | None = None,
     storage_state_path: str | None = None,
 ) -> BrowserPageResult:
-    """
-    Load a hard target (SPA / heavy JS) with Playwright Chromium.
+    """Load a hard target (SPA / heavy JS) with Playwright Chromium.
+
     Python stack standard — Puppeteer/Selenium are not required.
     """
     wait_ms = wait_after_load_ms if wait_after_load_ms is not None else config.BROWSER_WAIT_MS
@@ -107,7 +115,7 @@ def fetch_page(
     )
 
 
-def _extract_visible_text(page) -> str:
+def _extract_visible_text(page: Page) -> str:
     """Prefer main landmarks; fall back to full body text."""
     selectors = (
         "main",

@@ -1,7 +1,10 @@
+"""Article search: Typesense-backed with a feed-scan fallback."""
+
 from __future__ import annotations
 
 import logging
 import re
+from typing import TYPE_CHECKING
 
 from app.core.typesense_client import (
     ARTICLES_COLLECTION,
@@ -9,6 +12,11 @@ from app.core.typesense_client import (
     expanded_search_terms,
     get_typesense_client,
 )
+
+if TYPE_CHECKING:
+    import typesense
+
+    from app.modules.news.stores.base import StoredArticle
 from app.modules.news.services.news_service import NewsService
 from app.modules.search.models.schemas import SearchHit, SearchResponse
 
@@ -18,7 +26,9 @@ _HIGHLIGHT_AFFIX_TOKENS = 12
 
 
 class SearchService:
+    """Article search: Typesense-backed with a feed-scan fallback."""
     def __init__(self, news_service: NewsService | None = None) -> None:
+        """Wire the news service used for the feed-scan fallback path."""
         self._news = news_service or NewsService()
 
     def search(
@@ -28,6 +38,7 @@ class SearchService:
         limit: int = 20,
         service_id: str | None = None,
     ) -> SearchResponse:
+        """Search articles, preferring Typesense and falling back to a feed scan."""
         q = query.strip()
         if not q:
             return SearchResponse(query=q, engine="none", items=[])
@@ -48,15 +59,13 @@ class SearchService:
 
     def _search_typesense(
         self,
-        client,
+        client: typesense.Client,
         q: str,
         *,
         limit: int,
         service_id: str | None,
     ) -> list[SearchHit]:
-        """PUBLISHED ARTICLES only. The crawled-pages collection is the writer's
-        research corpus — surfacing it to readers mixed raw third-party pages
-        into results, with ids that don't resolve to any article route."""
+        """PUBLISHED ARTICLES only. The crawled-pages collection is the writer's research corpus — surfacing it to readers mixed raw third-party pages into results, with ids that don't resolve to any article route."""
         hits: list[SearchHit] = []
         params: dict = {
             "q": q,
@@ -190,7 +199,7 @@ def _word_boundary_pattern(term: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![\w]){escaped}(?![\w])", re.IGNORECASE | re.UNICODE)
 
 
-def _feed_article_matches(article, terms: list[str]) -> bool:
+def _feed_article_matches(article: StoredArticle, terms: list[str]) -> bool:
     haystacks = [article.title, article.summary]
     body = getattr(article, "body", None)
     if body:
@@ -204,7 +213,7 @@ def _feed_article_matches(article, terms: list[str]) -> bool:
     return False
 
 
-def _first_matching_term(article, terms: list[str]) -> str | None:
+def _first_matching_term(article: StoredArticle, terms: list[str]) -> str | None:
     haystacks = [
         ("body", str(getattr(article, "body", "") or "")),
         ("summary", article.summary),

@@ -1,5 +1,4 @@
-"""Incident 2026-07-15: one drain run chain-published three articles minutes
-apart (Subtopia 11:27, Aramid 11:33, Silo 11:37) instead of 8h apart.
+"""Incident 2026-07-15: one drain run chain-published three articles minutes apart (Subtopia 11:27, Aramid 11:33, Silo 11:37) instead of 8h apart.
 
 The review branch of drain_standard_publish_queue composes rows the
 classifier wasn't confident about; fresh-auto-approve inside
@@ -19,6 +18,7 @@ Contract pinned here:
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -38,7 +38,7 @@ def _row(queue_id: str) -> SimpleNamespace:
 
 
 @pytest.fixture
-def drain_env(monkeypatch):
+def drain_env(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Neutralize everything around the review-branch accounting under test."""
     monkeypatch.setattr(qdt, "_pending_feed_backlog_full", lambda: False)
     monkeypatch.setattr(qdt, "remaining_standard_publish_slots", lambda: 3)
@@ -55,17 +55,16 @@ def drain_env(monkeypatch):
     monkeypatch.setattr(qdt, "_row_needs_review", lambda _row: True)
 
     recorded: list[str] = []
-    monkeypatch.setattr(
-        qdt, "record_standard_publish", lambda **_kw: recorded.append("tick")
-    )
+    monkeypatch.setattr(qdt, "record_standard_publish", lambda **_kw: recorded.append("tick"))
     return recorded
 
 
 def test_auto_published_review_outcome_advances_clock_and_spends_budget(
-    monkeypatch, drain_env
+    monkeypatch: pytest.MonkeyPatch, drain_env: list[str]
 ) -> None:
+    """A review-branch auto-publish advances the pacing clock and blocks a second direct publish in the same run."""
     rows = [_row("r1"), _row("r2")]
-    monkeypatch.setattr(qdt, "_pending_for_tier", lambda _tier, limit: rows)
+    monkeypatch.setattr(qdt, "_pending_for_tier", lambda _tier, limit: rows)  # noqa: ARG005 -- name must match the real callee's keyword arg
     # r2 is a direct-publish row; it must never be composed once r1's
     # auto-publish spent the run's feed budget.
     monkeypatch.setattr(
@@ -75,7 +74,7 @@ def test_auto_published_review_outcome_advances_clock_and_spends_budget(
     )
     composed: list[str] = []
 
-    def compose(row):
+    def compose(row: Any) -> dict:  # noqa: ANN401 -- duck-typed Cassandra row/result
         composed.append(row.queue_id)
         return {"status": "published", "article_id": "a-1"}
 
@@ -83,7 +82,7 @@ def test_auto_published_review_outcome_advances_clock_and_spends_budget(
     monkeypatch.setattr(
         qdt,
         "publish_from_queued_row",
-        lambda *a, **k: pytest.fail("direct publish must not run after budget spent"),
+        lambda *_a, **_k: pytest.fail("direct publish must not run after budget spent"),
     )
 
     result = qdt.drain_standard_publish_queue()
@@ -94,14 +93,15 @@ def test_auto_published_review_outcome_advances_clock_and_spends_budget(
 
 
 def test_approved_backlog_outcome_counts_toward_compose_batch_limit(
-    monkeypatch, drain_env
+    monkeypatch: pytest.MonkeyPatch, drain_env: list[str]
 ) -> None:
+    """An approved_backlog outcome spends the compose batch budget without touching the pacing clock."""
     rows = [_row("r1"), _row("r2")]
-    monkeypatch.setattr(qdt, "_pending_for_tier", lambda _tier, limit: rows)
+    monkeypatch.setattr(qdt, "_pending_for_tier", lambda _tier, limit: rows)  # noqa: ARG005 -- name must match the real callee's keyword arg
     monkeypatch.setattr(qdt.config, "REVIEW_COMPOSE_BATCH_LIMIT", 1, raising=False)
     composed: list[str] = []
 
-    def compose(row):
+    def compose(row: Any) -> dict:  # noqa: ANN401 -- duck-typed Cassandra row/result
         composed.append(row.queue_id)
         return {"status": "approved_backlog", "article_id": "a-1"}
 
@@ -115,40 +115,31 @@ def test_approved_backlog_outcome_counts_toward_compose_batch_limit(
 
 
 def test_approved_backlog_is_terminal() -> None:
+    """Confirms approved_backlog is registered as a terminal queue outcome."""
     assert "approved_backlog" in TERMINAL_OUTCOMES
 
 
 def test_edited_is_terminal() -> None:
-    """Regression pin (2026-07-17): run_article_edit's success outcome
-    ({"status": "edited", ...}) was missing from TERMINAL_OUTCOMES, so a
-    completed edit never resolved its queue row — the row stayed "pending"
-    and drain_breaking_publish_queue (fires every ~2 min) redrained and
-    re-edited the same live article every beat, forever. 165 edits / 330
-    versions on one article in under 4 hours before this was caught by hand."""
+    """Regression pin (2026-07-17): run_article_edit's success outcome ({"status": "edited", ...}) was missing from TERMINAL_OUTCOMES, so a completed edit never resolved its queue row — the row stayed "pending" and drain_breaking_publish_queue (fires every ~2 min) redrained and re-edited the same live article every beat, forever. 165 edits / 330 versions on one article in under 4 hours before this was caught by hand."""
     assert "edited" in TERMINAL_OUTCOMES
 
 
 def test_edit_failure_is_terminal() -> None:
-    """run_article_edit's failure outcome ({"reason": "update_failed"}) is
-    only reachable when update_article() returns False, which is ONLY a
-    permanent condition (linked article deleted, malformed id, never
-    published) — a real Cassandra write error raises instead. Same
-    missing-terminal-status shape as "edited"; closed alongside it."""
+    """run_article_edit's failure outcome ({"reason": "update_failed"}) is only reachable when update_article() returns False, which is ONLY a permanent condition (linked article deleted, malformed id, never published) — a real Cassandra write error raises instead. Same missing-terminal-status shape as "edited"; closed alongside it."""
     assert "failed" in TERMINAL_OUTCOMES
 
 
-def test_full_backlog_stops_review_composes(monkeypatch, drain_env) -> None:
-    """2026-07-16: auto-approve → backlog bypassed the 1-slot review throttle,
-    so hourly drains composed six articles overnight — two days of publish
-    inventory at 3/day. With PENDING_FEED_MAX_DEPTH articles already queued,
-    review-bound rows must stay pending, uncomposed."""
+def test_full_backlog_stops_review_composes(
+    monkeypatch: pytest.MonkeyPatch, drain_env: list[str]
+) -> None:
+    """2026-07-16: auto-approve → backlog bypassed the 1-slot review throttle, so hourly drains composed six articles overnight — two days of publish inventory at 3/day. With PENDING_FEED_MAX_DEPTH articles already queued, review-bound rows must stay pending, uncomposed."""
     monkeypatch.setattr(qdt, "_pending_feed_backlog_full", lambda: True)
     rows = [_row("r1"), _row("r2")]
-    monkeypatch.setattr(qdt, "_pending_for_tier", lambda _tier, limit: rows)
+    monkeypatch.setattr(qdt, "_pending_for_tier", lambda _tier, limit: rows)  # noqa: ARG005 -- name must match the real callee's keyword arg
     monkeypatch.setattr(
         qdt,
         "_compose_review_row",
-        lambda row: pytest.fail("must not compose while the backlog is full"),
+        lambda _row: pytest.fail("must not compose while the backlog is full"),
     )
 
     result = qdt.drain_standard_publish_queue()
@@ -157,7 +148,8 @@ def test_full_backlog_stops_review_composes(monkeypatch, drain_env) -> None:
     assert drain_env == []  # clock untouched — nothing happened
 
 
-def test_ensure_review_ready_skips_when_backlog_full(monkeypatch) -> None:
+def test_ensure_review_ready_skips_when_backlog_full(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skips listing review candidates entirely when the pending feed backlog is already full."""
     monkeypatch.setattr(
         "app.modules.crawler.classifier_review_store.review_queue_full",
         lambda: False,
@@ -166,18 +158,16 @@ def test_ensure_review_ready_skips_when_backlog_full(monkeypatch) -> None:
     monkeypatch.setattr(
         qdt,
         "_pending_for_tier",
-        lambda _tier, limit: pytest.fail("must not even list candidates"),
+        lambda _tier, limit: pytest.fail("must not even list candidates"),  # noqa: ARG005 -- name must match the real callee's keyword arg
     )
     result = qdt.ensure_review_ready()
     assert result == {"status": "skipped", "reason": "pending_feed_backlog_full"}
 
 
-def test_capped_compose_is_stashed_to_backlog_not_discarded(monkeypatch) -> None:
-    """2026-07-15: a finished ok compose (the 'Seven Real-World Apps' YouTube
-    article) hit 'standard daily publish cap reached (3/3)' AFTER composing,
-    got returned as rate_limited, and the content was thrown away (its queue
-    row later aged out). The stash helper must store the article unlisted and
-    queue it for the paced backlog release instead."""
+def test_capped_compose_is_stashed_to_backlog_not_discarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-07-15: a finished ok compose (the 'Seven Real-World Apps' YouTube article) hit 'standard daily publish cap reached (3/3)' AFTER composing, got returned as rate_limited, and the content was thrown away (its queue row later aged out). The stash helper must store the article unlisted and queue it for the paced backlog release instead."""
     from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
     from app.modules.newspaper.tasks import publish_tasks as pt
 
@@ -189,15 +179,11 @@ def test_capped_compose_is_stashed_to_backlog_not_discarded(monkeypatch) -> None
     executed: list = []
 
     class _FakeSession:
-        def execute(self, stmt, params=None):
+        def execute(self, stmt: str, params: tuple | None = None) -> None:
             executed.append((stmt, params))
 
-    monkeypatch.setattr(
-        "app.core.cassandra.get_cassandra_session", lambda: _FakeSession()
-    )
-    monkeypatch.setattr(
-        "app.core.cassandra.prepare_cached", lambda cql: cql
-    )
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: _FakeSession())
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
 
     row = SimpleNamespace(
         queue_id="q1",

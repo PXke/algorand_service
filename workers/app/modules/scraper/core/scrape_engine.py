@@ -1,3 +1,5 @@
+"""Decide which scrape engine (HTTP vs browser) a domain needs."""
+
 from __future__ import annotations
 
 from urllib.parse import urlparse
@@ -20,9 +22,7 @@ def _allowed_browser_domains() -> set[str]:
 
 
 def uses_browser_engine(scrape_url: str) -> bool:
-    """
-    Whether this source should use Playwright (hard targets / SPAs).
-    """
+    """Whether this source should use Playwright (hard targets / SPAs)."""
     if config.SCRAPE_ENGINE_DEFAULT == "http":
         return scrape_url.startswith("browser://")
     if config.SCRAPE_ENGINE_DEFAULT == "browser":

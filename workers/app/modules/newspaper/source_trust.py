@@ -1,3 +1,5 @@
+"""Trust bonus for official/known-good sources (mail domains, verified channels)."""
+
 from __future__ import annotations
 
 from urllib.parse import urlparse
@@ -21,8 +23,8 @@ def source_trust_bonus(
     source_url: str = "",
     mail_from: str = "",
 ) -> int:
-    """
-    Authority boost for queue priority (0–25).
+    """Authority boost for queue priority (0–25).
+
     Official Foundation mail ranks highest.
     """
     kind = (source_kind or "").strip().lower()

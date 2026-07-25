@@ -1,3 +1,5 @@
+"""Poll all scrape sources for diffs and route significant ones into the publish queue."""
+
 from __future__ import annotations
 
 import uuid
@@ -27,9 +29,7 @@ def _has_pending_feed_release() -> bool:
     from app.core.statements import PendingFeedStmts
 
     bucket = getattr(config, "NEWS_FEED_BUCKET", "main") or "main"
-    row = get_cassandra_session().execute(
-        PendingFeedStmts.PEEK_ID, (bucket,)
-    ).one()
+    row = get_cassandra_session().execute(PendingFeedStmts.PEEK_ID, (bucket,)).one()
     return row is not None
 
 
@@ -44,9 +44,7 @@ def run_mistral_diff_check(
     is_throttled: Callable[[str], bool] = scrape_throttled,
     record_scrape: Callable[..., None] = mark_scraped,
 ) -> dict[str, object]:
-    """
-    Poll scrape sources, detect snapshot diffs, publish with Mistral when content changed.
-    """
+    """Poll scrape sources, detect snapshot diffs, publish with Mistral when content changed."""
     from app.core import config
 
     if pause_on_feed_backlog is None:
@@ -61,6 +59,7 @@ def run_mistral_diff_check(
         return {"status": "skipped", "reason": "approved_feed_pending_release", "checked": 0}
 
     clear_cache()
+
     # Web sources only — reddit/discord/telegram have dedicated pollers, so
     # scraping them here too would double the request rate and trigger limits.
     def _is_web(u: str) -> bool:

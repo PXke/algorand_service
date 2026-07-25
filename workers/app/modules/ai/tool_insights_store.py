@@ -1,12 +1,12 @@
-"""Writer introspection signals (best-effort, never raises into the compose path):
+"""Writer introspection signals (best-effort, never raises into the compose path).
 
-  - tool_suggestions (Cassandra): capabilities the model wished it had (via the
-    suggest_tool tool), reviewed in the admin "Tool insights" tab so we can add
-    tools over time.
-  - compose_feedback (Cassandra): operational friction the model hit — bad prompts,
-    source data, tool behavior, pipeline issues — via report_compose_issue.
-  - tool errors → Bugsnag: tool calls that errored are reported to Bugsnag (the
-    ops dashboard) rather than a bespoke table, grouped by tool name.
+- tool_suggestions (Cassandra): capabilities the model wished it had (via the
+suggest_tool tool), reviewed in the admin "Tool insights" tab so we can add
+tools over time.
+- compose_feedback (Cassandra): operational friction the model hit — bad prompts,
+source data, tool behavior, pipeline issues — via report_compose_issue.
+- tool errors → Bugsnag: tool calls that errored are reported to Bugsnag (the
+ops dashboard) rather than a bespoke table, grouped by tool name.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ def record_tool_suggestion(
     source_url: str = "",
     model: str = "",
 ) -> bool:
+    """Record a writer-suggested missing capability for admin review, best-effort."""
     capability = (capability or "").strip()
     if not capability:
         return False
@@ -59,9 +61,7 @@ def record_tool_suggestion(
         return False
 
 
-_COMPOSE_FEEDBACK_CATEGORIES = frozenset(
-    {"prompt", "source_data", "tool", "pipeline", "other"}
-)
+_COMPOSE_FEEDBACK_CATEGORIES = frozenset({"prompt", "source_data", "tool", "pipeline", "other"})
 _COMPOSE_FEEDBACK_SEVERITIES = frozenset({"low", "medium", "high"})
 
 
@@ -115,10 +115,8 @@ def record_compose_feedback(
         return False
 
 
-def new_session_ref() -> tuple[Any, datetime]:
-    """Stable (session_id, created_at) for ONE compose, generated at its start so
-    progress checkpoints all upsert the same compose_sessions row (PK is
-    (bucket, created_at, session_id))."""
+def new_session_ref() -> tuple[UUID, datetime]:
+    """Stable (session_id, created_at) for ONE compose, generated at its start so progress checkpoints all upsert the same compose_sessions row (PK is (bucket, created_at, session_id))."""
     from cassandra.util import uuid_from_time
 
     now = datetime.now(tz=UTC)
@@ -135,16 +133,13 @@ def record_compose_session(
     final_output: str = "",
     status: str = "ok",
     duration_ms: int = 0,
-    session_id: Any = None,
+    session_id: UUID | None = None,
     created_at: datetime | None = None,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     total_tokens: int = 0,
 ) -> bool:
-    """Persist the agentic transcript of one compose (best-effort). Pass a stable
-    ``session_id``/``created_at`` (from new_session_ref) to UPSERT the same row at
-    each stage so the admin sees progress live (status researching -> writing ->
-    ok), instead of the row only appearing at the very end."""
+    """Persist the agentic transcript of one compose (best-effort). Pass a stable ``session_id``/``created_at`` (from new_session_ref) to UPSERT the same row at each stage so the admin sees progress live (status researching -> writing -> ok), instead of the row only appearing at the very end."""
     try:
         debug = debug or {}
         slim: list[dict[str, Any]] = []
@@ -172,8 +167,10 @@ def record_compose_session(
                 # truncating it mid-sentence, right around where the Liveness
                 # Signals section lives — hiding exactly the evidence needed to
                 # diagnose a fabrication (2026-07-10, KryptoNurd).
-                cap = 6000 if text.startswith("[stage 2 handoff]") else (
-                    1500 if role in ("user", "system") else 4000
+                cap = (
+                    6000
+                    if text.startswith("[stage 2 handoff]")
+                    else (1500 if role in ("user", "system") else 4000)
                 )
                 entry["content"] = text[:cap]
             tcs = m.get("tool_calls")
@@ -236,17 +233,14 @@ _NON_TERMINAL_STATUSES = ("researching", "writing")
 
 
 def reap_stale_compose_sessions(*, stale_minutes: int | None = None) -> dict[str, int]:
-    """Mark any compose_sessions row still stuck in a non-terminal status
-    (researching/writing) past the staleness window as "stale". A crash that
-    skips mistral_compose's own try/except checkpoint finalizers (killed
-    process, OOM, or an exception before the first checkpoint call) otherwise
-    leaves the row looking perpetually in-progress in the admin Sessions view
-    until the table's 7-day TTL quietly drops it. Best-effort, never raises."""
+    """Mark any compose_sessions row still stuck in a non-terminal status (researching/writing) past the staleness window as "stale". A crash that skips mistral_compose's own try/except checkpoint finalizers (killed process, OOM, or an exception before the first checkpoint call) otherwise leaves the row looking perpetually in-progress in the admin Sessions view until the table's 7-day TTL quietly drops it. Best-effort, never raises."""
     from datetime import UTC, datetime, timedelta
 
     from app.core.config import COMPOSE_SESSION_STALE_MINUTES
 
-    threshold_minutes = stale_minutes if stale_minutes is not None else COMPOSE_SESSION_STALE_MINUTES
+    threshold_minutes = (
+        stale_minutes if stale_minutes is not None else COMPOSE_SESSION_STALE_MINUTES
+    )
     cutoff = datetime.now(tz=UTC) - timedelta(minutes=threshold_minutes)
 
     try:
@@ -277,13 +271,11 @@ def reap_stale_compose_sessions(*, stale_minutes: int | None = None) -> dict[str
 
 
 def record_tool_usage_from_trace(trace: list[dict[str, Any]] | None) -> bool:
-    """Increment durable per-tool, per-day call/error counters (tool_usage_stats)
-    from one compose's trace. compose_sessions expires after 7 days, so this is
-    the only lasting record of which tools the writer leans on and which keep
-    failing. Best-effort: wrapped so it can NEVER raise into the compose path.
+    """Increment durable per-tool, per-day call/error counters (tool_usage_stats) from one compose's trace. compose_sessions expires after 7 days, so this is the only lasting record of which tools the writer leans on and which keep failing. Best-effort: wrapped so it can NEVER raise into the compose path.
 
     'unknown tool' results are model output-format glitches, not tool failures
-    (matching report_tool_errors_from_trace), so they count as neither."""
+    (matching report_tool_errors_from_trace), so they count as neither.
+    """
     if not trace:
         return False
     try:
@@ -325,13 +317,9 @@ def report_tool_errors_from_trace(
     *,
     service_id: str = "",
     source_url: str = "",
-    model: str = "",
+    model: str = "",  # noqa: ARG001 -- name must match the real callee's keyword arg
 ) -> int:
-    """Log genuinely-errored tool calls at ERROR level — the celery root
-    ERROR-log handler forwards these to Bugsnag. Best-effort: wrapped so it can
-    NEVER raise into the compose path. Skips 'unknown tool' results, which are
-    model output-format glitches (it emitted its final answer as a bogus tool
-    call), not real tool failures."""
+    """Log genuinely-errored tool calls at ERROR level — the celery root ERROR-log handler forwards these to Bugsnag. Best-effort: wrapped so it can NEVER raise into the compose path. Skips 'unknown tool' results, which are model output-format glitches (it emitted its final answer as a bogus tool call), not real tool failures."""
     if not trace:
         return 0
     n = 0

@@ -1,5 +1,4 @@
-"""Client-side rate limiting for the Mistral API, coordinated across all
-Celery worker processes via Redis.
+"""Client-side rate limiting for the Mistral API, coordinated across all Celery worker processes via Redis.
 
 Why this exists: our account caps mistral-medium at a low requests/second AND a
 tokens/minute budget (e.g. 0.42 rps / 375k TPM on mistral-medium-2505). The

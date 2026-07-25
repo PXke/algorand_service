@@ -1,7 +1,4 @@
-"""Bluesky (AT Protocol) auto-poster. Free, open API — no paywall, no
-approval process, just a bot account with an app password (Settings > App
-Passwords in the Bluesky app; never the real account password — an app
-password can be revoked independently and can't change account settings).
+"""Bluesky (AT Protocol) auto-poster. Free, open API — no paywall, no approval process, just a bot account with an app password (Settings > App Passwords in the Bluesky app; never the real account password — an app password can be revoked independently and can't change account settings).
 
 Three calls per post: authenticate (com.atproto.server.createSession),
 upload the share-card image as a blob (com.atproto.repo.uploadBlob), then
@@ -34,17 +31,21 @@ _MAX_POST_CHARS = 280
 
 
 class BlueskyDistributor(SocialDistributor):
+    """SocialDistributor implementation for Bluesky."""
     name = "bluesky"
 
     def __init__(self, *, handle: str, app_password: str) -> None:
+        """Store the Bluesky handle and app password used to authenticate posts."""
         self._handle = handle
         self._app_password = app_password
 
     @property
     def enabled(self) -> bool:
+        """Whether the Bluesky handle and app password are configured."""
         return bool(self._handle and self._app_password)
 
     def post_article(self, share: ArticleShare) -> DistributionResult:
+        """Post an article to Bluesky as a link-card embed with the share image as thumbnail."""
         try:
             with httpx.Client(base_url=_SERVICE, timeout=_TIMEOUT) as client:
                 did, access_jwt = self._create_session(client)

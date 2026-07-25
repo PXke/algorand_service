@@ -1,6 +1,4 @@
-"""Shared site chrome for SSR bodies: masthead, primary nav, breadcrumbs and
-footer. Mirrors the Flutter shell/footer so crawlers see the same link graph
-humans get after the app boots (canvas apps otherwise expose almost no <a>)."""
+"""Shared site chrome for SSR bodies: masthead, primary nav, breadcrumbs and footer. Mirrors the Flutter shell/footer so crawlers see the same link graph humans get after the app boots (canvas apps otherwise expose almost no <a>)."""
 
 from __future__ import annotations
 
@@ -12,6 +10,7 @@ from app.core.config import settings
 
 def _site_url() -> str:
     return settings.public_site_url.rstrip("/")
+
 
 # (label, path) — matches the newspaper section nav in app_shell.dart / site_footer.dart.
 NAV_LINKS: tuple[tuple[str, str], ...] = (
@@ -47,10 +46,7 @@ def _nav_html(*, active: str | None) -> str:
         extra = ' aria-current="page"' if active and path == active else ""
         items.append(f'<li><a href="{_attr(path)}"{extra}>{html.escape(label)}</a></li>')
     # Home/nameplate is separate; nav covers the section axis.
-    return (
-        f'<nav class="ssr-nav" aria-label="Primary">'
-        f'<ul>{"".join(items)}</ul></nav>'
-    )
+    return f'<nav class="ssr-nav" aria-label="Primary"><ul>{"".join(items)}</ul></nav>'
 
 
 def _breadcrumb_html(trail: list[tuple[str, str]]) -> str:
@@ -59,15 +55,10 @@ def _breadcrumb_html(trail: list[tuple[str, str]]) -> str:
     items = []
     for i, (name, url) in enumerate(trail):
         if i < len(trail) - 1:
-            items.append(
-                f'<li><a href="{_attr(_path(url))}">{html.escape(name)}</a></li>'
-            )
+            items.append(f'<li><a href="{_attr(_path(url))}">{html.escape(name)}</a></li>')
         else:
             items.append(f'<li aria-current="page">{html.escape(name)}</li>')
-    return (
-        f'<nav class="ssr-crumbs" aria-label="Breadcrumb">'
-        f'<ol>{"".join(items)}</ol></nav>'
-    )
+    return f'<nav class="ssr-crumbs" aria-label="Breadcrumb"><ol>{"".join(items)}</ol></nav>'
 
 
 def _footer_html(*, topic_links: list[tuple[str, int]] | None) -> str:
@@ -87,7 +78,7 @@ def _footer_html(*, topic_links: list[tuple[str, int]] | None) -> str:
     if topic_links:
         links = "".join(
             f'<li><a href="{_attr(f"/topic/{tag}")}">{html.escape(tag)}</a>'
-            f" <span class=\"ssr-muted\">({count})</span></li>"
+            f' <span class="ssr-muted">({count})</span></li>'
             for tag, count in topic_links[:_FOOTER_TOPIC_CAP]
         )
         topic_block = (
@@ -129,7 +120,7 @@ def ssr_page(
         f'<header class="ssr-header">'
         f'<div class="ssr-masthead">'
         f'<p class="ssr-brand"><a href="/">{html.escape(settings.site_name)}</a></p>'
-        f"<p class=\"ssr-tagline\">{html.escape(settings.site_tagline)}</p>"
+        f'<p class="ssr-tagline">{html.escape(settings.site_tagline)}</p>'
         f"</div>"
         f"{_nav_html(active=active)}"
         f"</header>"

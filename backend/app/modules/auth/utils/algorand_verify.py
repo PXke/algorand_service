@@ -1,3 +1,5 @@
+"""Verify an Algorand wallet's signature over an arbitrary message."""
+
 from __future__ import annotations
 
 import base64
@@ -7,6 +9,7 @@ from nacl.signing import VerifyKey
 
 
 def verify_wallet_signature(wallet_address: str, message: str, signature_b64: str) -> bool:
+    """Verify an ed25519 signature over the raw message bytes for the given wallet."""
     try:
         public_key = decode_address(wallet_address)
         signature = base64.b64decode(signature_b64)
@@ -18,7 +21,7 @@ def verify_wallet_signature(wallet_address: str, message: str, signature_b64: st
 
 
 def verify_signed_bytes(wallet_address: str, message: str, signature_b64: str) -> bool:
-    """algosdk signBytes/verifyBytes convention: the wallet signs b"MX" + data.
+    """Algosdk signBytes/verifyBytes convention: the wallet signs b"MX" + data.
 
     This is what Pera's `signData` produces (and what SIWA verifies against),
     as opposed to `verify_wallet_signature`'s raw-message signature.

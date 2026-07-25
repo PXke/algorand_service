@@ -1,3 +1,5 @@
+"""Celery tasks that poll new rounds and dispatch chain-triggered discovery/matching."""
+
 from __future__ import annotations
 
 import redis

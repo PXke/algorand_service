@@ -7,6 +7,7 @@ import 'package:wallet_auth_flutter/wallet_auth_flutter.dart';
 
 import '../../../core/l10n/l10n_extensions.dart';
 import '../../../core/theme/app_theme_extension.dart';
+import 'wallet_deep_link.dart';
 import 'wallet_error_text.dart';
 
 /// Shows WalletConnect pairing UI without blocking the WC session handshake.
@@ -92,13 +93,37 @@ class _WalletConnectUriDialogState extends State<_WalletConnectUriDialog>
     super.dispose();
   }
 
+  DateTime? _backgroundedAt;
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // Coming back from the wallet app (Flutter web maps the browser tab's
     // visibilitychange to these states): the bridge WebSocket may have been
-    // killed while we were backgrounded and its reconnect budget exhausted —
-    // revive it so the approval/sign response queued on the bridge arrives.
-    if (state == AppLifecycleState.resumed) {
+    // killed while we were backgrounded — revive it so the approval/sign
+    // response queued on the bridge arrives.
+    //
+    // Gate on elapsed time, not just the resumed event: mobile browsers can
+    // silently drop a backgrounded WebSocket without ever firing its
+    // close/error handlers, so the transport's own "connected" flag is stuck
+    // reporting alive and can't be trusted to decide when to reconnect (root
+    // cause of "approve in Pera, tap back to site, nothing happens" surviving
+    // the 2026-07-16/07-21 liveness-gate fixes). A real trip to the wallet
+    // app takes at least a couple of seconds (switch app, review, approve,
+    // switch back); the OS's own "Open in Pera?" consent prompt covering the
+    // page is a sub-second flicker — reconnecting on every flicker churns
+    // the transport mid-request (2026-07-16 v1 regression), so only treat
+    // the former as a real resume.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden) {
+      _backgroundedAt ??= DateTime.now();
+      return;
+    }
+    if (state != AppLifecycleState.resumed) return;
+    final backgroundedAt = _backgroundedAt;
+    _backgroundedAt = null;
+    if (backgroundedAt != null &&
+        DateTime.now().difference(backgroundedAt) > const Duration(seconds: 2)) {
       widget.onResumed?.call();
     }
   }
@@ -133,11 +158,20 @@ class _WalletConnectUriDialogState extends State<_WalletConnectUriDialog>
     final l10n = context.l10n;
     setState(() => _launchFailed = false);
     try {
-      final launched = await launchUrl(
-        uri,
-        mode: LaunchMode.externalApplication,
-        webOnlyWindowName: target,
-      );
+      // Same-tab hand-offs (the mobile deep link) go through a direct
+      // location.href navigation rather than url_launcher's
+      // window.open(url, '_self', 'noopener,noreferrer') — Firefox for
+      // Android doesn't reliably route the latter through its protocol
+      // handler for custom schemes like wc:/perawallet-wc:, so the tap
+      // silently no-ops there. New-tab hand-offs (desktop) keep using
+      // url_launcher, which is unaffected.
+      final launched = target == '_self'
+          ? navigateCurrentWindow(uri.toString())
+          : await launchUrl(
+              uri,
+              mode: LaunchMode.externalApplication,
+              webOnlyWindowName: target,
+            );
       if (!launched && context.mounted) {
         setState(() => _launchFailed = true);
         ScaffoldMessenger.of(context).showSnackBar(

@@ -42,9 +42,7 @@ def record_view(article_id: str) -> None:
 
 
 def get_views_bulk(article_ids: list[str]) -> dict[str, int]:
-    """Read tallies for many articles in one parallel sweep. Missing counters
-    (never-viewed articles) and any Cassandra hiccup read as 0 — ranking is a
-    best-effort view, never an error source."""
+    """Read tallies for many articles in one parallel sweep. Missing counters (never-viewed articles) and any Cassandra hiccup read as 0 — ranking is a best-effort view, never an error source."""
     if not _cassandra_enabled() or not article_ids:
         return {}
     pairs = [(raw, aid) for raw in article_ids if (aid := _as_uuid(raw)) is not None]
@@ -71,6 +69,7 @@ def get_views_bulk(article_ids: list[str]) -> dict[str, int]:
 
 
 def get_views(article_id: str) -> int:
+    """Return the stored view count for article_id, or 0 if unavailable."""
     if not _cassandra_enabled():
         return 0
     aid = _as_uuid(article_id)

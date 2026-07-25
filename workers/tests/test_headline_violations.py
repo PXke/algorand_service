@@ -1,7 +1,10 @@
+"""Headline style rules: colon labels, marketing verbs, dollar figures."""
+
 from app.modules.newspaper.article_grader import grade_article_schema, headline_violations
 
 
 def test_colon_label_flagged() -> None:
+    """Flags "Name: Marketing tagline" style headlines as colon-label violations."""
     for title in (
         "Nodely: The Global Backbone for Algorand's Developer Ecosystem",
         "Downbad.farm: Atomic Trading and Creator Tools for Algorand NFTs",
@@ -12,6 +15,7 @@ def test_colon_label_flagged() -> None:
 
 
 def test_claim_style_passes() -> None:
+    """Plain claim-style headlines with a real number or fact pass with no violations."""
     for title in (
         "Nodely's free tier now carries 115M Algorand API calls a day",
         "HesabPay processes 30% of Afghanistan's electricity bills on Algorand",
@@ -21,6 +25,7 @@ def test_claim_style_passes() -> None:
 
 
 def test_late_colon_and_times_not_flagged() -> None:
+    """Does not flag a colon past the label window, or a time-ratio colon like "3:1"."""
     # ": " past the 48-char label window, and no colon+space at all.
     ok = "Folks Finance doubles cross-chain volume after upgrade: what changed"
     assert not any("colon-label" in i for i in headline_violations(ok))
@@ -28,20 +33,17 @@ def test_late_colon_and_times_not_flagged() -> None:
 
 
 def test_length_and_marketing_verbs() -> None:
+    """Flags an over-length headline by char count and a marketing verb like "unveils"."""
     long_title = "Algorand ecosystem partners with a consortium to deliver innovative solutions across many verticals soon"
     assert any("chars" in i for i in headline_violations(long_title))
-    assert any("marketing verb" in i.lower() for i in headline_violations(
-        "AlgoVoi unveils multi-chain payment gateway"
-    ))
+    assert any(
+        "marketing verb" in i.lower()
+        for i in headline_violations("AlgoVoi unveils multi-chain payment gateway")
+    )
 
 
 def test_negligible_dollar_figure_flagged() -> None:
-    """Regression-pin the real 2026-07-14 CompX incident: '$2.4K TVL' survived
-    every revision pass because nothing deterministic ever caught it — the
-    NUMERIC HONESTY prompt rule ('$4,000 TVL... is negligible, not a headline
-    metric') is soft guidance the model can drift away from under revision
-    pressure, exactly like colon-label headlines did before this file's own
-    deterministic check existed."""
+    """Regression-pin the real 2026-07-14 CompX incident: '$2.4K TVL' survived every revision pass because nothing deterministic ever caught it — the NUMERIC HONESTY prompt rule ('$4,000 TVL... is negligible, not a headline metric') is soft guidance the model can drift away from under revision pressure, exactly like colon-label headlines did before this file's own deterministic check existed."""
     for title in (
         "CompX launches DeFi infrastructure on Algorand with $2.4K TVL",
         "Some Protocol hits $4,000 TVL milestone on Algorand",
@@ -52,6 +54,7 @@ def test_negligible_dollar_figure_flagged() -> None:
 
 
 def test_real_dollar_figure_not_flagged() -> None:
+    """Does not flag headline dollar figures large enough to be a real metric."""
     for title in (
         "Folks Finance TVL crosses $50M on Algorand",
         "AlgoStartup raises $2.5M seed round",
@@ -62,6 +65,7 @@ def test_real_dollar_figure_not_flagged() -> None:
 
 
 def test_headline_issues_flow_into_schema_grade() -> None:
+    """Headline violations surface in grade_article_schema's overall issues list."""
     result = grade_article_schema(
         title="Nodely: The Global Backbone",
         summary="s",

@@ -1,3 +1,5 @@
+"""Sign-In-With-Algorand message matches the EIP-4361 shape."""
+
 from __future__ import annotations
 
 from app.modules.auth.utils.caip122 import Caip122Message
@@ -5,6 +7,7 @@ from app.modules.auth.utils.siwa_message import prepare_siwa_from_caip122
 
 
 def test_prepare_siwa_message_eip4361_shape() -> None:
+    """Renders a SIWA message with the EIP-4361 domain/address/chain-id/nonce lines."""
     caip122 = Caip122Message(
         domain="arc60.io",
         account_address="BYVBFXCGJLDU5Q7POFA2G4CLAGUBWRU3TOKDPNQG57D44KW6CVY3FPIXRM",

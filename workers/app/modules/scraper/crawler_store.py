@@ -1,3 +1,5 @@
+"""Cached crawler configuration rows."""
+
 from __future__ import annotations
 
 import logging
@@ -9,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CrawlerConfigRow:
+    """One crawler type's stored configuration."""
     crawler_type: str
     display_name: str
     description: str
@@ -70,4 +73,5 @@ def load_crawler_config() -> dict[str, CrawlerConfigRow]:
 
 
 def clear_crawler_config_cache() -> None:
+    """Clear the cached crawler config so the next read re-fetches from Cassandra."""
     load_crawler_config.cache_clear()

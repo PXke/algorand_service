@@ -1,3 +1,5 @@
+"""Assign and schedule editorial briefs (owner-triggered story assignments)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,6 +9,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class EditorialBrief:
+    """An owner-authored story assignment for the writer."""
     brief_id: str
     title: str
     body_markdown: str
@@ -18,6 +21,7 @@ class EditorialBrief:
 
 
 def get_brief(brief_id: str) -> EditorialBrief | None:
+    """Load a single editorial brief by id, or None if missing/invalid."""
     from uuid import UUID
 
     from app.core.cassandra import get_cassandra_session
@@ -43,6 +47,7 @@ def get_brief(brief_id: str) -> EditorialBrief | None:
 
 
 def list_active_briefs(*, limit: int = 200) -> list[EditorialBrief]:
+    """Return editorial briefs currently in the "active" status."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import EditorialBriefStmts
 
@@ -71,11 +76,7 @@ def list_active_briefs(*, limit: int = 200) -> list[EditorialBrief]:
 
 
 def mark_brief_run(*, brief_id: str, article_id: str = "") -> None:
-    """Record that a brief just fired: bumps ``last_run_at`` always, and sets
-    ``linked_article_id`` when a new article id is known (first assignment, or
-    a compose that produced/held an article). A refresh that only re-enqueues
-    (article id not known yet at enqueue time) still bumps last_run_at so the
-    scheduler doesn't fire again before the next cadence period."""
+    """Record that a brief just fired: bumps ``last_run_at`` always, and sets ``linked_article_id`` when a new article id is known (first assignment, or a compose that produced/held an article). A refresh that only re-enqueues (article id not known yet at enqueue time) still bumps last_run_at so the scheduler doesn't fire again before the next cadence period."""
     from uuid import UUID
 
     from app.core.cassandra import get_cassandra_session
@@ -113,11 +114,7 @@ def _build_assignment_payload(brief: EditorialBrief) -> dict[str, Any]:
 
 
 def assign_editorial_brief(brief_id: str) -> dict[str, Any]:
-    """First-run: enqueue a brand-new article for this brief's topic. Relevance
-    is forced to 1.0 — an editor already decided this is worth covering, so the
-    content-relevance classifier shouldn't gate it (novelty/timeliness still
-    apply normally: an editor-picked topic that duplicates something just
-    published shouldn't rank artificially high)."""
+    """First-run: enqueue a brand-new article for this brief's topic. Relevance is forced to 1.0 — an editor already decided this is worth covering, so the content-relevance classifier shouldn't gate it (novelty/timeliness still apply normally: an editor-picked topic that duplicates something just published shouldn't rank artificially high)."""
     from app.core.config import WRITER_EDITORIAL_BRIEFS_ENABLED
     from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
     from app.modules.newspaper.publish_queue_store import enqueue_publish
@@ -170,10 +167,7 @@ def assign_editorial_brief(brief_id: str) -> dict[str, Any]:
 
 
 def refresh_editorial_brief(brief_id: str) -> dict[str, Any]:
-    """Cadence refresh: re-enqueue as an in-place edit of the brief's existing
-    article. Falls back to ``assign_editorial_brief`` if the brief has no
-    linked article yet (e.g. an admin hits "publish now" before the first
-    assignment ever landed)."""
+    """Cadence refresh: re-enqueue as an in-place edit of the brief's existing article. Falls back to ``assign_editorial_brief`` if the brief has no linked article yet (e.g. an admin hits "publish now" before the first assignment ever landed)."""
     from app.core.config import WRITER_EDITORIAL_BRIEFS_ENABLED
 
     if not WRITER_EDITORIAL_BRIEFS_ENABLED:
@@ -232,10 +226,7 @@ def refresh_editorial_brief(brief_id: str) -> dict[str, Any]:
 
 
 def scan_editorial_brief_schedule() -> dict[str, Any]:
-    """Safety-net beat: fire the first assignment for any active brief that
-    hasn't produced an article yet, and refresh any brief whose cadence has
-    elapsed. The immediate on-create trigger (admin API) covers the common
-    case; this catches missed sends and drives the recurring refresh."""
+    """Safety-net beat: fire the first assignment for any active brief that hasn't produced an article yet, and refresh any brief whose cadence has elapsed. The immediate on-create trigger (admin API) covers the common case; this catches missed sends and drives the recurring refresh."""
     assigned = 0
     refreshed = 0
     now = datetime.now(tz=UTC)

@@ -1,3 +1,5 @@
+"""Gather and format all pre-compose enrichment collectors into one context."""
+
 from __future__ import annotations
 
 from app.core import config
@@ -43,8 +45,7 @@ def gather_writer_enrichment(
     match_kind: str = "",
     match_value: str = "",
 ) -> WriterEnrichmentBundle:
-    """
-    Build a writer context bundle: discovery intel, update diffs, scam cross-refs.
+    """Build a writer context bundle: discovery intel, update diffs, scam cross-refs.
 
     Fed to Mistral/templates — not shown raw to readers.
     """

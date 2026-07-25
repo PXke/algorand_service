@@ -1,9 +1,12 @@
+"""Store and fetch the latest content snapshot for a service source."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
 
 def source_id_for_service(service_id: str) -> str:
+    """Build the snapshot source_id key for a service."""
     return f"svc:{service_id}"
 
 
@@ -28,6 +31,7 @@ def insert_snapshot(
     title: str,
     body: str,
 ) -> None:
+    """Store a new content snapshot and update the source's latest-snapshot pointer."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import SnapshotStmts
 

@@ -1,3 +1,5 @@
+"""Fetch a YouTube video's transcript (local pipeline, then third-party fallback)."""
+
 from __future__ import annotations
 
 import logging
@@ -31,6 +33,7 @@ def transcript_attempted(video_id: str) -> bool:
 
 
 def mark_transcript_attempted(video_id: str) -> None:
+    """Record that a transcript fetch was attempted for this video, fail open."""
     if not video_id:
         return
     try:
@@ -45,7 +48,7 @@ def mark_transcript_attempted(video_id: str) -> None:
         logger.warning("failed to mark transcript attempted for %s", video_id, exc_info=True)
 
 
-def _extract_transcript_text(data: Any) -> str:
+def _extract_transcript_text(data: Any) -> str:  # noqa: ANN401 -- arbitrary third-party transcript response shape
     """Pull plain transcript text out of common third-party response shapes.
 
     Handles: a bare string; {"transcript"|"text"|"content": <str or list>};
@@ -92,9 +95,7 @@ def _fetch_via_third_party_api(video_id: str) -> str:
     )
 
     if not (
-        YOUTUBE_TRANSCRIPT_ENABLED
-        and YOUTUBE_TRANSCRIPT_API_URL
-        and YOUTUBE_TRANSCRIPT_API_KEY
+        YOUTUBE_TRANSCRIPT_ENABLED and YOUTUBE_TRANSCRIPT_API_URL and YOUTUBE_TRANSCRIPT_API_KEY
     ):
         return ""
     if not video_id:
@@ -126,15 +127,14 @@ def _fetch_via_third_party_api(video_id: str) -> str:
 
 
 def _fetch_via_local_pipeline(video_id: str) -> str:
-    """Local yt-dlp (proxied) -> ffmpeg -> Voxtral pipeline. "" on any failure
-    or when disabled — never raises."""
+    """Local yt-dlp (proxied) -> ffmpeg -> Voxtral pipeline. "" on any failure or when disabled — never raises."""
     from app.core.config import YOUTUBE_LOCAL_TRANSCRIBE_ENABLED
 
     if not YOUTUBE_LOCAL_TRANSCRIBE_ENABLED or not video_id:
         return ""
 
-    import os
     import shutil
+    from pathlib import Path
 
     from app.modules.ai.voxtral_client import transcribe_audio
     from app.modules.scraper.core.youtube_audio import download_video_audio
@@ -150,12 +150,11 @@ def _fetch_via_local_pipeline(video_id: str) -> str:
         return ""
     finally:
         if audio_path:
-            shutil.rmtree(os.path.dirname(audio_path), ignore_errors=True)
+            shutil.rmtree(Path(audio_path).parent, ignore_errors=True)
 
 
 def fetch_video_transcript(video_id: str) -> str:
-    """Best-effort transcript: local yt-dlp+Voxtral pipeline first (if
-    enabled), falling back to the legacy third-party API (if configured).
+    """Best-effort transcript: local yt-dlp+Voxtral pipeline first (if enabled), falling back to the legacy third-party API (if configured).
 
     Returns plain text, or "" when unavailable. Never raises — transcript is
     best-effort enrichment, not required for publishing.

@@ -26,7 +26,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import logging
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import redis
+
+logger = logging.getLogger(__name__)
 
 _GLOBAL_LOCK = "lock:compose:article"
 _LOCK_PATTERN = "lock:compose:*"
@@ -34,14 +41,14 @@ _LOCK_PATTERN = "lock:compose:*"
 _TERMINAL = {"ok", "error", "fallback", "credit_insufficient"}
 
 
-def _redis():
+def _redis() -> redis.Redis:
     # Reuse the lock module's client so we hit exactly the Redis/DB the locks use.
     from app.core.redis_lock import _client
 
     return _client()
 
 
-def _latest_session():
+def _latest_session() -> tuple[str, datetime, float] | None:
     """(status, created_at, age_seconds) of the newest compose row, or None."""
     from app.core.cassandra import get_cassandra_session
 
@@ -62,11 +69,12 @@ def _latest_session():
     return str(row.status or ""), created, age
 
 
-def _decode(key) -> str:
+def _decode(key: bytes | bytearray | str) -> str:
     return key.decode() if isinstance(key, (bytes, bytearray)) else str(key)
 
 
 def main() -> None:
+    """Diagnose, and optionally clear, a stuck compose lock per the CLI flags."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -87,10 +95,10 @@ def main() -> None:
     held = r.get(_GLOBAL_LOCK) is not None
     ttl = r.ttl(_GLOBAL_LOCK)
     lock_state = f"HELD (ttl {ttl}s)" if held else "free"
-    print(f"global lock {_GLOBAL_LOCK}: {lock_state}")
+    logger.info("global lock %s: %s", _GLOBAL_LOCK, lock_state)
     locks = list(r.scan_iter(match=_LOCK_PATTERN))
     for k in locks:
-        print(f"  lock present: {_decode(k)}  ttl={r.ttl(k)}s")
+        logger.info("  lock present: %s  ttl=%ss", _decode(k), r.ttl(k))
 
     # --- newest session ---
     stale = False
@@ -98,22 +106,24 @@ def main() -> None:
         latest = _latest_session()
     except Exception as exc:
         latest = None
-        print(f"(could not read compose_sessions: {exc})")
+        logger.info("(could not read compose_sessions: %s)", exc)
     if latest:
         status, _created, age = latest
         terminal = status in _TERMINAL
-        print(
-            f"newest session: status={status!r} age={int(age)}s "
-            f"({'terminal' if terminal else 'IN-PROGRESS'})"
+        logger.info(
+            "newest session: status=%r age=%ds (%s)",
+            status,
+            int(age),
+            "terminal" if terminal else "IN-PROGRESS",
         )
         # Dead if it's still in-progress past the threshold, or already finished
         # yet a lock is somehow still held (orphaned — release never ran).
         stale = bool(held) and (terminal or age > args.max_age)
     else:
-        print("newest session: none found")
+        logger.info("newest session: none found")
 
     if not held and not locks:
-        print(
+        logger.info(
             "\n=> Nothing is blocked. Any stuck row is just a stale display row "
             "(ages out via the 7-day compose_sessions TTL). No action needed."
         )
@@ -122,26 +132,29 @@ def main() -> None:
     # --- diagnose-only (no action flag) ---
     if not args.clear and not args.force:
         if stale:
-            print(
+            logger.info(
                 "\n=> A compose lock is held and the newest compose looks DEAD. "
                 "Re-run with --clear to release it (add --drain to retry the "
                 "pending row now)."
             )
         else:
-            print(
-                f"\n=> A compose lock is held and the newest compose may still be "
-                f"running (in-progress, age <= {args.max_age}s). Wait for it to finish "
-                f"or the lock to expire (ttl {ttl}s); re-run with --force only if you "
-                f"are certain no compose is running."
+            logger.info(
+                "\n=> A compose lock is held and the newest compose may still be "
+                "running (in-progress, age <= %ss). Wait for it to finish "
+                "or the lock to expire (ttl %ss); re-run with --force only if you "
+                "are certain no compose is running.",
+                args.max_age,
+                ttl,
             )
         return
 
     # --- act ---
     if args.clear and not stale and not args.force:
-        print(
-            f"\n=> Refusing to clear: the newest compose does not look dead "
-            f"(needs in-progress AND age > {args.max_age}s, or terminal-with-held-lock). "
-            f"Use --force to override after confirming no worker is composing."
+        logger.info(
+            "\n=> Refusing to clear: the newest compose does not look dead "
+            "(needs in-progress AND age > %ss, or terminal-with-held-lock). "
+            "Use --force to override after confirming no worker is composing.",
+            args.max_age,
         )
         return
 
@@ -149,7 +162,7 @@ def main() -> None:
     for k in locks or [_GLOBAL_LOCK]:
         with contextlib.suppress(Exception):
             deleted += int(r.delete(k))
-    print(f"\ncleared {deleted} compose lock(s).")
+    logger.info("\ncleared %d compose lock(s).", deleted)
 
     if args.drain:
         try:
@@ -158,12 +171,13 @@ def main() -> None:
             )
 
             drain_standard_publish_queue.delay()
-            print("enqueued drain_standard_publish_queue — workers will retry pending rows.")
+            logger.info("enqueued drain_standard_publish_queue — workers will retry pending rows.")
         except Exception as exc:
-            print(f"(could not enqueue drain: {exc}; the safety-net beat will still retry)")
+            logger.info("(could not enqueue drain: %s; the safety-net beat will still retry)", exc)
     else:
-        print("the pending row will retry on the next drain beat (add --drain to do it now).")
+        logger.info("the pending row will retry on the next drain beat (add --drain to do it now).")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

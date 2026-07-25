@@ -16,7 +16,6 @@ import msgspec
 from msgspec import Meta, field
 
 from app.modules.admin.classifier_constants import (
-    CONTENT_CATEGORIES,
     QUALITY_LEVELS,
     normalize_content_category,
 )
@@ -27,6 +26,7 @@ WalletAddress = Annotated[str, Meta(min_length=58, max_length=58)]
 
 # ── News ──────────────────────────────────────────────────────────────────────
 class ArticleFeedItem(msgspec.Struct, kw_only=True):
+    """One article's feed-list representation."""
     article_id: str
     service_id: str
     title: str
@@ -48,6 +48,7 @@ class ArticleFeedItem(msgspec.Struct, kw_only=True):
 
 
 class ArticleDetail(msgspec.Struct, kw_only=True):
+    """Full article detail for the article-detail route."""
     article_id: str
     service_id: str
     title: str
@@ -65,10 +66,12 @@ class ArticleDetail(msgspec.Struct, kw_only=True):
 
 
 class NewsFeedResponse(msgspec.Struct, kw_only=True):
+    """Paginated article feed response."""
     items: list[ArticleFeedItem]
 
 
 class ServiceEventItem(msgspec.Struct, kw_only=True):
+    """One service-watch event for the feed's event stream."""
     service_id: str
     event_id: str
     txid: str
@@ -78,10 +81,12 @@ class ServiceEventItem(msgspec.Struct, kw_only=True):
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 class NonceRequest(msgspec.Struct, kw_only=True):
+    """Request body for issuing a wallet-auth nonce."""
     wallet_address: WalletAddress
 
 
 class Caip122Payload(msgspec.Struct, kw_only=True):
+    """CAIP-122 message fields the client signs for login."""
     domain: str
     account_address: str
     uri: str
@@ -99,6 +104,7 @@ class Caip122Payload(msgspec.Struct, kw_only=True):
 
 
 class NonceResponse(msgspec.Struct, kw_only=True):
+    """Issued nonce and the message the wallet must sign."""
     wallet_address: str
     nonce: str
     signing_message: str
@@ -107,6 +113,7 @@ class NonceResponse(msgspec.Struct, kw_only=True):
 
 
 class Arc0060Proof(msgspec.Struct, kw_only=True):
+    """ARC-60 (WebAuthn-shaped) signature proof for wallet login."""
     data_b64: str
     signature_b64: str
     authenticator_data_b64: str
@@ -115,6 +122,7 @@ class Arc0060Proof(msgspec.Struct, kw_only=True):
 
 
 class VerifyRequest(msgspec.Struct, kw_only=True):
+    """Request body for verifying a wallet-auth signature."""
     wallet_address: WalletAddress
     nonce: str
     proof_method: Literal["arc0025_txn", "arc0060", "legacy_message", "signed_bytes"] = "arc0060"
@@ -123,6 +131,7 @@ class VerifyRequest(msgspec.Struct, kw_only=True):
     arc0060: Arc0060Proof | None = None
 
     def __post_init__(self) -> None:
+        """Require the proof fields matching `proof_method`."""
         if self.proof_method == "arc0060":
             if self.arc0060 is None:
                 raise ValueError("arc0060 proof is required when proof_method is arc0060")
@@ -133,6 +142,7 @@ class VerifyRequest(msgspec.Struct, kw_only=True):
 
 
 class VerifyResponse(msgspec.Struct, kw_only=True):
+    """Session issued after a successful wallet-auth verification."""
     session_token: str
     wallet_address: str
     issued_at_epoch: int
@@ -142,6 +152,7 @@ class VerifyResponse(msgspec.Struct, kw_only=True):
 
 
 class SessionInfo(msgspec.Struct, kw_only=True):
+    """The current session's wallet address and expiry."""
     wallet_address: str
     issued_at_epoch: int
     expires_in_epoch: int
@@ -149,6 +160,7 @@ class SessionInfo(msgspec.Struct, kw_only=True):
 
 # ── Ingest ────────────────────────────────────────────────────────────────────
 class IngestSignalRequest(msgspec.Struct, kw_only=True):
+    """Request body for pushing an external ingest signal."""
     """Push official announcements when bots cannot join Discord/Telegram."""
 
     service_id: Annotated[str, Meta(min_length=1, max_length=128)]
@@ -164,6 +176,7 @@ class IngestSignalRequest(msgspec.Struct, kw_only=True):
 
 # ── Search ────────────────────────────────────────────────────────────────────
 class SearchHit(msgspec.Struct, kw_only=True):
+    """One article search result."""
     article_id: str
     title: str
     summary: str
@@ -176,6 +189,7 @@ class SearchHit(msgspec.Struct, kw_only=True):
 
 
 class SearchResponse(msgspec.Struct, kw_only=True):
+    """Article search results for a query."""
     query: str
     engine: str
     items: list[SearchHit] = field(default_factory=list)
@@ -183,14 +197,15 @@ class SearchResponse(msgspec.Struct, kw_only=True):
 
 # ── Analytics ─────────────────────────────────────────────────────────────────
 class PageviewBeaconRequest(msgspec.Struct, kw_only=True):
-    """Client-side beacon for a Flutter in-app route change (no full document
-    request, so the SSR pageview record never sees it)."""
+    """Request body for a reader pageview beacon."""
+    """Client-side beacon for a Flutter in-app route change (no full document request, so the SSR pageview record never sees it)."""
 
     path: Annotated[str, Meta(min_length=1, max_length=200)]
 
 
 # ── Contact ───────────────────────────────────────────────────────────────────
 class ContactMessageRequest(msgspec.Struct, kw_only=True):
+    """Request body for a contact-form submission."""
     message: Annotated[str, Meta(min_length=10, max_length=4000)]
     name: Annotated[str, Meta(max_length=120)] = ""
     email: Annotated[str, Meta(max_length=254)] = ""
@@ -200,6 +215,7 @@ class ContactMessageRequest(msgspec.Struct, kw_only=True):
 
 
 class ContactMessageItem(msgspec.Struct, kw_only=True):
+    """One stored contact message."""
     message_id: str
     name: str
     email: str
@@ -208,17 +224,20 @@ class ContactMessageItem(msgspec.Struct, kw_only=True):
 
 
 class ContactMessagesResponse(msgspec.Struct, kw_only=True):
+    """List of stored contact messages for the admin view."""
     items: list[ContactMessageItem]
 
 
 # ── Suggestions ───────────────────────────────────────────────────────────────
 class CreateSuggestionRequest(msgspec.Struct, kw_only=True):
+    """Request body for a treasury-payment-gated service suggestion."""
     title: Annotated[str, Meta(min_length=3, max_length=200)]
     body: Annotated[str, Meta(min_length=10, max_length=5000)]
     submission_txid: Annotated[str, Meta(min_length=52, max_length=52)]
 
 
 class SuggestionResponse(msgspec.Struct, kw_only=True):
+    """A stored service suggestion."""
     suggestion_id: str
     wallet_address: str
     title: str
@@ -230,26 +249,67 @@ class SuggestionResponse(msgspec.Struct, kw_only=True):
 
 
 class SuggestionConfigResponse(msgspec.Struct, kw_only=True):
+    """Treasury address and minimum payment for suggestions."""
     treasury_address: str
     min_microalgos: int
     min_algo_display: str
 
 
 class SuggestionListResponse(msgspec.Struct, kw_only=True):
+    """List of stored service suggestions."""
     items: list[SuggestionResponse]
 
 
 class UpvoteRequest(msgspec.Struct, kw_only=True):
+    """Request body for upvoting a suggestion."""
     signature_b64: Annotated[str, Meta(min_length=16, max_length=2048)]
 
 
 class UpvoteResponse(msgspec.Struct, kw_only=True):
+    """A suggestion's upvote count after a vote."""
     suggestion_id: str
     upvote_count: int
 
 
+# ── KYC-as-a-service (x402 challenge) ───────────────────────────────────────
+class EnrollRequest(msgspec.Struct, kw_only=True):
+    """Request body for KYC enrollment."""
+    wallet_address: Annotated[str, Meta(min_length=58, max_length=58)]
+    consent_signature_b64: Annotated[str, Meta(min_length=16, max_length=2048)]
+
+
+class EnrollResponse(msgspec.Struct, kw_only=True):
+    """Stored enrollment and computed KYC level."""
+    wallet_address: str
+    kyc_level: str
+    wallet_age_round: int | None
+    recent_tx_count: int
+    enrolled_at_epoch: int
+
+
+class KycConsentMessageResponse(msgspec.Struct, kw_only=True):
+    """The message a wallet must sign to consent to KYC enrollment."""
+    message: str
+    wallet_address: str
+
+
+class KycLookupResponse(msgspec.Struct, kw_only=True):
+    """Paid KYC-status lookup result for a wallet."""
+    enrolled: bool
+    wallet_address: str
+    kyc_level: str | None = None
+    payout_status: str | None = None
+
+
+class KycPayoutRetryRequest(msgspec.Struct, kw_only=True):
+    """Request body for retrying a failed KYC payout."""
+    wallet_address: Annotated[str, Meta(min_length=58, max_length=58)]
+    amount_atomic: Annotated[str, Meta(min_length=1, max_length=32)]
+
+
 # ── Metrics ───────────────────────────────────────────────────────────────────
 class PriceMetricsResponse(msgspec.Struct, kw_only=True):
+    """Price-metrics brief for the dashboard."""
     asset_id: str
     asset_name: str
     currency: str
@@ -263,6 +323,7 @@ class PriceMetricsResponse(msgspec.Struct, kw_only=True):
 
 
 class MetricTile(msgspec.Struct, kw_only=True):
+    """One tile in the metrics dashboard."""
     id: str
     label: str
     value: str
@@ -271,11 +332,13 @@ class MetricTile(msgspec.Struct, kw_only=True):
 
 
 class MetricsDashboardResponse(msgspec.Struct, kw_only=True):
+    """Assembled metrics-dashboard tiles."""
     tiles: list[MetricTile]
 
 
 # ── Placements ────────────────────────────────────────────────────────────────
 class FeedPlacementItem(msgspec.Struct, kw_only=True):
+    """One sponsored placement merged into the reader feed."""
     placement_id: str
     slot: str
     sponsor_name: str
@@ -288,6 +351,7 @@ class FeedPlacementItem(msgspec.Struct, kw_only=True):
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 class ServiceRegistryItem(msgspec.Struct, kw_only=True):
+    """One registered service in the service registry."""
     service_id: str
     display_name: str
     match_kind: str
@@ -300,12 +364,14 @@ class ServiceRegistryItem(msgspec.Struct, kw_only=True):
 
 # ── Admin ─────────────────────────────────────────────────────────────────────
 class ArticlePatchRequest(msgspec.Struct, kw_only=True):
+    """Request body for an admin in-place article edit."""
     title: Annotated[str, Meta(max_length=512)] | None = None
     summary: Annotated[str, Meta(max_length=2000)] | None = None
     body: Annotated[str, Meta(max_length=200_000)] | None = None
 
 
 class EditorialBriefCreate(msgspec.Struct, kw_only=True):
+    """Request body for creating an editorial brief."""
     title: Annotated[str, Meta(min_length=1, max_length=256)]
     body_markdown: Annotated[str, Meta(min_length=1, max_length=100_000)]
     keywords: Annotated[str, Meta(max_length=1024)] = ""
@@ -316,6 +382,7 @@ class EditorialBriefCreate(msgspec.Struct, kw_only=True):
 
 
 class EditorialBriefUpdate(msgspec.Struct, kw_only=True):
+    """Request body for updating an editorial brief."""
     title: Annotated[str, Meta(max_length=256)] | None = None
     body_markdown: Annotated[str, Meta(max_length=100_000)] | None = None
     keywords: Annotated[str, Meta(max_length=1024)] | None = None
@@ -323,12 +390,14 @@ class EditorialBriefUpdate(msgspec.Struct, kw_only=True):
 
 
 class OfficialChannelCreate(msgspec.Struct, kw_only=True):
+    """Request body for adding an official (trusted) channel."""
     kind: Annotated[str, Meta(pattern="^(discord|telegram|mail_domain)$")]
     channel_id: Annotated[str, Meta(min_length=1, max_length=256)]
     label: Annotated[str, Meta(max_length=256)] = ""
 
 
 class ClassifierFeedbackCreate(msgspec.Struct, kw_only=True):
+    """Request body for recording classifier training feedback."""
     url: Annotated[str, Meta(min_length=1, max_length=2048)]
     approved: bool
     text_sample: Annotated[str, Meta(max_length=8000)] = ""
@@ -355,6 +424,7 @@ class ClassifierFeedbackCreate(msgspec.Struct, kw_only=True):
     article_id: Annotated[str, Meta(max_length=64)] | None = None
 
     def __post_init__(self) -> None:
+        """Normalize category/categories and validate quality is a known level."""
         # Writer tags / pipeline labels in the category slot coerce to generic —
         # never block approve/reject on taxonomy mismatch.
         self.category = normalize_content_category(self.category)
@@ -376,6 +446,7 @@ class ClassifierFeedbackCreate(msgspec.Struct, kw_only=True):
 
 
 class GatekeeperAnchorCreate(msgspec.Struct, kw_only=True):
+    """Request body for adding a gatekeeper anchor-pool sample."""
     """Tag an already-published article into the gatekeeper validation anchor set."""
 
     article_id: Annotated[str, Meta(min_length=1, max_length=64)]
@@ -385,6 +456,7 @@ class GatekeeperAnchorCreate(msgspec.Struct, kw_only=True):
 
 
 class SourceUpsertRequest(msgspec.Struct, kw_only=True):
+    """Request body for adding/updating a service's web source."""
     service_id: Annotated[str, Meta(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*$")]
     display_name: Annotated[str, Meta(min_length=1, max_length=256)]
     scrape_url: Annotated[str, Meta(min_length=1, max_length=2048)]
@@ -394,6 +466,7 @@ class SourceUpsertRequest(msgspec.Struct, kw_only=True):
 
 
 class ServiceMergeRequest(msgspec.Struct, kw_only=True):
+    """Request body for merging duplicate services."""
     target_service_id: Annotated[
         str, Meta(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9-]*$")
     ]
@@ -401,10 +474,12 @@ class ServiceMergeRequest(msgspec.Struct, kw_only=True):
 
 
 class ScraperRunRequest(msgspec.Struct, kw_only=True):
+    """Request body for manually triggering a scraper run."""
     action: Annotated[str, Meta(min_length=1, max_length=64)]
 
 
 class DomainSetRequest(msgspec.Struct, kw_only=True):
+    """Request body for setting a domain's frontier status."""
     domain: Annotated[str, Meta(min_length=3, max_length=256)]
     is_relevant: bool
     # Default True preserves existing behavior for every caller that predates
@@ -413,9 +488,19 @@ class DomainSetRequest(msgspec.Struct, kw_only=True):
     # — no service_registry row, so it won't be repeatedly re-scraped/diffed
     # going forward, just explored for whatever's linked from it right now.
     as_seed: bool = True
+    # True: this ONE page is a legitimate citation, not "watch this whole
+    # domain" — skips one-hop link-following and the domain-wide "approved"
+    # status entirely (frontier_status becomes "reference"), so it's excluded
+    # from every domain-wide sweep (backfills, bulk re-crawls). Implies
+    # as_seed=False — a single-page citation is never a monitored service.
+    # Added after python.org/nytimes.com/climatetrade.com/wfp.medium.com got
+    # approved for one article each and were then treated as full ecosystem
+    # services — dozens of irrelevant subpages crawled and indexed (2026-07-21).
+    single_page_only: bool = False
 
 
 class ToolSuggestionResolveRequest(msgspec.Struct, kw_only=True):
+    """Request body for resolving a tool-gap suggestion."""
     # Bulk-resolve every unresolved suggestion for this exact capability name
     # (the Tool gaps panel groups by capability, so "dismiss this group" is
     # the natural admin action — not one row at a time).

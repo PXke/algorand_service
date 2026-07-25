@@ -37,8 +37,15 @@ _SILENT_PHASES = frozenset({"reviewed"})
 
 _FUNDING_CATEGORY = {10: "small", 20: "medium", 30: "large"}
 _FUNDING_TYPE = {10: "proactive", 20: "retroactive"}
-_FOCUS = {10: "DeFi", 20: "education", 30: "libraries", 40: "NFT",
-          50: "tooling", 60: "SaaS", 70: "other"}
+_FOCUS = {
+    10: "DeFi",
+    20: "education",
+    30: "libraries",
+    40: "NFT",
+    50: "tooling",
+    60: "SaaS",
+    70: "other",
+}
 
 
 def _checksummed(data: bytes) -> str:
@@ -47,16 +54,17 @@ def _checksummed(data: bytes) -> str:
 
 
 def registry_escrow_address(app_id: int) -> str:
-    """The application account that creates proposal apps (standard Algorand
-    app-address derivation)."""
+    """The application account that creates proposal apps (standard Algorand app-address derivation)."""
     return _checksummed(hashlib.new("sha512_256", b"appID" + app_id.to_bytes(8, "big")).digest())
 
 
 def encode_address(pubkey: bytes) -> str:
+    """Encode a 32-byte public key as a checksummed Algorand address string."""
     return _checksummed(pubkey) if len(pubkey) == 32 else ""
 
 
 def decode_global_state(entries: list[dict]) -> dict[str, Any]:
+    """Decode an algod TEAL key-value global-state list into a plain dict of ints/bytes."""
     state: dict[str, Any] = {}
     for kv in entries or []:
         try:
@@ -71,13 +79,13 @@ def decode_global_state(entries: list[dict]) -> dict[str, Any]:
     return state
 
 
-def _utf8(value: Any) -> str:
+def _utf8(value: Any) -> str:  # noqa: ANN401 -- decoded TEAL global-state value, bytes or already-scalar
     if isinstance(value, bytes):
         return value.decode("utf-8", "replace").strip()
     return str(value or "").strip()
 
 
-def _iso(epoch: Any) -> str:
+def _iso(epoch: Any) -> str:  # noqa: ANN401 -- decoded TEAL global-state value, coerced via int()
     try:
         return datetime.fromtimestamp(int(epoch), tz=UTC).isoformat()
     except (TypeError, ValueError, OSError):
@@ -85,8 +93,7 @@ def _iso(epoch: Any) -> str:
 
 
 def proposal_facts(app_id: int, state: dict[str, Any]) -> dict[str, str]:
-    """Human-readable fact sheet from a proposal app's global state — the
-    page_text handed to the writer, who verifies live via lookup_application."""
+    """Human-readable fact sheet from a proposal app's global state — the page_text handed to the writer, who verifies live via lookup_application."""
     status = int(state.get("status") or 0)
     phase = STATUS_PHASES.get(status, "")
     requested = int(state.get("requested_amount") or 0) / 1_000_000
@@ -118,9 +125,7 @@ def proposal_facts(app_id: int, state: dict[str, Any]) -> dict[str, str]:
 
 
 def _phase_age_days(phase: str, state: dict[str, Any]) -> float | None:
-    """Approximate age of the CURRENT phase. Terminal phases have no on-chain
-    timestamp of their own — voting close (open + duration) approximates them.
-    None = no usable timestamp (treated as stale, never fresh)."""
+    """Approximate age of the CURRENT phase. Terminal phases have no on-chain timestamp of their own — voting close (open + duration) approximates them. None = no usable timestamp (treated as stale, never fresh)."""
     from datetime import datetime
 
     epoch = None
@@ -140,13 +145,13 @@ def _phase_age_days(phase: str, state: dict[str, Any]) -> float | None:
 
 
 def poll_xgov_proposals() -> dict[str, Any]:
-    """Enumerate proposals via the registry escrow's created apps and emit one
-    publish signal per (proposal, phase) not yet seen.
+    """Enumerate proposals via the registry escrow's created apps and emit one publish signal per (proposal, phase) not yet seen.
 
     Phases older than XGOV_MAX_PHASE_AGE_DAYS are skipped, not seeded: without
     this the FIRST run backfills every historical proposal's current phase
     (~60 stale queue rows at once). Skipping by age is idempotent and cheap —
-    old proposals are re-examined and re-skipped each poll."""
+    old proposals are re-examined and re-skipped each poll.
+    """
     from app.core import config
     from app.modules.ai.chain_tools import _algod_get
     from app.modules.newspaper.ingest_signal import ingest_publish_signal
@@ -187,8 +192,9 @@ def poll_xgov_proposals() -> dict[str, Any]:
             match_kind="xgov_proposal",
             match_value=str(app_id),
             txid=f"xgov-{app_id}-{phase}",
-            published_at=_iso(state.get("vote_opening_timestamp")
-                              or state.get("submission_timestamp")),
+            published_at=_iso(
+                state.get("vote_opening_timestamp") or state.get("submission_timestamp")
+            ),
             # The proposal app is new, but xGov itself is a known program —
             # without the override every phase signal would misclassify as
             # SERVICE_DISCOVERY of a brand-new service.

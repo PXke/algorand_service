@@ -8,18 +8,24 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import logging
 import os
-import sys
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:
+    from cassandra.cluster import Session as CassandraSession
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = REPO_ROOT / "schema" / "migrations" / "manifest.toml"
 
 
 class Migration(NamedTuple):
+    """One discovered migration file: its stream, version, path, and prod tier."""
     stream: str
     version: str
     file: Path
@@ -29,10 +35,12 @@ class Migration(NamedTuple):
 
     @property
     def key(self) -> tuple[str, str]:
+        """This migration's identity in the applied-migrations ledger."""
         return (self.stream, self.version)
 
 
 def load_manifest(path: Path) -> tuple[str, list[Migration]]:
+    """Parse manifest.toml into its keyspace name and ordered migration list."""
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     keyspace = str(raw.get("keyspace", "algorand_platform"))
     items: list[Migration] = []
@@ -52,12 +60,14 @@ def load_manifest(path: Path) -> tuple[str, list[Migration]]:
 
 
 def checksum_file(path: Path) -> str:
+    """Return the hex SHA-256 digest of a migration file's bytes."""
     digest = hashlib.sha256()
     digest.update(path.read_bytes())
     return digest.hexdigest()
 
 
 def split_cql_statements(cql: str) -> list[str]:
+    """Split a CQL file's text into individual statements, stripping '--' comment lines."""
     statements: list[str] = []
     for part in cql.split(";"):
         lines = []
@@ -72,7 +82,8 @@ def split_cql_statements(cql: str) -> list[str]:
     return statements
 
 
-def connect_cluster(hosts: list[str], keyspace: str):
+def connect_cluster(hosts: list[str], keyspace: str) -> CassandraSession:
+    """Connect to the Cassandra cluster and return a session bound to keyspace."""
     try:
         from cassandra.auth import PlainTextAuthProvider
         from cassandra.cluster import EXEC_PROFILE_DEFAULT, Cluster, ExecutionProfile
@@ -104,7 +115,8 @@ def connect_cluster(hosts: list[str], keyspace: str):
     return cluster.connect(keyspace)
 
 
-def fetch_applied(session) -> dict[tuple[str, str], dict]:
+def fetch_applied(session: CassandraSession) -> dict[tuple[str, str], dict]:
+    """Return the applied-migrations ledger keyed by (stream, version), or {} if the table doesn't exist yet."""
     try:
         rows = session.execute(
             "SELECT stream, version, applied_at, checksum, tier, description, applied_by "
@@ -127,12 +139,13 @@ def fetch_applied(session) -> dict[tuple[str, str], dict]:
 
 
 def record_migration(
-    session,
+    session: CassandraSession,
     migration: Migration,
     *,
     checksum: str,
     applied_by: str,
 ) -> None:
+    """Insert a row recording that migration has been applied."""
     session.execute(
         """
         INSERT INTO schema_migrations (
@@ -151,16 +164,17 @@ def record_migration(
     )
 
 
-def execute_file(session, path: Path, *, dry_run: bool) -> None:
+def execute_file(session: CassandraSession, path: Path, *, dry_run: bool) -> None:
+    """Execute each statement in a migration file (or just log it, in dry-run mode)."""
     statements = split_cql_statements(path.read_text(encoding="utf-8"))
     for stmt in statements:
         # Session is already on the manifest keyspace; skip redundant USE.
         if stmt.upper().startswith("USE "):
             if dry_run:
-                print(f"  [dry-run] skip {stmt[:80]}")
+                logger.info("  [dry-run] skip %s", stmt[:80])
             continue
         if dry_run:
-            print(f"  [dry-run] {stmt[:120]}{'...' if len(stmt) > 120 else ''}")
+            logger.info("  [dry-run] %s%s", stmt[:120], "..." if len(stmt) > 120 else "")
             continue
         session.execute(stmt)
 
@@ -171,6 +185,7 @@ def pending_migrations(
     *,
     tier_filter: str | None,
 ) -> list[Migration]:
+    """Return active migrations not yet applied, optionally filtered to prod tier."""
     pending: list[Migration] = []
     for migration in migrations:
         if migration.status != "active":
@@ -184,18 +199,19 @@ def pending_migrations(
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    """Print the manifest vs applied-ledger table and pending-migration counts."""
     keyspace, migrations = load_manifest(Path(args.manifest))
     hosts = [h.strip() for h in args.hosts.split(",") if h.strip()]
     session = connect_cluster(hosts, keyspace)
     applied = fetch_applied(session)
 
-    print(f"keyspace={keyspace} hosts={hosts}\n")
+    logger.info("keyspace=%s hosts=%s\n", keyspace, hosts)
     header = (
         f"{'STREAM':<8} {'VER':<5} {'TIER':<5} {'STATUS':<10} "
         f"{'APPLIED':<10} {'CHECKSUM':<12} DESCRIPTION"
     )
-    print(header)
-    print("-" * 100)
+    logger.info(header)
+    logger.info("-" * 100)
     for migration in migrations:
         row = applied.get(migration.key)
         applied_flag = "yes" if row else "no"
@@ -204,22 +220,29 @@ def cmd_status(args: argparse.Namespace) -> int:
             current = checksum_file(migration.file)[:12]
             if row["checksum"][:12] != current:
                 checksum = f"{checksum}!={current}"
-        print(
-            f"{migration.stream:<8} {migration.version:<5} {migration.tier:<5} "
-            f"{migration.status:<10} {applied_flag:<10} {checksum:<12} {migration.description}"
+        logger.info(
+            "%-8s %-5s %-5s %-10s %-10s %-12s %s",
+            migration.stream,
+            migration.version,
+            migration.tier,
+            migration.status,
+            applied_flag,
+            checksum,
+            migration.description,
         )
 
     pending = pending_migrations(migrations, applied, tier_filter=None)
     prod_pending = pending_migrations(migrations, applied, tier_filter="prod")
-    print(f"\nPending (all active): {len(pending)}")
-    print(f"Pending (prod tier only): {len(prod_pending)}")
+    logger.info("\nPending (all active): %d", len(pending))
+    logger.info("Pending (prod tier only): %d", len(prod_pending))
     if args.tier == "prod":
         for migration in prod_pending:
-            print(f"  - {migration.stream}/{migration.version} {migration.file.name}")
+            logger.info("  - %s/%s %s", migration.stream, migration.version, migration.file.name)
     return 0
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
+    """Apply all pending active migrations for the selected tier, recording each in the ledger."""
     keyspace, migrations = load_manifest(Path(args.manifest))
     hosts = [h.strip() for h in args.hosts.split(",") if h.strip()]
     session = connect_cluster(hosts, keyspace)
@@ -227,29 +250,33 @@ def cmd_apply(args: argparse.Namespace) -> int:
     pending = pending_migrations(migrations, applied, tier_filter=args.tier)
 
     if not pending:
-        print("No pending migrations.")
+        logger.info("No pending migrations.")
         return 0
 
     applied_by = args.applied_by or os.getenv("USER", "cql_migrate")
     for migration in pending:
         if not migration.file.is_file():
-            print(f"error: missing file {migration.file}", file=sys.stderr)
+            logger.error("missing file %s", migration.file)
             return 1
         digest = checksum_file(migration.file)
-        print(
-            f"Applying {migration.stream}/{migration.version} "
-            f"({migration.tier}) {migration.file.name}"
+        logger.info(
+            "Applying %s/%s (%s) %s",
+            migration.stream,
+            migration.version,
+            migration.tier,
+            migration.file.name,
         )
         execute_file(session, migration.file, dry_run=args.dry_run)
         if not args.dry_run:
             record_migration(session, migration, checksum=digest, applied_by=applied_by)
             applied[migration.key] = {"checksum": digest}
 
-    print("Done.")
+    logger.info("Done.")
     return 0
 
 
 def cmd_register_baseline(args: argparse.Namespace) -> int:
+    """Mark a stream's migrations up through a version as applied without executing them."""
     keyspace, migrations = load_manifest(Path(args.manifest))
     hosts = [h.strip() for h in args.hosts.split(",") if h.strip()]
     session = connect_cluster(hosts, keyspace)
@@ -263,27 +290,31 @@ def cmd_register_baseline(args: argparse.Namespace) -> int:
         if m.stream == stream and m.status == "active" and m.version <= through
     ]
     if not selected:
-        print(f"No migrations for stream={stream} through={through}", file=sys.stderr)
+        logger.error("no migrations for stream=%s through=%s", stream, through)
         return 1
 
     applied_by = args.applied_by or "register-baseline"
     for migration in selected:
         if migration.key in applied:
-            print(f"Skip (already recorded) {migration.stream}/{migration.version}")
+            logger.info("Skip (already recorded) %s/%s", migration.stream, migration.version)
             continue
         digest = checksum_file(migration.file) if migration.file.is_file() else "baseline"
         if args.dry_run:
-            print(
-                f"[dry-run] register {migration.stream}/{migration.version} checksum={digest[:12]}"
+            logger.info(
+                "[dry-run] register %s/%s checksum=%s",
+                migration.stream,
+                migration.version,
+                digest[:12],
             )
             continue
         record_migration(session, migration, checksum=digest, applied_by=applied_by)
-        print(f"Registered {migration.stream}/{migration.version}")
+        logger.info("Registered %s/%s", migration.stream, migration.version)
 
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser with its status/apply/register-baseline subcommands."""
     parser = argparse.ArgumentParser(description="Cassandra CQL migration tool")
     parser.add_argument(
         "--manifest",
@@ -331,10 +362,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """Parse CLI args and dispatch to the selected subcommand."""
     parser = build_parser()
     args = parser.parse_args()
     return int(args.func(args))
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     raise SystemExit(main())

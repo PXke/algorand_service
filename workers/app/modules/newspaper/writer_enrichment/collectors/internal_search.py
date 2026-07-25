@@ -1,3 +1,5 @@
+"""Search the platform's own published articles for prior mentions."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -10,8 +12,8 @@ def search_platform_mentions(
     display_name: str,
     limit: int = 5,
 ) -> dict[str, Any]:
-    """
-    Prior articles that mention this service, domain, or name (Cassandra scan v1).
+    """Prior articles that mention this service, domain, or name (Cassandra scan v1).
+
     Typesense search by keyword is phase 2.
     """
     from app.modules.newspaper.article_store import list_feed_articles

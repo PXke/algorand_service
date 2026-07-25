@@ -1,3 +1,5 @@
+"""Admin-wallet session verification for gating admin routes."""
+
 from __future__ import annotations
 
 from robyn import Request, Response
@@ -12,6 +14,7 @@ _session_store = SessionStore()
 
 
 def admin_wallet_addresses() -> set[str]:
+    """Return the configured admin wallet allowlist, uppercased."""
     raw = getattr(settings, "admin_wallet_addresses", "") or ""
     return {a.strip().upper() for a in raw.split(",") if a.strip()}
 
@@ -23,9 +26,7 @@ def _session_wallet(request: Request) -> str:
     sign-in, so the wallet behind it has cryptographically proven key ownership.
     """
     token = (
-        request.headers.get("x-session-token")
-        or request.headers.get("X-Session-Token")
-        or ""
+        request.headers.get("x-session-token") or request.headers.get("X-Session-Token") or ""
     ).strip()
     if not token:
         return ""
@@ -36,8 +37,7 @@ def _session_wallet(request: Request) -> str:
 
 
 def verified_admin_wallet(request: Request) -> str:
-    """The authenticated admin wallet to attribute an action to (verified, never
-    the self-asserted header). Call only after require_admin_wallet has passed."""
+    """The authenticated admin wallet to attribute an action to (verified, never the self-asserted header). Call only after require_admin_wallet has passed."""
     return _session_wallet(request)
 
 

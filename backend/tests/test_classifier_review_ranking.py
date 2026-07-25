@@ -1,3 +1,5 @@
+"""Pending-review ranking order and per-source window caps."""
+
 from __future__ import annotations
 
 from app.modules.admin.stores.cassandra import _rank_reviews
@@ -8,6 +10,7 @@ def _item(url: str, score: float) -> dict:
 
 
 def test_orders_by_promise_score_desc() -> None:
+    """Sorts review items by storage_score descending."""
     items = [
         _item("https://a.com/1", 0.2),
         _item("https://b.com/1", 0.9),
@@ -22,6 +25,7 @@ def test_orders_by_promise_score_desc() -> None:
 
 
 def test_caps_items_per_source() -> None:
+    """Caps how many items from one flooding source appear, leaving room for others."""
     # One source floods with high-scoring pages; cap keeps it from dominating
     # the window while other sources still appear.
     flood = [_item(f"https://flood.com/{i}", 0.9 - i * 0.01) for i in range(20)]
@@ -35,6 +39,7 @@ def test_caps_items_per_source() -> None:
 
 
 def test_www_prefix_treated_as_same_source() -> None:
+    """Treats a www.-prefixed host as the same source for the per-source cap."""
     items = [_item(f"https://www.flood.com/{i}", 0.9) for i in range(5)]
     items += [_item(f"https://flood.com/x{i}", 0.9) for i in range(5)]
     ranked = _rank_reviews(items, limit=10, per_source=3)
@@ -42,6 +47,7 @@ def test_www_prefix_treated_as_same_source() -> None:
 
 
 def test_single_source_window_stays_capped() -> None:
+    """Keeps the per-source cap even when it's the only source available, instead of backfilling the window."""
     # Only one source available: the window is intentionally short rather than
     # showing more than the cap from that one source. The rest stay pending.
     items = [_item(f"https://solo.com/{i}", 0.9 - i * 0.01) for i in range(10)]

@@ -29,30 +29,51 @@ trace and live sources, not as verdicts.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.modules.ai.interrogate import RevivedSession
+
+logger = logging.getLogger(__name__)
 
 
-def _print_header(rev) -> None:
-    print("=" * 78)
-    print(f"revived compose session for: {rev.source_url}")
-    print(
-        f"  service={rev.service_id}  model={rev.model}  status={rev.status}  "
-        f"rounds={rev.rounds}  tool_calls={rev.tool_calls}"
+def _print_header(rev: RevivedSession) -> None:
+    logger.info("=" * 78)
+    logger.info("revived compose session for: %s", rev.source_url)
+    logger.info(
+        "  service=%s  model=%s  status=%s  rounds=%s  tool_calls=%s",
+        rev.service_id,
+        rev.model,
+        rev.status,
+        rev.rounds,
+        rev.tool_calls,
     )
-    print(f"  composed_at={rev.created_at}  transcript_msgs={len(rev.messages)} "
-          f"(flattened to {len(rev.replay)} replay turns)")
-    print("=" * 78)
+    logger.info(
+        "  composed_at=%s  transcript_msgs=%d (flattened to %d replay turns)",
+        rev.created_at,
+        len(rev.messages),
+        len(rev.replay),
+    )
+    logger.info("=" * 78)
 
 
 def main() -> None:
+    """Parse CLI args, revive the target compose session, and run the Q&A loop."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", help="source_url substring, or an article id")
-    parser.add_argument("-q", "--question", default="",
-                        help="ask one question and exit (otherwise interactive)")
-    parser.add_argument("--no-ground-truth", action="store_true",
-                        help="replay verbatim; don't confront with live DNS / fetch-failure facts")
-    parser.add_argument("--session-id", default="",
-                        help="pin an exact session_id instead of newest-match")
+    parser.add_argument(
+        "-q", "--question", default="", help="ask one question and exit (otherwise interactive)"
+    )
+    parser.add_argument(
+        "--no-ground-truth",
+        action="store_true",
+        help="replay verbatim; don't confront with live DNS / fetch-failure facts",
+    )
+    parser.add_argument(
+        "--session-id", default="", help="pin an exact session_id instead of newest-match"
+    )
     args = parser.parse_args()
 
     from app.modules.ai.interrogate import (
@@ -82,10 +103,10 @@ def main() -> None:
             try:
                 rev = revive_session(source_url=target)
             except LookupError as exc:
-                print(f"error: {exc}", file=sys.stderr)
+                logger.error("%s", exc)
                 sys.exit(1)
         else:
-            print("error: no matching compose session", file=sys.stderr)
+            logger.error("no matching compose session")
             sys.exit(1)
 
     _print_header(rev)
@@ -94,28 +115,30 @@ def main() -> None:
     if ground_truth:
         note = ground_truth_note(rev)
         if note:
-            print("\n" + note + "\n")
+            logger.info("\n%s\n", note)
         else:
-            print("\n(no ground-truth flags: every linked domain resolves and no "
-                  "fetch failures in the transcript)\n")
+            logger.info(
+                "\n(no ground-truth flags: every linked domain resolves and no "
+                "fetch failures in the transcript)\n"
+            )
 
     history: list[dict] = []
 
     def ask(q: str) -> None:
         nonlocal history
         answer, history = interrogate(rev, q, ground_truth=ground_truth, history=history)
-        print(f"\nwriter> {answer}\n")
+        logger.info("\nwriter> %s\n", answer)
 
     if args.question:
         ask(args.question)
         return
 
-    print("Interactive interrogation. Blank line or Ctrl-D to quit.\n")
+    logger.info("Interactive interrogation. Blank line or Ctrl-D to quit.\n")
     while True:
         try:
             q = input("you> ").strip()
         except EOFError:
-            print()
+            logger.info("")
             break
         if not q:
             break
@@ -123,4 +146,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

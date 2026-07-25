@@ -1,3 +1,5 @@
+"""Match an indexed transaction to a registered service by address/app id."""
+
 from __future__ import annotations
 
 import json

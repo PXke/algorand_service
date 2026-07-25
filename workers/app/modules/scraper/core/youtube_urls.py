@@ -1,3 +1,5 @@
+"""Parse and classify YouTube URLs (channel, video, feed)."""
+
 from __future__ import annotations
 
 import re
@@ -9,11 +11,12 @@ _CHANNEL_ID = re.compile(r"^UC[0-9A-Za-z_-]{20,}$")
 
 @dataclass(frozen=True)
 class YoutubeTarget:
+    """A parsed YouTube scrape target (channel id)."""
     channel_id: str
 
 
 def parse_youtube_target(scrape_url: str) -> YoutubeTarget | None:
-    """Registry url → channel id. Accepts youtube://UC… or youtube://channel/UC…"""
+    """Registry url → channel id. Accepts youtube://UC… or youtube://channel/UC…."""
     raw = (scrape_url or "").strip()
     if raw.startswith("youtube://"):
         path = raw[len("youtube://") :].strip("/")
@@ -35,6 +38,7 @@ def parse_youtube_target(scrape_url: str) -> YoutubeTarget | None:
 
 
 def is_youtube_scrape_url(scrape_url: str) -> bool:
+    """Return whether a registry scrape url points at a YouTube channel."""
     return parse_youtube_target(scrape_url) is not None
 
 
@@ -44,4 +48,5 @@ def youtube_feed_url(channel_id: str) -> str:
 
 
 def youtube_channel_url(channel_id: str) -> str:
+    """Build the public channel page URL for a channel id."""
     return f"https://www.youtube.com/channel/{channel_id}"

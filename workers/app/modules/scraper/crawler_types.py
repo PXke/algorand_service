@@ -1,3 +1,5 @@
+"""Crawler-type enum shared across the scraper module."""
+
 from __future__ import annotations
 
 from enum import StrEnum

@@ -1,3 +1,5 @@
+"""Base scrape-result shape and scraper interface."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -5,6 +7,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ScrapeResult:
+    """A scraped page's extracted content and metadata."""
     source_id: str
     url: str
     title: str
@@ -26,5 +29,7 @@ class ScrapeResult:
 
 
 class BaseScraper:
+    """Scraper interface implemented per source type."""
     def scrape(self, url: str, source_id: str) -> ScrapeResult:  # pragma: no cover - interface
+        """Scrape one URL and return its extracted content and metadata."""
         raise NotImplementedError

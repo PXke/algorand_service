@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import contextlib
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import redis
 
 
-def _client():
+def _client() -> redis.Redis:
     import redis
 
     from app.core.config import REDIS_URL
@@ -23,6 +26,7 @@ def _client():
 
 
 def get_json(key: str) -> dict[str, Any] | None:
+    """Fetch and parse a cached JSON value, returning None on any failure."""
     try:
         raw = _client().get(key)
     except Exception:
@@ -36,11 +40,13 @@ def get_json(key: str) -> dict[str, Any] | None:
 
 
 def set_json(key: str, value: dict[str, Any], ttl: int) -> None:
+    """Cache a JSON-serializable value under key for ttl seconds, failing soft."""
     with contextlib.suppress(Exception):
         _client().set(key, json.dumps(value), ex=ttl)
 
 
 def get_name(asset_id: str) -> str | None:
+    """Fetch a cached asset display name, or None if uncached or on error."""
     try:
         return _client().get(f"coingecko:name:{asset_id}")
     except Exception:
@@ -48,6 +54,7 @@ def get_name(asset_id: str) -> str | None:
 
 
 def set_name(asset_id: str, name: str) -> None:
+    """Cache an asset's display name for COINGECKO_NAME_TTL seconds."""
     from app.core.config import COINGECKO_NAME_TTL
 
     with contextlib.suppress(Exception):

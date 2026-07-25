@@ -1,3 +1,5 @@
+"""Detecting an event's lifecycle phase and topic framing."""
+
 from app.modules.newspaper.event_lifecycle import EventPhase, detect_event_context
 from app.modules.newspaper.publish_policy import PublishTopic, build_publish_intent
 

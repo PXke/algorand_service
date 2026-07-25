@@ -1,3 +1,5 @@
+"""Fetch a YouTube channel's recent videos via its RSS feed."""
+
 from __future__ import annotations
 
 import hashlib
@@ -27,6 +29,7 @@ _MAX_VIDEOS = 15
 
 @dataclass(frozen=True)
 class ChannelVideo:
+    """One video from a YouTube channel's RSS feed."""
     video_id: str
     title: str
     description: str
@@ -39,7 +42,8 @@ def fetch_channel_videos(channel_id: str) -> tuple[str, list[ChannelVideo]]:
     """Fetch a channel's recent uploads from the public Atom feed.
 
     Returns (channel_title, videos). Metadata only — no transcript (the caption
-    endpoint needs a po_token; see Stage 2)."""
+    endpoint needs a po_token; see Stage 2).
+    """
     response = guarded_get(
         youtube_feed_url(channel_id),
         timeout=20.0,
@@ -88,6 +92,7 @@ class YoutubeScraper(BaseScraper):
     """
 
     def scrape(self, url: str, source_id: str) -> ScrapeResult:
+        """Scrape a channel's recent uploads via its public Atom feed, as one digest snapshot."""
         target = parse_youtube_target(url)
         if target is None:
             msg = f"not a youtube scrape url: {url!r}"

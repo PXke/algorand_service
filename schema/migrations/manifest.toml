@@ -501,3 +501,11 @@ file = "backend/schema/migrations/app/054_first_published_at.cql"
 tier = "prod"
 status = "active"
 description = "articles_by_id + articles_feed: first_published_at preserved across recompose re-publishes so daily caps and hot ranking use the original publication date"
+
+[[migrations]]
+stream = "app"
+version = "055"
+file = "backend/schema/migrations/app/055_kyc.cql"
+tier = "prod"
+status = "active"
+description = "kyc_enrollments + kyc_lookup_events: free wallet enrollment/trust-signal storage and the paid-lookup audit trail for the KYC-as-a-service x402 product"

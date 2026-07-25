@@ -1,3 +1,5 @@
+"""Orchestrate one collect-and-prepare price-metrics run."""
+
 from __future__ import annotations
 
 import httpx

@@ -19,8 +19,10 @@ from app.modules.gatekeeper.validation import Pair
 
 def human_sample_from_tags(tags: dict) -> AnnotatedSample:
     """Rebuild the human ground-truth ``AnnotatedSample`` from stored anchor tags.
+
     Severities are unknown from a human y/n tag, so they're left empty (the
-    profile defaults them); the harness only compares error-type membership."""
+    profile defaults them); the harness only compares error-type membership.
+    """
     return AnnotatedSample(
         factuality_fail=bool(tags.get("factuality_fail", False)),
         tone_fail=bool(tags.get("tone_fail", False)),
@@ -42,8 +44,12 @@ def build_pair(
     """One ``(human, machine)`` pair for a single anchor."""
     human = human_sample_from_tags(tags)
     machine = annotate(
-        source_text, trace_text, article_text,
-        classify=classify, fact_min=fact_min, sample_source="anchor",
+        source_text,
+        trace_text,
+        article_text,
+        classify=classify,
+        fact_min=fact_min,
+        sample_source="anchor",
     )
     return (human, machine)
 
@@ -55,15 +61,14 @@ def load_anchor_pairs(*, classify: ClassifyFn | None = None, limit: int = 200) -
     tool trace is pulled from ``investigation_findings`` by url (falling back to
     article_id). Deduped to the latest tag per article. Best-effort: any row that
     can't be rebuilt is skipped, total failure returns []. Pass ``classify`` (e.g.
-    ``annotator.mistral_classifier()``) to exercise Tier 2; omit for Tier-1-only."""
+    ``annotator.mistral_classifier()``) to exercise Tier 2; omit for Tier-1-only.
+    """
     try:
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import GatekeeperStmts
         from app.modules.newspaper.investigation_store import load_investigation_trace
 
-        rows = get_cassandra_session().execute(
-            GatekeeperStmts.LIST_ANCHORS, (limit,)
-        )
+        rows = get_cassandra_session().execute(GatekeeperStmts.LIST_ANCHORS, (limit,))
         pairs: list[Pair] = []
         seen: set[str] = set()
         for row in rows:

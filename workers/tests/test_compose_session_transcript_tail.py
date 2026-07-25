@@ -1,22 +1,15 @@
-"""record_compose_session must not silently drop the tail of a long compose
-transcript. Root-caused 2026-07-14/15 on a real NFT-marketplace article: the
-two-stage pipeline's most diagnostically important turns (the research->write
-digest handoff, review_draft/LLM-rubric grading, the final write) always come
-at the END of the transcript, after all research rounds — but a research-heavy
-story can exceed 60 messages on tool calls alone, and the old first-N slice
-silently dropped that entire tail. The grading itself still ran correctly
-(visible in final_output's heuristic_grade) — it was invisible in the
-admin Sessions transcript, which is what made this look like the LLM rubric
-never ran at all."""
+"""record_compose_session must not silently drop the tail of a long compose transcript. Root-caused 2026-07-14/15 on a real NFT-marketplace article: the two-stage pipeline's most diagnostically important turns (the research->write digest handoff, review_draft/LLM-rubric grading, the final write) always come at the END of the transcript, after all research rounds — but a research-heavy story can exceed 60 messages on tool calls alone, and the old first-N slice silently dropped that entire tail. The grading itself still ran correctly (visible in final_output's heuristic_grade) — it was invisible in the admin Sessions transcript, which is what made this look like the LLM rubric never ran at all."""
 
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock
 
 from app.modules.ai.tool_insights_store import record_compose_session
 
 
-def test_long_transcript_keeps_review_draft_tail(fake_cassandra_session) -> None:
+def test_long_transcript_keeps_review_draft_tail(fake_cassandra_session: MagicMock) -> None:
+    """Keeps the review_draft tail of a 150+ message transcript instead of dropping it via a first-N slice."""
     # 150 research-round messages, then the review_draft turn that matters —
     # a first-N-of-60 slice would have dropped everything from index 60 on.
     messages = [
@@ -47,7 +40,8 @@ def test_long_transcript_keeps_review_draft_tail(fake_cassandra_session) -> None
     assert "review_draft" in names
 
 
-def test_no_message_count_cap(fake_cassandra_session) -> None:
+def test_no_message_count_cap(fake_cassandra_session: MagicMock) -> None:
+    """Stores all 200 messages of a transcript with no fixed message-count cap."""
     messages = [{"role": "tool", "name": "search_web", "content": "x"} for _ in range(200)]
     debug = {"messages": messages}
 
@@ -66,15 +60,12 @@ def test_no_message_count_cap(fake_cassandra_session) -> None:
     assert len(stored_messages) == 200
 
 
-def test_oversized_transcript_drops_from_front_not_json_string(fake_cassandra_session) -> None:
-    """A transcript so large its JSON exceeds the storage cap must still be
-    stored as VALID json — dropping oldest (least valuable) entries whole,
-    never a raw character slice through the middle of an object, which would
-    corrupt the column for every reader (the Sessions page's json.loads)."""
+def test_oversized_transcript_drops_from_front_not_json_string(
+    fake_cassandra_session: MagicMock,
+) -> None:
+    """A transcript so large its JSON exceeds the storage cap must still be stored as VALID json — dropping oldest (least valuable) entries whole, never a raw character slice through the middle of an object, which would corrupt the column for every reader (the Sessions page's json.loads)."""
     big_content = "x" * 2000
-    messages = [
-        {"role": "tool", "name": "search_web", "content": big_content} for _ in range(100)
-    ]
+    messages = [{"role": "tool", "name": "search_web", "content": big_content} for _ in range(100)]
     messages.append({"role": "tool", "name": "review_draft", "content": '{"grade": 10.0}'})
     debug = {"messages": messages}
 

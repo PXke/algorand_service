@@ -985,7 +985,18 @@ class AppLocalizationsHi extends AppLocalizations {
   String get domainsAddAsSeed => 'स्थायी स्रोत के रूप में जोड़ें';
 
   @override
+  String get domainsAddSinglePageOnly =>
+      'केवल यह पेज (केवल उद्धरण, पूरी साइट को क्रॉल न करें)';
+
+  @override
   String get domainsScoreUnexplained => 'स्कोर का विवरण उपलब्ध नहीं है';
+
+  @override
+  String get domainsPossibleService => 'संभावित सेवा?';
+
+  @override
+  String get domainsPossibleServiceHint =>
+      'स्कोर अच्छा है पर समाचार/सामान्य के रूप में टैग किया गया है — यह एक वास्तविक उत्पाद हो सकता है, सिर्फ उद्धरण स्रोत नहीं। \"एक बार क्रॉल करें\" के बजाय \"स्वीकृत करें और खोजें\" पर विचार करें।';
 
   @override
   String get paginationPrevious => 'पिछला';

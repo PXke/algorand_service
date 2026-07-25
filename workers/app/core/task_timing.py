@@ -1,10 +1,15 @@
+"""Log each Celery task's duration via prerun/postrun/failure signals."""
+
 from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING
 
 from celery.signals import task_failure, task_postrun, task_prerun
+
+if TYPE_CHECKING:
+    from celery import Task
 
 logger = logging.getLogger("workers.task_timing")
 
@@ -12,7 +17,7 @@ _task_start: dict[str, float] = {}
 
 
 @task_prerun.connect
-def _on_task_prerun(task_id: str | None = None, task: Any = None, **_: Any) -> None:
+def _on_task_prerun(task_id: str | None = None, _task: Task | None = None, **_: object) -> None:
     if task_id:
         _task_start[task_id] = time.monotonic()
 
@@ -20,9 +25,9 @@ def _on_task_prerun(task_id: str | None = None, task: Any = None, **_: Any) -> N
 @task_postrun.connect
 def _on_task_postrun(
     task_id: str | None = None,
-    task: Any = None,
+    task: Task | None = None,
     state: str | None = None,
-    **_: Any,
+    **_: object,
 ) -> None:
     if not task_id:
         return
@@ -37,9 +42,9 @@ def _on_task_postrun(
 @task_failure.connect
 def _on_task_failure(
     task_id: str | None = None,
-    task: Any = None,
+    task: Task | None = None,
     exception: BaseException | None = None,
-    **_: Any,
+    **_: object,
 ) -> None:
     name = getattr(task, "name", "unknown")
     logger.warning(

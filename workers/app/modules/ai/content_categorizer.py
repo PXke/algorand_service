@@ -1,3 +1,5 @@
+"""Classify a page's content category, with a keyword fallback when the model doesn't run."""
+
 from __future__ import annotations
 
 from app.modules.search.classifier.score import POSITIVE_KEYWORDS
@@ -16,11 +18,44 @@ VALID_CATEGORIES = frozenset(
 
 _CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "news": ("announcement", "breaking", "launch", "partnership", "update"),
-    "tool": ("sdk", "api", "developer", "library", "cli", "indexer"),
+    "tool": (
+        "sdk",
+        "api",
+        "developer",
+        "library",
+        "cli",
+        "indexer",
+        "integration",
+        "plugin",
+        "dashboard",
+        "analytics",
+        "explorer",
+        "oracle",
+    ),
     "payment": ("payment", "checkout", "merchant", "invoice", "usdc"),
     "nft": ("nft", "collectible", "arc-3", "marketplace"),
     "governance": ("governance", "vote", "proposal", "dao"),
-    "service": ("wallet", "exchange", "defi", "staking", "bridge"),
+    # DeFi jargon alone missed non-DeFi Algorand products (loyalty apps,
+    # storage, gaming, ticketing) whose landing-page copy never says "staking"
+    # or "bridge" but does say "launch"/"update" — which only matched "news"
+    # (root-caused 2026-07-25: algofile.io, gramo.io sat mislabeled "news").
+    "service": (
+        "wallet",
+        "exchange",
+        "defi",
+        "staking",
+        "bridge",
+        "rewards",
+        "loyalty",
+        "storage",
+        "subscription",
+        "membership",
+        "platform",
+        "dapp",
+        "booking",
+        "ticketing",
+        "gaming",
+    ),
 }
 
 
@@ -62,9 +97,7 @@ def _admin_category_for_domain(url: str) -> str | None:
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import DomainTrackingStmts
 
-        row = get_cassandra_session().execute(
-            DomainTrackingStmts.GET_METADATA, (host,)
-        ).one()
+        row = get_cassandra_session().execute(DomainTrackingStmts.GET_METADATA, (host,)).one()
     except Exception:
         return None
     if row is None:

@@ -374,6 +374,25 @@ if [[ ! -s "\$MMDB" || "\$(cat "\$GEOIP_DIR/.month" 2>/dev/null)" != "\$MONTH" ]
 fi
 grep -q '^GEOIP_DB_PATH=' '${SHARED}/backend.env' \
   || echo "GEOIP_DB_PATH=\$MMDB" >> '${SHARED}/backend.env'
+
+# GeoIP ASN DB (DB-IP ASN Lite — same free/no-account tier as the country DB
+# above) — flags client IPs on a cloud/hosting ASN so a UA-rotation scraper
+# hiding in human "(direct)" can be caught by IP class, not just UA shape.
+# Privacy-safe: only the hosting/not-hosting boolean is counted, the IP and
+# the ASN itself are never stored. Idempotent, same monthly-refresh pattern.
+ASN_MMDB="\$GEOIP_DIR/asn.mmdb"
+if [[ ! -s "\$ASN_MMDB" || "\$(cat "\$GEOIP_DIR/.month-asn" 2>/dev/null)" != "\$MONTH" ]]; then
+  ASN_URL="https://download.db-ip.com/free/dbip-asn-lite-\${MONTH}.mmdb.gz"
+  if curl -fsSL "\$ASN_URL" -o "\$ASN_MMDB.gz" && gunzip -f "\$ASN_MMDB.gz"; then
+    echo "\$MONTH" > "\$GEOIP_DIR/.month-asn"
+    echo "NOTE: fetched DB-IP ASN database (\$MONTH)"
+  else
+    rm -f "\$ASN_MMDB.gz"
+    echo "warn: DB-IP ASN db fetch failed — hosting-IP check stays off until next deploy"
+  fi
+fi
+grep -q '^GEOIP_ASN_DB_PATH=' '${SHARED}/backend.env' \
+  || echo "GEOIP_ASN_DB_PATH=\$ASN_MMDB" >> '${SHARED}/backend.env'
 EOF
 
   if [[ "$DEPLOY_SKIP_MIGRATE" != "1" ]]; then

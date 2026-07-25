@@ -1,3 +1,5 @@
+"""Celery tasks that publish the weekly price analysis and digest."""
+
 from __future__ import annotations
 
 from app.celery_app import celery_app

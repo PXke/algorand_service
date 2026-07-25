@@ -1,3 +1,5 @@
+"""Celery tasks that drain the publish queue (breaking, standard, review) on their beats."""
+
 from __future__ import annotations
 
 import logging
@@ -9,6 +11,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from app.celery_app import celery_app
 from app.core import config
 from app.core.feed_bucket import feed_month as _feed_month
+from app.modules.ai.mistral_credit_guard import is_credit_exhausted
 from app.modules.newspaper.breaking_credibility import (
     BreakingAssessment,
     assess_breaking_credibility,
@@ -22,6 +25,7 @@ from app.modules.newspaper.publish_policy import (
     remaining_standard_publish_slots,
 )
 from app.modules.newspaper.publish_queue_store import (
+    QueuedPublishRow,
     is_terminal_outcome,
     list_pending_queue,
     mark_queue_done,
@@ -35,11 +39,8 @@ from app.modules.newspaper.tasks.publish_tasks import publish_from_queued_row
 logger = logging.getLogger(__name__)
 
 
-def _row_needs_review(row) -> bool:
-    """Would the classifier hold this row for admin review? Review-bound items
-    bypass publish pacing — they don't hit the feed until approved, so spacing
-    them out only delays training feedback. Reads the signals computed once at
-    ingest; recomputes only for rows queued before signals existed.
+def _row_needs_review(row: QueuedPublishRow) -> bool:
+    """Would the classifier hold this row for admin review? Review-bound items bypass publish pacing — they don't hit the feed until approved, so spacing them out only delays training feedback. Reads the signals computed once at ingest; recomputes only for rows queued before signals existed.
 
     Scam/incident topics always need review regardless of what the ML
     classifier thinks — both a sound editorial policy (never auto-publish
@@ -51,7 +52,8 @@ def _row_needs_review(row) -> bool:
     (2026-07-10: perawallet.app) would score as "confidently publishable" by
     the ML signals and sail past this check into a full — and wasted —
     research + compose pass, since a scam/incident piece must always route
-    to review no matter what the ML classifier's confidence says."""
+    to review no matter what the ML classifier's confidence says.
+    """
     from app.modules.newspaper.publish_policy import PublishTopic, is_breaking_topic
 
     try:
@@ -80,13 +82,7 @@ def _pending_for_tier(tier: PublishTier, *, limit: int) -> list:
 
 
 def _pending_feed_backlog_full() -> bool:
-    """True when pending_feed_queue already holds PENDING_FEED_MAX_DEPTH+
-    approved articles awaiting paced release. Composing further ahead than
-    that only burns Mistral budget to publish staler content later — the
-    auto-approve → backlog path bypasses the 1-slot review throttle, so
-    without this check hourly drains composed all night (2026-07-16: six
-    articles / two days of inventory queued overnight). Fails open: a
-    Cassandra blip must not stop the pipeline."""
+    """True when pending_feed_queue already holds PENDING_FEED_MAX_DEPTH+ approved articles awaiting paced release. Composing further ahead than that only burns Mistral budget to publish staler content later — the auto-approve → backlog path bypasses the 1-slot review throttle, so without this check hourly drains composed all night (2026-07-16: six articles / two days of inventory queued overnight). Fails open: a Cassandra blip must not stop the pipeline."""
     from app.core import config as cfg
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import PendingFeedStmts
@@ -100,9 +96,8 @@ def _pending_feed_backlog_full() -> bool:
         return False
 
 
-def _domain_capped(row) -> bool:
-    """True when this web source already created its allotted articles today
-    (COMPOSE_MAX_PER_DOMAIN_PER_DAY). Such rows are deferred rather than composed."""
+def _domain_capped(row: QueuedPublishRow) -> bool:
+    """True when this web source already created its allotted articles today (COMPOSE_MAX_PER_DOMAIN_PER_DAY). Such rows are deferred rather than composed."""
     from app.modules.crawler.domain_tracker import domain_compose_cap_reached
     from app.modules.newspaper.tasks.publish_tasks import _compose_domain_for_row
 
@@ -110,10 +105,8 @@ def _domain_capped(row) -> bool:
     return bool(dom and domain_compose_cap_reached(dom))
 
 
-def _domain_in_cooldown(row) -> bool:
-    """True when this web source published/composed within the diversity cooldown
-    (COMPOSE_DOMAIN_COOLDOWN_HOURS). Unlike the daily cap, cooldown is short-lived,
-    so such rows are left pending (not deferred) to retry once it clears."""
+def _domain_in_cooldown(row: QueuedPublishRow) -> bool:
+    """True when this web source published/composed within the diversity cooldown (COMPOSE_DOMAIN_COOLDOWN_HOURS). Unlike the daily cap, cooldown is short-lived, so such rows are left pending (not deferred) to retry once it clears."""
     from app.modules.crawler.domain_tracker import domain_in_cooldown
     from app.modules.newspaper.tasks.publish_tasks import _compose_domain_for_row
 
@@ -121,30 +114,22 @@ def _domain_in_cooldown(row) -> bool:
     return bool(dom and domain_in_cooldown(dom))
 
 
-def _service_in_cooldown(row) -> bool:
-    """True when this SERVICE (across all its domains) published/composed within
-    its diversity cooldown. Complements _domain_in_cooldown for a project whose
-    domains don't share a registrable domain, so the per-domain check alone
-    can't see the repeat (e.g. a project's own site + a separate Medium blog)."""
+def _service_in_cooldown(row: QueuedPublishRow) -> bool:
+    """True when this SERVICE (across all its domains) published/composed within its diversity cooldown. Complements _domain_in_cooldown for a project whose domains don't share a registrable domain, so the per-domain check alone can't see the repeat (e.g. a project's own site + a separate Medium blog)."""
     from app.modules.crawler.domain_tracker import service_in_cooldown
 
     return bool(row.service_id and service_in_cooldown(row.service_id))
 
 
-def _novelty_collapsed(row) -> bool:
-    """Fresh novelty at drain time. The enqueue-time novelty is a snapshot; a
-    story on the same subject may have PUBLISHED after this row entered the
-    queue (the Defly case: a newsletter about a wallet we had just covered), so
-    the stored priority silently overstates it. Recompute against articles
-    published NOW and cut the row when novelty has collapsed — one cheap
-    Typesense query beats a six-minute duplicate compose. Fails open (0.0
-    similarity → not collapsed) when Typesense is unavailable.
+def _novelty_collapsed(row: QueuedPublishRow) -> bool:
+    """Fresh novelty at drain time. The enqueue-time novelty is a snapshot; a story on the same subject may have PUBLISHED after this row entered the queue (the Defly case: a newsletter about a wallet we had just covered), so the stored priority silently overstates it. Recompute against articles published NOW and cut the row when novelty has collapsed — one cheap Typesense query beats a six-minute duplicate compose. Fails open (0.0 similarity → not collapsed) when Typesense is unavailable.
 
     Uses the SAME boundary as the compose-time duplicate check
     (NOVELTY_MAX_SIMILARITY, publish_tasks.py) rather than the old, more
     lenient NOVELTY_DUPLICATE_FLOOR — a row in between the two used to survive
     this drain-time check only to be discarded as a duplicate mid-compose,
-    wasting a full Mistral call."""
+    wasting a full Mistral call.
+    """
     from app.modules.newspaper.article_grader import (
         recent_content_similarity,
         recent_title_similarity,
@@ -158,14 +143,8 @@ def _novelty_collapsed(row) -> bool:
     return closest_sim >= config.NOVELTY_MAX_SIMILARITY
 
 
-def _brief_archived(row) -> bool:
-    """True when this row is an editorial-brief assignment whose brief is no
-    longer active (archived/deactivated since it was enqueued). Archiving a brief
-    does NOT purge its already-queued assignment, so without this a retired brief
-    still composes once when the drain reaches its stale row — 2026-07-20: an
-    archived duplicate wallet brief drained and AUTO-PUBLISHED a wrong article.
-    Fails open (compose) on any lookup error — a transient blip must not silently
-    drop legitimate assignments."""
+def _brief_archived(row: QueuedPublishRow) -> bool:
+    """True when this row is an editorial-brief assignment whose brief is no longer active (archived/deactivated since it was enqueued). Archiving a brief does NOT purge its already-queued assignment, so without this a retired brief still composes once when the drain reaches its stale row — 2026-07-20: an archived duplicate wallet brief drained and AUTO-PUBLISHED a wrong article. Fails open (compose) on any lookup error — a transient blip must not silently drop legitimate assignments."""
     payload = row.payload or {}
     if payload.get("source_kind") != "editorial_assignment":
         return False
@@ -183,10 +162,7 @@ def _brief_archived(row) -> bool:
 
 @dataclass(frozen=True)
 class _DrainGate:
-    """One pre-compose veto in the standard drain: ``check(row)`` True means the
-    row is skipped this run with ``name`` as its reported status. ``mark_status``
-    moves the row out of the pending lane (``deferred``/``expired``); None leaves
-    it pending to retry next beat (right for short-lived cooldowns)."""
+    """One pre-compose veto in the standard drain: ``check(row)`` True means the row is skipped this run with ``name`` as its reported status. ``mark_status`` moves the row out of the pending lane (``deferred``/``expired``); None leaves it pending to retry next beat (right for short-lived cooldowns)."""
 
     name: str
     check: Callable[..., bool]
@@ -208,13 +184,14 @@ _PRE_COMPOSE_GATES: tuple[_DrainGate, ...] = (
 )
 
 
-def _run_pre_compose_gates(row) -> _DrainGate | None:
+def _run_pre_compose_gates(row: QueuedPublishRow) -> _DrainGate | None:
     """First gate that vetoes this row, or None when all pass.
 
     Checks are resolved through the module namespace at call time (not the
     reference frozen into the tuple at import) so monkeypatching e.g.
     ``queue_drain_tasks._domain_in_cooldown`` keeps working — that seam is how
-    the existing drain tests fake cooldown/cap state."""
+    the existing drain tests fake cooldown/cap state.
+    """
     for gate in _PRE_COMPOSE_GATES:
         check = globals().get(gate.check.__name__, gate.check)
         if check(row):
@@ -222,15 +199,8 @@ def _run_pre_compose_gates(row) -> _DrainGate | None:
     return None
 
 
-def _resolve(row, outcome: dict) -> str:
-    """Mark the queue row done when its compose outcome resolved it (published /
-    review / duplicate); leave it pending otherwise. Returns the status string.
-    Single source of truth for which outcomes dequeue a row — a status missing
-    from TERMINAL_OUTCOMES is the bug class behind 'the same topic reappears'.
-    An outcome may also carry ``queue_status`` (e.g. the content-quality veto's
-    "expired") to retire the row under that status without counting as a
-    successful resolution. Either way the outcome is persisted as the row's
-    last_reason, so the admin queue view can answer "why is/was this row here"."""
+def _resolve(row: QueuedPublishRow, outcome: dict) -> str:
+    """Mark the queue row done when its compose outcome resolved it (published / review / duplicate); leave it pending otherwise. Returns the status string. Single source of truth for which outcomes dequeue a row — a status missing from TERMINAL_OUTCOMES is the bug class behind 'the same topic reappears'. An outcome may also carry ``queue_status`` (e.g. the content-quality veto's "expired") to retire the row under that status without counting as a successful resolution. Either way the outcome is persisted as the row's last_reason, so the admin queue view can answer "why is/was this row here"."""
     status = str(outcome.get("status", ""))
     reason = str(outcome.get("reason", "") or status)
     queue_status = str(outcome.get("queue_status", ""))
@@ -243,9 +213,8 @@ def _resolve(row, outcome: dict) -> str:
     return status
 
 
-def _compose_review_row(row) -> dict:
-    """Compose one review-bound row at standard tier and resolve it. Shared by
-    the standard drain's review branch and ensure_review_ready."""
+def _compose_review_row(row: QueuedPublishRow) -> dict:
+    """Compose one review-bound row at standard tier and resolve it. Shared by the standard drain's review branch and ensure_review_ready."""
     outcome = publish_from_queued_row(row, publish_tier=PublishTier.STANDARD)
     _resolve(row, outcome)
     return outcome
@@ -253,11 +222,7 @@ def _compose_review_row(row) -> dict:
 
 @dataclass
 class _BreakingVetoCtx:
-    """Loop state the breaking vetoes need beyond the row: whether the single
-    review slot is occupied this run, and the credibility assessment — set by
-    the credibility veto (last gate) and reused by the drain to tag the
-    SUCCESS outcome with its method, so it's only computed once and only for
-    rows that reach that gate. Mutable on purpose (unlike _DrainGate rows)."""
+    """Loop state the breaking vetoes need beyond the row: whether the single review slot is occupied this run, and the credibility assessment — set by the credibility veto (last gate) and reused by the drain to tag the SUCCESS outcome with its method, so it's only computed once and only for rows that reach that gate. Mutable on purpose (unlike _DrainGate rows)."""
 
     row: object
     review_full: bool
@@ -277,10 +242,7 @@ def _breaking_policy_veto(ctx: _BreakingVetoCtx) -> dict | None:
 
 
 def _breaking_review_slot_veto(ctx: _BreakingVetoCtx) -> dict | None:
-    """Composing a review-bound item into a full review queue just returns
-    "review_queue_full" — a status the drain does NOT mark done, so the row
-    would recompose every beat, burning a full Mistral loop each time. Leave
-    it pending until the admin clears the review queue."""
+    """Composing a review-bound item into a full review queue just returns "review_queue_full" — a status the drain does NOT mark done, so the row would recompose every beat, burning a full Mistral loop each time. Leave it pending until the admin clears the review queue."""
     if ctx.review_full and _row_needs_review(ctx.row):
         return {"status": "skipped", "reason": "review_queue_full"}
     return None
@@ -295,7 +257,8 @@ def _breaking_credibility_veto(ctx: _BreakingVetoCtx) -> dict | None:
     re-assessed every ~2-minute breaking beat forever AND held the service's
     one-pending-row slot hostage: observed 2026-07-17, a hay-app row stuck
     "not_credible" for 7 days, starving all hay-app coverage. The next scrape
-    re-offers the story fresh if it grows real evidence."""
+    re-offers the story fresh if it grows real evidence.
+    """
     ctx.assessment = assess_breaking_credibility(
         page_text=str(ctx.row.payload.get("page_text", "")),
         source_url=ctx.row.scrape_url,
@@ -336,6 +299,8 @@ def _run_breaking_vetoes(ctx: _BreakingVetoCtx) -> dict | None:
 @celery_app.task(name="app.tasks.newspaper.drain_breaking_publish_queue")
 def drain_breaking_publish_queue() -> dict[str, object]:
     """Publish breaking-tier items immediately up to the separate daily cap."""
+    if is_credit_exhausted():
+        return {"status": "skipped", "reason": "mistral_credit_exhausted", "published": 0}
     slots = remaining_breaking_publish_slots()
     if slots <= 0:
         return {"status": "skipped", "reason": "breaking_daily_cap_reached", "published": 0}
@@ -367,9 +332,7 @@ def drain_breaking_publish_queue() -> dict[str, object]:
                 veto_queue_status = str(veto_outcome.get("queue_status", ""))
                 veto_reason = str(veto_outcome.get("reason", "skipped"))
                 if veto_queue_status:
-                    mark_queue_status(
-                        row.queue_id, veto_queue_status, reason=veto_reason
-                    )
+                    mark_queue_status(row.queue_id, veto_queue_status, reason=veto_reason)
                 else:
                     record_queue_reason(row.queue_id, veto_reason)
                 results.append({"queue_id": row.queue_id, **veto_outcome})
@@ -432,6 +395,8 @@ def drain_standard_publish_queue() -> dict[str, object]:
     # gates THIS step on the interval, same as before — review composition
     # below intentionally bypasses publish pacing (it doesn't hit the feed
     # until approved), so a blanket check up here would wrongly delay it too.
+    # Backlog release never composes (it only publishes already-paid-for
+    # work), so it must run even while Mistral credit is exhausted.
     from app.modules.newspaper.publish_schedule import is_standard_publish_due
 
     due, _detail = is_standard_publish_due()
@@ -439,6 +404,9 @@ def drain_standard_publish_queue() -> dict[str, object]:
         backlog = _release_pending_feed_backlog(slots=slots)
         if backlog.get("published", 0):
             return {**backlog, "tier": "standard", "source": "pending_feed_backlog"}
+
+    if is_credit_exhausted():
+        return {"status": "skipped", "reason": "mistral_credit_exhausted", "published": 0}
 
     pending = _pending_for_tier(PublishTier.STANDARD, limit=config.PUBLISH_QUEUE_BATCH_LIMIT)
     published = 0
@@ -549,17 +517,14 @@ def drain_standard_publish_queue() -> dict[str, object]:
 
 @celery_app.task(name="app.tasks.newspaper.reap_stale_compose_sessions")
 def reap_stale_compose_sessions() -> dict[str, int]:
-    """Maintenance beat: mark any compose_sessions row stuck researching/writing
-    past the staleness window as "stale" (see tool_insights_store for why one
-    can get orphaned there)."""
+    """Maintenance beat: mark any compose_sessions row stuck researching/writing past the staleness window as "stale" (see tool_insights_store for why one can get orphaned there)."""
     from app.modules.ai.tool_insights_store import reap_stale_compose_sessions as _reap
 
     return _reap()
 
 
 def _curated_discovery(scrape_url: str) -> bool:
-    """True when the row's domain came from a curated listing (ecosystem
-    directory or case-study sync) — best-effort, False on any failure."""
+    """True when the row's domain came from a curated listing (ecosystem directory or case-study sync) — best-effort, False on any failure."""
     try:
         from app.modules.crawler.domain_tracker import domain_from_url
         from app.modules.crawler.ecosystem_sync import ecosystem_listed_domains
@@ -571,8 +536,8 @@ def _curated_discovery(scrape_url: str) -> bool:
 
 @celery_app.task(name="app.tasks.newspaper.expire_stale_queue_items")
 def expire_stale_queue_items() -> dict[str, object]:
-    """
-    Queue maintenance (Phase 5):
+    """Queue maintenance (Phase 5).
+
     - Expire stale `announce`-phase rows that were never published before the event passed.
     - Defer low-score rows that sat in the queue too long; index their page text
       for search first when available (`indexed_only`), otherwise mark `deferred`.
@@ -603,7 +568,7 @@ def expire_stale_queue_items() -> dict[str, object]:
                 # Curated once-ever introductions (ecosystem directory /
                 # Foundation case-study subjects) are chain-silent by nature,
                 # so their keyword-driven priority is structurally low (~27 =
-                # 0.45 anchor × discovery weight, under the 45 threshold).
+                # 0.45 anchor x discovery weight, under the 45 threshold).
                 # They're latency-tolerant by design: leave them pending until
                 # a quiet drain slot picks them up instead of parking them.
                 continue
@@ -630,8 +595,7 @@ def expire_stale_queue_items() -> dict[str, object]:
 
 
 def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
-    """Release ONE admin-approved article that was held because the daily
-    feed cap was already reached (pending_feed_queue), interest order.
+    """Release ONE admin-approved article that was held because the daily feed cap was already reached (pending_feed_queue), interest order.
 
     Shares the SAME pacing clock as the caller (is_standard_publish_due /
     NEWS_STANDARD_INTERVAL_HOURS), not a separate one — a held article going
@@ -643,7 +607,8 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
     2026-07-14 via the AlgoVanity article) — folded into
     drain_standard_publish_queue since both already share one pacing gate
     and one daily budget, so a separate task+beat entry was an avoidable
-    extra moving part that most cycles did nothing anyway."""
+    extra moving part that most cycles did nothing anyway.
+    """
     from datetime import UTC, datetime
 
     from app.core import config as cfg
@@ -658,6 +623,15 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
     published = 0
     for r in rows:
         art = session.execute(ArticleStmts.GET_FOR_FEED, (r.article_id,)).one()
+        if art is None:
+            # The queue row still gets deleted below (a permanently missing
+            # article would otherwise jam this one-row-per-run queue
+            # forever), but that silently discards whatever compose spend
+            # produced it — log it so the loss is at least visible.
+            logger.warning(
+                "pending_feed_queue row %s has no matching article — dropping without release",
+                r.article_id,
+            )
         if art is not None:
             # Time-capsule fix (2026-07-18): the article was composed days
             # ago and stored unlisted — gates added SINCE its compose never
@@ -702,9 +676,7 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
                         art.source_url,
                     ),
                 )
-                session.execute(
-                    ArticleStmts.UPDATE_PUBLISHED_AT, (released_at, art.article_id)
-                )
+                session.execute(ArticleStmts.UPDATE_PUBLISHED_AT, (released_at, art.article_id))
             except Exception:
                 # The article never became visible — hand the slot back so
                 # the day's budget isn't burned by a failed write.
@@ -742,10 +714,7 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
 
 @celery_app.task(name="app.tasks.newspaper.drain_approved_feed_queue")
 def drain_approved_feed_queue() -> dict[str, object]:
-    """Thin, directly-invocable wrapper around _release_pending_feed_backlog
-    — no longer on its own beat schedule (folded into
-    drain_standard_publish_queue, which now checks the backlog first), kept
-    registered for manual/debug triggers."""
+    """Thin, directly-invocable wrapper around _release_pending_feed_backlog — no longer on its own beat schedule (folded into drain_standard_publish_queue, which now checks the backlog first), kept registered for manual/debug triggers."""
     from app.modules.newspaper.publish_policy import remaining_standard_publish_slots
     from app.modules.newspaper.publish_schedule import is_standard_publish_due
 
@@ -762,8 +731,9 @@ def drain_approved_feed_queue() -> dict[str, object]:
 
 @celery_app.task(name="app.tasks.newspaper.ensure_review_ready")
 def ensure_review_ready() -> dict[str, object]:
-    """Keep exactly one composed article waiting in the review queue at all
-    times (when candidates exist), so the admin always has one to act on."""
+    """Keep exactly one composed article waiting in the review queue at all times (when candidates exist), so the admin always has one to act on."""
+    if is_credit_exhausted():
+        return {"status": "skipped", "reason": "mistral_credit_exhausted"}
     from app.modules.crawler.classifier_review_store import review_queue_full
 
     if review_queue_full():

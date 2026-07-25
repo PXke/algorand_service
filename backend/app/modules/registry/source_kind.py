@@ -1,3 +1,5 @@
+"""Classify a service's scrape URL into a source kind (web, mail, chain, etc.)."""
+
 from __future__ import annotations
 
 

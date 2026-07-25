@@ -1,3 +1,5 @@
+"""BaseScraper implementation backed by the browser fetch path."""
+
 from __future__ import annotations
 
 import hashlib
@@ -11,12 +13,13 @@ from app.modules.scraper.core.browser_scrape import (
 
 
 class BrowserScraper(BaseScraper):
-    """
-    Playwright-based scraper for hard targets (SPAs, heavy JS sites).
+    """Playwright-based scraper for hard targets (SPAs, heavy JS sites).
+
     Registry: browser://https://… or https://… on an allowlisted domain.
     """
 
     def scrape(self, url: str, source_id: str) -> ScrapeResult:
+        """Scrape one URL via Playwright and return its extracted content and metadata."""
         target = self._resolve_url(url)
         if not target:
             msg = f"cannot resolve browser scrape url: {url!r}"
@@ -69,5 +72,5 @@ class BrowserScraper(BaseScraper):
         return resolve_browser_target_url(scrape_url)
 
 
-def _default_title(scrape_url: str) -> str:
+def _default_title(_scrape_url: str) -> str:
     return "Web page"

@@ -12,8 +12,12 @@ import asyncio
 import logging
 from contextlib import suppress
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
-from robyn import Request, Response
+from robyn import Request, Response, Robyn
+
+if TYPE_CHECKING:
+    import redis
 
 from app.core import serialization
 from app.core.http_errors import json_error_response
@@ -34,7 +38,8 @@ def _client_ip(request: Request) -> str:
     read left-to-right — nginx's proxy_add_x_forwarded_for prepends the client's
     own XFF, so its first element is attacker-controlled and would hand every
     spoofed value its own rate-limit bucket. Fall back to the LAST XFF hop (the
-    one appended by our proxy) only when X-Real-IP is absent (e.g. local dev)."""
+    one appended by our proxy) only when X-Real-IP is absent (e.g. local dev).
+    """
     real_ip = (request.headers.get("x-real-ip") or "").strip()
     if real_ip:
         return real_ip
@@ -44,7 +49,7 @@ def _client_ip(request: Request) -> str:
 
 
 @lru_cache(maxsize=1)
-def _redis():
+def _redis() -> redis.Redis:
     import redis
 
     from app.core.config import settings
@@ -66,7 +71,9 @@ def _rate_limited(ip: str) -> bool:
     return False
 
 
-def register_contact_routes(app) -> None:
+def register_contact_routes(app: Robyn) -> None:
+    """Wire the public contact-submit and admin contact-inbox routes onto app."""
+
     @app.post("/api/v1/contact")
     async def contact_submit(request: Request) -> Response | dict:
         try:

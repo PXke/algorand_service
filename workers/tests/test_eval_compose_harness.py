@@ -1,20 +1,24 @@
-"""The eval harness (scripts/eval_compose_prompts.py) is a manual, costs-money
-tool never run in CI — this only pins that its report formatting and fixture
-lookup work, without making a real Mistral call."""
+"""The eval harness (scripts/eval_compose_prompts.py) is a manual, costs-money tool never run in CI — this only pins that its report formatting and fixture lookup work, without making a real Mistral call."""
 
 from __future__ import annotations
+
+from typing import Never
+
+import pytest
 
 from scripts.eval_compose_fixtures import FIXTURES, get
 from scripts.eval_compose_prompts import _run_one
 
 
 def test_fixtures_are_unique_and_nonempty() -> None:
+    """Eval fixtures have unique names and there are between 5 and 10 of them."""
     names = [f.name for f in FIXTURES]
     assert len(names) == len(set(names))
     assert 5 <= len(FIXTURES) <= 10
 
 
 def test_get_unknown_fixture_raises() -> None:
+    """Looking up a fixture by an unknown name raises KeyError."""
     try:
         get("does-not-exist")
     except KeyError:
@@ -23,7 +27,8 @@ def test_get_unknown_fixture_raises() -> None:
         raise AssertionError("expected KeyError")
 
 
-def test_run_one_formats_report(monkeypatch) -> None:
+def test_run_one_formats_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful fake compose+grade run produces a report with the fixture name, title, and body."""
     fixture = FIXTURES[0]
 
     class _FakeFields:
@@ -35,11 +40,11 @@ def test_run_one_formats_report(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "app.modules.ai.mistral_compose.compose_scrape_article_mistral",
-        lambda **kw: _FakeFields(),
+        lambda **_kw: _FakeFields(),
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: {"grade": 8.5, "issues": []},
+        lambda **_kw: {"grade": 8.5, "issues": []},
     )
 
     report = _run_one(fixture)
@@ -49,17 +54,16 @@ def test_run_one_formats_report(monkeypatch) -> None:
     assert "## Body" in report
 
 
-def test_run_one_reports_compose_failure(monkeypatch) -> None:
+def test_run_one_reports_compose_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A compose failure surfaces as a "COMPOSE FAILED" report line with the error message."""
     from app.modules.ai.mistral_client import MistralError
 
     fixture = FIXTURES[0]
 
-    def _raise(**kw):
+    def _raise(**_kw: object) -> Never:
         raise MistralError("boom")
 
-    monkeypatch.setattr(
-        "app.modules.ai.mistral_compose.compose_scrape_article_mistral", _raise
-    )
+    monkeypatch.setattr("app.modules.ai.mistral_compose.compose_scrape_article_mistral", _raise)
 
     report = _run_one(fixture)
     assert "COMPOSE FAILED" in report

@@ -1,3 +1,5 @@
+"""Assemble the metrics-dashboard response from price and network data."""
+
 from __future__ import annotations
 
 from app.core.config import settings
@@ -27,16 +29,19 @@ def _fmt_int(value: int | None) -> str | None:
 
 
 class MetricsDashboardService:
+    """Assemble the metrics-dashboard response from price and network data."""
     def __init__(
         self,
         *,
         price_service: PriceMetricsService | None = None,
         news_service: NewsService | None = None,
     ) -> None:
+        """Wire the price and news services, defaulting to real instances."""
         self._price = price_service or PriceMetricsService()
         self._news = news_service or NewsService()
 
     def get_dashboard(self, *, asset_id: str | None = None) -> MetricsDashboardResponse:
+        """Assemble the metrics-dashboard tiles from price, network, and article data."""
         aid = (asset_id or settings.price_metrics_asset_id).strip().lower()
         tiles: list[MetricTile] = []
 

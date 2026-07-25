@@ -1,3 +1,5 @@
+"""Track a service's known web sources and merge duplicate services."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +8,7 @@ from datetime import UTC, datetime
 
 @dataclass(frozen=True)
 class ServiceSource:
+    """One known web/social/mail source for a service."""
     source_id: str
     source_type: str  # web | youtube | mail | bluesky
     url: str
@@ -15,11 +18,13 @@ class ServiceSource:
 
 def add_web_source(service_id: str, *, domain: str, url: str) -> None:
     """Attach a web source to a service and claim the domain's reverse lookup.
+
     Idempotent (PK upserts). source_id keys on the URL's HOST — one entity's
     subdomains (stake./app./docs.folks.finance) are distinct sources of ONE
     service, each contributing its pages to the aggregate. The reverse row is
     what lets a URL resolve to its OWNING service, so a merged domain
-    (algorand.com → the algorand-co service) stops spawning its own service."""
+    (algorand.com → the algorand-co service) stops spawning its own service.
+    """
     from urllib.parse import urlparse
 
     from app.core.cassandra import get_cassandra_session
@@ -39,14 +44,13 @@ def add_web_source(service_id: str, *, domain: str, url: str) -> None:
 
 
 def list_sources(service_id: str) -> list[ServiceSource]:
+    """List the sources attached to a service."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ServiceSourceStmts
 
     if not service_id:
         return []
-    rows = get_cassandra_session().execute(
-        ServiceSourceStmts.LIST_FOR_SERVICE, (service_id,)
-    )
+    rows = get_cassandra_session().execute(ServiceSourceStmts.LIST_FOR_SERVICE, (service_id,))
     return [
         ServiceSource(
             source_id=r.source_id,
@@ -60,8 +64,7 @@ def list_sources(service_id: str) -> list[ServiceSource]:
 
 
 def web_domains_for_service(service_id: str) -> list[str]:
-    """Registrable domains of the service's enabled web sources (aggregation
-    scope for the weekly service-watch context)."""
+    """Registrable domains of the service's enabled web sources (aggregation scope for the weekly service-watch context)."""
     return sorted(
         {
             s.domain
@@ -78,20 +81,12 @@ def service_for_domain(domain: str) -> str:
 
     if not domain:
         return ""
-    row = get_cassandra_session().execute(
-        ServiceSourceStmts.GET_BY_DOMAIN, (domain,)
-    ).one()
+    row = get_cassandra_session().execute(ServiceSourceStmts.GET_BY_DOMAIN, (domain,)).one()
     return str(row.service_id) if row and row.service_id else ""
 
 
 def merge_services(*, target_service_id: str, source_service_ids: list[str]) -> dict:
-    """Fold whole services into ``target_service_id``: their sources move over,
-    their domains re-point, and the emptied services are DISABLED in the
-    registry (not deleted — audit trail + snapshots keep their history). Mirrors
-    the backend admin store's merge_services (kept in sync manually) — added
-    here so the worker side can auto-merge a service whose scrape resolved to a
-    domain a DIFFERENT service already owns (e.g. a rebrand redirect), not just
-    the admin's manual "merge duplicates" action."""
+    """Fold whole services into ``target_service_id``: their sources move over, their domains re-point, and the emptied services are DISABLED in the registry (not deleted — audit trail + snapshots keep their history). Mirrors the backend admin store's merge_services (kept in sync manually) — added here so the worker side can auto-merge a service whose scrape resolved to a domain a DIFFERENT service already owns (e.g. a rebrand redirect), not just the admin's manual "merge duplicates" action."""
     import contextlib
 
     from app.core.cassandra import get_cassandra_session
@@ -112,9 +107,7 @@ def merge_services(*, target_service_id: str, source_service_ids: list[str]) -> 
         # Only backfills when the target has no snapshot of its own yet —
         # never clobber fresher canonical history with a stale merged-in one.
         with contextlib.suppress(Exception):
-            src_snap = session.execute(
-                SnapshotStmts.GET_LATEST, (f"svc:{source_service}",)
-            ).one()
+            src_snap = session.execute(SnapshotStmts.GET_LATEST, (f"svc:{source_service}",)).one()
             if src_snap is not None:
                 tgt_source_id = f"svc:{target_service_id}"
                 if session.execute(SnapshotStmts.GET_LATEST, (tgt_source_id,)).one() is None:

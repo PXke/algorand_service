@@ -1,3 +1,5 @@
+"""Store a crawled page's content and score it for the publish pipeline."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,6 +11,7 @@ from app.modules.crawler.domain_tracker import domain_from_url, update_domain_st
 
 @dataclass(frozen=True)
 class DiscoveryStoreOutcome:
+    """Outcome of storing and scoring one crawled page."""
     status: str
     url: str
     storage_score: float = 0.0
@@ -21,10 +24,10 @@ class DiscoveryStoreOutcome:
 def store_discovery_content(
     *,
     url: str,
-    page_title: str,
+    page_title: str,  # noqa: ARG001 -- name must match the real callee's keyword arg
     page_text: str,
-    source: str = "web",
-    txid: str = "",
+    source: str = "web",  # noqa: ARG001 -- name must match the real callee's keyword arg
+    _txid: str = "",
 ) -> DiscoveryStoreOutcome:
     """Domain-centric discovery.
 

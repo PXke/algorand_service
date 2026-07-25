@@ -1,8 +1,11 @@
+"""Heuristic length/structure scoring bands for the article grader."""
+
 from app.core.config import LENGTH_OK_MAX_WORDS, LENGTH_OK_MIN_WORDS
 from app.modules.newspaper.article_grader import _length_score, _structure_score
 
 
 def test_length_band_is_lax() -> None:
+    """Word counts inside the OK band score 1.0; only extremes outside it ramp down."""
     # Anything inside [min, max] is full marks — length is not a target.
     assert _length_score(LENGTH_OK_MIN_WORDS) == 1.0
     assert _length_score((LENGTH_OK_MIN_WORDS + LENGTH_OK_MAX_WORDS) // 2) == 1.0
@@ -13,6 +16,7 @@ def test_length_band_is_lax() -> None:
 
 
 def test_structure_score_penalises_raw_text() -> None:
+    """A wall of unstructured prose scores lower than text with headings, paragraphs, and a table."""
     raw = ("Algorand had a busy week across the ecosystem. " * 20).strip()
     structured = (
         "# Headline\n\nIntro paragraph with detail.\n\n"

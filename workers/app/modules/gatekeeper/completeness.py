@@ -18,8 +18,7 @@ from app.modules.gatekeeper.fact_align import extract_entities
 
 @dataclass(frozen=True)
 class CompletenessRule:
-    """If any ``triggers`` substring appears in the source, at least one of
-    ``required_any`` tool names must appear in the trace."""
+    """If any ``triggers`` substring appears in the source, at least one of ``required_any`` tool names must appear in the trace."""
 
     name: str
     triggers: tuple[str, ...]
@@ -49,12 +48,14 @@ DEFAULT_RULES: tuple[CompletenessRule, ...] = (
 
 @dataclass(frozen=True)
 class CompletenessResult:
-    score: float                       # 1.0 pass, 0.0 any mandatory check missed
+    """Outcome of the deterministic tool-completeness check."""
+    score: float  # 1.0 pass, 0.0 any mandatory check missed
     failed_rules: tuple[str, ...] = ()
     detail: dict[str, str] = field(default_factory=dict)
 
     @property
     def passed(self) -> bool:
+        """Whether every triggered completeness rule was satisfied."""
         return self.score >= 1.0
 
 
@@ -66,7 +67,8 @@ def check_completeness(
     """Score whether the agent ran the checks its source material mandated.
 
     Returns score 0.0 (with the offending rule names + human-readable reasons)
-    if any triggered rule went unsatisfied, else 1.0."""
+    if any triggered rule went unsatisfied, else 1.0.
+    """
     src = (source_text or "").lower()
     trace = tool_trace or ""
     failed: list[str] = []
@@ -77,8 +79,7 @@ def check_completeness(
         if not any(tool in trace for tool in rule.required_any):
             failed.append(rule.name)
             detail[rule.name] = (
-                f"source matched {rule.triggers!r} but trace called none of "
-                f"{rule.required_any!r}"
+                f"source matched {rule.triggers!r} but trace called none of {rule.required_any!r}"
             )
     return CompletenessResult(
         score=0.0 if failed else 1.0,
@@ -88,18 +89,26 @@ def check_completeness(
 
 
 def named_persons_unscreened(source_text: str, tool_trace: str) -> list[str]:
-    """Candidate person names in the source for whom no sanctions/PEP screen
-    appears in the trace — the actionable detail behind the human_identity rule,
-    surfaced for the self-correction prompt."""
+    """Candidate person names in the source for whom no sanctions/PEP screen appears in the trace — the actionable detail behind the human_identity rule, surfaced for the self-correction prompt."""
     if "screen_sanctions_and_pep" in (tool_trace or ""):
         return []
-    src = (source_text or "")
+    src = source_text or ""
     if not any(t in src.lower() for t in ("founder", "ceo", "co-founder", "president")):
         return []
     # Two-word Capitalized runs are the cheap proxy for personal names; strip a
     # leading role/title word the greedy extractor may have swallowed.
-    titles = {"founder", "ceo", "president", "chairman", "chief", "co-founder",
-              "cofounder", "mr", "ms", "dr"}
+    titles = {
+        "founder",
+        "ceo",
+        "president",
+        "chairman",
+        "chief",
+        "co-founder",
+        "cofounder",
+        "mr",
+        "ms",
+        "dr",
+    }
     names: list[str] = []
     for e in extract_entities(src):
         if e.startswith("$") or " " not in e:

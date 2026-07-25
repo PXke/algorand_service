@@ -1,3 +1,5 @@
+"""Liveness/readiness checks for Redis, Cassandra, Typesense, Conduit, and Celery."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,12 +9,14 @@ from app.core.config import settings
 
 @dataclass
 class CheckResult:
+    """One dependency's liveness/readiness check outcome."""
     name: str
     ok: bool
     detail: str = ""
 
 
 def check_redis() -> CheckResult:
+    """Ping Redis and report whether it responded."""
     try:
         import redis
 
@@ -24,6 +28,7 @@ def check_redis() -> CheckResult:
 
 
 def check_cassandra() -> CheckResult:
+    """Run a trivial query against Cassandra and report whether it succeeded."""
     try:
         from app.core.cassandra import get_cassandra_session
 
@@ -35,6 +40,7 @@ def check_cassandra() -> CheckResult:
 
 
 def check_typesense() -> CheckResult:
+    """Check Typesense health, treating an unconfigured client as healthy."""
     try:
         from app.core.typesense_client import get_typesense_client
 
@@ -48,6 +54,7 @@ def check_typesense() -> CheckResult:
 
 
 def check_conduit_index() -> CheckResult:
+    """Report the latest indexed chain round, failing if none has been ingested yet."""
     try:
         from app.modules.chain.repository import get_chain_repository
 
@@ -75,6 +82,7 @@ def check_celery_queues() -> CheckResult:
 
 
 def run_readiness_checks() -> list[CheckResult]:
+    """Run all dependency checks and collect their results."""
     return [
         check_redis(),
         check_cassandra(),

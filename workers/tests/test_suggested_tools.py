@@ -1,27 +1,24 @@
-"""Coverage for the 2026-07-08 tool-insights follow-ups: suggest_tool
-self-correction (the writer kept suggesting tools it already has — the top
-prod asks reddit_api_post_history/discourse_forum/medium_api_article_list were
-all long since registered), discourse_forum search (the real ask was "search
-the forum for <project>", which latest-topics can't answer), and the new
-xgov_proposal_status tool (asked for by name in prod)."""
+"""Coverage for the 2026-07-08 tool-insights follow-ups: suggest_tool self-correction (the writer kept suggesting tools it already has — the top prod asks reddit_api_post_history/discourse_forum/medium_api_article_list were all long since registered), discourse_forum search (the real ask was "search the forum for <project>", which latest-topics can't answer), and the new xgov_proposal_status tool (asked for by name in prod)."""
 
 from typing import Any
+
+import pytest
 
 import app.modules.ai.research_tools as rt
 import app.modules.ai.writer_tools as wt
 
 
 class _FakeResp:
-    def __init__(self, payload: Any = None, status_code: int = 200, text: str = ""):
+    def __init__(self, payload: Any = None, status_code: int = 200, text: str = "") -> None:  # noqa: ANN401 -- arbitrary JSON test fixture
         self._payload = payload
         self.status_code = status_code
         self.text = text
 
-    def raise_for_status(self):
+    def raise_for_status(self) -> None:
         if self.status_code >= 400:
             raise RuntimeError(f"HTTP {self.status_code}")
 
-    def json(self):
+    def json(self) -> Any:  # noqa: ANN401 -- arbitrary JSON test fixture
         return self._payload
 
 
@@ -39,6 +36,7 @@ _KNOWN = {
 
 
 def test_match_covers_the_actual_prod_suggestions() -> None:
+    """Real prod-observed tool suggestions all resolve to an already-registered equivalent tool."""
     match = wt._match_existing_tool
     assert match("reddit_api_post_history", _KNOWN) == "reddit_api_post_history"
     assert match("discourse_api", _KNOWN) == "discourse_forum"
@@ -48,17 +46,21 @@ def test_match_covers_the_actual_prod_suggestions() -> None:
 
 
 def test_match_leaves_genuine_gaps_alone() -> None:
+    """A suggestion for a genuinely missing capability, or an empty string, does not match any existing tool."""
     match = wt._match_existing_tool
     assert match("telegram_channel_search", _KNOWN) is None
     assert match("nft_collection_floor_price", _KNOWN) is None
     assert match("", _KNOWN) is None
 
 
-def test_handler_nudges_instead_of_recording_when_tool_exists(monkeypatch) -> None:
+def test_handler_nudges_instead_of_recording_when_tool_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the suggested capability already exists, the handler nudges the caller toward it instead of recording a gap."""
     recorded = []
     monkeypatch.setattr(
         "app.modules.ai.tool_insights_store.record_tool_suggestion",
-        lambda *a, **k: recorded.append(a) or True,
+        lambda *a, **_k: recorded.append(a) or True,
     )
     handler = wt._make_suggest_tool_handler({}, known_tools=_KNOWN)
     out = handler(capability="discourse_api", reason="want forum data")
@@ -67,11 +69,12 @@ def test_handler_nudges_instead_of_recording_when_tool_exists(monkeypatch) -> No
     assert not recorded
 
 
-def test_handler_still_records_genuine_gaps(monkeypatch) -> None:
+def test_handler_still_records_genuine_gaps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A genuinely missing capability is still recorded as a tool-insight suggestion."""
     recorded = []
     monkeypatch.setattr(
         "app.modules.ai.tool_insights_store.record_tool_suggestion",
-        lambda *a, **k: recorded.append(a) or True,
+        lambda *a, **_k: recorded.append(a) or True,
     )
     handler = wt._make_suggest_tool_handler({}, known_tools=_KNOWN)
     out = handler(capability="telegram_channel_search", reason="no telegram access")
@@ -79,13 +82,12 @@ def test_handler_still_records_genuine_gaps(monkeypatch) -> None:
     assert len(recorded) == 1
 
 
-def test_all_tools_wires_the_full_registry_into_suggest(monkeypatch) -> None:
-    """suggest_tool must be registered AFTER every toolset merges, so
-    suggesting an existing research tool self-corrects."""
+def test_all_tools_wires_the_full_registry_into_suggest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """suggest_tool must be registered AFTER every toolset merges, so suggesting an existing research tool self-corrects."""
     recorded = []
     monkeypatch.setattr(
         "app.modules.ai.tool_insights_store.record_tool_suggestion",
-        lambda *a, **k: recorded.append(a) or True,
+        lambda *a, **_k: recorded.append(a) or True,
     )
     _, handlers = wt.all_tools()
     out = handlers["suggest_tool"](capability="github_repository_contents", reason="")
@@ -98,18 +100,30 @@ def test_all_tools_wires_the_full_registry_into_suggest(monkeypatch) -> None:
 _ABOUT = {"about": {"title": "Algorand Forum", "description": "d", "stats": {"topic_count": 5}}}
 _SEARCH = {
     "posts": [
-        {"topic_id": 42, "blurb": "rug.ninja bonding curve...", "username": "alice",
-         "created_at": "2026-07-01T10:00:00Z"},
+        {
+            "topic_id": 42,
+            "blurb": "rug.ninja bonding curve...",
+            "username": "alice",
+            "created_at": "2026-07-01T10:00:00Z",
+        },
     ],
-    "topics": [{"id": 42, "title": "Help understanding rug.ninja", "slug": "rug-ninja",
-                "posts_count": 7}],
+    "topics": [
+        {"id": 42, "title": "Help understanding rug.ninja", "slug": "rug-ninja", "posts_count": 7}
+    ],
 }
 
 
-def test_discourse_query_searches_instead_of_listing(monkeypatch) -> None:
+def test_discourse_query_searches_instead_of_listing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A discourse_forum call with a query hits the search endpoint and returns matching results, not a topic listing."""
     calls = []
 
-    def fake_get(url, *, headers=None, params=None, timeout=12.0):
+    def fake_get(
+        url: str,
+        *,
+        headers: dict | None = None,  # noqa: ARG001 -- name must match the real callee's keyword arg
+        params: tuple | None = None,
+        timeout: float = 12.0,  # noqa: ARG001 -- name must match the real callee's keyword arg
+    ) -> _FakeResp:
         calls.append((url, params))
         if url.endswith("/about.json"):
             return _FakeResp(_ABOUT)
@@ -129,8 +143,15 @@ def test_discourse_query_searches_instead_of_listing(monkeypatch) -> None:
     assert not any("/latest.json" in u or "/categories.json" in u for u, _ in calls)
 
 
-def test_discourse_without_query_keeps_listing_behavior(monkeypatch) -> None:
-    def fake_get(url, *, headers=None, params=None, timeout=12.0):
+def test_discourse_without_query_keeps_listing_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A discourse_forum call without a query falls back to the original recent-topics listing behavior."""
+    def fake_get(
+        url: str,
+        *,
+        headers: dict | None = None,  # noqa: ARG001 -- name must match the real callee's keyword arg
+        params: tuple | None = None,  # noqa: ARG001 -- name must match the real callee's keyword arg
+        timeout: float = 12.0,  # noqa: ARG001 -- name must match the real callee's keyword arg
+    ) -> _FakeResp:
         if url.endswith("/about.json"):
             return _FakeResp(_ABOUT)
         if url.endswith("/categories.json"):
@@ -166,10 +187,9 @@ A tool for generating Algorand vanity addresses using GPU acceleration.
 """
 
 
-def test_xgov_single_proposal_parses_frontmatter(monkeypatch) -> None:
-    monkeypatch.setattr(
-        rt, "_guarded_get", lambda url, **k: _FakeResp(text=_PROPOSAL_MD)
-    )
+def test_xgov_single_proposal_parses_frontmatter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fetching a single xGov proposal parses its YAML frontmatter and markdown abstract."""
+    monkeypatch.setattr(rt, "_guarded_get", lambda _url, **_k: _FakeResp(text=_PROPOSAL_MD))
     out = rt._tool_xgov_proposal(proposal_id=100)
     assert out["title"] == "GPU-based vanity address generator for Algorand"
     assert out["status"] == "Approved"
@@ -178,20 +198,18 @@ def test_xgov_single_proposal_parses_frontmatter(monkeypatch) -> None:
     assert out["url"].endswith("/Proposals/xgov-100.md")
 
 
-def test_xgov_unknown_id_explains_id_space(monkeypatch) -> None:
-    """The prod suggestion cited on-chain app ids (3572597746) as 'proposal
-    ids' — the miss must teach the model the difference."""
-    monkeypatch.setattr(
-        rt, "_guarded_get", lambda url, **k: _FakeResp(status_code=404)
-    )
+def test_xgov_unknown_id_explains_id_space(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The prod suggestion cited on-chain app ids (3572597746) as 'proposal ids' — the miss must teach the model the difference."""
+    monkeypatch.setattr(rt, "_guarded_get", lambda _url, **_k: _FakeResp(status_code=404))
     out = rt._tool_xgov_proposal(proposal_id=3572597746)
     assert "lookup_application" in out["error"]
 
 
-def test_xgov_listing_returns_newest_first(monkeypatch) -> None:
+def test_xgov_listing_returns_newest_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Listing xGov proposals returns them ordered newest-id-first, limited, without fetching abstracts."""
     listing = [{"name": f"xgov-{i}.md"} for i in (1, 100, 27)] + [{"name": "README.md"}]
 
-    def fake_get(url, **k):
+    def fake_get(url: str, **_k: object) -> _FakeResp:
         if url.endswith("/Proposals"):
             return _FakeResp(listing)
         return _FakeResp(text=_PROPOSAL_MD)
@@ -204,6 +222,7 @@ def test_xgov_listing_returns_newest_first(monkeypatch) -> None:
 
 
 def test_xgov_registered_in_research_tools() -> None:
+    """The xgov_proposal_status tool is registered in both the research schemas and handlers."""
     schemas, handlers = rt.research_tools()
     assert "xgov_proposal_status" in handlers
     assert any(s["function"]["name"] == "xgov_proposal_status" for s in schemas)

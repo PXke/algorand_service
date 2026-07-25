@@ -1,3 +1,5 @@
+"""Best-effort keyword inspection of chain transaction payloads for risky operations."""
+
 from __future__ import annotations
 
 import base64
@@ -43,4 +45,5 @@ def inspect_payload(group_b64: str) -> dict[str, object]:
 
 @celery_app.task(name="app.tasks.security.inspect_transaction_group")
 def inspect_transaction_group(group_b64: str) -> dict[str, object]:
+    """Celery task entrypoint wrapping inspect_payload."""
     return inspect_payload(group_b64)

@@ -1,3 +1,5 @@
+"""Building match keys and resolving edit-vs-create publish mode."""
+
 from pathlib import Path
 from unittest.mock import patch
 
@@ -6,7 +8,8 @@ from app.modules.newspaper.article_matching import build_match_keys, resolve_pub
 D13 = (Path(__file__).parent / "fixtures" / "algoblow_d13_alert.txt").read_text(encoding="utf-8")
 
 
-def test_build_match_keys_algoblow():
+def test_build_match_keys_algoblow() -> None:
+    """Builds domain/address/keyword/source_url match keys for a scam_alert page."""
     # scam_alert topic: body-mentioned domains ARE a legitimate "this belongs
     # to that story" signal — a later report about algoblow.com should
     # attach to the same scam-alert article.
@@ -24,15 +27,8 @@ def test_build_match_keys_algoblow():
     assert ("source_url", "https://x.com/d13_co/status/1") in [(t, v) for t, v in keys]
 
 
-def test_build_match_keys_body_domains_suppressed_outside_scam_incident_topics():
-    """Regression pin (2026-07-17): body-mentioned domains registered as
-    match keys for ORDINARY content turned the most-cited article into a
-    magnet for every unrelated future update mentioning any of them — six
-    unrelated sources all got routed to "edit" the same live article, which
-    then re-edited itself every ~2 minutes forever (missing terminal-outcome
-    bug, fixed separately) — 165 edits / 330 versions in under 4 hours.
-    Without topic=scam_alert/network_incident, body domains must NOT become
-    match keys; the source's own domain/service_id still can (unaffected)."""
+def test_build_match_keys_body_domains_suppressed_outside_scam_incident_topics() -> None:
+    """Regression pin (2026-07-17): body-mentioned domains registered as match keys for ORDINARY content turned the most-cited article into a magnet for every unrelated future update mentioning any of them — six unrelated sources all got routed to "edit" the same live article, which then re-edited itself every ~2 minutes forever (missing terminal-outcome bug, fixed separately) — 165 edits / 330 versions in under 4 hours. Without topic=scam_alert/network_incident, body domains must NOT become match keys; the source's own domain/service_id still can (unaffected)."""
     keys = build_match_keys(
         service_id="algorand-foundation-blog",
         page_text=D13,  # same body-mentioned domain (algoblow.com), different topic
@@ -53,7 +49,8 @@ def test_build_match_keys_body_domains_suppressed_outside_scam_incident_topics()
     assert any(t == "algo_address" for t, _ in keys)
 
 
-def test_build_match_keys_domain_source_uses_registry_domain_not_page_url():
+def test_build_match_keys_domain_source_uses_registry_domain_not_page_url() -> None:
+    """Uses the registry's match_value/service_id as keys, not a source_url key, when domain-matched."""
     keys = build_match_keys(
         service_id="algorand-foundation-blog",
         page_text="New post about governance.",
@@ -67,7 +64,8 @@ def test_build_match_keys_domain_source_uses_registry_domain_not_page_url():
     assert not any(key_type == "source_url" for key_type, _ in keys)
 
 
-def test_build_match_keys_domain_derives_from_url_when_no_match_value():
+def test_build_match_keys_domain_derives_from_url_when_no_match_value() -> None:
+    """Derives the domain key from source_url when match_kind is domain but match_value is absent."""
     keys = build_match_keys(
         service_id="algorand-foundation-blog",
         page_text="Blog listing page.",
@@ -77,7 +75,8 @@ def test_build_match_keys_domain_derives_from_url_when_no_match_value():
     assert ("domain", "algorand.co") in keys
 
 
-def test_resolve_publish_mode_edit_when_domain_matches():
+def test_resolve_publish_mode_edit_when_domain_matches() -> None:
+    """Resolves to edit mode against the matched article when a domain-matched follow-up is found."""
     with patch(
         "app.modules.newspaper.article_matching.find_article_for_followup",
         return_value="article-123",
@@ -97,7 +96,8 @@ def test_resolve_publish_mode_edit_when_domain_matches():
     assert info["linked_article_id"] == "article-123"
 
 
-def test_resolve_publish_mode_create_when_no_match():
+def test_resolve_publish_mode_create_when_no_match() -> None:
+    """Resolves to create mode with no linked article when no follow-up match is found."""
     with patch(
         "app.modules.newspaper.article_matching.find_article_for_followup",
         return_value=None,

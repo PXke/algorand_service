@@ -1,12 +1,12 @@
+"""Collect market/price context for a service before composing."""
+
 from __future__ import annotations
 
 from typing import Any
 
 
 def collect_market_context(asset_id: str = "algorand") -> dict[str, Any]:
-    """Live ALGO market snapshot for the writer bundle: price, 24h change,
-    market cap, volume, plus the prepared trend narrative. Empty when metrics
-    haven't been collected yet."""
+    """Live ALGO market snapshot for the writer bundle: price, 24h change, market cap, volume, plus the prepared trend narrative. Empty when metrics haven't been collected yet."""
     out: dict[str, Any] = {"available": False}
     try:
         from app.modules.metrics.price_metrics_store import list_recent_samples, load_brief

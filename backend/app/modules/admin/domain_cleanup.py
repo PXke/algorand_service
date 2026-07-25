@@ -1,6 +1,4 @@
-"""One-off: collapse subdomain rows in domain_tracking into their registrable
-domain (eTLD+1), so e.g. blog./docs./explorer.perawallet.app merge into a single
-perawallet.app entry. Mirrors the acceptance-path fix in AdminCassandraStore.
+"""One-off: collapse subdomain rows in domain_tracking into their registrable domain (eTLD+1), so e.g. blog./docs./explorer.perawallet.app merge into a single perawallet.app entry. Mirrors the acceptance-path fix in AdminCassandraStore.
 
 Run on a host with the app env loaded:
     python -m app.modules.admin.domain_cleanup            # dry-run (default)
@@ -30,6 +28,7 @@ def _merge_status(statuses: list[str | None]) -> str | None:
 
 
 def cleanup(*, apply: bool = False) -> dict:
+    """Merge subdomain rows into their registrable-domain row, deleting the rest when apply is True."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import DomainTrackingStmts
 
@@ -48,10 +47,14 @@ def cleanup(*, apply: bool = False) -> dict:
             continue
         merged_groups += 1
         status = _merge_status([m.frontier_status for m in members])
-        relevance = max((m.relevance_score for m in members if m.relevance_score is not None),
-                        default=None)
+        relevance = max(
+            (m.relevance_score for m in members if m.relevance_score is not None), default=None
+        )
         is_relevant = (
-            True if status == "approved" else False if status == "dead_end"
+            True
+            if status == "approved"
+            else False
+            if status == "dead_end"
             else any(m.is_relevant for m in members)
         )
         category = next((m.category for m in members if m.category), None)

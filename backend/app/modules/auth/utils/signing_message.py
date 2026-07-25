@@ -1,3 +1,5 @@
+"""Build the challenge/message a wallet signs to prove ownership."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,6 +12,7 @@ from app.modules.auth.utils.siwa_message import prepare_siwa_from_caip122
 
 @dataclass
 class AuthChallenge:
+    """The nonce, signing message, and CAIP-122 payload a wallet must sign to log in."""
     nonce: str
     signing_message: str
     caip122: Caip122Message

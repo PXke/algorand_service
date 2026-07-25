@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class ComposeFixture:
+    """One fixture case for the offline compose-prompt evaluation harness."""
     name: str
     service_name: str
     source_url: str
@@ -130,6 +131,7 @@ FIXTURES: tuple[ComposeFixture, ...] = (
 
 
 def get(name: str) -> ComposeFixture:
+    """Look up a named compose fixture, raising KeyError if it doesn't exist."""
     for fx in FIXTURES:
         if fx.name == name:
             return fx

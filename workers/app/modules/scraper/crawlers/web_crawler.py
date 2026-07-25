@@ -1,3 +1,5 @@
+"""CrawlerDriver implementation for regular web sources, with SPA fallback."""
+
 from __future__ import annotations
 
 import logging
@@ -40,10 +42,7 @@ def _browser_might_help(exc: Exception) -> bool:
 
 
 def needs_spa_fallback(text: str, raw_html: str = "") -> bool:
-    """Whether HTTP-fetched text is too thin (or an SPA shell) to trust, and a
-    Playwright render should be tried instead. Shared by the crawler pipeline
-    and any other caller (e.g. the writer's fetch_url tool) that fetches
-    arbitrary pages over plain HTTP first."""
+    """Whether HTTP-fetched text is too thin (or an SPA shell) to trust, and a Playwright render should be tried instead. Shared by the crawler pipeline and any other caller (e.g. the writer's fetch_url tool) that fetches arbitrary pages over plain HTTP first."""
     from app.core.config import SPA_FALLBACK_ENABLED
 
     if not SPA_FALLBACK_ENABLED:
@@ -61,6 +60,7 @@ class WebCrawlerDriver:
     crawler_type = CrawlerType.WEB.value
 
     def get_scraper(self, scrape_url: str) -> BaseScraper:
+        """Return the HTTP or browser scraper to use for a given URL."""
         if uses_browser_engine(scrape_url):
             if not is_web_spa_enabled():
                 msg = "web SPA sub-lane disabled (CRAWLER_WEB_SPA_ENABLED=0)"
@@ -71,6 +71,7 @@ class WebCrawlerDriver:
         return _SmartWebScraper(self)
 
     def scrape_with_fallback(self, scrape_url: str, source_id: str) -> ScrapeResult:
+        """Scrape via HTTP, falling back to the browser scraper for thin or SPA pages."""
         http = HttpScraper()
         try:
             result = http.scrape(scrape_url, source_id)
@@ -84,6 +85,7 @@ class WebCrawlerDriver:
         return result
 
     def scrape(self, scrape_url: str, source_id: str) -> ScrapeResult:
+        """Scrape one URL, falling back to the browser scraper for thin or SPA pages."""
         return self.scrape_with_fallback(scrape_url, source_id)
 
     def scrape_from_queue_item(self, item: dict) -> dict[str, object]:
@@ -96,6 +98,7 @@ class WebCrawlerDriver:
         from app.modules.crawler.domain_tracker import (
             domain_crawl_budget_exhausted,
             domain_from_url,
+            is_admin_approved_domain,
             record_domain_crawl,
             should_recrawl_domain,
         )
@@ -122,9 +125,21 @@ class WebCrawlerDriver:
                 mark_url_done(queue_id, status="skipped")
             return {"status": "skipped", "reason": "domain_recrawl_cooldown", "url": url}
 
+        # An admin explicitly vouching for a domain outranks the content-quality
+        # floor below — that gate exists to filter anonymous auto-discovery,
+        # not to second-guess a human relevance call. It does NOT outrank the
+        # page budget just below: that's a volume/politeness cap, not a
+        # relevance judgment, and bypassing it too let one-hop link-following
+        # spider an entire large site with no limit once its admin-approved
+        # flag (however it got set) stopped anything from ever stopping it
+        # (root-caused 2026-07-21: python.org/nytimes.com/climatetrade.com
+        # crawled dozens of subpages each, hit 429s on wfp.medium.com).
+        admin_approved = is_admin_approved_domain(domain)
+
         # Per-domain page budget: drop already-queued pages for a domain that has
         # hit its cap this window (e.g. a huge site queued thousands of links
-        # before the cap kicked in) — never fetch beyond the budget.
+        # before the cap kicked in) — never fetch beyond the budget, admin-
+        # approved or not.
         if domain_crawl_budget_exhausted(domain):
             if queue_id:
                 mark_url_done(queue_id, status="skipped")
@@ -149,7 +164,7 @@ class WebCrawlerDriver:
                 mark_url_done(queue_id, status="failed")
             return {"status": "error", "url": url, "detail": str(exc)}
 
-        if not is_content_quality_sufficient(result.text):
+        if not admin_approved and not is_content_quality_sufficient(result.text):
             # A thin / off-topic page is a per-PAGE signal only. Drop the page, but
             # do NOT demote the domain or zero its score on one bad page — the
             # per-URL cooldown (mark_url_crawled above) already prevents refetching
@@ -182,17 +197,21 @@ class WebCrawlerDriver:
         except Exception:
             logger.warning("failed to enqueue crawled-page indexing for %s", url, exc_info=True)
         # One-hop frontier: this page passed the quality gate, so its links are
-        # worth queueing (dead-end domains are filtered inside).
-        try:
-            from app.modules.scraper.core.link_extractor import enqueue_page_links
+        # worth queueing (dead-end domains are filtered inside) — unless the
+        # admin explicitly approved just this one page (single_page_only),
+        # which must never spider the rest of the site.
+        no_follow = item.get("metadata", {}).get("no_follow_links") == "true"
+        if not no_follow:
+            try:
+                from app.modules.scraper.core.link_extractor import enqueue_page_links
 
-            enqueue_page_links(
-                raw_html=result.raw_html,
-                page_url=url,
-                source="web",
-            )
-        except Exception:
-            logger.warning("failed to enqueue page links from %s", url, exc_info=True)
+                enqueue_page_links(
+                    raw_html=result.raw_html,
+                    page_url=url,
+                    source="web",
+                )
+            except Exception:
+                logger.warning("failed to enqueue page links from %s", url, exc_info=True)
         if queue_id:
             mark_url_done(queue_id)
         return {
@@ -207,6 +226,7 @@ class WebCrawlerDriver:
 
 
 class WebSpaDisabledError(Exception):
+    """Raised when a page needs the SPA (browser) fallback but it's disabled."""
     pass
 
 

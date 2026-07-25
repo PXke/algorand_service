@@ -1,3 +1,5 @@
+"""Cassandra-backed article storage."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -8,10 +10,7 @@ from app.modules.news.stores.base import StoredArticle
 
 
 def _epoch(dt: datetime | None) -> int:
-    """UTC epoch seconds from a stored timestamp. The Cassandra driver returns
-    timezone-NAIVE datetimes that are already UTC; calling .timestamp() directly
-    would make Python assume the server's local zone and shift the value (which
-    is why 'Xh ago' looked wrong on non-UTC hosts)."""
+    """UTC epoch seconds from a stored timestamp. The Cassandra driver returns timezone-NAIVE datetimes that are already UTC; calling .timestamp() directly would make Python assume the server's local zone and shift the value (which is why 'Xh ago' looked wrong on non-UTC hosts)."""
     if dt is None:
         return 0
     if dt.tzinfo is None:
@@ -20,7 +19,8 @@ def _epoch(dt: datetime | None) -> int:
 
 
 class CassandraArticleStore:
-    def insert(self, article: StoredArticle, *, feed_bucket: str = "main") -> None:
+    """Cassandra-backed article storage."""
+    def insert(self, article: StoredArticle, *, _feed_bucket: str = "main") -> None:
         # UNREACHABLE IN PRODUCTION as of 2026-07-13: NewsService (the only
         # consumer of ArticleStore) never calls this — real article writes
         # happen entirely in the `workers` package via insert_article /
@@ -34,6 +34,7 @@ class CassandraArticleStore:
         # includes published_at at full precision — found and cleaned up one
         # such duplicate (Bitrue article, 2026-07-13) whose origin predates
         # this comment and could not be traced to a live call site.
+        """Insert a new article and its feed row. Unreachable in production; kept to satisfy ArticleStore."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import NewsStmts
 
@@ -73,7 +74,8 @@ class CassandraArticleStore:
             ),
         )
 
-    def list_feed(self, *, feed_bucket: str = "main", limit: int = 50) -> list[StoredArticle]:
+    def list_feed(self, *, _feed_bucket: str = "main", limit: int = 50) -> list[StoredArticle]:
+        """List recent feed rows, newest first (wraps list_feed_page, discarding the cursor)."""
         items, _ = self.list_feed_page(limit=limit)
         return items
 
@@ -84,8 +86,7 @@ class CassandraArticleStore:
         cursor_epoch_ms: int | None = None,
         max_months: int = 18,
     ) -> tuple[list[StoredArticle], int | None]:
-        """Keyset-paginated feed across month partitions. Returns (items,
-        next_cursor_ms); next_cursor is None when no more pages."""
+        """Keyset-paginated feed across month partitions. Returns (items, next_cursor_ms); next_cursor is None when no more pages."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import NewsStmts
 
@@ -115,9 +116,7 @@ class CassandraArticleStore:
                         image_url=getattr(row, "image_url", None),
                         source_url=getattr(row, "source_url", None),
                         translations=dict(row.translations) if row.translations else None,
-                        updated_at_epoch=(
-                            _epoch(getattr(row, "updated_at", None)) or None
-                        ),
+                        updated_at_epoch=(_epoch(getattr(row, "updated_at", None)) or None),
                         first_published_at_epoch=(
                             _epoch(getattr(row, "first_published_at", None)) or None
                         ),
@@ -127,6 +126,7 @@ class CassandraArticleStore:
         return items, next_cursor
 
     def get(self, article_id: str) -> StoredArticle | None:
+        """Fetch one article's full data by id, or None if it does not exist."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import NewsStmts
 

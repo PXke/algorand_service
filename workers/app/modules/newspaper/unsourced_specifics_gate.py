@@ -44,21 +44,67 @@ logger = logging.getLogger(__name__)
 
 # Nouns whose count is an adoption/traction claim a reader would take as fact.
 _TRACTION_NOUNS = {
-    "user", "users", "issuer", "issuers", "customer", "customers", "holder",
-    "holders", "member", "members", "developer", "developers", "wallet",
-    "wallets", "download", "downloads", "install", "installs", "signup",
-    "signups", "event", "events", "hackathon", "hackathons", "integration",
-    "integrations", "partner", "partners", "project", "projects", "dapp",
-    "dapps", "validator", "validators", "subscriber", "subscribers",
-    "follower", "followers", "community", "communities", "merchant",
-    "merchants", "participant", "participants",
+    "user",
+    "users",
+    "issuer",
+    "issuers",
+    "customer",
+    "customers",
+    "holder",
+    "holders",
+    "member",
+    "members",
+    "developer",
+    "developers",
+    "wallet",
+    "wallets",
+    "download",
+    "downloads",
+    "install",
+    "installs",
+    "signup",
+    "signups",
+    "event",
+    "events",
+    "hackathon",
+    "hackathons",
+    "integration",
+    "integrations",
+    "partner",
+    "partners",
+    "project",
+    "projects",
+    "dapp",
+    "dapps",
+    "validator",
+    "validators",
+    "subscriber",
+    "subscribers",
+    "follower",
+    "followers",
+    "community",
+    "communities",
+    "merchant",
+    "merchants",
+    "participant",
+    "participants",
 }
 # Discrete FUNDING-EVENT nouns — a raise/round is announced as a round figure
 # ("$5M seed"), unlike live price/TVL, so a currency amount beside one is a
 # checkable claim. Deliberately excludes price/tvl/volume (live, reformatted).
 _FUNDING_NOUNS = {
-    "raised", "raise", "funding", "seed", "round", "valuation", "grant",
-    "grants", "investment", "backing", "backed", "led",
+    "raised",
+    "raise",
+    "funding",
+    "seed",
+    "round",
+    "valuation",
+    "grant",
+    "grants",
+    "investment",
+    "backing",
+    "backed",
+    "led",
 }
 # Percentages attach only to TRACTION nouns here ("70% of users churned").
 # On-chain SHARE percentages (of supply / holders / market) are deliberately
@@ -89,9 +135,19 @@ _PARTNER_TRIGGER_RE = re.compile(
 _PROPER_NOUN_RE = re.compile(r"[A-Z][A-Za-z0-9.&]+(?:\s+[A-Z][A-Za-z0-9.&]+){0,3}")
 # Generic capitalised words that are not a partner identity on their own.
 _NAME_STOPWORDS = {
-    "algorand", "the", "defi", "defi protocols", "web3", "web2", "ai", "nft",
-    "layer", "foundation",  # "the Foundation" alone isn't a specific backer name
-    "mainnet", "testnet", "dao",
+    "algorand",
+    "the",
+    "defi",
+    "defi protocols",
+    "web3",
+    "web2",
+    "ai",
+    "nft",
+    "layer",
+    "foundation",  # "the Foundation" alone isn't a specific backer name
+    "mainnet",
+    "testnet",
+    "dao",
 }
 
 _FOLD_RE = re.compile(r"[^a-z0-9]+")
@@ -126,12 +182,7 @@ def _stem(noun: str) -> str:
 
 
 def _number_grounded(digits: str, noun: str, corpus_ctx: str) -> bool:
-    """A count is grounded only if its digit-run appears NEAR its own noun in the
-    corpus — not merely somewhere in it. A bare digit-run match is far too weak:
-    common runs like '70' or '1000' turn up in almost any fetched page (a 70px
-    style, a 1000ms timing, a URL id), which would spuriously ground a fabricated
-    'issued to 1,000 issuers'. Require the number and the (stemmed) noun to
-    co-occur within a short window, in either order."""
+    """A count is grounded only if its digit-run appears NEAR its own noun in the corpus — not merely somewhere in it. A bare digit-run match is far too weak: common runs like '70' or '1000' turn up in almost any fetched page (a 70px style, a 1000ms timing, a URL id), which would spuriously ground a fabricated 'issued to 1,000 issuers'. Require the number and the (stemmed) noun to co-occur within a short window, in either order."""
     if not noun:
         return digits in set(_DIGIT_RUN_RE.findall(corpus_ctx))
     stem = re.escape(_stem(noun))
@@ -141,9 +192,7 @@ def _number_grounded(digits: str, noun: str, corpus_ctx: str) -> bool:
 
 
 def _numeric_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
-    """Count-shaped numbers adjacent to a traction/funding noun whose value is not
-    grounded (near its noun) in the corpus. ``corpus_ctx`` is the folded,
-    comma-stripped ground corpus."""
+    """Count-shaped numbers adjacent to a traction/funding noun whose value is not grounded (near its noun) in the corpus. ``corpus_ctx`` is the folded, comma-stripped ground corpus."""
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     tokens = _tokens(body)
@@ -184,8 +233,14 @@ def _numeric_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
         # protocol names (x402), years (2027) and version strings, which have no
         # count noun beside them. Financial nouns (TVL, valuation) are omitted:
         # currency is out of v1 scope, and raw TVL integers were pure noise.
-        noun = next((w for w in (list(lowered[i + 1: i + 4]) + list(lowered[max(0, i - 3): i]))
-                     if w in _TRACTION_NOUNS), "")
+        noun = next(
+            (
+                w
+                for w in (list(lowered[i + 1 : i + 4]) + list(lowered[max(0, i - 3) : i]))
+                if w in _TRACTION_NOUNS
+            ),
+            "",
+        )
         if not noun:
             continue
         if _number_grounded(digits, noun, corpus_ctx):
@@ -200,20 +255,23 @@ def _numeric_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
 
 def _noun_near(lowered: list[str], i: int, noun_set: set[str]) -> str:
     """First noun from noun_set within ±3 tokens of position i (after-side first).
+
     A proximity window, not a next-token check, so an adjective or a compound
     ('1,000 verified issuers', '70+ events and hackathons') doesn't break the
-    association."""
-    for w in list(lowered[i + 1: i + 4]) + list(lowered[max(0, i - 3): i]):
+    association.
+    """
+    for w in list(lowered[i + 1 : i + 4]) + list(lowered[max(0, i - 3) : i]):
         if w in noun_set:
             return w
     return ""
 
 
 def _funding_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
-    """Currency amounts beside a discrete funding-event noun (raised/seed/round/
-    valuation…) whose value isn't grounded near that noun. Currency near price/
-    TVL is still ignored — only a funding EVENT makes a $ figure a checkable
-    one-off claim."""
+    """Currency amounts beside a discrete funding-event noun (raised/seed/round/valuation…) whose value isn't grounded near that noun.
+
+    Currency near price/TVL is still ignored — only a funding EVENT makes a
+    $ figure a checkable one-off claim.
+    """
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     tokens = _tokens(body)
@@ -236,8 +294,7 @@ def _funding_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
 
 
 def _percent_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
-    """Percentages beside an ownership/traction noun ('40% of the supply', '70%
-    of holders') whose value isn't grounded near that noun."""
+    """Percentages beside an ownership/traction noun ('40% of the supply', '70% of holders') whose value isn't grounded near that noun."""
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     tokens = _tokens(body)
@@ -260,8 +317,7 @@ def _percent_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
 
 
 def _named_findings(body: str, corpus_folded: str) -> list[dict[str, str]]:
-    """Proper-noun partners/backers introduced by a partnership trigger whose name
-    is absent from the ground corpus."""
+    """Proper-noun partners/backers introduced by a partnership trigger whose name is absent from the ground corpus."""
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     for m in _PARTNER_TRIGGER_RE.finditer(body):
@@ -286,8 +342,7 @@ def find_unsourced_specifics(
     *,
     extra_texts: list[str] | None = None,
 ) -> list[dict[str, str]]:
-    """All hard specifics in the body not traceable to the ground corpus. Pure —
-    no config, no mutation; safe to call from a tuning script over old sessions."""
+    """All hard specifics in the body not traceable to the ground corpus. Pure — no config, no mutation; safe to call from a tuning script over old sessions."""
     if not body:
         return []
     corpus = _ground_corpus(trace, list(extra_texts or []))
@@ -308,13 +363,7 @@ def unsourced_specifics_revision_issues(
     *,
     extra_texts: list[str] | None = None,
 ) -> list[str]:
-    """Human-readable revision instructions for each unsourced specific, for the
-    in-loop revision pass (like authority/chain/link feedback). Lets the writer —
-    which read the research — remove or CORRECT the claim before the post-hoc
-    gate has to hold it. The reviser has no tools, only the research digest, so
-    the instruction is 'remove or correct to what your sources show', not 'go
-    fetch it'. Gated by ENABLED (this is non-destructive guidance); the ENFORCE
-    hold remains the backstop for anything that survives revision."""
+    """Human-readable revision instructions for each unsourced specific, for the in-loop revision pass (like authority/chain/link feedback). Lets the writer — which read the research — remove or CORRECT the claim before the post-hoc gate has to hold it. The reviser has no tools, only the research digest, so the instruction is 'remove or correct to what your sources show', not 'go fetch it'. Gated by ENABLED (this is non-destructive guidance); the ENFORCE hold remains the backstop for anything that survives revision."""
     from app.core.config import UNSOURCED_SPECIFICS_GATE_ENABLED
 
     if not UNSOURCED_SPECIFICS_GATE_ENABLED or not body:

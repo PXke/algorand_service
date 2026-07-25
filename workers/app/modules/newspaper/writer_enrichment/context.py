@@ -1,3 +1,5 @@
+"""The bundled enrichment context handed to the writer before composing."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,9 +8,7 @@ from typing import Any
 
 @dataclass
 class WriterEnrichmentBundle:
-    """
-    Evidence for Mistral/templates — discovery vs update vs scam verification.
-    """
+    """Evidence for Mistral/templates — discovery vs update vs scam verification."""
 
     service_id: str
     phase: str  # discovery | update | scam_alert
@@ -18,6 +18,7 @@ class WriterEnrichmentBundle:
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize this bundle to a JSON-friendly dict for the writer prompt."""
         return {
             "service_id": self.service_id,
             "phase": self.phase,

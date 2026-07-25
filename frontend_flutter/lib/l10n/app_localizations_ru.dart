@@ -993,7 +993,18 @@ class AppLocalizationsRu extends AppLocalizations {
   String get domainsAddAsSeed => 'Добавить как постоянный источник';
 
   @override
+  String get domainsAddSinglePageOnly =>
+      'Только эта страница (только цитирование, без сканирования сайта)';
+
+  @override
   String get domainsScoreUnexplained => 'Разбивка оценки недоступна';
+
+  @override
+  String get domainsPossibleService => 'возможно сервис?';
+
+  @override
+  String get domainsPossibleServiceHint =>
+      'Хороший балл, но помечено как новости/общее — возможно, это реальный продукт, а не просто источник цитаты. Рассмотрите «Одобрить и исследовать» вместо «Обойти один раз».';
 
   @override
   String get paginationPrevious => 'Назад';

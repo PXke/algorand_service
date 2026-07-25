@@ -1,3 +1,5 @@
+"""Spot price and recent-window stats for the price-metrics dashboard."""
+
 from __future__ import annotations
 
 from app.core.config import settings
@@ -6,7 +8,9 @@ from app.modules.metrics.stores.cassandra import load_latest_price_sample, load_
 
 
 class PriceMetricsService:
+    """Spot price and recent-window stats for the price-metrics dashboard."""
     def get_spot(self, *, asset_id: str | None = None) -> PriceMetricsResponse:
+        """Build the spot-price response for one asset from the latest stored sample."""
         aid = (asset_id or settings.price_metrics_asset_id).strip().lower()
         brief = load_price_brief(aid)
         if brief is None:

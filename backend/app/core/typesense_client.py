@@ -1,10 +1,15 @@
+"""Shared Typesense client and articles-collection schema/synonyms setup."""
+
 from __future__ import annotations
 
 import logging
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING
 
 from app.core.config import settings
+
+if TYPE_CHECKING:
+    import typesense
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +55,12 @@ PAGES_SCHEMA = {
 
 
 def is_typesense_configured() -> bool:
+    """True when a Typesense API key is set in settings."""
     return bool(settings.typesense_api_key.strip())
 
 
 @lru_cache(maxsize=1)
-def get_typesense_client() -> Any | None:
+def get_typesense_client() -> typesense.Client | None:
     """Return Typesense client or None when API key is unset."""
     if not is_typesense_configured():
         return None
@@ -79,6 +85,7 @@ def get_typesense_client() -> Any | None:
 
 
 def ensure_collection(schema: dict[str, object]) -> bool:
+    """Create the given Typesense collection if it doesn't already exist."""
     client = get_typesense_client()
     if client is None:
         return False
@@ -97,6 +104,7 @@ def ensure_collection(schema: dict[str, object]) -> bool:
 
 
 def ensure_articles_collection() -> bool:
+    """Create the articles collection and patch in the tokens field and synonyms."""
     if not ensure_collection(ARTICLES_SCHEMA):
         return False
     client = get_typesense_client()
@@ -106,7 +114,7 @@ def ensure_articles_collection() -> bool:
     return True
 
 
-def _ensure_tokens_field(client: Any) -> None:
+def _ensure_tokens_field(client: typesense.Client) -> None:
     """Add the optional tokens field to collections created before tokenization."""
     try:
         client.collections[ARTICLES_COLLECTION].update(
@@ -117,7 +125,7 @@ def _ensure_tokens_field(client: Any) -> None:
         logger.debug("tokens field patch skipped", exc_info=True)
 
 
-def ensure_article_search_synonyms(client: Any) -> None:
+def ensure_article_search_synonyms(client: typesense.Client) -> None:
     """Register acronym/geo synonyms (USA↔US, etc.) on the articles collection."""
     synonyms_api = client.collections[ARTICLES_COLLECTION].synonyms
     for syn_id, synonyms in ARTICLE_SEARCH_SYNONYMS.items():
@@ -147,6 +155,7 @@ def expanded_search_terms(query: str) -> list[str]:
 
 
 def ensure_pages_collection() -> bool:
+    """Create the pages collection if it doesn't already exist."""
     return ensure_collection(PAGES_SCHEMA)
 
 

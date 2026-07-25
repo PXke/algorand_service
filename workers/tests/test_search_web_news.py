@@ -1,13 +1,10 @@
-"""search_web (SearXNG-backed): general web search was returning almost no
-freshness signal — the general engines (Bing/DuckDuckGo web) essentially never
-carry a publish date. Root-caused 2026-07-15 alongside a live engine-config
-audit (brave/wikidata/startpage/qwant all confirmed dead — 429/CAPTCHA/access-
-denied from their own servers, not our request volume) that also found Bing
-News/DuckDuckGo News/Google News already enabled upstream but never queried:
-querying categories=general,news in the same call, then surfacing whichever
-publish date exists, fixes both the coverage gap and the missing date."""
+"""search_web (SearXNG-backed): general web search was returning almost no freshness signal — the general engines (Bing/DuckDuckGo web) essentially never carry a publish date. Root-caused 2026-07-15 alongside a live engine-config audit (brave/wikidata/startpage/qwant all confirmed dead — 429/CAPTCHA/access- denied from their own servers, not our request volume) that also found Bing News/DuckDuckGo News/Google News already enabled upstream but never queried: querying categories=general,news in the same call, then surfacing whichever publish date exists, fixes both the coverage gap and the missing date."""
 
 from __future__ import annotations
+
+from typing import Self
+
+import pytest
 
 from app.modules.ai.research_tools import _tool_search_web
 
@@ -29,21 +26,21 @@ class _FakeClient:
         self._payload = payload
         self._captured = captured
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *args) -> None:
+    def __exit__(self, *args: object) -> None:
         return None
 
-    def get(self, url, params=None):
+    def get(self, _url: str, params: tuple | None = None) -> _FakeResponse:
         self._captured.append(params)
         return _FakeResponse(self._payload)
 
 
-def test_search_web_requests_general_and_news_categories(monkeypatch) -> None:
+def test_search_web_requests_general_and_news_categories(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list = []
     monkeypatch.setattr(
-        "httpx.Client", lambda **kw: _FakeClient({"results": []}, captured=captured)
+        "httpx.Client", lambda **_kw: _FakeClient({"results": []}, captured=captured)
     )
     monkeypatch.setattr("app.core.config.SEARXNG_URL", "http://127.0.0.1:8888")
 
@@ -53,7 +50,7 @@ def test_search_web_requests_general_and_news_categories(monkeypatch) -> None:
     assert captured[0]["categories"] == "general,news"
 
 
-def test_search_web_surfaces_published_date(monkeypatch) -> None:
+def test_search_web_surfaces_published_date(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {
         "results": [
             {"title": "Old general hit", "url": "https://a.example/", "content": "x"},
@@ -65,9 +62,7 @@ def test_search_web_surfaces_published_date(monkeypatch) -> None:
             },
         ]
     }
-    monkeypatch.setattr(
-        "httpx.Client", lambda **kw: _FakeClient(payload, captured=[])
-    )
+    monkeypatch.setattr("httpx.Client", lambda **_kw: _FakeClient(payload, captured=[]))
     monkeypatch.setattr("app.core.config.SEARXNG_URL", "http://127.0.0.1:8888")
 
     result = _tool_search_web("algorand nft marketplace")
@@ -76,12 +71,12 @@ def test_search_web_surfaces_published_date(monkeypatch) -> None:
     assert result["results"][1]["published_date"] is None
 
 
-def test_search_web_ranks_dated_results_before_undated_when_truncating(monkeypatch) -> None:
-    """The dated result must not get pushed out by the `limit` truncation just
-    because it happened to come later in SearXNG's own result order."""
+def test_search_web_ranks_dated_results_before_undated_when_truncating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dated result must not get pushed out by the `limit` truncation just because it happened to come later in SearXNG's own result order."""
     undated = [
-        {"title": f"undated {i}", "url": f"https://u{i}.example/", "content": "x"}
-        for i in range(5)
+        {"title": f"undated {i}", "url": f"https://u{i}.example/", "content": "x"} for i in range(5)
     ]
     dated = {
         "title": "the one dated hit",
@@ -90,9 +85,7 @@ def test_search_web_ranks_dated_results_before_undated_when_truncating(monkeypat
         "publishedDate": "2026-07-14T10:00:00",
     }
     payload = {"results": [*undated, dated]}  # dated hit is LAST in raw order
-    monkeypatch.setattr(
-        "httpx.Client", lambda **kw: _FakeClient(payload, captured=[])
-    )
+    monkeypatch.setattr("httpx.Client", lambda **_kw: _FakeClient(payload, captured=[]))
     monkeypatch.setattr("app.core.config.SEARXNG_URL", "http://127.0.0.1:8888")
 
     result = _tool_search_web("algorand nft marketplace", limit=3)
@@ -101,7 +94,7 @@ def test_search_web_ranks_dated_results_before_undated_when_truncating(monkeypat
     assert "https://dated.example/" in urls
 
 
-def test_search_web_not_configured_without_url(monkeypatch) -> None:
+def test_search_web_not_configured_without_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.core.config.SEARXNG_URL", "")
 
     result = _tool_search_web("anything")
@@ -110,12 +103,12 @@ def test_search_web_not_configured_without_url(monkeypatch) -> None:
     assert result["results"] == []
 
 
-def test_search_web_surfaces_suggestions(monkeypatch) -> None:
+def test_search_web_surfaces_suggestions(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {
         "results": [],
         "suggestions": ["algorand nft marketplaces", "algo nft market"],
     }
-    monkeypatch.setattr("httpx.Client", lambda **kw: _FakeClient(payload, captured=[]))
+    monkeypatch.setattr("httpx.Client", lambda **_kw: _FakeClient(payload, captured=[]))
     monkeypatch.setattr("app.core.config.SEARXNG_URL", "http://127.0.0.1:8888")
 
     result = _tool_search_web("algorand nft marketplce")
@@ -123,9 +116,9 @@ def test_search_web_surfaces_suggestions(monkeypatch) -> None:
     assert result["suggestions"] == ["algorand nft marketplaces", "algo nft market"]
 
 
-def test_search_web_omits_suggestions_key_when_none(monkeypatch) -> None:
+def test_search_web_omits_suggestions_key_when_none(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {"results": [], "suggestions": []}
-    monkeypatch.setattr("httpx.Client", lambda **kw: _FakeClient(payload, captured=[]))
+    monkeypatch.setattr("httpx.Client", lambda **_kw: _FakeClient(payload, captured=[]))
     monkeypatch.setattr("app.core.config.SEARXNG_URL", "http://127.0.0.1:8888")
 
     result = _tool_search_web("a well-formed query")

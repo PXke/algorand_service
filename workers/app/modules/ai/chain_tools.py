@@ -1,7 +1,4 @@
-"""Read-only on-chain lookups backed by the wired algod node (ALGOD_URL/TOKEN,
-the same connector chain_reader.py uses). These answer the recurring "verify it
-on-chain" gap the writer kept working around — point lookup_application at a
-governance app to read its live proposal/vote state, etc.
+"""Read-only on-chain lookups backed by the wired algod node (ALGOD_URL/TOKEN, the same connector chain_reader.py uses). These answer the recurring "verify it on-chain" gap the writer kept working around — point lookup_application at a governance app to read its live proposal/vote state, etc.
 
 algod gives CURRENT state only (no history — that needs an indexer). Every handler
 is failure-tolerant: any error returns {"error": ...} and never aborts the article.
@@ -19,9 +16,8 @@ logger = logging.getLogger(__name__)
 _TIMEOUT = 15.0
 
 
-def _algod_get(path: str) -> Any:
-    """GET a path off the operator-configured (trusted) algod node. Returns the
-    parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}."""
+def _algod_get(path: str) -> dict[str, Any]:
+    """GET a path off the operator-configured (trusted) algod node. Returns the parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}."""
     import httpx
 
     from app.core.config import ALGOD_TOKEN, ALGOD_URL
@@ -41,8 +37,7 @@ def _algod_get(path: str) -> Any:
 
 
 def _encode_address(pubkey: bytes) -> str:
-    """32-byte public key -> 58-char Algorand address (base32 of key + 4-byte
-    sha512/256 checksum)."""
+    """32-byte public key -> 58-char Algorand address (base32 of key + 4-byte sha512/256 checksum)."""
     chksum = hashlib.new("sha512_256", pubkey).digest()[-4:]
     return base64.b32encode(pubkey + chksum).decode("ascii").rstrip("=")
 
@@ -58,9 +53,8 @@ def _decode_key(b64key: str) -> str:
     return "0x" + raw.hex()
 
 
-def _decode_value(v: dict) -> Any:
-    """TEAL state value: type 2 = uint, type 1 = bytes (shown as ASCII, a 32-byte
-    address, or hex — best-effort so the model can read governance/admin fields)."""
+def _decode_value(v: dict) -> int | str:
+    """TEAL state value: type 2 = uint, type 1 = bytes (shown as ASCII, a 32-byte address, or hex — best-effort so the model can read governance/admin fields)."""
     if v.get("type") == 2:
         return v.get("uint", 0)
     try:
@@ -78,13 +72,7 @@ def _decode_value(v: dict) -> Any:
 
 
 def _is_valid_address(addr: str) -> bool:
-    """58-char Algorand address format + checksum validity — the inverse of
-    _encode_address. Rejects a fabricated address BEFORE it reaches algod,
-    with a clear reason, instead of algod's generic 400 (root-caused
-    2026-07-14: the model invented plausible-looking addresses like
-    'EXA6RX5G...' for projects it had no real address for — three of the
-    four weren't even the right length, and none had a chance of a valid
-    checksum since nothing was actually generated)."""
+    """58-char Algorand address format + checksum validity — the inverse of _encode_address. Rejects a fabricated address BEFORE it reaches algod, with a clear reason, instead of algod's generic 400 (root-caused 2026-07-14: the model invented plausible-looking addresses like 'EXA6RX5G...' for projects it had no real address for — three of the four weren't even the right length, and none had a chance of a valid checksum since nothing was actually generated)."""
     if len(addr) != 58:
         return False
     try:
@@ -106,8 +94,7 @@ _INVALID_ADDRESS_ERROR = (
 
 
 def _tool_lookup_account(address: str) -> dict[str, Any]:
-    """Live state of an Algorand account: ALGO balance, ASAs held, and the apps it
-    created or opted into."""
+    """Live state of an Algorand account: ALGO balance, ASAs held, and the apps it created or opted into."""
     addr = (address or "").strip()
     if not addr:
         return {"error": "address required"}
@@ -148,9 +135,8 @@ def _tool_lookup_account(address: str) -> dict[str, Any]:
     }
 
 
-def _tool_lookup_asset(asset_id: Any) -> dict[str, Any]:
-    """Algorand Standard Asset (ASA) parameters: name, supply, decimals, creator,
-    and the manager/freeze/clawback/reserve roles."""
+def _tool_lookup_asset(asset_id: int | str) -> dict[str, Any]:
+    """Algorand Standard Asset (ASA) parameters: name, supply, decimals, creator, and the manager/freeze/clawback/reserve roles."""
     aid = str(asset_id).strip()
     if not aid.isdigit():
         return {"error": "asset_id must be a numeric ASA id"}
@@ -189,10 +175,8 @@ def _tool_lookup_asset(asset_id: Any) -> dict[str, Any]:
     }
 
 
-def _mainnet_idx_get(path: str, params: dict | None = None) -> Any:
-    """GET a path off the public MAINNET indexer (name-search capable, unlike
-    algod). Returns parsed JSON, {"_status": 404} for a missing entity, or
-    {"error": ...}."""
+def _mainnet_idx_get(path: str, params: dict | None = None) -> dict[str, Any]:
+    """GET a path off the public MAINNET indexer (name-search capable, unlike algod). Returns parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}."""
     import httpx
 
     from app.core.config import MAINNET_INDEXER_URL
@@ -211,10 +195,7 @@ def _mainnet_idx_get(path: str, params: dict | None = None) -> Any:
 
 
 def _tool_lookup_asset_by_name(name: str, limit: int = 5) -> dict[str, Any]:
-    """Search mainnet ASAs by ticker/unit-name (preferred) or display name when
-    the numeric asset_id isn't known yet — lookup_asset needs an id, and algod
-    itself can't search by name (only the indexer can). Use this first to find
-    the id, then lookup_asset for the full parameters.
+    """Search mainnet ASAs by ticker/unit-name (preferred) or display name when the numeric asset_id isn't known yet — lookup_asset needs an id, and algod itself can't search by name (only the indexer can). Use this first to find the id, then lookup_asset for the full parameters.
 
     Root-caused 2026-07-16: a ticker query (e.g. "WAD") used to hit the
     indexer's `name` param, which substring-matches a project's free-text
@@ -231,7 +212,8 @@ def _tool_lookup_asset_by_name(name: str, limit: int = 5) -> dict[str, Any]:
     unit-name match first — real tokens surface at the top instead of getting
     lost in substring noise. Falls back to the old `name` search only when the
     ticker search finds nothing at all (a genuine display-name lookup, e.g.
-    "CompX")."""
+    "CompX").
+    """
     q = (name or "").strip()
     if not q:
         return {"error": "name must not be empty"}
@@ -260,21 +242,19 @@ def _tool_lookup_asset_by_name(name: str, limit: int = 5) -> dict[str, Any]:
         if not isinstance(a, dict):
             continue
         p = a.get("params", {}) or {}
-        results.append({
-            "asset_id": a.get("index"),
-            "name": p.get("name"),
-            "unit_name": p.get("unit-name"),
-            "creator": p.get("creator"),
-        })
+        results.append(
+            {
+                "asset_id": a.get("index"),
+                "name": p.get("name"),
+                "unit_name": p.get("unit-name"),
+                "creator": p.get("creator"),
+            }
+        )
     return {"query": q, "results": results[:n]}
 
 
-def _tool_get_asset_holder_share(asset_id: Any, address: str) -> dict[str, Any]:
-    """A specific address's share of an ASA's total supply, computed here (not
-    left to the model) — use this instead of manually dividing lookup_asset's
-    total by lookup_account's raw holding, which is exactly how a real
-    fabricated "99.99%" concentration claim happened (2026-07-14): the model
-    got the decimal-shift arithmetic wrong on a 15-digit raw amount."""
+def _tool_get_asset_holder_share(asset_id: int | str, address: str) -> dict[str, Any]:
+    """A specific address's share of an ASA's total supply, computed here (not left to the model) — use this instead of manually dividing lookup_asset's total by lookup_account's raw holding, which is exactly how a real fabricated "99.99%" concentration claim happened (2026-07-14): the model got the decimal-shift arithmetic wrong on a 15-digit raw amount."""
     addr = (address or "").strip()
     if not addr:
         return {"error": "address required"}
@@ -310,11 +290,8 @@ def _tool_get_asset_holder_share(asset_id: Any, address: str) -> dict[str, Any]:
     }
 
 
-def _tool_lookup_application(app_id: Any) -> dict[str, Any]:
-    """An application's (smart contract's) creator and DECODED global state — the
-    on-chain variables a protocol exposes (e.g. governance proposal/vote tallies,
-    admin addresses, parameters). Point it at a governance app id to verify what
-    actually executed on-chain."""
+def _tool_lookup_application(app_id: int | str) -> dict[str, Any]:
+    """An application's (smart contract's) creator and DECODED global state — the on-chain variables a protocol exposes (e.g. governance proposal/vote tallies, admin addresses, parameters). Point it at a governance app id to verify what actually executed on-chain."""
     aid = str(app_id).strip()
     if not aid.isdigit():
         return {"error": "app_id must be a numeric application id"}
@@ -344,10 +321,7 @@ def _tool_lookup_application(app_id: Any) -> dict[str, Any]:
 
 
 def _tool_get_consensus_stats() -> dict[str, Any]:
-    """Algorand consensus participation from algod /v2/ledger/supply: ALGO stake
-    currently ONLINE (securing the network) vs total stake, and the online share.
-    The on-chain measure of participation scale. NOTE: this is online STAKE, not a
-    node count — node count is off-chain telemetry the ledger does not expose."""
+    """Algorand consensus participation from algod /v2/ledger/supply: ALGO stake currently ONLINE (securing the network) vs total stake, and the online share. The on-chain measure of participation scale. NOTE: this is online STAKE, not a node count — node count is off-chain telemetry the ledger does not expose."""
     data = _algod_get("/v2/ledger/supply")
     if not isinstance(data, dict):
         return {"error": "unexpected algod response"}
@@ -365,9 +339,11 @@ def _tool_get_consensus_stats() -> dict[str, Any]:
     }
 
 
-def _testnet_idx_get(path: str, params: dict | None = None) -> Any:
+def _testnet_idx_get(path: str, params: dict | None = None) -> dict[str, Any]:
     """GET a path off the public testnet INDEXER (history-capable, unlike algod).
-    Returns parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}."""
+
+    Returns parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}.
+    """
     import httpx
 
     from app.core.config import TESTNET_INDEXER_URL
@@ -386,12 +362,11 @@ def _testnet_idx_get(path: str, params: dict | None = None) -> Any:
 
 
 def _tool_testnet_lookup(
-    txid: str = "", address: str = "", app_id: Any = "",
+    txid: str = "",
+    address: str = "",
+    app_id: int | str = "",
 ) -> dict[str, Any]:
-    """Verify Testnet on-chain activity via the public testnet indexer. Pass EXACTLY
-    one of: a transaction id (confirm a tx happened and what it did), an account
-    address (recent activity + what it created), or an application id (confirm a
-    contract is deployed and when). Testnet only — for mainnet use lookup_* tools."""
+    """Verify Testnet on-chain activity via the public testnet indexer. Pass EXACTLY one of: a transaction id (confirm a tx happened and what it did), an account address (recent activity + what it created), or an application id (confirm a contract is deployed and when). Testnet only — for mainnet use lookup_* tools."""
     txid = (txid or "").strip()
     address = (address or "").strip()
     app_id = str(app_id).strip()
@@ -447,19 +422,19 @@ def _tool_testnet_lookup(
         if acct.get("_status") == 404:
             return {"address": address, "found": False, "error": "account not found on testnet"}
         a = acct.get("account", {}) or {}
-        txns = _testnet_idx_get(
-            f"/v2/accounts/{address}/transactions", params={"limit": 10}
-        )
+        txns = _testnet_idx_get(f"/v2/accounts/{address}/transactions", params={"limit": 10})
         recent = []
         if isinstance(txns, dict) and not txns.get("error"):
-            for t in (txns.get("transactions", []) or [])[:10]:
-                if isinstance(t, dict):
-                    recent.append({
-                        "txid": t.get("id"),
-                        "type": t.get("tx-type"),
-                        "round": t.get("confirmed-round"),
-                        "round_time": t.get("round-time"),
-                    })
+            recent.extend(
+                {
+                    "txid": t.get("id"),
+                    "type": t.get("tx-type"),
+                    "round": t.get("confirmed-round"),
+                    "round_time": t.get("round-time"),
+                }
+                for t in (txns.get("transactions", []) or [])[:10]
+                if isinstance(t, dict)
+            )
         return {
             "address": address,
             "found": True,
@@ -628,6 +603,5 @@ CHAIN_HANDLERS: dict[str, Any] = {
 
 
 def chain_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """On-chain lookup tools (schemas, handlers). Always registered — the handlers
-    degrade gracefully to {"error": ...} when ALGOD_URL is unset."""
+    """On-chain lookup tools (schemas, handlers). Always registered — the handlers degrade gracefully to {"error": ...} when ALGOD_URL is unset."""
     return list(CHAIN_SCHEMAS), dict(CHAIN_HANDLERS)

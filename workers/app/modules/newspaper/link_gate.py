@@ -49,8 +49,7 @@ def _normalize(url: str) -> str:
 
 
 def _trace_url_set(trace: list[dict] | None) -> set[str]:
-    """Every url that appeared anywhere in the research trace (tool arguments
-    AND results), normalized. Serialization keeps this shape-agnostic."""
+    """Every url that appeared anywhere in the research trace (tool arguments AND results), normalized. Serialization keeps this shape-agnostic."""
     urls: set[str] = set()
     for entry in trace or ():
         try:
@@ -79,10 +78,7 @@ def dead_untraced_links(
     *,
     checked: dict[str, bool] | None = None,
 ) -> list[str]:
-    """Body markdown-link urls that neither appeared in the research trace nor
-    resolve live — the fabrication-suspect set. Pass a shared ``checked`` dict
-    to reuse live-check results across revision passes (urls rarely change
-    between passes; re-fetching them each pass would triple the cost)."""
+    """Body markdown-link urls that neither appeared in the research trace nor resolve live — the fabrication-suspect set. Pass a shared ``checked`` dict to reuse live-check results across revision passes (urls rarely change between passes; re-fetching them each pass would triple the cost)."""
     if not body:
         return []
     traced = _trace_url_set(trace)
@@ -110,9 +106,7 @@ def sanitize_untraced_links(
     *,
     checked: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
-    """Delink body urls that neither appeared in the research trace nor
-    resolve live. Mutates and returns payload; records removals under
-    payload['_links_removed'] so the persisted final_output stays auditable."""
+    """Delink body urls that neither appeared in the research trace nor resolve live. Mutates and returns payload; records removals under payload['_links_removed'] so the persisted final_output stays auditable."""
     from app.core.config import LINK_GATE_ENABLED
 
     if not LINK_GATE_ENABLED:

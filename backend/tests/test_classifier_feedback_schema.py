@@ -1,3 +1,5 @@
+"""Classifier-feedback request validation and category normalization."""
+
 import pytest
 
 from app.modules.admin.classifier_constants import normalize_content_category
@@ -5,6 +7,7 @@ from app.modules.admin.schemas import ClassifierFeedbackCreate
 
 
 def test_classifier_feedback_accepts_category_and_quality() -> None:
+    """Round-trips a valid category, predicted_category and quality unchanged."""
     payload = ClassifierFeedbackCreate(
         url="https://algorand.foundation/news",
         approved=True,
@@ -31,6 +34,7 @@ def test_classifier_feedback_accepts_pipeline_writer_tag_as_predicted() -> None:
 
 
 def test_classifier_feedback_normalizes_category_alias() -> None:
+    """Normalizes a category alias like "tools" to its canonical form "tool"."""
     payload = ClassifierFeedbackCreate(
         url="https://example.com",
         approved=True,
@@ -41,6 +45,7 @@ def test_classifier_feedback_normalizes_category_alias() -> None:
 
 
 def test_normalize_content_category_maps_unknown_to_generic() -> None:
+    """Maps an unknown category to generic, and a known alias to its canonical form."""
     assert normalize_content_category("defi") == "generic"
     assert normalize_content_category("tools") == "tool"
 
@@ -59,5 +64,6 @@ def test_classifier_feedback_coerces_writer_tag_category() -> None:
 
 
 def test_classifier_feedback_rejects_invalid_quality() -> None:
-    with pytest.raises(ValueError):
+    """Raises ValueError when quality is not one of the accepted values."""
+    with pytest.raises(ValueError, match="quality must be one of"):
         ClassifierFeedbackCreate(url="https://example.com", approved=False, quality="trash")

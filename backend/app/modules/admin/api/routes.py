@@ -1,9 +1,11 @@
+"""HTTP routes for the admin dashboard."""
+
 from __future__ import annotations
 
 import logging
 from dataclasses import asdict
 
-from robyn import Request, Response
+from robyn import Request, Response, Robyn
 
 from app.core import serialization
 from app.core.http_errors import json_error_response
@@ -25,8 +27,12 @@ from app.modules.admin.stores.cassandra import AdminCassandraStore
 logger = logging.getLogger(__name__)
 
 # Cache keys for the domains list (one per status filter + the unfiltered view).
-_DOMAIN_CACHE_KEYS = ("admin:domains:all", "admin:domains:pending",
-                      "admin:domains:approved", "admin:domains:dead_end")
+_DOMAIN_CACHE_KEYS = (
+    "admin:domains:all",
+    "admin:domains:pending",
+    "admin:domains:approved",
+    "admin:domains:dead_end",
+)
 
 
 def _invalidate_domains_cache() -> None:
@@ -35,7 +41,8 @@ def _invalidate_domains_cache() -> None:
     invalidate(*_DOMAIN_CACHE_KEYS)
 
 
-def register_admin_routes(app) -> None:
+def register_admin_routes(app: Robyn) -> None:
+    """Register all admin API endpoints on the given Robyn app."""
     store = AdminCassandraStore()
 
     @app.get("/api/v1/admin/analytics")
@@ -283,9 +290,7 @@ def register_admin_routes(app) -> None:
 
     @app.get("/api/v1/admin/publish-queue")
     async def admin_list_publish_queue(request: Request) -> Response | dict:
-        """Queue rows with status + last drain/compose decision (last_reason) —
-        the persisted answer to "why was this row skipped/held/resolved" that
-        previously vanished with the Celery task return."""
+        """Queue rows with status + last drain/compose decision (last_reason) — the persisted answer to "why was this row skipped/held/resolved" that previously vanished with the Celery task return."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -298,9 +303,7 @@ def register_admin_routes(app) -> None:
 
     @app.get("/api/v1/admin/pending-feed-backlog")
     async def admin_pending_feed_backlog(request: Request) -> Response | dict:
-        """Approved articles waiting in pending_feed_queue for paced release
-        (capped by PENDING_FEED_MAX_DEPTH) — distinct from the in-flight
-        composing work publish-queue shows."""
+        """Approved articles waiting in pending_feed_queue for paced release (capped by PENDING_FEED_MAX_DEPTH) — distinct from the in-flight composing work publish-queue shows."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -412,8 +415,7 @@ def register_admin_routes(app) -> None:
 
     @app.post("/api/v1/admin/gatekeeper/anchor")
     async def admin_add_gatekeeper_anchor(request: Request) -> Response:
-        """Tag an already-published article into the anchor set (curate diverse
-        anchors without waiting for the review queue)."""
+        """Tag an already-published article into the anchor set (curate diverse anchors without waiting for the review queue)."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -509,10 +511,7 @@ def register_admin_routes(app) -> None:
 
     @app.post("/api/v1/admin/sources/merge")
     async def admin_merge_services(request: Request) -> Response:
-        """Fold services into one (multi-domain entities like algorand.co +
-        algorand.com): sources move to the target, domains re-point, merged
-        services are disabled. The target's next weekly poll aggregates across
-        all of its domains."""
+        """Fold services into one (multi-domain entities like algorand.co + algorand.com): sources move to the target, domains re-point, merged services are disabled. The target's next weekly poll aggregates across all of its domains."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -524,12 +523,11 @@ def register_admin_routes(app) -> None:
 
         from app.modules.registry.sources import merge_services
 
-        result = await asyncio.to_thread(
+        return await asyncio.to_thread(
             merge_services,
             target_service_id=payload.target_service_id,
             source_service_ids=payload.source_service_ids,
         )
-        return result
 
     @app.get("/api/v1/admin/sources/:service_id/sources")
     async def admin_list_service_sources(request: Request) -> Response:
@@ -607,8 +605,7 @@ def register_admin_routes(app) -> None:
 
     @app.post("/api/v1/admin/articles/reset")
     async def admin_reset_articles(request: Request) -> Response:
-        """Beta convenience: wipe all article/publish state so the pipeline
-        starts fresh. Keeps sources, classifier feedback and pending reviews."""
+        """Beta convenience: wipe all article/publish state so the pipeline starts fresh. Keeps sources, classifier feedback and pending reviews."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -635,6 +632,7 @@ def register_admin_routes(app) -> None:
             "investigation_findings",
             "compose_sessions",
         )
+
         def _truncate_all() -> None:
             session = get_cassandra_session()
             for table in tables:
@@ -651,8 +649,7 @@ def register_admin_routes(app) -> None:
 
     @app.post("/api/v1/admin/classifier-reviews/clear")
     async def admin_clear_classifier_reviews(request: Request) -> Response:
-        """Discard all pending review items without recording any feedback
-        (stored classifier_feedback labels are untouched)."""
+        """Discard all pending review items without recording any feedback (stored classifier_feedback labels are untouched)."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -688,13 +685,9 @@ def register_admin_routes(app) -> None:
         page_size = max(1, min(page_size, 100))
 
         def _compute_full_list() -> list[dict]:
-            """The metadata scan+sort — one query, cheap. Cached under a FIXED
-            key (no page/page_size in it) so the existing exact-match
-            _invalidate_domains_cache() still busts it correctly after a
-            domain is set/cleared; pagination and the per-domain page-count
-            queries happen fresh on every request, outside this cache, since
-            they're now scoped to a single page instead of the whole ~500-row
-            set and are cheap enough not to need caching."""
+            """The metadata scan+sort — one query, cheap. Cached under a FIXED key (no page/page_size in it) so the existing exact-match _invalidate_domains_cache() still busts it correctly after a domain is set/cleared; pagination and the per-domain page-count queries happen fresh on every request, outside this cache, since they're now scoped to a single page instead of the whole ~500-row set and are cheap enough not to need caching."""
+            from datetime import datetime
+
             from app.core.statements import DomainTrackingStmts
 
             session = get_cassandra_session()
@@ -713,14 +706,26 @@ def register_admin_routes(app) -> None:
                 except (ValueError, TypeError):
                     content_rel = None
                 is_relevant = bool(row.is_relevant) if row.is_relevant is not None else True
+                category = row.category or ""
+                relevance_score = float(row.relevance_score or 0)
+                # Nudge for the reviewer: the category classifier has almost no
+                # training signal outside "news" (67% of its admin-corrected
+                # samples are "news" corrections, vs 6 "service" — see
+                # content_categorizer.py), so a decent-scoring domain tagged
+                # news/generic is worth a second look before "Crawl Once" —
+                # root-caused 2026-07-25 (algofile.io, gramo.io: real Algorand
+                # products sitting mislabeled "news" and never registered as a
+                # monitored service). Advisory only — never auto-decides.
+                possible_service = category in ("news", "generic", "") and relevance_score >= 3
                 items.append(
                     {
                         "domain": row.domain,
                         "last_crawled_at": (
                             row.last_crawled_at.isoformat() if row.last_crawled_at else None
                         ),
-                        "relevance_score": float(row.relevance_score or 0),
-                        "category": row.category or "",
+                        "relevance_score": relevance_score,
+                        "category": category,
+                        "possible_service": possible_service,
                         "is_relevant": is_relevant,
                         "quality": meta.get("quality", ""),
                         "category_admin": meta.get("category_admin", ""),
@@ -752,11 +757,34 @@ def register_admin_routes(app) -> None:
                         "content_relevance_reasons": meta.get("content_relevance_reasons", ""),
                     }
                 )
-            # Assist the reviewer: surface the most relevant pending domains first
-            # (highest content score). Unscored (None) sort last.
-            items.sort(key=lambda it: it.get("content_relevance") or -1.0, reverse=True)
+            # Assist the reviewer: within each status, an unscored domain (not
+            # yet content-classified — i.e. a NEW arrival classify_pending_domains
+            # hasn't reached) sorts first, newest last_crawled_at first, so a
+            # fresh discovery is immediately visible instead of sinking under
+            # everything the classifier already scored. A scored domain sorts
+            # by content score, highest first. (Previously unscored sorted
+            # LAST via `or -1.0`, which combined with the old LIMIT 500 above
+            # meant new domains could go effectively invisible once the
+            # pending pool grew past a page or two — owner report 2026-07-22.)
             order = {"pending": 0, "dead_end": 1, "approved": 2}
-            items.sort(key=lambda d: (order.get(d["frontier_status"], 2), -(d["relevance_score"])))
+
+            def _recency_epoch(iso: str) -> float:
+                if not iso:
+                    return 0.0
+                try:
+                    return datetime.fromisoformat(iso).timestamp()
+                except ValueError:
+                    return 0.0
+
+            def _sort_key(it: dict) -> tuple:
+                content_rel = it.get("content_relevance")
+                if content_rel is None:
+                    tier, tie_break = 0, -_recency_epoch(it.get("last_crawled_at") or "")
+                else:
+                    tier, tie_break = 1, -content_rel
+                return (order.get(it["frontier_status"], 2), tier, tie_break)
+
+            items.sort(key=_sort_key)
             return items
 
         def _compute() -> dict:
@@ -827,11 +855,7 @@ def register_admin_routes(app) -> None:
 
     @app.get("/api/v1/admin/tool-suggestions")
     async def admin_list_tool_suggestions(request: Request) -> Response:
-        """Capabilities the writer model wished it had (via the suggest_tool tool),
-        newest first — input for which tools to build next. Resolved suggestions
-        (tools that have since shipped) are hidden by default so the list only
-        shows genuine gaps instead of growing forever; pass ?include_resolved=true
-        to see the full history."""
+        """Capabilities the writer model wished it had (via the suggest_tool tool), newest first — input for which tools to build next. Resolved suggestions (tools that have since shipped) are hidden by default so the list only shows genuine gaps instead of growing forever; pass ?include_resolved=true to see the full history."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -848,10 +872,7 @@ def register_admin_routes(app) -> None:
 
     @app.post("/api/v1/admin/tool-suggestions/resolve")
     async def admin_resolve_tool_suggestions(request: Request) -> Response:
-        """Mark every unresolved suggestion for one capability as resolved (the
-        tool now exists) — dismisses the whole group the Tool gaps panel shows,
-        not one row at a time. Rows are kept (not deleted) so the request count
-        stays visible as history; the table also self-prunes via a 90-day TTL."""
+        """Mark every unresolved suggestion for one capability as resolved (the tool now exists) — dismisses the whole group the Tool gaps panel shows, not one row at a time. Rows are kept (not deleted) so the request count stays visible as history; the table also self-prunes via a 90-day TTL."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -862,9 +883,7 @@ def register_admin_routes(app) -> None:
 
         import asyncio
 
-        resolved_count = await asyncio.to_thread(
-            store.resolve_tool_suggestions, payload.capability
-        )
+        resolved_count = await asyncio.to_thread(store.resolve_tool_suggestions, payload.capability)
         return {"capability": payload.capability, "resolved_count": resolved_count}
 
     @app.get("/api/v1/admin/compose-feedback")
@@ -903,9 +922,11 @@ def register_admin_routes(app) -> None:
     @app.get("/api/v1/admin/compose-sessions")
     async def admin_list_compose_sessions(request: Request) -> Response:
         """Recent article-compose sessions, newest first — status/timing only.
+
         Polled every few seconds by the admin UI for live progress, so this is
         deliberately summary-only (no messages/final_output, which can be up to
-        ~140KB per row); fetch a transcript on demand via GET .../:session_id."""
+        ~140KB per row); fetch a transcript on demand via GET .../:session_id.
+        """
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -946,8 +967,7 @@ def register_admin_routes(app) -> None:
 
     @app.get("/api/v1/admin/compose-sessions/:session_id")
     async def admin_get_compose_session(request: Request) -> Response:
-        """Full transcript (messages + final_output) for one compose session —
-        fetched on demand when the admin expands a session, not on every poll."""
+        """Full transcript (messages + final_output) for one compose session — fetched on demand when the admin expands a session, not on every poll."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -995,19 +1015,42 @@ def register_admin_routes(app) -> None:
         except Exception as exc:
             return json_error_response(400, "invalid_request", str(exc))
         wallet = verified_admin_wallet(request)
+        # Normalize once, in place, so domain_tracking, service_registry, and
+        # the seed-crawl URL all key on the SAME eTLD+1 the crawler's own
+        # is_admin_approved_domain(domain_from_url(url)) check will derive —
+        # a raw "www.example.com" written verbatim silently breaks the
+        # admin-approved bypass for that domain (root-caused 2026-07-24,
+        # urvote.ca). Only for is_relevant=True: a dead-end (reject) call
+        # through this same endpoint must keep dead-ending the EXACT host
+        # given, not collapse to the registrable domain and take out sibling
+        # subdomains with it (matches _write_domain_relevance, which applies
+        # the identical is_relevant gate).
+        if payload.is_relevant:
+            payload.domain = store._normalize_domain_input(payload.domain)
 
         def _compute() -> dict:
             from app.core.cassandra import get_cassandra_session
 
             session = get_cassandra_session()
             meta, pending_url = store._write_domain_relevance(
-                payload.domain, is_relevant=payload.is_relevant
+                payload.domain,
+                is_relevant=payload.is_relevant,
+                single_page_only=payload.single_page_only,
             )
             from datetime import UTC, datetime
 
             now = datetime.now(tz=UTC)
             enqueued = False
-            if payload.is_relevant and pending_url:
+            if payload.is_relevant:
+                # pending_url only exists when this domain came from an organic
+                # crawler discovery that stashed the triggering URL in metadata.
+                # A domain an admin adds and approves directly (no prior
+                # domain_tracking row) has no pending_url — fall back to the
+                # domain root so approval always seeds a crawl instead of
+                # silently enqueuing nothing (root-caused 2026-07-21: 71
+                # admin-approved domains sat at frontier_status=approved with
+                # zero crawled pages forever, dark-coin.com among them).
+                seed_url = pending_url or f"https://{payload.domain}"
                 # Approving a held domain starts its exploration right away.
                 import uuid as uuid_mod
 
@@ -1018,21 +1061,34 @@ def register_admin_routes(app) -> None:
                 seed_priority = 50
                 from app.core.statements import UrlQueueStmts
 
+                # single_page_only: tell the crawler not to follow this page's
+                # outbound links — fetch exactly the one URL and stop, never
+                # spider the rest of the site (see web_crawler.py's no_follow
+                # check).
+                queue_metadata = {"no_follow_links": "true"} if payload.single_page_only else {}
                 session.execute(
                     UrlQueueStmts.INSERT,
-                    (queue_id, pending_url, "frontier_approval", seed_priority, now, "pending", {}),
+                    (
+                        queue_id,
+                        seed_url,
+                        "frontier_approval",
+                        seed_priority,
+                        now,
+                        "pending",
+                        queue_metadata,
+                    ),
                 )
                 session.execute(
                     UrlQueueStmts.INSERT_BY_URL,
-                    (pending_url, queue_id, now, "pending"),
+                    (seed_url, queue_id, now, "pending"),
                 )
                 session.execute(
                     UrlQueueStmts.INSERT_PENDING,
-                    ("pending", seed_priority, now, queue_id, pending_url, "frontier_approval"),
+                    ("pending", seed_priority, now, queue_id, seed_url, "frontier_approval"),
                 )
                 enqueued = True
             source_created = False
-            if payload.is_relevant and payload.as_seed:
+            if payload.is_relevant and payload.as_seed and not payload.single_page_only:
                 # Domain-centric model: an approved domain becomes a monitored
                 # source so its content is reported on going forward — we don't
                 # re-judge individual pages for relevance. If another service
@@ -1045,9 +1101,7 @@ def register_admin_routes(app) -> None:
                 service_id = owner or payload.domain.replace(".", "-").lower()
                 from app.core.statements import ServiceRegistryStmts
 
-                existing = session.execute(
-                    ServiceRegistryStmts.GET_ID, (service_id,)
-                ).one()
+                existing = session.execute(ServiceRegistryStmts.GET_ID, (service_id,)).one()
                 if existing is None:
                     session.execute(
                         ServiceRegistryStmts.UPSERT,
@@ -1131,8 +1185,7 @@ def register_admin_routes(app) -> None:
 
     @app.post("/api/v1/admin/domains/clear")
     async def admin_clear_domains(request: Request) -> Response:
-        """Forget the whole crawl frontier: every explored/pending/dead-end
-        domain record. The blocklist (config) is unaffected."""
+        """Forget the whole crawl frontier: every explored/pending/dead-end domain record. The blocklist (config) is unaffected."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -1146,16 +1199,15 @@ def register_admin_routes(app) -> None:
 
     @app.post("/api/v1/admin/classifier-reviews/compose-next")
     async def admin_compose_next(request: Request) -> Response:
-        """Force the pipeline to compose the highest-interest pending candidate
-        now (instead of waiting for the next verdict/drain). The new proposal
-        appears in the review queue once the worker finishes (a few seconds).
+        """Force the pipeline to compose the highest-interest pending candidate now (instead of waiting for the next verdict/drain). The new proposal appears in the review queue once the worker finishes (a few seconds).
 
         The worker task this triggers (run_mistral_diff_check) silently no-ops
         if a review is already pending or the approved-feed backlog is paused
         for intake — from the admin's side that used to look identical to a
         genuine failure ("nothing happened"). Both gates are cheap reads, so
         check them here first and report the real reason instead of always
-        claiming success."""
+        claiming success.
+        """
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -1189,6 +1241,7 @@ def register_admin_routes(app) -> None:
                     "message": "The approved-feed backlog is paused for new intake "
                     "until it drains.",
                 }
+
         def _fire_and_wait() -> dict:
             import contextlib
 
@@ -1248,9 +1301,7 @@ def register_admin_routes(app) -> None:
 
     @app.post("/api/v1/admin/classifier-reviews/recompose")
     async def admin_recompose_review(request: Request) -> Response:
-        """Re-run composition on a pending review's source and replace it with a
-        fresh proposal — lets an admin watch a bad article improve as the writer
-        evolves. The new draft lands in the review queue once the worker finishes."""
+        """Re-run composition on a pending review's source and replace it with a fresh proposal — lets an admin watch a bad article improve as the writer evolves. The new draft lands in the review queue once the worker finishes."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
@@ -1311,8 +1362,7 @@ def register_admin_routes(app) -> None:
 
     @app.get("/api/v1/admin/investigations")
     async def admin_investigation_findings(request: Request) -> Response:
-        """Evidence trail: tool calls the investigative agent made for a source
-        URL (?url=...)."""
+        """Evidence trail: tool calls the investigative agent made for a source URL (?url=...)."""
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied

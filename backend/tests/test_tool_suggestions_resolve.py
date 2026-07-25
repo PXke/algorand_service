@@ -1,24 +1,28 @@
+"""Listing and bulk-resolving tool-gap suggestions."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
+
+import pytest
 
 from app.modules.admin.stores.cassandra import AdminCassandraStore
 
 
 class _FakeSession:
-    """Mirrors the pattern in test_reject_domain_source.py: prepare() returns
-    the raw CQL so execute() can branch on query text."""
+    """Mirrors the pattern in test_reject_domain_source.py: prepare() returns the raw CQL so execute() can branch on query text."""
 
     def __init__(self, rows: list[SimpleNamespace]) -> None:
         self._rows = rows
         self.resolve_calls: list[tuple] = []
 
-    def prepare(self, cql):
+    def prepare(self, cql: str) -> str:
         return cql
 
-    def execute(self, query, params=()):
+    def execute(self, query: str, params: tuple = ()) -> list | None:
         q = " ".join(str(query).split())
         if q.startswith("SELECT") and "tool_suggestions" in q:
             return list(self._rows)
@@ -43,18 +47,21 @@ def _row(capability: str, *, resolved: bool = False) -> SimpleNamespace:
     )
 
 
-def _patch(monkeypatch, fake) -> None:
+def _patch(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:  # noqa: ANN401 -- duck-typed fake Cassandra session
     import app.core.cassandra as c
 
     monkeypatch.setattr(c, "get_cassandra_session", lambda: fake)
     c.prepare_cached.cache_clear()
 
 
-def test_list_tool_suggestions_hides_resolved_by_default(monkeypatch) -> None:
-    fake = _FakeSession([
-        _row("reddit_api_post_history"),
-        _row("search_token_listings", resolved=True),
-    ])
+def test_list_tool_suggestions_hides_resolved_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Excludes already-resolved suggestions unless include_resolved is set."""
+    fake = _FakeSession(
+        [
+            _row("reddit_api_post_history"),
+            _row("search_token_listings", resolved=True),
+        ]
+    )
     _patch(monkeypatch, fake)
 
     store = AdminCassandraStore()
@@ -65,11 +72,16 @@ def test_list_tool_suggestions_hides_resolved_by_default(monkeypatch) -> None:
     assert items[0]["resolved"] is False
 
 
-def test_list_tool_suggestions_include_resolved_shows_everything(monkeypatch) -> None:
-    fake = _FakeSession([
-        _row("reddit_api_post_history"),
-        _row("search_token_listings", resolved=True),
-    ])
+def test_list_tool_suggestions_include_resolved_shows_everything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Returns both resolved and unresolved suggestions when include_resolved=True."""
+    fake = _FakeSession(
+        [
+            _row("reddit_api_post_history"),
+            _row("search_token_listings", resolved=True),
+        ]
+    )
     _patch(monkeypatch, fake)
 
     store = AdminCassandraStore()
@@ -78,16 +90,17 @@ def test_list_tool_suggestions_include_resolved_shows_everything(monkeypatch) ->
     assert len(items) == 2
 
 
-def test_resolve_tool_suggestions_marks_matching_capability_only(monkeypatch) -> None:
-    """Bulk-resolve targets every unresolved row for the exact capability —
-    this is what clears an already-implemented tool (e.g. search_token_listings,
-    github_repository_search, shipped 2026-07-14) off the growing Tool gaps
-    list without deleting the request-count history."""
-    fake = _FakeSession([
-        _row("search_token_listings"),
-        _row("search_token_listings"),
-        _row("reddit_api_post_history"),
-    ])
+def test_resolve_tool_suggestions_marks_matching_capability_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bulk-resolve targets every unresolved row for the exact capability — this is what clears an already-implemented tool (e.g. search_token_listings, github_repository_search, shipped 2026-07-14) off the growing Tool gaps list without deleting the request-count history."""
+    fake = _FakeSession(
+        [
+            _row("search_token_listings"),
+            _row("search_token_listings"),
+            _row("reddit_api_post_history"),
+        ]
+    )
     _patch(monkeypatch, fake)
 
     store = AdminCassandraStore()
@@ -100,7 +113,8 @@ def test_resolve_tool_suggestions_marks_matching_capability_only(monkeypatch) ->
     assert remaining[0]["capability"] == "reddit_api_post_history"
 
 
-def test_resolve_tool_suggestions_is_case_insensitive(monkeypatch) -> None:
+def test_resolve_tool_suggestions_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Matches the capability name for resolution regardless of stored casing."""
     fake = _FakeSession([_row("Search_Token_Listings")])
     _patch(monkeypatch, fake)
 
@@ -110,7 +124,8 @@ def test_resolve_tool_suggestions_is_case_insensitive(monkeypatch) -> None:
     assert n == 1
 
 
-def test_resolve_tool_suggestions_skips_already_resolved(monkeypatch) -> None:
+def test_resolve_tool_suggestions_skips_already_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leaves an already-resolved row untouched and reports zero rows resolved."""
     fake = _FakeSession([_row("search_token_listings", resolved=True)])
     _patch(monkeypatch, fake)
 

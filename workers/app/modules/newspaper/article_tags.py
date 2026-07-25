@@ -1,3 +1,5 @@
+"""Derive an article's tags from its source kind and content."""
+
 from __future__ import annotations
 
 

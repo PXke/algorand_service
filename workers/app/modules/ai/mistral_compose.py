@@ -1,3 +1,5 @@
+"""The writer's research -> compose -> grade/revise loop and its prompts."""
+
 from __future__ import annotations
 
 import contextlib
@@ -35,6 +37,7 @@ PROMPT_VERSION = "2026-07-20"
 
 @dataclass(frozen=True)
 class MistralArticleFields:
+    """The composed article's title/summary/body plus grading metadata."""
     title: str
     summary: str
     body: str
@@ -213,6 +216,7 @@ def _writer_system_prompt(today: str, *, assignment: bool = False) -> str:
         + "\n"
         + _JSON_ONLY
     )
+
 
 # Shared guidance appended to the system prompt when the agentic tool loop is on.
 # The ALGO PRICE/MARKET RULE is deliberate: the small model used to fetch the
@@ -482,8 +486,7 @@ _RESEARCH_PHASE_GUIDANCE = (
 
 
 def _format_research_digest(trace: list[dict]) -> str:
-    """Condense the research trace into a ground-truth findings block for the warm
-    generation pass: one line per tool call (tool, args -> result)."""
+    """Condense the research trace into a ground-truth findings block for the warm generation pass: one line per tool call (tool, args -> result)."""
     import json as _json
 
     lines: list[str] = []
@@ -554,7 +557,7 @@ _NARRATIVE_GUIDANCE = (
     "a fair journalist would. Where a *product-specific* mechanism is "
     "undocumented — a marketplace's exact fee percentage, which royalty "
     "standard it enforces, its specific commission structure — say so plainly "
-    "(\"fees are undisclosed\") rather than inventing a number or naming a "
+    '("fees are undisclosed") rather than inventing a number or naming a '
     "mechanism the Digest never verified; you may still explain Algorand's "
     "general layer-1 mechanics (consensus, finality, ASA tokenization AS A "
     "CONCEPT) when bridging why the story matters on-chain, but that license "
@@ -616,8 +619,7 @@ def _build_stage2_user(*, user: str, digest: str) -> str:
     """Stage-2 user prompt: digest-only ground truth (no raw tool trace)."""
     if digest.strip():
         return (
-            user
-            + "\n\n## Research Digest (PRIMARY AND ONLY ground truth for external facts):\n"
+            user + "\n\n## Research Digest (PRIMARY AND ONLY ground truth for external facts):\n"
             f"{digest}\n\n"
             "Write the article strictly from this digest plus any source material above. "
             "You cannot call tools or fetch additional pages.\n"
@@ -722,9 +724,11 @@ def _synthesize_research_digest(
 
 def _extract_unresolved_gaps(digest: str) -> str:
     """Pull the '### Unresolved Gaps' section out of a synthesized digest.
+
     Empty string when the section is absent or explicitly says None — the
     signal that tells the compose loop whether a bounded gap-fill research
-    pass is worth running before handing off to the writer."""
+    pass is worth running before handing off to the writer.
+    """
     marker = "### Unresolved Gaps"
     idx = digest.find(marker)
     if idx == -1:
@@ -740,11 +744,7 @@ def _extract_unresolved_gaps(digest: str) -> str:
 
 
 def _gap_fill_nudge(gaps: str) -> str:
-    """One bounded extra research pass targeting specific gaps the digest
-    synthesis flagged as unresolved but material — giving the model a real
-    chance to find the missing fact instead of the writer stage inventing (or
-    recalling from training) something to fill it, as happened when a piece
-    invented specific marketplace sales for a page with no real sales data."""
+    """One bounded extra research pass targeting specific gaps the digest synthesis flagged as unresolved but material — giving the model a real chance to find the missing fact instead of the writer stage inventing (or recalling from training) something to fill it, as happened when a piece invented specific marketplace sales for a page with no real sales data."""
     return (
         "\n\nSTOP — before handing off to the writer, make one real attempt at "
         f"resolving these specific gaps:\n{gaps}\n\n"
@@ -757,10 +757,8 @@ def _gap_fill_nudge(gaps: str) -> str:
     )
 
 
-def _urls_from_result(result: Any) -> list[str]:
-    """Best-effort extraction of every URL a tool result carries — a single fetch
-    exposes a top-level "url", while search-style tools nest hits under a list
-    key (search_web's "results", search_bluesky's "posts", etc.)."""
+def _urls_from_result(result: Any) -> list[str]:  # noqa: ANN401 -- arbitrary tool-result shape
+    """Best-effort extraction of every URL a tool result carries — a single fetch exposes a top-level "url", while search-style tools nest hits under a list key (search_web's "results", search_bluesky's "posts", etc.)."""
     urls: list[str] = []
     if not isinstance(result, dict):
         return urls
@@ -779,11 +777,7 @@ def _urls_from_result(result: Any) -> list[str]:
 
 
 def _research_call_signals(entry: dict) -> set[str]:
-    """The distinct source(s) one research call actually touched: the domain(s)
-    in its result, else a domain-like argument, else the tool name. Keying on
-    bare tool identity let the floor be satisfied by several trivial calls that
-    all skim the same one or two domains; keying on domains instead rewards what
-    the floor is meant to enforce — breadth of sources, not call count."""
+    """The distinct source(s) one research call actually touched: the domain(s) in its result, else a domain-like argument, else the tool name. Keying on bare tool identity let the floor be satisfied by several trivial calls that all skim the same one or two domains; keying on domains instead rewards what the floor is meant to enforce — breadth of sources, not call count."""
     tool = entry.get("tool")
     if not tool or tool == "review_draft":
         return set()
@@ -800,9 +794,7 @@ def _research_call_signals(entry: dict) -> set[str]:
 
 
 def _distinct_research_calls(trace: list[dict]) -> int:
-    """Count distinct research sources touched so far (domains fetched, or a
-    stable per-tool identity for calls with no URL), excluding review_draft
-    self-checks."""
+    """Count distinct research sources touched so far (domains fetched, or a stable per-tool identity for calls with no URL), excluding review_draft self-checks."""
     signals: set[str] = set()
     for entry in trace:
         signals |= _research_call_signals(entry)
@@ -810,8 +802,7 @@ def _distinct_research_calls(trace: list[dict]) -> int:
 
 
 def _research_floor_nudge(have: int, need: int, digest: str) -> str:
-    """A stronger directive to send the model back for a deeper research pass when
-    it stopped too early (the Stage-1 research floor)."""
+    """A stronger directive to send the model back for a deeper research pass when it stopped too early (the Stage-1 research floor)."""
     return (
         f"\n\nSTOP — you only touched {have} distinct research source(s); this story "
         f"needs at least {need} before writing. You have so far gathered:\n{digest}\n\n"
@@ -825,10 +816,7 @@ def _research_floor_nudge(have: int, need: int, digest: str) -> str:
 
 
 def _debug_tool_turn(debug: dict | None, name: str, arguments: dict, result: dict) -> None:
-    """Record a (synthetic) tool call + result into the debug transcript so the
-    admin Sessions view shows it. Two-stage compose calls the grader directly
-    rather than via the model's tool loop, so these turns aren't captured
-    automatically the way the legacy single-loop's were."""
+    """Record a (synthetic) tool call + result into the debug transcript so the admin Sessions view shows it. Two-stage compose calls the grader directly rather than via the model's tool loop, so these turns aren't captured automatically the way the legacy single-loop's were."""
     import json as _json
 
     if debug is None or not isinstance(debug.get("messages"), list):
@@ -850,6 +838,8 @@ def _review_and_revise(
     gen_user: str,
     trace: list[dict],
     debug: dict | None = None,
+    user: str = "",
+    research_user: str | None = None,
 ) -> dict:
     """Stage 3+4 of two-stage compose: grade the draft, then revise if weak.
 
@@ -954,9 +944,7 @@ def _review_and_revise(
         # style: the prompt states the rules, but only this deterministic check +
         # forced revision makes them invariants (prompts drift; regexes don't).
         schema_fixable = [
-            i
-            for i in issues
-            if i.startswith(("too long", "structure", "schema", "headline"))
+            i for i in issues if i.startswith(("too long", "structure", "schema", "headline"))
         ]
         needs_revision = quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE)
         quality_fixable: list[str] = list(quality.get("issues") or []) if needs_revision else []
@@ -971,12 +959,12 @@ def _review_and_revise(
             try:
                 from app.modules.newspaper.link_gate import dead_untraced_links
 
-                for _dead_url in dead_untraced_links(body, trace, checked=link_check_cache):
-                    link_fixable.append(
-                        f"dead link: {_dead_url} is unreachable and never appeared "
-                        "in your research — replace it with a working URL you "
-                        "actually researched, or drop the link and keep plain text"
-                    )
+                link_fixable.extend(
+                    f"dead link: {_dead_url} is unreachable and never appeared "
+                    "in your research — replace it with a working URL you "
+                    "actually researched, or drop the link and keep plain text"
+                    for _dead_url in dead_untraced_links(body, trace, checked=link_check_cache)
+                )
             except Exception:
                 logger.warning("dead-link check failed during revision", exc_info=True)
         if link_fixable:
@@ -1026,6 +1014,18 @@ def _review_and_revise(
         # it here — better than the post-hoc gate holding the whole draft for a
         # human (GoPlausible 2026-07-20). The hold stays as the backstop for
         # anything that survives revision.
+        #
+        # Grounds against [user, research_user] — the ORIGINAL prompt/source
+        # material — not gen_user alone. gen_user embeds the stage-1 digest,
+        # the researcher's own paraphrase of the source; checking a claim
+        # against the digest that produced it is circular and can rubber-stamp
+        # drift the digest already introduced (root-caused 2026-07-20: a "25%
+        # increase in engagement" source fact became "Monthly Active Users
+        # +25%" in the draft, grounded fine against the digest's own loose
+        # phrasing in-loop, then correctly flagged by the post-hoc gate — which
+        # already checks against user/research_user — after the revision loop
+        # had no more passes left to fix it). Must match the post-hoc call's
+        # extra_texts below so the model sees the SAME verdict it'll be held on.
         unsourced_fixable: list[str] = []
         from app.core.config import UNSOURCED_SPECIFICS_GATE_ENABLED
 
@@ -1036,15 +1036,19 @@ def _review_and_revise(
                 )
 
                 unsourced_fixable = unsourced_specifics_revision_issues(
-                    body, trace, extra_texts=[gen_user]
+                    body, trace, extra_texts=[user, research_user or ""]
                 )
             except Exception:
                 logger.warning("unsourced-specifics check failed during revision", exc_info=True)
         if unsourced_fixable:
             review["unsourced_specifics"] = unsourced_fixable
         fixable = (
-            schema_fixable + quality_fixable + link_fixable + chain_fixable
-            + authority_fixable + unsourced_fixable
+            schema_fixable
+            + quality_fixable
+            + link_fixable
+            + chain_fixable
+            + authority_fixable
+            + unsourced_fixable
         )
 
         grade_val = review.get("grade")
@@ -1342,9 +1346,7 @@ def _today_utc() -> str:
 
 
 def _recency_rule(today: str) -> str:
-    """Temporal-awareness rule: scraped pages routinely carry stale figures and the
-    model otherwise has no idea what 'today' is, so it restates old numbers as current
-    (e.g. an article written in 2026 quoting 2022 TVL)."""
+    """Temporal-awareness rule: scraped pages routinely carry stale figures and the model otherwise has no idea what 'today' is, so it restates old numbers as current (e.g. an article written in 2026 quoting 2022 TVL)."""
     return (
         f"- Recency: today is {today} (UTC). Source pages often contain outdated "
         "figures. Never present a number, price, ranking, TVL/volume or a 'latest/"
@@ -1365,11 +1367,7 @@ def _recency_rule(today: str) -> str:
 
 
 def is_static_landing_page(url: str) -> bool:
-    """A root domain / shallow marketing page (e.g. https://tinyman.org) is a
-    static profile, not a dated news item. Such pages have no reliable timeline
-    (a persistent 'v2 is live!' banner sits next to an undated roadmap), so the
-    writer must produce an evergreen profile, never breaking news — this is the
-    deterministic fix for chronological context collapse."""
+    """A root domain / shallow marketing page (e.g. https://tinyman.org) is a static profile, not a dated news item. Such pages have no reliable timeline (a persistent 'v2 is live!' banner sits next to an undated roadmap), so the writer must produce an evergreen profile, never breaking news — this is the deterministic fix for chronological context collapse."""
     from urllib.parse import urlparse
 
     try:
@@ -1443,9 +1441,11 @@ def _clip(text: str, limit: int = MISTRAL_MAX_SOURCE_CHARS) -> str:
 
 
 def _source_links_block(source_links: list[dict[str, str]] | None, *, limit: int = 25) -> str:
-    """The source page's own outbound links (the research trail), rendered for the
-    composer. Links are stripped from `page_text` (they'd pollute the relevance/
-    novelty signals), so this is how the writer learns what to `fetch_url` next."""
+    """The source page's own outbound links (the research trail), rendered for the composer.
+
+    Links are stripped from `page_text` (they'd pollute the relevance/novelty
+    signals), so this is how the writer learns what to `fetch_url` next.
+    """
     if not source_links:
         return ""
     lines = []
@@ -1472,14 +1472,15 @@ def _price_metrics_block(asset_id: str) -> str:
     return f"\n\nPrepared price metrics (stored polls + chart reference):\n{_clip(block, 3500)}\n"
 
 
-def _coerce_markdown(value: Any) -> str:
+def _coerce_markdown(value: Any) -> str:  # noqa: ANN401 -- model-emitted body can be str, dict, or list
     """Flatten a body the model emitted as nested JSON back into markdown.
 
     In json_object mode the model sometimes returns ``body`` as an object keyed
     by section heading (``{"## Market snapshot": "...table...", ...}``) or a list
     of blocks instead of a single markdown string. ``str(dict)`` would store the
     Python repr verbatim (the "broken JSON structure" on the page), so reconstruct
-    real markdown: each key becomes a heading, each value its content."""
+    real markdown: each key becomes a heading, each value its content.
+    """
     if value is None:
         return ""
     if isinstance(value, str):
@@ -1546,7 +1547,8 @@ def compose_scrape_article_mistral(
     ``first_coverage``: the service has never had a published article (e.g. its
     one-shot discovery row expired unpublished), so a diff-driven update would
     reference a service readers have never met — write an introduction/profile
-    instead, with the recent change as a secondary note."""
+    instead, with the recent change as a secondary note.
+    """
     mistral = client or get_mistral_client()
     today = _today_utc()
     source_domain = (urlparse(source_url).netloc or "").lower()
@@ -1641,7 +1643,7 @@ Source material (may be days or years old — judge figures against today's date
     )
 
 
-def _call_compose_via_writer_tools(**kwargs: Any) -> MistralArticleFields:
+def _call_compose_via_writer_tools(**kwargs: object) -> MistralArticleFields:
     """Invoke the shared compose loop, omitting kwargs older workers may lack.
 
     Rolling deploys can briefly load a ``compose_scrape_article_mistral`` that
@@ -1652,9 +1654,7 @@ def _call_compose_via_writer_tools(**kwargs: Any) -> MistralArticleFields:
     allowed = inspect.signature(_compose_via_writer_tools).parameters
     if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in allowed.values()):
         return _compose_via_writer_tools(**kwargs)
-    return _compose_via_writer_tools(
-        **{k: v for k, v in kwargs.items() if k in allowed}
-    )
+    return _compose_via_writer_tools(**{k: v for k, v in kwargs.items() if k in allowed})
 
 
 def _compose_via_writer_tools(
@@ -1666,16 +1666,13 @@ def _compose_via_writer_tools(
     topic: str = "",
     research_user: str | None = None,
 ) -> MistralArticleFields:
-    """Shared research -> write -> grade/revise loop behind every writer-tools
-    compose path. Only depends on the system/user prompt pair and a label
-    (``source_url``) used for tool scoping and session/investigation bookkeeping
-    — it doesn't assume the source material was a real scraped page, so callers
-    can feed it a from-scratch topic assignment just as well as a scrape diff.
+    """Shared research -> write -> grade/revise loop behind every writer-tools compose path. Only depends on the system/user prompt pair and a label (``source_url``) used for tool scoping and session/investigation bookkeeping — it doesn't assume the source material was a real scraped page, so callers can feed it a from-scratch topic assignment just as well as a scrape diff.
 
     ``research_user``: optional slimmer variant of ``user`` (smaller source
     clip) for the stage-1 research rounds, which re-send the whole prompt on
     every tool round; stage-2 generation always uses the full ``user``.
-    Defaults to ``user``."""
+    Defaults to ``user``.
+    """
     from app.modules.newspaper.compose_lock import compose_lock
 
     with compose_lock(label=source_url):
@@ -1740,10 +1737,7 @@ def _compose_via_writer_tools_locked(
             _sid, _screated = new_session_ref()
 
             def _usage_so_far() -> dict[str, int]:
-                """Combined token usage across both clients used in this session
-                (research_mistral for stage 1, mistral for stage 2/revise) — each
-                is a fresh instance per compose, so its counter is this session's
-                total, not a lifetime one."""
+                """Combined token usage across both clients used in this session (research_mistral for stage 1, mistral for stage 2/revise) — each is a fresh instance per compose, so its counter is this session's total, not a lifetime one."""
                 research_usage = research_mistral.usage_totals()
                 write_usage = mistral.usage_totals()
                 return {
@@ -1838,9 +1832,7 @@ def _compose_via_writer_tools_locked(
                         )
                 # Stage 1b — synthesize a structured Research Digest handoff so Stage 2
                 # grounds on high-signal facts, not raw tool JSON.
-                digest = _synthesize_research_digest(
-                    trace=trace, research_context=stage1_user
-                )
+                digest = _synthesize_research_digest(trace=trace, research_context=stage1_user)
                 # Gap-fill: the digest may flag specific unresolved-but-material
                 # gaps. Give the model ONE bounded extra research pass targeting
                 # exactly those before handing off to the tool-less writer, which
@@ -1906,7 +1898,14 @@ def _compose_via_writer_tools_locked(
                     )
                 # Stage 3+4 — deterministic grade, then one revision if weak.
                 payload = _review_and_revise(
-                    mistral, payload, system=system, gen_user=gen_user, trace=trace, debug=debug
+                    mistral,
+                    payload,
+                    system=system,
+                    gen_user=gen_user,
+                    trace=trace,
+                    debug=debug,
+                    user=user,
+                    research_user=research_user,
                 )
                 raw = _json.dumps(payload)
             else:
@@ -2089,9 +2088,7 @@ def _compose_via_writer_tools_locked(
             # by manually replaying compose_sessions.messages — the traceback
             # itself was gone forever. logger.exception here costs nothing and
             # makes every future one of these actually diagnosable.
-            logger.exception(
-                "compose fell back to ungrounded single-shot for %s", source_url
-            )
+            logger.exception("compose fell back to ungrounded single-shot for %s", source_url)
             with contextlib.suppress(Exception):
                 _checkpoint("fallback")
 
@@ -2107,10 +2104,7 @@ def compose_assignment_article_mistral(
     brief_id: str,
     client: MistralClient | None = None,
 ) -> MistralArticleFields:
-    """Generate a from-scratch article for an editor-assigned topic (no scraped
-    source page). Unlike ``compose_scrape_article_mistral``, the brief text is
-    NOT verified fact — the model must substantiate the topic itself via tools
-    before writing, using the same research -> write -> grade/revise loop."""
+    """Generate a from-scratch article for an editor-assigned topic (no scraped source page). Unlike ``compose_scrape_article_mistral``, the brief text is NOT verified fact — the model must substantiate the topic itself via tools before writing, using the same research -> write -> grade/revise loop."""
     mistral = client or get_mistral_client()
     today = _today_utc()
 
@@ -2247,8 +2241,8 @@ def compose_recap_from_transcript_mistral(
     transcript_text: str,
     client: MistralClient | None = None,
 ) -> MistralArticleFields:
-    """
-    Community-call recap from a video transcript (Phase 4).
+    """Community-call recap from a video transcript (Phase 4).
+
     Uses the premium model — transcripts are long-form input.
     """
     from app.core.config import MISTRAL_MODEL_PREMIUM
@@ -2403,6 +2397,7 @@ Articles published this week ({len(context.articles)}):
     )
     return _parse_article_fields(payload)
 
+
 def translate_article_mistral(
     *,
     english_title: str,
@@ -2411,12 +2406,9 @@ def translate_article_mistral(
     target_language: str,
     client: MistralClient | None = None,
 ) -> dict[str, str]:
-    """Translate an English article to the target language via Mistral. Runs on
-    the Small tier (MISTRAL_MODEL_TRANSLATE) — localization needs no research or
-    editorial judgment, and this fires once per target language per published article."""
-    from app.core.config import MISTRAL_MODEL_TRANSLATE
-
+    """Translate an English article to the target language via Mistral. Runs on the Small tier (MISTRAL_MODEL_TRANSLATE) — localization needs no research or editorial judgment, and this fires once per target language per published article."""
     from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANG_NAMES
+    from app.core.config import MISTRAL_MODEL_TRANSLATE
 
     mistral = client or get_mistral_client(model=MISTRAL_MODEL_TRANSLATE)
 
@@ -2448,7 +2440,7 @@ Body:
             {"role": "user", "content": user},
         ]
     )
-    
+
     return {
         "title": str(payload.get("title") or "").strip() or english_title,
         "summary": str(payload.get("summary") or "").strip() or english_summary,

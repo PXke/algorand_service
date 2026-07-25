@@ -1,4 +1,8 @@
+"""Feed listing, filtering, and translation overlay for article reads."""
+
 from __future__ import annotations
+
+import pytest
 
 from app.modules.news.services.news_service import NewsService
 from app.modules.news.stores.base import StoredArticle
@@ -6,6 +10,7 @@ from app.modules.news.stores.memory import InMemoryArticleStore
 
 
 def test_news_feed_lists_articles_newest_first() -> None:
+    """Orders the feed by published_at_epoch descending."""
     store = InMemoryArticleStore()
     store.insert(
         StoredArticle(
@@ -34,6 +39,7 @@ def test_news_feed_lists_articles_newest_first() -> None:
 
 
 def test_news_feed_filters_by_service_id() -> None:
+    """Restricts the feed to articles matching the given service_id."""
     store = InMemoryArticleStore()
     store.insert(
         StoredArticle(
@@ -61,6 +67,7 @@ def test_news_feed_filters_by_service_id() -> None:
 
 
 def test_get_article_detail() -> None:
+    """Fetches full article detail, including body and trigger metadata, by id."""
     store = InMemoryArticleStore()
     store.insert(
         StoredArticle(
@@ -82,6 +89,7 @@ def test_get_article_detail() -> None:
 
 
 def test_get_article_applies_translation_overlay() -> None:
+    """Overlays the stored translation's title/summary/body when a lang is requested."""
     import json
 
     store = InMemoryArticleStore()
@@ -112,6 +120,7 @@ def test_get_article_applies_translation_overlay() -> None:
     assert detail.body == "متن"
     assert svc.translation_langs_for("id-fa") == ["fa"]
 
+
 def _story(article_id: str, epoch: int, tags: list[str]) -> StoredArticle:
     return StoredArticle(
         article_id=article_id,
@@ -125,6 +134,7 @@ def _story(article_id: str, epoch: int, tags: list[str]) -> StoredArticle:
 
 
 def test_news_feed_filters_by_tag_case_insensitive() -> None:
+    """Matches a tag filter regardless of case or trailing whitespace on stored tags."""
     store = InMemoryArticleStore()
     store.insert(_story("a1", 100, ["NFT", "algorand"]))
     store.insert(_story("a2", 200, ["defi"]))
@@ -136,6 +146,7 @@ def test_news_feed_filters_by_tag_case_insensitive() -> None:
 
 
 def test_hot_feed_ranks_by_views_then_recency() -> None:
+    """Falls back to recency ordering when all articles have zero views."""
     store = InMemoryArticleStore()
     store.insert(_story("a1", 100, []))
     store.insert(_story("a2", 200, []))
@@ -148,6 +159,7 @@ def test_hot_feed_ranks_by_views_then_recency() -> None:
 
 
 def test_tag_stats_aggregates_counts_and_last_epoch() -> None:
+    """Aggregates per-tag article counts and last-seen epoch case-insensitively."""
     store = InMemoryArticleStore()
     store.insert(_story("a1", 100, ["nft", "Algorand"]))
     store.insert(_story("a2", 200, ["NFT"]))
@@ -161,18 +173,17 @@ def test_tag_stats_aggregates_counts_and_last_epoch() -> None:
     assert by_tag["defi"]["count"] == 1
 
 
-def test_hot_feed_velocity_vs_alltime(monkeypatch) -> None:
+def test_hot_feed_velocity_vs_alltime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ranks "hot" by views-per-day velocity but "top" by lifetime view count."""
     import time
 
     from app.modules.news.stores import view_counts
 
     now = int(time.time())
     store = InMemoryArticleStore()
-    store.insert(_story("old", now - 10 * 86400, []))   # 100 views / 10d = 10/d
-    store.insert(_story("new", now - 1 * 86400, []))    # 30 views / 1d = 30/d
-    monkeypatch.setattr(
-        view_counts, "get_views_bulk", lambda ids: {"old": 100, "new": 30}
-    )
+    store.insert(_story("old", now - 10 * 86400, []))  # 100 views / 10d = 10/d
+    store.insert(_story("new", now - 1 * 86400, []))  # 30 views / 1d = 30/d
+    monkeypatch.setattr(view_counts, "get_views_bulk", lambda _ids: {"old": 100, "new": 30})
     service = NewsService(store=store)
     hot = service.hot_feed(rank="hot")
     assert [i.article_id for i in hot] == ["new", "old"]
@@ -182,11 +193,9 @@ def test_hot_feed_velocity_vs_alltime(monkeypatch) -> None:
 
 
 def test_hot_feed_ages_recomposed_articles_from_first_publication(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A recompose re-publish re-stamps published_at. Velocity must age the
-    article from first_published_at_epoch, or its lifetime views divided by
-    a just-reset age would catapult any refreshed old story to #1 hot."""
+    """A recompose re-publish re-stamps published_at. Velocity must age the article from first_published_at_epoch, or its lifetime views divided by a just-reset age would catapult any refreshed old story to #1 hot."""
     import time
 
     from app.modules.news.stores import view_counts
@@ -197,9 +206,7 @@ def test_hot_feed_ages_recomposed_articles_from_first_publication(
     refreshed.first_published_at_epoch = now - 30 * 86400  # ...born 30d ago
     store.insert(refreshed)
     store.insert(_story("new", now - 1 * 86400, []))  # 30 views / 1d = 30/d
-    monkeypatch.setattr(
-        view_counts, "get_views_bulk", lambda ids: {"refreshed": 100, "new": 30}
-    )
+    monkeypatch.setattr(view_counts, "get_views_bulk", lambda _ids: {"refreshed": 100, "new": 30})
     # refreshed: 100 views / 30d ≈ 3.3/d — well below new's 30/d. (With the
     # bug, 100 views / 0.25d floor = 400/d would have ranked it first.)
     hot = NewsService(store=store).hot_feed(rank="hot")

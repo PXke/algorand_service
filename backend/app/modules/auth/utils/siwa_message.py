@@ -1,3 +1,5 @@
+"""Sign-In-With-Algorand (EIP-4361-shaped) message construction."""
+
 from __future__ import annotations
 
 from app.modules.auth.utils.caip122 import Caip122Message

@@ -1,12 +1,9 @@
-"""New research tools requested by a stronger research model via suggest_tool
-on a real CompX recompose (2026-07-14): github_repository_search (the model's
-owner guess 404'd and it had no way to search GitHub by keyword) and
-search_token_listings (confirm whether an ASA is actually tradeable instead
-of assuming so from its supply)."""
+"""New research tools requested by a stronger research model via suggest_tool on a real CompX recompose (2026-07-14): github_repository_search (the model's owner guess 404'd and it had no way to search GitHub by keyword) and search_token_listings (confirm whether an ASA is actually tradeable instead of assuming so from its supply)."""
 
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from app.modules.ai import research_tools
 from app.modules.ai.research_tools import (
@@ -18,61 +15,98 @@ from app.modules.ai.research_tools import (
 )
 
 
-def _json_response(url: str, status_code: int, payload) -> httpx.Response:
-    return httpx.Response(
-        status_code, json=payload, request=httpx.Request("GET", url)
-    )
+def _json_response(url: str, status_code: int, payload: dict) -> httpx.Response:
+    return httpx.Response(status_code, json=payload, request=httpx.Request("GET", url))
 
 
-def test_owner_liveness_flags_active_owner(monkeypatch):
-    """An archived repo under an owner still pushing to other repos = superseded,
-    not defunct (the Pera Wallet case)."""
+def test_owner_liveness_flags_active_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An archived repo under an owner still pushing to other repos = superseded, not defunct (the Pera Wallet case)."""
     from datetime import UTC, datetime, timedelta
 
     recent = (datetime.now(UTC) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
-    monkeypatch.setattr(research_tools, "_github_owner_repos", lambda owner: {
-        "owner": owner,
-        "repos": [
-            {"repo": "perawallet/pera-wallet", "pushed_at": "2024-08-26T00:00:00Z",
-             "stars": 200, "archived": True},
-            {"repo": "perawallet/pera-react-native", "pushed_at": recent,
-             "stars": 40, "archived": False},
-        ],
-    })
+    monkeypatch.setattr(
+        research_tools,
+        "_github_owner_repos",
+        lambda owner: {
+            "owner": owner,
+            "repos": [
+                {
+                    "repo": "perawallet/pera-wallet",
+                    "pushed_at": "2024-08-26T00:00:00Z",
+                    "stars": 200,
+                    "archived": True,
+                },
+                {
+                    "repo": "perawallet/pera-react-native",
+                    "pushed_at": recent,
+                    "stars": 40,
+                    "archived": False,
+                },
+            ],
+        },
+    )
     out = research_tools._owner_liveness("perawallet", exclude="perawallet/pera-wallet")
     assert "OWNER STILL ACTIVE" in out["verdict"]
-    assert out["active_repos"] and out["active_repos"][0]["repo"] == "perawallet/pera-react-native"
+    assert out["active_repos"]
+    assert out["active_repos"][0]["repo"] == "perawallet/pera-react-native"
 
 
-def test_owner_liveness_dormant_when_no_recent(monkeypatch):
-    monkeypatch.setattr(research_tools, "_github_owner_repos", lambda owner: {
-        "owner": owner,
-        "repos": [{"repo": "x/old", "pushed_at": "2020-01-01T00:00:00Z",
-                   "stars": 1, "archived": False}],
-    })
+def test_owner_liveness_dormant_when_no_recent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An owner with no recent commits across any repo is reported dormant, with no active repos."""
+    monkeypatch.setattr(
+        research_tools,
+        "_github_owner_repos",
+        lambda owner: {
+            "owner": owner,
+            "repos": [
+                {
+                    "repo": "x/old",
+                    "pushed_at": "2020-01-01T00:00:00Z",
+                    "stars": 1,
+                    "archived": False,
+                }
+            ],
+        },
+    )
     out = research_tools._owner_liveness("x")
     assert "dormant" in out["verdict"].lower()
     assert out["active_repos"] == []
 
 
-def test_github_activity_archived_repo_attaches_owner_liveness(monkeypatch):
-    """An archived repo returns owner_liveness so the writer can't conclude the
-    project is dead from the archived flag alone."""
+def test_github_activity_archived_repo_attaches_owner_liveness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An archived repo returns owner_liveness so the writer can't conclude the project is dead from the archived flag alone."""
     from datetime import UTC, datetime, timedelta
 
     recent = (datetime.now(UTC) - timedelta(days=2)).isoformat().replace("+00:00", "Z")
 
-    def fake_get(url, **kw):
+    def fake_get(url: str, **_kw: object) -> httpx.Response:
         if url.endswith("/repos/perawallet/pera-wallet"):
-            return _json_response(url, 200, {"description": "old monorepo",
-                                             "stargazers_count": 200,
-                                             "pushed_at": "2024-08-26T00:00:00Z",
-                                             "archived": True})
+            return _json_response(
+                url,
+                200,
+                {
+                    "description": "old monorepo",
+                    "stargazers_count": 200,
+                    "pushed_at": "2024-08-26T00:00:00Z",
+                    "archived": True,
+                },
+            )
         if "/users/perawallet/repos" in url:
-            return _json_response(url, 200, [
-                {"full_name": "perawallet/pera-react-native", "description": "app",
-                 "stargazers_count": 40, "pushed_at": recent, "archived": False},
-            ])
+            return _json_response(
+                url,
+                200,
+                [
+                    {
+                        "full_name": "perawallet/pera-react-native",
+                        "description": "app",
+                        "stargazers_count": 40,
+                        "pushed_at": recent,
+                        "archived": False,
+                    },
+                ],
+            )
         # releases / commits / contributors
         return _json_response(url, 200, [])
 
@@ -83,43 +117,59 @@ def test_github_activity_archived_repo_attaches_owner_liveness(monkeypatch):
     assert "OWNER STILL ACTIVE" in out["owner_liveness"]["verdict"]
 
 
-def test_fetch_url_archived_github_page_gets_owner_liveness(monkeypatch):
-    """A raw fetch_url of an archived github repo page must carry owner_liveness —
-    the path the writer actually took in the Pera incident."""
-    monkeypatch.setattr(research_tools, "_owner_liveness", lambda owner, **kw: {
-        "owner": owner, "active_repos": [{"repo": f"{owner}/new-app"}],
-        "verdict": "OWNER STILL ACTIVE: do NOT report the project as defunct.",
-    })
-    result = {"url": "https://github.com/perawallet/pera-wallet",
-              "title": "GitHub - perawallet/pera-wallet",
-              "text": "This repository was archived by the owner on Oct 15, 2025."}
+def test_fetch_url_archived_github_page_gets_owner_liveness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raw fetch_url of an archived github repo page must carry owner_liveness — the path the writer actually took in the Pera incident."""
+    monkeypatch.setattr(
+        research_tools,
+        "_owner_liveness",
+        lambda owner, **_kw: {
+            "owner": owner,
+            "active_repos": [{"repo": f"{owner}/new-app"}],
+            "verdict": "OWNER STILL ACTIVE: do NOT report the project as defunct.",
+        },
+    )
+    result = {
+        "url": "https://github.com/perawallet/pera-wallet",
+        "title": "GitHub - perawallet/pera-wallet",
+        "text": "This repository was archived by the owner on Oct 15, 2025.",
+    }
     out = research_tools._augment_github_archived(result["url"], result)
     assert "owner_liveness" in out
     assert out["text"].startswith("[ARCHIVED-REPO CHECK] OWNER STILL ACTIVE")
 
 
-def test_fetch_url_non_archived_github_page_untouched(monkeypatch):
+def test_fetch_url_non_archived_github_page_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-archived github page is passed through untouched, with no owner-liveness lookup."""
     called = {"n": 0}
-    monkeypatch.setattr(research_tools, "_owner_liveness",
-                        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or {})
-    result = {"url": "https://github.com/perawallet/pera-react-native",
-              "text": "An actively maintained Algorand wallet."}
+    monkeypatch.setattr(
+        research_tools,
+        "_owner_liveness",
+        lambda *_a, **_k: called.__setitem__("n", called["n"] + 1) or {},
+    )
+    result = {
+        "url": "https://github.com/perawallet/pera-react-native",
+        "text": "An actively maintained Algorand wallet.",
+    }
     out = research_tools._augment_github_archived(result["url"], result)
     assert "owner_liveness" not in out
     assert called["n"] == 0  # no liveness lookup when not archived
 
 
-def test_fetch_url_non_github_url_untouched():
+def test_fetch_url_non_github_url_untouched() -> None:
+    """A non-github URL is never augmented, even if its text mentions being archived."""
     result = {"url": "https://example.com/x", "text": "repository was archived somewhere"}
     out = research_tools._augment_github_archived(result["url"], result)
     assert "owner_liveness" not in out
 
 
-def test_github_repository_search_returns_candidates(monkeypatch):
+def test_github_repository_search_returns_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Maps a GitHub code-search response into the tool's repo/description/stars/pushed_at shape."""
     monkeypatch.setattr(
         research_tools,
         "_guarded_get",
-        lambda url, **kw: _json_response(
+        lambda url, **_kw: _json_response(
             url,
             200,
             {
@@ -147,18 +197,14 @@ def test_github_repository_search_returns_candidates(monkeypatch):
     ]
 
 
-def test_github_get_retries_unauthenticated_when_token_rejected(monkeypatch):
-    """Root-caused 2026-07-16: the prod GITHUB_TOKEN expired, and GitHub
-    answers 401 to ANY request carrying a revoked token — so every github_*
-    tool call started failing verbatim ('401 Unauthorized' straight into the
-    research trace of the isitalgorandsbirthday.com compose), even though the
-    same request would have SUCCEEDED unauthenticated (rate-limited harder,
-    but working). A dead token must degrade to anonymous access, not take the
-    whole tool family down."""
+def test_github_get_retries_unauthenticated_when_token_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-caused 2026-07-16: the prod GITHUB_TOKEN expired, and GitHub answers 401 to ANY request carrying a revoked token — so every github_* tool call started failing verbatim ('401 Unauthorized' straight into the research trace of the isitalgorandsbirthday.com compose), even though the same request would have SUCCEEDED unauthenticated (rate-limited harder, but working). A dead token must degrade to anonymous access, not take the whole tool family down."""
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_expired_token")
     calls: list[dict] = []
 
-    def fake_get(url, **kw):
+    def fake_get(url: str, **kw: object) -> httpx.Response:
         # Copy — _github_get mutates the same dict in place for the retry.
         calls.append(dict(kw.get("headers") or {}))
         if "Authorization" in (kw.get("headers") or {}):
@@ -178,12 +224,13 @@ def test_github_get_retries_unauthenticated_when_token_rejected(monkeypatch):
     assert "error" not in result
 
 
-def test_github_get_no_retry_without_token(monkeypatch):
+def test_github_get_no_retry_without_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 401 with no token configured is not retried — it must not double the request."""
     # Anonymous 401 (should not happen, but) must not double the request.
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     calls: list[str] = []
 
-    def fake_get(url, **kw):
+    def fake_get(url: str, **_kw: object) -> httpx.Response:
         calls.append(url)
         return _json_response(url, 401, {"message": "nope"})
 
@@ -193,16 +240,20 @@ def test_github_get_no_retry_without_token(monkeypatch):
     assert "error" in result
 
 
-def test_github_repository_search_requires_nonempty_query():
+def test_github_repository_search_requires_nonempty_query() -> None:
+    """Rejects an empty search query with an error."""
     result = _tool_github_repository_search("")
     assert "error" in result
 
 
-def test_github_repository_search_no_results_is_not_an_error(monkeypatch):
+def test_github_repository_search_no_results_is_not_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zero-result search returns an empty results list, not an error."""
     monkeypatch.setattr(
         research_tools,
         "_guarded_get",
-        lambda url, **kw: _json_response(url, 200, {"total_count": 0, "items": []}),
+        lambda url, **_kw: _json_response(url, 200, {"total_count": 0, "items": []}),
     )
     result = _tool_github_repository_search("compx-io")
     assert result["total_count"] == 0
@@ -210,15 +261,18 @@ def test_github_repository_search_no_results_is_not_an_error(monkeypatch):
     assert "error" not in result
 
 
-def test_github_repository_search_tool_registered():
+def test_github_repository_search_tool_registered() -> None:
+    """github_repository_search is registered as a tool schema and handler."""
     schemas, handlers = research_tools_fn()
     names = {s["function"]["name"] for s in schemas}
     assert "github_repository_search" in names
     assert "github_repository_search" in handlers
 
 
-def test_search_token_listings_reports_both_dexes(monkeypatch):
-    def fake_get(url, **kw):
+def test_search_token_listings_reports_both_dexes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reports listing status/liquidity from both Tinyman and Pact for a traded asset."""
+
+    def fake_get(url: str, **_kw: object) -> httpx.Response:
         if "tinyman" in url:
             return _json_response(
                 url,
@@ -254,8 +308,10 @@ def test_search_token_listings_reports_both_dexes(monkeypatch):
     assert result["pact"]["pools"][0]["pair"] == "COMPX/USDC"
 
 
-def test_search_token_listings_not_listed_on_tinyman(monkeypatch):
-    def fake_get(url, **kw):
+def test_search_token_listings_not_listed_on_tinyman(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reports not-listed on Tinyman and zero pools on Pact for an untraded asset."""
+
+    def fake_get(url: str, **_kw: object) -> httpx.Response:
         if "tinyman" in url:
             return _json_response(url, 404, {})
         return _json_response(url, 200, {"results": []})
@@ -267,17 +323,13 @@ def test_search_token_listings_not_listed_on_tinyman(monkeypatch):
     assert result["pact"]["pool_count"] == 0
 
 
-def test_search_token_listings_uses_pacts_real_filter_param(monkeypatch):
-    """Regression-pin a real incident (2026-07-14/15): Pact's API silently
-    ignores an unrecognized `asset_id` query param and returns its ENTIRE
-    ~3900-pool listing instead of erroring — confirmed live, a COMPX query
-    returned unrelated USDC/goUSD and ALGO/gALGO pools with count=3863,
-    matching the platform total exactly. `primary_asset__on_chain_id` is
-    the real filter (verified live to match the asset on either side of
-    the pool, despite the name)."""
+def test_search_token_listings_uses_pacts_real_filter_param(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression-pin a real incident (2026-07-14/15): Pact's API silently ignores an unrecognized `asset_id` query param and returns its ENTIRE ~3900-pool listing instead of erroring — confirmed live, a COMPX query returned unrelated USDC/goUSD and ALGO/gALGO pools with count=3863, matching the platform total exactly. `primary_asset__on_chain_id` is the real filter (verified live to match the asset on either side of the pool, despite the name)."""
     captured_params: list = []
 
-    def fake_get(url, **kw):
+    def fake_get(url: str, **kw: object) -> httpx.Response:
         if "tinyman" in url:
             return _json_response(url, 404, {})
         captured_params.append(kw.get("params"))
@@ -291,12 +343,14 @@ def test_search_token_listings_uses_pacts_real_filter_param(monkeypatch):
     assert "asset_id" not in captured_params[0]
 
 
-def test_search_token_listings_requires_numeric_asset_id():
+def test_search_token_listings_requires_numeric_asset_id() -> None:
+    """Rejects a non-numeric asset_id with an error."""
     result = _tool_search_token_listings("not-a-number")
     assert "error" in result
 
 
-def test_search_token_listings_tool_registered():
+def test_search_token_listings_tool_registered() -> None:
+    """search_token_listings is registered as a tool schema and handler."""
     schemas, handlers = research_tools_fn()
     names = {s["function"]["name"] for s in schemas}
     assert "search_token_listings" in names

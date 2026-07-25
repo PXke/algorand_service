@@ -13,6 +13,7 @@ CrawlLane = str  # deprecated alias
 
 
 def crawl_lane_for_url(scrape_url: str) -> str:
+    """Return which crawl lane ("http", "browser", or "mail") handles this URL."""
     from app.modules.scraper.core.scrape_engine import uses_browser_engine
 
     ctype = infer_crawler_type(scrape_url)
@@ -24,6 +25,7 @@ def crawl_lane_for_url(scrape_url: str) -> str:
 
 
 def is_lane_enabled(lane: str) -> bool:
+    """Return whether the given crawl lane is currently enabled by feature flags."""
     if lane == "browser":
         return is_web_spa_enabled() and is_crawler_enabled(CrawlerType.WEB)
     if lane == "http":

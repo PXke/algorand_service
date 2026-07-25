@@ -1,12 +1,17 @@
+"""Learned publish/reject classifier: TF-IDF + scalar features over a logistic model."""
+
 from __future__ import annotations
 
 import hashlib
 import pickle
 import random
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.modules.search.classifier.score import keyword_hits, score_page
+
+if TYPE_CHECKING:
+    from sklearn.feature_extraction.text import TfidfVectorizer
 
 _FEATURE_DIM = 8
 
@@ -29,9 +34,8 @@ def _text_blob(text: str, url: str) -> str:
     return f"{url}\n{text[:6000]}"
 
 
-def _combined_features(vectorizer, text: str, url: str, category: str):
-    """Sparse matrix: TF-IDF of the article text hstacked with the scalar
-    features (relevance score, length, category one-hots)."""
+def _combined_features(vectorizer: TfidfVectorizer, text: str, url: str, category: str) -> Any:  # noqa: ANN401 -- scipy sparse matrix, no single static type
+    """Sparse matrix: TF-IDF of the article text hstacked with the scalar features (relevance score, length, category one-hots)."""
     from scipy.sparse import csr_matrix, hstack
 
     x_text = vectorizer.transform([_text_blob(text, url)])
@@ -45,7 +49,7 @@ def _model_path() -> Path:
     return Path(PUBLISH_CLASSIFIER_MODEL_PATH)
 
 
-def _load_model() -> Any | None:
+def _load_model() -> Any | None:  # noqa: ANN401 -- pickled payload shape varies (bare estimator or {"vectorizer","model"} dict)
     path = _model_path()
     if not path.is_file():
         return None
@@ -56,7 +60,7 @@ def _load_model() -> Any | None:
         return None
 
 
-def _save_model(model: Any) -> None:
+def _save_model(model: Any) -> None:  # noqa: ANN401 -- pickled payload shape varies (bare estimator or {"vectorizer","model"} dict)
     path = _model_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as fh:
@@ -75,8 +79,7 @@ def _heuristic_publish(text: str, url: str, category: str) -> tuple[bool, float]
 
 
 def predict_publish(text: str, url: str, category: str) -> tuple[bool | None, float]:
-    """
-    Predict publish-worthiness with its confidence.
+    """Predict publish-worthiness with its confidence.
 
     Returns (True/False, confidence) when confident; (None, confidence) when
     manual review is required (low confidence or sampling threshold).
@@ -120,33 +123,40 @@ def is_publish_worthy(text: str, url: str, category: str) -> bool | None:
     return decision
 
 
-def relevance_score(text: str, url: str = "") -> float:
+def relevance_score(text: str, url: str = "", outbound_links: tuple[str, ...] = ()) -> float:
     """On-topic relevance in [0, 1] from the page relevance scorer.
 
     Independent of the publish classifier's review-sampling, so it stays a
     meaningful signal even in training mode (where ``predict_publish`` defers
-    everything). Used to gate enqueue and to weight publish-queue priority."""
+    everything). Used to gate enqueue and to weight publish-queue priority.
+
+    outbound_links feeds score_page's explorer-link signal — without it, a
+    multi-chain service whose own text never says "algorand" (quantoz.com/
+    EURQ, zerosignal.ai) scores 0 here even after the SAME domain already
+    cleared discovery on this exact signal, sinking its publish-queue
+    priority to the bottom for no real reason (root-caused 2026-07-22).
+    """
     try:
-        return float(max(0.0, min(1.0, score_page(url=url, text=text).score)))
+        return float(
+            max(0.0, min(1.0, score_page(url=url, text=text, outbound_links=outbound_links).score))
+        )
     except Exception:
         # Fail open: an unscored page is treated as relevant rather than dropped.
         return 1.0
 
 
-def score_content_for_storage(text: str, url: str = "") -> float:
-    """Crude storage-relevance score (~0–10): on-topic keyword families present
-    plus the page classifier's 0–1 score scaled ×5. Used for the domain
-    relevance_score column / admin sort and the frontier preview_score — not a
-    hard gate, so the loose scale is fine."""
+def score_content_for_storage(
+    text: str, url: str = "", outbound_links: tuple[str, ...] = ()
+) -> float:
+    """Crude storage-relevance score (~0–10): on-topic keyword families present plus the page classifier's 0–1 score scaled ×5. Used for the domain relevance_score column / admin sort and the frontier preview_score — not a hard gate, so the loose scale is fine."""
     hits = keyword_hits(text)
     if url:
-        hits += int(score_page(url=url, text=text).score * 5)
+        hits += int(score_page(url=url, text=text, outbound_links=outbound_links).score * 5)
     return float(hits)
 
 
 def is_content_quality_sufficient(text: str) -> bool:
-    """Quality floor: at least 3 distinct on-topic keyword families, or 2 in a
-    page long enough to be substantive."""
+    """Quality floor: at least 3 distinct on-topic keyword families, or 2 in a page long enough to be substantive."""
     hits = keyword_hits(text)
     return hits >= 3 or (len(text) >= 300 and hits >= 2)
 
@@ -163,6 +173,7 @@ def record_classifier_feedback(
     admin_wallet: str,
     metadata: dict[str, str] | None = None,
 ) -> str:
+    """Persist an admin's corrected/confirmed classifier verdict for a page as training feedback."""
     import uuid
     from datetime import UTC, datetime
 
@@ -206,9 +217,7 @@ def retrain_publish_classifier(*, limit: int = 500) -> dict[str, object]:
     from app.core.statements import ClassifierFeedbackStmts
 
     session = get_cassandra_session()
-    index_rows = list(
-        session.execute(ClassifierFeedbackStmts.LIST_IDS, ("main", limit))
-    )
+    index_rows = list(session.execute(ClassifierFeedbackStmts.LIST_IDS, ("main", limit)))
     samples: list[tuple[str, str, str, int]] = []
     cat_samples: list[tuple[str, str, str]] = []
     fids = [r.feedback_id for r in index_rows if r.feedback_id is not None]
@@ -273,8 +282,7 @@ def _category_model_path() -> Path:
 
 
 def _retrain_category_model(cat_samples: list[tuple[str, str, str]]) -> dict[str, object]:
-    """Train a TF-IDF + LogisticRegression category classifier from admin
-    category labels (replaces the Mistral categorizer for routing)."""
+    """Train a TF-IDF + LogisticRegression category classifier from admin category labels (replaces the Mistral categorizer for routing)."""
     import pickle
 
     distinct = {c for (_t, _u, c) in cat_samples}
@@ -308,11 +316,10 @@ def predict_categories(
     max_categories: int = 3,
     min_prob: float = 0.15,
 ) -> list[str]:
-    """Return up to ``max_categories`` labels from the trained model's
-    probability distribution (primary first). Empty when no model exists."""
-    from app.modules.ai.content_categorizer import VALID_CATEGORIES
-
+    """Return up to ``max_categories`` labels from the trained model's probability distribution (primary first). Empty when no model exists."""
     import pickle
+
+    from app.modules.ai.content_categorizer import VALID_CATEGORIES
 
     path = _category_model_path()
     if not path.is_file():
@@ -347,5 +354,6 @@ def predict_categories(
 
 
 def service_id_for_url(url: str) -> str:
+    """Derive a stable synthetic service id from a discovered page's URL."""
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
     return f"discovered-web-{digest}"

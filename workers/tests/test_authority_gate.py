@@ -1,13 +1,15 @@
-"""Authority gate: unattributed appeals to authority are unattributable by
-construction — a real claim has a citable source in the writer's own trace.
+"""Authority gate: unattributed appeals to authority are unattributable by construction — a real claim has a citable source in the writer's own trace.
 
 Root incident (2026-07-18, quantum-rebrand draft caught pre-release): the
 writer asserted 'industry-wide research suggests that Falcon signatures can
 be 10-100x slower to verify than classical ECC signatures' — a fabricated
 benchmark, wrong in direction (Falcon verification is fast; signing is the
-costly op), laundered through authority no reader can check."""
+costly op), laundered through authority no reader can check.
+"""
 
 from __future__ import annotations
+
+import pytest
 
 from app.modules.newspaper.authority_gate import (
     authority_revision_issues,
@@ -22,13 +24,13 @@ INCIDENT_SENTENCE = (
 )
 
 
-def test_finds_the_real_incident_phrase():
-    assert find_unattributed_authority(INCIDENT_SENTENCE) == [
-        "industry-wide research"
-    ]
+def test_finds_the_real_incident_phrase() -> None:
+    """Flags "industry-wide research" as unattributed authority in the root-incident sentence."""
+    assert find_unattributed_authority(INCIDENT_SENTENCE) == ["industry-wide research"]
 
 
-def test_finds_common_weasel_constructions():
+def test_finds_common_weasel_constructions() -> None:
+    """Flags each common unattributed-authority phrase (experts say, analysts believe, etc.)."""
     body = (
         "Experts say the merge is risky. Analysts believe fees will rise. "
         "Studies show adoption lags. It is widely believed that quantum "
@@ -42,7 +44,8 @@ def test_finds_common_weasel_constructions():
     assert "sources say" in found
 
 
-def test_named_attribution_and_plain_nouns_are_not_flagged():
+def test_named_attribution_and_plain_nouns_are_not_flagged() -> None:
+    """Never flags named sources (NIST, the Foundation) or the plain noun "research"."""
     body = (
         "According to NIST's 2024 standard, Falcon was selected for "
         "signatures. The Foundation's roadmap states native accounts land in "
@@ -53,14 +56,16 @@ def test_named_attribution_and_plain_nouns_are_not_flagged():
     assert find_unattributed_authority(body) == []
 
 
-def test_revision_issue_names_phrase_and_demands_source_or_deletion():
+def test_revision_issue_names_phrase_and_demands_source_or_deletion() -> None:
+    """Names the offending phrase and demands a source or deletion in the revision issue text."""
     issues = authority_revision_issues(INCIDENT_SENTENCE)
     assert len(issues) == 1
     assert "'industry-wide research'" in issues[0]
     assert "delete the claim" in issues[0]
 
 
-def test_excision_removes_only_the_offending_sentence():
+def test_excision_removes_only_the_offending_sentence() -> None:
+    """Deletes only the flagged sentence, leaving neighboring text and table structure intact."""
     body = (
         "## Risks\n\n"
         "Falcon signatures are large. " + INCIDENT_SENTENCE + " For a "
@@ -78,7 +83,8 @@ def test_excision_removes_only_the_offending_sentence():
     assert out["_authority_removed"] == [INCIDENT_SENTENCE]
 
 
-def test_structure_lines_never_touched_even_if_matching():
+def test_structure_lines_never_touched_even_if_matching() -> None:
+    """Leaves headings and list items untouched even when their text matches a weasel phrase."""
     body = "## Experts say\n\n- experts say this bullet stays\n\nClean prose."
     out = excise_unattributed_authority({"body": body})
     # Headings/lists are structural; the gate only edits prose sentences.
@@ -86,14 +92,16 @@ def test_structure_lines_never_touched_even_if_matching():
     assert "_authority_removed" not in out
 
 
-def test_clean_body_untouched():
+def test_clean_body_untouched() -> None:
+    """Returns the same payload object unmodified when the body has no unattributed claims."""
     payload = {"body": "The Foundation's own table lists 1,793-byte keys."}
     out = excise_unattributed_authority(payload)
     assert out is payload
     assert "_authority_removed" not in out
 
 
-def test_gate_respects_disable_flag(monkeypatch):
+def test_gate_respects_disable_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leaves the body unmodified when AUTHORITY_GATE_ENABLED is False."""
     monkeypatch.setattr("app.core.config.AUTHORITY_GATE_ENABLED", False)
     payload = {"body": INCIDENT_SENTENCE}
     out = excise_unattributed_authority(payload)

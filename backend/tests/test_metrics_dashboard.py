@@ -1,4 +1,8 @@
+"""Metrics-dashboard response includes the expected tiles."""
+
 from __future__ import annotations
+
+import pytest
 
 from app.modules.metrics.services.dashboard_service import MetricsDashboardService
 from app.modules.news.services.news_service import NewsService
@@ -6,7 +10,8 @@ from app.modules.news.stores.base import StoredArticle
 from app.modules.news.stores.memory import InMemoryArticleStore
 
 
-def test_dashboard_includes_articles_tile(monkeypatch) -> None:
+def test_dashboard_includes_articles_tile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Includes articles, last_round and round_latency tiles with expected formatted values."""
     store = InMemoryArticleStore()
     store.insert(
         StoredArticle(
@@ -21,15 +26,15 @@ def test_dashboard_includes_articles_tile(monkeypatch) -> None:
     news = NewsService(store=store)
     monkeypatch.setattr(
         "app.modules.metrics.services.dashboard_service.fetch_algod_status",
-        lambda **kwargs: {"last-round": 12345, "time-since-last-round": 3_000_000_000},
+        lambda **_kwargs: {"last-round": 12345, "time-since-last-round": 3_000_000_000},
     )
     monkeypatch.setattr(
         "app.modules.metrics.services.price_service.load_price_brief",
-        lambda asset_id: None,
+        lambda _asset_id: None,
     )
     monkeypatch.setattr(
         "app.modules.metrics.services.dashboard_service.load_latest_price_sample",
-        lambda asset_id: None,
+        lambda _asset_id: None,
     )
 
     service = MetricsDashboardService(news_service=news)

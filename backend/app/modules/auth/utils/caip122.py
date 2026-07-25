@@ -1,3 +1,5 @@
+"""CAIP-122 sign-in message construction."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -24,6 +26,7 @@ class Caip122Message:
     resources: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize this message to the CAIP-122 JSON payload shape."""
         payload: dict[str, Any] = {
             "domain": self.domain,
             "account_address": self.account_address,
@@ -49,6 +52,7 @@ class Caip122Message:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Caip122Message:
+        """Reconstruct a Caip122Message from its CAIP-122 JSON payload shape."""
         return cls(
             domain=str(data["domain"]),
             account_address=str(data["account_address"]),
@@ -67,4 +71,5 @@ class Caip122Message:
 
 
 def utc_now_iso() -> str:
+    """Return the current UTC time as a second-precision ISO 8601 string with a Z suffix."""
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

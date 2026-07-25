@@ -1,10 +1,15 @@
+"""Upsert articles/pages into the Typesense search index."""
+
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
 
 from app.modules.search.core.tokenize import build_article_search_tokens
 from app.modules.search.core.typesense_config import build_typesense_client, is_typesense_configured
+
+if TYPE_CHECKING:
+    import typesense
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +53,7 @@ PAGES_SCHEMA = {
 }
 
 
-def _ensure_collection(client: Any, schema: dict[str, object]) -> None:
+def _ensure_collection(client: typesense.Client, schema: dict[str, object]) -> None:
     name = str(schema["name"])
     try:
         client.collections[name].retrieve()
@@ -59,7 +64,7 @@ def _ensure_collection(client: Any, schema: dict[str, object]) -> None:
         _ensure_article_search_synonyms(client)
 
 
-def _ensure_article_search_synonyms(client: Any) -> None:
+def _ensure_article_search_synonyms(client: typesense.Client) -> None:
     synonyms_api = client.collections[ARTICLES_COLLECTION].synonyms
     for syn_id, synonyms in ARTICLE_SEARCH_SYNONYMS.items():
         try:
@@ -78,6 +83,7 @@ def upsert_article_document(
     published_at_epoch: int,
     tags: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, str]:
+    """Upsert an article's searchable fields into the Typesense articles collection."""
     if not is_typesense_configured():
         return {"status": "skipped", "reason": "typesense_not_configured"}
 
@@ -87,9 +93,7 @@ def upsert_article_document(
 
     try:
         _ensure_collection(client, ARTICLES_SCHEMA)
-        tokens = build_article_search_tokens(
-            title=title, summary=summary, body=body, tags=tags
-        )
+        tokens = build_article_search_tokens(title=title, summary=summary, body=body, tags=tags)
         client.collections[ARTICLES_COLLECTION].documents.upsert(
             {
                 "id": article_id,
@@ -120,6 +124,7 @@ def upsert_page_document(
     published_at_epoch: int,
     classifier_score: float,
 ) -> dict[str, str]:
+    """Upsert a crawled page's searchable fields into the Typesense pages collection."""
     if not is_typesense_configured():
         return {"status": "skipped", "reason": "typesense_not_configured"}
 

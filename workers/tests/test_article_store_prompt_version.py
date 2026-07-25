@@ -1,5 +1,4 @@
-"""prompt_version must round-trip through the write and read paths so stored
-articles can be correlated with the compose prompt that produced them."""
+"""prompt_version must round-trip through the write and read paths so stored articles can be correlated with the compose prompt that produced them."""
 
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ from app.modules.newspaper.article_store import get_article, insert_stored_artic
 
 
 def test_insert_stored_article_passes_prompt_version_last_positional(
-    fake_cassandra_session,
+    fake_cassandra_session: MagicMock,
 ) -> None:
     insert_stored_article(
         service_id="svc",
@@ -29,7 +28,9 @@ def test_insert_stored_article_passes_prompt_version_last_positional(
     assert params[-1] == "2026-07-02"
 
 
-def test_insert_stored_article_defaults_prompt_version_to_none(fake_cassandra_session) -> None:
+def test_insert_stored_article_defaults_prompt_version_to_none(
+    fake_cassandra_session: MagicMock,
+) -> None:
     insert_stored_article(
         service_id="svc",
         title="T",
@@ -46,7 +47,7 @@ def test_insert_stored_article_defaults_prompt_version_to_none(fake_cassandra_se
     assert params[-1] is None
 
 
-def test_get_article_reads_prompt_version(fake_cassandra_session) -> None:
+def test_get_article_reads_prompt_version(fake_cassandra_session: MagicMock) -> None:
     aid = uuid4()
     row = MagicMock()
     row.article_id = aid

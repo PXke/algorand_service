@@ -10,15 +10,17 @@ from __future__ import annotations
 
 import html
 import logging
+from collections.abc import Awaitable, Callable
 from uuid import UUID
 
-from robyn import Request, Response
+from robyn import Request, Response, Robyn
 
 from app.core import serialization
 from app.core.article_translation_langs import html_lang_for
 from app.core.config import settings
 from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
+from app.core.tracking import tracking_opted_out_from_headers
 from app.modules.news.services.news_service import NewsService
 from app.modules.seo import analytics_store, feeds, render, shell, sitemap
 from app.modules.seo.markdown import md_to_html
@@ -38,9 +40,6 @@ _NEWS_SSR_LIMIT = 30
 _SECTION_LIMIT = 30
 _FEED_FULL_CONTENT_LIMIT = 20  # newest items carry full content:encoded HTML
 _SITEMAP_LIMIT = 5000
-
-
-from app.core.tracking import tracking_opted_out_from_headers
 
 
 def _doc_response(
@@ -111,6 +110,8 @@ def _record(request: Request, path: str) -> None:
         # Sent by every evergreen browser on both the initial document GET and
         # this same beacon POST — see analytics_store.is_missing_fetch_metadata.
         sec_fetch_mode=_header(request, "sec-fetch-mode"),
+        # See analytics_store.is_missing_accept_header.
+        accept=_header(request, "accept"),
     )
 
 
@@ -127,9 +128,7 @@ _BEACON_STATIC_PATHS = {
 
 
 def _is_known_app_path(path: str) -> bool:
-    """True for a path the Flutter router can actually land on — keeps the
-    unauthenticated beacon from letting a client bump counters for arbitrary
-    made-up paths (cardinality/data-quality, not just a hard filter)."""
+    """True for a path the Flutter router can actually land on — keeps the unauthenticated beacon from letting a client bump counters for arbitrary made-up paths (cardinality/data-quality, not just a hard filter)."""
     if path in _BEACON_STATIC_PATHS:
         return True
     if path.startswith("/news/articles/"):
@@ -147,8 +146,7 @@ def _is_known_app_path(path: str) -> bool:
 
 
 def _article_tombstoned(article_id: str) -> bool:
-    """Was this article deliberately deleted (vs never existed)? Fail-open to
-    False — a lookup error must degrade to the plain 404, never break SSR."""
+    """Was this article deliberately deleted (vs never existed)? Fail-open to False — a lookup error must degrade to the plain 404, never break SSR."""
     try:
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import DeletedArticleStmts
@@ -177,8 +175,7 @@ def _text_response(body: str, content_type: str, cache: str) -> Response:
 
 
 def _response_for_head(response: Response) -> Response:
-    """Robyn does not auto-register HEAD for GET routes; crawlers (Yandex
-    sitemap analyzer, etc.) probe with HEAD and treat non-200 as failure."""
+    """Robyn does not auto-register HEAD for GET routes; crawlers (Yandex sitemap analyzer, etc.) probe with HEAD and treat non-200 as failure."""
     headers = dict(response.headers) if response.headers else {}
     return Response(
         status_code=response.status_code,
@@ -187,7 +184,9 @@ def _response_for_head(response: Response) -> Response:
     )
 
 
-def _mirror_head(app, path: str, get_handler) -> None:
+def _mirror_head(
+    app: Robyn, path: str, get_handler: Callable[[Request], Awaitable[Response]]
+) -> None:
     """Register HEAD on `path` with the same status/headers as GET, no body."""
 
     @app.head(path)
@@ -195,7 +194,8 @@ def _mirror_head(app, path: str, get_handler) -> None:
         return _response_for_head(await get_handler(request))
 
 
-def register_seo_routes(app) -> None:
+def register_seo_routes(app: Robyn) -> None:
+    """Attach the server-rendered SEO document routes (front page, articles, sitemaps) to the app."""
     news = NewsService()
 
     @app.get("/")
@@ -268,11 +268,7 @@ def register_seo_routes(app) -> None:
 
     @app.get("/og/article/:article_id")
     async def og_article_card(request: Request) -> Response:
-        """Generated share-card PNG (accent slug, kicker, serif headline —
-        see seo/share_card.py) for an article's title/primary tag. Always
-        generates regardless of whether the article has a real photo; the
-        DECISION to use this vs. a real og:image lives in render.py, which is
-        the only caller that should ever link here."""
+        """Generated share-card PNG (accent slug, kicker, serif headline — see seo/share_card.py) for an article's title/primary tag. Always generates regardless of whether the article has a real photo; the DECISION to use this vs. a real og:image lives in render.py, which is the only caller that should ever link here."""
         import asyncio
         import hashlib
 
@@ -339,10 +335,8 @@ def register_seo_routes(app) -> None:
     async def topics(request: Request) -> Response:
         path = "/topics"
         _record(request, path)
-        feed, picked = cached_feed_snapshot(news.list_feed)
-        return _doc_response(
-            render.render_topics(picked), "public, max-age=300", tracked_path=path
-        )
+        _feed, picked = cached_feed_snapshot(news.list_feed)
+        return _doc_response(render.render_topics(picked), "public, max-age=300", tracked_path=path)
 
     @app.get("/topic/:tag")
     async def topic(request: Request) -> Response:
@@ -380,7 +374,9 @@ def register_seo_routes(app) -> None:
     @app.get("/search")
     async def search(request: Request) -> Response:
         _ = request
-        return _doc_response(render.render_noindex("Search", active="/search"), "public, max-age=300")
+        return _doc_response(
+            render.render_noindex("Search", active="/search"), "public, max-age=300"
+        )
 
     @app.get("/suggestions")
     async def suggestions(request: Request) -> Response:
@@ -394,9 +390,7 @@ def register_seo_routes(app) -> None:
 
     @app.post("/api/v1/analytics/pageview")
     async def beacon_pageview(request: Request) -> Response:
-        """Client-side beacon for a Flutter in-app route change — the initial
-        document load is already recorded server-side; this covers navigation
-        after that, which never hits a document route."""
+        """Client-side beacon for a Flutter in-app route change — the initial document load is already recorded server-side; this covers navigation after that, which never hits a document route."""
         if tracking_opted_out_from_headers(request.headers):
             return {"ok": True}
         try:

@@ -1,3 +1,5 @@
+"""Assess whether a breaking-tier draft is credible enough to auto-publish."""
+
 from __future__ import annotations
 
 import re
@@ -6,12 +8,14 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class BreakingAssessment:
+    """Whether a breaking-tier draft is credible enough to auto-publish."""
     credible: bool
     reason: str
     method: str
 
 
 def extract_urls(text: str) -> list[str]:
+    """Pull all http(s) URLs out of free text."""
     return re.findall(r"https?://[^\s\])>\"']+", text)
 
 
@@ -19,13 +23,9 @@ def assess_breaking_credibility(
     *,
     page_text: str,
     source_url: str,
-    topic: str,
+    topic: str,  # noqa: ARG001 -- name must match the real callee's keyword arg
 ) -> BreakingAssessment:
-    """
-    Gate breaking publishes using lightweight heuristics (links + loss/scam
-    language). Mistral is reserved for article composition and is intentionally
-    not used here.
-    """
+    """Gate breaking publishes using lightweight heuristics (links + loss/scam language). Mistral is reserved for article composition and is intentionally not used here."""
     urls = extract_urls(page_text)
     if not urls and source_url.startswith("http"):
         urls = [source_url]

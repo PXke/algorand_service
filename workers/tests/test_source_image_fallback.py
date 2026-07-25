@@ -1,9 +1,6 @@
-"""Hero/source image resolution (2026-07-09): three lanes published imageless —
-editorial briefs (service_id "editorial-brief:<id>" fails the domain-slug
-regex AND scrape_url "editorial://…" isn't fetchable), mail ("mail://message/N",
-same), and recompose (og_image was never stashed in review metadata). Plus the
-2026-07-06 cross-domain hero guard dropped every CDN-hosted og:image (the
-majority pattern: cloudfront/cloudinary/ipfs/discourse-cdn)."""
+"""Hero/source image resolution (2026-07-09): three lanes published imageless — editorial briefs (service_id "editorial-brief:<id>" fails the domain-slug regex AND scrape_url "editorial://…" isn't fetchable), mail ("mail://message/N", same), and recompose (og_image was never stashed in review metadata). Plus the 2026-07-06 cross-domain hero guard dropped every CDN-hosted og:image (the majority pattern: cloudfront/cloudinary/ipfs/discourse-cdn)."""
+
+from typing import Any, Never
 
 import pytest
 
@@ -23,10 +20,11 @@ from app.modules.newspaper.tasks.publish_tasks import (
 
 
 @pytest.fixture(autouse=True)
-def _no_real_sleep(monkeypatch):
+def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     # _is_real_image retries once with a real sleep between attempts — no
     # test here needs that actual delay.
-    monkeypatch.setattr("time.sleep", lambda *a, **kw: None)
+    monkeypatch.setattr("time.sleep", lambda *_a, **_kw: None)
+
 
 _BODY = """HesabPay runs on Algorand.
 
@@ -61,16 +59,21 @@ def test_source_urls_falls_back_to_inline_links_without_heading() -> None:
 def test_editorial_and_mail_lanes_have_no_direct_candidates() -> None:
     # The failure that motivated the fallback: neither URL form is fetchable
     # and the service_id isn't a domain slug.
-    assert candidate_urls(
-        source_url="editorial://brief/7616eb02", service_id="editorial-brief:7616eb02"
-    ) == []
+    assert (
+        candidate_urls(
+            source_url="editorial://brief/7616eb02", service_id="editorial-brief:7616eb02"
+        )
+        == []
+    )
     assert candidate_urls(source_url="mail://message/7", service_id="") == []
 
 
-def test_resolve_article_images_uses_body_sources_when_direct_fails(monkeypatch) -> None:
+def test_resolve_article_images_uses_body_sources_when_direct_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fetched = []
 
-    def fake_images(url):
+    def fake_images(url: str) -> tuple[str, str]:
         fetched.append(url)
         if url == "https://hesab.com/about":
             return "https://hesab.com/images/logos/favicon.png", ""
@@ -85,22 +88,22 @@ def test_resolve_article_images_uses_body_sources_when_direct_fails(monkeypatch)
     assert fetched[0] == "https://hesab.com/about"
 
 
-def test_dead_declared_og_falls_through_to_sources_block(monkeypatch) -> None:
-    """Root-caused 2026-07-16 (Aramid + Subtopia published imageless):
-    aramid.finance declares og/twitter images that both 404, and subtopia.io's
-    og:image sits on the dead nftstorage.link IPFS gateway. The resolver
-    accepted the DECLARED og unvalidated and stopped early, so the
-    Sources-block fallback never ran — and the caller's post-hoc validation
-    could only blank the result, not recover a better candidate. With
-    ``validate`` wired into the resolver, a dead og is rejected mid-search
-    and the cited links still get their chance."""
+def test_dead_declared_og_falls_through_to_sources_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Root-caused 2026-07-16 (Aramid + Subtopia published imageless): aramid.finance declares og/twitter images that both 404, and subtopia.io's og:image sits on the dead nftstorage.link IPFS gateway.
+
+    The resolver accepted the DECLARED og unvalidated and stopped early, so
+    the Sources-block fallback never ran — and the caller's post-hoc
+    validation could only blank the result, not recover a better candidate.
+    With ``validate`` wired into the resolver, a dead og is rejected
+    mid-search and the cited links still get their chance.
+    """
     pages = {
         "https://aramid.finance/": ("https://www.aramid.finance/og-image.jpg", ""),
         "https://hesab.com/about": ("https://hesab.com/images/logos/favicon.png", ""),
     }
     monkeypatch.setattr(si, "_images_from_url", lambda url: pages.get(url, ("", "")))
 
-    def validate(image, page_url):
+    def validate(image: str, _page_url: str) -> str:
         # The declared og 404s in the real incident — validator rejects it.
         if image == "https://www.aramid.finance/og-image.jpg":
             return ""
@@ -115,18 +118,17 @@ def test_dead_declared_og_falls_through_to_sources_block(monkeypatch) -> None:
     assert og == "https://hesab.com/images/logos/favicon.png"
 
 
-def test_resolver_validation_is_anchored_to_the_declaring_page(monkeypatch) -> None:
-    """A GitHub/docs link cited in Sources advertises an image on ITS own
-    CDN (opengraph.githubassets.com) — foreign to the article's subject site
-    but correct for the declaring page. Validation must therefore be anchored
-    to the page each image was found on, not the article's source_url."""
+def test_resolver_validation_is_anchored_to_the_declaring_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GitHub/docs link cited in Sources advertises an image on ITS own CDN (opengraph.githubassets.com) — foreign to the article's subject site but correct for the declaring page. Validation must therefore be anchored to the page each image was found on, not the article's source_url."""
     pages = {
         "https://hesab.com/about": ("https://cdn.hesab-images.net/og.png", ""),
     }
     monkeypatch.setattr(si, "_images_from_url", lambda url: pages.get(url, ("", "")))
     seen: list[tuple[str, str]] = []
 
-    def validate(image, page_url):
+    def validate(image: str, page_url: str) -> str:
         seen.append((image, page_url))
         return image
 
@@ -140,24 +142,18 @@ def test_resolver_validation_is_anchored_to_the_declaring_page(monkeypatch) -> N
     assert ("https://cdn.hesab-images.net/og.png", "https://hesab.com/about") in seen
 
 
-def test_resolver_without_validate_keeps_first_declared_og(monkeypatch) -> None:
+def test_resolver_without_validate_keeps_first_declared_og(monkeypatch: pytest.MonkeyPatch) -> None:
     # Legacy behavior (backfill --dry-run style callers): no validator, first
     # declared og wins unvalidated.
-    monkeypatch.setattr(
-        si, "_images_from_url", lambda url: ("https://site.com/og.png", "")
-    )
-    og, _ = resolve_article_images(
-        source_url="https://site.com/", service_id="", body=""
-    )
+    monkeypatch.setattr(si, "_images_from_url", lambda _url: ("https://site.com/og.png", ""))
+    og, _ = resolve_article_images(source_url="https://site.com/", service_id="", body="")
     assert og == "https://site.com/og.png"
 
 
-def test_resolve_article_images_prefers_direct_source(monkeypatch) -> None:
+def test_resolve_article_images_prefers_direct_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(si, "resolve_source_images", lambda **_kw: ("https://site.com/og.png", ""))
     monkeypatch.setattr(
-        si, "resolve_source_images", lambda **kw: ("https://site.com/og.png", "")
-    )
-    monkeypatch.setattr(
-        si, "_images_from_url", lambda url: (_ for _ in ()).throw(AssertionError("no fallback"))
+        si, "_images_from_url", lambda _url: (_ for _ in ()).throw(AssertionError("no fallback"))
     )
     og, _ = resolve_article_images(source_url="https://site.com/", service_id="", body=_BODY)
     assert og == "https://site.com/og.png"
@@ -263,9 +259,7 @@ def test_validated_hero_keeps_plausible_image_url() -> None:
         == "https://vestige.fi/og-image.png"
     )
     assert (
-        _validated_hero(
-            "https://res.cloudinary.com/noahapp/image/upload/x.png", "https://noah.com"
-        )
+        _validated_hero("https://res.cloudinary.com/noahapp/image/upload/x.png", "https://noah.com")
         == "https://res.cloudinary.com/noahapp/image/upload/x.png"
     )
 
@@ -283,7 +277,7 @@ def test_validated_hero_does_not_shape_reject_icon_urls() -> None:
     )
 
 
-def _fake_response(*, content: bytes, status_ok: bool = True):
+def _fake_response(*, content: bytes, status_ok: bool = True) -> Any:  # noqa: ANN401 -- test double / fake response
     class _Resp:
         def __init__(self) -> None:
             self.content = content
@@ -309,13 +303,13 @@ def _png_bytes(*, size: tuple[int, int], mode: str = "RGB", transparent: bool = 
     return buf.getvalue()
 
 
-def test_validated_hero_checked_drops_decoy_pixel(monkeypatch) -> None:
+def test_validated_hero_checked_drops_decoy_pixel(monkeypatch: pytest.MonkeyPatch) -> None:
     # geographia.com.br/docs.vestigelabs.org-shaped case: a real, non-logo-
     # shaped URL that resolves to a 1x1 fully-transparent decoy pixel instead
     # of an error (2026-07-14 root cause).
     monkeypatch.setattr(
         "app.core.net_guard.guarded_get",
-        lambda *a, **kw: _fake_response(content=_png_bytes(size=(1, 1), transparent=True)),
+        lambda *_a, **_kw: _fake_response(content=_png_bytes(size=(1, 1), transparent=True)),
     )
     assert (
         _validated_hero_checked("https://geographia.com.br/hero.png", "https://geographia.com.br")
@@ -323,43 +317,45 @@ def test_validated_hero_checked_drops_decoy_pixel(monkeypatch) -> None:
     )
 
 
-def test_validated_hero_checked_drops_tiny_image(monkeypatch) -> None:
+def test_validated_hero_checked_drops_tiny_image(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.core.net_guard.guarded_get",
-        lambda *a, **kw: _fake_response(content=_png_bytes(size=(8, 8))),
+        lambda *_a, **_kw: _fake_response(content=_png_bytes(size=(8, 8))),
     )
     assert _validated_hero_checked("https://vestige.fi/hero.png", "https://vestige.fi") == ""
 
 
-def test_validated_hero_checked_drops_real_favicon_size(monkeypatch) -> None:
+def test_validated_hero_checked_drops_real_favicon_size(monkeypatch: pytest.MonkeyPatch) -> None:
     # a-wallet.net/downbad.farm-shaped case: a genuine favicon (48x48, the
     # measured real-world size) is too small/blurry to use as a hero.
     monkeypatch.setattr(
         "app.core.net_guard.guarded_get",
-        lambda *a, **kw: _fake_response(content=_png_bytes(size=(48, 48))),
+        lambda *_a, **_kw: _fake_response(content=_png_bytes(size=(48, 48))),
     )
-    assert (
-        _validated_hero_checked("https://a-wallet.net/favicon.ico", "https://a-wallet.net") == ""
-    )
+    assert _validated_hero_checked("https://a-wallet.net/favicon.ico", "https://a-wallet.net") == ""
 
 
-def test_validated_hero_checked_keeps_good_apple_touch_icon(monkeypatch) -> None:
+def test_validated_hero_checked_keeps_good_apple_touch_icon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # AlgoVanity's real apple-touch-icon.png measures 192x192 — a decent icon,
     # not a blurry favicon, even though the URL "looks like" a logo.
     monkeypatch.setattr(
         "app.core.net_guard.guarded_get",
-        lambda *a, **kw: _fake_response(content=_png_bytes(size=(192, 192))),
+        lambda *_a, **_kw: _fake_response(content=_png_bytes(size=(192, 192))),
     )
     assert (
-        _validated_hero_checked("https://algovanity.com/apple-touch-icon.png", "https://algovanity.com")
+        _validated_hero_checked(
+            "https://algovanity.com/apple-touch-icon.png", "https://algovanity.com"
+        )
         == "https://algovanity.com/apple-touch-icon.png"
     )
 
 
-def test_validated_hero_checked_keeps_real_image(monkeypatch) -> None:
+def test_validated_hero_checked_keeps_real_image(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.core.net_guard.guarded_get",
-        lambda *a, **kw: _fake_response(content=_png_bytes(size=(1200, 630))),
+        lambda *_a, **_kw: _fake_response(content=_png_bytes(size=(1200, 630))),
     )
     assert (
         _validated_hero_checked("https://vestige.fi/hero.png", "https://vestige.fi")
@@ -367,14 +363,16 @@ def test_validated_hero_checked_keeps_real_image(monkeypatch) -> None:
     )
 
 
-def test_validated_hero_checked_retries_once_on_transient_failure(monkeypatch) -> None:
+def test_validated_hero_checked_retries_once_on_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # 2026-07-14: a batch backfill hitting dozens of external hosts back-to-
     # back saw several perfectly good images (algorand.co, GitBook OG images,
     # x402.org, hesab.com) wrongly cleared by a single transient fetch
     # failure. One retry before giving up fixes that.
     calls = {"n": 0}
 
-    def _flaky(*a, **kw):
+    def _flaky(*_a: object, **_kw: object) -> Any:  # noqa: ANN401 -- test double / fake response
         calls["n"] += 1
         if calls["n"] == 1:
             raise TimeoutError("transient")
@@ -388,21 +386,23 @@ def test_validated_hero_checked_retries_once_on_transient_failure(monkeypatch) -
     assert calls["n"] == 2
 
 
-def test_validated_hero_checked_drops_on_fetch_failure(monkeypatch) -> None:
-    def _boom(*a, **kw):
+def test_validated_hero_checked_drops_on_fetch_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(*_a: object, **_kw: object) -> Never:
         raise RuntimeError("network down")
 
     monkeypatch.setattr("app.core.net_guard.guarded_get", _boom)
     assert _validated_hero_checked("https://vestige.fi/hero.png", "https://vestige.fi") == ""
 
 
-def test_validated_hero_checked_never_fetches_for_implausible_domain(monkeypatch) -> None:
+def test_validated_hero_checked_never_fetches_for_implausible_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Domain-plausibility rejection happens in the pure gate — no network
     # call should even be attempted for an obviously foreign image host.
     monkeypatch.setattr(
         publish_tasks,
         "_is_real_image",
-        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not fetch")),
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not fetch")),
     )
     assert (
         _validated_hero_checked(

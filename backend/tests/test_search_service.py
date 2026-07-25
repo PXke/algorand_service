@@ -1,5 +1,10 @@
+"""Feed-scan search fallback and Typesense tuning (synonyms, prefix, typos)."""
+
 from __future__ import annotations
 
+import pytest
+
+from app.core.typesense_client import expanded_search_terms
 from app.modules.news.services.news_service import NewsService
 from app.modules.news.stores.base import StoredArticle
 from app.modules.news.stores.memory import InMemoryArticleStore
@@ -9,10 +14,10 @@ from app.modules.search.services.search_service import (
     _typesense_num_typos,
     _typesense_prefix_enabled,
 )
-from app.core.typesense_client import ARTICLES_COLLECTION, expanded_search_terms
 
 
-def test_search_feed_scan_fallback(monkeypatch) -> None:
+def test_search_feed_scan_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Falls back to feed-scan search (with a matching snippet) when Typesense is unconfigured."""
     monkeypatch.setattr(
         "app.modules.search.services.search_service.get_typesense_client",
         lambda: None,
@@ -37,7 +42,8 @@ def test_search_feed_scan_fallback(monkeypatch) -> None:
     assert "governance" in result.items[0].snippet.lower()
 
 
-def test_feed_scan_usa_does_not_match_usability(monkeypatch) -> None:
+def test_feed_scan_usa_does_not_match_usability(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Searching "USA" does not spuriously match an article containing "usability"."""
     monkeypatch.setattr(
         "app.modules.search.services.search_service.get_typesense_client",
         lambda: None,
@@ -59,7 +65,8 @@ def test_feed_scan_usa_does_not_match_usability(monkeypatch) -> None:
     assert result.items == []
 
 
-def test_feed_scan_usa_matches_us_via_synonym(monkeypatch) -> None:
+def test_feed_scan_usa_matches_us_via_synonym(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Searching "USA" matches an article that only says "US" via the geo-usa synonym cluster."""
     monkeypatch.setattr(
         "app.modules.search.services.search_service.get_typesense_client",
         lambda: None,
@@ -83,12 +90,14 @@ def test_feed_scan_usa_matches_us_via_synonym(monkeypatch) -> None:
 
 
 def test_expanded_search_terms_includes_us_for_usa() -> None:
+    """Expanding "USA" includes both "usa" and "us" as search terms."""
     terms = expanded_search_terms("USA")
     assert "usa" in terms
     assert "us" in terms
 
 
 def test_typesense_tuning_for_short_acronyms() -> None:
+    """Disables prefix matching and typo tolerance for short all-caps acronyms like "USA"."""
     assert _typesense_prefix_enabled("USA") is False
     assert _typesense_prefix_enabled("governance") is True
     assert _typesense_num_typos("USA") == 0
@@ -96,6 +105,7 @@ def test_typesense_tuning_for_short_acronyms() -> None:
 
 
 def test_feed_article_matches_word_boundary() -> None:
+    """Matches a search term only on word boundaries, not as a substring of a longer word."""
     article = StoredArticle(
         article_id="1",
         service_id="svc",
@@ -119,6 +129,7 @@ def test_feed_article_matches_word_boundary() -> None:
 
 
 def test_parse_highlights_prefers_body_snippet() -> None:
+    """Picks the body highlight as the snippet while keeping the title highlight separate."""
     from app.modules.search.services.search_service import _parse_highlights
 
     title_hl, snippet = _parse_highlights(
@@ -134,9 +145,10 @@ def test_parse_highlights_prefers_body_snippet() -> None:
     assert snippet == "long <mark>governance</mark> story in the body"
 
 
-def test_search_typesense_parses_highlights(monkeypatch) -> None:
+def test_search_typesense_parses_highlights(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Uses Typesense when configured, forwarding tuned query params and parsing hit highlights."""
     class _FakeDocuments:
-        def search(self, params):
+        def search(self, params: tuple) -> dict:
             assert params["highlight_fields"] == "title,summary,body"
             assert params["query_by"] == "title,summary,body,tokens"
             assert params["query_by_weights"] == "4,2,1,6"
@@ -166,7 +178,7 @@ def test_search_typesense_parses_highlights(monkeypatch) -> None:
         documents = _FakeDocuments()
 
     class _FakeCollections:
-        def __getitem__(self, _name):
+        def __getitem__(self, _name: str) -> _FakeCollection:
             return _FakeCollection()
 
     class _FakeClient:
@@ -180,9 +192,7 @@ def test_search_typesense_parses_highlights(monkeypatch) -> None:
         "app.modules.search.services.search_service.ensure_articles_collection",
         lambda: True,
     )
-    result = SearchService(news_service=NewsService(store=InMemoryArticleStore())).search(
-        "USA"
-    )
+    result = SearchService(news_service=NewsService(store=InMemoryArticleStore())).search("USA")
     assert result.engine == "typesense"
     assert len(result.items) == 1
     assert result.items[0].snippet == "the <mark>governance</mark> proposal passed"

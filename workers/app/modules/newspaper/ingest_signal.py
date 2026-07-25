@@ -1,3 +1,5 @@
+"""Hash a scrape's content to decide whether it's a real change worth publishing."""
+
 from __future__ import annotations
 
 import hashlib
@@ -40,7 +42,9 @@ _MONTHS = (
 _VOLATILE_PATTERNS = (
     re.compile(r"\d+\s*(?:seconds?|minutes?|mins?|hours?|days?)\s+ago", re.IGNORECASE),
     re.compile(r"\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?", re.IGNORECASE),
-    re.compile(rf"\b(?:{_MONTHS})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s*(?:\d{{4}})?\b", re.IGNORECASE),
+    re.compile(
+        rf"\b(?:{_MONTHS})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s*(?:\d{{4}})?\b", re.IGNORECASE
+    ),
     re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
     re.compile(r"[$€£]\s?\d[\d,]*(?:\.\d+)?"),
     re.compile(r"\d[\d,]*(?:\.\d+)?\s*%"),
@@ -49,9 +53,7 @@ _VOLATILE_PATTERNS = (
 
 
 def _stable_content_hash(text: str) -> str:
-    """Hash of the page with volatile numeric/time tokens removed, so pages that
-    only update live data (prices, counters, timestamps) hash the same across
-    polls and are correctly treated as ``unchanged``."""
+    """Hash of the page with volatile numeric/time tokens removed, so pages that only update live data (prices, counters, timestamps) hash the same across polls and are correctly treated as ``unchanged``."""
     normalized = text
     for pat in _VOLATILE_PATTERNS:
         normalized = pat.sub("", normalized)
@@ -81,8 +83,8 @@ def ingest_publish_signal(
     inner_links: list[dict[str, str]] | None = None,
     is_first_override: bool | None = None,
 ) -> dict[str, str]:
-    """
-    Shared enqueue path for crawl, mail, and other lanes after content is fetched.
+    """Shared enqueue path for crawl, mail, and other lanes after content is fetched.
+
     Updates snapshot, service profile, and publish queue.
 
     ``is_first_override``: for lanes whose ``service_id`` is a synthetic
@@ -129,7 +131,16 @@ def ingest_publish_signal(
     # Whether a domain is worth monitoring is decided upstream (Classifier A at
     # discovery); by the time content reaches here the source is already
     # approved, so the only enqueue veto is an explicit admin reject.
-    signals = compute_content_signals(page_text, source_url)
+    #
+    # outbound_links reuses inner_links (already scraped for the writer's
+    # source context) to feed the SAME explorer-link signal discovery already
+    # cleared — without it a multi-chain service's priority sinks to the
+    # bottom of the queue for content that already proved relevant once
+    # (zerosignal.ai/dark-coin.com sitting at priority 0, 2026-07-22).
+    outbound_links = tuple(
+        link["url"] for link in (inner_links or []) if isinstance(link, dict) and link.get("url")
+    )
+    signals = compute_content_signals(page_text, source_url, outbound_links=outbound_links)
 
     if url_recently_rejected(source_url):
         return _skip("recently_rejected")

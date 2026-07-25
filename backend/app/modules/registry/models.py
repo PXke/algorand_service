@@ -1,6 +1,4 @@
-"""Registry models. ServiceRegistryItem (wire schema) lives in app/schemas.py
-and is re-exported here; the two frozen dataclasses below are internal value
-objects (never serialised over the API) and stay local."""
+"""Registry models. ServiceRegistryItem (wire schema) lives in app/schemas.py and is re-exported here; the two frozen dataclasses below are internal value objects (never serialised over the API) and stay local."""
 
 from __future__ import annotations
 
@@ -11,6 +9,7 @@ from app.schemas import ServiceRegistryItem  # noqa: F401
 
 @dataclass(frozen=True)
 class ServiceEntry:
+    """One entry in the service registry."""
     service_id: str
     display_name: str
     match_kind: str

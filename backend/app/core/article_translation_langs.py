@@ -55,10 +55,12 @@ SEO_OG_LOCALES: dict[str, str] = {
 
 
 def html_lang_for(lang: str | None) -> str:
+    """Return the BCP-47 tag for `<html lang>`, defaulting to English."""
     code = (lang or "en").strip() or "en"
     return SEO_HREFLANG_LOCALES.get(code, code)
 
 
 def og_locale_for(lang: str | None) -> str:
+    """Return the Open Graph locale code, defaulting to en_US."""
     code = (lang or "en").strip() or "en"
     return SEO_OG_LOCALES.get(code, "en_US")

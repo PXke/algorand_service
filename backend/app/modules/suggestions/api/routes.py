@@ -1,6 +1,8 @@
+"""HTTP routes for treasury-payment-gated service suggestions."""
+
 from __future__ import annotations
 
-from robyn import Request, Response
+from robyn import Request, Response, Robyn
 
 from app.core import serialization
 from app.core.config import settings
@@ -19,7 +21,8 @@ from app.modules.suggestions.services.upvote_service import UpvoteService
 from app.modules.suggestions.stores.factory import get_suggestion_store
 
 
-def register_suggestions_routes(app) -> None:
+def register_suggestions_routes(app: Robyn) -> None:
+    """Register all service-suggestion and upvote API endpoints."""
     auth_service = AuthService(session_store=SessionStore())
     suggestion_store = get_suggestion_store()
     suggestion_service = SuggestionService(

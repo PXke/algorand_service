@@ -1,19 +1,23 @@
 """report_compose_issue — writer pipeline feedback tool."""
 
+import pytest
+
 from app.modules.ai import writer_tools as wt
 
 
 def test_report_compose_issue_registered() -> None:
+    """The report_compose_issue tool is registered in both the schemas and handlers."""
     schemas, handlers = wt.all_tools()
     names = {(s.get("function") or {}).get("name") for s in schemas}
     assert "report_compose_issue" in names
     assert "report_compose_issue" in handlers
 
 
-def test_handler_records_valid_feedback(monkeypatch) -> None:
+def test_handler_records_valid_feedback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Valid feedback is recorded with its category, severity, and the handler's bound source_url."""
     recorded: list[dict] = []
 
-    def _fake_record(**kwargs):
+    def _fake_record(**kwargs: object) -> bool:
         recorded.append(kwargs)
         return True
 
@@ -37,12 +41,14 @@ def test_handler_records_valid_feedback(monkeypatch) -> None:
 
 
 def test_handler_rejects_empty_summary() -> None:
+    """A whitespace-only summary is rejected."""
     handler = wt._make_report_compose_issue_handler({})
     out = handler(category="prompt", summary="   ")
     assert out["ok"] is False
 
 
 def test_handler_rejects_invalid_category() -> None:
+    """A category outside the allowed set is rejected with an "invalid category" error."""
     handler = wt._make_report_compose_issue_handler({})
     out = handler(category="tool_gap", summary="need telegram search")
     assert out["ok"] is False
@@ -50,6 +56,7 @@ def test_handler_rejects_invalid_category() -> None:
 
 
 def test_tools_guidance_mentions_pipeline_feedback() -> None:
+    """The writer's tools-guidance prompt text documents the pipeline-feedback tool."""
     import app.modules.ai.mistral_compose as mc
 
     assert "report_compose_issue" in mc._TOOLS_GUIDANCE

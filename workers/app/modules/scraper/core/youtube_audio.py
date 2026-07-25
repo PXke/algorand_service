@@ -21,9 +21,7 @@ _VIDEO_ID_RE = re.compile(r"^[0-9A-Za-z_-]{11}$")
 
 
 def download_video_audio(video_id: str) -> str | None:
-    """Download bestaudio for video_id via yt-dlp, extract to a compact mp3
-    with ffmpeg, and return the local file path. Returns None on any failure
-    (bot-block, proxy auth, missing ffmpeg, disk, etc.) — never raises.
+    """Download bestaudio for video_id via yt-dlp, extract to a compact mp3 with ffmpeg, and return the local file path. Returns None on any failure (bot-block, proxy auth, missing ffmpeg, disk, etc.) — never raises.
 
     Caller owns cleanup of the returned file's parent directory.
     """
@@ -59,9 +57,9 @@ def download_video_audio(video_id: str) -> str | None:
             ydl.extract_info(watch_url, download=True)
 
         audio_path = f"{tmpdir}/{video_id}.mp3"
-        import os
+        from pathlib import Path
 
-        if os.path.exists(audio_path):
+        if Path(audio_path).exists():
             return audio_path
         logger.warning("yt-dlp reported success but no mp3 found for %s", video_id)
         shutil.rmtree(tmpdir, ignore_errors=True)

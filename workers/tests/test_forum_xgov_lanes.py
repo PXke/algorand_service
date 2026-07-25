@@ -1,10 +1,9 @@
-"""Forum hot-topic + xGov proposal lanes (2026-07-09): community debates and
-governance phases as publish signals. xGov has no REST API — proposals are
-apps created by the registry escrow (registry 3147789458), enumerated in one
-algod account call; the forum lane reads Discourse /latest.json."""
+"""Forum hot-topic + xGov proposal lanes (2026-07-09): community debates and governance phases as publish signals. xGov has no REST API — proposals are apps created by the registry escrow (registry 3147789458), enumerated in one algod account call; the forum lane reads Discourse /latest.json."""
 
 import base64
 from types import SimpleNamespace
+
+import pytest
 
 import app.modules.chain_tail.xgov_watch as xw
 import app.modules.scraper.tasks.forum_poll_tasks as fp
@@ -39,6 +38,7 @@ def _state(status: int, title: str = "Test Proposal", *, age_days: float = 1.0) 
 
 
 def test_registry_escrow_address_derivation() -> None:
+    """Derives the registry escrow address that holds the created proposal apps."""
     # Verified against algod: this account holds the created proposal apps.
     assert registry_escrow_address(3147789458) == (
         "GR7UPYPKVCT7EIYFAGIJYT3LLHZZK3NRMWBXNZ7SXAAC2OPNXQTJVXV52A"
@@ -46,6 +46,7 @@ def test_registry_escrow_address_derivation() -> None:
 
 
 def test_proposal_facts_decode() -> None:
+    """Decodes an xGov proposal's global state into phase, title, and summary text."""
     state = decode_global_state(_state(25))
     facts = proposal_facts(3599298458, state)
     assert facts["phase"] == "voting"
@@ -55,26 +56,26 @@ def test_proposal_facts_decode() -> None:
     assert "xgov.algorand.co/proposals/3599298458" in facts["text"]
 
 
-def test_poll_signals_new_phases_and_skips_drafts_and_seen(monkeypatch) -> None:
-    account = {"created-apps": [
-        {"id": 101, "params": {"global-state": _state(25, "Voting one")}},
-        {"id": 102, "params": {"global-state": _state(10, "Still a draft")}},
-        {"id": 103, "params": {"global-state": _state(30, "Approved one")}},
-        {"id": 104, "params": {"global-state": _state(45, "Reviewed internal")}},
-        # First-run backfill guard: a proposal that finished months ago must
-        # never signal as news.
-        {"id": 105, "params": {"global-state": _state(30, "Ancient history",
-                                                      age_days=120)}},
-    ]}
-    monkeypatch.setattr("app.modules.ai.chain_tools._algod_get", lambda path: account)
+def test_poll_signals_new_phases_and_skips_drafts_and_seen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Signals only new-phase, non-draft, non-stale xGov proposals; skips already-seen and ancient ones."""
+    account = {
+        "created-apps": [
+            {"id": 101, "params": {"global-state": _state(25, "Voting one")}},
+            {"id": 102, "params": {"global-state": _state(10, "Still a draft")}},
+            {"id": 103, "params": {"global-state": _state(30, "Approved one")}},
+            {"id": 104, "params": {"global-state": _state(45, "Reviewed internal")}},
+            # First-run backfill guard: a proposal that finished months ago must
+            # never signal as news.
+            {"id": 105, "params": {"global-state": _state(30, "Ancient history", age_days=120)}},
+        ]
+    }
+    monkeypatch.setattr("app.modules.ai.chain_tools._algod_get", lambda _path: account)
     # 103's approved phase already signaled.
     monkeypatch.setattr(
         "app.modules.newspaper.snapshot_store.get_latest_snapshot",
         lambda sid: ("h", "t", "b") if "103" in sid else None,
     )
-    monkeypatch.setattr(
-        "app.modules.newspaper.snapshot_store.source_id_for_service", lambda s: s
-    )
+    monkeypatch.setattr("app.modules.newspaper.snapshot_store.source_id_for_service", lambda s: s)
     signals = []
     monkeypatch.setattr(
         "app.modules.newspaper.ingest_signal.ingest_publish_signal",
@@ -89,33 +90,59 @@ def test_poll_signals_new_phases_and_skips_drafts_and_seen(monkeypatch) -> None:
 
 
 def test_topic_is_hot_thresholds_and_pinned() -> None:
-    assert topic_is_hot({"posts_count": 21, "like_count": 0},
-                        min_posts=8, min_likes=10)
-    assert topic_is_hot({"posts_count": 1, "like_count": 12},
-                        min_posts=8, min_likes=10)
-    assert not topic_is_hot({"posts_count": 3, "like_count": 4},
-                            min_posts=8, min_likes=10)
+    """Applies posts/likes thresholds and never counts a pinned topic as hot."""
+    assert topic_is_hot({"posts_count": 21, "like_count": 0}, min_posts=8, min_likes=10)
+    assert topic_is_hot({"posts_count": 1, "like_count": 12}, min_posts=8, min_likes=10)
+    assert not topic_is_hot({"posts_count": 3, "like_count": 4}, min_posts=8, min_likes=10)
     # The pinned scam-warning banner outscores everything, forever — never news.
-    assert not topic_is_hot({"posts_count": 50, "like_count": 90, "pinned": True},
-                            min_posts=8, min_likes=10)
+    assert not topic_is_hot(
+        {"posts_count": 50, "like_count": 90, "pinned": True}, min_posts=8, min_likes=10
+    )
 
 
-def test_forum_poll_signals_hot_unseen_topics(monkeypatch) -> None:
-    latest = {"topic_list": {"topics": [
-        {"id": 15288, "title": "Wormhole NTT Contracts", "slug": "wormhole-ntt",
-         "posts_count": 21, "like_count": 18},
-        {"id": 15362, "title": "Quiet topic", "slug": "quiet",
-         "posts_count": 1, "like_count": 0},
-        {"id": 15309, "title": "Already covered", "slug": "covered",
-         "posts_count": 22, "like_count": 17},
-    ]}}
-    topic_json = {"post_stream": {"posts": [
-        {"username": "dev1", "cooked": "<p>Proposal to deploy <b>NTT</b>.</p>",
-         "created_at": "2026-07-01T10:00:00Z"},
-        {"username": "dev2", "cooked": "<p>Concerns about fees.</p>"},
-    ]}}
+def test_forum_poll_signals_hot_unseen_topics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Signals only hot, not-already-covered forum topics with post excerpts and published_at."""
+    latest = {
+        "topic_list": {
+            "topics": [
+                {
+                    "id": 15288,
+                    "title": "Wormhole NTT Contracts",
+                    "slug": "wormhole-ntt",
+                    "posts_count": 21,
+                    "like_count": 18,
+                },
+                {
+                    "id": 15362,
+                    "title": "Quiet topic",
+                    "slug": "quiet",
+                    "posts_count": 1,
+                    "like_count": 0,
+                },
+                {
+                    "id": 15309,
+                    "title": "Already covered",
+                    "slug": "covered",
+                    "posts_count": 22,
+                    "like_count": 17,
+                },
+            ]
+        }
+    }
+    topic_json = {
+        "post_stream": {
+            "posts": [
+                {
+                    "username": "dev1",
+                    "cooked": "<p>Proposal to deploy <b>NTT</b>.</p>",
+                    "created_at": "2026-07-01T10:00:00Z",
+                },
+                {"username": "dev2", "cooked": "<p>Concerns about fees.</p>"},
+            ]
+        }
+    }
 
-    def fake_get(url, **kw):
+    def fake_get(url: str, **_kw: object) -> SimpleNamespace:
         payload = latest if url.endswith("/latest.json") else topic_json
         return SimpleNamespace(json=lambda: payload, raise_for_status=lambda: None)
 
@@ -124,9 +151,7 @@ def test_forum_poll_signals_hot_unseen_topics(monkeypatch) -> None:
         "app.modules.newspaper.snapshot_store.get_latest_snapshot",
         lambda sid: ("h", "t", "b") if "15309" in sid else None,
     )
-    monkeypatch.setattr(
-        "app.modules.newspaper.snapshot_store.source_id_for_service", lambda s: s
-    )
+    monkeypatch.setattr("app.modules.newspaper.snapshot_store.source_id_for_service", lambda s: s)
     signals = []
     monkeypatch.setattr(
         "app.modules.newspaper.ingest_signal.ingest_publish_signal",

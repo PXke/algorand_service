@@ -6,6 +6,7 @@ one GET per account per poll and no credentials. We ingest original posts (not
 reposts/replies) as publish signals, one per post, deduped by the snapshot
 store on a per-post service_id — the same pattern the YouTube lane uses.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ _PUBLIC_APPVIEW = "https://public.api.bsky.app"
 
 @dataclass(frozen=True)
 class BlueskyPost:
+    """One fetched Bluesky post."""
     uri: str  # at:// URI (stable id)
     rkey: str  # record key — the id segment, used for the post's web URL
     handle: str
@@ -26,13 +28,16 @@ class BlueskyPost:
 
     @property
     def web_url(self) -> str:
+        """This post's web URL on bsky.app."""
         return f"https://bsky.app/profile/{self.handle}/post/{self.rkey}"
 
 
 def _record_links(record: dict) -> tuple[str, ...]:
     """Full link URLs from a post record: link facets + the external embed.
+
     The display text truncates URLs ("example.com/pa..."), so these fields are
-    the only reliable source of what a post actually links to."""
+    the only reliable source of what a post actually links to.
+    """
     links: list[str] = []
     embed = record.get("embed") or {}
     external = embed.get("external") or {}
@@ -67,13 +72,13 @@ def normalize_handle(actor: str) -> str:
 
 
 def is_bluesky_scrape_url(url: str) -> bool:
+    """True when the URL is a Bluesky profile or bluesky: scheme link."""
     u = (url or "").lower()
     return "bsky.app/profile/" in u or u.startswith("bluesky:")
 
 
 def fetch_author_posts(actor: str, *, limit: int = 20) -> tuple[str, list[BlueskyPost]]:
-    """(display_name, posts) for an account's recent authored posts. Raises on
-    transport/HTTP error so the caller can record + continue (like YouTube)."""
+    """(display_name, posts) for an account's recent authored posts. Raises on transport/HTTP error so the caller can record + continue (like YouTube)."""
     from app.core.net_guard import guarded_get
 
     handle = normalize_handle(actor)
@@ -81,7 +86,11 @@ def fetch_author_posts(actor: str, *, limit: int = 20) -> tuple[str, list[Bluesk
         return "", []
     resp = guarded_get(
         f"{_PUBLIC_APPVIEW}/xrpc/app.bsky.feed.getAuthorFeed",
-        params={"actor": handle, "limit": str(min(max(limit, 1), 100)), "filter": "posts_no_replies"},
+        params={
+            "actor": handle,
+            "limit": str(min(max(limit, 1), 100)),
+            "filter": "posts_no_replies",
+        },
         timeout=12.0,
         headers={"User-Agent": "algorand-platform-newspaper/1.0"},
     )

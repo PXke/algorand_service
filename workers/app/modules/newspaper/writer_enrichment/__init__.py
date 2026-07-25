@@ -1,3 +1,5 @@
+"""Pre-compose context collectors (chain activity, market data, social signals) fed to the writer."""
+
 from app.modules.newspaper.writer_enrichment.gather import (
     WriterEnrichmentBundle,
     format_enrichment_for_writer,

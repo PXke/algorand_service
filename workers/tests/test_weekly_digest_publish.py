@@ -1,6 +1,11 @@
+"""Publishing the weekly digest, including its no-fallback Mistral failure path."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any, Never
+
+import pytest
 
 from app.modules.ai.mistral_client import MistralError
 from app.modules.newspaper import weekly_digest_publish
@@ -8,7 +13,7 @@ from app.modules.newspaper.price_analysis import WeeklyPriceSnapshot
 from app.modules.newspaper.weekly_digest import WeeklyDigestContext
 
 
-def _fake_compose(_ctx):
+def _fake_compose(_ctx: WeeklyDigestContext) -> Any:  # noqa: ANN401 -- test double / fake response
     return type(
         "R",
         (),
@@ -16,7 +21,8 @@ def _fake_compose(_ctx):
     )()
 
 
-def test_run_skips_when_disabled(monkeypatch) -> None:
+def test_run_skips_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skips the weekly digest publish entirely when PRICE_ANALYSIS_ENABLED is off."""
     import app.core.config as config
 
     monkeypatch.setattr(config, "PRICE_ANALYSIS_ENABLED", False)
@@ -24,7 +30,8 @@ def test_run_skips_when_disabled(monkeypatch) -> None:
     assert result["status"] == "skipped"
 
 
-def test_run_skips_when_already_published(monkeypatch) -> None:
+def test_run_skips_when_already_published(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skips the run with an "already_published" reason when this week's digest article already exists."""
     import app.core.config as config
 
     monkeypatch.setattr(config, "PRICE_ANALYSIS_ENABLED", True)
@@ -45,10 +52,10 @@ def test_run_skips_when_already_published(monkeypatch) -> None:
         articles=(),
     )
 
-    monkeypatch.setattr(weekly_digest_publish, "build_weekly_digest", lambda **kw: ctx)
+    monkeypatch.setattr(weekly_digest_publish, "build_weekly_digest", lambda **_kw: ctx)
     monkeypatch.setattr(weekly_digest_publish, "compose_weekly_digest", _fake_compose)
 
-    def fake_insert(**kwargs):
+    def fake_insert(**kwargs: object) -> tuple[str, bool]:
         return str(kwargs["article_id"]), False
 
     monkeypatch.setattr(weekly_digest_publish, "insert_article_if_absent", fake_insert)
@@ -57,7 +64,8 @@ def test_run_skips_when_already_published(monkeypatch) -> None:
     assert result["reason"] == "already_published"
 
 
-def test_run_publishes_new_digest(monkeypatch) -> None:
+def test_run_publishes_new_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Publishes and indexes a new weekly digest article when none exists yet for the week."""
     import app.core.config as config
 
     monkeypatch.setattr(config, "PRICE_ANALYSIS_ENABLED", True)
@@ -78,7 +86,7 @@ def test_run_publishes_new_digest(monkeypatch) -> None:
         articles=(),
     )
 
-    monkeypatch.setattr(weekly_digest_publish, "build_weekly_digest", lambda **kw: ctx)
+    monkeypatch.setattr(weekly_digest_publish, "build_weekly_digest", lambda **_kw: ctx)
     monkeypatch.setattr(weekly_digest_publish, "compose_weekly_digest", _fake_compose)
     indexed: list[str] = []
     monkeypatch.setattr(
@@ -87,7 +95,7 @@ def test_run_publishes_new_digest(monkeypatch) -> None:
         lambda **kw: indexed.append(kw["article_id"]),
     )
 
-    def fake_insert(**kwargs):
+    def fake_insert(**kwargs: object) -> tuple[str, bool]:
         return str(kwargs["article_id"]), True
 
     monkeypatch.setattr(weekly_digest_publish, "insert_article_if_absent", fake_insert)
@@ -97,12 +105,8 @@ def test_run_publishes_new_digest(monkeypatch) -> None:
     assert indexed
 
 
-def test_run_skips_cleanly_when_mistral_unavailable(monkeypatch) -> None:
-    """No template fallback exists (owner decision 2026-07-14) —
-    compose_weekly_digest now raises MistralError instead of silently
-    falling back, and this was the one caller in the whole compose layer
-    with no existing exception handling for that. Must skip cleanly with a
-    status dict, not let the Celery task fail with an uncaught exception."""
+def test_run_skips_cleanly_when_mistral_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No template fallback exists (owner decision 2026-07-14) — compose_weekly_digest now raises MistralError instead of silently falling back, and this was the one caller in the whole compose layer with no existing exception handling for that. Must skip cleanly with a status dict, not let the Celery task fail with an uncaught exception."""
     import app.core.config as config
 
     monkeypatch.setattr(config, "PRICE_ANALYSIS_ENABLED", True)
@@ -123,9 +127,9 @@ def test_run_skips_cleanly_when_mistral_unavailable(monkeypatch) -> None:
         articles=(),
     )
 
-    monkeypatch.setattr(weekly_digest_publish, "build_weekly_digest", lambda **kw: ctx)
+    monkeypatch.setattr(weekly_digest_publish, "build_weekly_digest", lambda **_kw: ctx)
 
-    def fail_compose(_ctx):
+    def fail_compose(_ctx: WeeklyDigestContext) -> Never:
         raise MistralError("MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback")
 
     monkeypatch.setattr(weekly_digest_publish, "compose_weekly_digest", fail_compose)

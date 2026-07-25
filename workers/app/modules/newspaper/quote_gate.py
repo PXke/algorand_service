@@ -58,8 +58,10 @@ def unquote_ungrounded_quotes(
     extra_texts: list[str] | None = None,
 ) -> dict[str, Any]:
     """De-quote body quotations that aren't verbatim in the ground corpus.
+
     Mutates and returns payload; records removals under
-    payload['_quotes_unquoted'] so the persisted final_output stays auditable."""
+    payload['_quotes_unquoted'] so the persisted final_output stays auditable.
+    """
     from app.core.config import QUOTE_GATE_ENABLED
 
     if not QUOTE_GATE_ENABLED:

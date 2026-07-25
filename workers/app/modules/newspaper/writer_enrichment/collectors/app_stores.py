@@ -1,3 +1,5 @@
+"""Detect App Store / Play Store links in a page for the writer's context."""
+
 from __future__ import annotations
 
 import re

@@ -1,3 +1,5 @@
+"""Service-registry listing, source-kind inference, and null-field tolerance."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -12,6 +14,7 @@ from app.modules.registry.services.registry_service import RegistryService
 
 
 def test_list_services_includes_source_kind() -> None:
+    """Infers a source_kind (discord/reddit) from scrape_url for listed services."""
     set_service_registry_repository(
         InMemoryServiceRegistryRepository(
             [
@@ -42,6 +45,7 @@ def test_list_services_includes_source_kind() -> None:
 
 
 def test_list_services_excludes_domain_origin_when_seeds_only() -> None:
+    """seeds_only=True excludes services whose origin is a learned domain, not a seed."""
     set_service_registry_repository(
         InMemoryServiceRegistryRepository(
             [
@@ -74,6 +78,7 @@ def test_list_services_excludes_domain_origin_when_seeds_only() -> None:
 
 
 def test_row_to_entry_infers_domain_origin_from_match_kind() -> None:
+    """Infers origin='domain' from a domain match_kind when origin is null in the row."""
     row = SimpleNamespace(
         service_id="tinyman-org",
         display_name=None,
@@ -89,6 +94,7 @@ def test_row_to_entry_infers_domain_origin_from_match_kind() -> None:
 
 
 def test_row_to_entry_fills_null_domain_fields() -> None:
+    """Fills null display_name/match_kind/match_value from service_id and scrape_url."""
     row = SimpleNamespace(
         service_id="tinyman-org",
         display_name=None,
@@ -106,6 +112,7 @@ def test_row_to_entry_fills_null_domain_fields() -> None:
 
 
 def test_list_services_tolerates_incomplete_domain_rows() -> None:
+    """Lists a domain-origin service without dropping it despite the tolerant null-fill path."""
     set_service_registry_repository(
         InMemoryServiceRegistryRepository(
             [

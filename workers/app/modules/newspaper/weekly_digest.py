@@ -1,3 +1,5 @@
+"""Build the weekly market-digest article context."""
+
 from __future__ import annotations
 
 import uuid
@@ -20,6 +22,7 @@ from app.modules.newspaper.price_analysis import (
 
 @dataclass(frozen=True)
 class DigestArticleItem:
+    """One article summarized for the weekly digest."""
     article_id: str
     service_id: str
     title: str
@@ -29,6 +32,7 @@ class DigestArticleItem:
 
 @dataclass(frozen=True)
 class WeeklyDigestContext:
+    """Assembled price and article context for the weekly digest."""
     week_key: str
     week_label: str
     price: WeeklyPriceSnapshot
@@ -36,6 +40,7 @@ class WeeklyDigestContext:
 
 
 def weekly_digest_trigger_id(week_key: str) -> str:
+    """Build the compose-trigger id for a given ISO week's digest."""
     return f"weekly-digest-{week_key}"
 
 
@@ -45,6 +50,7 @@ def digest_article_id(week_key: str) -> uuid.UUID:
 
 
 def current_week_key(when: datetime | None = None) -> str:
+    """Return the ISO year-week key (e.g. "2026-W30") for the given or current moment."""
     moment = when or datetime.now(tz=UTC)
     return moment.strftime("%Y-W%V")
 
@@ -57,6 +63,7 @@ def build_weekly_digest(
     max_articles: int = WEEKLY_DIGEST_MAX_ARTICLES,
     digest_service_ids: tuple[str, ...] = ("weekly-digest", "weekly-price-analysis"),
 ) -> WeeklyDigestContext:
+    """Assemble the price snapshot and article summaries for this week's digest."""
     price = fetch_weekly_price(asset_id)
     week_key = current_week_key(price.as_of)
     articles: tuple[DigestArticleItem, ...] = ()

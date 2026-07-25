@@ -1,7 +1,9 @@
+"""Fetch a page over HTTP or Playwright and extract its main readable content."""
+
 from __future__ import annotations
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from app.modules.scraper.core.http_retry import request_with_retry
 
@@ -54,7 +56,7 @@ def fetch_html(
 _MIN_MAIN_CHARS = 200
 
 
-def _main_content_node(soup: BeautifulSoup):
+def _main_content_node(soup: BeautifulSoup) -> Tag | None:
     """Readability-style main-content selection (no extra dependency).
 
     Prefers a semantic <article>/<main>/[role=main]; otherwise scores the
@@ -100,12 +102,7 @@ def _main_content_node(soup: BeautifulSoup):
 
 
 def html_to_plain_text(html: str, *, keep_links: bool = False) -> str:
-    """Cleaned main ARTICLE text. Boilerplate (nav/header/footer/cookie/etc.) is
-    stripped, then a readability pass narrows to the main content block so the
-    high-signal body isn't buried behind menus and banners (and isn't lost to a
-    downstream character cap). With keep_links=True, in-content anchors are
-    rendered inline as "label (https://url)" so an LLM reading the page can see
-    where each link points. hrefs should be absolute by the time they reach here."""
+    """Cleaned main ARTICLE text. Boilerplate (nav/header/footer/cookie/etc.) is stripped, then a readability pass narrows to the main content block so the high-signal body isn't buried behind menus and banners (and isn't lost to a downstream character cap). With keep_links=True, in-content anchors are rendered inline as "label (https://url)" so an LLM reading the page can see where each link points. hrefs should be absolute by the time they reach here."""
     soup = BeautifulSoup(html, "html.parser")
     _strip_boilerplate(soup)
     target = _main_content_node(soup) or soup
@@ -115,15 +112,11 @@ def html_to_plain_text(html: str, *, keep_links: bool = False) -> str:
             label = a.get_text(" ", strip=True)
             if label and href.startswith(("http://", "https://")):
                 a.replace_with(f"{label} ({href})")
-    return "\n".join(
-        line.strip() for line in target.get_text("\n").splitlines() if line.strip()
-    )
+    return "\n".join(line.strip() for line in target.get_text("\n").splitlines() if line.strip())
 
 
 def extract_content_links(html: str, base_url: str, *, limit: int = 40) -> list[dict[str, str]]:
-    """In-content outbound links as [{"text", "url"}], absolute + deduped. Strips
-    boilerplate first so nav/footer/menu links are excluded — what's left is the
-    article's own research trail (the linked blog post, GitHub PR, proposal, …)."""
+    """In-content outbound links as [{"text", "url"}], absolute + deduped. Strips boilerplate first so nav/footer/menu links are excluded — what's left is the article's own research trail (the linked blog post, GitHub PR, proposal, …)."""
     from urllib.parse import urljoin
 
     soup = BeautifulSoup(html, "html.parser")

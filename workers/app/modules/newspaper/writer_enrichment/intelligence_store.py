@@ -1,3 +1,5 @@
+"""Cassandra storage for a service's accumulated writer intelligence."""
+
 from __future__ import annotations
 
 import json
@@ -6,6 +8,7 @@ from typing import Any
 
 
 def load_intelligence(service_id: str) -> dict[str, Any] | None:
+    """Load a service's stored writer-intelligence bundle, or None if none exists."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import IntelligenceStmts
 
@@ -30,6 +33,7 @@ def save_intelligence(
     bundle_dict: dict[str, Any],
     is_first: bool,
 ) -> None:
+    """Persist a service's writer-intelligence bundle, preserving first-seen time."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import IntelligenceStmts
 

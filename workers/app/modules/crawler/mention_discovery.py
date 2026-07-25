@@ -31,8 +31,7 @@ def _clean_host(url: str) -> str:
 
 
 def homepages_from_github_topic(payload: dict[str, Any]) -> dict[str, str]:
-    """url -> attribution from a GitHub repo-search response: each repo's
-    self-declared `homepage` (the project's own site)."""
+    """Url -> attribution from a GitHub repo-search response: each repo's self-declared `homepage` (the project's own site)."""
     out: dict[str, str] = {}
     for item in payload.get("items") or []:
         if not isinstance(item, dict):
@@ -48,9 +47,7 @@ def homepages_from_github_topic(payload: dict[str, Any]) -> dict[str, str]:
 
 
 def urls_from_feed_html(xml_text: str, *, self_host: str) -> dict[str, str]:
-    """url -> attribution for external links inside a tag feed's post bodies
-    (self-links and skip-listed hosts dropped, one URL per external domain).
-    Feed bodies ship as entity-escaped HTML inside CDATA, so unescape first."""
+    """Url -> attribution for external links inside a tag feed's post bodies (self-links and skip-listed hosts dropped, one URL per external domain). Feed bodies ship as entity-escaped HTML inside CDATA, so unescape first."""
     import html
 
     out: dict[str, str] = {}
@@ -87,15 +84,17 @@ def discover_from_mentions() -> dict[str, Any]:
                 if created:
                     stats["enqueued"] += 1
             except Exception:
-                logger.warning("mention discovery: enqueue failed for %s", url,
-                               exc_info=True)
+                logger.warning("mention discovery: enqueue failed for %s", url, exc_info=True)
                 stats["errors"] += 1
 
     try:
         resp = guarded_get(
             "https://api.github.com/search/repositories",
-            params={"q": "topic:algorand", "sort": "updated",
-                    "per_page": str(config.MENTION_GITHUB_REPO_CAP)},
+            params={
+                "q": "topic:algorand",
+                "sort": "updated",
+                "per_page": str(config.MENTION_GITHUB_REPO_CAP),
+            },
             timeout=20.0,
             headers={"Accept": "application/vnd.github+json"},
         )

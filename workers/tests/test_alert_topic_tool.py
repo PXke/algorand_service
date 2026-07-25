@@ -1,12 +1,11 @@
-"""confirm_alert_topic: keyword topic classification demotes to a routing
-hint; reader-facing alert tags and the scam-topic match-key carve-out require
-the writer's confirmation.
+"""confirm_alert_topic: keyword topic classification demotes to a routing hint; reader-facing alert tags and the scam-topic match-key carve-out require the writer's confirmation.
 
 Root incident (2026-07-18): classify_publish_topic tagged the Algorand
 Foundation's own homepage rebrand SCAM_ALERT — a quoted 2021 research paper
 asked "is this approach vulnerable to malicious servers?", and "malicious"
 near ordinary "opt-in" vocabulary satisfied the context+alarm scan. Second
-false scam labeling in a week; same fix shape as mark_breaking_news."""
+false scam labeling in a week; same fix shape as mark_breaking_news.
+"""
 
 from __future__ import annotations
 
@@ -20,14 +19,16 @@ from app.modules.newspaper.publish_policy import PublishTopic
 from app.modules.newspaper.tasks.publish_tasks import _effective_alert_topic
 
 
-def test_handler_accepts_known_kinds_and_rejects_others():
+def test_handler_accepts_known_kinds_and_rejects_others() -> None:
+    """Confirms a recognized alert kind and rejects an unrecognized one."""
     ok = confirm_alert_topic_handler(kind="scam_alert", reason="drainer live")
     assert ok == {"confirmed": True, "kind": "scam_alert", "reason": "drainer live"}
     bad = confirm_alert_topic_handler(kind="urgent", reason="x")
     assert bad["confirmed"] is False
 
 
-def test_trace_scan_returns_last_confirmed_kind():
+def test_trace_scan_returns_last_confirmed_kind() -> None:
+    """Returns the last confirmed alert kind from the trace, or None if no call confirmed."""
     trace = [
         {"tool": "fetch_url", "result": {}},
         {"tool": "confirm_alert_topic", "result": {"confirmed": True, "kind": "scam_alert"}},
@@ -44,38 +45,36 @@ def test_trace_scan_returns_last_confirmed_kind():
     )
 
 
-def test_unconfirmed_scam_topic_downgrades_to_generic():
-    """The incident pin: keyword-routed scam_alert with no writer
-    confirmation must not keep its reader-facing consequences."""
+def test_unconfirmed_scam_topic_downgrades_to_generic() -> None:
+    """The incident pin: keyword-routed scam_alert with no writer confirmation must not keep its reader-facing consequences."""
     composed = SimpleNamespace(confirmed_alert=None)
     assert _effective_alert_topic(PublishTopic.SCAM_ALERT, composed) is PublishTopic.GENERIC
-    assert (
-        _effective_alert_topic(PublishTopic.NETWORK_INCIDENT, composed)
-        is PublishTopic.GENERIC
-    )
+    assert _effective_alert_topic(PublishTopic.NETWORK_INCIDENT, composed) is PublishTopic.GENERIC
 
 
-def test_confirmed_alert_keeps_topic():
+def test_confirmed_alert_keeps_topic() -> None:
+    """Keeps the keyword-routed topic when the writer confirms the same alert kind."""
     composed = SimpleNamespace(confirmed_alert="scam_alert")
     assert _effective_alert_topic(PublishTopic.SCAM_ALERT, composed) is PublishTopic.SCAM_ALERT
 
 
-def test_writer_kind_wins_over_keyword_route():
+def test_writer_kind_wins_over_keyword_route() -> None:
     """Keyword said scam, writer (who read the material) said incident."""
     composed = SimpleNamespace(confirmed_alert="network_incident")
     assert (
-        _effective_alert_topic(PublishTopic.SCAM_ALERT, composed)
-        is PublishTopic.NETWORK_INCIDENT
+        _effective_alert_topic(PublishTopic.SCAM_ALERT, composed) is PublishTopic.NETWORK_INCIDENT
     )
 
 
-def test_non_alert_topics_pass_through_untouched():
+def test_non_alert_topics_pass_through_untouched() -> None:
+    """Passes non-alert topics through unchanged regardless of confirmation state."""
     composed = SimpleNamespace(confirmed_alert=None)
     for topic in (PublishTopic.GENERIC, PublishTopic.SDK_RELEASE, PublishTopic.PRICING_CHANGE):
         assert _effective_alert_topic(topic, composed) is topic
 
 
-def test_tool_registered_in_writer_toolset():
+def test_tool_registered_in_writer_toolset() -> None:
+    """Registers confirm_alert_topic in both the writer's tool schemas and handlers."""
     from app.modules.ai.writer_tools import all_tools
 
     schemas, handlers = all_tools()

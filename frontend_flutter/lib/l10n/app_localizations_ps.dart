@@ -984,7 +984,18 @@ class AppLocalizationsPs extends AppLocalizations {
   String get domainsAddAsSeed => 'د دایمي سرچینې په توګه یې زیات کړئ';
 
   @override
+  String get domainsAddSinglePageOnly =>
+      'یوازې دا مخ (یوازې حواله، ټول سایټ مه سکن کوئ)';
+
+  @override
   String get domainsScoreUnexplained => 'د نمرې تفصیل شتون نلري';
+
+  @override
+  String get domainsPossibleService => 'ښایي یوه خدمت وي؟';
+
+  @override
+  String get domainsPossibleServiceHint =>
+      'ښه نمره لري خو د خبر/عمومي په توګه نښه شوی — دا ممکن یو ریښتینی محصول وي، نه یوازې د حواله سرچینه. \"یوځل وڅارل شي\" پرځای \"تصویب او پلټنه\" وګورئ.';
 
   @override
   String get paginationPrevious => 'پخوانی';

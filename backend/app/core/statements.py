@@ -18,17 +18,23 @@ still prepares each distinct string once. TRUNCATE / DDL and
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cassandra.query import PreparedStatement
+
 
 class _Stmt:
     """Descriptor holding CQL; resolves to the (cached) PreparedStatement on access.
 
     Preparation is delegated to `app.core.cassandra.prepare_cached`, so there is a
-    single process-wide cache keyed by CQL string."""
+    single process-wide cache keyed by CQL string.
+    """
 
     def __init__(self, cql: str) -> None:
         self.cql = cql
 
-    def __get__(self, obj, owner):
+    def __get__(self, obj: object | None, owner: type | None) -> PreparedStatement:
         from app.core.cassandra import prepare_cached
 
         return prepare_cached(self.cql)
@@ -38,6 +44,7 @@ class _Stmt:
 # articles_by_id (read-only here; written by the workers service)
 # --------------------------------------------------------------------------- #
 class ArticleStmts:
+    """Prepared statements for articles_by_id."""
     GET_TAGS = _Stmt("SELECT tags FROM algorand_platform.articles_by_id WHERE article_id = ?")
     GET_CARD = _Stmt(
         "SELECT title, published_at, tags FROM algorand_platform.articles_by_id "
@@ -76,17 +83,17 @@ class ArticleStmts:
 # articles_feed (projection)
 # --------------------------------------------------------------------------- #
 class DeletedArticleStmts:
+    """Prepared statements for the deleted-article tombstone table."""
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.deleted_articles (article_id, deleted_at, title) "
         "VALUES (?, ?, ?)"
     )
-    GET = _Stmt(
-        "SELECT article_id FROM algorand_platform.deleted_articles WHERE article_id = ?"
-    )
+    GET = _Stmt("SELECT article_id FROM algorand_platform.deleted_articles WHERE article_id = ?")
     LIST_IDS = _Stmt("SELECT article_id FROM algorand_platform.deleted_articles")
 
 
 class FeedStmts:
+    """Prepared statements for the articles_feed projection."""
     INSERT_FULL = _Stmt(
         "INSERT INTO algorand_platform.articles_feed ("
         "bucket, published_at, article_id, service_id, title, summary, tags, "
@@ -107,6 +114,7 @@ class FeedStmts:
 # article_versions
 # --------------------------------------------------------------------------- #
 class ArticleVersionStmts:
+    """Prepared statements for article edit-history versions."""
     LATEST = _Stmt(
         "SELECT version FROM algorand_platform.article_versions "
         "WHERE article_id = ? ORDER BY version DESC LIMIT 1"
@@ -132,6 +140,7 @@ class ArticleVersionStmts:
 # article_match_keys / article_match_keys_by_article
 # --------------------------------------------------------------------------- #
 class ArticleMatchStmts:
+    """Prepared statements for article match-key lookups (edit-vs-create routing)."""
     LIST_BY_ARTICLE = _Stmt(
         "SELECT key_type, key_value FROM algorand_platform.article_match_keys_by_article "
         "WHERE article_id = ?"
@@ -160,6 +169,7 @@ class ArticleMatchStmts:
 # editorial_briefs
 # --------------------------------------------------------------------------- #
 class EditorialBriefStmts:
+    """Prepared statements for editorial briefs."""
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.editorial_briefs ("
         "brief_id, title, body_markdown, keywords, status, "
@@ -183,6 +193,7 @@ class EditorialBriefStmts:
 # official_channels
 # --------------------------------------------------------------------------- #
 class OfficialChannelStmts:
+    """Prepared statements for the official-channels trust list."""
     LIST_BY_KIND = _Stmt(
         "SELECT kind, channel_id, label, added_by, created_at "
         "FROM algorand_platform.official_channels WHERE kind = ? LIMIT ?"
@@ -205,6 +216,7 @@ class OfficialChannelStmts:
 # classifier_feedback / classifier_feedback_by_time
 # --------------------------------------------------------------------------- #
 class ClassifierFeedbackStmts:
+    """Prepared statements for classifier training feedback."""
     GET_GRADE = _Stmt(
         "SELECT approved, metadata FROM algorand_platform.classifier_feedback WHERE feedback_id = ?"
     )
@@ -229,6 +241,7 @@ class ClassifierFeedbackStmts:
 # gatekeeper_anchors / gatekeeper_validation_report
 # --------------------------------------------------------------------------- #
 class GatekeeperStmts:
+    """Prepared statements for gatekeeper telemetry/training data."""
     INSERT_ANCHOR = _Stmt(
         "INSERT INTO algorand_platform.gatekeeper_anchors ("
         "bucket, created_at, anchor_id, article_id, url, source_text, "
@@ -250,6 +263,7 @@ class GatekeeperStmts:
 # domain_tracking
 # --------------------------------------------------------------------------- #
 class DomainTrackingStmts:
+    """Prepared statements for per-domain crawl/frontier tracking."""
     GET_FOR_CORRECTION = _Stmt(
         "SELECT domain, last_crawled_at, last_online_at, relevance_score, "
         "category, is_relevant, metadata FROM algorand_platform.domain_tracking WHERE domain = ?"
@@ -265,14 +279,20 @@ class DomainTrackingStmts:
         "category, is_relevant, metadata, frontier_status FROM algorand_platform.domain_tracking"
     )
     DELETE = _Stmt("DELETE FROM algorand_platform.domain_tracking WHERE domain = ?")
+    # 5000 comfortably covers the current pool (pending=1213, approved=251,
+    # dead_end=220 as of 2026-07-22) with headroom — the old LIMIT 500 silently
+    # dropped over half of pending with no ORDER BY to guarantee which half,
+    # so newly discovered domains could go permanently invisible in the admin
+    # list once the pool crossed 500 (owner report 2026-07-22: "I do not see
+    # new services appearing").
     LIST_BY_STATUS = _Stmt(
         "SELECT domain, last_crawled_at, relevance_score, category, "
         "is_relevant, metadata, frontier_status "
-        "FROM algorand_platform.domain_tracking WHERE frontier_status = ? LIMIT 500"
+        "FROM algorand_platform.domain_tracking WHERE frontier_status = ? LIMIT 5000"
     )
     LIST_BRIEF = _Stmt(
         "SELECT domain, last_crawled_at, relevance_score, category, "
-        "is_relevant, metadata, frontier_status FROM algorand_platform.domain_tracking LIMIT 500"
+        "is_relevant, metadata, frontier_status FROM algorand_platform.domain_tracking LIMIT 5000"
     )
 
 
@@ -280,6 +300,7 @@ class DomainTrackingStmts:
 # crawled_pages_by_domain (read-only here)
 # --------------------------------------------------------------------------- #
 class CrawledPageStmts:
+    """Prepared statements for crawled_pages."""
     COUNT_BY_DOMAIN = _Stmt(
         "SELECT COUNT(*) AS c FROM algorand_platform.crawled_pages_by_domain WHERE domain = ?"
     )
@@ -289,6 +310,7 @@ class CrawledPageStmts:
 # tool_suggestions / compose_sessions (writer introspection, read-only here)
 # --------------------------------------------------------------------------- #
 class ToolInsightStmts:
+    """Prepared statements for writer tool-usage insights."""
     LIST_SUGGESTIONS = _Stmt(
         "SELECT created_at, suggestion_id, capability, reason, service_id, source_url, "
         "model, resolved "
@@ -326,6 +348,7 @@ class ToolInsightStmts:
 # url_queue / url_queue_by_url / url_queue_pending (admin frontier-approval seed)
 # --------------------------------------------------------------------------- #
 class UrlQueueStmts:
+    """Prepared statements for the crawl frontier URL queue."""
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.url_queue ("
         "queue_id, url, source, priority, enqueued_at, status, metadata"
@@ -346,6 +369,7 @@ class UrlQueueStmts:
 # investigation_findings (evidence trail, read-only here)
 # --------------------------------------------------------------------------- #
 class InvestigationStmts:
+    """Prepared statements for investigative-tool findings."""
     LIST = _Stmt(
         "SELECT created_at, tool, arguments, result_json "
         "FROM algorand_platform.investigation_findings WHERE service_id = ? LIMIT 50"
@@ -356,6 +380,7 @@ class InvestigationStmts:
 # classifier_review_queue / classifier_review_pending
 # --------------------------------------------------------------------------- #
 class ClassifierReviewStmts:
+    """Prepared statements for the pending classifier-review queue."""
     GET_METADATA = _Stmt(
         "SELECT metadata FROM algorand_platform.classifier_review_queue WHERE review_id = ?"
     )
@@ -387,6 +412,7 @@ class ClassifierReviewStmts:
 # publish_queue (admin observability — the workers own the write path)
 # --------------------------------------------------------------------------- #
 class PublishQueueStmts:
+    """Prepared statements for the publish queue."""
     # Pending rows come from the SAME single-partition index the drain reads
     # (publish_queue_pending), so the admin view is complete and exact for
     # pending. The unfiltered token-order scan below only fills in resolved
@@ -394,8 +420,7 @@ class PublishQueueStmts:
     # partition key and there is no status/time index to page by. Both exclude
     # payload — it carries the full page text (up to ~48k chars per row).
     LIST_PENDING_IDS = _Stmt(
-        "SELECT queue_id FROM algorand_platform.publish_queue_pending "
-        "WHERE status = ? LIMIT ?"
+        "SELECT queue_id FROM algorand_platform.publish_queue_pending WHERE status = ? LIMIT ?"
     )
     GET_ROW = _Stmt(
         "SELECT queue_id, status, last_reason, priority, topic, publish_kind, "
@@ -407,15 +432,14 @@ class PublishQueueStmts:
         "service_id, display_name, scrape_url, created_at, updated_at "
         "FROM algorand_platform.publish_queue LIMIT ?"
     )
-    GET_PAYLOAD = _Stmt(
-        "SELECT payload FROM algorand_platform.publish_queue WHERE queue_id = ?"
-    )
+    GET_PAYLOAD = _Stmt("SELECT payload FROM algorand_platform.publish_queue WHERE queue_id = ?")
 
 
 # --------------------------------------------------------------------------- #
 # pending_feed_queue
 # --------------------------------------------------------------------------- #
 class PendingFeedStmts:
+    """Prepared statements for the pending-feed backlog."""
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.pending_feed_queue "
         "(bucket, interest_score, approved_at, article_id) "
@@ -435,6 +459,7 @@ class PendingFeedStmts:
 # public feed uses.
 # --------------------------------------------------------------------------- #
 class NewsStmts:
+    """Prepared statements for reader-facing article reads."""
     INSERT_BY_ID = _Stmt(
         "INSERT INTO algorand_platform.articles_by_id ("
         "article_id, service_id, title, summary, body, "
@@ -465,6 +490,7 @@ class NewsStmts:
 # article_view_counts (counter table)
 # --------------------------------------------------------------------------- #
 class ViewCountStmts:
+    """Prepared statements for per-article view counters."""
     BUMP = _Stmt(
         "UPDATE algorand_platform.article_view_counts SET views = views + 1 WHERE article_id = ?"
     )
@@ -475,6 +501,7 @@ class ViewCountStmts:
 # Chain tables written by the Conduit exporter (read-only here)
 # --------------------------------------------------------------------------- #
 class ChainStmts:
+    """Prepared statements for chain data indexed by Conduit."""
     GET_TXN = _Stmt(
         "SELECT txid, round, intra, sender, txn_type, txn_json, receiver, amount_microalgos "
         "FROM algorand_platform.transactions_by_id WHERE txid = ?"
@@ -490,6 +517,7 @@ class ChainStmts:
 # suggestions_by_status / upvotes_by_suggestion
 # --------------------------------------------------------------------------- #
 class SuggestionStmts:
+    """Prepared statements for service suggestions."""
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.suggestions_by_status ("
         "status, created_at, suggestion_id, wallet_address, title, body, submission_txid"
@@ -514,6 +542,7 @@ class SuggestionStmts:
 # contact_messages (public /contact form → admin inbox)
 # --------------------------------------------------------------------------- #
 class ContactStmts:
+    """Prepared statements for contact messages."""
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.contact_messages ("
         "bucket, created_at, message_id, name, email, message"
@@ -526,6 +555,7 @@ class ContactStmts:
 
 
 class UpvoteStmts:
+    """Prepared statements for suggestion upvotes."""
     GET = _Stmt(
         "SELECT wallet_address FROM algorand_platform.upvotes_by_suggestion "
         "WHERE suggestion_id = ? AND wallet_address = ?"
@@ -544,6 +574,7 @@ class UpvoteStmts:
 # service_registry
 # --------------------------------------------------------------------------- #
 class ServiceRegistryStmts:
+    """Prepared statements for the service registry."""
     LIST_ALL = _Stmt(
         "SELECT service_id, display_name, match_kind, match_value, scrape_url, enabled, origin "
         "FROM algorand_platform.service_registry"
@@ -570,6 +601,7 @@ class ServiceRegistryStmts:
 # Keep in sync with the workers' ServiceSourceStmts.
 # --------------------------------------------------------------------------- #
 class ServiceSourceStmts:
+    """Prepared statements for a service's known web sources."""
     UPSERT = _Stmt(
         "INSERT INTO algorand_platform.service_sources ("
         "service_id, source_id, source_type, url, domain, enabled, added_at"
@@ -579,9 +611,7 @@ class ServiceSourceStmts:
         "SELECT source_id, source_type, url, domain, enabled "
         "FROM algorand_platform.service_sources WHERE service_id = ?"
     )
-    DELETE_FOR_SERVICE = _Stmt(
-        "DELETE FROM algorand_platform.service_sources WHERE service_id = ?"
-    )
+    DELETE_FOR_SERVICE = _Stmt("DELETE FROM algorand_platform.service_sources WHERE service_id = ?")
     UPSERT_BY_DOMAIN = _Stmt(
         "INSERT INTO algorand_platform.service_by_domain (domain, service_id) VALUES (?, ?)"
     )
@@ -594,6 +624,7 @@ class ServiceSourceStmts:
 # page_snapshots
 # --------------------------------------------------------------------------- #
 class SnapshotStmts:
+    """Prepared statements for service-source content snapshots."""
     GET_LATEST = _Stmt(
         "SELECT content_hash, title, body FROM algorand_platform.page_snapshots "
         "WHERE source_id = ? LIMIT 1"
@@ -609,6 +640,7 @@ class SnapshotStmts:
 # feed_placements / feed_placements_by_slot
 # --------------------------------------------------------------------------- #
 class PlacementStmts:
+    """Prepared statements for sponsored feed placements."""
     LIST_BY_SLOT = _Stmt(
         "SELECT placement_id, slot, sponsor_name, headline, body, "
         "image_url, target_url, priority, enabled, active_from, active_until "
@@ -632,6 +664,7 @@ class PlacementStmts:
 # price_metrics_brief / price_metric_samples (read-only here)
 # --------------------------------------------------------------------------- #
 class PriceMetricsStmts:
+    """Prepared statements for price-metrics samples and briefs."""
     GET_BRIEF = _Stmt(
         "SELECT asset_id, asset_name, currency, current_price_usd, change_24h_pct, "
         "sample_count_24h, prepared_at FROM algorand_platform.price_metrics_brief "
@@ -658,6 +691,7 @@ class PriceMetricsStmts:
 # defined here — the per-day aggregate reads are NOT built from runtime fragments.
 # --------------------------------------------------------------------------- #
 class AnalyticsStmts:
+    """Prepared statements for session/search analytics."""
     # -- write path (fire-and-forget counter bumps) --
     SESSION_BUMP = _Stmt(
         "UPDATE algorand_platform.session_daily SET sessions = sessions + 1 "
@@ -678,10 +712,6 @@ class AnalyticsStmts:
     PATH_KIND_BUMP = _Stmt(
         "UPDATE algorand_platform.pageview_path_kind_daily SET views = views + 1 "
         "WHERE day = ? AND path = ? AND kind = ?"
-    )
-    BOT_BUMP = _Stmt(
-        "UPDATE algorand_platform.pageview_bot_daily SET views = views + 1 "
-        "WHERE day = ? AND bot = ?"
     )
     GEO_BUMP = _Stmt(
         "UPDATE algorand_platform.geo_country_daily SET views = views + 1 "
@@ -710,6 +740,41 @@ class AnalyticsStmts:
     REFERRER_BUMP = _Stmt(
         "UPDATE algorand_platform.pageview_referrer_daily SET views = views + 1 "
         "WHERE day = ? AND referrer = ?"
+    )
+    # -- retroactive correction (2026-07-22): a UA whose is_repeated_ua count
+    # JUST crossed the daily threshold had its earlier hits today already
+    # counted as human via the '(direct)' bucket — the only lane with a raw
+    # per-request log (pageview_direct_sample) to reconstruct a correction
+    # from. Counter columns accept negative deltas same as positive.
+    DIRECT_SAMPLE_ALL_BY_DAY = _Stmt(
+        "SELECT ts, path, referer, user_agent, ua_class "
+        "FROM algorand_platform.pageview_direct_sample WHERE day = ?"
+    )
+    DIRECT_SAMPLE_DELETE = _Stmt(
+        "DELETE FROM algorand_platform.pageview_direct_sample WHERE day = ? AND ts = ?"
+    )
+    PAGEVIEW_BUMP_DECR = _Stmt(
+        "UPDATE algorand_platform.pageview_daily SET views = views - ? WHERE kind = ? AND day = ?"
+    )
+    PATH_KIND_BUMP_DECR = _Stmt(
+        "UPDATE algorand_platform.pageview_path_kind_daily SET views = views - ? "
+        "WHERE day = ? AND path = ? AND kind = ?"
+    )
+    DEVICE_BUMP_DECR = _Stmt(
+        "UPDATE algorand_platform.pageview_device_daily SET views = views - ? "
+        "WHERE day = ? AND device = ?"
+    )
+    BROWSER_BUMP_DECR = _Stmt(
+        "UPDATE algorand_platform.pageview_browser_daily SET views = views - ? "
+        "WHERE day = ? AND browser = ?"
+    )
+    REFERRER_BUMP_DECR = _Stmt(
+        "UPDATE algorand_platform.pageview_referrer_daily SET views = views - ? "
+        "WHERE day = ? AND referrer = ?"
+    )
+    DIRECT_UACLASS_BUMP_DECR = _Stmt(
+        "UPDATE algorand_platform.pageview_direct_uaclass_daily SET views = views - ? "
+        "WHERE day = ? AND ua_class = ?"
     )
     REFERRER_PATH_BUMP = _Stmt(
         "UPDATE algorand_platform.pageview_referrer_path_daily SET views = views + 1 "
@@ -766,7 +831,6 @@ class AnalyticsStmts:
     AGG_SEARCH_ZERO = _Stmt(
         "SELECT query, searches FROM algorand_platform.search_zero_daily WHERE day = ?"
     )
-    AGG_BOT = _Stmt("SELECT bot, views FROM algorand_platform.pageview_bot_daily WHERE day = ?")
     AGG_NOTFOUND = _Stmt(
         "SELECT path, views FROM algorand_platform.pageview_notfound_daily WHERE day = ?"
     )
@@ -786,4 +850,28 @@ class AnalyticsStmts:
     AGG_GEO = _Stmt("SELECT country, views FROM algorand_platform.geo_country_daily WHERE day = ?")
     AGG_CAMPAIGN = _Stmt(
         "SELECT campaign, views FROM algorand_platform.campaign_daily WHERE day = ?"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# kyc_enrollments / kyc_lookup_events (KYC-as-a-service, x402 challenge)
+# --------------------------------------------------------------------------- #
+class KycStmts:
+    """Prepared statements for KYC enrollments and lookup events."""
+    UPSERT_ENROLLMENT = _Stmt(
+        "INSERT INTO algorand_platform.kyc_enrollments ("
+        "wallet_address, enrolled_at, updated_at, consent_signature_b64, "
+        "wallet_age_round, recent_tx_count, kyc_level"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    GET_ENROLLMENT = _Stmt(
+        "SELECT wallet_address, enrolled_at, updated_at, consent_signature_b64, "
+        "wallet_age_round, recent_tx_count, kyc_level "
+        "FROM algorand_platform.kyc_enrollments WHERE wallet_address = ?"
+    )
+    INSERT_LOOKUP_EVENT = _Stmt(
+        "INSERT INTO algorand_platform.kyc_lookup_events ("
+        "wallet_address, created_at, payer_address, payment_txid, found, "
+        "payout_status, payout_txid, payout_error"
+        ") VALUES (?, now(), ?, ?, ?, ?, ?, ?)"
     )

@@ -1,3 +1,5 @@
+"""Apply an in-place edit to an already-published article."""
+
 from __future__ import annotations
 
 import logging
@@ -18,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 
 def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
-    """
-    Apply follow-up ingest to an existing article (within edit window).
+    """Apply follow-up ingest to an existing article (within edit window).
+
     Saves prior body to article_versions, then updates live article.
     """
     from app.modules.ai.mistral_client import MistralCreditError, MistralError
@@ -186,9 +188,7 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
         )
     else:
         keys = [
-            (str(k[0]), str(k[1]))
-            for k in keys
-            if isinstance(k, (list, tuple)) and len(k) == 2
+            (str(k[0]), str(k[1])) for k in keys if isinstance(k, (list, tuple)) and len(k) == 2
         ]
     # Anchor the re-registered keys' edit window to the article's ORIGINAL
     # publish time, never "now": the default (now + window) meant every edit

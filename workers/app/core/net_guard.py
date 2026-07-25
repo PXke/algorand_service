@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    import httpx
 
 _ALLOWED_SCHEMES = {"http", "https"}
 
@@ -75,6 +79,7 @@ def assert_public_url(url: str) -> str:
 
 
 def is_public_url(url: str) -> bool:
+    """Return whether url resolves only to public (non-SSRF-able) addresses."""
     try:
         assert_public_url(url)
         return True
@@ -89,8 +94,8 @@ def guarded_get(
     params: dict | None = None,
     timeout: float = 12.0,
     max_redirects: int = 5,
-):
-    """httpx GET that re-validates the target on every redirect hop.
+) -> httpx.Response:
+    """Httpx GET that re-validates the target on every redirect hop.
 
     follow_redirects must stay off here: otherwise a public URL could 302 to an
     internal one and the client would follow it before any guard runs. We follow

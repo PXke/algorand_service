@@ -1,12 +1,15 @@
+"""HTTP routes for sponsored/curated feed placements."""
+
 from __future__ import annotations
 
-from robyn import Request
+from robyn import Request, Robyn
 
 from app.core import serialization
 from app.modules.placements.services.placement_service import PlacementService
 
 
-def register_placement_routes(app) -> None:
+def register_placement_routes(app: Robyn) -> None:
+    """Register the sponsored/curated feed placements endpoint on the app."""
     service = PlacementService()
 
     @app.get("/api/v1/news/placements")

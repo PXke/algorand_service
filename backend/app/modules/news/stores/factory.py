@@ -1,3 +1,5 @@
+"""Article-store singleton wiring, swappable for tests."""
+
 from __future__ import annotations
 
 from app.core.config import settings
@@ -9,6 +11,7 @@ _article_store: ArticleStore | None = None
 
 
 def get_article_store() -> ArticleStore:
+    """Return the process-wide article store, creating it from settings on first use."""
     global _article_store
     if _article_store is None:
         backend = settings.news_store.strip().lower()
@@ -20,5 +23,6 @@ def get_article_store() -> ArticleStore:
 
 
 def set_article_store(store: ArticleStore | None) -> None:
+    """Override the process-wide article store, e.g. with a test double."""
     global _article_store
     _article_store = store

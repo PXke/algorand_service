@@ -1,3 +1,5 @@
+"""Keyword-based relevance scoring for crawled pages."""
+
 from __future__ import annotations
 
 import re
@@ -50,6 +52,7 @@ DEFAULT_THRESHOLD = 0.35
 
 @dataclass(frozen=True)
 class ClassifierResult:
+    """One page's keyword-relevance scoring result."""
     score: float
     in_scope: bool
     reasons: tuple[str, ...]

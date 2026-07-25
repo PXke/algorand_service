@@ -1791,11 +1791,29 @@ abstract class AppLocalizations {
   /// **'Add as permanent source'**
   String get domainsAddAsSeed;
 
+  /// No description provided for @domainsAddSinglePageOnly.
+  ///
+  /// In en, this message translates to:
+  /// **'Just this page (citation only, don\'t crawl the site)'**
+  String get domainsAddSinglePageOnly;
+
   /// No description provided for @domainsScoreUnexplained.
   ///
   /// In en, this message translates to:
   /// **'Score breakdown not available'**
   String get domainsScoreUnexplained;
+
+  /// No description provided for @domainsPossibleService.
+  ///
+  /// In en, this message translates to:
+  /// **'possible service?'**
+  String get domainsPossibleService;
+
+  /// No description provided for @domainsPossibleServiceHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Scored well but tagged news/generic — this may be a real product, not just a citation source. Consider \"Approve & explore\" instead of \"Crawl once\".'**
+  String get domainsPossibleServiceHint;
 
   /// No description provided for @paginationPrevious.
   ///

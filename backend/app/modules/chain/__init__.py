@@ -1,3 +1,5 @@
+"""Read access to chain data indexed by Conduit."""
+
 from app.modules.chain.models import IndexedTransaction
 from app.modules.chain.repository import (
     CassandraChainRepository,

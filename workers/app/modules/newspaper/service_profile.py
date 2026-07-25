@@ -1,11 +1,13 @@
+"""Score a service's impressiveness for headline/framing decisions."""
+
 from __future__ import annotations
 
 import re
 
 
 def score_service_impressiveness(*, page_text: str, source_url: str = "") -> tuple[int, str]:
-    """
-    Heuristic service weight for queue priority (−20 .. +15).
+    """Heuristic service weight for queue priority (−20 .. +15).
+
     Thin placeholder sites rank below rich docs.
     """
     text = page_text.strip()

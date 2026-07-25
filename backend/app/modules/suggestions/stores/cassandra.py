@@ -1,3 +1,5 @@
+"""Cassandra-backed suggestion storage."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -7,7 +9,9 @@ from app.modules.suggestions.models.domain import StoredSuggestion, SuggestionEr
 
 
 class CassandraSuggestionStore:
+    """Cassandra-backed suggestion storage."""
     def insert(self, item: StoredSuggestion) -> None:
+        """Insert a new suggestion; raises SuggestionError if the txid was already used."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import SuggestionStmts
 
@@ -30,6 +34,7 @@ class CassandraSuggestionStore:
         )
 
     def list_open(self) -> list[StoredSuggestion]:
+        """List open suggestions."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import SuggestionStmts
 
@@ -53,6 +58,7 @@ class CassandraSuggestionStore:
         return items
 
     def get(self, suggestion_id: str) -> StoredSuggestion | None:
+        """Fetch one suggestion by id, or None if it does not exist."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import SuggestionStmts
 
@@ -78,6 +84,7 @@ class CassandraSuggestionStore:
         )
 
     def has_submission_txid(self, submission_txid: str) -> bool:
+        """Check whether a submission txid has already been used."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import SuggestionStmts
 

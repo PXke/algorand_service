@@ -1,3 +1,5 @@
+"""Persist crawled pages and derive their keyword/description metadata."""
+
 from __future__ import annotations
 
 import hashlib
@@ -42,6 +44,7 @@ _STOPWORDS = {
 
 @dataclass(frozen=True)
 class CrawledPageRecord:
+    """One stored crawled page and its derived metadata."""
     page_id: str
     url: str
     domain: str
@@ -84,8 +87,15 @@ def _top_keywords(texts: Iterable[str], *, limit: int = 12) -> list[str]:
 
 
 def build_keywords(*, title: str, body: str, domain: str) -> list[str]:
+    """Rank keyword terms drawn from a page's title, body prefix and domain."""
     domain_tokens = [part for part in re.split(r"[.\-_/]+", domain) if len(part) >= 3]
     return _top_keywords([title, body[:3000], " ".join(domain_tokens)], limit=12)
+
+
+def page_id_for_url(url: str) -> uuid.UUID:
+    """Deterministic page_id derived from the url alone. crawled_pages_by_id is keyed by this (not by url), so any caller holding just a url can point- look-up an already-harvested page's cached body — no domain scan needed."""
+    page_id = hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"crawled-page:{page_id}")
 
 
 def upsert_crawled_page(
@@ -98,15 +108,15 @@ def upsert_crawled_page(
     classifier_score: float,
     crawled_at: datetime | None = None,
 ) -> CrawledPageRecord:
+    """Insert or update a crawled page's cached record, keyed by its url-derived id."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import CrawledPageStmts
 
     now = crawled_at or datetime.now(tz=UTC)
     domain = _normalize_domain(url)
-    page_id = hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
     description = _short_description(body)
     keywords = build_keywords(title=title, body=body, domain=domain)
-    page_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"crawled-page:{page_id}")
+    page_uuid = page_id_for_url(url)
 
     session = get_cassandra_session()
     session.execute(
@@ -156,7 +166,9 @@ def upsert_crawled_page(
 
 def crawled_page_count_for_url(url: str) -> int:
     """Pages already harvested for the URL's domain (single-partition COUNT).
-    Used to front-load a new domain's initial harvest at high priority."""
+
+    Used to front-load a new domain's initial harvest at high priority.
+    """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import CrawledPageStmts
 
@@ -165,10 +177,7 @@ def crawled_page_count_for_url(url: str) -> int:
         return 0
     try:
         session = get_cassandra_session()
-        row = session.execute(
-            CrawledPageStmts.COUNT_BY_DOMAIN, (domain,)
-        ).one()
+        row = session.execute(CrawledPageStmts.COUNT_BY_DOMAIN, (domain,)).one()
         return int(row.c) if row and row.c is not None else 0
     except Exception:
         return 0
-

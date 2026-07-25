@@ -28,11 +28,10 @@ _RSS_RE = re.compile(
 )
 _HEAD_CLOSE_RE = re.compile(r"</head>", re.IGNORECASE)
 _BODY_OPEN_RE = re.compile(r"<body[^>]*>", re.IGNORECASE)
-_HTML_LANG_RE = re.compile(
-    r'(<html[^>]*\s)lang=["\'][^"\']*["\']', re.IGNORECASE
-)
+_HTML_LANG_RE = re.compile(r'(<html[^>]*\s)lang=["\'][^"\']*["\']', re.IGNORECASE)
 
 _cache: dict[str, object] = {"path": None, "mtime": 0.0, "html": None}
+
 
 # Without hints the engine critical path is discovered serially. A dual --wasm
 # build ships dart2wasm+skwasm AND dart2js+canvaskit; preloading BOTH stacks
@@ -43,7 +42,7 @@ _cache: dict[str, object] = {"path": None, "mtime": 0.0, "html": None}
 # and a WasmGC-only check preloads megabytes of wasm it never executes
 # (observed in Firefox devtools as "preloaded but not used" warnings).
 def _resource_hints() -> str:
-    hints = (
+    return (
         "<script>(function(){"
         # Blink detection MUST match flutter_bootstrap.js's own browserEngine
         # probe (navigator.vendor), not UA brands: headless Chrome reports no
@@ -78,7 +77,6 @@ def _resource_hints() -> str:
         "}"
         "})();</script>"
     )
-    return hints
 
 
 _PRELOADS = _resource_hints()
@@ -100,6 +98,7 @@ def _safe_cwd_roots() -> list[Path]:
 
 
 def _candidate_dirs() -> list[Path]:
+    """Directories to probe for the built Flutter web app, most likely first."""
     if settings.frontend_dist_dir:
         return [Path(settings.frontend_dist_dir)]
     # Auto-detect the built web dir. In prod it sits at <release>/frontend_web,
@@ -108,10 +107,7 @@ def _candidate_dirs() -> list[Path]:
     # probe the systemd WorkingDirectory (releases/current/backend) via cwd, so a
     # path-depth change can't silently strip the bootstrap script again.
     here = Path(__file__).resolve()
-    roots: list[Path] = []
-    for depth in (4, 3, 5):
-        if depth < len(here.parents):
-            roots.append(here.parents[depth])
+    roots: list[Path] = [here.parents[depth] for depth in (4, 3, 5) if depth < len(here.parents)]
     roots += _safe_cwd_roots()
     dirs: list[Path] = []
     seen: set[Path] = set()
@@ -146,18 +142,13 @@ def load_template() -> str | None:
 
 
 def ssr_track_snippet(path: str) -> str:
-    """Inline script marking the SSR-recorded path so the Flutter beacon can skip
-    a duplicate count for the same landing page."""
+    """Inline script marking the SSR-recorded path so the Flutter beacon can skip a duplicate count for the same landing page."""
     safe = path.replace("\\", "\\\\").replace('"', '\\"')
-    return (
-        f'<script>try{{sessionStorage.setItem("pxke_ssr_pv","{safe}")}}catch(e){{}}</script>'
-    )
+    return f'<script>try{{sessionStorage.setItem("pxke_ssr_pv","{safe}")}}catch(e){{}}</script>'
 
 
 def render_document(head_html: str, body_html: str, *, html_lang: str = "en") -> str | None:
-    """Inject `head_html` (title/meta/JSON-LD) before </head> and `body_html`
-    (the crawlable `#ssr-body` content) right after <body>. Strips the static
-    title/description so ours win."""
+    """Inject `head_html` (title/meta/JSON-LD) before </head> and `body_html` (the crawlable `#ssr-body` content) right after <body>. Strips the static title/description so ours win."""
     template = load_template()
     if template is None:
         return None
@@ -178,7 +169,7 @@ def render_document(head_html: str, body_html: str, *, html_lang: str = "en") ->
         # wrote inside the JSON-LD articleBody into raw newlines — invalid JSON
         # that made Google drop the whole NewsArticle block.
         injected = _PRELOADS + "\n" + head_html + "\n</head>"
-        doc = _HEAD_CLOSE_RE.sub(lambda m: injected, doc, count=1)
+        doc = _HEAD_CLOSE_RE.sub(lambda _m: injected, doc, count=1)
     if _BODY_OPEN_RE.search(doc):
         doc = _BODY_OPEN_RE.sub(lambda m: m.group(0) + "\n" + body_html, doc, count=1)
     return doc

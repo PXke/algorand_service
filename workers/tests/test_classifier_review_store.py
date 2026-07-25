@@ -1,3 +1,5 @@
+"""Completing a pending classifier review by id."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -7,10 +9,12 @@ from app.modules.crawler.classifier_review_store import complete_classifier_revi
 
 
 def test_complete_classifier_review_invalid_id() -> None:
+    """Returns False for a review id that isn't a valid UUID."""
     assert complete_classifier_review("not-a-uuid") is False
 
 
-def test_complete_classifier_review_success(fake_cassandra_session) -> None:
+def test_complete_classifier_review_success(fake_cassandra_session: MagicMock) -> None:
+    """Completes a found pending review, returning True and issuing at least 2 writes."""
     rid = uuid4()
     created = MagicMock()
     created.tzinfo = None

@@ -953,7 +953,17 @@ class AppLocalizationsZh extends AppLocalizations {
   String get domainsAddAsSeed => '添加为永久来源';
 
   @override
+  String get domainsAddSinglePageOnly => '仅此页面（仅作引用，不抓取整个网站）';
+
+  @override
   String get domainsScoreUnexplained => '暂无评分明细';
+
+  @override
+  String get domainsPossibleService => '可能是服务？';
+
+  @override
+  String get domainsPossibleServiceHint =>
+      '评分较高但被标记为新闻/通用——可能是真实产品，而非仅是引用来源。建议选择「批准并探索」而非「仅爬取一次」。';
 
   @override
   String get paginationPrevious => '上一页';

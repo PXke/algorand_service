@@ -1,3 +1,5 @@
+"""Verify a wallet signature and record an upvote on a suggestion."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -17,12 +19,14 @@ def _default_signature_verifier(wallet_address: str, message: str, signature_b64
 
 
 class UpvoteService:
+    """Verify a wallet signature and record an upvote on a suggestion."""
     def __init__(
         self,
         suggestion_store: SuggestionStore,
         upvote_store: UpvoteStore | None = None,
         signature_verifier: SignatureVerifier | None = None,
     ) -> None:
+        """Wire the suggestion/upvote stores and signature verifier, defaulting to the real implementations."""
         self._suggestions = suggestion_store
         self._upvotes = upvote_store or get_upvote_store()
         self._verify_signature = signature_verifier or _default_signature_verifier
@@ -34,6 +38,7 @@ class UpvoteService:
         wallet_address: str,
         signature_b64: str,
     ) -> dict[str, int | str]:
+        """Verify a wallet's signature and record its upvote on a suggestion."""
         item = self._suggestions.get(suggestion_id)
         if item is None:
             raise UpvoteError("not_found", "Suggestion not found")

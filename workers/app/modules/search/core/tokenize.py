@@ -38,6 +38,7 @@ def build_article_search_tokens(
     body: str,
     tags: list[str] | tuple[str, ...] | None = None,
 ) -> list[str]:
+    """Build the Typesense `tokens` field: tags, acronyms, and synonym-cluster expansions."""
     tokens: set[str] = set()
     for raw in tags or ():
         tag = raw.strip().lower()

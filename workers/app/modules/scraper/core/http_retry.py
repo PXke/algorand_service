@@ -1,12 +1,14 @@
+"""HTTP request with backoff on rate limits and transient errors."""
+
 from __future__ import annotations
 
 import time
-from typing import Any
 
 import httpx
 
 
 class HttpRetryError(Exception):
+    """Raised when a retried HTTP request exhausts its attempts."""
     pass
 
 
@@ -17,10 +19,10 @@ def request_with_retry(
     *,
     max_attempts: int = 4,
     retry_statuses: frozenset[int] = frozenset({429, 500, 502, 503, 504}),
-    **kwargs: Any,
+    **kwargs: object,
 ) -> httpx.Response:
-    """
-    HTTP request with backoff on rate limits and transient errors.
+    """HTTP request with backoff on rate limits and transient errors.
+
     Honors Retry-After (seconds) when present (Discord/Reddit/CDN).
     """
     last_response: httpx.Response | None = None

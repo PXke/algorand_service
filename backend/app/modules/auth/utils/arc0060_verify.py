@@ -1,3 +1,5 @@
+"""ARC-60 (WebAuthn-shaped) signature verification for wallet auth."""
+
 from __future__ import annotations
 
 import base64
@@ -39,6 +41,7 @@ def verify_arc0060_auth(
     domain: str,
     expected_caip122: Caip122Message | None = None,
 ) -> bool:
+    """Verify an ARC-60 AUTH-scope signature, and optionally cross-check its embedded CAIP-122 claims."""
     try:
         authenticator_data = base64.b64decode(authenticator_data_b64)
         rp_id_hash = hashlib.sha256(domain.encode("utf-8")).digest()
@@ -70,4 +73,5 @@ def verify_arc0060_auth(
 
 
 def caip122_to_data_b64(caip122: Caip122Message) -> str:
+    """Encode a CAIP-122 message as the base64 clientData payload expected by ARC-60 signing."""
     return base64.b64encode(canonical_json_bytes(caip122.to_dict())).decode("ascii")

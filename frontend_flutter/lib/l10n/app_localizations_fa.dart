@@ -982,7 +982,18 @@ class AppLocalizationsFa extends AppLocalizations {
   String get domainsAddAsSeed => 'افزودن به‌عنوان منبع دائمی';
 
   @override
+  String get domainsAddSinglePageOnly =>
+      'فقط همین صفحه (فقط استناد، بدون خزیدن در کل سایت)';
+
+  @override
   String get domainsScoreUnexplained => 'جزئیات امتیاز در دسترس نیست';
+
+  @override
+  String get domainsPossibleService => 'احتمالاً یک سرویس؟';
+
+  @override
+  String get domainsPossibleServiceHint =>
+      'امتیاز خوبی دارد اما به‌عنوان خبر/عمومی برچسب خورده — ممکن است یک محصول واقعی باشد، نه فقط منبع استناد. به‌جای «یک‌بار بخزد» به «تأیید و کاوش» فکر کنید.';
 
   @override
   String get paginationPrevious => 'قبلی';

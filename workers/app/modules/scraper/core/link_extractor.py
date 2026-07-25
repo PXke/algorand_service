@@ -1,3 +1,5 @@
+"""Extract and score outbound links from a fetched page."""
+
 from __future__ import annotations
 
 import logging
@@ -6,10 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 def _preview_has_algorand_signal(preview: dict[str, str]) -> bool:
-    """True when a domain's landing-page preview actually mentions the Algorand
-    ecosystem — the guard that keeps frontier auto-approve from crawling sites
-    that merely scored on noise. Reject is never decided here; this only gates the
-    no-human auto-approve, so a miss just means 'hold for review'."""
+    """True when a domain's landing-page preview actually mentions the Algorand ecosystem — the guard that keeps frontier auto-approve from crawling sites that merely scored on noise. Reject is never decided here; this only gates the no-human auto-approve, so a miss just means 'hold for review'."""
     blob = " ".join(
         (
             preview.get("preview_title", ""),
@@ -21,8 +20,23 @@ def _preview_has_algorand_signal(preview: dict[str, str]) -> bool:
 
 
 _SKIP_EXTENSIONS = (
-    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".css", ".js",
-    ".pdf", ".zip", ".mp4", ".mp3", ".woff", ".woff2", ".xml", ".rss",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".ico",
+    ".css",
+    ".js",
+    ".pdf",
+    ".zip",
+    ".mp4",
+    ".mp3",
+    ".woff",
+    ".woff2",
+    ".xml",
+    ".rss",
 )
 
 
@@ -70,25 +84,14 @@ def _expected_preview_failure(exc: BaseException) -> bool:
         return True
     if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError)):
         return True
-    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {
-        401,
-        403,
-        404,
-        410,
-        429,
-        500,
-        502,
-        503,
-        504,
-    }:
-        return True
-    return False
+    return bool(
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response.status_code in {401, 403, 404, 410, 429, 500, 502, 503, 504}
+    )
 
 
 def fetch_domain_preview(url: str) -> dict[str, str]:
-    """Lightweight peek at a candidate domain: title + meta description +
-    keywords only. One GET, no link-following, no storage, no Mistral — just
-    enough for an admin to judge a pending domain without visiting it."""
+    """Lightweight peek at a candidate domain: title + meta description + keywords only. One GET, no link-following, no storage, no Mistral — just enough for an admin to judge a pending domain without visiting it."""
     out = {"preview_title": "", "preview_description": "", "preview_keywords": ""}
     try:
         from bs4 import BeautifulSoup
@@ -116,17 +119,13 @@ def fetch_domain_preview(url: str) -> dict[str, str]:
         # Predicted interest from the preview text alone (no full crawl).
         from app.modules.ai.publish_classifier import score_content_for_storage
 
-        blob = " ".join(
-            (out["preview_title"], out["preview_description"], out["preview_keywords"])
-        )
+        blob = " ".join((out["preview_title"], out["preview_description"], out["preview_keywords"]))
         out["preview_score"] = f"{score_content_for_storage(blob, url):.1f}"
     except Exception as exc:
         if _expected_preview_failure(exc):
             logger.info("domain preview unavailable for %s: %s", url, exc)
         else:
-            logger.warning(
-                "failed to fetch domain preview for %s: %s", url, exc, exc_info=True
-            )
+            logger.warning("failed to fetch domain preview for %s: %s", url, exc, exc_info=True)
     return out
 
 
@@ -140,7 +139,8 @@ def enqueue_page_links(
 
     Same-domain links (e.g. articles behind a blog index) are queued directly;
     external links pass the dead-end gate (platform blocklist + domains the
-    admin marked irrelevant); everything else unknown is held for review."""
+    admin marked irrelevant); everything else unknown is held for review.
+    """
     from app.core.config import WEB_LINK_DISCOVERY_ENABLED
     from app.modules.crawler.domain_tracker import (
         domain_crawl_count,
@@ -182,9 +182,7 @@ def enqueue_page_links(
         counts["budget_exhausted"] = 1
     else:
         same_domain_priority = (
-            CRAWL_INITIAL_HARVEST_PRIORITY
-            if crawl_count < CRAWL_INITIAL_HARVEST_TARGET
-            else 25
+            CRAWL_INITIAL_HARVEST_PRIORITY if crawl_count < CRAWL_INITIAL_HARVEST_TARGET else 25
         )
         for url, _text in same:
             _, created = enqueue_url(
@@ -224,9 +222,7 @@ def enqueue_page_links(
         # preview (the classify_pending_domains task previews it later) instead of
         # stalling the drain worker on a link-heavy page.
         if previews_done >= FRONTIER_PREVIEW_MAX_PER_PAGE:
-            register_pending_domain(
-                domain, first_url=url, link_text=link_text, found_on=page_url
-            )
+            register_pending_domain(domain, first_url=url, link_text=link_text, found_on=page_url)
             counts["held_no_preview"] += 1
             continue
         previews_done += 1

@@ -1,8 +1,4 @@
-"""Abstract base for auto-posting a published article to an external social
-channel (Bluesky, Telegram, ...). One method per channel to implement; the
-dispatcher (dispatcher.py) handles enable-checking, per-channel failure
-isolation, and fan-out so adding a new channel never touches an existing one.
-"""
+"""Abstract base for auto-posting a published article to an external social channel (Bluesky, Telegram, ...). One method per channel to implement; the dispatcher (dispatcher.py) handles enable-checking, per-channel failure isolation, and fan-out so adding a new channel never touches an existing one."""
 
 from __future__ import annotations
 
@@ -17,9 +13,7 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ArticleShare:
-    """Everything a channel needs to compose a post — deliberately just
-    strings, no article_id/DB coupling, so a distributor is trivially
-    testable without Cassandra."""
+    """Everything a channel needs to compose a post — deliberately just strings, no article_id/DB coupling, so a distributor is trivially testable without Cassandra."""
 
     title: str
     summary: str
@@ -59,11 +53,7 @@ def _hashtag_label(raw: str) -> str:
 
 
 def hashtags_for(tags: Sequence[str], *, limit: int = 4) -> list[str]:
-    """Deterministic tag-slug -> hashtag list, always anchored by #Algorand
-    first (ecosystem discovery matters more than any one article's topic,
-    especially on Mastodon where hashtags ARE the discovery mechanism — no
-    site-wide full-text search there). Deduped case-insensitively so an
-    article already tagged "algorand" doesn't produce #Algorand twice."""
+    """Deterministic tag-slug -> hashtag list, always anchored by #Algorand first (ecosystem discovery matters more than any one article's topic, especially on Mastodon where hashtags ARE the discovery mechanism — no site-wide full-text search there). Deduped case-insensitively so an article already tagged "algorand" doesn't produce #Algorand twice."""
     seen: set[str] = set()
     out: list[str] = []
     for raw in ("algorand", *tags):
@@ -80,10 +70,7 @@ def hashtags_for(tags: Sequence[str], *, limit: int = 4) -> list[str]:
 
 
 def compose_caption(*, parts: Sequence[str], tags: Sequence[str], max_chars: int) -> str:
-    """Join `parts` with blank lines and append a hashtag line built from
-    `tags`. Hashtags are the least important content, so they're dropped one
-    at a time before anything else is truncated — a caption that fits without
-    a mid-sentence ellipsis reads far better than one with all hashtags kept."""
+    """Join `parts` with blank lines and append a hashtag line built from `tags`. Hashtags are the least important content, so they're dropped one at a time before anything else is truncated — a caption that fits without a mid-sentence ellipsis reads far better than one with all hashtags kept."""
     tag_list = hashtags_for(tags)
     text = "\n\n".join([*parts, " ".join(tag_list)] if tag_list else parts)
     while len(text) > max_chars and tag_list:
@@ -96,27 +83,23 @@ def compose_caption(*, parts: Sequence[str], tags: Sequence[str], max_chars: int
 
 @dataclass(frozen=True)
 class DistributionResult:
+    """Outcome of posting to one distribution channel."""
     channel: str
     ok: bool
     detail: str = ""
 
 
 class SocialDistributor(ABC):
-    """One external channel. `name` is the short id used in config/logging
-    (e.g. "bluesky"); `enabled` gates whether post_article() should even be
-    attempted (missing credentials, feature flag off, etc — checked by the
-    dispatcher before calling post_article so a disabled channel never makes
-    a network call)."""
+    """One external channel. `name` is the short id used in config/logging (e.g. "bluesky"); `enabled` gates whether post_article() should even be attempted (missing credentials, feature flag off, etc — checked by the dispatcher before calling post_article so a disabled channel never makes a network call)."""
 
     name: str
 
     @property
     @abstractmethod
-    def enabled(self) -> bool: ...
+    def enabled(self) -> bool:
+        """Whether this channel has the credentials/config needed to post."""
+        ...
 
     @abstractmethod
     def post_article(self, share: ArticleShare) -> DistributionResult:
-        """Post the article to this channel. Must not raise — catch
-        everything internally and return a failed DistributionResult, since
-        the dispatcher calls every enabled channel regardless of whether an
-        earlier one raised."""
+        """Post the article to this channel. Must not raise — catch everything internally and return a failed DistributionResult, since the dispatcher calls every enabled channel regardless of whether an earlier one raised."""

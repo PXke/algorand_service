@@ -1,3 +1,5 @@
+"""Fetch context for social posts (e.g. tweets) linked from a page."""
+
 from __future__ import annotations
 
 import html
@@ -16,6 +18,7 @@ _OEMBED = "https://publish.twitter.com/oembed"
 
 
 def extract_post_urls(text: str) -> list[str]:
+    """Pull up to 5 distinct X/Twitter status URLs out of a page's text."""
     seen: set[str] = set()
     urls: list[str] = []
     for match in _TWEET_URL.finditer(text):
@@ -32,8 +35,8 @@ def _html_to_plain(fragment: str) -> str:
 
 
 def fetch_tweet_context(tweet_url: str, *, timeout: float = 15.0) -> dict[str, Any]:
-    """
-    Public tweet metadata via Twitter oEmbed (no API key).
+    """Public tweet metadata via Twitter oEmbed (no API key).
+
     Use only for URLs already present in trusted ingest (Discord mirror, push).
     """
     result: dict[str, Any] = {"url": tweet_url}
@@ -62,6 +65,7 @@ def fetch_tweet_context(tweet_url: str, *, timeout: float = 15.0) -> dict[str, A
 
 
 def enrich_linked_posts(page_text: str, *, enabled: bool = True) -> dict[str, Any]:
+    """Fetch oEmbed context for every tweet URL linked in the page text, if enabled."""
     urls = extract_post_urls(page_text)
     if not urls:
         return {"linked_posts": [], "count": 0}
@@ -72,7 +76,5 @@ def enrich_linked_posts(page_text: str, *, enabled: bool = True) -> dict[str, An
             "count": len(urls),
         }
 
-    posts: list[dict[str, Any]] = []
-    for url in urls:
-        posts.append(fetch_tweet_context(url))
+    posts: list[dict[str, Any]] = [fetch_tweet_context(url) for url in urls]
     return {"linked_posts": posts, "count": len(posts)}

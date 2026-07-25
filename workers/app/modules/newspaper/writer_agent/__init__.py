@@ -1,5 +1,4 @@
-"""
-Tool-using writer agent (phase 2+).
+"""Tool-using writer agent (phase 2+).
 
 Replaces one-shot mistral_compose for create/edit flows.
 See docs/modules/editorial-platform-vision.md

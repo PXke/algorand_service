@@ -1,5 +1,4 @@
-"""Best-effort distributed locks (Redis) so the same unit of work is not run by
-multiple Celery workers at the same time.
+"""Best-effort distributed locks (Redis) so the same unit of work is not run by multiple Celery workers at the same time.
 
 Why: with --concurrency=4, beat tasks and re-dispatches can hand the SAME source
 or queue row to several workers at once, so all four scrape/crawl/compose the
@@ -22,6 +21,10 @@ import contextlib
 import functools
 import secrets
 from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import redis
 
 # Delete the key only if it still holds the token we wrote, so we never release
 # someone else's lock after ours expired underneath us.
@@ -34,7 +37,7 @@ end
 """
 
 
-def _client():
+def _client() -> redis.Redis:
     import redis
 
     from app.core.config import REDIS_URL
@@ -68,14 +71,14 @@ def release(key: str, token: str) -> None:
         _client().eval(_RELEASE_LUA, 1, f"lock:{key}", token)
 
 
-def single_flight(key_fn: Callable[..., str], *, ttl: int):
-    """Decorator: run at most one instance of the wrapped function for a given key
-    across all workers. A concurrent call with the same key returns
-    ``{"status": "already_running", "key": ...}`` without executing the body."""
+def single_flight(
+    key_fn: Callable[..., str], *, ttl: int
+) -> Callable[[Callable[..., object]], Callable[..., object]]:
+    """Decorator: run at most one instance of the wrapped function for a given key across all workers. A concurrent call with the same key returns ``{"status": "already_running", "key": ...}`` without executing the body."""
 
-    def deco(fn):
+    def deco(fn: Callable[..., object]) -> Callable[..., object]:
         @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: object, **kwargs: object) -> object:
             key = key_fn(*args, **kwargs)
             token = acquire(key, ttl)
             if token is None:

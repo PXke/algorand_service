@@ -1,3 +1,5 @@
+"""Cassandra-backed placements storage."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -7,7 +9,9 @@ from app.modules.placements.models import FeedPlacementItem
 
 
 class PlacementsStore:
+    """Cassandra-backed sponsored-placement storage."""
     def list_active(self, *, slot: str, limit: int = 10) -> list[FeedPlacementItem]:
+        """List active, currently-scheduled placements for a slot, priority order."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import PlacementStmts
 
@@ -51,6 +55,7 @@ class PlacementsStore:
         active_from: datetime | None = None,
         active_until: datetime | None = None,
     ) -> None:
+        """Insert or update a sponsored placement."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import PlacementStmts
 

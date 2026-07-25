@@ -1,3 +1,5 @@
+"""Celery task that polls monitored YouTube channels."""
+
 from __future__ import annotations
 
 from app.celery_app import celery_app

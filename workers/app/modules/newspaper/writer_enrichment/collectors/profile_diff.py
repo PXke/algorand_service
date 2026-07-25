@@ -1,3 +1,5 @@
+"""Diff a service's current snapshot against its stored profile intelligence."""
+
 from __future__ import annotations
 
 from typing import Any

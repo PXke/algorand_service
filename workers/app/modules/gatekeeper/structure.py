@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 # --- thresholds -----------------------------------------------------------
-MAX_DESERT_PARAGRAPHS = 4          # FAIL when > 4 consecutive prose blocks
-MAX_METRICS_PER_PARAGRAPH = 3      # FAIL when > 3 distinct metrics in one block
-MIN_LINKS_PER_100_WORDS = 1.0      # FAIL when < 1.0
+MAX_DESERT_PARAGRAPHS = 4  # FAIL when > 4 consecutive prose blocks
+MAX_METRICS_PER_PARAGRAPH = 3  # FAIL when > 3 distinct metrics in one block
+MIN_LINKS_PER_100_WORDS = 1.0  # FAIL when < 1.0
 
 # Blockchain metrics that belong in a table once they pile up in prose.
 _METRIC_RES = (
@@ -41,9 +42,8 @@ def _strip_code(md: str) -> str:
     return re.sub(r"`[^`]*`", " ", md)
 
 
-def _segments(md: str):
-    """Yield (kind, text) splitting fenced code from prose so a code block is one
-    opaque unit (its blank lines must not be mistaken for paragraph breaks)."""
+def _segments(md: str) -> Iterator[tuple[str, str]]:
+    """Yield (kind, text) splitting fenced code from prose so a code block is one opaque unit (its blank lines must not be mistaken for paragraph breaks)."""
     for part in re.split(r"(```.*?```)", md, flags=re.S):
         if part.startswith("```"):
             yield "code", part
@@ -77,8 +77,7 @@ def _classify_blocks(md: str) -> list[tuple[str, str]]:
 
 
 def _distinct_metrics(text: str) -> list[str]:
-    """Distinct metric mentions in ``text``, merging overlapping matches so
-    "$5 million" counts once, not twice."""
+    """Distinct metric mentions in ``text``, merging overlapping matches so "$5 million" counts once, not twice."""
     spans: list[tuple[int, int, str]] = []
     for rx in _METRIC_RES:
         spans.extend((m.start(), m.end(), m.group(0)) for m in rx.finditer(text))
@@ -95,6 +94,7 @@ def _distinct_metrics(text: str) -> list[str]:
 # --- heuristics -----------------------------------------------------------
 @dataclass(frozen=True)
 class Heuristic:
+    """One structural-quality heuristic's observed value vs. threshold."""
     name: str
     observed: str
     threshold: str
@@ -102,8 +102,7 @@ class Heuristic:
 
 
 def formatting_deserts(blocks: list[tuple[str, str]]) -> Heuristic:
-    """Longest run of consecutive prose blocks. A heading/table (and any other
-    structural block: list/code) resets the run — those are formatting relief."""
+    """Longest run of consecutive prose blocks. A heading/table (and any other structural block: list/code) resets the run — those are formatting relief."""
     run = longest = 0
     for btype, _ in blocks:
         if btype == "paragraph":
@@ -112,8 +111,10 @@ def formatting_deserts(blocks: list[tuple[str, str]]) -> Heuristic:
         else:
             run = 0
     return Heuristic(
-        "Formatting Deserts", f"{longest} consecutive paragraphs",
-        f"> {MAX_DESERT_PARAGRAPHS}", longest <= MAX_DESERT_PARAGRAPHS,
+        "Formatting Deserts",
+        f"{longest} consecutive paragraphs",
+        f"> {MAX_DESERT_PARAGRAPHS}",
+        longest <= MAX_DESERT_PARAGRAPHS,
     )
 
 
@@ -124,20 +125,19 @@ def buried_metrics(blocks: list[tuple[str, str]]) -> Heuristic:
         if btype == "paragraph":
             worst = max(worst, len(_distinct_metrics(text)))
     return Heuristic(
-        "Buried Metrics", f"{worst} metrics in one paragraph",
-        f"> {MAX_METRICS_PER_PARAGRAPH}", worst <= MAX_METRICS_PER_PARAGRAPH,
+        "Buried Metrics",
+        f"{worst} metrics in one paragraph",
+        f"> {MAX_METRICS_PER_PARAGRAPH}",
+        worst <= MAX_METRICS_PER_PARAGRAPH,
     )
 
 
 def hierarchy_integrity(md: str) -> Heuristic:
-    """Heading levels must not deepen by more than one at a time (## -> #### is a
-    skipped level)."""
+    """Heading levels must not deepen by more than one at a time (## -> #### is a skipped level)."""
     from itertools import pairwise
 
     levels = [
-        len(m.group(1))
-        for ln in _strip_code(md).splitlines()
-        if (m := _HEADING_RE.match(ln))
+        len(m.group(1)) for ln in _strip_code(md).splitlines() if (m := _HEADING_RE.match(ln))
     ]
     worst_jump = max((cur - prev for prev, cur in pairwise(levels)), default=0)
     observed = "no skips" if worst_jump <= 1 else f"jump of +{worst_jump} levels"
@@ -151,12 +151,15 @@ def citation_density(md: str) -> Heuristic:
     words = len(re.findall(r"\b[\w'’]+\b", text))
     density = (links / words * 100) if words else 0.0
     return Heuristic(
-        "Citation Density", f"{density:.2f} links / 100 words ({links} links, {words} words)",
-        f"< {MIN_LINKS_PER_100_WORDS:.1f}", density >= MIN_LINKS_PER_100_WORDS,
+        "Citation Density",
+        f"{density:.2f} links / 100 words ({links} links, {words} words)",
+        f"< {MIN_LINKS_PER_100_WORDS:.1f}",
+        density >= MIN_LINKS_PER_100_WORDS,
     )
 
 
 def evaluate_structure(md: str) -> list[Heuristic]:
+    """Run all deterministic structure heuristics against a markdown body."""
     blocks = _classify_blocks(md)
     return [
         formatting_deserts(blocks),
@@ -167,8 +170,7 @@ def evaluate_structure(md: str) -> list[Heuristic]:
 
 
 def structure_score(md: str) -> float:
-    """Fraction of structure heuristics that pass (0..1) — the deterministic
-    structure component of the cold-start grade."""
+    """Fraction of structure heuristics that pass (0..1) — the deterministic structure component of the cold-start grade."""
     hs = evaluate_structure(md)
     return sum(h.passed for h in hs) / len(hs) if hs else 1.0
 
@@ -180,11 +182,11 @@ def structure_issues(md: str) -> list[str]:
 
 def structure_report_markdown(md: str) -> str:
     """Markdown table summarizing every heuristic with a PASS/FAIL status."""
-    rows = ["| Heuristic | Observed | Threshold (fail) | Status |",
-            "| :-- | :-- | :-- | :-- |"]
-    for h in evaluate_structure(md):
-        rows.append(f"| {h.name} | {h.observed} | {h.threshold} | "
-                    f"{'✅ PASS' if h.passed else '❌ FAIL'} |")
+    rows = ["| Heuristic | Observed | Threshold (fail) | Status |", "| :-- | :-- | :-- | :-- |"]
+    rows.extend(
+        f"| {h.name} | {h.observed} | {h.threshold} | {'✅ PASS' if h.passed else '❌ FAIL'} |"
+        for h in evaluate_structure(md)
+    )
     return "\n".join(rows)
 
 

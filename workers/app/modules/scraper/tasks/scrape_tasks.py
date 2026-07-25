@@ -1,3 +1,5 @@
+"""Celery task that scrapes one source and routes the result into the pipeline."""
+
 from __future__ import annotations
 
 from app.celery_app import celery_app
@@ -13,8 +15,9 @@ from app.modules.scraper.crawler_registry import crawl_disabled_reason
 
 
 @celery_app.task(name="app.tasks.scrape.fetch_source")
-@single_flight(lambda source_id, url: f"scrape:{source_id}", ttl=900)
+@single_flight(lambda source_id, _url: f"scrape:{source_id}", ttl=900)
 def fetch_source(source_id: str, url: str) -> dict[str, str]:
+    """Scrape one source URL, respecting crawl-disabled and cooldown gates, and route the result."""
     disabled = crawl_disabled_reason(url)
     if disabled:
         return {"status": "skipped", "reason": disabled, "source_id": source_id, "url": url}

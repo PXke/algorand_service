@@ -1,3 +1,5 @@
+"""Redis-backed per-source cooldown and failure backoff."""
+
 from __future__ import annotations
 
 import time
@@ -58,6 +60,7 @@ def cooldown_for_exception(exc: BaseException) -> int | None:
 
 
 def is_on_cooldown(service_id: str) -> tuple[bool, str]:
+    """Return whether the source is still cooling down, with a reason tag."""
     raw = _client().get(_key(service_id))
     if not raw:
         return False, ""
@@ -111,6 +114,7 @@ def _throttle_key(service_id: str) -> str:
 
 
 def rescrape_window_seconds(*, ok: bool = True) -> int:
+    """Seconds until the next allowed poll: the weekly window on success, the short cooldown otherwise."""
     from app.core.config import SCRAPE_COOLDOWN_SECONDS, SERVICE_RESCRAPE_DAYS
 
     if not ok or SERVICE_RESCRAPE_DAYS <= 0:

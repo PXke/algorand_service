@@ -1,3 +1,5 @@
+"""Match an on-chain transaction to a registered service."""
+
 from __future__ import annotations
 
 import json
@@ -49,6 +51,7 @@ def match_services(
     *,
     enqueue_discovery: bool = True,
 ) -> list[ServiceEntry]:
+    """Return registry entries whose address/app-id/asset-id matches this transaction."""
     addresses = {tx.sender}
     if tx.receiver:
         addresses.add(tx.receiver)

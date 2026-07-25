@@ -1,14 +1,18 @@
+"""Feed assembly, article reads, and engagement rankings (hot/top)."""
+
 from __future__ import annotations
 
 from app.core.config import settings
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.news.services.trigger_kind import classify_article_trigger
-from app.modules.news.stores.base import ArticleStore
+from app.modules.news.stores.base import ArticleStore, StoredArticle
 from app.modules.news.stores.factory import get_article_store
 
 
 class NewsService:
+    """Feed assembly, article reads, and engagement rankings (hot/top)."""
     def __init__(self, store: ArticleStore | None = None) -> None:
+        """Wire the article store, defaulting to the configured backend."""
         self._store = store or get_article_store()
 
     def count_feed(self, *, feed_bucket: str | None = None) -> int:
@@ -24,6 +28,7 @@ class NewsService:
         service_id: str | None = None,
         lang: str | None = None,
     ) -> list[ArticleFeedItem]:
+        """List feed items for the front page (wraps list_feed_page, discarding the cursor)."""
         items, _ = self.list_feed_page(limit=limit, service_id=service_id, lang=lang)
         return items
 
@@ -36,6 +41,7 @@ class NewsService:
         cursor_epoch_ms: int | None = None,
         lang: str | None = None,
     ) -> tuple[list[ArticleFeedItem], int | None]:
+        """List a page of feed items, keyset-paginated by cursor_epoch_ms."""
         cap = limit if limit is not None else settings.news_feed_limit
         if service_id or tag:
             # Filtered view: over-fetch and filter (no cross-partition cursor).
@@ -45,9 +51,7 @@ class NewsService:
             if tag:
                 wanted = tag.strip().lower()
                 articles = [
-                    a
-                    for a in articles
-                    if any(t.strip().lower() == wanted for t in (a.tags or []))
+                    a for a in articles if any(t.strip().lower() == wanted for t in (a.tags or []))
                 ]
             articles = articles[:cap]
             return [self._to_feed_item(a, lang) for a in articles], None
@@ -73,9 +77,7 @@ class NewsService:
         articles = self._store.list_feed(limit=self._ENGAGEMENT_SCAN_LIMIT)
         articles = [a for a in articles if a.service_id and a.title]
         views = get_views_bulk([a.article_id for a in articles])
-        return [
-            (self._to_feed_item(a, lang), views.get(a.article_id, 0)) for a in articles
-        ]
+        return [(self._to_feed_item(a, lang), views.get(a.article_id, 0)) for a in articles]
 
     def hot_feed(
         self, *, limit: int = 20, lang: str | None = None, rank: str = "hot"
@@ -88,7 +90,8 @@ class NewsService:
         the same six mid-June stories for weeks). Age is floored at 6h so a
         just-published story needs real traction, not two lucky clicks.
         rank="top": lifetime totals — the all-time most-read ledger.
-        Ties break newest-first either way."""
+        Ties break newest-first either way.
+        """
         import time as _time
 
         now = _time.time()
@@ -115,10 +118,7 @@ class NewsService:
         return items
 
     def tag_stats(self) -> dict:
-        """Per-tag coverage and readership over the recent feed: how often the
-        newsroom tagged a topic, how many reads those stories drew, and when
-        the topic last appeared. Tags are the writer's own labels, so this is
-        the paper's real taxonomy (richer than the fixed sections)."""
+        """Per-tag coverage and readership over the recent feed: how often the newsroom tagged a topic, how many reads those stories drew, and when the topic last appeared. Tags are the writer's own labels, so this is the paper's real taxonomy (richer than the fixed sections)."""
         stats: dict[str, dict] = {}
         pairs = self._recent_with_views()
         for item, views in pairs:
@@ -126,9 +126,7 @@ class NewsService:
                 tag = raw.strip().lower()
                 if not tag:
                     continue
-                entry = stats.setdefault(
-                    tag, {"tag": tag, "count": 0, "views": 0, "last_epoch": 0}
-                )
+                entry = stats.setdefault(tag, {"tag": tag, "count": 0, "views": 0, "last_epoch": 0})
                 entry["count"] += 1
                 entry["views"] += views
                 entry["last_epoch"] = max(entry["last_epoch"], item.published_at_epoch)
@@ -136,6 +134,7 @@ class NewsService:
         return {"article_count": len(pairs), "tags": ordered}
 
     def translation_langs_for(self, article_id: str) -> list[str]:
+        """List the language codes this article has a stored translation for."""
         article = self._store.get(article_id)
         if article is None or not article.translations:
             return []
@@ -149,31 +148,34 @@ class NewsService:
         articles = [a for a in articles if a.service_id and a.title]
         items = [self._to_feed_item(a) for a in articles]
         translations = {
-            a.article_id: sorted(a.translations.keys())
-            for a in articles
-            if a.translations
+            a.article_id: sorted(a.translations.keys()) for a in articles if a.translations
         }
         return items, translations
 
     def get_article(self, article_id: str, lang: str | None = None) -> ArticleDetail | None:
+        """Fetch one article's full detail, translated if lang is given and available."""
         article = self._store.get(article_id)
         if article is None:
             return None
-            
+
         title = article.title
         summary = article.summary
         body = article.body
-        
+
         if lang and article.translations and lang in article.translations:
             import json
+
             try:
                 t = json.loads(article.translations[lang])
-                if t.get("title"): title = t["title"]
-                if t.get("summary"): summary = t["summary"]
-                if t.get("body"): body = t["body"]
+                if t.get("title"):
+                    title = t["title"]
+                if t.get("summary"):
+                    summary = t["summary"]
+                if t.get("body"):
+                    body = t["body"]
             except Exception:
                 pass
-                
+
         tags = list(article.tags or [])
         from app.modules.news.stores.view_counts import get_views
 
@@ -201,20 +203,23 @@ class NewsService:
         )
 
     @staticmethod
-    def _to_feed_item(article, lang: str | None = None) -> ArticleFeedItem:
+    def _to_feed_item(article: StoredArticle, lang: str | None = None) -> ArticleFeedItem:
         tags = list(article.tags or [])
-        
+
         title = article.title
         summary = article.summary
         if lang and getattr(article, "translations", None) and lang in article.translations:
             import json
+
             try:
                 t = json.loads(article.translations[lang])
-                if t.get("title"): title = t["title"]
-                if t.get("summary"): summary = t["summary"]
+                if t.get("title"):
+                    title = t["title"]
+                if t.get("summary"):
+                    summary = t["summary"]
             except Exception:
                 pass
-                
+
         return ArticleFeedItem(
             article_id=article.article_id,
             service_id=article.service_id,
@@ -232,8 +237,6 @@ class NewsService:
             ),
             image_url=getattr(article, "image_url", None),
             source_url=getattr(article, "source_url", None),
-            first_published_at_epoch=getattr(
-                article, "first_published_at_epoch", None
-            ),
+            first_published_at_epoch=getattr(article, "first_published_at_epoch", None),
             updated_at_epoch=getattr(article, "updated_at_epoch", None),
         )

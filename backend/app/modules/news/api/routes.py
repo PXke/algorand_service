@@ -1,9 +1,11 @@
+"""HTTP routes for the reader-facing article feed and article detail."""
+
 from __future__ import annotations
 
 import hashlib
 from email.utils import formatdate
 
-from robyn import Request, Response
+from robyn import Request, Response, Robyn
 
 from app.core import serialization
 from app.core.config import settings
@@ -13,7 +15,8 @@ from app.core.tracking import tracking_opted_out_from_headers
 from app.modules.news.services.news_service import NewsService
 
 
-def register_news_routes(app) -> None:
+def register_news_routes(app: Robyn) -> None:
+    """Register all reader-facing news feed and article API endpoints."""
     news_service = NewsService()
 
     @app.get("/api/v1/news/stats")
@@ -26,9 +29,7 @@ def register_news_routes(app) -> None:
 
     @app.get("/api/v1/news/tags")
     async def tags(request: Request) -> dict:
-        """Per-tag coverage/readership aggregate for the topics cloud. The scan
-        joins view counters across the recent feed, so it hides behind a short
-        cache; the cloud tolerates minutes-stale heat."""
+        """Per-tag coverage/readership aggregate for the topics cloud. The scan joins view counters across the recent feed, so it hides behind a short cache; the cloud tolerates minutes-stale heat."""
         _ = request
         from app.core.cache import cached_json
 
@@ -91,7 +92,7 @@ def register_news_routes(app) -> None:
         article_id = request.path_params.get("article_id", "")
         if not article_id:
             return json_error_response(400, "invalid_request", "article_id required")
-            
+
         lang = query_param(request.query_params.get("lang", "")) or None
         detail = news_service.get_article(article_id, lang=lang)
         if detail is None:
@@ -103,9 +104,7 @@ def register_news_routes(app) -> None:
         from app.modules.news.stores.view_counts import record_view
         from app.modules.seo.analytics_store import is_bot, is_malformed_ua, is_repeated_ua
 
-        user_agent = (
-            request.headers.get("user-agent") or request.headers.get("User-Agent") or ""
-        )
+        user_agent = request.headers.get("user-agent") or request.headers.get("User-Agent") or ""
         if (
             not is_bot(user_agent)
             and not is_malformed_ua(user_agent)

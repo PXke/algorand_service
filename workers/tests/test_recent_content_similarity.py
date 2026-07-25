@@ -1,36 +1,37 @@
-"""Content-level novelty: retrieve recently-published articles closest to a
-candidate from the Typesense articles index, then score token overlap against the
-matched article's title+summary. Catches same-topic/different-headline dupes."""
+"""Content-level novelty: retrieve recently-published articles closest to a candidate from the Typesense articles index, then score token overlap against the matched article's title+summary. Catches same-topic/different-headline dupes."""
+
+import pytest
 
 from app.modules.newspaper import article_grader
 
 
 class _FakeDocs:
-    def __init__(self, hits):
+    def __init__(self, hits: list[dict]) -> None:
         self._hits = hits
 
-    def search(self, params):
+    def search(self, _params: tuple) -> dict:
         return {"hits": self._hits}
 
 
 class _FakeCollection:
-    def __init__(self, hits):
+    def __init__(self, hits: list[dict]) -> None:
         self.documents = _FakeDocs(hits)
 
 
 class _FakeClient:
-    def __init__(self, hits):
+    def __init__(self, hits: list[dict]) -> None:
         self.collections = {"articles": _FakeCollection(hits)}
 
 
-def _patch(monkeypatch, client):
+def _patch(monkeypatch: pytest.MonkeyPatch, client: _FakeClient) -> None:
     monkeypatch.setattr(
         "app.modules.search.core.typesense_config.build_typesense_client",
         lambda: client,
     )
 
 
-def test_paraphrased_headline_about_same_story_scores_high(monkeypatch):
+def test_paraphrased_headline_about_same_story_scores_high(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scores a paraphrased headline about the same story as highly similar via title+summary overlap."""
     # Different headline tokens, same story — the body retrieval still finds the
     # recent article and the title+summary overlap is high.
     hits = [
@@ -49,7 +50,8 @@ def test_paraphrased_headline_about_same_story_scores_high(monkeypatch):
     assert "Pera" in match
 
 
-def test_unrelated_candidate_scores_low(monkeypatch):
+def test_unrelated_candidate_scores_low(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scores a candidate about a different service low against an unrelated recent match."""
     hits = [
         {
             "document": {
@@ -65,7 +67,8 @@ def test_unrelated_candidate_scores_low(monkeypatch):
     assert sim < 0.2
 
 
-def test_age_decay_eases_penalty_for_old_near_duplicates(monkeypatch):
+def test_age_decay_eases_penalty_for_old_near_duplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Discounts the same near-duplicate match to zero once it's older than the decay horizon."""
     # The SAME near-duplicate scores high when published recently but is heavily
     # discounted once the match is older than the decay horizon — so a story can
     # be re-covered after enough time has passed.
@@ -77,7 +80,7 @@ def test_age_decay_eases_penalty_for_old_near_duplicates(monkeypatch):
     monkeypatch.setattr(config, "NOVELTY_DECAY_FULL_DAYS", 7, raising=False)
     monkeypatch.setattr(config, "NOVELTY_DECAY_ZERO_DAYS", 70, raising=False)
 
-    def _hit(age_days):
+    def _hit(age_days: int) -> list[dict]:
         return [
             {
                 "document": {
@@ -101,15 +104,15 @@ def test_age_decay_eases_penalty_for_old_near_duplicates(monkeypatch):
     assert fresh > stale
 
 
-def test_fails_open_without_typesense(monkeypatch):
+def test_fails_open_without_typesense(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Returns a neutral zero-similarity result when no Typesense client is available."""
     _patch(monkeypatch, None)
     assert article_grader.recent_content_similarity("anything", "body") == (0.0, "")
 
 
-def test_disabled_when_window_zero(monkeypatch):
-    monkeypatch.setattr(
-        "app.core.config.NOVELTY_CONTENT_WINDOW_HOURS", 0, raising=False
-    )
+def test_disabled_when_window_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skips building a Typesense client and returns zero similarity when the content window is disabled."""
+    monkeypatch.setattr("app.core.config.NOVELTY_CONTENT_WINDOW_HOURS", 0, raising=False)
     # Must not even build a client when disabled.
     _patch(monkeypatch, _FakeClient([{"document": {"title": "x", "summary": "x"}}]))
     assert article_grader.recent_content_similarity("x", "x") == (0.0, "")

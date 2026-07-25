@@ -1,3 +1,5 @@
+"""Collect social-presence signals for a service before composing."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -16,8 +18,7 @@ def collect_social_signals(
     display_name: str = "",
     page_text: str = "",
 ) -> dict[str, Any]:
-    """
-    Social context for the writer.
+    """Social context for the writer.
 
     - X/Twitter: oEmbed for status URLs found in ingest text (e.g. community warnings).
     - Discord/Telegram sentiment: via mirrored ingest + platform article search (not live scrape).

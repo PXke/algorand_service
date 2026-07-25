@@ -1,3 +1,5 @@
+"""Chain-triggered generic rows are retagged, without overriding scam framing."""
+
 from __future__ import annotations
 
 from app.modules.newspaper.publish_policy import (

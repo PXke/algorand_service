@@ -1,3 +1,5 @@
+"""Collect this platform's own stored context about a service."""
+
 from __future__ import annotations
 
 from typing import Any

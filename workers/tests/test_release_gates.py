@@ -1,11 +1,11 @@
-"""Release-time re-gating: pending_feed_queue articles are corrected by the
-current body-only self-healing gates at the moment of release, closing the
-time capsule where gates added after an article's compose never saw it
-(UNDP/Stellar and quantum-rebrand incidents, week of 2026-07-14)."""
+"""Release-time re-gating: pending_feed_queue articles are corrected by the current body-only self-healing gates at the moment of release, closing the time capsule where gates added after an article's compose never saw it (UNDP/Stellar and quantum-rebrand incidents, week of 2026-07-14)."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
+
+import pytest
 
 from app.modules.newspaper import release_gates
 from app.modules.newspaper.article_store import ArticleDetail
@@ -31,7 +31,8 @@ def _detail(body: str) -> ArticleDetail:
     )
 
 
-def test_dirty_body_is_corrected_and_persisted(monkeypatch):
+def test_dirty_body_is_corrected_and_persisted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strips an unsupported-authority sentence, persists before/after versions, updates Cassandra and reindexes."""
     body = "Clean sentence. " + INCIDENT_SENTENCE + " Another clean one."
     monkeypatch.setattr(
         "app.modules.newspaper.article_store.get_article", lambda _aid: _detail(body)
@@ -44,7 +45,7 @@ def test_dirty_body_is_corrected_and_persisted(monkeypatch):
     executed: list = []
 
     class _FakeSession:
-        def execute(self, stmt, params=None):
+        def execute(self, stmt: str, params: tuple | None = None) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
             # First-ever import of index_tasks pulls in celery_app, whose
             # beat-schedule build reads crawler config at import time — only
             # the article UPDATE is the write under test.
@@ -52,9 +53,7 @@ def test_dirty_body_is_corrected_and_persisted(monkeypatch):
                 executed.append(params)
             return SimpleNamespace(one=lambda: None)
 
-    monkeypatch.setattr(
-        "app.core.cassandra.get_cassandra_session", lambda: _FakeSession()
-    )
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: _FakeSession())
     monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
     indexed: list = []
     monkeypatch.setattr(
@@ -71,11 +70,14 @@ def test_dirty_body_is_corrected_and_persisted(monkeypatch):
     assert len(executed) == 1
     new_body = executed[0][2]
     assert "industry-wide research" not in new_body
-    assert "Clean sentence." in new_body and "Another clean one." in new_body
-    assert indexed and "industry-wide research" not in indexed[0]["body"]
+    assert "Clean sentence." in new_body
+    assert "Another clean one." in new_body
+    assert indexed
+    assert "industry-wide research" not in indexed[0]["body"]
 
 
-def test_clean_body_untouched_no_writes(monkeypatch):
+def test_clean_body_untouched_no_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leaves a clean body untouched and never opens a Cassandra session."""
     monkeypatch.setattr(
         "app.modules.newspaper.article_store.get_article",
         lambda _aid: _detail("Perfectly grounded prose with real sources."),
@@ -88,7 +90,7 @@ def test_clean_body_untouched_no_writes(monkeypatch):
     assert result == {"changed": False, "notes": {}}
 
 
-def test_fail_open_on_gate_crash(monkeypatch):
+def test_fail_open_on_gate_crash(monkeypatch: pytest.MonkeyPatch) -> None:
     """An already-approved article is never blocked by a gate crash."""
     monkeypatch.setattr(
         "app.modules.newspaper.article_store.get_article",
@@ -98,9 +100,8 @@ def test_fail_open_on_gate_crash(monkeypatch):
     assert result == {"changed": False, "notes": {}}
 
 
-def test_release_drain_invokes_gates_before_feed_insert(monkeypatch):
-    """Wiring pin: _release_pending_feed_backlog must call apply_release_gates
-    for each released article before inserting its feed row."""
+def test_release_drain_invokes_gates_before_feed_insert(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wiring pin: _release_pending_feed_backlog must call apply_release_gates for each released article before inserting its feed row."""
     from app.modules.newspaper.tasks import queue_drain_tasks as qdt
 
     calls: list[str] = []
@@ -128,7 +129,7 @@ def test_release_drain_invokes_gates_before_feed_insert(monkeypatch):
     )
 
     class _FakeSession:
-        def execute(self, stmt, params=None):
+        def execute(self, stmt: str, _params: tuple | None = None) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
             text = str(stmt)
             if "pending_feed_queue" in text and "SELECT" in text.upper():
                 order.append("peek")
@@ -144,9 +145,7 @@ def test_release_drain_invokes_gates_before_feed_insert(monkeypatch):
             order.append("other")
             return SimpleNamespace(one=lambda: None)
 
-    monkeypatch.setattr(
-        "app.core.cassandra.get_cassandra_session", lambda: _FakeSession()
-    )
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: _FakeSession())
     monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
     monkeypatch.setattr(qdt, "record_standard_publish", lambda **_kw: None)
     monkeypatch.setattr(

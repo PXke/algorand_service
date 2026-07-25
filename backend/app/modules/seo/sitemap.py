@@ -46,6 +46,7 @@ class SitemapBuild:
 
 
 def robots_txt() -> str:
+    """Render robots.txt, disallowing admin/search/suggestions and pointing at the sitemap(s)."""
     lines = [
         "User-agent: *",
         "Allow: /",
@@ -61,10 +62,7 @@ def robots_txt() -> str:
 
 
 def llms_txt() -> str:
-    """llms.txt (llmstxt.org): a markdown site guide for AI crawlers — a real
-    audience here (their share of bot traffic is tracked as a first-class
-    analytics stat). Points them at the full-content feed and sitemap instead
-    of leaving them to scrape the Flutter shell."""
+    """llms.txt (llmstxt.org): a markdown site guide for AI crawlers — a real audience here (their share of bot traffic is tracked as a first-class analytics stat). Points them at the full-content feed and sitemap instead of leaving them to scrape the Flutter shell."""
     lines = [
         f"# {settings.site_name}",
         "",
@@ -99,10 +97,7 @@ def _chunk(entries: list[_UrlEntry], size: int) -> list[list[_UrlEntry]]:
 
 
 def _hreflang_link(hreflang: str, href: str) -> str:
-    return (
-        f'<xhtml:link rel="alternate" hreflang="{escape(hreflang)}" '
-        f'href="{escape(href)}"/>'
-    )
+    return f'<xhtml:link rel="alternate" hreflang="{escape(hreflang)}" href="{escape(href)}"/>'
 
 
 def _url_xml(entry: _UrlEntry) -> str:
@@ -127,14 +122,9 @@ def _sitemap_index_xml(child_filenames: list[str], *, lastmod: str) -> str:
     entries = []
     for name in child_filenames:
         loc = absolute(f"/{name}")
-        entries.append(
-            f"<sitemap><loc>{escape(loc)}</loc><lastmod>{lastmod}</lastmod></sitemap>"
-        )
+        entries.append(f"<sitemap><loc>{escape(loc)}</loc><lastmod>{lastmod}</lastmod></sitemap>")
     body = "".join(entries)
-    return (
-        f'<?xml version="1.0" encoding="UTF-8"?>'
-        f"<sitemapindex {_INDEX_NS}>{body}</sitemapindex>"
-    )
+    return f'<?xml version="1.0" encoding="UTF-8"?><sitemapindex {_INDEX_NS}>{body}</sitemapindex>'
 
 
 def bust_tombstone_cache() -> None:
@@ -143,8 +133,7 @@ def bust_tombstone_cache() -> None:
 
 
 def _tombstoned_ids(_article_ids: Iterable[str] | None = None) -> set[str]:
-    """Article IDs hard-deleted by admin (410 Gone). Full-table scan of a tiny
-    tombstone set, cached briefly so sitemap builds don't hammer Cassandra."""
+    """Article IDs hard-deleted by admin (410 Gone). Full-table scan of a tiny tombstone set, cached briefly so sitemap builds don't hammer Cassandra."""
     now = time.monotonic()
     cached = _tombstone_cache.get("ids")
     cached_at = float(_tombstone_cache.get("mono", 0.0))
@@ -226,6 +215,7 @@ def build_sitemaps(
     items: list[ArticleFeedItem],
     translations_by_id: dict[str, list[str]],
 ) -> SitemapBuild:
+    """Build the full urlset, splitting into a sitemap index plus chunked files once it exceeds the URL cap."""
     static = _static_entries(items)
     articles = _article_entries(items, translations_by_id)
     all_entries = static + articles
@@ -254,21 +244,16 @@ def sitemap_xml(
 
 
 def news_sitemap_xml(items: list[ArticleFeedItem]) -> str:
+    """Build the Google News sitemap, limited to non-tombstoned articles from the last 48 hours."""
     cutoff = int(time.time()) - _NEWS_WINDOW_SECONDS
     tombstones = _tombstoned_ids()
-    recent = [
-        i
-        for i in items
-        if i.published_at_epoch >= cutoff and i.article_id not in tombstones
-    ]
+    recent = [i for i in items if i.published_at_epoch >= cutoff and i.article_id not in tombstones]
     entries = []
     for item in recent:
         pub = datetime.fromtimestamp(item.published_at_epoch, tz=UTC).isoformat()
         keywords = ""
         if item.tags:
-            keywords = (
-                f"<news:keywords>{escape(', '.join(item.tags))}</news:keywords>"
-            )
+            keywords = f"<news:keywords>{escape(', '.join(item.tags))}</news:keywords>"
         entries.append(
             "<url>"
             f"<loc>{escape(absolute(article_path(item.article_id)))}</loc>"

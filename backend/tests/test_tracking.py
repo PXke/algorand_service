@@ -1,13 +1,17 @@
+"""Opt-out detection from cookies and headers."""
+
 from app.core.tracking import tracking_opted_out_from_cookie, tracking_opted_out_from_headers
 
 
 def test_tracking_opted_out_from_cookie() -> None:
+    """Detects the opt-out cookie value 1, not 0 or an absent cookie header."""
     assert tracking_opted_out_from_cookie("pxke_no_track=1; path=/")
     assert not tracking_opted_out_from_cookie("")
     assert not tracking_opted_out_from_cookie("pxke_no_track=0")
 
 
 def test_tracking_opted_out_from_headers() -> None:
+    """Detects the opt-out cookie in a headers dict, case-insensitively, from a real header shape."""
     # 2026-07-12: the pageview beacon route (seo/api/routes.py:beacon_pageview)
     # called an undefined `_tracking_opted_out(request)` — a live NameError on
     # every beacon POST in prod. The real function takes headers, not the

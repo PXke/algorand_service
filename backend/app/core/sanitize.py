@@ -1,3 +1,5 @@
+"""Strip unsafe HTML from writer-emitted article bodies."""
+
 from __future__ import annotations
 
 import re

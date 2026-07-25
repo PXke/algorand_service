@@ -1,10 +1,15 @@
+"""Typesense indexing gates on classifier relevance and configuration."""
+
 from __future__ import annotations
+
+import pytest
 
 from app.modules.search.classifier.score import score_page
 from app.modules.search.core.indexer import upsert_article_document
 
 
 def test_classifier_accepts_algorand_page() -> None:
+    """A clearly Algorand-relevant page passes the classifier's in-scope check."""
     result = score_page(
         url="https://algorand.foundation",
         text="Algorand blockchain and ALGO staking on TestNet.",
@@ -12,7 +17,7 @@ def test_classifier_accepts_algorand_page() -> None:
     assert result.in_scope
 
 
-def test_indexer_skips_when_typesense_not_configured(monkeypatch) -> None:
+def test_indexer_skips_when_typesense_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "app.modules.search.core.indexer.is_typesense_configured",
         lambda: False,
@@ -28,7 +33,7 @@ def test_indexer_skips_when_typesense_not_configured(monkeypatch) -> None:
     assert outcome["status"] == "skipped"
 
 
-def test_page_index_skips_when_classifier_rejects(monkeypatch) -> None:
+def test_page_index_skips_when_classifier_rejects(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.modules.search.tasks import index_tasks
 
     monkeypatch.setattr(
@@ -46,7 +51,7 @@ def test_page_index_skips_when_classifier_rejects(monkeypatch) -> None:
     assert outcome["reason"] == "classifier_rejected"
 
 
-def test_index_article_reads_tags_from_article_detail(monkeypatch) -> None:
+def test_index_article_reads_tags_from_article_detail(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.modules.newspaper.article_store import ArticleDetail
     from app.modules.search.tasks import index_tasks
 
@@ -67,7 +72,7 @@ def test_index_article_reads_tags_from_article_detail(monkeypatch) -> None:
             tags=("defi", "payments"),
         )
 
-    def fake_upsert(**kwargs):
+    def fake_upsert(**kwargs: object) -> dict:
         captured.update(kwargs)
         return {"status": "indexed"}
 
@@ -87,10 +92,7 @@ def test_index_article_reads_tags_from_article_detail(monkeypatch) -> None:
 
 
 def test_classifier_anchors_chain_silent_ecosystem_domains() -> None:
-    """HesabPay/Sealed: real Algorand-ecosystem services whose own sites never
-    say 'Algorand' (hesab.com has zero chain mentions). Without a KNOWN_DOMAINS
-    anchor they score 0 relevance, so their discovery rows drained at priority
-    ~0 and every future diff would fail CONTENT_UPDATE_RELEVANCE_FLOOR (0.35)."""
+    """HesabPay/Sealed: real Algorand-ecosystem services whose own sites never say 'Algorand' (hesab.com has zero chain mentions). Without a KNOWN_DOMAINS anchor they score 0 relevance, so their discovery rows drained at priority ~0 and every future diff would fail CONTENT_UPDATE_RELEVANCE_FLOOR (0.35)."""
     hesab = score_page(
         url="https://hesab.com/",
         text="HesabPay - Digital Wallet. Send Money, Pay Bills, Top-Up Mobile.",

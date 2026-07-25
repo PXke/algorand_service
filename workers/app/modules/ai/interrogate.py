@@ -30,9 +30,14 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.modules.newspaper import defunct_entity_gate as _dg
+
+if TYPE_CHECKING:
+    from cassandra.cluster import Session as CassandraSession
+
+    from app.modules.ai.mistral_client import MistralClient
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +72,7 @@ _SYSTEM_FRAMING = (
 
 @dataclass
 class RevivedSession:
+    """A compose session's transcript, replayed and ready for interrogation."""
     source_url: str
     service_id: str
     model: str
@@ -88,7 +94,7 @@ def _looks_like_uuid(s: str) -> bool:
     return len(parts) == 5 and all(all(c in "0123456789abcdef" for c in p.lower()) for p in parts)
 
 
-def _resolve_article_source_url(session, article_id: str) -> str | None:
+def _resolve_article_source_url(session: CassandraSession, article_id: str) -> str | None:
     """Map an article id to the source_url its compose session was keyed on."""
     from app.core.statements import ArticleStmts
 
@@ -100,12 +106,10 @@ def revive_session(
     *,
     source_url: str | None = None,
     article_id: str | None = None,
-    session_id: Any | None = None,
-    _session=None,
+    session_id: Any | None = None,  # noqa: ANN401 -- raw Cassandra driver UUID value, passed through unmodified
+    _session: CassandraSession | None = None,
 ) -> RevivedSession:
-    """Load the newest compose session matching a source_url substring (or the
-    session behind an article id, or an exact session_id) and prepare it for
-    interrogation. Raises LookupError if nothing matches."""
+    """Load the newest compose session matching a source_url substring (or the session behind an article id, or an exact session_id) and prepare it for interrogation. Raises LookupError if nothing matches."""
     session = _session
     if session is None:
         from app.core.cassandra import get_cassandra_session
@@ -130,9 +134,7 @@ def revive_session(
             chosen = row  # first (newest) match wins
             break
     if chosen is None:
-        raise LookupError(
-            f"no compose session matching {source_url or session_id!r}"
-        )
+        raise LookupError(f"no compose session matching {source_url or session_id!r}")
 
     try:
         messages = json.loads(chosen.messages) if chosen.messages else []
@@ -163,17 +165,12 @@ def _text_of(message: dict[str, Any]) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "".join(
-            str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in content
-        )
+        return "".join(str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in content)
     return "" if content is None else str(content)
 
 
 def _flatten(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Collapse the tool-call protocol transcript into plain narrated turns the
-    chat API will accept unconditionally (system/user/assistant only, no
-    tool_call ids to keep paired). Everything the model saw is preserved as
-    readable text; oversized tool results are head-truncated."""
+    """Collapse the tool-call protocol transcript into plain narrated turns the chat API will accept unconditionally (system/user/assistant only, no tool_call ids to keep paired). Everything the model saw is preserved as readable text; oversized tool results are head-truncated."""
     out: list[dict[str, str]] = []
     for m in messages:
         role = m.get("role", "user")
@@ -201,8 +198,9 @@ def _flatten(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
             continue
         # system / user
         if text:
-            out.append({"role": role if role in ("system", "user") else "user",
-                        "content": text[:_MSG_CAP]})
+            out.append(
+                {"role": role if role in ("system", "user") else "user", "content": text[:_MSG_CAP]}
+            )
     return out
 
 
@@ -210,10 +208,10 @@ def _flatten(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
 # ground truth
 # --------------------------------------------------------------------------- #
 def ground_truth_note(rev: RevivedSession) -> str | None:
-    """Build an evidence-only note confronting the writer with current reality:
-    a live DNS status for every domain it linked in the final draft, plus an
-    index of the fetch failures already present in its own transcript. Returns
-    None if there is nothing notable to confront it with."""
+    """Build an evidence-only note confronting the writer with current reality: a live DNS status for every domain it linked in the final draft, plus an index of the fetch failures already present in its own transcript.
+
+    Returns None if there is nothing notable to confront it with.
+    """
     lines: list[str] = []
 
     # live DNS on every linked domain of the FINAL body
@@ -225,8 +223,7 @@ def ground_truth_note(rev: RevivedSession) -> str | None:
             dns_lines.append(f"  - {h}: {'resolves' if alive else 'DOES NOT RESOLVE (no address)'}")
         dead = [ln for ln in dns_lines if "DOES NOT" in ln]
         if dead:
-            lines.append(
-                "Live DNS check, just now, on the domains your article links:")
+            lines.append("Live DNS check, just now, on the domains your article links:")
             lines.extend(dns_lines)
 
     # fetch failures already in the transcript
@@ -234,13 +231,13 @@ def ground_truth_note(rev: RevivedSession) -> str | None:
     if failed:
         lines.append(
             "Your own research in this transcript recorded DNS/fetch failures for: "
-            + ", ".join(failed))
+            + ", ".join(failed)
+        )
 
     if not lines:
         return None
-    return (
-        "GROUND-TRUTH CHECK (facts, verified independently of your transcript):\n"
-        + "\n".join(lines)
+    return "GROUND-TRUTH CHECK (facts, verified independently of your transcript):\n" + "\n".join(
+        lines
     )
 
 
@@ -253,7 +250,7 @@ def interrogate(
     *,
     ground_truth: bool = True,
     history: list[dict[str, str]] | None = None,
-    client=None,
+    client: MistralClient | None = None,
 ) -> tuple[str, list[dict[str, str]]]:
     """Ask the revived writer one question and return (answer, updated_history).
 
@@ -263,12 +260,11 @@ def interrogate(
     (it does not change), so history stays small.
     """
     if client is None:
-        from app.modules.ai.mistral_client import MistralClient
-
         # Interrogate on the SAME model that composed, so the answers come from
         # the same weights that produced the draft. Fall back to the writer model
         # if the stored session predates model capture.
         from app.core.config import MISTRAL_MODEL_WRITER
+        from app.modules.ai.mistral_client import MistralClient
 
         client = MistralClient(model=rev.model or MISTRAL_MODEL_WRITER)
 

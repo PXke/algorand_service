@@ -1,3 +1,5 @@
+"""Robyn app entrypoint: route registration, health checks, and startup wiring."""
+
 from __future__ import annotations
 
 from robyn import Request, Response, Robyn
@@ -27,11 +29,13 @@ register_cors(app)
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    """Report basic liveness for the API process."""
     return {"status": "ok", "service": settings.app_name, "env": settings.app_env}
 
 
 @app.get("/health/ready")
 async def health_ready() -> dict[str, object]:
+    """Report readiness, degraded if Redis or Cassandra checks fail."""
     checks = run_readiness_checks()
     ok = all(check.ok for check in checks if check.name in {"redis", "cassandra"})
     return {
@@ -63,6 +67,7 @@ register_seo_routes(app)
 
 @app.after_request()
 def add_robots_tag(request: Request, response: Response) -> Response:
+    """Tag `/api/*` responses noindex so crawlers skip the JSON API."""
     if request.url.path.startswith("/api/"):
         response.headers["X-Robots-Tag"] = "noindex"
     return response

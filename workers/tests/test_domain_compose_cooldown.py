@@ -1,10 +1,12 @@
-"""Per-domain diversity cooldown: composing an article for a registrable domain
-stamps a cooldown so the same project isn't published again until it expires."""
+"""Per-domain diversity cooldown: composing an article for a registrable domain stamps a cooldown so the same project isn't published again until it expires."""
+
+import pytest
+from conftest import FakeRedis
 
 from app.modules.crawler import domain_tracker
 
 
-def test_compose_stamps_cooldown(patch_redis_from_url):
+def test_compose_stamps_cooldown(patch_redis_from_url: FakeRedis) -> None:  # noqa: ARG001 -- name must match the real callee's keyword arg
     assert domain_tracker.domain_in_cooldown("perawallet.app") is False
     domain_tracker.record_domain_compose("perawallet.app")
     assert domain_tracker.domain_in_cooldown("perawallet.app") is True
@@ -12,25 +14,23 @@ def test_compose_stamps_cooldown(patch_redis_from_url):
     assert domain_tracker.domain_in_cooldown("tinyman.org") is False
 
 
-def test_blank_domain_is_safe(patch_redis_from_url):
+def test_blank_domain_is_safe(patch_redis_from_url: FakeRedis) -> None:
     assert domain_tracker.domain_in_cooldown("") is False
     domain_tracker.record_domain_compose("")  # no-op
     assert patch_redis_from_url.store == {}
 
 
-def test_cooldown_disabled_when_hours_zero(monkeypatch, patch_redis_from_url):
-    monkeypatch.setattr(
-        "app.core.config.COMPOSE_DOMAIN_COOLDOWN_HOURS", 0, raising=False
-    )
+def test_cooldown_disabled_when_hours_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    patch_redis_from_url: FakeRedis,  # noqa: ARG001 -- name must match the real callee's keyword arg
+) -> None:
+    monkeypatch.setattr("app.core.config.COMPOSE_DOMAIN_COOLDOWN_HOURS", 0, raising=False)
     domain_tracker.record_domain_compose("perawallet.app")
     assert domain_tracker.domain_in_cooldown("perawallet.app") is False
 
 
-def test_drain_skips_review_bound_row_in_cooldown(monkeypatch):
-    """Regression: a domain in its multi-day cooldown must NOT be composed into
-    the review queue. The cooldown check has to run BEFORE the review branch,
-    which previously composed + continued past it (so re-coverage slipped through
-    e.g. explorer.perawallet.app a couple days after a perawallet.app article)."""
+def test_drain_skips_review_bound_row_in_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: a domain in its multi-day cooldown must NOT be composed into the review queue. The cooldown check has to run BEFORE the review branch, which previously composed + continued past it (so re-coverage slipped through e.g. explorer.perawallet.app a couple days after a perawallet.app article)."""
     from app.modules.newspaper.publish_queue_store import QueuedPublishRow
     from app.modules.newspaper.tasks import queue_drain_tasks as q
 
@@ -48,13 +48,13 @@ def test_drain_skips_review_bound_row_in_cooldown(monkeypatch):
     review_called = {"hit": False}
 
     monkeypatch.setattr(q, "remaining_standard_publish_slots", lambda: 5)
-    monkeypatch.setattr(q, "_pending_for_tier", lambda *a, **k: [row])
-    monkeypatch.setattr(q, "_domain_capped", lambda r: False)
-    monkeypatch.setattr(q, "_domain_in_cooldown", lambda r: True)  # in cooldown
-    monkeypatch.setattr(q, "_row_needs_review", lambda r: True)    # would go to review
-    monkeypatch.setattr(q, "mark_queue_status", lambda *a, **k: None)
+    monkeypatch.setattr(q, "_pending_for_tier", lambda *_a, **_k: [row])
+    monkeypatch.setattr(q, "_domain_capped", lambda _r: False)
+    monkeypatch.setattr(q, "_domain_in_cooldown", lambda _r: True)  # in cooldown
+    monkeypatch.setattr(q, "_row_needs_review", lambda _r: True)  # would go to review
+    monkeypatch.setattr(q, "mark_queue_status", lambda *_a, **_k: None)
 
-    def _spy_review(r):
+    def _spy_review(_r: QueuedPublishRow) -> dict:
         review_called["hit"] = True
         return {"status": "review"}
 

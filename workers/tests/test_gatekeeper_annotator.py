@@ -1,11 +1,13 @@
-"""Annotator: Tier-1 deterministic numeric grounding, Tier-2 LLM union (injected,
-no network), defensive parsing, and the unclassified/novel-mode canary."""
+"""Annotator: Tier-1 deterministic numeric grounding, Tier-2 LLM union (injected, no network), defensive parsing, and the unclassified/novel-mode canary."""
+
+from typing import Never
 
 from app.modules.gatekeeper import annotator as an
 from app.modules.gatekeeper.profile import AnnotatedSample
 
 
 def test_tier1_flags_ungrounded_numbers() -> None:
+    """Flags a factuality failure and severity for an article number absent from the trace."""
     t1 = an.tier1_annotate(
         source_text="A routine update.",
         trace_text='{"tps": 50000}',
@@ -19,31 +21,38 @@ def test_tier1_flags_ungrounded_numbers() -> None:
 
 
 def test_tier1_clean_when_grounded() -> None:
+    """Reports no failure when every article number is grounded in the trace."""
     t1 = an.tier1_annotate("s", '{"tps": 50000}', "Hit 50,000 TPS.", fact_min=0.8)
     assert not t1.factuality_fail
     assert t1.error_types == ()
 
 
 def test_tier2_coerce_filters_unknown_types() -> None:
-    raw = {"factuality_fail": True, "tone_fail": True,
-           "error_types": ["entity_swap", "made_up_type"],
-           "severities": {"entity_swap": 0.9, "made_up_type": 1.0},
-           "confidence": 0.8}
+    """Drops an unrecognized error type from Tier-2 output and flags the unclassified canary."""
+    raw = {
+        "factuality_fail": True,
+        "tone_fail": True,
+        "error_types": ["entity_swap", "made_up_type"],
+        "severities": {"entity_swap": 0.9, "made_up_type": 1.0},
+        "confidence": 0.8,
+    }
     t2 = an._coerce_tier2(raw)
-    assert t2.error_types == ("entity_swap",)        # unknown dropped
-    assert t2.unclassified                            # ...and canary flipped
+    assert t2.error_types == ("entity_swap",)  # unknown dropped
+    assert t2.unclassified  # ...and canary flipped
     assert t2.severities == {"entity_swap": 0.9}
 
 
 def test_tier2_severity_clamped_and_defaulted() -> None:
+    """Clamps an out-of-range severity to 1.0 and infers tone_fail from a tone-class error type."""
     t2 = an._coerce_tier2({"error_types": ["hype"], "severities": {"hype": 5.0}})
-    assert t2.severities["hype"] == 1.0               # clamped to [0,1]
-    assert t2.tone_fail                                # inferred from a tone type
+    assert t2.severities["hype"] == 1.0  # clamped to [0,1]
+    assert t2.tone_fail  # inferred from a tone type
 
 
 def test_annotate_unions_tiers() -> None:
+    """Unions Tier-1's numeric-grounding failure with Tier-2's classifier-supplied tone failure."""
     # Tier-1 finds the numeric problem; Tier-2 adds a tone problem.
-    def classify(s, tr, a):
+    def classify(_s: str, _tr: str, _a: str) -> dict:
         return {"tone_fail": True, "error_types": ["hype"], "severities": {"hype": 0.6}}
 
     sample = an.annotate(
@@ -53,31 +62,33 @@ def test_annotate_unions_tiers() -> None:
         classify=classify,
     )
     assert isinstance(sample, AnnotatedSample)
-    assert sample.factuality_fail and sample.tone_fail
+    assert sample.factuality_fail
+    assert sample.tone_fail
     assert set(sample.error_types) == {"unsupported_elaboration", "hype"}
 
 
 def test_annotate_degrades_to_tier1_when_classifier_raises() -> None:
-    def broken(s, tr, a):
+    """Falls back to Tier-1-only results when the Tier-2 classifier raises."""
+    def broken(_s: str, _tr: str, _a: str) -> Never:
         raise RuntimeError("LLM down")
 
     sample = an.annotate(
-        "s", '{"tps": 50000}', "Hit 50,000 TPS serving 999,000 users.",
+        "s",
+        '{"tps": 50000}',
+        "Hit 50,000 TPS serving 999,000 users.",
         classify=broken,
     )
-    assert sample.factuality_fail              # Tier-1 still works
-    assert not sample.tone_fail                # Tier-2 contributed nothing
+    assert sample.factuality_fail  # Tier-1 still works
+    assert not sample.tone_fail  # Tier-2 contributed nothing
     assert sample.error_types == ("unsupported_elaboration",)
 
 
 def test_annotate_feeds_build_profile() -> None:
+    """Feeds annotate() output directly into build_profile() end-to-end."""
     # End-to-end: annotator output is directly consumable by build_profile.
     from app.modules.gatekeeper.profile import build_profile
 
-    samples = [
-        an.annotate("s", '{"x": 1}', "claimed 999 widgets", fact_min=0.8)
-        for _ in range(5)
-    ]
+    samples = [an.annotate("s", '{"x": 1}', "claimed 999 widgets", fact_min=0.8) for _ in range(5)]
     prof = build_profile(samples)
     assert "unsupported_elaboration" in prof.composition_mix()
     assert prof.base_fail_rate_factuality == 1.0

@@ -1,3 +1,5 @@
+"""Hero/logo image extraction and candidate URL ordering."""
+
 from __future__ import annotations
 
 from bs4 import BeautifulSoup
@@ -21,21 +23,25 @@ def _soup(html: str) -> BeautifulSoup:
 
 
 def test_extract_og_image_absolute() -> None:
+    """Extracts the og:image meta content as an absolute URL."""
     og = extract_og_image(_soup(_PERA_HEAD), "https://perawallet.app/")
     assert og == "https://perawallet.s3.amazonaws.com/images/pera-header.png"
 
 
 def test_extract_source_logo_picks_largest_absolute() -> None:
+    """Picks the largest declared icon and resolves it to an absolute URL."""
     logo = extract_source_logo(_soup(_PERA_HEAD), "https://perawallet.app/")
     # 192x192 is the biggest declared icon, resolved to an absolute URL.
     assert logo == "https://perawallet.app/images/favicon/android-icon-192x192.png"
 
 
 def test_logo_empty_when_no_icons() -> None:
+    """Returns an empty string when the page declares no icons."""
     assert extract_source_logo(_soup("<html><head></head></html>"), "https://x.io") == ""
 
 
 def test_homepage_from_service_id() -> None:
+    """Derives a homepage URL from a dash-slug service_id, or empty when it isn't domain-shaped."""
     assert homepage_from_service_id("perawallet-app") == "https://perawallet.app"
     assert homepage_from_service_id("app-folks-finance") == "https://app.folks.finance"
     assert homepage_from_service_id("weekly-digest") == "https://weekly.digest"  # plausible-looking
@@ -44,6 +50,7 @@ def test_homepage_from_service_id() -> None:
 
 
 def test_candidate_urls_order() -> None:
+    """Orders candidate URLs as source URL then brand homepage, falling back gracefully when either is missing."""
     # Source URL first (contextual), then the brand homepage.
     urls = candidate_urls(source_url="https://blog.x.io/post", service_id="x-io")
     assert urls == ["https://blog.x.io/post", "https://x.io"]

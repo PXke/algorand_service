@@ -1,6 +1,7 @@
-"""train_gatekeeper must train from a batch carrying only soft_label_quality
-(no factuality/tone) -- the path feedback_loader relies on, since there's no
-gold-run/corruptor corpus yet to supply the other two heads."""
+"""train_gatekeeper must train from a batch carrying only soft_label_quality (no factuality/tone) -- the path feedback_loader relies on, since there's no gold-run/corruptor corpus yet to supply the other two heads."""
+
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -12,8 +13,7 @@ from app.modules.gatekeeper.training import TrainConfig, train_gatekeeper  # noq
 
 
 class _FakeMultiTaskModel(nn.Module):
-    """Tiny stand-in for ModernBertMultiTaskGrader with the same head names,
-    so tests never download real ModernBERT weights."""
+    """Tiny stand-in for ModernBertMultiTaskGrader with the same head names, so tests never download real ModernBERT weights."""
 
     def __init__(self, _name: str) -> None:
         super().__init__()
@@ -22,7 +22,7 @@ class _FakeMultiTaskModel(nn.Module):
         self.quality_head = nn.Linear(4, 1)
         self.relevance_head = nn.Linear(4, 1)
 
-    def forward(self, input_ids, attention_mask):
+    def forward(self, input_ids: Any, _attention_mask: Any) -> dict:  # noqa: ANN401 -- torch tensor stand-in
         x = input_ids.float().mean(dim=1, keepdim=True).expand(-1, 4)
         return {
             "factuality": self.factuality_head(x).squeeze(-1),
@@ -40,7 +40,8 @@ def _quality_only_batch() -> dict:
     }
 
 
-def test_trains_from_quality_only_batch(monkeypatch, tmp_path) -> None:
+def test_trains_from_quality_only_batch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Trains and saves a checkpoint from a batch that only carries soft_label_quality."""
     monkeypatch.setattr(gk_model, "build_model", lambda name: _FakeMultiTaskModel(name))
     out_path = tmp_path / "quality_only.pt"
 
@@ -54,7 +55,8 @@ def test_trains_from_quality_only_batch(monkeypatch, tmp_path) -> None:
     assert out_path.exists()
 
 
-def test_batch_with_no_labels_is_skipped(monkeypatch, tmp_path) -> None:
+def test_batch_with_no_labels_is_skipped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Skips a batch carrying no soft-label heads at all, leaving loss at zero."""
     monkeypatch.setattr(gk_model, "build_model", lambda name: _FakeMultiTaskModel(name))
     out_path = tmp_path / "no_labels.pt"
     empty_batch = {

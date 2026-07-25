@@ -11,10 +11,7 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task(name="app.tasks.gatekeeper.run_annotator_validation")
 def run_annotator_validation() -> dict:
-    """Validate the LLM annotator against the human-tagged anchors and persist the
-    report for the admin UI. Builds (human, machine) pairs from gatekeeper_anchors,
-    runs the Tier-2 Mistral classifier, scores per-error-type precision/recall, and
-    decides which types are trustworthy to auto-label."""
+    """Validate the LLM annotator against the human-tagged anchors and persist the report for the admin UI. Builds (human, machine) pairs from gatekeeper_anchors, runs the Tier-2 Mistral classifier, scores per-error-type precision/recall, and decides which types are trustworthy to auto-label."""
     import json
     from datetime import UTC, datetime
 
@@ -58,12 +55,7 @@ def run_annotator_validation() -> dict:
 
 @celery_app.task(name="app.tasks.gatekeeper.train_quality_head")
 def train_quality_head_task() -> dict:
-    """Train the gatekeeper's quality head from admin classifier_feedback labels
-    (factuality/tone are untouched — that needs the gold-run/corruptor corpus,
-    which doesn't exist yet). Writes GATEKEEPER_MODEL_PATH on success; whether
-    that checkpoint actually serves live grading is a separate, explicit flag
-    (GATEKEEPER_QUALITY_LIVE) — training alone never flips production behavior.
-    """
+    """Train the gatekeeper's quality head from admin classifier_feedback labels (factuality/tone are untouched — that needs the gold-run/corruptor corpus, which doesn't exist yet). Writes GATEKEEPER_MODEL_PATH on success; whether that checkpoint actually serves live grading is a separate, explicit flag (GATEKEEPER_QUALITY_LIVE) — training alone never flips production behavior."""
     from app.core.config import GATEKEEPER_MODEL_PATH, GATEKEEPER_QUALITY_MIN_SAMPLES
 
     try:

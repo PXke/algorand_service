@@ -26,13 +26,7 @@ def get_views_bulk(article_ids: list[str]) -> dict[str, int]:
         # IN on the partition key; callers cap the list to a small recent window.
         # Prepared `IN ?` binds the id list directly (no client-side `[...]`
         # rendering of the old `IN %s` SimpleStatement).
-        rows = get_cassandra_session().execute(
-            ViewCountStmts.GET_BULK, (uuids,)
-        )
+        rows = get_cassandra_session().execute(ViewCountStmts.GET_BULK, (uuids,))
     except Exception:
         return {}
-    return {
-        str(row.article_id): int(row.views)
-        for row in rows
-        if row.views is not None
-    }
+    return {str(row.article_id): int(row.views) for row in rows if row.views is not None}

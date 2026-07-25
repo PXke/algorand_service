@@ -1,13 +1,19 @@
+"""Same-origin image proxy: fetch, resize/re-encode, and cache external images."""
+
 from __future__ import annotations
 
 import contextlib
 import hashlib
 import ipaddress
 import socket
+from typing import TYPE_CHECKING
 from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
-from robyn import Request, Response
+from robyn import Request, Response, Robyn
+
+if TYPE_CHECKING:
+    import redis
 
 # Same-origin image proxy. Flutter web (CanvasKit) renders Image.network by
 # FETCHING the image via XHR, which needs CORS headers most external hosts
@@ -49,7 +55,7 @@ def _cache_key(url: str) -> str:
     return f"imgproxy3:{hashlib.sha256(url.encode()).hexdigest()}"
 
 
-def _redis():
+def _redis() -> redis.Redis:
     import redis
 
     from app.core.config import settings
@@ -58,7 +64,7 @@ def _redis():
 
 
 def _cache_get(url: str) -> tuple[str, bytes] | None:
-    """Return (content_type, data) from Redis, or None. Packed as ctype\\0data."""
+    r"""Return (content_type, data) from Redis, or None. Packed as ctype\\0data."""
     try:
         raw = _redis().get(_cache_key(url))
     except Exception:
@@ -134,11 +140,7 @@ def _rasterize_svg(data: bytes) -> tuple[str, bytes] | None:
 
 
 def _optimize(ctype: str, data: bytes) -> tuple[str, bytes]:
-    """Downscale to <=_MAX_DIM px and re-encode as WebP. SVG and ICO are always
-    converted to raster formats CanvasKit can decode (a passed-through SVG
-    renders as a blank/monogram tile in Flutter web). GIFs (animation), tiny
-    raster files, and anything Pillow can't read pass through; the original is
-    kept whenever it is already smaller. Never upscales."""
+    """Downscale to <=_MAX_DIM px and re-encode as WebP. SVG and ICO are always converted to raster formats CanvasKit can decode (a passed-through SVG renders as a blank/monogram tile in Flutter web). GIFs (animation), tiny raster files, and anything Pillow can't read pass through; the original is kept whenever it is already smaller. Never upscales."""
     if ctype.startswith("image/svg"):
         return _rasterize_svg(data) or (ctype, data)
     if ctype == "image/gif":
@@ -185,7 +187,8 @@ def _fetch_and_optimize(url: str) -> tuple[int, str, bytes]:
     return 200, ctype, data
 
 
-def register_media_routes(app) -> None:
+def register_media_routes(app: Robyn) -> None:
+    """Register the cached, size-limited image-proxy endpoint."""
     @app.get("/api/v1/img")
     async def proxy_image(request: Request) -> Response:
         import asyncio

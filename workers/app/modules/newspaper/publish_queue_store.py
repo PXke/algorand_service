@@ -1,3 +1,5 @@
+"""Cassandra-backed publish queue: enqueue, list pending, and resolve outcomes."""
+
 from __future__ import annotations
 
 import contextlib
@@ -13,6 +15,7 @@ from app.modules.newspaper.publish_policy import PublishKind, PublishTier, Publi
 
 
 def queue_row_tier(row: QueuedPublishRow) -> PublishTier:
+    """Read a queue row's publish tier from its payload, defaulting to standard."""
     raw = str(row.payload.get("tier", PublishTier.STANDARD.value))
     try:
         return PublishTier(raw)
@@ -60,11 +63,13 @@ TERMINAL_OUTCOMES = frozenset(
 
 
 def is_terminal_outcome(outcome: dict[str, Any]) -> bool:
+    """Check whether a compose outcome resolves its queue row rather than leaving it pending."""
     return outcome.get("status") in TERMINAL_OUTCOMES
 
 
 @dataclass(frozen=True)
 class QueuedPublishRow:
+    """One row in the publish queue awaiting compose/publish."""
     queue_id: str
     priority: int
     topic: str
@@ -145,13 +150,12 @@ def enqueue_publish(
 
 
 def list_pending_queue(*, limit: int = 50) -> list[QueuedPublishRow]:
+    """Load pending publish-queue rows with their detail payloads, ordered for draining."""
     from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
     from app.core.statements import PublishQueueStmts
 
     session = get_cassandra_session()
-    pending = list(
-        session.execute(PublishQueueStmts.LIST_PENDING, ("pending", limit))
-    )
+    pending = list(session.execute(PublishQueueStmts.LIST_PENDING, ("pending", limit)))
     # Fan the per-row detail lookups out concurrently instead of one round-trip
     # per pending row; results come back aligned with `pending` (input order).
     details = execute_parallel_with_args(
@@ -185,21 +189,14 @@ def list_pending_queue(*, limit: int = 50) -> list[QueuedPublishRow]:
 
 
 def _queue_domain(row: QueuedPublishRow) -> str:
-    """Source key for diversity: the registrable domain (eTLD+1), falling back to
-    service_id. Collapsing subdomains is deliberate — explore.perawallet.app and
-    perawallet.app are one source, so the interleave can't treat the same project's
-    subdomains as distinct sources and let a burst from one entity through. Matches
-    the key the per-domain compose cap/cooldown use, so the two layers agree."""
+    """Source key for diversity: the registrable domain (eTLD+1), falling back to service_id. Collapsing subdomains is deliberate — explore.perawallet.app and perawallet.app are one source, so the interleave can't treat the same project's subdomains as distinct sources and let a burst from one entity through. Matches the key the per-domain compose cap/cooldown use, so the two layers agree."""
     from app.modules.crawler.domain_tracker import domain_from_url
 
     return domain_from_url(row.scrape_url or "") or (row.service_id or "")
 
 
 def _interleave_by_source(rows: list[QueuedPublishRow]) -> list[QueuedPublishRow]:
-    """Round-robin one item per source per round (random source order each
-    round, random within a source), so a burst of same-source candidates can't
-    monopolize the head before other sources are reached. Every row is kept;
-    this only reorders within a single priority tier."""
+    """Round-robin one item per source per round (random source order each round, random within a source), so a burst of same-source candidates can't monopolize the head before other sources are reached. Every row is kept; this only reorders within a single priority tier."""
     buckets: dict[str, list[QueuedPublishRow]] = {}
     order: list[str] = []
     for row in rows:
@@ -214,16 +211,12 @@ def _interleave_by_source(rows: list[QueuedPublishRow]) -> list[QueuedPublishRow
     while any(buckets[d] for d in order):
         round_order = [d for d in order if buckets[d]]
         random.shuffle(round_order)
-        for dom in round_order:
-            result.append(buckets[dom].pop(0))
+        result.extend(buckets[dom].pop(0) for dom in round_order)
     return result
 
 
 def order_for_drain(rows: list[QueuedPublishRow]) -> list[QueuedPublishRow]:
-    """Drain order. Priority (the interest score) strictly dominates: a
-    higher-priority candidate always precedes a lower one. Within one priority
-    tier, sources are interleaved with a random tiebreak so equivalent-score
-    candidates are diverse and no single domain floods the head of the queue."""
+    """Drain order. Priority (the interest score) strictly dominates: a higher-priority candidate always precedes a lower one. Within one priority tier, sources are interleaved with a random tiebreak so equivalent-score candidates are diverse and no single domain floods the head of the queue."""
     by_priority: dict[int, list[QueuedPublishRow]] = {}
     for row in rows:
         by_priority.setdefault(row.priority, []).append(row)
@@ -234,29 +227,26 @@ def order_for_drain(rows: list[QueuedPublishRow]) -> list[QueuedPublishRow]:
 
 
 def count_pending_queue() -> int:
-    """Count pending rows. A single-partition COUNT (status is the partition
-    key) — does NOT materialise rows or hit the per-row detail table the way
-    ``list_pending_queue`` does, so it stays cheap regardless of queue depth."""
+    """Count pending rows. A single-partition COUNT (status is the partition key) — does NOT materialise rows or hit the per-row detail table the way ``list_pending_queue`` does, so it stays cheap regardless of queue depth."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import PublishQueueStmts
 
-    row = get_cassandra_session().execute(
-        PublishQueueStmts.COUNT_PENDING, ("pending",)
-    ).one()
+    row = get_cassandra_session().execute(PublishQueueStmts.COUNT_PENDING, ("pending",)).one()
     return int(row.n) if row is not None else 0
 
 
 def mark_queue_done(queue_id: str, *, reason: str = "") -> None:
+    """Mark a publish-queue row done."""
     mark_queue_status(queue_id, "done", reason=reason)
 
 
 def mark_queue_status(queue_id: str, status: str, *, reason: str = "") -> None:
-    """
-    Move a queue item out of the pending lane into a terminal status:
-    done, deferred, indexed_only, or expired. ``reason`` (the gate name or
-    outcome reason that resolved the row) persists on the row so the admin
-    queue view can answer "why" — it defaults to the status itself so a
-    resolved row is never left with a stale reason from an earlier skip.
+    """Move a queue item out of the pending lane into a terminal status: done, deferred, indexed_only, or expired.
+
+    ``reason`` (the gate name or outcome reason that resolved the row)
+    persists on the row so the admin queue view can answer "why" — it
+    defaults to the status itself so a resolved row is never left with a
+    stale reason from an earlier skip.
     """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import PublishQueueStmts
@@ -283,10 +273,7 @@ def mark_queue_status(queue_id: str, status: str, *, reason: str = "") -> None:
 
 
 def record_queue_reason(queue_id: str, reason: str) -> None:
-    """Persist why a row was skipped THIS run while it stays pending (cooldown,
-    review slot full, not credible, ...) — the status doesn't change, so this is
-    the only trace the decision leaves. Best-effort: a miss here only loses
-    observability, never correctness."""
+    """Persist why a row was skipped THIS run while it stays pending (cooldown, review slot full, not credible, ...) — the status doesn't change, so this is the only trace the decision leaves. Best-effort: a miss here only loses observability, never correctness."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import PublishQueueStmts
 

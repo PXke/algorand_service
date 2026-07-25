@@ -1,6 +1,8 @@
+"""HTTP routes for wallet authentication."""
+
 from __future__ import annotations
 
-from robyn import Request, Response
+from robyn import Request, Response, Robyn
 
 from app.core import serialization
 from app.core.errors import PlatformError
@@ -10,7 +12,8 @@ from app.modules.auth.services.auth_service import AuthService
 from app.modules.auth.services.session_store import SessionStore
 
 
-def register_auth_routes(app) -> None:
+def register_auth_routes(app: Robyn) -> None:
+    """Register the nonce and verify endpoints for wallet authentication."""
     auth_service = AuthService(session_store=SessionStore())
 
     @app.post("/api/v1/auth/nonce")

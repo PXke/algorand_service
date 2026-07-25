@@ -1,5 +1,4 @@
-"""Telegram auto-poster. Free Bot API, no review process — create a bot via
-@BotFather, get a token, add the bot as admin to the target channel.
+"""Telegram auto-poster. Free Bot API, no review process — create a bot via @BotFather, get a token, add the bot as admin to the target channel.
 
 sendPhoto with the share-card image as an explicit `photo` URL, rather than
 relying on Telegram's own link-preview crawler off a bare URL in the text —
@@ -46,17 +45,21 @@ def _escape(text: str) -> str:
 
 
 class TelegramDistributor(SocialDistributor):
+    """SocialDistributor implementation for Telegram."""
     name = "telegram"
 
     def __init__(self, *, bot_token: str, chat_id: str) -> None:
+        """Store the Telegram bot token and target chat id used to post."""
         self._bot_token = bot_token
         self._chat_id = chat_id
 
     @property
     def enabled(self) -> bool:
+        """Whether the Telegram bot token and chat id are configured."""
         return bool(self._bot_token and self._chat_id)
 
     def post_article(self, share: ArticleShare) -> DistributionResult:
+        """Post an article to the Telegram channel, as a photo with caption or plain text if no image."""
         base = f"https://api.telegram.org/bot{self._bot_token}"
         caption = _caption(share)
         try:

@@ -1,3 +1,5 @@
+"""Celery task that collects and stores a price-metrics sample."""
+
 from __future__ import annotations
 
 from app.celery_app import celery_app

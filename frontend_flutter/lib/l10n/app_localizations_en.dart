@@ -987,7 +987,18 @@ class AppLocalizationsEn extends AppLocalizations {
   String get domainsAddAsSeed => 'Add as permanent source';
 
   @override
+  String get domainsAddSinglePageOnly =>
+      'Just this page (citation only, don\'t crawl the site)';
+
+  @override
   String get domainsScoreUnexplained => 'Score breakdown not available';
+
+  @override
+  String get domainsPossibleService => 'possible service?';
+
+  @override
+  String get domainsPossibleServiceHint =>
+      'Scored well but tagged news/generic — this may be a real product, not just a citation source. Consider \"Approve & explore\" instead of \"Crawl once\".';
 
   @override
   String get paginationPrevious => 'Previous';

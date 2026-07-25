@@ -1,3 +1,5 @@
+"""Read newly-indexed rounds/transactions from Conduit's Cassandra tables."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -5,6 +7,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class RoundTransaction:
+    """One transaction read from a newly-indexed round."""
     txid: str
     round: int
     sender: str
@@ -15,6 +18,7 @@ class RoundTransaction:
 
 
 def get_conduit_head_round() -> int | None:
+    """Return the last round Conduit has ingested into Cassandra, or None if unset."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ChainStmts
 
@@ -43,26 +47,26 @@ def get_algod_head_round() -> int:
 
 
 def list_transactions_for_round(round_num: int) -> list[RoundTransaction]:
+    """Fetch every transaction Conduit indexed for the given round."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ChainStmts
 
     session = get_cassandra_session()
     rows = session.execute(ChainStmts.TXNS_BY_ROUND, (round_num,))
-    items: list[RoundTransaction] = []
-    for row in rows:
-        items.append(
-            RoundTransaction(
-                txid=row.txid,
-                round=int(row.round),
-                sender=row.sender,
-                txn_type=row.txn_type,
-                receiver=getattr(row, "receiver", None) or None,
-                amount_microalgos=(
-                    int(row.amount_microalgos)
-                    if getattr(row, "amount_microalgos", None) is not None
-                    else None
-                ),
-                txn_json=getattr(row, "txn_json", None),
-            )
+    items: list[RoundTransaction] = [
+        RoundTransaction(
+            txid=row.txid,
+            round=int(row.round),
+            sender=row.sender,
+            txn_type=row.txn_type,
+            receiver=getattr(row, "receiver", None) or None,
+            amount_microalgos=(
+                int(row.amount_microalgos)
+                if getattr(row, "amount_microalgos", None) is not None
+                else None
+            ),
+            txn_json=getattr(row, "txn_json", None),
         )
+        for row in rows
+    ]
     return items

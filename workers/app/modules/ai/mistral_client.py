@@ -1,3 +1,5 @@
+"""Thin HTTP connector for the Mistral Chat Completions API."""
+
 from __future__ import annotations
 
 import json
@@ -25,6 +27,7 @@ from app.core.config import (
     MISTRAL_TIMEOUT_SECONDS,
     MISTRAL_TOOL_RESULT_MAX_CHARS,
 )
+from app.modules.ai.mistral_credit_guard import is_credit_exhausted, mark_credit_exhausted
 from app.modules.ai.mistral_rate_limit import throttle_mistral
 from app.modules.ai.story_spike import StorySpikedError
 from app.modules.ai.token_budget import fit_messages_to_budget, serialize_tool_result
@@ -82,7 +85,8 @@ def _balanced_object_span(raw: str) -> str | None:
 def _parse_json_object(raw: str) -> dict[str, Any] | None:
     """Parse a model reply as a JSON object, salvaging fences and prose wrappers.
 
-    None when nothing object-like parses."""
+    None when nothing object-like parses.
+    """
     candidates: list[str] = []
     stripped = raw.strip()
     if stripped:
@@ -126,7 +130,8 @@ def _message_text(message: dict[str, Any]) -> str:
     Reasoning models (Small 4 at reasoning_effort != none) may return ``content``
     as a list of typed chunks (thinking + text) rather than a plain string. We
     keep only the answer text and drop thinking/reasoning chunks so the caller's
-    strict-JSON parse never sees the reasoning trace."""
+    strict-JSON parse never sees the reasoning trace.
+    """
     content = message.get("content")
     if isinstance(content, list):
         parts = [
@@ -139,6 +144,7 @@ def _message_text(message: dict[str, Any]) -> str:
 
 
 class MistralError(Exception):
+    """Raised on a Mistral API failure."""
     pass
 
 
@@ -148,10 +154,12 @@ class MistralRateLimitError(MistralError):
 
 class MistralCreditError(MistralError):
     """Raised on 401/402 — Mistral rejects the request outright, no retry.
+
     Seen in practice (2026-07-10) as 401 "Unauthorized" once monthly prepaid
     credit ran out; some providers disable the key itself rather than
     returning a billing-specific code, so this also covers a genuinely bad/
-    revoked key — either way, waiting and retrying the same request won't help."""
+    revoked key — either way, waiting and retrying the same request won't help.
+    """
 
 
 # Live model metadata (max context length, reasoning_effort support) from
@@ -169,12 +177,12 @@ _model_metadata_cache: dict[str, dict[str, Any]] = {}
 
 
 def _fetch_model_metadata(*, api_base: str, api_key: str, model: str) -> dict[str, Any]:
-    """{"max_context_length": int, "reasoning": bool} for `model`, or {} on any
-    failure — callers fall back to their existing hardcoded defaults, so a
-    slow/unreachable /v1/models never blocks a compose."""
+    """{"max_context_length": int, "reasoning": bool} for `model`, or {} on any failure — callers fall back to their existing hardcoded defaults, so a slow/unreachable /v1/models never blocks a compose."""
     cached = _model_metadata_cache.get(model)
     if cached is not None:
         return cached
+    if is_credit_exhausted():
+        return {}
     try:
         with httpx.Client(timeout=10.0) as client:
             resp = client.get(f"{api_base}/models", headers={"Authorization": f"Bearer {api_key}"})
@@ -203,6 +211,7 @@ class MistralClient:
         model: str | None = None,
         timeout: float | None = None,
     ) -> None:
+        """Wire credentials/model/timeout, defaulting to config, and fetch live model metadata."""
         self._api_key = (api_key if api_key is not None else MISTRAL_API_KEY).strip()
         self._api_base = (api_base if api_base is not None else MISTRAL_API_BASE).rstrip("/")
         self._model = model if model is not None else MISTRAL_MODEL
@@ -223,18 +232,19 @@ class MistralClient:
 
     @property
     def is_configured(self) -> bool:
+        """Whether an API key is configured for this client."""
         return bool(self._api_key)
 
     def usage_totals(self) -> dict[str, int]:
-        """Cumulative token usage across every request this instance has made
-        (a compose session's client(s) are created fresh per session, so this
-        is the session total, not a lifetime counter)."""
+        """Cumulative token usage across every request this instance has made (a compose session's client(s) are created fresh per session, so this is the session total, not a lifetime counter)."""
         return dict(self._usage)
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """POST one chat/completions request through the shared rate-limit gate,
-        retrying on 429 with Retry-After / exponential backoff. Returns the
-        parsed JSON body or raises MistralError."""
+        """POST one chat/completions request through the shared rate-limit gate, retrying on 429 with Retry-After / exponential backoff. Returns the parsed JSON body or raises MistralError."""
+        if is_credit_exhausted():
+            raise MistralCreditError(
+                "Mistral credit exhausted (cached — will retry after the monthly reset)"
+            )
         url = f"{self._api_base}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -258,7 +268,10 @@ class MistralClient:
                 wait = min(MISTRAL_BACKOFF_MAX_SECONDS, MISTRAL_BACKOFF_BASE_SECONDS * (2**attempt))
                 logger.warning(
                     "Mistral network error (attempt %d/%d): %s; backing off %.1fs",
-                    attempt + 1, MISTRAL_MAX_RETRIES + 1, exc, wait,
+                    attempt + 1,
+                    MISTRAL_MAX_RETRIES + 1,
+                    exc,
+                    wait,
                 )
                 time.sleep(wait)
                 continue
@@ -278,7 +291,10 @@ class MistralClient:
                 )
                 logger.warning(
                     "Mistral %d (attempt %d/%d); backing off %.1fs",
-                    resp.status_code, attempt + 1, MISTRAL_MAX_RETRIES + 1, wait,
+                    resp.status_code,
+                    attempt + 1,
+                    MISTRAL_MAX_RETRIES + 1,
+                    wait,
                 )
                 time.sleep(wait)
                 continue
@@ -296,9 +312,8 @@ class MistralClient:
                 )
                 continue
             if resp.status_code in (401, 402):
-                raise MistralCreditError(
-                    f"Mistral API {resp.status_code}: {resp.text[:500]}"
-                )
+                mark_credit_exhausted()
+                raise MistralCreditError(f"Mistral API {resp.status_code}: {resp.text[:500]}")
             if resp.status_code >= 400:
                 raise MistralError(f"Mistral API {resp.status_code}: {resp.text[:500]}")
             data = resp.json()
@@ -310,8 +325,7 @@ class MistralClient:
         raise MistralError("Mistral request retry loop exhausted")  # unreachable
 
     def _log_task_context(self, op: str) -> None:
-        """Log which Celery task is driving this Mistral call, so an unexpected
-        burst of API queries can be traced back to the task that caused it."""
+        """Log which Celery task is driving this Mistral call, so an unexpected burst of API queries can be traced back to the task that caused it."""
         try:
             from celery import current_task
 
@@ -328,6 +342,7 @@ class MistralClient:
         json_object: bool = True,
         temperature: float = 0.3,
     ) -> str:
+        """Send a chat-completion request and return the response text."""
         if not self._api_key:
             msg = "MISTRAL_API_KEY is not set"
             raise MistralError(msg)
@@ -357,6 +372,7 @@ class MistralClient:
         max_tokens: int | None = None,
         temperature: float = 0.3,
     ) -> dict[str, Any]:
+        """Send a chat-completion request and parse the response as a JSON object."""
         raw = self.chat_completion(
             messages,
             max_tokens=max_tokens,
@@ -410,11 +426,7 @@ class MistralClient:
         context_tokens: int | None = None,
         finalize_on_exhaustion: bool = True,
     ) -> str:
-        """Agentic loop: let the model call the provided tools, execute them,
-        feed results back, and return the final assistant message content.
-        Tools are real functions the writer invokes on demand (live price,
-        chain stats, platform search, recent articles). Pass ``debug`` to capture
-        the full transcript (it tracks ``convo`` live + records the round count)."""
+        """Agentic loop: let the model call the provided tools, execute them, feed results back, and return the final assistant message content. Tools are real functions the writer invokes on demand (live price, chain stats, platform search, recent articles). Pass ``debug`` to capture the full transcript (it tracks ``convo`` live + records the round count)."""
         if not self._api_key:
             raise MistralError("MISTRAL_API_KEY is not set")
         self._log_task_context("chat_with_tools")
@@ -468,8 +480,10 @@ class MistralClient:
         # An explicit context_tokens always wins; otherwise prefer this
         # instance's own live-fetched limit (correct for whatever self._model
         # actually is) over the generic hardcoded fallback.
-        window = context_tokens if context_tokens is not None else (
-            self._metadata.get("max_context_length") or MISTRAL_CONTEXT_TOKENS
+        window = (
+            context_tokens
+            if context_tokens is not None
+            else (self._metadata.get("max_context_length") or MISTRAL_CONTEXT_TOKENS)
         )
         convo_budget = window - response_reserve - MISTRAL_CONTEXT_SAFETY_TOKENS
         for round_idx in range(rounds):
@@ -527,7 +541,7 @@ class MistralClient:
                 return salvaged
             convo.append(msg)
             for call in tool_calls:
-                fn = (call.get("function") or {})
+                fn = call.get("function") or {}
                 name = fn.get("name", "")
                 try:
                     args = json.loads(fn.get("arguments") or "{}")
@@ -642,8 +656,7 @@ def _salvage_final_article(
 
 
 def _retry_after_seconds(resp: httpx.Response) -> float | None:
-    """Seconds to wait from a 429 response's Retry-After header (delta-seconds
-    form), or None when absent/unparseable."""
+    """Seconds to wait from a 429 response's Retry-After header (delta-seconds form), or None when absent/unparseable."""
     raw = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
     if not raw:
         return None
@@ -654,12 +667,15 @@ def _retry_after_seconds(resp: httpx.Response) -> float | None:
 
 
 def get_mistral_client(*, model: str | None = None) -> MistralClient:
+    """Build a Mistral client for the writer tier, or an override model."""
     return MistralClient(model=model or MISTRAL_MODEL_WRITER)
 
 
 def get_mistral_research_client() -> MistralClient:
+    """Build a Mistral client pinned to the research-tier model."""
     return MistralClient(model=MISTRAL_MODEL_RESEARCH)
 
 
 def get_mistral_digest_client() -> MistralClient:
+    """Build a Mistral client pinned to the digest-tier model."""
     return MistralClient(model=MISTRAL_MODEL_DIGEST)

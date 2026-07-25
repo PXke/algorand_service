@@ -1,3 +1,5 @@
+"""Match a scraped page to an existing article for edit-vs-create routing."""
+
 from __future__ import annotations
 
 import re
@@ -93,18 +95,14 @@ def _normalize_source_url(url: str) -> str:
 
 
 def edit_window_closes_at(*, from_time: datetime | None = None) -> datetime:
+    """Return when the post-publish edit window closes, from now or a given start time."""
     hours = getattr(config, "ARTICLE_EDIT_WINDOW_HOURS", 24)
     start = from_time or datetime.now(tz=UTC)
     return start + timedelta(hours=hours)
 
 
 def service_has_article(service_id: str) -> bool:
-    """Whether this service has EVER had a real published article. Match keys
-    are registered only on the publish and edit paths (never for held/review
-    drafts) and are deleted with the article, so a hit here means readers have
-    genuinely been introduced to the service. Fails open (True) on store
-    errors: the safe default is the normal update framing, not re-introducing
-    a service we may already have covered."""
+    """Whether this service has EVER had a real published article. Match keys are registered only on the publish and edit paths (never for held/review drafts) and are deleted with the article, so a hit here means readers have genuinely been introduced to the service. Fails open (True) on store errors: the safe default is the normal update framing, not re-introducing a service we may already have covered."""
     sid = (service_id or "").strip().lower()
     if not sid:
         return True
@@ -112,9 +110,11 @@ def service_has_article(service_id: str) -> bool:
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ArticleMatchStmts
 
-        row = get_cassandra_session().execute(
-            ArticleMatchStmts.FIND_BY_KEY, ("service_id", sid)
-        ).one()
+        row = (
+            get_cassandra_session()
+            .execute(ArticleMatchStmts.FIND_BY_KEY, ("service_id", sid))
+            .one()
+        )
         return row is not None
     except Exception:
         return True
@@ -125,9 +125,7 @@ def find_article_for_followup(
     *,
     now: datetime | None = None,
 ) -> str | None:
-    """
-    If any key still has an open edit window, return article_id to update.
-    """
+    """If any key still has an open edit window, return article_id to update."""
     if not keys:
         return None
     moment = now or datetime.now(tz=UTC)
@@ -211,8 +209,8 @@ def resolve_publish_mode(
     match_kind: str = "",
     match_value: str = "",
 ) -> dict[str, Any]:
-    """
-    Decide new article vs edit follow-up.
+    """Decide new article vs edit follow-up.
+
     An explicitly requested edit (`requested_mode="edit"` + article id) wins when
     the edit window is still open; otherwise fall back to match-key lookup.
     Returns { publish_mode, linked_article_id?, match_keys, edit_window_open? }.

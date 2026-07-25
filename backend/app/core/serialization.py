@@ -19,14 +19,13 @@ T = TypeVar("T")
 _encoder = msgspec.json.Encoder()
 
 
-def encode(obj: Any) -> bytes:
-    """JSON-encode any msgspec.Struct / dict / list / primitive (datetimes ->
-    RFC 3339) to bytes."""
+def encode(obj: Any) -> bytes:  # noqa: ANN401 -- any msgspec.Struct / dict / list / primitive
+    """JSON-encode any msgspec.Struct / dict / list / primitive (datetimes -> RFC 3339) to bytes."""
     return _encoder.encode(obj)
 
 
 def json_response(
-    payload: Any,
+    payload: Any,  # noqa: ANN401 -- any msgspec.Struct / dict / list / primitive
     *,
     status: int = 200,
     headers: dict[str, str] | None = None,
@@ -35,7 +34,8 @@ def json_response(
     """Build a Robyn JSON Response from `payload` (Struct/dict/list/...).
 
     Robyn's Response body is a str, so the msgspec bytes are decoded once here —
-    the single place to revisit if Robyn gains native bytes support."""
+    the single place to revisit if Robyn gains native bytes support.
+    """
     hdrs = {"Content-Type": "application/json"}
     if cache:
         hdrs["Cache-Control"] = cache
@@ -48,22 +48,21 @@ def json_response(
     )
 
 
-def to_builtins(obj: Any) -> Any:
-    """Convert a Struct (or nested structure) to plain dict/list builtins — for
-    the few spots that merge model data into a larger hand-built payload."""
+def to_builtins(obj: Any) -> Any:  # noqa: ANN401 -- any nested Struct/dict/list structure in or out
+    """Convert a Struct (or nested structure) to plain dict/list builtins — for the few spots that merge model data into a larger hand-built payload."""
     return msgspec.to_builtins(obj)
 
 
 class DecodeError(Exception):
-    """Raised when a request body fails to decode/validate. Carries a client-safe
-    message; callers translate it to a 400."""
+    """Raised when a request body fails to decode/validate. Carries a client-safe message; callers translate it to a 400."""
 
 
 def decode(raw: str | bytes | None, type_: type[T]) -> T:
     """Decode + validate a request body into `type_`.
 
     Raises DecodeError (client-safe) on malformed JSON or schema/`__post_init__`
-    validation failure, so callers return a uniform 400."""
+    validation failure, so callers return a uniform 400.
+    """
     if raw is None or raw == "" or raw == b"":
         raise DecodeError("request body is required")
     try:

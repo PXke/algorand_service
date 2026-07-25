@@ -21,7 +21,7 @@ _UA = "algorand-platform-newspaper/1.0 (+https://algorand.pxke.me)"
 _TIMEOUT = 12.0
 
 
-def _get(url: str, *, headers: dict | None = None, params: dict | None = None) -> Any:
+def _get(url: str, *, headers: dict | None = None, params: dict | None = None) -> Any:  # noqa: ANN401 -- returns parsed JSON (dict/list) or plain text depending on content-type
     from app.core.net_guard import guarded_get
 
     h = {"User-Agent": _UA, "Accept": "application/json"}
@@ -34,9 +34,7 @@ def _get(url: str, *, headers: dict | None = None, params: dict | None = None) -
 
 
 def _resolve_ips(host: str, timeout: float = 5.0) -> list[str]:
-    """Bounded DNS resolution. socket.getaddrinfo has no native timeout and can
-    block for tens of seconds on a slow resolver — which would violate this
-    module's timeout-bounded contract — so run it in a thread we can abandon."""
+    """Bounded DNS resolution. socket.getaddrinfo has no native timeout and can block for tens of seconds on a slow resolver — which would violate this module's timeout-bounded contract — so run it in a thread we can abandon."""
     import concurrent.futures
 
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -49,8 +47,7 @@ def _resolve_ips(host: str, timeout: float = 5.0) -> list[str]:
 
 # --- Provenance ------------------------------------------------------------
 def fetch_archive_snapshot(url: str, target_date: str = "") -> dict[str, Any]:
-    """Wayback Machine closest snapshot — proves a page existed/said something
-    on a date, even if later edited or deleted. target_date: YYYYMMDD."""
+    """Wayback Machine closest snapshot — proves a page existed/said something on a date, even if later edited or deleted. target_date: YYYYMMDD."""
     try:
         ts = "".join(ch for ch in target_date if ch.isdigit())[:8]
         data = _get(
@@ -71,11 +68,7 @@ def fetch_archive_snapshot(url: str, target_date: str = "") -> dict[str, Any]:
 
 
 def fetch_archive_text(url: str, target_date: str = "", max_chars: int = 6000) -> dict[str, Any]:
-    """Read the actual TEXT of a Wayback Machine snapshot — not just prove it
-    existed, but extract the archived page's title and body so you can quote
-    titles/dates/content from a deleted or rewritten page. target_date: YYYYMMDD
-    (closest snapshot on/near it). Use after fetch_archive_snapshot when you need
-    what the page SAID, not just that it was captured."""
+    """Read the actual TEXT of a Wayback Machine snapshot — not just prove it existed, but extract the archived page's title and body so you can quote titles/dates/content from a deleted or rewritten page. target_date: YYYYMMDD (closest snapshot on/near it). Use after fetch_archive_snapshot when you need what the page SAID, not just that it was captured."""
     from app.core.net_guard import guarded_get
     from app.modules.scraper.core.web_fetch import html_to_plain_text
 
@@ -116,8 +109,7 @@ def fetch_archive_text(url: str, target_date: str = "", max_chars: int = 6000) -
 
 
 def extract_document_metadata(file_url: str) -> dict[str, Any]:
-    """EXIF (images) / document properties (PDF) from a leaked file URL:
-    author, creation time, GPS, producing software."""
+    """EXIF (images) / document properties (PDF) from a leaked file URL: author, creation time, GPS, producing software."""
     try:
         from app.core.net_guard import guarded_get
 
@@ -171,8 +163,7 @@ def extract_document_metadata(file_url: str) -> dict[str, Any]:
 
 # --- Identity --------------------------------------------------------------
 def resolve_domain_infrastructure(domain: str) -> dict[str, Any]:
-    """WHOIS-equivalent (RDAP) + DNS A records + IP geolocation/host. Finds the
-    physical servers and registration behind a site."""
+    """WHOIS-equivalent (RDAP) + DNS A records + IP geolocation/host. Finds the physical servers and registration behind a site."""
     out: dict[str, Any] = {"domain": domain}
     d = domain.strip().lower().removeprefix("http://").removeprefix("https://").split("/")[0]
     out["domain"] = d
@@ -207,8 +198,7 @@ def resolve_domain_infrastructure(domain: str) -> dict[str, Any]:
 
 
 def screen_sanctions_and_pep(person_name: str, dob: str = "") -> dict[str, Any]:
-    """OpenSanctions: flag PEPs, sanctioned entities, watchlist hits. Uses
-    OPENSANCTIONS_API_KEY when set."""
+    """OpenSanctions: flag PEPs, sanctioned entities, watchlist hits. Uses OPENSANCTIONS_API_KEY when set."""
     try:
         key = os.getenv("OPENSANCTIONS_API_KEY", "").strip()
         headers = {"Authorization": f"ApiKey {key}"} if key else None
@@ -236,7 +226,9 @@ def screen_sanctions_and_pep(person_name: str, dob: str = "") -> dict[str, Any]:
 
 def query_corporate_registry(company_name: str, jurisdiction: str = "") -> dict[str, Any]:
     """OpenCorporates: board members, incorporation date, registered address.
-    Uses OPENCORPORATES_API_TOKEN when set."""
+
+    Uses OPENCORPORATES_API_TOKEN when set.
+    """
     try:
         token = os.getenv("OPENCORPORATES_API_TOKEN", "").strip()
         params = {"q": company_name, "per_page": 5}
@@ -266,8 +258,7 @@ def query_corporate_registry(company_name: str, jurisdiction: str = "") -> dict[
 
 # --- History ---------------------------------------------------------------
 def query_court_dockets(entity_name: str) -> dict[str, Any]:
-    """CourtListener: civil/criminal cases, bankruptcies. Token optional via
-    COURTLISTENER_TOKEN."""
+    """CourtListener: civil/criminal cases, bankruptcies. Token optional via COURTLISTENER_TOKEN."""
     try:
         token = os.getenv("COURTLISTENER_TOKEN", "").strip()
         headers = {"Authorization": f"Token {token}"} if token else None
@@ -276,24 +267,22 @@ def query_court_dockets(entity_name: str) -> dict[str, Any]:
             params={"q": entity_name, "order_by": "score desc"},
             headers=headers,
         )
-        results = []
-        for r in (data.get("results") or [])[:5]:
-            results.append(
-                {
-                    "case": r.get("caseName"),
-                    "court": r.get("court"),
-                    "date": r.get("dateFiled"),
-                    "docket": r.get("docketNumber"),
-                }
-            )
+        results = [
+            {
+                "case": r.get("caseName"),
+                "court": r.get("court"),
+                "date": r.get("dateFiled"),
+                "docket": r.get("docketNumber"),
+            }
+            for r in (data.get("results") or [])[:5]
+        ]
         return {"query": entity_name, "count": data.get("count"), "results": results}
     except Exception as exc:
         return {"error": str(exc)}
 
 
 def search_leak_databases(entity_name: str) -> dict[str, Any]:
-    """ICIJ Offshore Leaks (Panama/Pandora/Paradise Papers). Best-effort HTML
-    search; no official API."""
+    """ICIJ Offshore Leaks (Panama/Pandora/Paradise Papers). Best-effort HTML search; no official API."""
     try:
         html = _get(
             "https://offshoreleaks.icij.org/search",
@@ -305,9 +294,7 @@ def search_leak_databases(entity_name: str) -> dict[str, Any]:
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(html, "html.parser")
-        rows = []
-        for a in soup.select("table a[href*='/nodes/']")[:6]:
-            rows.append(a.get_text(" ").strip())
+        rows = [a.get_text(" ").strip() for a in soup.select("table a[href*='/nodes/']")[:6]]
         return {"query": entity_name, "hits": len(rows), "entities": rows}
     except Exception as exc:
         return {"error": str(exc), "note": "ICIJ has no official API; best-effort"}

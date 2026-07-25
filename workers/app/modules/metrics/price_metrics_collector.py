@@ -1,3 +1,5 @@
+"""Fetch a spot price tick from CoinGecko."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -11,6 +13,7 @@ COINGECKO_API = "https://api.coingecko.com/api/v3"
 
 
 class PriceMetricsCollectorError(Exception):
+    """Raised when a price tick can't be collected."""
     pass
 
 

@@ -7,12 +7,14 @@ field type. Unknown env vars are ignored.
 """
 
 import os
+from pathlib import Path
 from typing import get_args
 
 import msgspec
 
 
 class Settings(msgspec.Struct, kw_only=True):
+    """Backend service configuration, populated from environment variables."""
     app_name: str = "algorand-platform-api"
     app_env: str = "dev"
     app_host: str = "0.0.0.0"
@@ -76,6 +78,15 @@ class Settings(msgspec.Struct, kw_only=True):
     # record time. Country-level only — the IP itself is never stored. Empty ->
     # geography is silently disabled. Provisioned to shared/geoip by deploy.sh.
     geoip_db_path: str = ""
+    # Path to a local GeoIP ASN database (DB-IP ASN Lite, same .mmdb format and
+    # no-account download as geoip_db_path) used to flag client IPs that belong
+    # to a cloud/hosting provider rather than a residential/mobile ISP — a
+    # strong signal for the UA-rotation scrapers that otherwise hide inside
+    # human "(direct)" (see analytics_store.is_hosting_ip). Only the boolean
+    # classification is counted, never the IP or the ASN itself. Empty ->
+    # disabled (fails open, same as geoip_db_path). Provisioned to shared/geoip
+    # by deploy.sh.
+    geoip_asn_db_path: str = ""
 
     auth_domain: str = "algorand-platform.local"
     auth_uri: str = "https://algorand-platform.local/sign-in"
@@ -158,8 +169,32 @@ class Settings(msgspec.Struct, kw_only=True):
     # Public address only — no private key is held by this module.
     x402_pay_to_address: str = ""
 
+    # KYC-as-a-service (the x402 challenge's actual product): free wallet
+    # enrollment + trust-signal computation, then a paid x402 lookup that
+    # splits its fee with the enrolled wallet. See app/modules/kyc/.
+    kyc_store: str = "memory"
+    kyc_lookup_price: str = "$0.05"
+    # Share of the lookup fee paid out to the enrolled wallet (the rest stays
+    # with the platform). 0.5 = 50/50, matching the product's original pitch.
+    kyc_payout_share: float = 0.5
+    # Public AlgoNode indexers — same free tier + URLs as the workers service
+    # (workers/app/core/config.py's TESTNET_INDEXER_URL/MAINNET_INDEXER_URL),
+    # mirrored here since backend has never needed indexer reads before (algod
+    # alone can't answer "when was this account created" or "recent txns" —
+    # that's what an indexer is for, algod only has current state).
+    kyc_testnet_indexer_url: str = "https://testnet-idx.algonode.cloud"
+    kyc_mainnet_indexer_url: str = "https://mainnet-idx.algonode.cloud"
+    # Mnemonic for a FRESH, DEDICATED, minimally-funded hot wallet — never the
+    # x402_pay_to_address (receive-only, no key held) and never the admin
+    # login wallet. Only ever spends (pays out half of each settled lookup
+    # fee); someone has to top up its USDC balance manually, there is no
+    # automated sweep from x402_pay_to_address. Empty = payouts are skipped
+    # (logged, never block the paid lookup response) until configured.
+    kyc_payout_mnemonic: str = ""
+
     @property
     def cors_origins(self) -> list[str]:
+        """Parse the comma-separated CORS origins setting into a list."""
         raw = self.cors_allowed_origins.strip()
         if not raw:
             return []
@@ -173,7 +208,7 @@ def _parse_dotenv(path: str) -> dict[str, str]:
     """Minimal KEY=VALUE .env reader (comments/blank lines skipped, quotes stripped)."""
     out: dict[str, str] = {}
     try:
-        with open(path, encoding="utf-8") as fh:
+        with Path(path).open(encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -185,7 +220,7 @@ def _parse_dotenv(path: str) -> dict[str, str]:
     return out
 
 
-def _coerce(value: str, typ: object):
+def _coerce(value: str, typ: object) -> bool | int | float | str:
     """Coerce an env string to a Struct field's type (bool/int/float/str)."""
     candidates = set(get_args(typ)) | {typ}
     if bool in candidates:  # checked first — bool is a subclass of int

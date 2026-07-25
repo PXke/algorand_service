@@ -88,9 +88,7 @@ def _wrap_to_width(
 def _fit_headline(
     draw: ImageDraw.ImageDraw, title: str, max_width: float, max_height: float
 ) -> tuple[list[str], ImageFont.FreeTypeFont]:
-    """Largest serif size (from a fixed ramp) whose wrapped headline fits the
-    box, so a short title reads big and a long one still fits without
-    overflowing into the footer."""
+    """Largest serif size (from a fixed ramp) whose wrapped headline fits the box, so a short title reads big and a long one still fits without overflowing into the footer."""
     for size in (64, 56, 48, 42, 37, 33):
         font = _serif(size)
         lines = _wrap_to_width(draw, title, font, max_width)
@@ -113,12 +111,7 @@ def _fit_headline(
 
 
 def _brand_mark(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int, size: int) -> None:
-    """Flat indigo tile + diagonal facet + white 'P' — mirrors BrandMark.dart
-    (frontend_flutter/lib/core/ui/brand_mark.dart) so the card and the app
-    show the same monogram. Base rect + facet triangle are drawn full-size on
-    their own layer, then rounded together with one alpha mask (matching the
-    Dart version's ClipRRect-wraps-CustomPaint: only the OUTER tile boundary
-    is rounded, not the triangle itself)."""
+    """Flat indigo tile + diagonal facet + white 'P' — mirrors BrandMark.dart (frontend_flutter/lib/core/ui/brand_mark.dart) so the card and the app show the same monogram. Base rect + facet triangle are drawn full-size on their own layer, then rounded together with one alpha mask (matching the Dart version's ClipRRect-wraps-CustomPaint: only the OUTER tile boundary is rounded, not the triangle itself)."""
     radius = size * 0.23
     tile = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     tdraw = ImageDraw.Draw(tile)
@@ -174,9 +167,7 @@ def render_share_card(*, title: str, kicker: str = "") -> bytes:
         draw.rectangle([_PAD_X, cursor_y, _PAD_X + 40, cursor_y + 4], fill=_ACCENT)
         cursor_y += 22
         kicker_font = _sans(26, bold=True)
-        draw.text(
-            (_PAD_X, cursor_y), kicker.upper(), font=kicker_font, fill=_ACCENT
-        )
+        draw.text((_PAD_X, cursor_y), kicker.upper(), font=kicker_font, fill=_ACCENT)
         kbbox = draw.textbbox((0, 0), kicker.upper(), font=kicker_font)
         cursor_y += (kbbox[3] - kbbox[1]) + 30
     else:
@@ -185,9 +176,7 @@ def render_share_card(*, title: str, kicker: str = "") -> bytes:
     footer_font = _sans(22)
     footer_h = draw.textbbox((0, 0), "algorand.pxke.me", font=footer_font)[3]
     headline_bottom_limit = CARD_HEIGHT - _PAD_BOTTOM - footer_h - 28
-    lines, headline_font = _fit_headline(
-        draw, title, max_width, headline_bottom_limit - cursor_y
-    )
+    lines, headline_font = _fit_headline(draw, title, max_width, headline_bottom_limit - cursor_y)
     line_height = headline_font.size * 1.22
     for line in lines:
         draw.text((_PAD_X, cursor_y), line, font=headline_font, fill=_INK)

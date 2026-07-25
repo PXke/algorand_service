@@ -1,35 +1,37 @@
+"""Publishing to the feed must stamp release time, not compose time."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
+
+import pytest
 
 from app.modules.admin.stores.cassandra import AdminCassandraStore
 
 
 class _Result:
-    def __init__(self, row=None) -> None:
+    def __init__(self, row: Any = None) -> None:  # noqa: ANN401 -- duck-typed Cassandra row
         self._row = row
 
-    def one(self):
+    def one(self) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row
         return self._row
 
 
 class _FakeSession:
-    """The statement registry resolves *Stmts.* by calling
-    get_cassandra_session().prepare(cql); return the CQL text so execute() can
-    branch on it (SELECT vs INSERT vs UPDATE), matching the pattern already
-    used in workers/tests/test_domain_status_sticky.py."""
+    """The statement registry resolves *Stmts.* by calling get_cassandra_session().prepare(cql); return the CQL text so execute() can branch on it (SELECT vs INSERT vs UPDATE), matching the pattern already used in workers/tests/test_domain_status_sticky.py."""
 
-    def __init__(self, feed_row) -> None:
+    def __init__(self, feed_row: Any) -> None:  # noqa: ANN401 -- duck-typed Cassandra row
         self._feed_row = feed_row
         self.feed_inserts: list[tuple] = []
         self.published_at_updates: list[tuple] = []
 
-    def prepare(self, cql):
+    def prepare(self, cql: str) -> str:
         return cql
 
-    def execute(self, query, params=()):
+    def execute(self, query: str, params: tuple = ()) -> _Result:
         q = " ".join(str(query).split())
         if q.startswith("SELECT") and "articles_by_id" in q:
             return _Result(self._feed_row)
@@ -40,19 +42,17 @@ class _FakeSession:
         return _Result(None)
 
 
-def _patch(monkeypatch, fake) -> None:
+def _patch(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:  # noqa: ANN401 -- duck-typed fake Cassandra session
     import app.core.cassandra as c
 
     monkeypatch.setattr(c, "get_cassandra_session", lambda: fake)
     c.prepare_cached.cache_clear()
 
 
-def test_publish_article_to_feed_stamps_release_time_not_compose_time(monkeypatch) -> None:
-    """A held/review draft's articles_by_id.published_at was stamped at compose
-    time — first release into the feed must stamp the real release moment on
-    BOTH articles_feed and articles_by_id, not reuse the stale compose-time
-    value (root-caused 2026-07-14: this let a held draft display the wrong
-    timestamp and dodge the daily cap's published_at-windowed count)."""
+def test_publish_article_to_feed_stamps_release_time_not_compose_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held/review draft's articles_by_id.published_at was stamped at compose time — first release into the feed must stamp the real release moment on BOTH articles_feed and articles_by_id, not reuse the stale compose-time value (root-caused 2026-07-14: this let a held draft display the wrong timestamp and dodge the daily cap's published_at-windowed count)."""
     article_id = uuid4()
     compose_time = datetime.now(tz=UTC) - timedelta(hours=5)
     feed_row = SimpleNamespace(

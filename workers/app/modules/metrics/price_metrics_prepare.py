@@ -1,3 +1,5 @@
+"""Build the price-metrics brief and Mistral context from stored samples."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -44,8 +46,9 @@ def _samples_in_window(
     now: datetime,
 ) -> list[PriceSampleRow]:
     cutoff = now - timedelta(hours=hours)
+
     # Cassandra returns naive UTC timestamps; the cutoff is aware.
-    def _aware(collected_at):
+    def _aware(collected_at: datetime) -> datetime:
         return collected_at.replace(tzinfo=UTC) if collected_at.tzinfo is None else collected_at
 
     return [row for row in samples if _aware(row.collected_at) >= cutoff]
@@ -130,6 +133,7 @@ def build_brief(
     *,
     weekly: WeeklyPriceSnapshot | None = None,
 ) -> PriceMetricsBrief:
+    """Summarize a price tick plus its recent samples into a brief for the writer."""
     now = tick.collected_at
     samples_24h = _samples_in_window(samples, hours=24, now=now)
     samples_7d = _samples_in_window(samples, hours=24 * 7, now=now)
@@ -148,6 +152,7 @@ def build_brief(
 
 
 def fetch_weekly_reference(asset_id: str) -> WeeklyPriceSnapshot | None:
+    """Fetch the weekly price snapshot for an asset, swallowing errors as None."""
     try:
         return fetch_weekly_price(asset_id)
     except (PriceAnalysisError, Exception):

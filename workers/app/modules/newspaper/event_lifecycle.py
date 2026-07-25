@@ -1,3 +1,5 @@
+"""Detect an event's lifecycle phase (announce/live/recap) for topic framing."""
+
 from __future__ import annotations
 
 import hashlib
@@ -9,6 +11,7 @@ from app.modules.newspaper.publish_policy import PublishTopic
 
 
 class EventPhase(StrEnum):
+    """Lifecycle phase of a detected event (announce/live/recap)."""
     ANNOUNCE = "announce"
     RECAP = "recap"
 
@@ -18,21 +21,19 @@ _VIDEO_HOSTS = ("youtube.com", "youtu.be", "vimeo.com")
 
 @dataclass(frozen=True)
 class EventContext:
+    """Detected event phase and topic override for one draft."""
     event_id: str
     phase: EventPhase
     topic_override: PublishTopic | None
 
 
 def detect_event_context(*, page_text: str, page_title: str) -> EventContext | None:
-    """
-    Community calls: separate announce vs recap (video link after call).
-    """
+    """Community calls: separate announce vs recap (video link after call)."""
     combined = f"{page_title}\n{page_text}"
     lower = combined.lower()
 
     has_call = any(
-        p in lower
-        for p in ("community call", "town hall", "ama", "office hours", "webinar")
+        p in lower for p in ("community call", "town hall", "ama", "office hours", "webinar")
     )
     has_video = _contains_video_url(combined)
 
@@ -72,9 +73,11 @@ def build_event_dedupe_key(
     phase: EventPhase,
     content_hash: str,
 ) -> str:
+    """Build the compose-cooldown dedupe key for one service/event/phase/content combination."""
     short_hash = content_hash[:16] if content_hash else "none"
     return f"{service_id}:event:{event_id}:{phase.value}:{short_hash}"
 
 
 def new_event_id() -> str:
+    """Generate a fresh random event id."""
     return f"evt-{uuid.uuid4().hex[:12]}"

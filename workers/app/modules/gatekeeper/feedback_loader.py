@@ -1,28 +1,22 @@
-"""Turns admin ``classifier_feedback`` labels into training batches for the
-gatekeeper's quality head only — factuality/tone still need the gold-run /
-corruptor corpus (see ``training.py``), which doesn't exist yet. Reuses the
-same ground truth ``grader_model._training_rows`` used for the now-dead
-sklearn grader (``row.approved``), redirected to the model that's actually
-served (``live.py:quality_proba``).
-"""
+"""Turns admin ``classifier_feedback`` labels into training batches for the gatekeeper's quality head only — factuality/tone still need the gold-run / corruptor corpus (see ``training.py``), which doesn't exist yet. Reuses the same ground truth ``grader_model._training_rows`` used for the now-dead sklearn grader (``row.approved``), redirected to the model that's actually served (``live.py:quality_proba``)."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any
 
 
 @dataclass(frozen=True)
 class FeedbackBatchConfig:
+    """Batch-loading parameters for classifier-feedback training data."""
     limit: int = 1000
     batch_size: int = 4
     max_length: int = 4096
 
 
 def _labeled_examples(limit: int) -> list[tuple[str, float]]:
-    """(model_input_text, label) pairs from classifier_feedback rows that
-    captured the article body. label is 1.0/0.0 from the human approve/reject
-    decision — same ground truth the sklearn grader used as ``y``."""
+    """(model_input_text, label) pairs from classifier_feedback rows that captured the article body. label is 1.0/0.0 from the human approve/reject decision — same ground truth the sklearn grader used as ``y``."""
     from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
     from app.core.statements import ClassifierFeedbackStmts
     from app.modules.gatekeeper.model import build_input
@@ -51,17 +45,14 @@ def _labeled_examples(limit: int) -> list[tuple[str, float]]:
 
 
 def quality_sample_stats(limit: int = 1000) -> dict[str, int]:
-    """Cheap pre-flight class-balance check, for the caller's min-samples
-    guard before kicking off a training run."""
+    """Cheap pre-flight class-balance check, for the caller's min-samples guard before kicking off a training run."""
     examples = _labeled_examples(limit)
     approved = sum(1 for _, y in examples if y >= 0.5)
     return {"total": len(examples), "approved": approved, "rejected": len(examples) - approved}
 
 
 def iter_quality_batches(cfg: FeedbackBatchConfig | None = None) -> Iterator[dict[str, Any]]:
-    """Yields batches of ``{input_ids, attention_mask, soft_label_quality}``
-    for ``train_gatekeeper``'s quality-only path. Caller decides whether
-    there's enough data to bother (see ``quality_sample_stats``)."""
+    """Yields batches of ``{input_ids, attention_mask, soft_label_quality}`` for ``train_gatekeeper``'s quality-only path. Caller decides whether there's enough data to bother (see ``quality_sample_stats``)."""
     cfg = cfg or FeedbackBatchConfig()
     examples = _labeled_examples(cfg.limit)
     if not examples:

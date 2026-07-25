@@ -1,3 +1,5 @@
+"""Whitespace-normalized unified diff between two snapshot texts."""
+
 from __future__ import annotations
 
 import re
@@ -16,6 +18,7 @@ def normalize_text(text: str) -> str:
 
 
 def build_text_diff(previous: str, current: str, max_lines: int = 200) -> str:
+    """Return a whitespace-normalized unified diff, truncated to max_lines with a marker."""
     prev_norm = normalize_text(previous)
     curr_norm = normalize_text(current)
     diff = unified_diff(

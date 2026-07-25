@@ -4,6 +4,10 @@ The warm generation pass has no tools, so the model can't call review_draft
 itself — `_review_and_revise` must run the grader for it and revise once.
 """
 
+from typing import Any, Never
+
+import pytest
+
 from app.modules.ai.mistral_compose import _parse_article_fields, _review_and_revise
 
 
@@ -12,23 +16,26 @@ class _FakeMistral:
         self._revised = revised
         self.calls = 0
 
-    def chat_json_object(self, messages, temperature=None):
+    def chat_json_object(self, _messages: list[dict], temperature: float | None = None) -> dict:  # noqa: ARG002 -- name must match the real callee's keyword arg
         self.calls += 1
         return self._revised
 
 
-def test_low_grade_triggers_one_revision(monkeypatch) -> None:
-    grades = iter([
-        {"grade": 5.0, "issues": ["structure — Formatting Deserts: 6 prose blocks"]},
-        {"grade": 8.0, "issues": []},
-    ])
+def test_low_grade_triggers_one_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Revises once when the initial grade is low, and returns the post-revision grade, not the stale one."""
+    grades = iter(
+        [
+            {"grade": 5.0, "issues": ["structure — Formatting Deserts: 6 prose blocks"]},
+            {"grade": 8.0, "issues": []},
+        ]
+    )
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: next(grades),
+        lambda **_kw: next(grades),
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
-        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+        lambda **_kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
     )
     trace: list[dict] = []
     fake = _FakeMistral({"title": "T2", "body": "a much longer grounded body", "summary": "s"})
@@ -45,14 +52,15 @@ def test_low_grade_triggers_one_revision(monkeypatch) -> None:
     assert out["_heuristic_grade"]["grade"] == 8.0
 
 
-def test_high_grade_keeps_draft_untouched(monkeypatch) -> None:
+def test_high_grade_keeps_draft_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Returns the original draft unchanged, with no revision call, when the grade clears the bar with no issues."""
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: {"grade": 9.0, "issues": []},
+        lambda **_kw: {"grade": 9.0, "issues": []},
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
-        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+        lambda **_kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
     )
     trace: list[dict] = []
     fake = _FakeMistral({"title": "X", "body": "Y"})
@@ -67,28 +75,35 @@ def test_high_grade_keeps_draft_untouched(monkeypatch) -> None:
     assert out["_heuristic_grade"]["grade"] == 9.0
 
 
-def test_review_turns_land_in_debug_transcript(monkeypatch) -> None:
+def test_review_turns_land_in_debug_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Records the deterministic review as review_draft tool calls in the debug transcript the Sessions view renders."""
     # The Sessions view renders debug["messages"]; the deterministic review must
     # appear there as a review_draft tool call (it isn't captured by the loop).
-    grades = iter([
-        {"grade": 4.0, "issues": ["structure — Buried Metrics: 4 in one paragraph"]},
-        {"grade": 8.0, "issues": []},
-    ])
+    grades = iter(
+        [
+            {"grade": 4.0, "issues": ["structure — Buried Metrics: 4 in one paragraph"]},
+            {"grade": 8.0, "issues": []},
+        ]
+    )
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: next(grades),
+        lambda **_kw: next(grades),
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
-        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+        lambda **_kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
     )
     debug: dict = {"messages": []}
     trace: list[dict] = []
     fake = _FakeMistral({"title": "T2", "body": "revised grounded body"})
 
     _review_and_revise(
-        fake, {"title": "T", "body": "short"},
-        system="s", gen_user="u", trace=trace, debug=debug,
+        fake,
+        {"title": "T", "body": "short"},
+        system="s",
+        gen_user="u",
+        trace=trace,
+        debug=debug,
     )
 
     tool_names = [
@@ -100,26 +115,31 @@ def test_review_turns_land_in_debug_transcript(monkeypatch) -> None:
 
 
 class _FailingMistral:
-    def chat_json_object(self, messages, temperature=None):
+    def chat_json_object(self, _messages: list[dict], temperature: float | None = None) -> Never:  # noqa: ARG002 -- name must match the real callee's keyword arg
         raise RuntimeError("Mistral API 429 after 5 attempts")
 
 
-def test_failed_revision_is_surfaced_not_silent(monkeypatch) -> None:
+def test_failed_revision_is_surfaced_not_silent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keeps the original draft and records the failure reason in the trace when a revision call errors out."""
     # A rate-limited/failed revision must record WHY (so it isn't invisible) and
     # keep the original draft rather than crashing the compose.
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: {"grade": 4.0, "issues": ["too long (3000 words) — cut padding"]},
+        lambda **_kw: {"grade": 4.0, "issues": ["too long (3000 words) — cut padding"]},
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
-        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+        lambda **_kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
     )
     trace: list[dict] = []
     payload = {"title": "T", "body": "short draft"}
 
     out = _review_and_revise(
-        _FailingMistral(), payload, system="s", gen_user="u", trace=trace,
+        _FailingMistral(),
+        payload,
+        system="s",
+        gen_user="u",
+        trace=trace,
     )
 
     assert out is payload  # original kept
@@ -131,10 +151,13 @@ def test_failed_revision_is_surfaced_not_silent(monkeypatch) -> None:
 
 
 def test_parse_article_fields_threads_heuristic_grade() -> None:
+    """Carries the heuristic grade from the payload dict onto the parsed ArticleComposeResult dataclass."""
     # publish_tasks._quality_floor_fails reads composed.heuristic_grade — the
     # grade must survive from the payload dict onto the dataclass.
     payload = {
-        "title": "T", "summary": "S", "body": "B",
+        "title": "T",
+        "summary": "S",
+        "body": "B",
         "_heuristic_grade": {"grade": 5.5, "issues": ["stale"]},
     }
     fields = _parse_article_fields(payload)
@@ -142,49 +165,53 @@ def test_parse_article_fields_threads_heuristic_grade() -> None:
 
 
 def test_parse_article_fields_grade_defaults_none() -> None:
+    """Defaults heuristic_grade to None when the payload carries no grade."""
     fields = _parse_article_fields({"title": "T", "summary": "S", "body": "B"})
     assert fields.heuristic_grade is None
 
 
-def test_low_repetition_score_triggers_revision_with_cut_instruction(monkeypatch) -> None:
-    """A repetition-only failure (all other rubric dimensions fine) must still
-    trigger a revision pass, and that pass's prompt must explicitly tell the
-    model to CUT restated points rather than just vaguely 'improve' the draft
-    — root-caused 2026-07-15 on a real NFT-marketplace article that restated
-    'fees are undisclosed' five times across sections."""
+def test_low_repetition_score_triggers_revision_with_cut_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repetition-only failure (all other rubric dimensions fine) must still trigger a revision pass, and that pass's prompt must explicitly tell the model to CUT restated points rather than just vaguely 'improve' the draft — root-caused 2026-07-15 on a real NFT-marketplace article that restated 'fees are undisclosed' five times across sections."""
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: {"grade": 10.0, "issues": []},
+        lambda **_kw: {"grade": 10.0, "issues": []},
     )
-    quality_results = iter([
-        {
-            "narrative_synthesis": 5,
-            "technical_depth": 5,
-            "critical_distance": 5,
-            "repetition": 2,
-            "issues": [
-                "repetition scored 2/5 — a specific fact is restated in more than one section"
-            ],
-        },
-        {
-            "narrative_synthesis": 5,
-            "technical_depth": 5,
-            "critical_distance": 5,
-            "repetition": 5,
-            "issues": [],
-        },
-    ])
+    quality_results = iter(
+        [
+            {
+                "narrative_synthesis": 5,
+                "technical_depth": 5,
+                "critical_distance": 5,
+                "repetition": 2,
+                "issues": [
+                    "repetition scored 2/5 — a specific fact is restated in more than one section"
+                ],
+            },
+            {
+                "narrative_synthesis": 5,
+                "technical_depth": 5,
+                "critical_distance": 5,
+                "repetition": 5,
+                "issues": [],
+            },
+        ]
+    )
     monkeypatch.setattr(
         "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
-        lambda **kw: next(quality_results),
+        lambda **_kw: next(quality_results),
     )
-    seq = _SequenceMistral([
-        {"title": "T2", "body": "the fact stated once and a tightened rest of the section"}
-    ])
+    seq = _SequenceMistral(
+        [{"title": "T2", "body": "the fact stated once and a tightened rest of the section"}]
+    )
 
     out = _review_and_revise(
-        seq, {"title": "T", "body": "the same fact restated in every section of the draft"},
-        system="sys", gen_user="u", trace=[],
+        seq,
+        {"title": "T", "body": "the same fact restated in every section of the draft"},
+        system="sys",
+        gen_user="u",
+        trace=[],
     )
 
     assert seq.calls == 1
@@ -192,17 +219,18 @@ def test_low_repetition_score_triggers_revision_with_cut_instruction(monkeypatch
     assert out["body"] == "the fact stated once and a tightened rest of the section"
 
 
-def test_low_quality_llm_triggers_revision(monkeypatch) -> None:
+def test_low_quality_llm_triggers_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spends both available revision passes and returns the last draft when quality-LLM score never clears the bar."""
     # Quality mock never improves — with WRITER_REVISION_MAX_PASSES=2 (default)
     # this should genuinely attempt a SECOND revision instead of giving up
     # after one, then stop once the revision budget is spent.
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: {"grade": 10.0, "issues": []},
+        lambda **_kw: {"grade": 10.0, "issues": []},
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
-        lambda **kw: {
+        lambda **_kw: {
             "narrative_synthesis": 2,
             "technical_depth": 2,
             "issues": ["technical depth scored 2/5 — explain layer-1 mechanics"],
@@ -212,8 +240,11 @@ def test_low_quality_llm_triggers_revision(monkeypatch) -> None:
     fake = _FakeMistral({"title": "T2", "body": "deeper revised body with more detail"})
 
     out = _review_and_revise(
-        fake, {"title": "T", "body": "short generic press release body"},
-        system="sys", gen_user="u", trace=trace,
+        fake,
+        {"title": "T", "body": "short generic press release body"},
+        system="sys",
+        gen_user="u",
+        trace=trace,
     )
 
     assert fake.calls == 2  # spent both revision passes since quality never clears
@@ -222,7 +253,8 @@ def test_low_quality_llm_triggers_revision(monkeypatch) -> None:
     assert len(reviews) == 3  # initial grade + 2 rechecks
 
 
-def test_revision_stops_once_max_passes_reached(monkeypatch) -> None:
+def test_revision_stops_once_max_passes_reached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stops after WRITER_REVISION_MAX_PASSES revisions even though quality never clears the bar."""
     # Bound it to 1 revision explicitly and confirm the loop respects it even
     # though the mock quality never improves — no unbounded looping.
     import app.core.config as cfg
@@ -230,11 +262,11 @@ def test_revision_stops_once_max_passes_reached(monkeypatch) -> None:
     monkeypatch.setattr(cfg, "WRITER_REVISION_MAX_PASSES", 1)
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: {"grade": 10.0, "issues": []},
+        lambda **_kw: {"grade": 10.0, "issues": []},
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
-        lambda **kw: {
+        lambda **_kw: {
             "narrative_synthesis": 2,
             "technical_depth": 2,
             "issues": ["technical depth scored 2/5 — explain layer-1 mechanics"],
@@ -244,27 +276,35 @@ def test_revision_stops_once_max_passes_reached(monkeypatch) -> None:
     fake = _FakeMistral({"title": "T2", "body": "deeper revised body with more detail"})
 
     _review_and_revise(
-        fake, {"title": "T", "body": "short generic press release body"},
-        system="sys", gen_user="u", trace=trace,
+        fake,
+        {"title": "T", "body": "short generic press release body"},
+        system="sys",
+        gen_user="u",
+        trace=trace,
     )
 
     assert fake.calls == 1
 
 
-def test_second_revision_only_fires_when_first_still_fixable(monkeypatch) -> None:
+def test_second_revision_only_fires_when_first_still_fixable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Does not spend a second, unneeded revision call once the first revision already clears the bar."""
     # First revision clears the bar -> the loop must NOT spend a second
     # revision call it doesn't need, even though up to 2 are allowed.
-    grades = iter([
-        {"grade": 5.0, "issues": ["structure — Formatting Deserts: 6 prose blocks"]},
-        {"grade": 8.0, "issues": []},
-    ])
+    grades = iter(
+        [
+            {"grade": 5.0, "issues": ["structure — Formatting Deserts: 6 prose blocks"]},
+            {"grade": 8.0, "issues": []},
+        ]
+    )
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: next(grades),
+        lambda **_kw: next(grades),
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
-        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+        lambda **_kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
     )
     trace: list[dict] = []
     fake = _FakeMistral({"title": "T2", "body": "a much longer grounded body"})
@@ -278,50 +318,51 @@ def test_second_revision_only_fires_when_first_still_fixable(monkeypatch) -> Non
 
 
 class _SequenceMistral:
-    """Returns a different revised draft on each successive call, and records
-    the exact revise_user text sent each time (needed to check carry-forward
-    memory reaches the prompt, not just the return value)."""
+    """Returns a different revised draft on each successive call, and records the exact revise_user text sent each time (needed to check carry-forward memory reaches the prompt, not just the return value)."""
 
     def __init__(self, revisions: list[dict]) -> None:
         self._revisions = list(revisions)
         self.calls = 0
         self.sent_users: list[str] = []
 
-    def chat_json_object(self, messages, temperature=None):
+    def chat_json_object(self, messages: list[dict], temperature: float | None = None) -> dict:  # noqa: ARG002 -- name must match the real callee's keyword arg
         self.sent_users.append(messages[-1]["content"])
         out = self._revisions[self.calls]
         self.calls += 1
         return out
 
 
-def test_best_of_n_returns_highest_scoring_pass_not_last(monkeypatch) -> None:
-    """Regression-pin the real 2026-07-14 CompX incident: pass 2 (grade 8.6)
-    fixed a headline issue but not yet its own new one; pass 3 (grade 7.3,
-    the LAST pass) fixed that but re-broke structure pass 2 had already
-    cleaned up. The loop must not just return whatever pass happened to run
-    last — it must return the best-scoring draft it ever produced."""
-    grades = iter([
-        {"grade": 5.0, "issues": ["structure — Buried Metrics: 5 metrics in one paragraph"]},
-        {"grade": 8.6, "issues": ["headline — colon-label title"]},
-        {"grade": 7.3, "issues": []},  # clean, but scores lower than pass 2
-    ])
+def test_best_of_n_returns_highest_scoring_pass_not_last(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression-pin the real 2026-07-14 CompX incident: pass 2 (grade 8.6) fixed a headline issue but not yet its own new one; pass 3 (grade 7.3, the LAST pass) fixed that but re-broke structure pass 2 had already cleaned up. The loop must not just return whatever pass happened to run last — it must return the best-scoring draft it ever produced."""
+    grades = iter(
+        [
+            {"grade": 5.0, "issues": ["structure — Buried Metrics: 5 metrics in one paragraph"]},
+            {"grade": 8.6, "issues": ["headline — colon-label title"]},
+            {"grade": 7.3, "issues": []},  # clean, but scores lower than pass 2
+        ]
+    )
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: next(grades),
+        lambda **_kw: next(grades),
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
-        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+        lambda **_kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
     )
     trace: list[dict] = []
-    fake = _SequenceMistral([
-        {"title": "T2", "body": "pass two body — the best draft"},
-        {"title": "T3", "body": "pass three body — regressed but graded last"},
-    ])
+    fake = _SequenceMistral(
+        [
+            {"title": "T2", "body": "pass two body — the best draft"},
+            {"title": "T3", "body": "pass three body — regressed but graded last"},
+        ]
+    )
 
     out = _review_and_revise(
-        fake, {"title": "T1", "body": "pass one body"},
-        system="sys", gen_user="u", trace=trace,
+        fake,
+        {"title": "T1", "body": "pass one body"},
+        system="sys",
+        gen_user="u",
+        trace=trace,
     )
 
     assert fake.calls == 2
@@ -329,33 +370,39 @@ def test_best_of_n_returns_highest_scoring_pass_not_last(monkeypatch) -> None:
     assert out["_heuristic_grade"]["grade"] == 8.6
 
 
-def test_carry_forward_tells_revision_not_to_undo_earlier_fix(monkeypatch) -> None:
-    """An issue resolved in pass 1 (dropped from pass 2's issue list) must be
-    named explicitly in pass 2's revision prompt as 'already fixed — do not
-    reintroduce', so the model doesn't trade it away while fixing the new
-    issue pass 2 raised."""
-    grades = iter([
-        {"grade": 5.0, "issues": ["structure — Buried Metrics: 5 metrics in one paragraph"]},
-        {"grade": 6.0, "issues": ["headline — colon-label title"]},
-        {"grade": 8.0, "issues": []},
-    ])
+def test_carry_forward_tells_revision_not_to_undo_earlier_fix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An issue resolved in pass 1 (dropped from pass 2's issue list) must be named explicitly in pass 2's revision prompt as 'already fixed — do not reintroduce', so the model doesn't trade it away while fixing the new issue pass 2 raised."""
+    grades = iter(
+        [
+            {"grade": 5.0, "issues": ["structure — Buried Metrics: 5 metrics in one paragraph"]},
+            {"grade": 6.0, "issues": ["headline — colon-label title"]},
+            {"grade": 8.0, "issues": []},
+        ]
+    )
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: next(grades),
+        lambda **_kw: next(grades),
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
-        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+        lambda **_kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
     )
     trace: list[dict] = []
-    fake = _SequenceMistral([
-        {"title": "T2", "body": "pass two body"},
-        {"title": "T3", "body": "pass three body"},
-    ])
+    fake = _SequenceMistral(
+        [
+            {"title": "T2", "body": "pass two body"},
+            {"title": "T3", "body": "pass three body"},
+        ]
+    )
 
     _review_and_revise(
-        fake, {"title": "T1", "body": "pass one body"},
-        system="sys", gen_user="u", trace=trace,
+        fake,
+        {"title": "T1", "body": "pass one body"},
+        system="sys",
+        gen_user="u",
+        trace=trace,
     )
 
     assert fake.calls == 2
@@ -367,24 +414,21 @@ def test_carry_forward_tells_revision_not_to_undo_earlier_fix(monkeypatch) -> No
     assert "Buried Metrics" in fake.sent_users[1]
 
 
-def test_quality_rubric_uses_research_client_not_writer_client(monkeypatch) -> None:
-    """LLM rubric grading is a judgment task, not generation — it must run on
-    the research (Small) client, not the Large writer client passed in for
-    Stage 2 generation/revision. grade_article_quality_llm's own docstring
-    calls itself a 'Fast Small-tier rubric', but that only ever applied to
-    its unused default — the actual call site was silently passing the
-    writer's Large client until this was fixed 2026-07-15."""
+def test_quality_rubric_uses_research_client_not_writer_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LLM rubric grading is a judgment task, not generation — it must run on the research (Small) client, not the Large writer client passed in for Stage 2 generation/revision. grade_article_quality_llm's own docstring calls itself a 'Fast Small-tier rubric', but that only ever applied to its unused default — the actual call site was silently passing the writer's Large client until this was fixed 2026-07-15."""
     import app.modules.ai.mistral_compose as mc
 
     seen_clients: list[object] = []
 
-    def _fake_grade_quality(*, title, body, client=None):
+    def _fake_grade_quality(*, title: str, body: str, client: Any = None) -> dict:  # noqa: ARG001, ANN401 -- name must match the real callee's keyword arg
         seen_clients.append(client)
         return {"narrative_synthesis": 4, "technical_depth": 4, "issues": []}
 
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: {"grade": 9.0, "issues": []},
+        lambda **_kw: {"grade": 9.0, "issues": []},
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
@@ -402,7 +446,8 @@ def test_quality_rubric_uses_research_client_not_writer_client(monkeypatch) -> N
     assert seen_clients[0] is not writer_client
 
 
-def test_disabled_skips_review(monkeypatch) -> None:
+def test_disabled_skips_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skips grading and revision entirely, returning the payload untouched, when review is disabled."""
     import app.core.config as cfg
 
     monkeypatch.setattr(cfg, "WRITER_REVIEW_ENABLED", False)
@@ -417,25 +462,21 @@ def test_disabled_skips_review(monkeypatch) -> None:
     assert trace == []
 
 
-def test_dead_link_feedback_forces_revision_naming_the_url(monkeypatch) -> None:
-    """Owner request 2026-07-16: a dead cited link must be surfaced to the
-    WRITER during revision ('your link X is unreachable — find an
-    alternative'), not just silently delinked by the post-hoc gate. The dead
-    url must appear verbatim in the revision instructions so the model knows
-    exactly which citation to replace."""
+def test_dead_link_feedback_forces_revision_naming_the_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner request 2026-07-16: a dead cited link must be surfaced to the WRITER during revision ('your link X is unreachable — find an alternative'), not just silently delinked by the post-hoc gate. The dead url must appear verbatim in the revision instructions so the model knows exactly which citation to replace."""
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.grade_article_draft",
-        lambda **kw: {"grade": 9.0, "issues": []},  # otherwise clean draft
+        lambda **_kw: {"grade": 9.0, "issues": []},  # otherwise clean draft
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
-        lambda **kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+        lambda **_kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
     )
     monkeypatch.setattr("app.core.config.LINK_GATE_ENABLED", True, raising=False)
     dead_results = iter([["https://downbad.art/"], []])  # fixed after revision
     monkeypatch.setattr(
         "app.modules.newspaper.link_gate.dead_untraced_links",
-        lambda body, trace, checked=None: next(dead_results),
+        lambda _body, _trace, checked=None: next(dead_results),  # noqa: ARG005 -- name must match the real callee's keyword arg
     )
 
     class _CapturingMistral:
@@ -443,7 +484,7 @@ def test_dead_link_feedback_forces_revision_naming_the_url(monkeypatch) -> None:
             self.calls = 0
             self.last_messages = None
 
-        def chat_json_object(self, messages, temperature=None):
+        def chat_json_object(self, messages: list[dict], temperature: float | None = None) -> dict:  # noqa: ARG002 -- name must match the real callee's keyword arg
             self.calls += 1
             self.last_messages = messages
             return {

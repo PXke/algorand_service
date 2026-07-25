@@ -16,12 +16,16 @@ Usage (on a host with the workers env):
 
 from __future__ import annotations
 
+import logging
 import sys
+
+logger = logging.getLogger(__name__)
 
 
 def main(argv: list[str]) -> int:
+    """Queue recompose_published tasks for each article id passed on argv."""
     if not argv or argv[0] in ("-h", "--help"):
-        print(__doc__)
+        logger.info("%s", __doc__)
         return 0
     from app.celery_app import celery_app
 
@@ -31,13 +35,15 @@ def main(argv: list[str]) -> int:
             args=[article_id],
             queue="pipeline",
         )
-        print(f"queued recompose_published({article_id}) -> task {result.id}")
-    print(
-        f"\n{len(argv)} task(s) queued. Drafts will land in the admin review "
-        "queue; approve to swap content in place, reject to keep the original."
+        logger.info("queued recompose_published(%s) -> task %s", article_id, result.id)
+    logger.info(
+        "\n%d task(s) queued. Drafts will land in the admin review "
+        "queue; approve to swap content in place, reject to keep the original.",
+        len(argv),
     )
     return 0
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     raise SystemExit(main(sys.argv[1:]))

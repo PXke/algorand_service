@@ -1,3 +1,5 @@
+"""Verify a signed 0-ALGO auth transaction as a login proof."""
+
 from __future__ import annotations
 
 import base64

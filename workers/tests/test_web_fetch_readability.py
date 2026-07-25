@@ -1,6 +1,4 @@
-"""Readability-style main-content extraction in html_to_plain_text: the article
-body survives, boilerplate (nav/footer/cookie) is dropped, and degenerate pages
-fall back to whole-document text rather than returning nothing."""
+"""Readability-style main-content extraction in html_to_plain_text: the article body survives, boilerplate (nav/footer/cookie) is dropped, and degenerate pages fall back to whole-document text rather than returning nothing."""
 
 from __future__ import annotations
 
@@ -47,15 +45,16 @@ def test_picks_content_div_without_semantic_article() -> None:
     """
     text = html_to_plain_text(page)
     assert "institutional custody footprint" in text
-    assert "One" not in text and "Two" not in text
+    assert "One" not in text
+    assert "Two" not in text
 
 
 def test_keep_links_renders_inline_urls() -> None:
     page = (
-        '<html><body><article><p>'
+        "<html><body><article><p>"
         'Read the full proposal at <a href="https://algorand.foundation/gov">governance</a> '
-        'before the vote closes, the foundation noted in its detailed update post.'
-        '</p></article></body></html>'
+        "before the vote closes, the foundation noted in its detailed update post."
+        "</p></article></body></html>"
     )
     text = html_to_plain_text(page, keep_links=True)
     assert "governance (https://algorand.foundation/gov)" in text

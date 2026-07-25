@@ -8,12 +8,17 @@ task names and routes.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from app.core.config import settings
+
+if TYPE_CHECKING:
+    from celery import Celery
 
 
 @dataclass(frozen=True)
 class ScraperAction:
+    """One manually-triggerable admin scraper action."""
     action: str
     task: str
     queue: str
@@ -79,7 +84,7 @@ SCRAPER_ACTIONS: dict[str, ScraperAction] = {
 _celery = None
 
 
-def _get_celery():
+def _get_celery() -> Celery:
     global _celery
     if _celery is None:
         from celery import Celery

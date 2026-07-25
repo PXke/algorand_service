@@ -1,10 +1,4 @@
-"""mark_breaking_news tool (2026-07-17): replaces the deterministic keyword
-classifier that mistagged ordinary positive infrastructure claims (a
-"zero downtime" interview got tagged NETWORK_INCIDENT and shipped as
-"Breaking:" about a months-stale campaign, plus 4 more live articles hit
-the same "downtime" false-positive). The writer decides now, via this tool,
-after having actually researched the story.
-"""
+"""mark_breaking_news tool (2026-07-17): replaces the deterministic keyword classifier that mistagged ordinary positive infrastructure claims (a "zero downtime" interview got tagged NETWORK_INCIDENT and shipped as "Breaking:" about a months-stale campaign, plus 4 more live articles hit the same "downtime" false-positive). The writer decides now, via this tool, after having actually researched the story."""
 
 from __future__ import annotations
 
@@ -20,17 +14,20 @@ from app.modules.newspaper.tasks import publish_tasks as pt
 
 
 def test_handler_returns_marked_and_trims_reason() -> None:
+    """Marks the article breaking and caps an overlong reason to 400 characters."""
     result = mark_breaking_news_handler(reason="x" * 5000)
     assert result["marked_breaking"] is True
     assert len(result["reason"]) <= 400
 
 
 def test_schema_requires_reason() -> None:
+    """Declares "reason" as a required parameter on the tool schema."""
     props = MARK_BREAKING_NEWS_SCHEMA["function"]["parameters"]
     assert props["required"] == ["reason"]
 
 
 def test_registered_in_writer_tool_registry() -> None:
+    """Registers mark_breaking_news among the writer's available tool schemas and handlers."""
     from app.modules.ai.writer_tools import all_tools
 
     schemas, handlers = all_tools(context={"service_id": "x", "source_url": "x", "model": "m"})
@@ -40,6 +37,7 @@ def test_registered_in_writer_tool_registry() -> None:
 
 
 def test_breaking_reason_from_trace_finds_the_call() -> None:
+    """Extracts the reason from a mark_breaking_news call recorded in the tool trace."""
     reason = "consensus halted per official status page"
     trace = [
         {"tool": "search_web", "arguments": {}, "result": {}},
@@ -53,16 +51,19 @@ def test_breaking_reason_from_trace_finds_the_call() -> None:
 
 
 def test_breaking_reason_from_trace_none_when_never_called() -> None:
+    """Returns None when mark_breaking_news never appears in the trace."""
     trace = [{"tool": "search_web", "arguments": {}, "result": {}}]
     assert breaking_reason_from_trace(trace) is None
 
 
 def test_breaking_reason_from_trace_ignores_other_tools_named_similarly() -> None:
+    """Ignores a "marked_breaking" result field coming from an unrelated tool call."""
     trace = [{"tool": "review_draft", "arguments": {}, "result": {"marked_breaking": True}}]
     assert breaking_reason_from_trace(trace) is None
 
 
 def test_breaking_reason_from_trace_takes_the_last_call() -> None:
+    """Returns the reason from the most recent mark_breaking_news call when it was invoked more than once."""
     trace = [
         {
             "tool": "mark_breaking_news",
@@ -79,16 +80,19 @@ def test_breaking_reason_from_trace_takes_the_last_call() -> None:
 
 
 def test_writer_flagged_breaking_upgrades_standard_tier() -> None:
+    """Reports a writer-flagged upgrade when a standard-tier draft carries a breaking_reason."""
     composed = SimpleNamespace(breaking_reason="consensus halted per status page")
     assert pt._writer_flagged_breaking(PublishTier.STANDARD, composed) is True
 
 
 def test_writer_flagged_breaking_false_without_a_reason() -> None:
+    """Reports no writer-flagged upgrade when breaking_reason is None."""
     composed = SimpleNamespace(breaking_reason=None)
     assert pt._writer_flagged_breaking(PublishTier.STANDARD, composed) is False
 
 
 def test_writer_flagged_breaking_false_when_already_breaking() -> None:
+    """Reports no additional upgrade when the tier is already breaking, avoiding double-application."""
     # No double-application / no misleading log line when tier is already
     # breaking (e.g. a future re-enablement of BREAKING_TIER_ENABLED).
     composed = SimpleNamespace(breaking_reason="consensus halted per status page")
@@ -96,6 +100,7 @@ def test_writer_flagged_breaking_false_when_already_breaking() -> None:
 
 
 def test_writer_flagged_breaking_tolerates_missing_attribute() -> None:
+    """Does not raise and reports no upgrade when the compose result has no breaking_reason attribute at all."""
     # ArticleComposeResult predates breaking_reason on some construction
     # paths (weekly digest) — getattr must not raise.
     composed = SimpleNamespace()

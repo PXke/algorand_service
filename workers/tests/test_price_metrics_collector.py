@@ -1,9 +1,16 @@
+"""Fetching a spot price tick."""
+
 from __future__ import annotations
+
+from typing import Self
+
+import pytest
 
 from app.modules.metrics.price_metrics_collector import fetch_spot_tick
 
 
-def test_fetch_spot_tick_mocked(monkeypatch) -> None:
+def test_fetch_spot_tick_mocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parses a spot price tick (price/change/market-cap/volume) from a mocked CoinGecko response."""
     class FakeResponse:
         def __init__(self, payload: dict) -> None:
             self._payload = payload
@@ -15,16 +22,16 @@ def test_fetch_spot_tick_mocked(monkeypatch) -> None:
             return self._payload
 
     class FakeClient:
-        def __init__(self, *args, **kwargs) -> None:
+        def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        def __enter__(self):
+        def __enter__(self) -> Self:
             return self
 
-        def __exit__(self, *args) -> None:
+        def __exit__(self, *args: object) -> None:
             return None
 
-        def get(self, url: str, params=None):
+        def get(self, url: str, params: tuple | None = None) -> FakeResponse:  # noqa: ARG002 -- name must match the real callee's keyword arg
             if url.endswith("/coins/algorand"):
                 return FakeResponse({"name": "Algorand"})
             return FakeResponse(

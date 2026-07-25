@@ -62,7 +62,10 @@ def apply_release_gates(article_id: str) -> dict[str, Any]:
             except Exception:
                 logger.warning(
                     "release gate %s.%s failed for %s (fail-open)",
-                    module_name, func_name, article_id, exc_info=True,
+                    module_name,
+                    func_name,
+                    article_id,
+                    exc_info=True,
                 )
 
         new_body = payload.get("body")
@@ -77,8 +80,12 @@ def apply_release_gates(article_id: str) -> dict[str, Any]:
         from app.modules.newspaper.article_version_store import save_article_version
 
         save_article_version(
-            article_id=article_id, title=art.title, summary=art.summary,
-            body=art.body, edit_reason="before_edit", editor="release_gate",
+            article_id=article_id,
+            title=art.title,
+            summary=art.summary,
+            body=art.body,
+            edit_reason="before_edit",
+            editor="release_gate",
         )
         # Raw UPDATE, deliberately NOT update_article(): the article is still
         # unlisted at this instant — update_article would upsert a feed row
@@ -86,13 +93,22 @@ def apply_release_gates(article_id: str) -> dict[str, Any]:
         # right after this returns.
         get_cassandra_session().execute(
             ArticleStmts.UPDATE,
-            (art.title, art.summary, new_body, list(art.tags or []),
-             datetime.now(tz=UTC), UUID(article_id)),
+            (
+                art.title,
+                art.summary,
+                new_body,
+                list(art.tags or []),
+                datetime.now(tz=UTC),
+                UUID(article_id),
+            ),
         )
         save_article_version(
-            article_id=article_id, title=art.title, summary=art.summary,
+            article_id=article_id,
+            title=art.title,
+            summary=art.summary,
             body=new_body,
-            edit_reason="release_gate:" + ",".join(result["notes"]) if result["notes"]
+            edit_reason="release_gate:" + ",".join(result["notes"])
+            if result["notes"]
             else "release_gate",
             editor="release_gate",
         )
@@ -100,8 +116,11 @@ def apply_release_gates(article_id: str) -> dict[str, Any]:
             from app.modules.search.tasks.index_tasks import index_article
 
             index_article.delay(
-                article_id=article_id, title=art.title, summary=art.summary,
-                body=new_body, service_id=art.service_id,
+                article_id=article_id,
+                title=art.title,
+                summary=art.summary,
+                body=new_body,
+                service_id=art.service_id,
                 published_at_epoch=art.published_at_epoch or 0,
             )
         except Exception:
@@ -109,7 +128,8 @@ def apply_release_gates(article_id: str) -> dict[str, Any]:
         result["changed"] = True
         logger.warning(
             "release gates corrected article %s before feed release: %s",
-            article_id, {k: len(v) for k, v in result["notes"].items()},
+            article_id,
+            {k: len(v) for k, v in result["notes"].items()},
         )
     except Exception:
         logger.warning("apply_release_gates failed for %s (fail-open)", article_id, exc_info=True)

@@ -76,9 +76,7 @@ def _host(url: str) -> str:
 
 
 def _dns_failed_hosts(trace: list[dict] | None) -> set[str]:
-    """Hosts the research trace recorded as DNS-unresolvable — for annotating the
-    hold reason only (a link the writer was explicitly shown to be dead is a
-    stronger faithfulness failure than one recommended blind)."""
+    """Hosts the research trace recorded as DNS-unresolvable — for annotating the hold reason only (a link the writer was explicitly shown to be dead is a stronger faithfulness failure than one recommended blind)."""
     import json
 
     hosts: set[str] = set()
@@ -93,8 +91,7 @@ def _dns_failed_hosts(trace: list[dict] | None) -> set[str]:
 
 
 def _resolve_blocking(host: str) -> bool:
-    """True if the host has a usable address; False only on a definitive
-    no-address DNS answer. Fail-open (alive) on any non-definitive error."""
+    """True if the host has a usable address; False only on a definitive no-address DNS answer. Fail-open (alive) on any non-definitive error."""
     try:
         socket.getaddrinfo(host, None)
         return True
@@ -105,9 +102,7 @@ def _resolve_blocking(host: str) -> bool:
 
 
 def _resolves(host: str) -> bool:
-    """Bounded, fail-open live DNS check. Split out for test injection; runs the
-    blocking lookup in a worker thread so a hung resolver can't stall the compose
-    (a timeout reads as alive)."""
+    """Bounded, fail-open live DNS check. Split out for test injection; runs the blocking lookup in a worker thread so a hung resolver can't stall the compose (a timeout reads as alive)."""
     if not host:
         return True
     import concurrent.futures as _cf
@@ -132,10 +127,7 @@ def _linked_hosts(body: str) -> list[str]:
 
 
 def defunct_linked_domains(body: str) -> list[str]:
-    """Body-linked hosts that do not resolve to a usable address right now — the
-    entities the article presents as live but that are actually gone. Bounded by
-    a per-article lookup cap; anything past the cap is left unchecked (fail-open)
-    rather than stalling the compose on a link farm."""
+    """Body-linked hosts that do not resolve to a usable address right now — the entities the article presents as live but that are actually gone. Bounded by a per-article lookup cap; anything past the cap is left unchecked (fail-open) rather than stalling the compose on a link farm."""
     if not body:
         return []
     dead: list[str] = []
@@ -147,12 +139,10 @@ def defunct_linked_domains(body: str) -> list[str]:
     return dead
 
 
-def flag_defunct_entities(payload: dict[str, Any], trace: list[dict] | None = None) -> dict[str, Any]:
-    """Set ``payload['_defunct_domains']`` (and a human-readable ``_hold_reason``)
-    when the body links a domain that does not resolve, so the publish gate
-    diverts the draft to human review. Never mutates the body — the prose, not
-    just the link, needs a human. No-op when disabled. Must run BEFORE the link
-    gate's delinker so it still sees the writer's original links."""
+def flag_defunct_entities(
+    payload: dict[str, Any], trace: list[dict] | None = None
+) -> dict[str, Any]:
+    """Set ``payload['_defunct_domains']`` (and a human-readable ``_hold_reason``) when the body links a domain that does not resolve, so the publish gate diverts the draft to human review. Never mutates the body — the prose, not just the link, needs a human. No-op when disabled. Must run BEFORE the link gate's delinker so it still sees the writer's original links."""
     from app.core.config import DEFUNCT_ENTITY_GATE_ENABLED
 
     if not DEFUNCT_ENTITY_GATE_ENABLED:

@@ -1,3 +1,5 @@
+"""Classify what kind of event triggered an article (chain, editorial, crawl, digest)."""
+
 from __future__ import annotations
 
 _ALGORAND_TXID_LEN = 52

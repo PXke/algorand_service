@@ -42,12 +42,12 @@ _TAG_DISPLAY_LABELS: dict[str, str] = {"chain-only": "on-chain"}
 
 
 def display_tag_label(tag: str) -> str:
+    """Map an internal tag slug to its reader-facing display label, if any."""
     return _TAG_DISPLAY_LABELS.get(tag.strip().lower(), tag)
 
 
 def primary_tag(tags: list[str] | None) -> str | None:
-    """First non-boilerplate tag (raw slug — see display_tag_label for the
-    reader-facing text), falling back to the plain first tag."""
+    """First non-boilerplate tag (raw slug — see display_tag_label for the reader-facing text), falling back to the plain first tag."""
     cleaned = [t.strip().lower() for t in (tags or []) if t.strip()]
     for tag in cleaned:
         if tag not in BOILERPLATE_TAGS:
@@ -56,6 +56,7 @@ def primary_tag(tags: list[str] | None) -> str | None:
 
 
 def tag_counts(items: list[ArticleFeedItem]) -> Counter[str]:
+    """Count how many feed items carry each lowercased tag."""
     counts: Counter[str] = Counter()
     for item in items:
         for raw in item.tags or []:
@@ -78,11 +79,13 @@ def reliable_tags(items: list[ArticleFeedItem], *, cap: int = DEFAULT_CAP) -> li
 
 
 def is_reliable_tag(tag: str, items: list[ArticleFeedItem]) -> bool:
+    """Return whether the given tag qualifies for its own topic landing page."""
     wanted = tag.strip().lower()
     return any(t == wanted for t, _ in reliable_tags(items))
 
 
 def topic_feed_path(tag: str) -> str:
+    """Return the RSS feed URL path for a given topic tag."""
     slug = tag.strip().lower()
     return f"/feed/topic/{slug}.xml"
 
@@ -90,11 +93,7 @@ def topic_feed_path(tag: str) -> str:
 def items_for_tag(items: list[ArticleFeedItem], tag: str) -> list[ArticleFeedItem]:
     """Feed rows carrying this writer tag (case-insensitive)."""
     wanted = tag.strip().lower()
-    return [
-        item
-        for item in items
-        if any(t.strip().lower() == wanted for t in (item.tags or []))
-    ]
+    return [item for item in items if any(t.strip().lower() == wanted for t in (item.tags or []))]
 
 
 _FEED_CACHE_TTL_SEC = 120

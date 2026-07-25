@@ -1,13 +1,19 @@
+"""Cassandra-backed reads/writes for the admin dashboard (review queue, publish queue, domains, feedback)."""
+
 from __future__ import annotations
 
 import contextlib
 import logging
 import uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 from uuid import UUID
 
 from app.core.feed_bucket import feed_month
+
+if TYPE_CHECKING:
+    from cassandra.cluster import Session as CassandraSession
 from app.modules.admin.classifier_constants import (
     CONTENT_CATEGORIES,
     is_content_category,
@@ -31,11 +37,7 @@ def _review_domain(url: str) -> str:
 def _rank_reviews(
     items: list[dict], *, limit: int, per_source: int = _MAX_REVIEWS_PER_SOURCE
 ) -> list[dict]:
-    """Order pending reviews by classifier promise score (desc), capping how
-    many items any one source domain may occupy so a flood of pages from a
-    single site can't dominate the window. Over-cap items are intentionally
-    held back (the window may be shorter than ``limit``) and resurface once the
-    higher-ranked ones ahead of them are cleared."""
+    """Order pending reviews by classifier promise score (desc), capping how many items any one source domain may occupy so a flood of pages from a single site can't dominate the window. Over-cap items are intentionally held back (the window may be shorter than ``limit``) and resurface once the higher-ranked ones ahead of them are cleared."""
     ordered = sorted(items, key=lambda d: d.get("storage_score") or 0.0, reverse=True)
     result: list[dict] = []
     taken: dict[str, int] = {}
@@ -51,7 +53,9 @@ def _rank_reviews(
 
 
 class AdminCassandraStore:
+    """Cassandra reads/writes for the admin dashboard."""
     def get_article(self, article_id: str) -> StoredArticle | None:
+        """Fetch one article by id, or None if it does not exist."""
         from app.modules.news.stores.cassandra import CassandraArticleStore
 
         return CassandraArticleStore().get(article_id)
@@ -65,6 +69,7 @@ class AdminCassandraStore:
         body: str | None = None,
         editor: str = "admin",
     ) -> StoredArticle | None:
+        """Patch an article's fields and re-publish it, re-stamping published_at."""
         current = self.get_article(article_id)
         if current is None:
             return None
@@ -173,6 +178,7 @@ class AdminCassandraStore:
         )
 
     def delete_article(self, article_id: str) -> bool:
+        """Delete an article and its feed row; returns False if it did not exist."""
         current = self.get_article(article_id)
         if current is None:
             return False
@@ -250,6 +256,7 @@ class AdminCassandraStore:
         return True
 
     def list_versions(self, article_id: str, *, limit: int = 20) -> list[dict]:
+        """List an article's revision history, newest first."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ArticleVersionStmts
 
@@ -287,6 +294,7 @@ class AdminCassandraStore:
         wallet_address: str,
         refresh_every_days: int = 0,
     ) -> dict:
+        """Insert a new editorial brief."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import EditorialBriefStmts
 
@@ -316,6 +324,7 @@ class AdminCassandraStore:
         }
 
     def list_briefs(self, *, limit: int = 50) -> list[dict]:
+        """List editorial briefs, newest first."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import EditorialBriefStmts
 
@@ -346,6 +355,7 @@ class AdminCassandraStore:
         return items
 
     def get_brief(self, brief_id: str) -> dict | None:
+        """Fetch one editorial brief by id, or None if it does not exist."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import EditorialBriefStmts
 
@@ -375,15 +385,14 @@ class AdminCassandraStore:
         }
 
     def list_official_channels(self, *, kind: str | None = None, limit: int = 200) -> list[dict]:
+        """List official channel entries, optionally filtered by kind."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import OfficialChannelStmts
 
         session = get_cassandra_session()
         try:
             if kind:
-                rows = session.execute(
-                    OfficialChannelStmts.LIST_BY_KIND, (kind, limit)
-                )
+                rows = session.execute(OfficialChannelStmts.LIST_BY_KIND, (kind, limit))
             else:
                 rows = session.execute(OfficialChannelStmts.LIST_ALL, (limit,))
         except Exception:
@@ -410,6 +419,7 @@ class AdminCassandraStore:
         label: str,
         added_by: str,
     ) -> dict:
+        """Insert or update an official channel entry."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import OfficialChannelStmts
 
@@ -428,6 +438,7 @@ class AdminCassandraStore:
         }
 
     def delete_official_channel(self, *, kind: str, channel_id: str) -> None:
+        """Delete one official channel entry."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import OfficialChannelStmts
 
@@ -435,8 +446,7 @@ class AdminCassandraStore:
         session.execute(OfficialChannelStmts.DELETE, (kind, channel_id))
 
     def _grade_meta_for_review(self, review_id: str) -> dict[str, str]:
-        """Pull the article grade + subscores from a review item so they're
-        stored alongside the accept/reject label (trainable features)."""
+        """Pull the article grade + subscores from a review item so they're stored alongside the accept/reject label (trainable features)."""
         import json
 
         from app.core.cassandra import get_cassandra_session
@@ -456,8 +466,8 @@ class AdminCassandraStore:
                     out["grade"] = str(parsed["grade"])
                 gd = parsed.get("grade_detail")
                 if gd is not None:
-                    out["grade_detail"] = gd if isinstance(gd, str) else json.dumps(
-                        gd, separators=(",", ":")
+                    out["grade_detail"] = (
+                        gd if isinstance(gd, str) else json.dumps(gd, separators=(",", ":"))
                     )
         except Exception:
             logger.debug("failed to parse review metadata for %s", review_id, exc_info=True)
@@ -465,15 +475,15 @@ class AdminCassandraStore:
 
     def training_stats(self) -> dict:
         """Labelled-data volume + balance + grader readiness for the Training tab.
+
         `graded_*` are rows that captured grade dimensions (only since the capture
-        was added) — those are what the learned grader trains on."""
+        was added) — those are what the learned grader trains on.
+        """
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ClassifierFeedbackStmts
 
         session = get_cassandra_session()
-        rows = list(
-            session.execute(ClassifierFeedbackStmts.LIST_BY_TIME, ("main",))
-        )
+        rows = list(session.execute(ClassifierFeedbackStmts.LIST_BY_TIME, ("main",)))
         total = len(rows)
         approved = sum(1 for r in rows if r.approved)
         graded = graded_pos = graded_neg = 0
@@ -484,7 +494,8 @@ class AdminCassandraStore:
         for ok, res in execute_parallel_with_args(
             ClassifierFeedbackStmts.GET_GRADE,
             [(r.feedback_id,) for r in rows[:400]],
-            concurrency=64, raise_on_error=False,
+            concurrency=64,
+            raise_on_error=False,
         ):
             if not ok:
                 continue
@@ -531,6 +542,7 @@ class AdminCassandraStore:
         tone_fail: bool = False,
         error_types: list | None = None,
     ) -> dict:
+        """Record a human correction to a classifier verdict for later retraining."""
         from app.core.cassandra import get_cassandra_session
 
         predicted = (predicted_category or category).strip().lower()
@@ -559,9 +571,9 @@ class AdminCassandraStore:
             try:
                 art = self.get_article(article_id)
                 if art is not None and getattr(art, "body", ""):
-                    feedback_meta["article_text"] = (
-                        f"{getattr(art, 'title', '')}\n{art.body}"
-                    )[:8000]
+                    feedback_meta["article_text"] = (f"{getattr(art, 'title', '')}\n{art.body}")[
+                        :8000
+                    ]
             except Exception:
                 logger.warning(
                     "failed to snapshot article text for feedback on %s",
@@ -657,8 +669,10 @@ class AdminCassandraStore:
         admin_wallet: str,
     ) -> str:
         """Write a validation anchor (immutable ground truth for the annotator).
+
         article_text is snapshotted so the anchor is fixed even if the article
-        later changes. Returns the anchor id."""
+        later changes. Returns the anchor id.
+        """
         from cassandra.util import uuid_from_time
 
         from app.core.cassandra import get_cassandra_session
@@ -681,17 +695,25 @@ class AdminCassandraStore:
         get_cassandra_session().execute(
             GatekeeperStmts.INSERT_ANCHOR,
             (
-                now, anchor_id, article_id or "", url[:512],
-                (source_text or "")[:8000], (article_text or "")[:8000],
-                bool(factuality_fail), bool(tone_fail),
-                [str(t) for t in (error_types or [])], admin_wallet,
+                now,
+                anchor_id,
+                article_id or "",
+                url[:512],
+                (source_text or "")[:8000],
+                (article_text or "")[:8000],
+                bool(factuality_fail),
+                bool(tone_fail),
+                [str(t) for t in (error_types or [])],
+                admin_wallet,
             ),
         )
         return str(anchor_id)
 
     def list_gatekeeper_anchors(self, *, limit: int = 200) -> dict:
         """List anchors (newest-first, deduped to the latest tag per article).
-        Returns {count, target, items}."""
+
+        Returns {count, target, items}.
+        """
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import GatekeeperStmts
 
@@ -739,32 +761,97 @@ class AdminCassandraStore:
 
     # Multi-label public suffixes where eTLD+1 needs three labels (foo.co.uk).
     # Mirrors workers' domain_tracker._MULTI_LABEL_SUFFIXES — keep in sync.
-    _MULTI_LABEL_SUFFIXES = frozenset({
-        "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk", "ltd.uk", "plc.uk",
-        "co.jp", "co.kr", "co.za", "co.nz", "co.in", "co.il", "co.id", "co.th",
-        "com.au", "com.br", "com.mx", "com.tr", "com.cn", "com.sg", "com.hk",
-        "com.tw", "com.ar", "com.co", "com.ua", "com.pl", "com.ng",
-        "ac.in", "edu.in", "gov.in", "res.in", "nic.in", "org.in", "net.in",
-    })
+    _MULTI_LABEL_SUFFIXES = frozenset(
+        {
+            "co.uk",
+            "org.uk",
+            "gov.uk",
+            "ac.uk",
+            "me.uk",
+            "ltd.uk",
+            "plc.uk",
+            "co.jp",
+            "co.kr",
+            "co.za",
+            "co.nz",
+            "co.in",
+            "co.il",
+            "co.id",
+            "co.th",
+            "com.au",
+            "com.br",
+            "com.mx",
+            "com.tr",
+            "com.cn",
+            "com.sg",
+            "com.hk",
+            "com.tw",
+            "com.ar",
+            "com.co",
+            "com.ua",
+            "com.pl",
+            "com.ng",
+            "ac.in",
+            "edu.in",
+            "gov.in",
+            "res.in",
+            "nic.in",
+            "org.in",
+            "net.in",
+            "or.jp",
+            "ne.jp",
+            "ac.jp",
+            "ad.jp",
+            "ed.jp",
+            "go.jp",
+            "gr.jp",
+            "lg.jp",
+        }
+    )
 
     # Platform / hosting suffixes where the SUBDOMAIN is the real identity
     # (foo.medium.com != bar.medium.com). Keep in sync with workers'
     # domain_tracker._PLATFORM_SUFFIXES; parity guarded by
     # test_domain_from_url_parity.py in both services.
-    _PLATFORM_SUFFIXES = frozenset({
-        "medium.com", "substack.com", "blogspot.com", "wordpress.com", "ghost.io",
-        "github.io", "gitbook.io", "gitbook.com", "notion.site", "super.site",
-        "netlify.app", "vercel.app", "pages.dev", "web.app", "firebaseapp.com",
-        "herokuapp.com", "onrender.com", "readthedocs.io", "ipfs.io", "w3s.link",
-        "fleek.co", "surge.sh", "webflow.io", "wixsite.com", "replit.app", "repl.co",
-    })
+    _PLATFORM_SUFFIXES = frozenset(
+        {
+            "medium.com",
+            "substack.com",
+            "blogspot.com",
+            "wordpress.com",
+            "ghost.io",
+            "github.io",
+            "gitbook.io",
+            "gitbook.com",
+            "notion.site",
+            "super.site",
+            "netlify.app",
+            "vercel.app",
+            "pages.dev",
+            "web.app",
+            "firebaseapp.com",
+            "herokuapp.com",
+            "onrender.com",
+            "readthedocs.io",
+            "ipfs.io",
+            "w3s.link",
+            "fleek.co",
+            "surge.sh",
+            "webflow.io",
+            "wixsite.com",
+            "replit.app",
+            "repl.co",
+        }
+    )
 
     @staticmethod
     def _domain_from_url(url: str) -> str:
         """Registrable domain (eTLD+1) — collapses subdomains so accepting e.g.
+
         blog.perawallet.app keys the frontier on perawallet.app, matching the
         workers' domain_from_url. Platform/public suffixes keep the subdomain
-        (foo.medium.com stays distinct) so unrelated sources don't merge."""
+        (foo.medium.com stays distinct) so unrelated sources don't merge.
+        """
         parsed = urlparse(url.strip())
         host = (parsed.hostname or "").lower().strip(".")
         if not host:
@@ -780,6 +867,26 @@ class AdminCassandraStore:
             return ".".join(labels[-3:]) if len(labels) >= 3 else host
         return last_two
 
+    @staticmethod
+    def _normalize_domain_input(domain: str) -> str:
+        """Normalize an admin-supplied domain (bare, e.g. "www.urvote.ca", or a full URL) to the SAME eTLD+1 key ``_domain_from_url`` derives from a real URL during crawling — that function requires a scheme to parse a hostname at all, so passing a bare domain straight to it returns "" and silently skips normalization.
+
+        Root-caused 2026-07-24 (urvote.ca): an admin approved "www.urvote.ca"
+        (the real canonical/redirect host, not a mistake) and it was written
+        to domain_tracking verbatim. The crawler's own is_admin_approved_domain
+        check always looks up domain_from_url(page_url), which collapses
+        "www.urvote.ca" -> "urvote.ca" — so the approval never matched, the
+        admin-approved bypass never fired, and the page was rejected by the
+        ordinary thin-content quality gate despite being explicitly approved.
+        Normalizing at write time means the write key always matches what
+        every read path derives from a URL, regardless of which form (bare
+        domain, with/without www, or a full URL) an admin/user enters.
+        """
+        raw = domain.strip()
+        if "://" not in raw:
+            raw = f"https://{raw}"
+        return AdminCassandraStore._domain_from_url(raw) or domain.strip().lower()
+
     def _apply_classifier_corrections(
         self,
         *,
@@ -788,7 +895,7 @@ class AdminCassandraStore:
         predicted_category: str,
         quality: str,
         article_id: str | None,
-        approved: bool = True,
+        _approved: bool = True,
         source_relevant: bool = True,
     ) -> None:
         from app.core.cassandra import get_cassandra_session
@@ -797,9 +904,7 @@ class AdminCassandraStore:
         domain = self._domain_from_url(url)
         if domain:
             session = get_cassandra_session()
-            row = session.execute(
-                DomainTrackingStmts.GET_FOR_CORRECTION, (domain,)
-            ).one()
+            row = session.execute(DomainTrackingStmts.GET_FOR_CORRECTION, (domain,)).one()
             metadata = dict(row.metadata or {}) if row is not None else {}
             metadata["quality"] = quality
             # Ground truth from the admin — future categorization of pages on
@@ -886,21 +991,45 @@ class AdminCassandraStore:
             )
         return True
 
-    def _write_domain_relevance(self, domain: str, *, is_relevant: bool) -> tuple[dict, str]:
-        """Write the domain_tracking row and return (metadata, pending_url) for
-        the caller's own follow-up logic (e.g. admin_set_domain's frontier
-        crawl enqueue on approval). Shared by admin_set_domain and
-        reject_domain_source so there is one write, not two hand-copies of
-        the same INSERT."""
+    def _write_domain_relevance(
+        self, domain: str, *, is_relevant: bool, single_page_only: bool = False
+    ) -> tuple[dict, str]:
+        """Write the domain_tracking row and return (metadata, pending_url) for the caller's own follow-up logic (e.g. admin_set_domain's frontier crawl enqueue on approval). Shared by admin_set_domain and reject_domain_source so there is one write, not two hand-copies of the same INSERT.
+
+        single_page_only (only meaningful with is_relevant=True): this domain
+        was approved for ONE specific page/article, not as a monitored
+        ecosystem service — frontier_status becomes "reference" instead of
+        "approved", so it's excluded from every domain-wide sweep (backfills,
+        bulk re-crawls, the admin-bypass gates' implicit "crawl the whole
+        site" treatment). Added after python.org/nytimes.com/climatetrade.com
+        got approved for one citation each and were then crawled/indexed as
+        if they were ecosystem services (2026-07-21).
+        """
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import DomainTrackingStmts
 
+        # Only normalize the APPROVE path. reject_domain_source intentionally
+        # dead-ends whatever exact host string it's given (e.g. a bad
+        # subdomain like spam.geographia.com.br) without collapsing to the
+        # registrable domain — doing so would silently dead-end every OTHER
+        # subdomain of that same registrable domain too, which is not what
+        # "mark dead end" means. Only the approve side needs to match the
+        # crawler's own domain_from_url(page_url) key so
+        # is_admin_approved_domain finds it.
+        if is_relevant:
+            domain = self._normalize_domain_input(domain)
         session = get_cassandra_session()
         row = session.execute(DomainTrackingStmts.GET_FOR_CORRECTION, (domain,)).one()
         now = datetime.now(tz=UTC)
         meta = dict(row.metadata or {}) if row is not None else {}
         meta["frontier_set_by_admin"] = "true"
-        meta["frontier_status"] = "approved" if is_relevant else "dead_end"
+        if single_page_only and is_relevant:
+            frontier_status = "reference"
+            meta["admin_scope"] = "single_page"
+        else:
+            frontier_status = "approved" if is_relevant else "dead_end"
+            meta.pop("admin_scope", None)
+        meta["frontier_status"] = frontier_status
         pending_url = meta.pop("pending_url", "")
         session.execute(
             DomainTrackingStmts.INSERT,
@@ -912,7 +1041,7 @@ class AdminCassandraStore:
                 (row.category if row is not None else "") or "",
                 is_relevant,
                 meta,
-                "approved" if is_relevant else "dead_end",
+                frontier_status,
             ),
         )
         return meta, pending_url
@@ -920,8 +1049,7 @@ class AdminCassandraStore:
     def _record_domain_relevance_feedback(
         self, *, domain: str, meta: dict, pending_url: str, is_relevant: bool, wallet: str
     ) -> None:
-        """Train the relevance classifier on this domain decision. Shared by
-        admin_set_domain and reject_domain_source."""
+        """Train the relevance classifier on this domain decision. Shared by admin_set_domain and reject_domain_source."""
         try:
             blob = " ".join(
                 x
@@ -951,18 +1079,8 @@ class AdminCassandraStore:
                 "failed to record classifier feedback for domain %s", domain, exc_info=True
             )
 
-    def reject_domain_source(
-        self, *, domain: str, wallet: str, source_url_hint: str = ""
-    ) -> None:
-        """Permanently mark a domain irrelevant so it's never re-scraped or
-        re-composed — run_publish_pipeline's is_dead_end_domain check (via
-        domain_tracker.is_dead_end_domain) reads this exact flag before any
-        future scrape/compose spend. For use anywhere an admin judges a
-        source irrecoverably bad (e.g. deleting a fabricated article), not
-        just the Domains tab's own "Mark Dead End" button — a deleted
-        article previously left this flag unset, so the same source could
-        (and did, 2026-07-14: GEO World Energy / world.geographia.com.br)
-        get re-crawled and re-composed from scratch after being deleted once."""
+    def reject_domain_source(self, *, domain: str, wallet: str, source_url_hint: str = "") -> None:
+        """Permanently mark a domain irrelevant so it's never re-scraped or re-composed — run_publish_pipeline's is_dead_end_domain check (via domain_tracker.is_dead_end_domain) reads this exact flag before any future scrape/compose spend. For use anywhere an admin judges a source irrecoverably bad (e.g. deleting a fabricated article), not just the Domains tab's own "Mark Dead End" button — a deleted article previously left this flag unset, so the same source could (and did, 2026-07-14: GEO World Energy / world.geographia.com.br) get re-crawled and re-composed from scratch after being deleted once."""
         meta, pending_url = self._write_domain_relevance(domain, is_relevant=False)
         self._record_domain_relevance_feedback(
             domain=domain,
@@ -973,10 +1091,7 @@ class AdminCassandraStore:
         )
 
     def list_tool_suggestions(self, *, include_resolved: bool = False) -> list[dict]:
-        """Capabilities the writer model wished it had (via suggest_tool), newest
-        first. Resolved suggestions (tools that have since shipped) are hidden by
-        default so the Tool gaps panel only shows genuine gaps instead of growing
-        forever — see resolve_tool_suggestions."""
+        """Capabilities the writer model wished it had (via suggest_tool), newest first. Resolved suggestions (tools that have since shipped) are hidden by default so the Tool gaps panel only shows genuine gaps instead of growing forever — see resolve_tool_suggestions."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
@@ -998,11 +1113,7 @@ class AdminCassandraStore:
         ]
 
     def resolve_tool_suggestions(self, capability: str) -> int:
-        """Mark every unresolved suggestion for one capability as resolved (the
-        tool now exists) — dismisses the whole group the Tool gaps panel shows
-        at once, not one row at a time. Rows are kept (not deleted) so the
-        request count stays visible as history; the table also self-prunes via
-        a 90-day TTL (migration 028)."""
+        """Mark every unresolved suggestion for one capability as resolved (the tool now exists) — dismisses the whole group the Tool gaps panel shows at once, not one row at a time. Rows are kept (not deleted) so the request count stays visible as history; the table also self-prunes via a 90-day TTL (migration 028)."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
@@ -1044,8 +1155,15 @@ class AdminCassandraStore:
         session.execute(
             FeedStmts.INSERT_FULL,
             (
-                feed_month(published_at), published_at, aid, row.service_id,
-                row.title, row.summary or "", tags, row.image_url, row.source_url,
+                feed_month(published_at),
+                published_at,
+                aid,
+                row.service_id,
+                row.title,
+                row.summary or "",
+                tags,
+                row.image_url,
+                row.source_url,
             ),
         )
         session.execute(ArticleStmts.UPDATE_PUBLISHED_AT, (published_at, aid))
@@ -1080,11 +1198,7 @@ class AdminCassandraStore:
 
     @staticmethod
     def _enqueue_article_translations(article_id: str) -> None:
-        """Fan out worker translate_article tasks now that the article is feed-
-        visible. Translation happens at publish time only — held drafts are not
-        translated (see workers publish_tasks.enqueue_article_translations, the
-        other half of this seam). The task fetches current text by id and skips
-        already-stored languages, so this is safe to fire more than once."""
+        """Fan out worker translate_article tasks now that the article is feed- visible. Translation happens at publish time only — held drafts are not translated (see workers publish_tasks.enqueue_article_translations, the other half of this seam). The task fetches current text by id and skips already-stored languages, so this is safe to fire more than once."""
         try:
             from celery import Celery
 
@@ -1102,9 +1216,7 @@ class AdminCassandraStore:
             logger.warning("failed to enqueue translation tasks", exc_info=True)
 
     def _review_replaces_article_id(self, review_id: str) -> str:
-        """The published article this review's draft would replace on approval
-        (recompose_published flow), or "" for normal reviews. Fail-open to ""
-        so a metadata read error degrades to the normal publish path."""
+        """The published article this review's draft would replace on approval (recompose_published flow), or "" for normal reviews. Fail-open to "" so a metadata read error degrades to the normal publish path."""
         import json
 
         from app.core.cassandra import get_cassandra_session
@@ -1142,11 +1254,7 @@ class AdminCassandraStore:
 
     @staticmethod
     def _trigger_distribution(article_id: str) -> None:
-        """Auto-post to social channels (Bluesky, Telegram, ...) once an
-        admin-approved fresh article actually lands in the feed. Recompose
-        approvals deliberately do NOT trigger this (see
-        apply_recomposed_article) — reposting every refresh of already-
-        published content would look repetitive to followers."""
+        """Auto-post to social channels (Bluesky, Telegram, ...) once an admin-approved fresh article actually lands in the feed. Recompose approvals deliberately do NOT trigger this (see apply_recomposed_article) — reposting every refresh of already- published content would look repetitive to followers."""
         try:
             from celery import Celery
 
@@ -1176,7 +1284,7 @@ class AdminCassandraStore:
         except Exception:
             logger.warning("failed to trigger compose-next task", exc_info=True)
 
-    def _feed_count_today(self, session, bucket: str = "") -> int:
+    def _feed_count_today(self, session: CassandraSession, _bucket: str = "") -> int:
         from datetime import UTC, datetime, timedelta
 
         from app.core.statements import FeedStmts
@@ -1246,9 +1354,7 @@ class AdminCassandraStore:
 
     @staticmethod
     def _record_url_rejected(url: str) -> None:
-        """Mark a URL as recently-rejected so the worker enqueue path suppresses
-        it (see domain_tracker.url_recently_rejected). Key format must match the
-        worker's reject_cooldown_key. Best-effort."""
+        """Mark a URL as recently-rejected so the worker enqueue path suppresses it (see domain_tracker.url_recently_rejected). Key format must match the worker's reject_cooldown_key. Best-effort."""
         if not url:
             return
         import hashlib
@@ -1269,8 +1375,7 @@ class AdminCassandraStore:
             logger.warning("failed to record rejected-url cooldown for %s", url, exc_info=True)
 
     def _publish_or_queue_article(self, article_id: str) -> str:
-        """Publish to the feed if under the daily cap; otherwise hold in
-        pending_feed_queue for a worker to release at the configured pace."""
+        """Publish to the feed if under the daily cap; otherwise hold in pending_feed_queue for a worker to release at the configured pace."""
         from uuid import UUID
 
         from app.core.cassandra import get_cassandra_session
@@ -1303,6 +1408,7 @@ class AdminCassandraStore:
         return "queued_daily_cap"
 
     def list_classifier_reviews(self, *, limit: int = 50, scan_limit: int = 500) -> list[dict]:
+        """List recent classifier reviews (human-corrected verdicts), newest first."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ArticleStmts, ClassifierReviewStmts
 
@@ -1311,9 +1417,7 @@ class AdminCassandraStore:
             # Scan the full pending set (bounded by the queue cap) so ranking is
             # global; the Cassandra clustering order (created_at ASC) is just the
             # scan order, not the display order — see _rank_reviews below.
-            rows = session.execute(
-                ClassifierReviewStmts.LIST_PENDING, ("pending", scan_limit)
-            )
+            rows = session.execute(ClassifierReviewStmts.LIST_PENDING, ("pending", scan_limit))
         except Exception:
             return []
         import json
@@ -1328,8 +1432,10 @@ class AdminCassandraStore:
         # sequential SELECT per pending row (was the dominant cost of this tab).
         details = []
         for ok, res in execute_parallel_with_args(
-            ClassifierReviewStmts.GET_DETAIL, [(rid,) for rid in review_ids],
-            concurrency=64, raise_on_error=False,
+            ClassifierReviewStmts.GET_DETAIL,
+            [(rid,) for rid in review_ids],
+            concurrency=64,
+            raise_on_error=False,
         ):
             if not ok:
                 continue
@@ -1338,7 +1444,9 @@ class AdminCassandraStore:
                 details.append(d)
 
         # Parse metadata (pure Python) and collect the article ids to batch-fetch.
-        parsed_rows: list[tuple] = []  # (detail, article_id, confidence, grade, grade_detail, categories)
+        parsed_rows: list[
+            tuple
+        ] = []  # (detail, article_id, confidence, grade, grade_detail, categories)
         for detail in details:
             article_id = ""
             confidence: float | None = None
@@ -1392,8 +1500,16 @@ class AdminCassandraStore:
             diverted_by = str(parsed.get("diverted_by", "") or meta.get("diverted_by", "") or "")
             hold_reason = str(parsed.get("hold_reason", "") or meta.get("hold_reason", "") or "")
             parsed_rows.append(
-                (detail, article_id, confidence, grade, grade_detail, categories,
-                 diverted_by, hold_reason)
+                (
+                    detail,
+                    article_id,
+                    confidence,
+                    grade,
+                    grade_detail,
+                    categories,
+                    diverted_by,
+                    hold_reason,
+                )
             )
 
         # Phase 2: batch-fetch the referenced articles concurrently (was a second
@@ -1406,8 +1522,10 @@ class AdminCassandraStore:
         article_by_id: dict[str, object] = {}
         if uuid_args:
             for ok, res in execute_parallel_with_args(
-                ArticleStmts.GET_SUMMARY_CARD, uuid_args,
-                concurrency=64, raise_on_error=False,
+                ArticleStmts.GET_SUMMARY_CARD,
+                uuid_args,
+                concurrency=64,
+                raise_on_error=False,
             ):
                 if not ok:
                     continue
@@ -1416,8 +1534,16 @@ class AdminCassandraStore:
                     article_by_id[str(a.article_id)] = a
 
         items: list[dict] = []
-        for (detail, article_id, confidence, grade, grade_detail, categories,
-             diverted_by, hold_reason) in parsed_rows:
+        for (
+            detail,
+            article_id,
+            confidence,
+            grade,
+            grade_detail,
+            categories,
+            diverted_by,
+            hold_reason,
+        ) in parsed_rows:
             a = article_by_id.get(article_id)
             items.append(
                 {
@@ -1443,7 +1569,7 @@ class AdminCassandraStore:
         return _rank_reviews(items, limit=limit)
 
     @staticmethod
-    def _queue_row_dict(row) -> dict:
+    def _queue_row_dict(row: Any) -> dict:  # noqa: ANN401 -- duck-typed Cassandra driver row, no formal class
         return {
             "queue_id": str(row.queue_id),
             "status": row.status or "",
@@ -1459,13 +1585,7 @@ class AdminCassandraStore:
         }
 
     def list_publish_queue(self, *, limit: int = 200) -> list[dict]:
-        """Publish-queue rows with their status and last drain/compose decision
-        (last_reason). EVERY truly-pending row is always included (read from the
-        same publish_queue_pending index the drain uses — a plain LIMIT scan of
-        the main table returns token-order samples and silently under-reports
-        pending); resolved history fills the remainder up to ``limit``, newest
-        first. Payload deliberately excluded — it carries the full page text;
-        use publish_queue_breakdown for one row's score."""
+        """Publish-queue rows with their status and last drain/compose decision (last_reason). EVERY truly-pending row is always included (read from the same publish_queue_pending index the drain uses — a plain LIMIT scan of the main table returns token-order samples and silently under-reports pending); resolved history fills the remainder up to ``limit``, newest first. Payload deliberately excluded — it carries the full page text; use publish_queue_breakdown for one row's score."""
         from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
         from app.core.statements import PublishQueueStmts
 
@@ -1474,9 +1594,7 @@ class AdminCassandraStore:
         pending: list[dict] = []
         pending_ids: set[str] = set()
         try:
-            id_rows = list(
-                session.execute(PublishQueueStmts.LIST_PENDING_IDS, ("pending", 2000))
-            )
+            id_rows = list(session.execute(PublishQueueStmts.LIST_PENDING_IDS, ("pending", 2000)))
             for ok, res in execute_parallel_with_args(
                 PublishQueueStmts.GET_ROW,
                 [(row.queue_id,) for row in id_rows],
@@ -1502,25 +1620,19 @@ class AdminCassandraStore:
         except Exception:
             resolved = []
 
-        pending.sort(key=lambda it: it["updated_at"], reverse=True)
+        pending.sort(key=lambda it: it["priority"], reverse=True)
         resolved.sort(key=lambda it: it["updated_at"], reverse=True)
         room = max(0, limit - len(pending))
         return pending + resolved[:room]
 
     def list_pending_feed_backlog(self) -> list[dict]:
-        """Articles already approved and composed, waiting in pending_feed_queue
-        for the paced-release worker to publish them (PENDING_FEED_MAX_DEPTH
-        caps this at 3) — distinct from publish_queue above, which is
-        in-flight COMPOSING work. Not surfaced anywhere in admin before
-        2026-07-17; checking it required a direct DB read."""
+        """Articles already approved and composed, waiting in pending_feed_queue for the paced-release worker to publish them (PENDING_FEED_MAX_DEPTH caps this at 3) — distinct from publish_queue above, which is in-flight COMPOSING work. Not surfaced anywhere in admin before 2026-07-17; checking it required a direct DB read."""
         from app.core.cassandra import get_cassandra_session
         from app.core.config import settings
         from app.core.statements import PendingFeedStmts
 
         session = get_cassandra_session()
-        rows = list(
-            session.execute(PendingFeedStmts.LIST_ALL, (settings.news_feed_bucket,))
-        )
+        rows = list(session.execute(PendingFeedStmts.LIST_ALL, (settings.news_feed_bucket,)))
         items: list[dict] = []
         for row in rows:
             article_id = str(row.article_id)
@@ -1538,9 +1650,7 @@ class AdminCassandraStore:
         return items
 
     def publish_queue_breakdown(self, queue_id: str) -> dict | None:
-        """One row's priority_breakdown (computed at enqueue, stored on the
-        payload) plus content signals — the "why this score" companion to
-        list_publish_queue. None when the row is missing/unreadable."""
+        """One row's priority_breakdown (computed at enqueue, stored on the payload) plus content signals — the "why this score" companion to list_publish_queue. None when the row is missing/unreadable."""
         import json
 
         from app.core.cassandra import get_cassandra_session

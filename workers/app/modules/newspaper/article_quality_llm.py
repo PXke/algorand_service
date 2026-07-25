@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.modules.ai.mistral_client import MistralClient
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +69,7 @@ _FALLBACK_QUALITY = {
 }
 
 
-def _parse_quality_response(raw: Any) -> dict[str, Any] | None:
+def _parse_quality_response(raw: Any) -> dict[str, Any] | None:  # noqa: ANN401 -- model output, dict or JSON-in-string
     """Parse rubric JSON; salvage fenced/prose-wrapped objects when possible."""
     from app.modules.ai.mistral_client import _parse_json_object
 
@@ -81,11 +84,11 @@ def grade_article_quality_llm(
     *,
     title: str,
     body: str,
-    client: Any | None = None,
+    client: MistralClient | None = None,
 ) -> dict[str, Any]:
     """Fast Small-tier rubric for narrative synthesis and technical depth."""
     from app.core.config import WRITER_QUALITY_LLM_ENABLED
-    from app.modules.ai.mistral_client import MistralClient, get_mistral_digest_client
+    from app.modules.ai.mistral_client import get_mistral_digest_client
 
     if not WRITER_QUALITY_LLM_ENABLED:
         return {
@@ -111,10 +114,7 @@ def grade_article_quality_llm(
             {"role": "system", "content": _QUALITY_RUBRIC},
             {
                 "role": "user",
-                "content": (
-                    f"Title: {title}\n\nBody:\n{snippet}\n\n"
-                    "Return JSON only."
-                ),
+                "content": (f"Title: {title}\n\nBody:\n{snippet}\n\nReturn JSON only."),
             },
         ]
         parsed = mistral.chat_json_object(
@@ -150,11 +150,7 @@ def grade_article_quality_llm(
         technical = scores["technical_depth"]
         critical_distance = scores["critical_distance"]
         repetition = scores["repetition"]
-        issues = [
-            str(i).strip()
-            for i in (parsed.get("issues") or [])
-            if str(i).strip()
-        ][:6]
+        issues = [str(i).strip() for i in (parsed.get("issues") or []) if str(i).strip()][:6]
         if missing:
             logger.warning("LLM rubric returned partial scores; missing %s", missing)
             issues.append(
@@ -199,9 +195,9 @@ def grade_article_quality_llm(
         return fallback
 
 
-def _clamp_score(value: Any) -> int | None:
+def _clamp_score(value: Any) -> int | None:  # noqa: ANN401 -- arbitrary model-emitted score value, coerced via float()
     try:
-        n = int(round(float(value)))
+        n = round(float(value))
     except (TypeError, ValueError):
         return None
     return max(1, min(5, n))

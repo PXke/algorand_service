@@ -83,15 +83,19 @@ class WalletConnectAlgorandConnector implements WalletConnector {
     return WalletAuthProof.arc0025Txn(signedTxn);
   }
 
-  /// Pera-dialect arbitrary-data signing: one request item per datum, each
-  /// carrying `{data: <b64>, message, signer, chainId}` (the shape
-  /// @perawallet/connect v1.5.2 sends). Pera answers with an algosdk
-  /// signBytes signature — ed25519 over b"MX" + data — as base64 or bytes.
-  /// Returns null (falling back to the 0-ALGO txn) on any error, e.g. a
-  /// wallet that does not implement the method.
-  Future<String?> _trySignDataPera({
+  /// Pera-dialect arbitrary-data signing, exposed for any caller that needs
+  /// a signature over a plain message it controls (e.g. a consent message
+  /// for a non-login action) rather than the login-nonce flow. One request
+  /// item per datum, carrying `{data: <b64>, message, signer, chainId}` (the
+  /// shape @perawallet/connect v1.5.2 sends). Pera answers with an algosdk
+  /// signBytes signature — ed25519 over b"MX" + data — as base64 or bytes
+  /// (verify server-side with the MX-prefixed convention, not a raw-message
+  /// verifier). Returns null on any error, e.g. a wallet that does not
+  /// implement the method — callers decide their own fallback.
+  Future<String?> signArbitraryData({
     required String walletAddress,
-    required AuthNonce nonce,
+    required String message,
+    String? prompt,
   }) async {
     if (_session == null) return null;
     try {
@@ -99,8 +103,8 @@ class WalletConnectAlgorandConnector implements WalletConnector {
         method: 'algo_signData',
         params: [
           {
-            'data': base64Encode(utf8.encode(nonce.signingMessage)),
-            'message': _config.signInPrompt,
+            'data': base64Encode(utf8.encode(message)),
+            'message': prompt ?? _config.signInPrompt,
             'signer': walletAddress,
             'chainId': _config.walletConnectChainId,
           },
@@ -114,10 +118,17 @@ class WalletConnectAlgorandConnector implements WalletConnector {
       return null;
     } catch (e, st) {
       if (kDebugMode) {
-        debugPrint('algo_signData failed, falling back to auth txn: $e\n$st');
+        debugPrint('algo_signData failed: $e\n$st');
       }
       return null;
     }
+  }
+
+  Future<String?> _trySignDataPera({
+    required String walletAddress,
+    required AuthNonce nonce,
+  }) {
+    return signArbitraryData(walletAddress: walletAddress, message: nonce.signingMessage);
   }
 
   Future<Arc0060Proof?> _trySignArc0060({
@@ -199,6 +210,63 @@ class WalletConnectAlgorandConnector implements WalletConnector {
     return base64Encode(List<int>.from(first as List));
   }
 
+  /// Signs an arbitrary ASA-transfer transaction via the same `algo_signTxn`
+  /// (ARC-0025) request the login flow already uses for [_signArc0025AuthTxn]
+  /// — that method only ever builds the hardcoded 0-ALGO auth payment; this
+  /// is the general-purpose sibling for anything that needs to move a real
+  /// asset (e.g. signing an x402 "exact" scheme payment). Returns the signed
+  /// transaction, base64-encoded, ready to submit or hand to a facilitator.
+  Future<String> signAssetTransferTxn({
+    required String senderAddress,
+    required String receiverAddress,
+    required int assetId,
+    required int amount,
+    String? note,
+    int? feeMicroAlgos,
+  }) async {
+    if (_session == null) {
+      throw StateError('Wallet session is not connected');
+    }
+
+    final params = await _algod.suggestedParams();
+    final txBytes = AssetTransferTransaction.buildUnsignedBytes(
+      senderAddress: senderAddress,
+      receiverAddress: receiverAddress,
+      assetId: assetId,
+      amount: amount,
+      params: params,
+      note: note,
+      feeMicroAlgos: feeMicroAlgos,
+    );
+
+    final walletTxn = {
+      'txn': base64Encode(txBytes),
+      'signers': [senderAddress],
+      if (note != null) 'message': note,
+    };
+
+    final result = await _connector.sendCustomRequest(
+      method: 'algo_signTxn',
+      params: [
+        [walletTxn],
+        if (note != null) {'message': note},
+      ],
+    );
+
+    if (result == null || result is! List || result.isEmpty) {
+      throw StateError('Unable to sign asset transfer transaction');
+    }
+
+    final first = result.first;
+    if (first is String) {
+      return first;
+    }
+    if (first is List<int>) {
+      return base64Encode(first);
+    }
+    return base64Encode(List<int>.from(first as List));
+  }
+
   /// Root cause of "login works on desktop, hangs on mobile" (2026-07-16):
   /// deep-linking to the wallet backgrounds the browser tab; the OS kills or
   /// starves the bridge WebSocket, and ReconnectingWebSocket gives up after
@@ -208,16 +276,21 @@ class WalletConnectAlgorandConnector implements WalletConnector {
   /// re-queues topic subscriptions; pending request completers are held in
   /// memory and resolve when the queued response finally arrives. Guarded so
   /// it never CONSTRUCTS the lazy connector just to reconnect nothing.
+  ///
+  /// Deliberately does NOT gate on [bridgeConnected] (tried 2026-07-20,
+  /// reverted 2026-07-21): ensemble_walletconnect's ReconnectingWebSocket
+  /// marks itself connected the instant `WebSocketChannel.connect()` is
+  /// *called*, not when the socket actually opens, and only clears that flag
+  /// if the browser fires a close/error — which mobile OSes routinely skip
+  /// for a backgrounded socket they silently drop. That makes the flag stuck
+  /// reporting "alive" on a dead transport, permanently defeating this
+  /// revival. The caller (wallet_connect_dialog's lifecycle observer) now
+  /// gates the call on elapsed backgrounded time instead, so this is safe to
+  /// call unconditionally.
   @override
   void wakeTransport() {
     final connector = _connectorInstance;
     if (connector == null) return;
-    // Only revive a DEAD socket. Foreground events also fire for harmless
-    // visibility flickers (the OS "Open in Pera?" prompt covering the page,
-    // quick app switches) — force-reconnecting a healthy socket there churns
-    // the transport at the worst possible moment, right as the pairing or
-    // sign request is in flight (v1 of this fix did exactly that, 2026-07-16).
-    if (connector.bridgeConnected) return;
     connector.reconnect();
   }
 

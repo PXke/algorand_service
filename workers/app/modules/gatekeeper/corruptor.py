@@ -31,13 +31,14 @@ TOLERANCE = 0.02
 
 @dataclass(frozen=True)
 class Sample:
+    """One (source, trace, article) training sample."""
     source: str
     trace: str
     article: str
-    label_factuality: float   # soft target in [0,1]; 1.0 = clean
+    label_factuality: float  # soft target in [0,1]; 1.0 = clean
     label_tone: float
-    operator: str             # provenance for the audit
-    severity: float           # 0..1, drives the soft label
+    operator: str  # provenance for the audit
+    severity: float  # 0..1, drives the soft label
 
 
 def _replace_first_number(article: str, raw: str, new_raw: str) -> str:
@@ -46,8 +47,7 @@ def _replace_first_number(article: str, raw: str, new_raw: str) -> str:
 
 
 def _format_like(original_raw: str, new_value: float) -> str:
-    """Render ``new_value`` echoing the original's thousands separators/decimals
-    so the mutation leaves no formatting fingerprint."""
+    """Render ``new_value`` echoing the original's thousands separators/decimals so the mutation leaves no formatting fingerprint."""
     had_comma = "," in original_raw
     had_decimal = "." in re.sub(r"[^\d.]", "", original_raw)
     if had_decimal:
@@ -60,7 +60,7 @@ def _format_like(original_raw: str, new_value: float) -> str:
 
 
 def _soft_label_from_severity(severity: float) -> float:
-    """severity 0 -> clean (1.0); severity 1 -> definitely wrong (0.0)."""
+    """Severity 0 -> clean (1.0); severity 1 -> definitely wrong (0.0)."""
     return round(max(0.0, min(1.0, 1.0 - severity)), 3)
 
 
@@ -71,12 +71,19 @@ def numeric_drift(
 
     The drift magnitude is sampled across the boundary: some land inside the
     tolerance band (hard POSITIVES), most outside (graded negatives). Returns
-    None when no grounded number exists to perturb."""
+    None when no grounded number exists to perturb.
+    """
     nums = extract_numbers(sample_gold.article)
-    grounded = [n for n in nums if extract_numbers(sample_gold.trace)
-                and any(abs(n.value - t.value) <= abs(n.value) * TOLERANCE
-                        for t in extract_numbers(sample_gold.trace)
-                        if (n.unit == "percent") == (t.unit == "percent"))]
+    grounded = [
+        n
+        for n in nums
+        if extract_numbers(sample_gold.trace)
+        and any(
+            abs(n.value - t.value) <= abs(n.value) * TOLERANCE
+            for t in extract_numbers(sample_gold.trace)
+            if (n.unit == "percent") == (t.unit == "percent")
+        )
+    ]
     if not grounded:
         return None
     target = rng.choice(grounded)
@@ -96,11 +103,8 @@ def numeric_drift(
     )
 
 
-def cross_contamination(
-    sample_gold: Sample, donor_trace: str, rng: random.Random
-) -> Sample | None:
-    """Insert a real number lifted from a DIFFERENT run's trace — a plausible
-    value in the wrong context. Hard negative: realistic, ungrounded here."""
+def cross_contamination(sample_gold: Sample, donor_trace: str, rng: random.Random) -> Sample | None:
+    """Insert a real number lifted from a DIFFERENT run's trace — a plausible value in the wrong context. Hard negative: realistic, ungrounded here."""
     donors = extract_numbers(donor_trace)
     targets = extract_numbers(sample_gold.article)
     if not donors or not targets:
@@ -122,11 +126,9 @@ def cross_contamination(
 
 
 def unsupported_elaboration(
-    sample_gold: Sample, paraphraser: Callable[[str], str], rng: random.Random
+    sample_gold: Sample, paraphraser: Callable[[str], str], _rng: random.Random
 ) -> Sample:
-    """Inject a plausible, ungrounded sentence via the paraphraser (prod: the
-    Mistral client). The injected fact has the same surface form as grounded
-    ones, so only its lack of an anchor — not its style — marks it."""
+    """Inject a plausible, ungrounded sentence via the paraphraser (prod: the Mistral client). The injected fact has the same surface form as grounded ones, so only its lack of an anchor — not its style — marks it."""
     addition = paraphraser(sample_gold.article)
     return Sample(
         source=sample_gold.source,
@@ -140,12 +142,13 @@ def unsupported_elaboration(
 
 
 def hype_rewrite(
-    sample_gold: Sample, paraphraser: Callable[[str], str], rng: random.Random,
-    *, intensity: float = 1.0
+    sample_gold: Sample,
+    paraphraser: Callable[[str], str],
+    _rng: random.Random,
+    *,
+    intensity: float = 1.0,
 ) -> Sample:
-    """Rewrite the article into subtle hype at a sampled intensity (graded tone
-    label). Vocabulary rotation lives in the injected paraphraser so the tone
-    head can't memorize a fixed banlist."""
+    """Rewrite the article into subtle hype at a sampled intensity (graded tone label). Vocabulary rotation lives in the injected paraphraser so the tone head can't memorize a fixed banlist."""
     return Sample(
         source=sample_gold.source,
         trace=sample_gold.trace,
@@ -158,15 +161,9 @@ def hype_rewrite(
 
 
 def temporal_collapse(
-    sample_gold: Sample, paraphraser: Callable[[str], str], rng: random.Random
+    sample_gold: Sample, paraphraser: Callable[[str], str], _rng: random.Random
 ) -> Sample:
-    """Reframe the article's events as current/breaking ("now live", "just
-    launched", "this week") WITHOUT changing the underlying facts — the temporal
-    relationship is fabricated. This is the chronological-context-collapse mode
-    (Tinyman/Defly): every entity is grounded, so numeric entailment passes, but
-    a stale or undated event is presented as fresh news. The head can only learn
-    it if the corruptor generates it — entailment/value-swap negatives never will.
-    The injected ``paraphraser`` rewrites the prose with a false 'now' framing."""
+    """Reframe the article's events as current/breaking ("now live", "just launched", "this week") WITHOUT changing the underlying facts — the temporal relationship is fabricated. This is the chronological-context-collapse mode (Tinyman/Defly): every entity is grounded, so numeric entailment passes, but a stale or undated event is presented as fresh news. The head can only learn it if the corruptor generates it — entailment/value-swap negatives never will. The injected ``paraphraser`` rewrites the prose with a false 'now' framing."""
     return Sample(
         source=sample_gold.source,
         trace=sample_gold.trace,
@@ -178,12 +175,8 @@ def temporal_collapse(
     )
 
 
-def symmetric_positive(
-    sample_gold: Sample, paraphraser: Callable[[str], str]
-) -> Sample:
-    """A POSITIVE passed through the same paraphraser (neutral->neutral), so
-    "LLM-touched text" is uncorrelated with the label. Without this the heads
-    learn the paraphraser's fingerprint instead of the concept."""
+def symmetric_positive(sample_gold: Sample, paraphraser: Callable[[str], str]) -> Sample:
+    """A POSITIVE passed through the same paraphraser (neutral->neutral), so "LLM-touched text" is uncorrelated with the label. Without this the heads learn the paraphraser's fingerprint instead of the concept."""
     return Sample(
         source=sample_gold.source,
         trace=sample_gold.trace,

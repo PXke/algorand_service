@@ -1,3 +1,5 @@
+"""Nonce issuance and signature verification for wallet login."""
+
 from __future__ import annotations
 
 import json
@@ -17,10 +19,13 @@ from app.modules.auth.utils.signing_message import AuthChallenge, build_auth_cha
 
 
 class AuthService:
+    """Nonce issuance and signature verification for wallet login."""
     def __init__(self, session_store: SessionStore) -> None:
+        """Wire the session/nonce store used for challenge issuance and verification."""
         self._store = session_store
 
     def issue_nonce(self, wallet_address: str) -> AuthChallenge:
+        """Issue a fresh login nonce for a wallet, rate-limited per address."""
         if not self._store.allow_nonce_issue(wallet_address):
             raise PlatformError(
                 "rate_limited",
@@ -51,6 +56,7 @@ class AuthService:
         signed_txn_b64: str | None = None,
         arc0060: Arc0060Proof | None = None,
     ) -> tuple[str, SessionInfo, str] | None:
+        """Verify a signed nonce and, on success, mint a new session token."""
         raw = self._store.pop_nonce_challenge(wallet_address)
         if not raw:
             return None
@@ -100,6 +106,7 @@ class AuthService:
         )
 
     def get_session(self, token: str) -> SessionInfo | None:
+        """Look up an active session by token, or None if absent/expired."""
         rec = self._store.get_session(token)
         if not rec:
             return None
@@ -110,17 +117,19 @@ class AuthService:
         )
 
     def revoke_session(self, token: str) -> None:
+        """Revoke a session token, ending that login."""
         self._store.delete_session(token)
 
     def caip122_payload(self, challenge: AuthChallenge) -> Caip122Payload:
-        return msgspec.convert(
-            challenge.caip122.to_dict(), Caip122Payload, strict=False
-        )
+        """Build the CAIP-122 payload the client must sign for this challenge."""
+        return msgspec.convert(challenge.caip122.to_dict(), Caip122Payload, strict=False)
 
     @property
     def session_ttl(self) -> int:
+        """Session lifetime in seconds."""
         return settings.session_ttl_seconds
 
     @property
     def nonce_ttl(self) -> int:
+        """Nonce lifetime in seconds."""
         return settings.nonce_ttl_seconds

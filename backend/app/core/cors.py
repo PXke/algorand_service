@@ -1,3 +1,5 @@
+"""CORS: per-request Origin reflection, not a static allow-list header."""
+
 from __future__ import annotations
 
 from robyn import Request, Response, Robyn
@@ -33,12 +35,13 @@ _ALLOW_METHODS = "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS"
 
 
 def register_cors(app: Robyn) -> None:
+    """Install before/after-request hooks that enforce and reflect the configured CORS origins."""
     origins = settings.cors_origins
     if not origins:
         return
 
     @app.before_request()
-    def cors_middleware(request):
+    def cors_middleware(request: Request) -> Request | Response:
         origin = request.headers.get("Origin")
 
         if origin and not _origin_allowed(origin, origins):

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 # Dedicated-evaluator thread pinning. Must be set BEFORE torch is imported, so
@@ -33,14 +34,14 @@ _CPU_ENV = {
 
 
 def configure_cpu_threads() -> dict[str, str]:
-    """Pin OpenMP/KMP threads for cache-friendly CPU inference/training. Returns
-    the applied env for logging. No-op effect if torch is already imported."""
+    """Pin OpenMP/KMP threads for cache-friendly CPU inference/training. Returns the applied env for logging. No-op effect if torch is already imported."""
     os.environ.update(_CPU_ENV)
     return dict(_CPU_ENV)
 
 
 @dataclass
 class TrainConfig:
+    """Hyperparameters and output path for a training run."""
     model_name: str = "answerdotai/ModernBERT-base"
     lr: float = 2e-5
     epochs: int = 3
@@ -49,7 +50,7 @@ class TrainConfig:
     out_path: str = "data/models/gatekeeper_mtth.pt"
 
 
-def _maybe_ipex(model, optimizer, dtype):
+def _maybe_ipex(model: Any, optimizer: Any, dtype: Any) -> tuple[Any, Any, bool]:  # noqa: ANN401 -- torch model/optimizer/dtype, lazily imported to keep this module torch-free by default
     """Apply ipex.optimize when available; otherwise return inputs unchanged."""
     try:
         import intel_extension_for_pytorch as ipex
@@ -59,11 +60,8 @@ def _maybe_ipex(model, optimizer, dtype):
     return model, optimizer, True
 
 
-def train_gatekeeper(train_loader: Any, cfg: TrainConfig | None = None) -> dict:
-    """Train the grader on a loader yielding batches with keys
-    ``input_ids``, ``attention_mask``, ``soft_label_factuality``,
-    ``soft_label_tone`` (soft targets in [0,1]). Saves a state_dict to
-    ``cfg.out_path``. Returns a summary dict."""
+def train_gatekeeper(train_loader: Any, cfg: TrainConfig | None = None) -> dict:  # noqa: ANN401 -- torch DataLoader-like iterable, lazily imported to keep this module torch-free by default
+    """Train the grader on a loader yielding batches with keys ``input_ids``, ``attention_mask``, ``soft_label_factuality``, ``soft_label_tone`` (soft targets in [0,1]). Saves a state_dict to ``cfg.out_path``. Returns a summary dict."""
     configure_cpu_threads()
     cfg = cfg or TrainConfig()
 
@@ -111,7 +109,7 @@ def train_gatekeeper(train_loader: Any, cfg: TrainConfig | None = None) -> dict:
             last_loss = float(loss.detach().float().item())
             n_batches += 1
 
-    os.makedirs(os.path.dirname(cfg.out_path) or ".", exist_ok=True)
+    Path(cfg.out_path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), cfg.out_path)
     return {
         "status": "trained",

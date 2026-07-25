@@ -1,3 +1,5 @@
+"""Verify a treasury payment and record a new service suggestion."""
+
 from __future__ import annotations
 
 import time
@@ -13,6 +15,7 @@ from app.modules.suggestions.stores.upvote_factory import UpvoteStore, get_upvot
 
 
 class SuggestionService:
+    """Verify a treasury payment and record a new service suggestion."""
     def __init__(
         self,
         chain_repository: ChainRepository,
@@ -22,6 +25,7 @@ class SuggestionService:
         treasury_address: str,
         min_microalgos: int,
     ) -> None:
+        """Wire chain repository, stores, and the treasury-payment requirements for verification."""
         self._chain = chain_repository
         self._store = store or get_suggestion_store()
         self._upvotes = upvote_store or get_upvote_store()
@@ -30,6 +34,7 @@ class SuggestionService:
 
     @property
     def store(self) -> SuggestionStore:
+        """The underlying suggestion store."""
         return self._store
 
     def create_suggestion(
@@ -37,6 +42,7 @@ class SuggestionService:
         wallet_address: str,
         payload: CreateSuggestionRequest,
     ) -> SuggestionResponse:
+        """Verify the treasury payment and record a new suggestion."""
         if not self._treasury_address:
             raise SuggestionError(
                 "treasury_not_configured",
@@ -77,6 +83,7 @@ class SuggestionService:
         return self._to_response(stored)
 
     def list_open_suggestions(self) -> list[SuggestionResponse]:
+        """List open suggestions with their current upvote counts."""
         return [self._to_response(item) for item in self._store.list_open()]
 
     def _to_response(self, item: StoredSuggestion) -> SuggestionResponse:

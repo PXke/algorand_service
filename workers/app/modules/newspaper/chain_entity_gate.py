@@ -94,7 +94,7 @@ def _lookup_status(kind: str, value: str) -> str:
     """
     from app.modules.ai.chain_tools import _algod_get, _mainnet_idx_get, _testnet_idx_get
 
-    def _classify(data: Any) -> str:
+    def _classify(data: dict[str, Any]) -> str:
         if not isinstance(data, dict) or data.get("error"):
             return "unknown"
         if data.get("_status") == 404:
@@ -146,8 +146,10 @@ def _entity_status(
 
 def find_chain_entities(body: str) -> list[tuple[str, str]]:
     """Unique (kind, value) entities cited in the body, in first-seen order.
+
     Kinds: 'address', 'txid', 'asset'. Explorer-link ids are included under
-    their entity kind."""
+    their entity kind.
+    """
     seen: set[tuple[str, str]] = set()
     ordered: list[tuple[str, str]] = []
 
@@ -177,10 +179,7 @@ def unverifiable_chain_entities(
     extra_texts: tuple[str, ...] | list[str] = (),
     checked: dict[tuple[str, str], str] | None = None,
 ) -> list[str]:
-    """Revision-loop feedback: one concrete message per fabrication-suspect
-    on-chain citation, so the writer can fix or drop it instead of the final
-    gate silently delinking. Pass a shared ``checked`` dict across passes to
-    reuse network results."""
+    """Revision-loop feedback: one concrete message per fabrication-suspect on-chain citation, so the writer can fix or drop it instead of the final gate silently delinking. Pass a shared ``checked`` dict across passes to reuse network results."""
     if not body:
         return []
     checked = checked if checked is not None else {}
@@ -218,8 +217,7 @@ def unverifiable_chain_entities(
 
 
 def _protected_spans(body: str) -> list[tuple[int, int]]:
-    """Regions where we must not inject links: existing markdown links (text
-    and url) and inline code spans."""
+    """Regions where we must not inject links: existing markdown links (text and url) and inline code spans."""
     spans = [m.span() for m in _MD_LINK_RE.finditer(body)]
     spans.extend(m.span() for m in _CODE_SPAN_RE.finditer(body))
     return spans
@@ -244,11 +242,7 @@ def link_and_verify_chain_entities(
     extra_texts: tuple[str, ...] | list[str] = (),
     checked: dict[tuple[str, str], str] | None = None,
 ) -> dict[str, Any]:
-    """Final compose gate. Auto-links the first occurrence of each verified
-    entity to an explorer, delinks explorer urls that point at provably
-    nonexistent entities, and records the audit trail on the payload
-    (``_chain_entities_linked`` / ``_chain_entities_unverified``). Never
-    touches prose."""
+    """Final compose gate. Auto-links the first occurrence of each verified entity to an explorer, delinks explorer urls that point at provably nonexistent entities, and records the audit trail on the payload (``_chain_entities_linked`` / ``_chain_entities_unverified``). Never touches prose."""
     from app.core.config import CHAIN_ENTITY_GATE_ENABLED
 
     if not CHAIN_ENTITY_GATE_ENABLED:

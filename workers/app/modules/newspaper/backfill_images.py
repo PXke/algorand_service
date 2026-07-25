@@ -16,13 +16,18 @@ import logging
 import sys
 from uuid import UUID
 
-from app.modules.newspaper.article_store import get_article, list_feed_articles, update_article_image
+from app.modules.newspaper.article_store import (
+    get_article,
+    list_feed_articles,
+    update_article_image,
+)
 from app.modules.newspaper.source_image import resolve_article_images
 
 logger = logging.getLogger(__name__)
 
 
 def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
+    """Resolve and write a source image for already-published articles missing one."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
 
@@ -31,9 +36,7 @@ def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
     for row in list_feed_articles(limit=limit):
         scanned += 1
         aid = str(row.article_id)
-        meta = session.execute(
-            ArticleStmts.GET_IMAGE_META, (UUID(aid),)
-        ).one()
+        meta = session.execute(ArticleStmts.GET_IMAGE_META, (UUID(aid),)).one()
         if meta is None:
             continue
         if (meta.image_url or "").strip():
@@ -74,8 +77,7 @@ def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
 
 
 def resync_feed_images(*, limit: int = 500, dry_run: bool = False) -> dict:
-    """Copy each article's image_url from the detail row into the feed projection
-    (idempotent). Heals rows whose feed image got out of sync with the detail."""
+    """Copy each article's image_url from the detail row into the feed projection (idempotent). Heals rows whose feed image got out of sync with the detail."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
 
@@ -97,8 +99,7 @@ def resync_feed_images(*, limit: int = 500, dry_run: bool = False) -> dict:
 
 
 def cleanup_phantoms(*, dry_run: bool = False) -> dict:
-    """Delete malformed feed rows (null service_id/title) left by an earlier
-    partial upsert, so they stop counting against the feed page size."""
+    """Delete malformed feed rows (null service_id/title) left by an earlier partial upsert, so they stop counting against the feed page size."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import FeedStmts
 

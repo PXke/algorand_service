@@ -1,13 +1,17 @@
+"""Environment-driven configuration for the workers service."""
+
 from __future__ import annotations
 
 import os
 
 
 def env_str(name: str, default: str) -> str:
+    """Read a string environment variable, falling back to `default` when unset."""
     return os.getenv(name, default)
 
 
 def env_int(name: str, default: int) -> int:
+    """Read an integer environment variable, falling back to `default` when unset/blank."""
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
@@ -15,6 +19,7 @@ def env_int(name: str, default: int) -> int:
 
 
 def env_bool(name: str, default: bool) -> bool:
+    """Read a boolean environment variable, falling back to `default` when unset/blank."""
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
@@ -22,6 +27,7 @@ def env_bool(name: str, default: bool) -> bool:
 
 
 def env_float(name: str, default: float) -> float:
+    """Read a float environment variable, falling back to `default` when unset/blank."""
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
@@ -40,14 +46,14 @@ ALGOD_URL = env_str("ALGOD_URL", "https://testnet-api.algonode.cloud").rstrip("/
 ALGOD_TOKEN = env_str("ALGOD_TOKEN", "")
 # Public AlgoNode testnet INDEXER (history-capable, unlike algod) — backs the
 # writer's testnet_lookup tool for verifying a project's Testnet txns/app deploys.
-TESTNET_INDEXER_URL = env_str(
-    "TESTNET_INDEXER_URL", "https://testnet-idx.algonode.cloud"
-).rstrip("/")
+TESTNET_INDEXER_URL = env_str("TESTNET_INDEXER_URL", "https://testnet-idx.algonode.cloud").rstrip(
+    "/"
+)
 # Public AlgoNode MAINNET indexer — read-only, name-search capable (unlike
 # algod, which only looks up assets by numeric id). Backs lookup_asset_by_name.
-MAINNET_INDEXER_URL = env_str(
-    "MAINNET_INDEXER_URL", "https://mainnet-idx.algonode.cloud"
-).rstrip("/")
+MAINNET_INDEXER_URL = env_str("MAINNET_INDEXER_URL", "https://mainnet-idx.algonode.cloud").rstrip(
+    "/"
+)
 NEWS_FEED_BUCKET = env_str("NEWS_FEED_BUCKET", "main")
 NEWS_MAX_ARTICLES_PER_DAY = min(max(1, env_int("NEWS_MAX_ARTICLES_PER_DAY", 3)), 7)
 NEWS_MAX_BREAKING_PER_DAY = env_int("NEWS_MAX_BREAKING_PER_DAY", 2)
@@ -80,8 +86,8 @@ CRAWLER_USER_AGENT = env_str(
 )
 # Per-URL recrawl cooldown: a given link is fetched at most once per this window
 # (skipped at enqueue AND before fetch). Stops the frontier re-crawling the same
-# page every time a link is rediscovered. 6 hours.
-CRAWL_URL_RECRAWL_COOLDOWN_SECONDS = env_int("CRAWL_URL_RECRAWL_COOLDOWN_SECONDS", 21600)
+# page every time a link is rediscovered. 30 days.
+CRAWL_URL_RECRAWL_COOLDOWN_SECONDS = env_int("CRAWL_URL_RECRAWL_COOLDOWN_SECONDS", 30 * 86400)
 
 WRITER_ENRICHMENT_ENABLED = env_bool("WRITER_ENRICHMENT_ENABLED", True)
 WRITER_ENRICHMENT_PROBE_DOMAIN = env_bool("WRITER_ENRICHMENT_PROBE_DOMAIN", True)
@@ -404,14 +410,20 @@ MISTRAL_BACKOFF_MAX_SECONDS = env_float("MISTRAL_BACKOFF_MAX_SECONDS", 300.0)
 
 
 def mistral_configured() -> bool:
+    """True when Mistral is enabled and an API key is set."""
     return MISTRAL_ENABLED and bool(MISTRAL_API_KEY.strip())
 
 
 URL_QUEUE_ENABLED = env_bool("URL_QUEUE_ENABLED", True)
 URL_QUEUE_DRAIN_SECONDS = env_int("URL_QUEUE_DRAIN_SECONDS", 60)
-# How many URLs the drain crawls per tick. One per tick (paced by the beat
-# interval) keeps requests gentle — ~1 page / 10s with URL_QUEUE_DRAIN_SECONDS=10.
-URL_QUEUE_DRAIN_BATCH = env_int("URL_QUEUE_DRAIN_BATCH", 1)
+# How many URLs the drain crawls per tick. Paced by the beat interval — 10 per
+# tick with URL_QUEUE_DRAIN_SECONDS=10 clears a large backlog faster than the
+# old 1/tick default while still spacing requests out over the beat window.
+URL_QUEUE_DRAIN_BATCH = env_int("URL_QUEUE_DRAIN_BATCH", 10)
+# How many top pending rows dequeue_url() picks randomly among, instead of
+# always the single front-of-queue row — see dequeue_url() for why. 1 restores
+# strict priority/enqueued_at order.
+URL_QUEUE_RANDOM_PICK_POOL = env_int("URL_QUEUE_RANDOM_PICK_POOL", 100)
 # When the writer's fetch_url tool successfully reads a page during compose,
 # enqueue it for a full harvest (crawled_pages + Typesense) — high-signal URLs
 # the model explicitly chose to investigate.
@@ -440,12 +452,12 @@ COMPOSE_DAILY_TTL = env_int("COMPOSE_DAILY_TTL", 86400)
 # daily count cap above bounds volume; this bounds *clustering* — it stops the
 # same project being published twice in a short window (the "two Pera Wallet
 # articles in 24h" case) even when both are under the daily count. 0 disables.
-COMPOSE_DOMAIN_COOLDOWN_HOURS = env_int("COMPOSE_DOMAIN_COOLDOWN_HOURS", 168)
+COMPOSE_DOMAIN_COOLDOWN_HOURS = env_int("COMPOSE_DOMAIN_COOLDOWN_HOURS", 720)
 # Same spacing, keyed on the canonical service_id instead of the registrable
 # domain — a project spread across domains that don't share an eTLD+1 (e.g. a
 # Medium blog + its own site) would otherwise dodge the cooldown above by
 # publishing from its OTHER domain. 0 disables.
-COMPOSE_SERVICE_COOLDOWN_HOURS = env_int("COMPOSE_SERVICE_COOLDOWN_HOURS", 168)
+COMPOSE_SERVICE_COOLDOWN_HOURS = env_int("COMPOSE_SERVICE_COOLDOWN_HOURS", 720)
 
 # After an admin rejects a review, suppress re-enqueueing that exact URL for
 # this long (seconds). Stops a rejected page re-entering the candidate queue the
@@ -638,6 +650,23 @@ FRONTIER_PREVIEW_MIN_SCORE = env_float("FRONTIER_PREVIEW_MIN_SCORE", 1.0)
 # whose CRAWLED page text scores below this is clearly off-topic. Used only when
 # that task is invoked with auto_reject=True (validate the scores first).
 FRONTIER_CONTENT_REJECT_SCORE = env_float("FRONTIER_CONTENT_REJECT_SCORE", 0.2)
+# classify_pending_domains samples up to this many same-domain pages (landing
+# page + same-domain links found on it) and takes the BEST-scoring one as the
+# domain's relevance, instead of betting the whole verdict on the landing page
+# alone. A chain-silent service's homepage can score 0 while its product/docs
+# page scores well (the exact HesabPay/Lofty problem KNOWN_DOMAINS works
+# around by hand — this generalizes it without curating every domain by name).
+# 1 restores the old landing-page-only behavior.
+FRONTIER_CLASSIFY_SAMPLE_PAGES = env_int("FRONTIER_CLASSIFY_SAMPLE_PAGES", 4)
+# Before permanently rejecting a domain the cheap FRONTIER_CLASSIFY_SAMPLE_PAGES
+# pass couldn't clear, escalate to a thorough one-time crawl instead of taking
+# the shallow sample's word for it (deep_classify_domain task) — slow, but
+# only once per domain, and only for the ones the cheap pass couldn't resolve.
+# Stops at the first page that clears relevance; only a genuinely off-topic
+# domain pays the full FRONTIER_DEEP_CLASSIFY_MAX_PAGES cost. False restores
+# the old behavior of trusting the shallow sample's reject outright.
+FRONTIER_DEEP_CLASSIFY_ENABLED = env_bool("FRONTIER_DEEP_CLASSIFY_ENABLED", True)
+FRONTIER_DEEP_CLASSIFY_MAX_PAGES = env_int("FRONTIER_DEEP_CLASSIFY_MAX_PAGES", 200)
 # CONTENT_UPDATE-specific compose-time quality floor: stricter backstop than
 # FRONTIER_CONTENT_REJECT_SCORE (which stays lenient for first-crawl discovery)
 # in case relevance drifts between ingest-time scoring and compose time.

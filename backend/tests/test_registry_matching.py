@@ -1,3 +1,5 @@
+"""Matching an indexed transaction to a registered service."""
+
 from __future__ import annotations
 
 from app.modules.registry.matching import match_services_for_transaction
@@ -5,6 +7,7 @@ from app.modules.registry.models import ChainTransaction, ServiceEntry
 
 
 def test_match_address_on_receiver() -> None:
+    """Matches a registered service by its address appearing as the tx receiver."""
     treasury = "T" * 58
     wallet = "W" * 58
     tx = ChainTransaction(
@@ -29,6 +32,7 @@ def test_match_address_on_receiver() -> None:
 
 
 def test_no_match_when_disabled() -> None:
+    """Excludes a disabled registry entry even when its address would otherwise match."""
     tx = ChainTransaction(txid="X" * 52, round=1, sender="W" * 58, txn_type="pay")
     registry = [
         ServiceEntry(

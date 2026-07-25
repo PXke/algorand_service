@@ -28,11 +28,14 @@ output is visible instead of only guessed at by watching prod.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 from scripts.eval_compose_fixtures import FIXTURES, ComposeFixture
+
+logger = logging.getLogger(__name__)
 
 
 def _run_one(fixture: ComposeFixture) -> str:
@@ -88,6 +91,7 @@ def _run_one(fixture: ComposeFixture) -> str:
 
 
 def main() -> None:
+    """Parse CLI args, run the fixtures, and write one Markdown report per fixture."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -107,7 +111,7 @@ def main() -> None:
     from app.modules.ai.mistral_compose import PROMPT_VERSION
 
     if not mistral_configured():
-        print("MISTRAL_ENABLED / MISTRAL_API_KEY not configured — nothing to eval.")
+        logger.error("MISTRAL_ENABLED / MISTRAL_API_KEY not configured — nothing to eval.")
         sys.exit(1)
 
     if args.fixtures == "all":
@@ -117,7 +121,7 @@ def main() -> None:
         selected = [f for f in FIXTURES if f.name in wanted]
         missing = wanted - {f.name for f in selected}
         if missing:
-            print(f"unknown fixture(s): {sorted(missing)}")
+            logger.error("unknown fixture(s): %s", sorted(missing))
             sys.exit(1)
 
     stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -128,16 +132,17 @@ def main() -> None:
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"PROMPT_VERSION={PROMPT_VERSION}")
-    print(f"writing {len(selected)} fixture(s) to {out_dir}")
+    logger.info("PROMPT_VERSION=%s", PROMPT_VERSION)
+    logger.info("writing %d fixture(s) to %s", len(selected), out_dir)
 
     for fixture in selected:
-        print(f"  composing {fixture.name} ...")
+        logger.info("  composing %s ...", fixture.name)
         report = _run_one(fixture)
         (out_dir / f"{fixture.name}.md").write_text(report)
 
-    print(f"done. diff two runs with: diff -ru <old_run_dir> {out_dir}")
+    logger.info("done. diff two runs with: diff -ru <old_run_dir> %s", out_dir)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

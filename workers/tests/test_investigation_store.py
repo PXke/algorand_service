@@ -1,6 +1,10 @@
+"""Percent-suffixing known numeric fields for gatekeeper grounding."""
+
 from __future__ import annotations
 
 import json
+
+import pytest
 
 from app.modules.newspaper.investigation_store import (
     _stringify_percent_fields,
@@ -9,6 +13,7 @@ from app.modules.newspaper.investigation_store import (
 
 
 def test_stringify_percent_fields_adds_percent_suffix() -> None:
+    """Suffixes a known percent field with '%' while leaving other fields untouched."""
     result = {"round": 123, "online_stake_algo": 1.0, "online_pct": 92.35}
     out = _stringify_percent_fields(result)
     assert out["online_pct"] == "92.35%"
@@ -17,6 +22,7 @@ def test_stringify_percent_fields_adds_percent_suffix() -> None:
 
 
 def test_stringify_percent_fields_covers_known_keys() -> None:
+    """Suffixes every known percent-field key but leaves an unlisted lookalike key untouched."""
     result = {
         "change_24h_pct": 1.37,
         "week_change_pct": -3.5,
@@ -31,27 +37,29 @@ def test_stringify_percent_fields_covers_known_keys() -> None:
 
 
 def test_stringify_percent_fields_leaves_non_dict_untouched() -> None:
+    """Returns non-dict input (string, None) unchanged instead of raising."""
     assert _stringify_percent_fields("not a dict") == "not a dict"
     assert _stringify_percent_fields(None) is None
 
 
 def test_stringify_percent_fields_ignores_non_numeric_percent_value() -> None:
+    """Leaves a None percent-field value as None instead of suffixing it."""
     result = {"online_pct": None}
     out = _stringify_percent_fields(result)
     assert out["online_pct"] is None
 
 
-def test_store_investigation_findings_persists_percent_suffixed_result(monkeypatch) -> None:
-    """The stored result_json must carry the '%' suffix — this is what lets
-    the gatekeeper's numeric-entailment check later recognize a genuine
-    server-computed percentage as a grounding anchor."""
+def test_store_investigation_findings_persists_percent_suffixed_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stored result_json must carry the '%' suffix — this is what lets the gatekeeper's numeric-entailment check later recognize a genuine server-computed percentage as a grounding anchor."""
     captured: list[tuple] = []
 
     class _FakeSession:
-        def prepare(self, cql):
+        def prepare(self, cql: str) -> str:
             return cql
 
-        def execute(self, stmt, params):
+        def execute(self, _stmt: str, params: tuple) -> None:
             captured.append(params)
 
     import app.core.cassandra as c

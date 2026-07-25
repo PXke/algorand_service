@@ -1,3 +1,5 @@
+"""Build the message a wallet signs to upvote a suggestion."""
+
 from __future__ import annotations
 
 UPVOTE_MESSAGE_VERSION = "v1"

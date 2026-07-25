@@ -1,3 +1,5 @@
+"""Publish kind/tier/topic enums and the policy deciding what to do with a scrape diff."""
+
 from __future__ import annotations
 
 import re
@@ -10,6 +12,7 @@ from app.modules.newspaper.article_store import count_articles_published_on_utc_
 
 
 class PublishKind(StrEnum):
+    """What kind of event triggered this publish candidate."""
     WEEKLY_DIGEST = "weekly_digest"
     SERVICE_DISCOVERY = "service_discovery"
     CONTENT_UPDATE = "content_update"
@@ -17,11 +20,13 @@ class PublishKind(StrEnum):
 
 
 class PublishTier(StrEnum):
+    """Publish urgency tier (standard vs. breaking)."""
     STANDARD = "standard"
     BREAKING = "breaking"
 
 
 class PublishTopic(StrEnum):
+    """Reader-facing topic classification for tags and match keys."""
     SCAM_ALERT = "scam_alert"
     NETWORK_INCIDENT = "network_incident"
     SDK_RELEASE = "sdk_release"
@@ -155,6 +160,7 @@ _PRICING_PHRASES = (
 
 @dataclass(frozen=True)
 class PublishDecision:
+    """Whether a publish kind is currently allowed, and why."""
     kind: PublishKind
     allowed: bool
     reason: str
@@ -162,6 +168,7 @@ class PublishDecision:
 
 @dataclass(frozen=True)
 class PublishIntent:
+    """The kind/topic/tier a queued row should publish as."""
     kind: PublishKind
     topic: PublishTopic
     tier: PublishTier
@@ -172,6 +179,7 @@ class PublishIntent:
 
 
 def utc_day_start_epoch(when: datetime | None = None) -> int:
+    """Return the epoch seconds for UTC midnight on the given (or current) day."""
     moment = when or datetime.now(tz=UTC)
     start = datetime(moment.year, moment.month, moment.day, tzinfo=UTC)
     return int(start.timestamp())
@@ -183,15 +191,12 @@ def remaining_daily_publish_slots(*, when: datetime | None = None) -> int:
 
 
 def remaining_standard_publish_slots(*, when: datetime | None = None) -> int:
-    """Redundancy pruning (2026-07-18, deferred from the gate consolidation):
-    the daily cap used to have two parallel counting implementations — this
-    advisory read counted Cassandra feed rows while publish_daily_guard's
-    atomic reserve counted Redis reservations, and the two drift intra-day
-    (in-flight reservations are invisible to the feed count; backlog
-    releases used to insert feed rows without reserving). One counting
-    authority now: the guard's reservation-aware Redis counter, itself
-    initialized from the feed count once per day. The Cassandra counters
-    below survive solely as that init source."""
+    """Redundancy pruning (2026-07-18, deferred from the gate consolidation): the daily cap used to have two parallel counting implementations — this advisory read counted Cassandra feed rows while publish_daily_guard's atomic reserve counted Redis reservations, and the two drift intra-day (in-flight reservations are invisible to the feed count; backlog releases used to insert feed rows without reserving).
+
+    One counting authority now: the guard's reservation-aware Redis counter,
+    itself initialized from the feed count once per day. The Cassandra
+    counters below survive solely as that init source.
+    """
     from app.modules.newspaper.publish_daily_guard import published_count_today
 
     published = published_count_today(tier=PublishTier.STANDARD, when=when)
@@ -199,6 +204,7 @@ def remaining_standard_publish_slots(*, when: datetime | None = None) -> int:
 
 
 def remaining_breaking_publish_slots(*, when: datetime | None = None) -> int:
+    """Remaining breaking-tier publish slots left for the UTC day."""
     from app.modules.newspaper.publish_daily_guard import published_count_today
 
     published = published_count_today(tier=PublishTier.BREAKING, when=when)
@@ -206,13 +212,14 @@ def remaining_breaking_publish_slots(*, when: datetime | None = None) -> int:
 
 
 def count_standard_articles_on_utc_day(*, day_start_epoch: int, limit: int = 500) -> int:
-
+    """Count articles published that UTC day excluding breaking-tagged ones."""
     total = count_articles_published_on_utc_day(day_start_epoch=day_start_epoch, limit=limit)
     breaking = count_breaking_articles_on_utc_day(day_start_epoch=day_start_epoch, limit=limit)
     return max(0, total - breaking)
 
 
 def count_breaking_articles_on_utc_day(*, day_start_epoch: int, limit: int = 500) -> int:
+    """Count articles tagged "breaking" that were published on the given UTC day."""
     from app.modules.newspaper.article_store import count_feed_articles_with_tag_on_day
 
     return count_feed_articles_with_tag_on_day(
@@ -223,15 +230,16 @@ def count_breaking_articles_on_utc_day(*, day_start_epoch: int, limit: int = 500
 
 
 def priority_for_topic(topic: PublishTopic) -> int:
+    """Base queue priority for a topic, falling back to the generic weight."""
     return TOPIC_PRIORITY.get(topic, TOPIC_PRIORITY[PublishTopic.GENERIC])
 
 
 def classify_scrape_publish(
     *,
-    service_id: str,
-    page_text: str,
+    service_id: str,  # noqa: ARG001 -- name must match the real callee's keyword arg
+    page_text: str,  # noqa: ARG001 -- name must match the real callee's keyword arg
     is_first_snapshot: bool,
-    diff: str | None,
+    diff: str | None,  # noqa: ARG001 -- name must match the real callee's keyword arg
 ) -> PublishKind:
     """Choose discovery vs content-update for a crawl/scrape publish.
 
@@ -254,7 +262,7 @@ def classify_publish_topic(
     page_text: str,
     diff: str | None,
     publish_kind: PublishKind,
-    source_kind: str | None = None,
+    source_kind: str | None = None,  # noqa: ARG001 -- name must match the real callee's keyword arg
     chain_triggered: bool = False,
 ) -> PublishTopic:
     """Score editorial topic for queue ordering (scam, SDK, community, pricing, …)."""
@@ -267,13 +275,13 @@ def classify_publish_topic(
         lower, _SCAM_CONTEXT_PHRASES, _SCAM_ALARM_WORDS
     ):
         return PublishTopic.SCAM_ALERT
-    if _contains_any(lower, _BREAKING_PHRASES) and _contains_any(
-        lower, ("down", "outage", "halt", "lost", "stolen", "scam", "exploit")
-    ) and _contains_any(lower, ("chain", "network", "mainnet", "consensus", "outage", "halt")):
-        return PublishTopic.NETWORK_INCIDENT
-    if _contains_any(lower, _SDK_PHRASES) or re.search(
-        r"\bv\d+\.\d+(\.\d+)?\b", lower
+    if (
+        _contains_any(lower, _BREAKING_PHRASES)
+        and _contains_any(lower, ("down", "outage", "halt", "lost", "stolen", "scam", "exploit"))
+        and _contains_any(lower, ("chain", "network", "mainnet", "consensus", "outage", "halt"))
     ):
+        return PublishTopic.NETWORK_INCIDENT
+    if _contains_any(lower, _SDK_PHRASES) or re.search(r"\bv\d+\.\d+(\.\d+)?\b", lower):
         return PublishTopic.SDK_RELEASE
     if _contains_any(lower, _COMMUNITY_PHRASES) or re.search(
         r"\b(in|within)\s+\d+\s+days?\b", lower
@@ -308,6 +316,7 @@ def build_publish_intent(
     classifier_publish: bool | None = None,
     classifier_confidence: float = 0.0,
 ) -> PublishIntent:
+    """Build the full kind/topic/tier/priority decision for a candidate publish."""
     from app.modules.newspaper.event_lifecycle import detect_event_context
     from app.modules.newspaper.publish_score import compute_priority
 
@@ -373,12 +382,7 @@ def build_publish_intent(
 
 
 def classify_publish_tier(*, topic: PublishTopic, page_text: str) -> PublishTier:
-    """Breaking tier: scams, network incidents — immediate path, separate daily
-    cap. Disabled by default (BREAKING_TIER_ENABLED, 2026-07-17): the keyword
-    scan below false-positived on ordinary positive infrastructure claims (see
-    config.py) — the topic-classification short-circuits above it stay live
-    (SCAM_ALERT/NETWORK_INCIDENT still force human review), only the "skip
-    the queue, prepend Breaking:" escalation is off."""
+    """Breaking tier: scams, network incidents — immediate path, separate daily cap. Disabled by default (BREAKING_TIER_ENABLED, 2026-07-17): the keyword scan below false-positived on ordinary positive infrastructure claims (see config.py) — the topic-classification short-circuits above it stay live (SCAM_ALERT/NETWORK_INCIDENT still force human review), only the "skip the queue, prepend Breaking:" escalation is off."""
     if not config.BREAKING_TIER_ENABLED:
         return PublishTier.STANDARD
     if topic in (PublishTopic.SCAM_ALERT, PublishTopic.NETWORK_INCIDENT):
@@ -394,6 +398,7 @@ def classify_publish_tier(*, topic: PublishTopic, page_text: str) -> PublishTier
 
 
 def is_breaking_topic(topic: PublishTopic) -> bool:
+    """True for topics that always force human review (scam alert / network incident)."""
     return topic in (PublishTopic.SCAM_ALERT, PublishTopic.NETWORK_INCIDENT)
 
 
@@ -404,6 +409,7 @@ def build_dedupe_key(
     content_hash: str,
     tier: str = "standard",
 ) -> str:
+    """Build the dedupe key used to suppress repeat queue entries for the same content."""
     short_hash = content_hash[:16] if content_hash else "none"
     return f"{service_id}:{topic}:{tier}:{short_hash}"
 
@@ -449,6 +455,7 @@ def _diff_mentions_pricing(diff: str | None) -> bool:
 
 
 def is_significant_diff(diff: str | None, *, min_lines: int | None = None) -> bool:
+    """True when the diff adds at least the configured (or given) number of lines."""
     if not diff or not diff.strip():
         return False
     threshold = min_lines if min_lines is not None else config.NEWS_MIN_DIFF_LINES
@@ -460,14 +467,12 @@ def is_significant_diff(diff: str | None, *, min_lines: int | None = None) -> bo
 
 
 def diff_is_reformat(diff: str | None) -> bool:
-    """True when the diff's added text is mostly the SAME WORDS as its removed
-    text — a page redesign/reflow, not new information. Line counting can't
-    see this (a reformat trivially clears NEWS_MIN_DIFF_LINES), so compare the
-    two sides' token sets: high overlap = reshuffled content, no story.
+    """True when the diff's added text is mostly the SAME WORDS as its removed text — a page redesign/reflow, not new information. Line counting can't see this (a reformat trivially clears NEWS_MIN_DIFF_LINES), so compare the two sides' token sets: high overlap = reshuffled content, no story.
 
     Conservative by construction: pure additions (nothing removed) are never a
     reformat, and a small removed side (< 20 distinct tokens) is too little
-    evidence to veto on."""
+    evidence to veto on.
+    """
     threshold = config.NEWS_REFORMAT_SIMILARITY
     if threshold <= 0 or not diff:
         return False
@@ -588,17 +593,19 @@ def evaluate_breaking_publish(
 def evaluate_publish(
     kind: PublishKind,
     *,
-    service_id: str = "",
+    _service_id: str = "",
     diff: str | None = None,
     when: datetime | None = None,
     tier: PublishTier = PublishTier.STANDARD,
 ) -> PublishDecision:
+    """Dispatch to the standard or breaking publish evaluation for this tier."""
     if tier == PublishTier.BREAKING:
         return evaluate_breaking_publish(kind, diff=diff, when=when)
     return evaluate_standard_publish(kind, diff=diff, when=when)
 
 
 def trim_text_to_chars(text: str, max_chars: int) -> str:
+    """Truncate text to max_chars, preferring a paragraph/sentence boundary and appending an ellipsis."""
     text = text.strip()
     if len(text) <= max_chars:
         return text
@@ -613,5 +620,4 @@ def trim_text_to_chars(text: str, max_chars: int) -> str:
 def strip_markdown_for_length_estimate(body: str) -> str:
     """Rough plain length check (markdown kept for storage)."""
     plain = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", body)
-    plain = re.sub(r"[#*_`]", "", plain)
-    return plain
+    return re.sub(r"[#*_`]", "", plain)

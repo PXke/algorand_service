@@ -1,6 +1,4 @@
-"""Find a compose session's transcript by matching its source_url, bypassing
-the admin UI's LIST_COMPOSE_SESSIONS_SUMMARY (capped at the 20 most recent —
-useless once the article in question has scrolled off that window).
+"""Find a compose session's transcript by matching its source_url, bypassing the admin UI's LIST_COMPOSE_SESSIONS_SUMMARY (capped at the 20 most recent — useless once the article in question has scrolled off that window).
 
 Run on the prod host, in the workers env (same Cassandra creds deploy.sh uses):
 
@@ -18,6 +16,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 _BUCKET = "all"
 
@@ -33,10 +34,12 @@ _SELECT_ALL = (
 
 
 def main() -> None:
+    """Parse CLI args, scan compose_sessions for source_url matches, and print each transcript."""
     parser = argparse.ArgumentParser()
     parser.add_argument("match", help="substring to match against source_url (case-insensitive)")
     parser.add_argument(
-        "--grep", default="",
+        "--grep",
+        default="",
         help="comma-separated keywords; only print tool messages containing one of these",
     )
     parser.add_argument("--max-matches", type=int, default=5)
@@ -53,14 +56,19 @@ def main() -> None:
         if args.match.lower() not in (row.source_url or "").lower():
             continue
         found += 1
-        print("=" * 80)
-        print(
-            f"session_id={row.session_id} created_at={row.created_at} "
-            f"service_id={row.service_id}"
+        logger.info("=" * 80)
+        logger.info(
+            "session_id=%s created_at=%s service_id=%s",
+            row.session_id,
+            row.created_at,
+            row.service_id,
         )
-        print(
-            f"source_url={row.source_url} status={row.status} "
-            f"rounds={row.rounds} tool_calls={row.tool_calls}"
+        logger.info(
+            "source_url=%s status=%s rounds=%s tool_calls=%s",
+            row.source_url,
+            row.status,
+            row.rounds,
+            row.tool_calls,
         )
         try:
             messages = json.loads(row.messages) if row.messages else []
@@ -75,17 +83,18 @@ def main() -> None:
             content = msg.get("content", "")
             if isinstance(content, list):
                 content = json.dumps(content)
-            print(f"--- [{role}{' ' + name if name else ''}] ---")
-            print((content or "")[:2000])
+            logger.info("--- [%s%s] ---", role, f" {name}" if name else "")
+            logger.info("%s", (content or "")[:2000])
         if not keywords:
-            print("--- final_output ---")
-            print((row.final_output or "")[:5000])
+            logger.info("--- final_output ---")
+            logger.info("%s", (row.final_output or "")[:5000])
         if found >= args.max_matches:
             break
 
     if not found:
-        print(f"No compose sessions found with source_url matching {args.match!r}")
+        logger.info("No compose sessions found with source_url matching %r", args.match)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

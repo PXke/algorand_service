@@ -1,3 +1,5 @@
+"""Cached list of official (trusted) channel ids for source-trust scoring."""
+
 from __future__ import annotations
 
 import time
@@ -7,11 +9,7 @@ _cache: dict[str, tuple[float, set[str]]] = {}
 
 
 def load_official_channel_ids(kind: str) -> set[str]:
-    """
-    Official channel/domain allowlist from Cassandra (admin-managed),
-    cached briefly. Returns empty set when the table is unavailable so
-    env-based allowlists keep working alone.
-    """
+    """Official channel/domain allowlist from Cassandra (admin-managed), cached briefly. Returns empty set when the table is unavailable so env-based allowlists keep working alone."""
     now = time.monotonic()
     cached = _cache.get(kind)
     if cached and now - cached[0] < _CACHE_TTL_SECONDS:
@@ -33,4 +31,5 @@ def load_official_channel_ids(kind: str) -> set[str]:
 
 
 def clear_official_channels_cache() -> None:
+    """Evict all cached official-channel allowlists."""
     _cache.clear()

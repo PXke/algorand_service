@@ -1,3 +1,5 @@
+"""Cassandra-backed pending classifier-review queue (the 1-slot admin review gate)."""
+
 from __future__ import annotations
 
 import json
@@ -15,6 +17,7 @@ def enqueue_classifier_review(
     storage_score: float,
     metadata: dict[str, str] | None = None,
 ) -> str:
+    """Insert a new pending classifier-review row and return its id."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ClassifierReviewStmts
 
@@ -66,34 +69,31 @@ def review_queue_full() -> bool:
     non-drain callers (admin recompose, editorial assignments), and the
     drain-level checks avoid burning a full Mistral compose on a row whose
     review outcome couldn't land anyway. Collapsing them to one site would
-    remove protection, not duplication."""
+    remove protection, not duplication.
+    """
     from app.core.config import MAX_PENDING_REVIEWS
 
     return count_pending_reviews() >= MAX_PENDING_REVIEWS
 
 
 def has_pending_review_for_url(url: str, *, scan_limit: int = 500) -> bool:
-    """True when a pending review already covers this URL (dedupe guard so a
-    fast-changing source doesn't pile up one held article per crawl cycle)."""
+    """True when a pending review already covers this URL (dedupe guard so a fast-changing source doesn't pile up one held article per crawl cycle)."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ClassifierReviewStmts
 
     session = get_cassandra_session()
-    rows = session.execute(
-        ClassifierReviewStmts.LIST_PENDING_URLS, ("pending", scan_limit)
-    )
+    rows = session.execute(ClassifierReviewStmts.LIST_PENDING_URLS, ("pending", scan_limit))
     normalized = url.strip().rstrip("/")
     return any((row.url or "").strip().rstrip("/") == normalized for row in rows)
 
 
 def list_pending_reviews(*, limit: int = 50) -> list[dict[str, Any]]:
+    """List pending classifier-review rows with their article detail joined in."""
     from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
     from app.core.statements import ClassifierReviewStmts
 
     session = get_cassandra_session()
-    pending = list(
-        session.execute(ClassifierReviewStmts.LIST_PENDING, ("pending", limit))
-    )
+    pending = list(session.execute(ClassifierReviewStmts.LIST_PENDING, ("pending", limit)))
     # Fan the per-row detail lookups out concurrently (aligned with `pending`).
     details = execute_parallel_with_args(
         ClassifierReviewStmts.GET_DETAIL, [(row.review_id,) for row in pending]

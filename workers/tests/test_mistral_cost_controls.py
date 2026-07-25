@@ -1,16 +1,18 @@
-"""Cost controls on the Mistral lanes: translations run on the Small tier, and
-stage-1 research rounds get a slimmer source clip than the single stage-2
-generation call (the research prompt is re-sent on every tool round)."""
+"""Cost controls on the Mistral lanes: translations run on the Small tier, and stage-1 research rounds get a slimmer source clip than the single stage-2 generation call (the research prompt is re-sent on every tool round)."""
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.modules.ai import mistral_compose as mc
+from app.modules.ai.mistral_client import MistralClient
 
 
-def test_translations_use_small_tier(monkeypatch):
+def test_translations_use_small_tier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Article translation requests the Small Mistral model, not the larger writer tier."""
     captured = {}
 
-    def _fake_get_client(*, model=None):
+    def _fake_get_client(*, model: str | None = None) -> SimpleNamespace:
         captured["model"] = model
         return SimpleNamespace(
             chat_json_object=lambda *_a, **_kw: {
@@ -34,16 +36,23 @@ def test_translations_use_small_tier(monkeypatch):
     assert out["title"] == "t"
 
 
-def test_stale_compose_loop_ignores_unknown_research_user_kwarg(monkeypatch):
+def test_stale_compose_loop_ignores_unknown_research_user_kwarg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Mid-deploy workers may lack ``research_user`` on the compose loop."""
 
-    def _legacy_loop(*, system, user, source_url, mistral, topic=""):
+    def _legacy_loop(
+        *,
+        system: str,  # noqa: ARG001 -- name must match the real callee's keyword arg
+        user: str,  # noqa: ARG001 -- name must match the real callee's keyword arg
+        source_url: str,  # noqa: ARG001 -- name must match the real callee's keyword arg
+        mistral: MistralClient,  # noqa: ARG001 -- name must match the real callee's keyword arg
+        topic: str = "",  # noqa: ARG001 -- name must match the real callee's keyword arg
+    ) -> mc.MistralArticleFields:
         return mc.MistralArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _legacy_loop)
-    monkeypatch.setattr(
-        "app.core.config.MISTRAL_RESEARCH_SOURCE_CHARS", 1000, raising=False
-    )
+    monkeypatch.setattr("app.core.config.MISTRAL_RESEARCH_SOURCE_CHARS", 1000, raising=False)
 
     fields = mc.compose_scrape_article_mistral(
         service_name="svc",
@@ -59,16 +68,14 @@ def test_stale_compose_loop_ignores_unknown_research_user_kwarg(monkeypatch):
     assert fields.title == "t"
 
 
-def test_research_rounds_get_slimmer_source_than_generation(monkeypatch):
-    """The scrape compose passes a research_user with a smaller source clip
-    into the shared writer loop; the full user (48k clip) is reserved for the
-    single stage-2 generation call."""
-    monkeypatch.setattr(
-        "app.core.config.MISTRAL_RESEARCH_SOURCE_CHARS", 1000, raising=False
-    )
+def test_research_rounds_get_slimmer_source_than_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scrape compose passes a research_user with a smaller source clip into the shared writer loop; the full user (48k clip) is reserved for the single stage-2 generation call."""
+    monkeypatch.setattr("app.core.config.MISTRAL_RESEARCH_SOURCE_CHARS", 1000, raising=False)
     captured = {}
 
-    def _fake_via_tools(**kwargs):
+    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
         captured.update(kwargs)
         return mc.MistralArticleFields(title="t", summary="s", body="b")
 
@@ -92,15 +99,12 @@ def test_research_rounds_get_slimmer_source_than_generation(monkeypatch):
     assert big_source[:500] in captured["user"]
 
 
-def test_small_source_reuses_full_prompt_for_research(monkeypatch):
-    """No pointless second prompt when the source already fits the research
-    clip — research_user must be the SAME object as user."""
-    monkeypatch.setattr(
-        "app.core.config.MISTRAL_RESEARCH_SOURCE_CHARS", 16_000, raising=False
-    )
+def test_small_source_reuses_full_prompt_for_research(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No pointless second prompt when the source already fits the research clip — research_user must be the SAME object as user."""
+    monkeypatch.setattr("app.core.config.MISTRAL_RESEARCH_SOURCE_CHARS", 16_000, raising=False)
     captured = {}
 
-    def _fake_via_tools(**kwargs):
+    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
         captured.update(kwargs)
         return mc.MistralArticleFields(title="t", summary="s", body="b")
 
@@ -119,12 +123,11 @@ def test_small_source_reuses_full_prompt_for_research(monkeypatch):
     assert captured["research_user"] is captured["user"]
 
 
-def test_first_coverage_forces_introduction_framing(monkeypatch):
-    """A diff-driven update on a never-published service must compose as an
-    introduction (FIRST COVERAGE MODE), not an evolution/what-changed story."""
+def test_first_coverage_forces_introduction_framing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A diff-driven update on a never-published service must compose as an introduction (FIRST COVERAGE MODE), not an evolution/what-changed story."""
     captured = {}
 
-    def _fake_via_tools(**kwargs):
+    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
         captured.update(kwargs)
         return mc.MistralArticleFields(title="t", summary="s", body="b")
 
@@ -146,10 +149,11 @@ def test_first_coverage_forces_introduction_framing(monkeypatch):
     assert "WHAT CHANGED since we last looked" not in captured["user"]
 
 
-def test_known_service_keeps_evolution_framing(monkeypatch):
+def test_known_service_keeps_evolution_framing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-first-coverage service keeps the "WHAT CHANGED" evolution framing instead of first-coverage mode."""
     captured = {}
 
-    def _fake_via_tools(**kwargs):
+    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
         captured.update(kwargs)
         return mc.MistralArticleFields(title="t", summary="s", body="b")
 
@@ -170,9 +174,8 @@ def test_known_service_keeps_evolution_framing(monkeypatch):
     assert "WHAT CHANGED since we last looked" in captured["user"]
 
 
-def test_model_tier_split_large_writes_small_does_mechanics():
-    """Owner policy (2026-07-12): Large writes reader-facing prose (writer,
-    digest); Small does the mechanical work (tool-loop research, translate)."""
+def test_model_tier_split_large_writes_small_does_mechanics() -> None:
+    """Owner policy (2026-07-12): Large writes reader-facing prose (writer, digest); Small does the mechanical work (tool-loop research, translate)."""
     from app.core.config import (
         MISTRAL_MODEL_DIGEST,
         MISTRAL_MODEL_RESEARCH,
@@ -192,25 +195,24 @@ def test_model_tier_split_large_writes_small_does_mechanics():
     assert get_mistral_digest_client()._model == MISTRAL_MODEL_DIGEST
 
 
-def test_two_stage_compose_routes_research_to_small_tier(monkeypatch):
-    """Stage-1 tool loop + digest synthesis use the research client; generation
-    stays on the writer (Large) client."""
+def test_two_stage_compose_routes_research_to_small_tier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stage-1 tool loop + digest synthesis use the research client; generation stays on the writer (Large) client."""
     calls: list[tuple[str, str]] = []
 
     class _FakeClient:
-        def __init__(self, tier: str, model: str):
+        def __init__(self, tier: str, model: str) -> None:
             self._tier = tier
             self._model = model
 
-        def chat_with_tools(self, *_a, **_kw):
+        def chat_with_tools(self, *_a: object, **_kw: object) -> str:
             calls.append(("tools", self._tier))
             return '{"title":"t","summary":"s","body":"b","tags":["algo"]}'
 
-        def chat_json_object(self, *_a, **_kw):
+        def chat_json_object(self, *_a: object, **_kw: object) -> dict:
             calls.append(("json", self._tier))
             return {"title": "t", "summary": "s", "body": "b", "tags": ["algo"]}
 
-        def chat_completion(self, *_a, **_kw):
+        def chat_completion(self, *_a: object, **_kw: object) -> str:
             calls.append(("completion", self._tier))
             return "## Research Digest\n\n### Verified Facts\n- fact [src](https://x)"
 
@@ -251,29 +253,25 @@ def test_two_stage_compose_routes_research_to_small_tier(monkeypatch):
     assert ("tools", "writer") not in calls
 
 
-def test_digest_gap_triggers_one_bounded_research_pass(monkeypatch):
-    """When digest synthesis flags an Unresolved Gap, one extra bounded
-    research pass runs (capped via DIGEST_GAP_FILL_MAX_ROUNDS) before the
-    digest is re-synthesized and handed to the writer — the fix for the
-    nf.domains incident, where the writer invented sales data instead of the
-    model getting a real second chance to look for it."""
+def test_digest_gap_triggers_one_bounded_research_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When digest synthesis flags an Unresolved Gap, one extra bounded research pass runs (capped via DIGEST_GAP_FILL_MAX_ROUNDS) before the digest is re-synthesized and handed to the writer — the fix for the nf.domains incident, where the writer invented sales data instead of the model getting a real second chance to look for it."""
     calls: list[tuple[str, str, dict]] = []
     digest_calls = {"n": 0}
 
     class _FakeClient:
-        def __init__(self, tier: str, model: str):
+        def __init__(self, tier: str, model: str) -> None:
             self._tier = tier
             self._model = model
 
-        def chat_with_tools(self, *_a, **kw):
+        def chat_with_tools(self, *_a: object, **kw: object) -> str:
             calls.append(("tools", self._tier, kw))
             return '{"title":"t","summary":"s","body":"b","tags":["algo"]}'
 
-        def chat_json_object(self, *_a, **_kw):
+        def chat_json_object(self, *_a: object, **_kw: object) -> dict:
             calls.append(("json", self._tier, {}))
             return {"title": "t", "summary": "s", "body": "b", "tags": ["algo"]}
 
-        def chat_completion(self, *_a, **_kw):
+        def chat_completion(self, *_a: object, **_kw: object) -> str:
             digest_calls["n"] += 1
             calls.append(("completion", self._tier, {}))
             if digest_calls["n"] == 1:
@@ -325,24 +323,27 @@ def test_digest_gap_triggers_one_bounded_research_pass(monkeypatch):
     assert gap_fill_kwargs.get("max_rounds") == 3
 
 
-def test_digest_with_no_gaps_skips_extra_research_pass(monkeypatch):
+def test_digest_with_no_gaps_skips_extra_research_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skips the extra gap-fill research pass when the digest reports no Unresolved Gaps."""
     calls: list[tuple[str, str]] = []
 
     class _FakeClient:
-        def __init__(self, tier: str):
+        def __init__(self, tier: str) -> None:
             self._tier = tier
 
-        def chat_with_tools(self, *_a, **_kw):
+        def chat_with_tools(self, *_a: object, **_kw: object) -> str:
             calls.append(("tools", self._tier))
             return '{"title":"t","summary":"s","body":"b","tags":["algo"]}'
 
-        def chat_json_object(self, *_a, **_kw):
+        def chat_json_object(self, *_a: object, **_kw: object) -> dict:
             calls.append(("json", self._tier))
             return {"title": "t", "summary": "s", "body": "b", "tags": ["algo"]}
 
-        def chat_completion(self, *_a, **_kw):
+        def chat_completion(self, *_a: object, **_kw: object) -> str:
             calls.append(("completion", self._tier))
-            return "## Research Digest\n\n### Verified Facts\n- fact\n\n### Unresolved Gaps\n- None\n"
+            return (
+                "## Research Digest\n\n### Verified Facts\n- fact\n\n### Unresolved Gaps\n- None\n"
+            )
 
     writer = _FakeClient("writer")
     research = _FakeClient("research")

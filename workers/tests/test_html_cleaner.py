@@ -1,3 +1,5 @@
+"""Stripping boilerplate from HTML-to-plain-text conversion."""
+
 from __future__ import annotations
 
 from app.modules.scraper.core.web_fetch import html_to_plain_text

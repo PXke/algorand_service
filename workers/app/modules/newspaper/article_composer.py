@@ -1,3 +1,5 @@
+"""Compose an article draft (scrape-triggered or weekly digest) via the writer."""
+
 from __future__ import annotations
 
 import logging
@@ -20,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ArticleComposeResult:
+    """The composer's output: fields, composer used, and heuristic grade."""
     title: str
     summary: str
     body: str
@@ -30,15 +33,19 @@ class ArticleComposeResult:
     heuristic_grade: dict | None = None
     breaking_reason: str | None = None
     confirmed_alert: str | None = None
+    # Hard-divert signals from mistral_compose's post-hoc gates (chain_entity_gate,
+    # unsourced_specifics_gate) — MUST be forwarded from MistralArticleFields on
+    # every branch below. Silently dropping these makes publish_tasks.py's
+    # getattr(composed, ..., default) fall back to the all-clear default, which
+    # is exactly what happened 2026-07-17..07-20: both hard-diverts (MyAlgo
+    # defunct-entity fix, GoPlausible unsourced-specifics fix) were dead code in
+    # production because this dataclass never carried the fields through.
+    defunct_domains: tuple[str, ...] = ()
+    unsourced_hold_reason: str = ""
 
 
 def _require_mistral() -> None:
-    """No template fallback exists (owner decision 2026-07-14: a lesser,
-    robotic article is worse than no article) — Mistral or nothing. Callers
-    must handle the resulting MistralError as "no article this cycle"; see
-    publish_from_queued_row/recompose_review/recompose_published for the
-    established skip-cleanly pattern (all three already catch MistralError
-    and return a {"status": ...} dict before any DB write happens)."""
+    """No template fallback exists (owner decision 2026-07-14: a lesser, robotic article is worse than no article) — Mistral or nothing. Callers must handle the resulting MistralError as "no article this cycle"; see publish_from_queued_row/recompose_review/recompose_published for the established skip-cleanly pattern (all three already catch MistralError and return a {"status": ...} dict before any DB write happens)."""
     if not mistral_configured():
         raise MistralError("MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback")
 
@@ -99,6 +106,8 @@ def compose_scrape_article(
             extra_tags=getattr(fields, "tags", ()),
             prompt_version=getattr(fields, "prompt_version", ""),
             heuristic_grade=getattr(fields, "heuristic_grade", None),
+            defunct_domains=getattr(fields, "defunct_domains", ()),
+            unsourced_hold_reason=getattr(fields, "unsourced_hold_reason", ""),
         )
 
     if topic == PublishTopic.COMMUNITY_RECAP and transcript_text:
@@ -144,6 +153,8 @@ def compose_scrape_article(
         heuristic_grade=getattr(fields, "heuristic_grade", None),
         breaking_reason=getattr(fields, "breaking_reason", None),
         confirmed_alert=getattr(fields, "confirmed_alert", None),
+        defunct_domains=getattr(fields, "defunct_domains", ()),
+        unsourced_hold_reason=getattr(fields, "unsourced_hold_reason", ""),
     )
 
 

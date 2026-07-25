@@ -1,5 +1,4 @@
-"""Annotator-validation harness — the gate that decides which error types the
-Tier-2 LLM annotator is allowed to auto-label.
+"""Annotator-validation harness — the gate that decides which error types the Tier-2 LLM annotator is allowed to auto-label.
 
 The annotator produces labels; nothing should trust it until it agrees with
 humans. This compares machine ``AnnotatedSample``s against the human-tagged 40
@@ -23,7 +22,7 @@ from app.modules.gatekeeper.profile import AnnotatedSample
 # 40 anchors is the target; below this the report is statistically meaningless.
 MIN_ANCHORS = 20
 # Per-type bars for auto-label trust.
-MIN_SUPPORT = 5          # human-positive anchors for this type
+MIN_SUPPORT = 5  # human-positive anchors for this type
 MIN_PRECISION = 0.80
 MIN_RECALL = 0.70
 
@@ -32,11 +31,12 @@ Pair = tuple[AnnotatedSample, AnnotatedSample]  # (human, machine)
 
 @dataclass(frozen=True)
 class TypeMetrics:
+    """One error type's precision/recall against the anchor pool."""
     error_type: str
     tp: int
     fp: int
     fn: int
-    support: int          # human positives = tp + fn
+    support: int  # human positives = tp + fn
     precision: float
     recall: float
     trusted: bool
@@ -44,14 +44,16 @@ class TypeMetrics:
 
 @dataclass(frozen=True)
 class ValidationReport:
+    """Per-type metrics and overall agreement for a validation run."""
     per_type: dict[str, TypeMetrics]
-    factuality_agreement: float   # fraction of anchors where the fail flag matched
+    factuality_agreement: float  # fraction of anchors where the fail flag matched
     tone_agreement: float
     trusted_types: frozenset[str]
     n_anchors: int
-    gated: bool                   # True => too few anchors; trust nothing
+    gated: bool  # True => too few anchors; trust nothing
 
     def summary(self) -> dict:
+        """Serialize this report to a JSON-friendly summary dict."""
         return {
             "n_anchors": self.n_anchors,
             "gated": self.gated,
@@ -59,8 +61,12 @@ class ValidationReport:
             "tone_agreement": round(self.tone_agreement, 3),
             "trusted_types": sorted(self.trusted_types),
             "per_type": {
-                t: {"precision": round(m.precision, 3), "recall": round(m.recall, 3),
-                    "support": m.support, "trusted": m.trusted}
+                t: {
+                    "precision": round(m.precision, 3),
+                    "recall": round(m.recall, 3),
+                    "support": m.support,
+                    "trusted": m.trusted,
+                }
                 for t, m in self.per_type.items()
             },
         }
@@ -78,8 +84,7 @@ def validate_annotator(
     min_recall: float = MIN_RECALL,
     min_anchors: int = MIN_ANCHORS,
 ) -> ValidationReport:
-    """Compute per-type precision/recall of the machine annotator against the
-    human anchors and decide which types are trustworthy enough to auto-label."""
+    """Compute per-type precision/recall of the machine annotator against the human anchors and decide which types are trustworthy enough to auto-label."""
     pairs = list(pairs)
     n = len(pairs)
 
@@ -112,9 +117,7 @@ def validate_annotator(
         per_type[t] = TypeMetrics(t, tp, fp, fn, support, precision, recall, trusted)
 
     gated = n < min_anchors
-    trusted_types = frozenset() if gated else frozenset(
-        t for t, m in per_type.items() if m.trusted
-    )
+    trusted_types = frozenset() if gated else frozenset(t for t, m in per_type.items() if m.trusted)
     return ValidationReport(
         per_type=per_type,
         factuality_agreement=_safe_div(fact_match, n),
@@ -126,10 +129,7 @@ def validate_annotator(
 
 
 def apply_trust(sample: AnnotatedSample, trusted_types: frozenset[str]) -> AnnotatedSample:
-    """Drop error types the annotator isn't trusted on, so untrusted machine
-    labels can't reach Layer 1. Numeric grounding from Tier-1 is deterministic
-    and always kept; only LLM-contributed types are subject to the trust filter
-    via this call at the point where machine labels are persisted."""
+    """Drop error types the annotator isn't trusted on, so untrusted machine labels can't reach Layer 1. Numeric grounding from Tier-1 is deterministic and always kept; only LLM-contributed types are subject to the trust filter via this call at the point where machine labels are persisted."""
     kept = tuple(t for t in sample.error_types if t in trusted_types)
     severities = {t: v for t, v in sample.severities.items() if t in trusted_types}
     return AnnotatedSample(

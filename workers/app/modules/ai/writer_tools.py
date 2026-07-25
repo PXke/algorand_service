@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 from app.modules.ai.chart_tools import CHART_DATA_SCHEMA, _tool_chart_data
@@ -47,7 +48,8 @@ def _tool_get_price_history(days: int = 7) -> dict[str, Any]:
     """Daily-ish ALGO price series (x=dates, y=USD price).
 
     Prefer ``chart_data(dataset='algo_price')`` when you need a ```chart block
-    for the article — this returns raw x/y for inline prose only."""
+    for the article — this returns raw x/y for inline prose only.
+    """
     from app.modules.ai.chart_tools import algo_price_series
 
     pts = algo_price_series(days=days)
@@ -155,7 +157,8 @@ def _tool_get_article(article_id: str) -> dict[str, Any]:
     Use after recent_articles / search_platform / source_history to read prior
     coverage in depth — to build on it, avoid repeating it, or link it. Returns
     the full markdown body. Does NOT expose trigger txids/rounds (those must
-    never appear in a new article body)."""
+    never appear in a new article body).
+    """
     from app.modules.newspaper.article_store import get_article
 
     aid = (article_id or "").strip()
@@ -182,7 +185,9 @@ def _tool_get_article(article_id: str) -> dict[str, Any]:
 
 def _tool_trending_articles(limit: int = 5) -> dict[str, Any]:
     """Most-read recent articles on this platform — what readers actually click.
-    Use to gauge audience interest or pick a follow-up angle."""
+
+    Use to gauge audience interest or pick a follow-up angle.
+    """
     from app.modules.newspaper.article_store import list_feed_articles
     from app.modules.newspaper.view_counts import get_views_bulk
 
@@ -204,9 +209,7 @@ def _tool_trending_articles(limit: int = 5) -> dict[str, Any]:
 
 
 def _tool_source_history(source: str, limit: int = 8) -> dict[str, Any]:
-    """Past articles this platform already published about one source domain or
-    publisher, newest first — continuity so the writer can say 'third incident
-    this quarter' and avoid repeating prior coverage."""
+    """Past articles this platform already published about one source domain or publisher, newest first — continuity so the writer can say 'third incident this quarter' and avoid repeating prior coverage."""
     from app.modules.chain_tail.registry_cache import load_enabled_services
     from app.modules.crawler.domain_tracker import domain_from_url
     from app.modules.newspaper.article_store import list_feed_articles
@@ -405,7 +408,8 @@ def _match_existing_tool(capability: str, known_tools: set[str]) -> str | None:
     The writer keeps suggesting tools it already has (~30 schemas in context and
     it loses track — prod asked for reddit_api_post_history, discourse_forum and
     medium_api_article_list, all long since registered). Conservative on
-    purpose: exact name, alias vocabulary, or a shared non-generic token."""
+    purpose: exact name, alias vocabulary, or a shared non-generic token.
+    """
     tokens = [t for t in re.split(r"[^a-z0-9]+", (capability or "").lower()) if t]
     if not tokens:
         return None
@@ -419,9 +423,7 @@ def _match_existing_tool(capability: str, known_tools: set[str]) -> str | None:
     significant = {t for t in tokens if t not in _GENERIC_TOKENS}
     best: tuple[int, str] | None = None
     for tool in known_tools:
-        overlap = significant & {
-            t for t in tool.lower().split("_") if t not in _GENERIC_TOKENS
-        }
+        overlap = significant & {t for t in tool.lower().split("_") if t not in _GENERIC_TOKENS}
         if overlap and (best is None or len(overlap) > best[0]):
             best = (len(overlap), tool)
     return best[1] if best else None
@@ -429,7 +431,7 @@ def _match_existing_tool(capability: str, known_tools: set[str]) -> str | None:
 
 def _make_suggest_tool_handler(
     context: dict[str, Any] | None, known_tools: set[str] | None = None
-):
+) -> Callable[..., dict[str, Any]]:
     ctx = context or {}
     known = known_tools or set()
 
@@ -459,7 +461,9 @@ def _make_suggest_tool_handler(
     return _handler
 
 
-def _make_report_compose_issue_handler(context: dict[str, Any] | None):
+def _make_report_compose_issue_handler(
+    context: dict[str, Any] | None,
+) -> Callable[..., dict[str, Any]]:
     ctx = context or {}
 
     def _handler(
@@ -706,11 +710,7 @@ def all_tools(
     *,
     topic: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Writer tools plus, when enabled, the investigative OSINT and external
-    research (web search + Bluesky) toolsets. ``context`` (service_id, source_url,
-    model) tags any suggest_tool calls with the story they came from. ``topic``
-    (a PublishTopic value) lane-gates entity-background OSINT tools to
-    investigative stories; empty means ungated."""
+    """Writer tools plus, when enabled, the investigative OSINT and external research (web search + Bluesky) toolsets. ``context`` (service_id, source_url, model) tags any suggest_tool calls with the story they came from. ``topic`` (a PublishTopic value) lane-gates entity-background OSINT tools to investigative stories; empty means ungated."""
     schemas = list(TOOL_SCHEMAS)
     handlers = dict(TOOL_HANDLERS)
     schemas.append(REPORT_COMPOSE_ISSUE_SCHEMA)
@@ -792,13 +792,15 @@ def _canonical_fetch_url(url: str) -> str:
     return u
 
 
-def _wrap_fetch_url_scroll(handler: Any, context: dict[str, Any] | None):
+def _wrap_fetch_url_scroll(
+    _handler: Callable[..., dict[str, Any]], context: dict[str, Any] | None
+) -> Callable[..., dict[str, Any]]:
     """Track per-compose scroll position so the model only passes continue_reading."""
     ctx = context or {}
     offsets: dict[str, int] = ctx.setdefault("_fetch_url_offsets", {})
     window_caps: dict[str, int] = ctx.setdefault("_fetch_url_window_caps", {})
 
-    def _wrapped(**kwargs: Any) -> dict[str, Any]:
+    def _wrapped(**kwargs: Any) -> dict[str, Any]:  # noqa: ANN401 -- arbitrary LLM tool-call arguments
         from app.modules.ai.research_tools import _fetch_url_internal, _publicize_fetch_result
 
         url = _canonical_fetch_url(str(kwargs.get("url") or ""))
@@ -827,11 +829,13 @@ def _wrap_fetch_url_scroll(handler: Any, context: dict[str, Any] | None):
     return _wrapped
 
 
-def _wrap_fetch_url_enqueue(handler: Any, context: dict[str, Any] | None):
+def _wrap_fetch_url_enqueue(
+    handler: Callable[..., dict[str, Any]], context: dict[str, Any] | None
+) -> Callable[..., dict[str, Any]]:
     """After fetch_url returns, queue the canonical URL for a full crawl."""
     ctx = context or {}
 
-    def _wrapped(**kwargs: Any) -> dict[str, Any]:
+    def _wrapped(**kwargs: Any) -> dict[str, Any]:  # noqa: ANN401 -- arbitrary LLM tool-call arguments
         result = handler(**kwargs)
         try:
             from app.modules.crawler.writer_fetch_enqueue import maybe_enqueue_writer_fetched_url

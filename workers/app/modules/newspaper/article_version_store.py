@@ -1,3 +1,5 @@
+"""Store a version snapshot each time an article's content changes."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,6 +9,7 @@ from uuid import UUID
 
 @dataclass(frozen=True)
 class ArticleVersionRow:
+    """One stored version snapshot of an article's content."""
     version: int
     title: str
     summary: str
@@ -17,6 +20,7 @@ class ArticleVersionRow:
 
 
 def next_version_number(article_id: str) -> int:
+    """Return the next version number for an article, defaulting to 1 on any lookup failure."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleVersionStmts
 
@@ -43,6 +47,7 @@ def save_article_version(
     edit_reason: str,
     editor: str = "agent",
 ) -> int:
+    """Save a new version snapshot of an article's content and return its version number."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleVersionStmts
 
@@ -58,6 +63,7 @@ def save_article_version(
 
 
 def list_article_versions(article_id: str, *, limit: int = 20) -> list[ArticleVersionRow]:
+    """List an article's stored version snapshots, newest first, empty on any lookup failure."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleVersionStmts
 

@@ -1,3 +1,5 @@
+"""Cassandra storage for price samples and briefs."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -7,6 +9,7 @@ from app.modules.metrics.price_metrics_models import PriceMetricsBrief, PriceSam
 
 
 def insert_sample(tick: PriceTick) -> None:
+    """Insert one price sample row."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import PriceMetricsStmts
 
@@ -32,6 +35,7 @@ def list_recent_samples(
     lookback_days: int = 7,
     limit: int | None = None,
 ) -> list[PriceSampleRow]:
+    """Return price samples for an asset within the lookback window, oldest first."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import PriceMetricsStmts
 
@@ -42,25 +46,25 @@ def list_recent_samples(
         PriceMetricsStmts.LIST_SAMPLES,
         (asset_id.strip().lower(), cutoff, cap),
     )
-    items: list[PriceSampleRow] = []
-    for row in rows:
-        items.append(
-            PriceSampleRow(
-                asset_id=row.asset_id,
-                collected_at=row.collected_at,
-                price_usd=float(row.price_usd),
-                currency=row.currency or "USD",
-                change_24h_pct=row.change_24h_pct,
-                market_cap_usd=row.market_cap_usd,
-                volume_24h_usd=row.volume_24h_usd,
-                source=row.source or "coingecko",
-            )
+    items: list[PriceSampleRow] = [
+        PriceSampleRow(
+            asset_id=row.asset_id,
+            collected_at=row.collected_at,
+            price_usd=float(row.price_usd),
+            currency=row.currency or "USD",
+            change_24h_pct=row.change_24h_pct,
+            market_cap_usd=row.market_cap_usd,
+            volume_24h_usd=row.volume_24h_usd,
+            source=row.source or "coingecko",
         )
+        for row in rows
+    ]
     items.sort(key=lambda item: item.collected_at)
     return items
 
 
 def save_brief(brief: PriceMetricsBrief) -> None:
+    """Upsert an asset's prepared price-metrics brief."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import PriceMetricsStmts
 
@@ -82,13 +86,12 @@ def save_brief(brief: PriceMetricsBrief) -> None:
 
 
 def load_brief(asset_id: str) -> PriceMetricsBrief | None:
+    """Load an asset's saved price-metrics brief, or None if none exists yet."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import PriceMetricsStmts
 
     session = get_cassandra_session()
-    row = session.execute(
-        PriceMetricsStmts.GET_BRIEF, (asset_id.strip().lower(),)
-    ).one()
+    row = session.execute(PriceMetricsStmts.GET_BRIEF, (asset_id.strip().lower(),)).one()
     if row is None:
         return None
     return PriceMetricsBrief(

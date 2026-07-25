@@ -1,3 +1,5 @@
+"""Celery tasks that index articles and crawled pages into Typesense."""
+
 from __future__ import annotations
 
 import time
@@ -20,6 +22,7 @@ def index_article(
     service_id: str,
     published_at_epoch: int,
 ) -> dict[str, str]:
+    """Celery task: upsert an article's document into the Typesense search index."""
     tags: list[str] | None = None
     detail = get_article(article_id)
     if detail is not None:
@@ -44,14 +47,25 @@ def index_crawled_page(
     service_id: str,
     published_at_epoch: int | None = None,
 ) -> dict[str, str]:
-    """Index scraped page text when the classifier marks it in-scope."""
+    """Index scraped page text when the classifier marks it in-scope.
+
+    An admin-approved domain bypasses this too, same reasoning as the crawl-
+    storage gate in web_crawler.py: score_page scores purely on keyword/domain-
+    anchor presence in the text, which a legitimate but chain-silent ecosystem
+    partner's page can easily score 0.0 on — an explicit human relevance call
+    shouldn't lose to that (root-caused 2026-07-21: dark-coin.com passed the
+    storage gate after that fix but still never reached the search index).
+    """
     result = score_page(url=url, text=text)
     if not result.in_scope:
-        return {
-            "status": "skipped",
-            "reason": "classifier_rejected",
-            "score": str(result.score),
-        }
+        from app.modules.crawler.domain_tracker import domain_from_url, is_admin_approved_domain
+
+        if not is_admin_approved_domain(domain_from_url(url)):
+            return {
+                "status": "skipped",
+                "reason": "classifier_rejected",
+                "score": str(result.score),
+            }
     epoch = published_at_epoch if published_at_epoch is not None else int(time.time())
     stored = upsert_crawled_page(
         url=url,

@@ -1,7 +1,4 @@
-"""Article-level grader: scores a composed draft on the factors that actually
-matter here — novelty, relevance, recency, length, factual specificity,
-structure, and a popularity prior from real view counts. Distinct from the
-SOURCE publish classifier (which only judges input relevance).
+"""Article-level grader: scores a composed draft on the factors that actually matter here — novelty, relevance, recency, length, factual specificity, structure, and a popularity prior from real view counts. Distinct from the SOURCE publish classifier (which only judges input relevance).
 
 Surfaced to the human reviewer on the classifier page, and (next) to the writer
 as a `review_draft` tool so it can self-assess and improve once before finishing.
@@ -15,9 +12,35 @@ from datetime import UTC, datetime, timedelta
 
 _STOP = frozenset(
     [
-        "the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are",
-        "was", "were", "be", "been", "with", "from", "at", "by", "as", "this",
-        "that", "these", "those", "it", "its", "algorand", "algo",
+        "the",
+        "a",
+        "an",
+        "of",
+        "to",
+        "in",
+        "on",
+        "for",
+        "and",
+        "or",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "with",
+        "from",
+        "at",
+        "by",
+        "as",
+        "this",
+        "that",
+        "these",
+        "those",
+        "it",
+        "its",
+        "algorand",
+        "algo",
     ]
 )
 
@@ -35,10 +58,7 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 
 
 def _age_decay_weight(published_at_epoch: float, *, now_ts: float | None = None) -> float:
-    """How much a recent article's similarity should still count against novelty,
-    by its age: full weight (1.0) within NOVELTY_DECAY_FULL_DAYS, easing linearly
-    to 0 by NOVELTY_DECAY_ZERO_DAYS. Lets us re-cover a story freely once the
-    closest prior article is old enough (~10 weeks by default)."""
+    """How much a recent article's similarity should still count against novelty, by its age: full weight (1.0) within NOVELTY_DECAY_FULL_DAYS, easing linearly to 0 by NOVELTY_DECAY_ZERO_DAYS. Lets us re-cover a story freely once the closest prior article is old enough (~10 weeks by default)."""
     from app.core import config
 
     full_days = max(0, config.NOVELTY_DECAY_FULL_DAYS)
@@ -60,9 +80,7 @@ def _age_decay_weight(published_at_epoch: float, *, now_ts: float | None = None)
 
 
 def _length_score(words: int) -> float:
-    """Lax band: 1.0 anywhere in [LENGTH_OK_MIN, LENGTH_OK_MAX]; ramps down only
-    outside it. Length is intentionally NOT a target — research depth drives the
-    grade, so we don't reward hitting a word count (which causes padding)."""
+    """Lax band: 1.0 anywhere in [LENGTH_OK_MIN, LENGTH_OK_MAX]; ramps down only outside it. Length is intentionally NOT a target — research depth drives the grade, so we don't reward hitting a word count (which causes padding)."""
     from app.core.config import LENGTH_OK_MAX_WORDS, LENGTH_OK_MIN_WORDS
 
     if words < LENGTH_OK_MIN_WORDS:
@@ -160,10 +178,7 @@ def _recent_articles(limit: int = 60) -> list[_Recent]:
 
 
 def _closest_similarity(cand_tokens: set[str], recent: list[_Recent]) -> tuple[float, str]:
-    """Highest title-token Jaccard between the candidate and any recent article,
-    plus that article's title. Compares HEADLINES only — category tags
-    (governance/defi/…) are shared across many articles and would otherwise
-    inflate similarity and crush novelty for genuinely distinct stories."""
+    """Highest title-token Jaccard between the candidate and any recent article, plus that article's title. Compares HEADLINES only — category tags (governance/defi/…) are shared across many articles and would otherwise inflate similarity and crush novelty for genuinely distinct stories."""
     best_sim, best_title = 0.0, ""
     if not cand_tokens:
         return best_sim, best_title
@@ -181,9 +196,7 @@ def _closest_similarity(cand_tokens: set[str], recent: list[_Recent]) -> tuple[f
 
 
 def recent_title_similarity(title: str) -> tuple[float, str]:
-    """(closest_similarity, that_article_title) of a candidate headline vs
-    recently published articles. Used pre-composition to skip near-duplicates;
-    same tokenizer/metric as the grader's novelty so they agree."""
+    """(closest_similarity, that_article_title) of a candidate headline vs recently published articles. Used pre-composition to skip near-duplicates; same tokenizer/metric as the grader's novelty so they agree."""
     try:
         recent = _recent_articles()
     except Exception:
@@ -193,6 +206,7 @@ def recent_title_similarity(title: str) -> tuple[float, str]:
 
 def recent_same_service_similarity(title: str, service_id: str) -> tuple[float, str]:
     """recent_title_similarity restricted to articles from the SAME service.
+
     Re-covering one's own subject deserves a stricter near-duplicate bar than
     the global one: 'Alpha Arcade Goes Live with Daily Algorand Price
     Prediction Markets' vs 'Alpha Arcade expands to daily Algorand price
@@ -200,7 +214,8 @@ def recent_same_service_similarity(title: str, service_id: str) -> tuple[float, 
     global 0.6 gate — yet is plainly the same story about the same service
     ten days later (found 2026-07-16 as a near-duplicate pair; the second
     draft only failed to reach readers because a review-queue clear orphaned
-    it)."""
+    it).
+    """
     sid = (service_id or "").strip().lower()
     if not sid:
         return 0.0, ""
@@ -212,11 +227,7 @@ def recent_same_service_similarity(title: str, service_id: str) -> tuple[float, 
 
 
 def recent_content_similarity(title: str, text: str = "") -> tuple[float, str]:
-    """(closest_similarity, that_article_title) of a candidate vs recently
-    published articles, retrieved by CONTENT (title+summary+body) from the
-    Typesense articles index rather than by headline tokens. This catches the
-    same-topic / different-headline dupes that recent_title_similarity misses
-    (e.g. "Pera adds staking" vs "Explore Pera's new feature").
+    """(closest_similarity, that_article_title) of a candidate vs recently published articles, retrieved by CONTENT (title+summary+body) from the Typesense articles index rather than by headline tokens. This catches the same-topic / different-headline dupes that recent_title_similarity misses (e.g. "Pera adds staking" vs "Explore Pera's new feature").
 
     The retrieval is semantic-ish (full-text over the body); the raw score is
     token Jaccard of the candidate's title+summary against the matched article's
@@ -225,7 +236,8 @@ def recent_content_similarity(title: str, text: str = "") -> tuple[float, str]:
     easing linearly to 0 by NOVELTY_DECAY_ZERO_DAYS — so re-covering a story is
     penalized hard for a week and allowed again after ~10 weeks. The returned
     score is on the same 0-1 scale as the headline metric (combinable with max()).
-    Fails open (0.0) when Typesense is unavailable or the window is disabled."""
+    Fails open (0.0) when Typesense is unavailable or the window is disabled.
+    """
     from app.core import config
 
     window_hours = config.NOVELTY_CONTENT_WINDOW_HOURS
@@ -303,9 +315,7 @@ _DOLLAR_MULTIPLIERS = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
 
 
 def headline_violations(title: str) -> list[str]:
-    """Deterministic house-style checks for a headline. Returns actionable
-    issue strings (prefixed "headline — ") that the compose revision pass can
-    feed straight back to the writer; empty list when the title conforms."""
+    """Deterministic house-style checks for a headline. Returns actionable issue strings (prefixed "headline — ") that the compose revision pass can feed straight back to the writer; empty list when the title conforms."""
     text = (title or "").strip()
     if not text:
         return []
@@ -375,9 +385,7 @@ def grade_article_schema(
     issues.extend(f"structure — {h.name}: {h.observed}" for h in struct if not h.passed)
 
     # Multi-item comma dumps without a table (light heuristic).
-    if not has_table and re.search(
-        r"(?:,\s+\w+){4,}", " ".join((body or "").splitlines()[:40])
-    ):
+    if not has_table and re.search(r"(?:,\s+\w+){4,}", " ".join((body or "").splitlines()[:40])):
         issues.append(
             "schema — multi-item data buried in comma-separated prose; use a "
             "Markdown table with Concept and Real-World Implication columns"
@@ -403,15 +411,16 @@ def grade_article_draft(
     title: str,
     body: str,
     source_url: str = "",
-    published_at: str = "",
-    tags: tuple[str, ...] = (),
+    published_at: str = "",  # noqa: ARG001 -- name must match the real callee's keyword arg
+    tags: tuple[str, ...] = (),  # noqa: ARG001 -- name must match the real callee's keyword arg
     summary: str = "",
 ) -> dict:
     """Grade a draft: schema heuristic (grade/issues) plus informational signals.
 
     The headline ``grade`` is schema/structure only. Qualitative journalism
     (narrative synthesis, Algorand technical depth) is scored separately via
-    ``grade_article_quality_llm`` during compose revision."""
+    ``grade_article_quality_llm`` during compose revision.
+    """
     schema = grade_article_schema(title=title, summary=summary, body=body)
 
     # Informational signals for telemetry / human review — NOT fused into grade.

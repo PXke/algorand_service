@@ -1,3 +1,5 @@
+"""Chain data models shared across the chain module."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

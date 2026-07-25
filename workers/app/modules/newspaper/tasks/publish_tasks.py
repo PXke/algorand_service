@@ -1,20 +1,25 @@
+"""Celery tasks and helpers that compose and publish a queued row."""
+
 from __future__ import annotations
 
 import contextlib
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from celery import Task
+
     from app.modules.ai.content_signals import ContentSignals
 
 from app.celery_app import celery_app
+from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
 from app.core.redis_lock import single_flight
-from app.modules.newspaper.article_composer import compose_scrape_article
+from app.modules.newspaper.article_composer import ArticleComposeResult, compose_scrape_article
 from app.modules.newspaper.article_store import insert_article
-from app.modules.newspaper.compose_lock import COMPOSE_LOCK_KEY, ComposeBusyError
 from app.modules.newspaper.article_tags import derive_article_tags
+from app.modules.newspaper.compose_lock import COMPOSE_LOCK_KEY, ComposeBusyError
 from app.modules.newspaper.ingest_signal import ingest_publish_signal
 from app.modules.newspaper.publish_policy import PublishKind, PublishTier, PublishTopic
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow
@@ -54,8 +59,7 @@ _IMAGE_CDN_HINTS: tuple[str, ...] = (
 
 
 def _plausible_image_host(og_image: str, source_url: str) -> bool:
-    """True when the og:image host plausibly belongs to the source: same
-    registrable domain, or a recognizable CDN/media host."""
+    """True when the og:image host plausibly belongs to the source: same registrable domain, or a recognizable CDN/media host."""
     from urllib.parse import urlparse
 
     from app.modules.crawler.domain_tracker import _PLATFORM_SUFFIXES, domain_from_url
@@ -93,8 +97,7 @@ def _plausible_image_host(og_image: str, source_url: str) -> bool:
 
 
 def _is_real_image(url: str, *, min_dimension: int = 120) -> bool:
-    """Fetch and decode a candidate image; reject content that's too small or
-    blank to be worth showing.
+    """Fetch and decode a candidate image; reject content that's too small or blank to be worth showing.
 
     This is a QUALITY judgment made from the actual pixels, not a URL-shape
     guess (that's what the frontend's looksLikeLogoUrl does, since it can't
@@ -116,7 +119,8 @@ def _is_real_image(url: str, *, min_dimension: int = 120) -> bool:
     (rejects) on the FIRST error only after a second attempt also fails,
     which happened for real to several perfectly fine images
     (algorand.co, two GitBook OG images, x402.org, hesab.com) during the
-    2026-07-14 backfill and had to be manually restored."""
+    2026-07-14 backfill and had to be manually restored.
+    """
     import time
     from io import BytesIO
 
@@ -146,18 +150,15 @@ def _is_real_image(url: str, *, min_dimension: int = 120) -> bool:
 
 
 def _validated_hero(image: str, source_url: str) -> str:
-    """Gate a candidate share image the same way _with_hero_image gates the
-    body embed — previously only the body used this check, so a template
-    site's stale/foreign og:image (e.g. copy-pasted from an unrelated
-    project) could still become the article's image_url/feed-tile/OG-card
-    even though it was correctly kept out of the body text.
+    """Gate a candidate share image the same way _with_hero_image gates the body embed — previously only the body used this check, so a template site's stale/foreign og:image (e.g. copy-pasted from an unrelated project) could still become the article's image_url/feed-tile/OG-card even though it was correctly kept out of the body text.
 
     Domain-plausibility only (no network I/O, no URL-shape guessing) — see
     _validated_hero_checked for the actual content-quality check (real
     dimensions, not-blank) used at compose call sites. A URL that merely
     "looks like" a logo (e.g. contains apple-touch/icon/favicon) is NOT
     rejected here: whether it's actually too small/blurry to use is a
-    pixel-level judgment, not a URL-shape one — see _is_real_image."""
+    pixel-level judgment, not a URL-shape one — see _is_real_image.
+    """
     if not image:
         return image
     if source_url and not _plausible_image_host(image, source_url):
@@ -167,10 +168,7 @@ def _validated_hero(image: str, source_url: str) -> str:
 
 
 def _validated_hero_checked(image: str, source_url: str) -> str:
-    """_validated_hero, then fetch+decode to reject images too small or blank
-    to be worth showing (see _is_real_image). Does real network I/O — use
-    this at compose call sites, not _validated_hero directly, so pure unit
-    tests of the URL-based gate stay fast and deterministic."""
+    """_validated_hero, then fetch+decode to reject images too small or blank to be worth showing (see _is_real_image). Does real network I/O — use this at compose call sites, not _validated_hero directly, so pure unit tests of the URL-based gate stay fast and deterministic."""
     image = _validated_hero(image, source_url)
     if image and not _is_real_image(image):
         logger.warning("dropping degenerate/decoy og:image %s for %s", image, source_url)
@@ -179,8 +177,7 @@ def _validated_hero_checked(image: str, source_url: str) -> str:
 
 
 def _with_hero_image(body: str, og_image: str, alt: str, source_url: str = "") -> str:
-    """Prepend the source's share image as a hero, if present and not already
-    embedded. Real image from the page, never AI-generated."""
+    """Prepend the source's share image as a hero, if present and not already embedded. Real image from the page, never AI-generated."""
     if not og_image or og_image in body:
         return body
     if not og_image.lower().startswith(("http://", "https://")):
@@ -196,7 +193,7 @@ def _with_hero_image(body: str, og_image: str, alt: str, source_url: str = "") -
     return f"![{safe_alt}]({og_image})\n\n{body}"
 
 
-def _merge_tags(base: list[str], extra) -> list[str]:
+def _merge_tags(base: list[str], extra: list[str] | None) -> list[str]:
     out = list(base)
     for t in extra or ():
         if t and t not in out:
@@ -205,16 +202,18 @@ def _merge_tags(base: list[str], extra) -> list[str]:
 
 
 def _stash_capped_compose_to_backlog(
-    *, row, composed, payload, hero_image, image_field, publish_kind, topic, tier, reason
+    *,
+    row: QueuedPublishRow,
+    composed: ArticleComposeResult,
+    payload: dict[str, Any],
+    hero_image: str | None,
+    image_field: str | None,
+    publish_kind: PublishKind,
+    topic: PublishTopic,
+    tier: PublishTier,
+    reason: str,
 ) -> dict[str, str]:
-    """The daily cap filled between the drain's pre-compose check and this
-    publish attempt (composes take minutes; another lane can take the last
-    slot meanwhile). The old behavior returned rate_limited and THREW AWAY
-    the finished article — the 2026-07-15 'Seven Real-World Apps' YouTube
-    compose (~300k tokens, status ok) died exactly this way, then its queue
-    row aged out and the content was lost. Store it unlisted and queue it in
-    pending_feed_queue instead, exactly like the auto-approve backlog path:
-    the paced release ships it once a slot opens."""
+    """The daily cap filled between the drain's pre-compose check and this publish attempt (composes take minutes; another lane can take the last slot meanwhile). The old behavior returned rate_limited and THREW AWAY the finished article — the 2026-07-15 'Seven Real-World Apps' YouTube compose (~300k tokens, status ok) died exactly this way, then its queue row aged out and the content was lost. Store it unlisted and queue it in pending_feed_queue instead, exactly like the auto-approve backlog path: the paced release ships it once a slot opens."""
     from datetime import UTC, datetime
     from uuid import UUID
 
@@ -275,9 +274,6 @@ def _stash_capped_compose_to_backlog(
     }
 
 
-from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
-
-
 def enqueue_missing_article_translations(article_id: str) -> int:
     """Enqueue translate_article only for langs not yet stored. Returns count queued."""
     try:
@@ -295,31 +291,17 @@ def enqueue_missing_article_translations(article_id: str) -> int:
             )
         return len(missing)
     except Exception:
-        logger.warning(
-            "Failed to enqueue translation tasks for %s", article_id, exc_info=True
-        )
+        logger.warning("Failed to enqueue translation tasks for %s", article_id, exc_info=True)
         return 0
 
 
 def enqueue_article_translations(article_id: str) -> None:
-    """Fan out translate_article tasks for an article that just became feed-
-    visible. Publish-time only: most held drafts never pass review, so
-    translating at held/recompose time burns one Mistral call per target lang
-    per dead draft."""
+    """Fan out translate_article tasks for an article that just became feed- visible. Publish-time only: most held drafts never pass review, so translating at held/recompose time burns one Mistral call per target lang per dead draft."""
     enqueue_missing_article_translations(article_id)
 
 
 def _auto_merge_redirect(*, original_url: str, final_url: str, service_id: str) -> None:
-    """A scrape that resolves to a DIFFERENT registrable domain than requested
-    (a real HTTP redirect — e.g. algonode.io -> nodely.io after a rebrand) is
-    definitionally the same website. Auto-fold the current service into
-    whichever service already owns the resolved domain, rather than the two
-    polling and composing independently forever (the nodely.io/algonode.io
-    duplicate-article incident). Mirrors the admin domain-approval flow's
-    "attach to the existing owner" behavior for brand-new domains, just
-    triggered by a redirect discovered on an ALREADY-tracked service instead of
-    a fresh frontier approval. Best-effort: never blocks the compose in
-    progress. No-op when same domain, no existing owner, or already merged."""
+    """A scrape that resolves to a DIFFERENT registrable domain than requested (a real HTTP redirect — e.g. algonode.io -> nodely.io after a rebrand) is definitionally the same website. Auto-fold the current service into whichever service already owns the resolved domain, rather than the two polling and composing independently forever (the nodely.io/algonode.io duplicate-article incident). Mirrors the admin domain-approval flow's "attach to the existing owner" behavior for brand-new domains, just triggered by a redirect discovered on an ALREADY-tracked service instead of a fresh frontier approval. Best-effort: never blocks the compose in progress. No-op when same domain, no existing owner, or already merged."""
     from app.modules.crawler.domain_tracker import domain_from_url
     from app.modules.newspaper.service_sources import merge_services, service_for_domain
 
@@ -336,6 +318,7 @@ def _auto_merge_redirect(*, original_url: str, final_url: str, service_id: str) 
 
 def _compose_domain_for_row(row: QueuedPublishRow) -> str:
     """Registrable domain to count against the per-website daily article cap.
+
     Only web sources are capped (social pollers have their own pacing).
 
     Bluesky posts are ingested as a plain https://bsky.app/profile/.../post/...
@@ -343,7 +326,8 @@ def _compose_domain_for_row(row: QueuedPublishRow) -> str:
     would misclassify every monitored Bluesky account as sharing ONE "bsky.app"
     domain cap/cooldown (COMPOSE_MAX_PER_DOMAIN_PER_DAY / _HOURS), throttling
     unrelated accounts against each other. The stored payload source_kind is
-    set once at ingest and is reliable, so check it first."""
+    set once at ingest and is reliable, so check it first.
+    """
     if row.payload.get("source_kind") == "bluesky":
         return ""
     if _source_kind_from_url(row.scrape_url) != "web":
@@ -356,29 +340,24 @@ def _compose_domain_for_row(row: QueuedPublishRow) -> str:
 def _gate_enforces_review(
     *, clf_decision: object, title: str, body: str, page_text: str, source_url: str
 ) -> bool:
-    """Quality veto on the auto-publish path. True when a draft Classifier A
-    would send STRAIGHT to the feed (``clf_decision is True``) should instead be
-    diverted to human review because the deterministic gatekeeper fails.
+    """Quality veto on the auto-publish path. True when a draft Classifier A would send STRAIGHT to the feed (``clf_decision is True``) should instead be diverted to human review because the deterministic gatekeeper fails.
 
     Honors ``GATEKEEPER_ENFORCE`` — default off, so this returns False (shadow
     mode, no behaviour change) until the quality head is trusted. Failure-tolerant:
-    a None gate (disabled / error) never diverts."""
+    a None gate (disabled / error) never diverts.
+    """
     from app.core import config
 
     if clf_decision is not True or not config.GATEKEEPER_ENFORCE:
         return False
     from app.modules.gatekeeper.live import gate_draft
 
-    gate = gate_draft(
-        source_text=page_text, article_text=f"{title}\n{body}", service_id=source_url
-    )
+    gate = gate_draft(source_text=page_text, article_text=f"{title}\n{body}", service_id=source_url)
     return gate is not None and not gate.passed
 
 
 def _content_quality_fails(relevance: float, kind: PublishKind | None = None) -> bool:
-    """Pre-compose veto: judge the actual context about to be handed to Mistral
-    (page_text relevance, same 0-1 score_page scorer classify_pending_domains
-    uses) so a poor-quality source never even reaches the writer.
+    """Pre-compose veto: judge the actual context about to be handed to Mistral (page_text relevance, same 0-1 score_page scorer classify_pending_domains uses) so a poor-quality source never even reaches the writer.
 
     CONTENT_UPDATE gets its own, stricter CONTENT_UPDATE_QUALITY_FLOOR: a
     service is vetted once as a domain at discovery (lenient, first-crawl
@@ -387,7 +366,8 @@ def _content_quality_fails(relevance: float, kind: PublishKind | None = None) ->
     backstop behind the CONTENT_UPDATE_RELEVANCE_FLOOR enqueue-time gate
     (evaluate_enqueue), in case relevance shifts between ingest-time scoring
     and compose time. Other kinds keep sharing FRONTIER_CONTENT_REJECT_SCORE
-    with the domain classifier."""
+    with the domain classifier.
+    """
     from app.core import config
 
     if kind == PublishKind.CONTENT_UPDATE:
@@ -395,24 +375,13 @@ def _content_quality_fails(relevance: float, kind: PublishKind | None = None) ->
     return relevance < config.FRONTIER_CONTENT_REJECT_SCORE
 
 
-def _writer_flagged_breaking(tier: PublishTier, composed) -> bool:
-    """True when the writer called mark_breaking_news this compose and the
-    row isn't already breaking-tier. Kept pure/tiny so the decision is
-    testable without exercising the rest of publish_from_queued_row."""
+def _writer_flagged_breaking(tier: PublishTier, composed: ArticleComposeResult) -> bool:
+    """True when the writer called mark_breaking_news this compose and the row isn't already breaking-tier. Kept pure/tiny so the decision is testable without exercising the rest of publish_from_queued_row."""
     return bool(getattr(composed, "breaking_reason", None)) and tier != PublishTier.BREAKING
 
 
-def _effective_alert_topic(topic: PublishTopic, composed) -> PublishTopic:
-    """Reader-facing topic for tags and match keys. The keyword topic
-    classifier still ROUTES rows (priority, mandatory review — a false
-    positive there only costs a review slot), but a scam/incident label only
-    keeps its reader-facing consequences — the alert tag and the scam-topic
-    match-key carve-out — when the writer confirmed it via the
-    confirm_alert_topic tool. 2026-07-18: the Foundation's own homepage
-    rebrand shipped toward readers tagged 'scam-alert' because a quoted
-    research paper asked about 'malicious servers' — second false scam
-    labeling in a week; same fix shape as mark_breaking_news for the tier.
-    Kept pure/tiny like _writer_flagged_breaking above."""
+def _effective_alert_topic(topic: PublishTopic, composed: ArticleComposeResult) -> PublishTopic:
+    """Reader-facing topic for tags and match keys. The keyword topic classifier still ROUTES rows (priority, mandatory review — a false positive there only costs a review slot), but a scam/incident label only keeps its reader-facing consequences — the alert tag and the scam-topic match-key carve-out — when the writer confirmed it via the confirm_alert_topic tool. 2026-07-18: the Foundation's own homepage rebrand shipped toward readers tagged 'scam-alert' because a quoted research paper asked about 'malicious servers' — second false scam labeling in a week; same fix shape as mark_breaking_news for the tier. Kept pure/tiny like _writer_flagged_breaking above."""
     if topic not in (PublishTopic.SCAM_ALERT, PublishTopic.NETWORK_INCIDENT):
         return topic
     confirmed = getattr(composed, "confirmed_alert", None)
@@ -423,12 +392,7 @@ def _effective_alert_topic(topic: PublishTopic, composed) -> PublishTopic:
 
 
 def _quality_floor_fails(heuristic_grade: dict | None) -> bool:
-    """Second quality veto on the auto-publish path: the writer's own two-stage
-    grade/revise pass (article_grader.grade_article_draft, same score
-    review_draft reports) falls below WRITER_QUALITY_FLOOR. Honors
-    WRITER_QUALITY_GATE_ENABLED (default on). A missing/errored grade never
-    diverts (fails open, matching _gate_enforces_review's failure-tolerant
-    design)."""
+    """Second quality veto on the auto-publish path: the writer's own two-stage grade/revise pass (article_grader.grade_article_draft, same score review_draft reports) falls below WRITER_QUALITY_FLOOR. Honors WRITER_QUALITY_GATE_ENABLED (default on). A missing/errored grade never diverts (fails open, matching _gate_enforces_review's failure-tolerant design)."""
     from app.core import config
 
     if not config.WRITER_QUALITY_GATE_ENABLED or not heuristic_grade:
@@ -443,19 +407,15 @@ def _quality_floor_fails(heuristic_grade: dict | None) -> bool:
 
 
 def _fresh_auto_approve_passes(
-    *, title: str, body: str, page_text: str, source_url: str,
+    *,
+    title: str,
+    body: str,
+    page_text: str,
+    source_url: str,
     defunct_domains: tuple[str, ...] = (),
     unsourced_hold_reason: str = "",
 ) -> tuple[bool, dict[str, str]]:
-    """Strict autonomous-approve gate for content that would otherwise wait for
-    a human review click (owner decision 2026-07-12), mirroring
-    recompose_published's auto-apply design exactly: grade + headline +
-    gatekeeper factuality must ALL clear a bar at least as strict as
-    recompose's — fresh content has zero prior human vetting at all, unlike
-    recompose which only touches content a human already approved once, so
-    there's no argument for a looser bar here. Fails CLOSED: any missing or
-    errored signal blocks auto-approve, never allows it. Always returns
-    metadata (even on failure) for the review-row audit trail."""
+    """Strict autonomous-approve gate for content that would otherwise wait for a human review click (owner decision 2026-07-12): grade + headline + gatekeeper factuality AND completeness must ALL clear a bar at least as strict as recompose_published's — fresh content has zero prior human vetting at all, unlike recompose which only touches content a human already approved once, so there's no argument for a looser bar here. Unlike recompose (which deliberately drops completeness from its gate — see the comment at its call site), fresh candidates are exactly what completeness's domain_provenance check exists to triage, so gate_ok uses gate.passed (factuality AND completeness), not factuality alone. Fails CLOSED: any missing or errored signal blocks auto-approve, never allows it. Always returns metadata (even on failure) for the review-row audit trail."""
     import json as _json
 
     from app.core import config as worker_config
@@ -500,7 +460,7 @@ def _fresh_auto_approve_passes(
         )
         if gate is not None:
             meta.update(gate.as_metadata())
-            gate_ok = gate.factuality_score >= worker_config.GATEKEEPER_FACT_MIN
+            gate_ok = gate.passed
         else:
             gate_ok = True  # gatekeeper disabled entirely — no signal to fail on
     except Exception:
@@ -533,8 +493,7 @@ class _ComposeVetoCtx:
 
 
 def _domain_cap_veto(ctx: _ComposeVetoCtx) -> dict | None:
-    """Per-website daily article cap (COMPOSE_MAX_PER_DOMAIN_PER_DAY). Breaking
-    alerts pass enforce_domain_cap=False so a critical warning is never held."""
+    """Per-website daily article cap (COMPOSE_MAX_PER_DOMAIN_PER_DAY). Breaking alerts pass enforce_domain_cap=False so a critical warning is never held."""
     if not (ctx.enforce_domain_cap and ctx.compose_domain):
         return None
     from app.modules.crawler.domain_tracker import domain_compose_cap_reached
@@ -545,10 +504,7 @@ def _domain_cap_veto(ctx: _ComposeVetoCtx) -> dict | None:
 
 
 def _novelty_duplicate_veto(ctx: _ComposeVetoCtx) -> dict | None:
-    """Near-duplicate guard: a very similar headline published recently means
-    this compose would be spent on a repeat. Runs HERE (composition) not at
-    enqueue, because more articles may have published since this was queued.
-    "duplicate" is a terminal outcome, so the drain dequeues the row."""
+    """Near-duplicate guard: a very similar headline published recently means this compose would be spent on a repeat. Runs HERE (composition) not at enqueue, because more articles may have published since this was queued. "duplicate" is a terminal outcome, so the drain dequeues the row."""
     from app.core import config as worker_config
 
     if not worker_config.NOVELTY_GATE_ENABLED:
@@ -585,14 +541,7 @@ def _novelty_duplicate_veto(ctx: _ComposeVetoCtx) -> dict | None:
 
 
 def _pending_review_veto(ctx: _ComposeVetoCtx) -> dict | None:
-    """A pending review already covers this exact URL — skip BEFORE paying for
-    a Mistral compose, not after. This used to be a post-compose check only
-    (still kept below as a safety net for the race window during a multi-
-    minute compose), which meant a highly dynamic page — bank.testnet.
-    algorand.network's wallet-connect/session chrome makes it register as
-    "changed" on nearly every poll — could burn a full ~4min compose 5x in
-    one day only to have every result but the first silently discarded with
-    no article stored and no review ever updated (2026-07-10)."""
+    """A pending review already covers this exact URL — skip BEFORE paying for a Mistral compose, not after. This used to be a post-compose check only (still kept below as a safety net for the race window during a multi- minute compose), which meant a highly dynamic page — bank.testnet. algorand.network's wallet-connect/session chrome makes it register as "changed" on nearly every poll — could burn a full ~4min compose 5x in one day only to have every result but the first silently discarded with no article stored and no review ever updated (2026-07-10)."""
     from app.modules.crawler.classifier_review_store import has_pending_review_for_url
 
     if has_pending_review_for_url(ctx.row.scrape_url):
@@ -607,7 +556,8 @@ def _content_quality_veto(ctx: _ComposeVetoCtx) -> dict | None:
     improve until the next crawl, and the one-pending-per-service dedupe means
     a squatting sub-floor row would block that crawl's fresh signal from ever
     enqueueing (prod 2026-07-08: 10 rows from 07-03 recycling through every
-    drain, so 'Pull Top topic' composed nothing)."""
+    drain, so 'Pull Top topic' composed nothing).
+    """
     if _content_quality_fails(ctx.signals.relevance, ctx.publish_kind):
         return {
             "status": "skipped",
@@ -835,9 +785,7 @@ def publish_from_queued_row(
     except MistralError as exc:
         credit_issue = isinstance(exc, MistralCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
-        logger.error(
-            "Mistral compose failed for %s (%s): %s", row.service_id, row.scrape_url, exc
-        )
+        logger.error("Mistral compose failed for %s (%s): %s", row.service_id, row.scrape_url, exc)
         return {
             "status": status,
             "service_id": row.service_id,
@@ -853,9 +801,7 @@ def publish_from_queued_row(
     # MAKER changed, from a page-text substring scan to the model that
     # actually researched the story.
     if _writer_flagged_breaking(tier, composed):
-        logger.info(
-            "writer marked %s breaking: %s", row.service_id, composed.breaking_reason
-        )
+        logger.info("writer marked %s breaking: %s", row.service_id, composed.breaking_reason)
         tier = PublishTier.BREAKING
 
     # Classifier gate: only confidently publish-worthy content goes straight
@@ -1291,9 +1237,7 @@ def publish_from_queued_row(
             )
         else:
             keys = [
-                (str(k[0]), str(k[1]))
-                for k in keys
-                if isinstance(k, (list, tuple)) and len(k) == 2
+                (str(k[0]), str(k[1])) for k in keys if isinstance(k, (list, tuple)) and len(k) == 2
             ]
         register_article_match_keys(article_id=article_id, keys=keys)
 
@@ -1456,7 +1400,7 @@ def run_publish_pipeline(
             )
             page_text = result.text
 
-    outcome = ingest_publish_signal(
+    return ingest_publish_signal(
         service_id=service_id,
         display_name=display_name,
         source_url=scrape_url,
@@ -1472,7 +1416,6 @@ def run_publish_pipeline(
         published_at=getattr(result, "published_at", ""),
         inner_links=getattr(result, "links", None),
     )
-    return outcome
 
 
 @celery_app.task(name="app.tasks.newspaper.publish_from_chain_event")
@@ -1486,6 +1429,7 @@ def publish_from_chain_event(
     txid: str,
     round_num: int,
 ) -> dict[str, str]:
+    """Celery task: run the publish pipeline for a chain-detected match, skipping if unresolvable."""
     if not scrape_url:
         return {"status": "skipped", "reason": "no_scrape_url"}
     return run_publish_pipeline(
@@ -1519,11 +1463,7 @@ def _source_kind_from_url(scrape_url: str) -> str | None:
 
 @celery_app.task(name="app.tasks.newspaper.recompose_review")
 def recompose_review(review_id: str) -> dict[str, str]:
-    """Re-run composition on a pending review's stored source and REPLACE the
-    review with a fresh proposal. Lets an admin watch a previously bad article
-    improve as the writer/grader evolve, without waiting for the source to
-    change. This is a deliberate manual replay, so it bypasses the dedup /
-    novelty / domain gates the normal pipeline applies."""
+    """Re-run composition on a pending review's stored source and REPLACE the review with a fresh proposal. Lets an admin watch a previously bad article improve as the writer/grader evolve, without waiting for the source to change. This is a deliberate manual replay, so it bypasses the dedup / novelty / domain gates the normal pipeline applies."""
     import json as _json
     from uuid import UUID
 
@@ -1755,8 +1695,7 @@ def recompose_review(review_id: str) -> dict[str, str]:
 
 @celery_app.task(name="app.tasks.newspaper.assign_editorial_brief")
 def assign_editorial_brief(brief_id: str) -> dict[str, str]:
-    """First-run assignment for an active editorial brief — thin wrapper, see
-    app.modules.newspaper.editorial_assignment for the actual logic."""
+    """First-run assignment for an active editorial brief — thin wrapper, see app.modules.newspaper.editorial_assignment for the actual logic."""
     from app.modules.newspaper.editorial_assignment import assign_editorial_brief as _assign
 
     return _assign(brief_id)
@@ -1764,8 +1703,7 @@ def assign_editorial_brief(brief_id: str) -> dict[str, str]:
 
 @celery_app.task(name="app.tasks.newspaper.refresh_editorial_brief")
 def refresh_editorial_brief(brief_id: str) -> dict[str, str]:
-    """Cadence refresh for an editorial brief's linked article — thin wrapper,
-    see app.modules.newspaper.editorial_assignment for the actual logic."""
+    """Cadence refresh for an editorial brief's linked article — thin wrapper, see app.modules.newspaper.editorial_assignment for the actual logic."""
     from app.modules.newspaper.editorial_assignment import refresh_editorial_brief as _refresh
 
     return _refresh(brief_id)
@@ -1773,28 +1711,29 @@ def refresh_editorial_brief(brief_id: str) -> dict[str, str]:
 
 @celery_app.task(name="app.tasks.newspaper.scan_editorial_brief_schedule")
 def scan_editorial_brief_schedule() -> dict[str, object]:
-    """Safety-net beat: assign any active brief still missing its first article,
-    and refresh any brief whose cadence has elapsed."""
+    """Safety-net beat: assign any active brief still missing its first article, and refresh any brief whose cadence has elapsed."""
     from app.modules.newspaper.editorial_assignment import (
         scan_editorial_brief_schedule as _scan,
     )
 
     return _scan()
 
+
 @celery_app.task(name="app.tasks.newspaper.translate_article")
 def translate_article_task(
     article_id: str,
     lang: str,
-    english_title: str = "",
-    english_summary: str = "",
-    english_body: str = "",
+    _english_title: str = "",
+    _english_summary: str = "",
+    _english_body: str = "",
 ) -> dict[str, str]:
     """Background task to translate an article into a target language using the LLM.
 
     Reads the CURRENT article text from the store rather than trusting enqueue-time
     args (kept only for in-flight compatibility with pre-2026-07-05 enqueues), so a
     recompose between enqueue and run can't persist a stale translation. Skips
-    languages already stored — re-enqueueing is free."""
+    languages already stored — re-enqueueing is free.
+    """
     import json
 
     from app.modules.ai.mistral_compose import translate_article_mistral
@@ -1852,19 +1791,15 @@ def backfill_article_translations_task(limit: int = 500) -> dict:
 
 
 @celery_app.task(name="app.tasks.newspaper.recompose_published", bind=True, max_retries=20)
-def recompose_published(self, article_id: str) -> dict[str, str]:
-    """Archive refresh: re-compose a PUBLISHED article into a NEW unlisted
-    draft. When the draft clears the (strict) RECOMPOSE_AUTO_APPLY bar — grade,
-    headline style, gatekeeper — it swaps onto the live article_id immediately
-    (autonomous mode); otherwise it holds in the review queue for a human.
-    Either way apply_recomposed_article does the swap: the URL survives and
-    published_at is re-stamped to the apply time (recompose is a re-publish —
-    owner policy 2026-07-15 — the story returns to the top of the feed).
+def recompose_published(self: Task, article_id: str) -> dict[str, str]:
+    """Archive refresh: re-compose a PUBLISHED article into a NEW unlisted draft. When the draft clears the (strict) RECOMPOSE_AUTO_APPLY bar — grade, headline style, gatekeeper — it swaps onto the live article_id immediately (autonomous mode); otherwise it holds in the review queue for a human. Either way apply_recomposed_article does the swap: the URL survives and published_at is re-stamped to the apply time (recompose is a re-publish — owner policy 2026-07-15 — the story returns to the top of the feed).
 
     recompose_review cannot serve this case: it reuses the article_id at
     compose time, which would replace the live page before any approval
-    (human or automatic) — and approving it would double-publish the feed row."""
+    (human or automatic) — and approving it would double-publish the feed row.
+    """
     import json as _json
+    from uuid import UUID as _UUID
 
     from app.core import config as worker_config
     from app.core.cassandra import get_cassandra_session
@@ -1874,7 +1809,6 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
     from app.modules.crawler.classifier_review_store import enqueue_classifier_review
     from app.modules.newspaper.article_store import get_article, insert_stored_article
     from app.modules.newspaper.security import sanitize_body
-    from uuid import UUID as _UUID
 
     existing = get_article(article_id)
     if existing is None:
@@ -1982,7 +1916,7 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
         # archive-refresh task — the worker runs concurrency=4, so batched
         # recomposes DO collide). A plain return here silently dropped the
         # whole recompose; retry with backoff instead until the lock frees.
-        raise self.retry(exc=exc, countdown=180)
+        raise self.retry(exc=exc, countdown=180) from exc
     except StorySpikedError as spike:
         logger.info(
             "writer spiked archive-refresh of %s: %s [%s]",
@@ -2007,9 +1941,7 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
     if not image_field:
         try:
             row = (
-                get_cassandra_session()
-                .execute(ArticleStmts.GET_IMAGE, (_UUID(article_id),))
-                .one()
+                get_cassandra_session().execute(ArticleStmts.GET_IMAGE, (_UUID(article_id),)).one()
             )
             image_field = (row.image_url or "") if row else ""
         except Exception:
@@ -2048,9 +1980,7 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
     try:
         from app.modules.newspaper.article_grader import grade_article_draft
 
-        grade = grade_article_draft(
-            title=composed.title, body=composed.body, source_url=source_url
-        )
+        grade = grade_article_draft(title=composed.title, body=composed.body, source_url=source_url)
         grade_value = float(grade["grade"])
         grade_meta = {
             "grade": str(grade["grade"]),
@@ -2148,13 +2078,7 @@ def recompose_published(self, article_id: str) -> dict[str, str]:
 
 @celery_app.task(name="app.tasks.newspaper.apply_recomposed_article")
 def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dict[str, str]:
-    """Approved recompose of a published article: swap the draft's content
-    onto the live article_id (same URL; published_at re-stamped to the apply
-    time — recompose is a re-publish, owner policy 2026-07-15 — so the story
-    returns to the top of the feed), version both states, re-index,
-    re-translate, ping IndexNow. The unlisted draft row is left behind (same
-    convention as recompose_review's superseded drafts — never in the feed or
-    sitemap)."""
+    """Approved recompose of a published article: swap the draft's content onto the live article_id (same URL; published_at re-stamped to the apply time — recompose is a re-publish, owner policy 2026-07-15 — so the story returns to the top of the feed), version both states, re-index, re-translate, ping IndexNow. The unlisted draft row is left behind (same convention as recompose_review's superseded drafts — never in the feed or sitemap)."""
     import time as _time
     from uuid import UUID as _UUID
 

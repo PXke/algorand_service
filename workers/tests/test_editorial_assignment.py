@@ -1,10 +1,15 @@
+"""Assigning and refreshing editorial briefs."""
+
 from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
 
 from app.modules.newspaper import editorial_assignment as ea
 from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
 
 
-def _brief(**overrides) -> ea.EditorialBrief:
+def _brief(**overrides: object) -> ea.EditorialBrief:
     defaults = {
         "brief_id": "00000000-0000-0000-0000-000000000001",
         "title": "Algorand wallets compared",
@@ -19,13 +24,16 @@ def _brief(**overrides) -> ea.EditorialBrief:
     return ea.EditorialBrief(**defaults)
 
 
-def test_assign_editorial_brief_forces_relevance_and_enqueues(monkeypatch) -> None:
+def test_assign_editorial_brief_forces_relevance_and_enqueues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Assigning a brief forces relevance=1.0, enqueues a create, and triggers a drain."""
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", True)
     monkeypatch.setattr(ea, "get_brief", lambda brief_id: _brief(brief_id=brief_id))
 
     captured_priority_kwargs = {}
 
-    def fake_compute_priority(**kwargs):
+    def fake_compute_priority(**kwargs: object) -> Any:  # noqa: ANN401 -- test double / fake response
         captured_priority_kwargs.update(kwargs)
 
         class _Breakdown:
@@ -35,7 +43,7 @@ def test_assign_editorial_brief_forces_relevance_and_enqueues(monkeypatch) -> No
 
     captured_enqueue_kwargs = {}
 
-    def fake_enqueue_publish(**kwargs):
+    def fake_enqueue_publish(**kwargs: object) -> tuple[str, bool]:
         captured_enqueue_kwargs.update(kwargs)
         return ("queue-id-1", True)
 
@@ -64,16 +72,17 @@ def test_assign_editorial_brief_forces_relevance_and_enqueues(monkeypatch) -> No
     assert drain_calls == [1]
 
 
-def test_assign_editorial_brief_duplicate_does_not_redrain(monkeypatch) -> None:
+def test_assign_editorial_brief_duplicate_does_not_redrain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A duplicate enqueue does not trigger a drain."""
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", True)
     monkeypatch.setattr(ea, "get_brief", lambda brief_id: _brief(brief_id=brief_id))
     monkeypatch.setattr(
         "app.modules.newspaper.publish_score.compute_priority",
-        lambda **kwargs: type("B", (), {"total": 100})(),
+        lambda **_kwargs: type("B", (), {"total": 100})(),
     )
     monkeypatch.setattr(
         "app.modules.newspaper.publish_queue_store.enqueue_publish",
-        lambda **kw: ("existing-queue-id", False),
+        lambda **_kw: ("existing-queue-id", False),
     )
     drain_calls = []
     monkeypatch.setattr(
@@ -87,7 +96,8 @@ def test_assign_editorial_brief_duplicate_does_not_redrain(monkeypatch) -> None:
     assert not drain_calls
 
 
-def test_assign_editorial_brief_disabled_flag(monkeypatch) -> None:
+def test_assign_editorial_brief_disabled_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skips assignment and never enqueues when editorial briefs are disabled."""
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", False)
     called = []
     monkeypatch.setattr(
@@ -101,9 +111,10 @@ def test_assign_editorial_brief_disabled_flag(monkeypatch) -> None:
     assert not called
 
 
-def test_assign_editorial_brief_missing_brief(monkeypatch) -> None:
+def test_assign_editorial_brief_missing_brief(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skips assignment with reason brief_not_found when the brief id doesn't resolve."""
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", True)
-    monkeypatch.setattr(ea, "get_brief", lambda brief_id: None)
+    monkeypatch.setattr(ea, "get_brief", lambda _brief_id: None)
 
     result = ea.assign_editorial_brief("does-not-exist")
 
@@ -111,12 +122,15 @@ def test_assign_editorial_brief_missing_brief(monkeypatch) -> None:
     assert result["reason"] == "brief_not_found"
 
 
-def test_refresh_falls_back_to_assign_without_linked_article(monkeypatch) -> None:
+def test_refresh_falls_back_to_assign_without_linked_article(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refreshing a brief with no linked article delegates to assign_editorial_brief."""
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", True)
-    monkeypatch.setattr(ea, "get_brief", lambda brief_id: _brief(linked_article_id=""))
+    monkeypatch.setattr(ea, "get_brief", lambda _brief_id: _brief(linked_article_id=""))
     called_assign = []
 
-    def fake_assign(brief_id):
+    def fake_assign(brief_id: str) -> dict:
         called_assign.append(brief_id)
         return {"status": "enqueued"}
 
@@ -128,10 +142,11 @@ def test_refresh_falls_back_to_assign_without_linked_article(monkeypatch) -> Non
     assert result["status"] == "enqueued"
 
 
-def test_refresh_edits_existing_article_and_bumps_last_run(monkeypatch) -> None:
+def test_refresh_edits_existing_article_and_bumps_last_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refreshing a brief with a linked article enqueues an edit and marks the brief's last run."""
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", True)
     linked_id = "11111111-1111-1111-1111-111111111111"
-    monkeypatch.setattr(ea, "get_brief", lambda brief_id: _brief(linked_article_id=linked_id))
+    monkeypatch.setattr(ea, "get_brief", lambda _brief_id: _brief(linked_article_id=linked_id))
 
     captured_enqueue_kwargs = {}
     monkeypatch.setattr(
@@ -139,7 +154,7 @@ def test_refresh_edits_existing_article_and_bumps_last_run(monkeypatch) -> None:
         lambda **kw: (captured_enqueue_kwargs.update(kw), ("queue-id-2", True))[1],
     )
 
-    def fake_compute_priority(**kwargs):
+    def fake_compute_priority(**_kwargs: object) -> Any:  # noqa: ANN401 -- test double / fake response
         class _Breakdown:
             total = 150
 
@@ -150,9 +165,7 @@ def test_refresh_edits_existing_article_and_bumps_last_run(monkeypatch) -> None:
     )
 
     mark_run_calls = []
-    monkeypatch.setattr(
-        ea, "mark_brief_run", lambda **kw: mark_run_calls.append(kw)
-    )
+    monkeypatch.setattr(ea, "mark_brief_run", lambda **kw: mark_run_calls.append(kw))
     drain_calls = []
     monkeypatch.setattr(
         "app.modules.newspaper.tasks.queue_drain_tasks.drain_standard_publish_queue.delay",
@@ -168,7 +181,8 @@ def test_refresh_edits_existing_article_and_bumps_last_run(monkeypatch) -> None:
     assert drain_calls == [1]
 
 
-def test_scan_schedule_assigns_unlinked_and_refreshes_due(monkeypatch) -> None:
+def test_scan_schedule_assigns_unlinked_and_refreshes_due(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The schedule scan assigns unlinked briefs and refreshes only the ones due, skipping the rest."""
     now = datetime.now(tz=UTC)
     unlinked = _brief(brief_id="brief-unlinked", linked_article_id="")
     due = _brief(

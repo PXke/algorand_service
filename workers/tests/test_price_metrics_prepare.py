@@ -1,3 +1,5 @@
+"""Building the Mistral context and brief from stored price samples."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta

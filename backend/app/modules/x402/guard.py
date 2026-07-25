@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from typing import Any
 
 from robyn import Request, Response
 from x402.http.types import (
@@ -25,6 +26,12 @@ from app.core.config import settings
 from app.modules.x402.adapter import RobynAdapter
 from app.modules.x402.client import get_resource_server
 
+# The contest's required "x402-global-challenge" tag is injected via a custom
+# money parser registered on the AVM scheme in client.py, NOT here —
+# PaymentOption.extra is never read by the installed package when building
+# the response (verified against x402/server_base.py). See client.py's
+# CHALLENGE_TAG for the actual mechanism.
+
 
 @dataclass
 class PaymentResult:
@@ -32,11 +39,19 @@ class PaymentResult:
 
     `error` is None only once the payment has been both verified AND settled
     — settlement is a second, separate facilitator call (x402 does not settle
-    automatically after a successful verify)."""
+    automatically after a successful verify).
+    """
 
     error: Response | None
     payer: str | None = None
     settlement_headers: dict[str, str] = field(default_factory=dict)
+    # The settled amount, atomic units as a string (e.g. USDC has 6 decimals)
+    # — None unless error is None. Lets a caller like the KYC lookup endpoint
+    # compute a payout split without re-deriving the price itself.
+    amount_atomic: str | None = None
+    # The incoming payment's own txid, for audit trails that need to link a
+    # side effect (e.g. a payout) back to the payment that funded it.
+    payment_txid: str | None = None
 
 
 def _instructions_to_response(instr: HTTPResponseInstructions) -> Response:
@@ -47,11 +62,22 @@ def _instructions_to_response(instr: HTTPResponseInstructions) -> Response:
     return Response(status_code=instr.status, headers=instr.headers, description=body)
 
 
-def require_payment(request: Request, *, price: str, resource: str) -> PaymentResult:
+def require_payment(
+    request: Request,
+    *,
+    price: str,
+    resource: str,
+    extensions: dict[str, Any] | None = None,
+) -> PaymentResult:
     """Gate a Robyn handler behind an x402 payment.
 
-    `price` is a Money string, e.g. "$0.01" (converted to USDC atomic units).
+    `price` is a Money string, e.g. "$0.01" — converted to USDC atomic units
+    by the tagged money parser registered in client.py, which is also where
+    the required challenge tag gets attached (see CHALLENGE_TAG there).
     `resource` is a short stable id for this endpoint, shown to the payer.
+    `extensions` sets RouteConfig.extensions — pass
+    `x402.extensions.bazaar.declare_discovery_extension(...)` here to make a
+    route Bazaar-discoverable (required for the leaderboard, not automatic).
     """
     route_config = RouteConfig(
         accepts=PaymentOption(
@@ -61,6 +87,7 @@ def require_payment(request: Request, *, price: str, resource: str) -> PaymentRe
             network=settings.x402_network,
         ),
         resource=resource,
+        extensions=extensions,
     )
     # A fresh wrapper per call (route compilation is cheap, local regex work)
     # around the process-wide, already-initialized resource server — this
@@ -106,4 +133,10 @@ def require_payment(request: Request, *, price: str, resource: str) -> PaymentRe
             )
         )
 
-    return PaymentResult(error=None, payer=settle.payer, settlement_headers=settle.headers)
+    return PaymentResult(
+        error=None,
+        payer=settle.payer,
+        settlement_headers=settle.headers,
+        amount_atomic=result.payment_requirements.amount,
+        payment_txid=settle.transaction,
+    )

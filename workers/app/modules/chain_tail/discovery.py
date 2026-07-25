@@ -1,3 +1,5 @@
+"""Extract candidate URLs from a transaction's note/asset-config/rekey/clawback fields and enqueue them."""
+
 from __future__ import annotations
 
 import json
@@ -31,10 +33,7 @@ _ASSET_URL_SKIP_HINTS: tuple[str, ...] = (
 
 
 def _urls_from_asset_config(txn_json: str | None) -> list[str]:
-    """The asset-config `apar.au` field — the creator's own on-chain website
-    declaration. This is the one discovery signal that cannot miss a
-    chain-active service: chain-silent sites (HesabPay/Lofty class) never say
-    "Algorand" on the web, but their ASA declares their domain on-chain."""
+    """The asset-config `apar.au` field — the creator's own on-chain website declaration. This is the one discovery signal that cannot miss a chain-active service: chain-silent sites (HesabPay/Lofty class) never say "Algorand" on the web, but their ASA declares their domain on-chain."""
     if not txn_json:
         return []
     try:
@@ -100,7 +99,7 @@ def _urls_from_rekey(txn_json: str | None) -> list[str]:
     return []
 
 
-def _urls_from_clawback(txn_json: str | None, addresses: set[str]) -> list[str]:
+def _urls_from_clawback(_txn_json: str | None, addresses: set[str]) -> list[str]:
     found: list[str] = []
     for addr in addresses:
         if not addr:

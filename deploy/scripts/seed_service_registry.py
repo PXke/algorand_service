@@ -3,17 +3,21 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SEED = REPO_ROOT / "deploy/seeds/testnet_services.toml"
 
 
 def resolve_seed_path() -> Path:
+    """Seed file to load: $SEED_FILE if set, else the bundled TestNet default."""
     raw = os.getenv("SEED_FILE", "").strip()
     if raw:
         path = Path(raw)
@@ -22,9 +26,10 @@ def resolve_seed_path() -> Path:
 
 
 def main() -> int:
+    """Upsert every service_registry row from the seed file, enqueueing each scrape_url."""
     seed_path = resolve_seed_path()
     if not seed_path.is_file():
-        print(f"error: seed file not found: {seed_path}", file=sys.stderr)
+        logger.error("seed file not found: %s", seed_path)
         return 1
 
     try:
@@ -32,7 +37,7 @@ def main() -> int:
         from cassandra.cluster import Cluster
         from cassandra.policies import DCAwareRoundRobinPolicy
     except ImportError:
-        print("error: pip install cassandra-driver", file=sys.stderr)
+        logger.error("pip install cassandra-driver")
         return 1
 
     hosts = [h.strip() for h in os.getenv("CASSANDRA_HOSTS", "127.0.0.1").split(",") if h.strip()]
@@ -72,16 +77,17 @@ def main() -> int:
                 now,
             ),
         )
-        print(f"upserted service_id={entry['service_id']}")
+        logger.info("upserted service_id=%s", entry["service_id"])
         scrape_url = entry.get("scrape_url") or ""
         if scrape_url.startswith(("http://", "https://")):
             _maybe_enqueue_seed_url(scrape_url, entry["service_id"])
 
-    print(f"Done ({len(services)} services).")
+    logger.info("Done (%d services).", len(services))
     return 0
 
 
 def _maybe_enqueue_seed_url(url: str, service_id: str) -> None:
+    """Best-effort url_queue enqueue for a freshly-seeded service's scrape_url."""
     if os.getenv("URL_QUEUE_ENABLED", "1").strip().lower() in ("0", "false", "no"):
         return
     try:
@@ -89,10 +95,11 @@ def _maybe_enqueue_seed_url(url: str, service_id: str) -> None:
         from app.modules.crawler.url_queue import enqueue_url
 
         enqueue_url(url, source="seed", priority=40, metadata={"service_id": service_id})
-        print(f"enqueued url_queue url={url}")
+        logger.info("enqueued url_queue url=%s", url)
     except Exception as exc:
-        print(f"warn: url_queue enqueue failed for {service_id}: {exc}", file=sys.stderr)
+        logger.warning("url_queue enqueue failed for %s: %s", service_id, exc)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     raise SystemExit(main())

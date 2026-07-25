@@ -1,3 +1,5 @@
+"""Atomic Redis-backed daily publish-slot reservation, the single counting authority."""
+
 from __future__ import annotations
 
 import logging
@@ -73,8 +75,8 @@ def _ensure_counter_initialized(
 
 
 def reserve_publish_slot(*, tier: PublishTier) -> tuple[bool, str]:
-    """
-    Atomically reserve one publish slot for today.
+    """Atomically reserve one publish slot for today.
+
     Must call release_publish_slot if compose/insert fails after reserve.
     """
     day = _day_key()
@@ -108,14 +110,18 @@ def release_publish_slot(*, tier: PublishTier) -> None:
 
 
 def is_standard_publish_saturated(*, when: datetime | None = None) -> bool:
+    """Whether today's standard-tier publish cap has been reached."""
     count = published_count_today(tier=PublishTier.STANDARD, when=when)
     return count >= config.NEWS_MAX_ARTICLES_PER_DAY
 
 
 def is_any_publish_saturated(*, when: datetime | None = None) -> bool:
-    return is_standard_publish_saturated(when=when) and published_count_today(
-        tier=PublishTier.BREAKING, when=when
-    ) >= config.NEWS_MAX_BREAKING_PER_DAY
+    """Whether both the standard and breaking-tier daily caps are reached."""
+    return (
+        is_standard_publish_saturated(when=when)
+        and published_count_today(tier=PublishTier.BREAKING, when=when)
+        >= config.NEWS_MAX_BREAKING_PER_DAY
+    )
 
 
 def assert_publish_allowed(*, tier: PublishTier) -> None:
@@ -128,4 +134,5 @@ def assert_publish_allowed(*, tier: PublishTier) -> None:
 
 
 class PublishCapExceededError(Exception):
+    """Raised when a publish-slot reservation exceeds the daily cap."""
     pass

@@ -1,9 +1,5 @@
-"""Social auto-post on publish (owner decision 2026-07-12): Bluesky first,
-Telegram second, in that priority order. Each channel is independently
-"enabled" by having credentials configured — no separate flag. These test
-the HTTP call shapes against mocked httpx clients (no real network) and the
-dispatcher's per-channel failure isolation.
-"""
+"""Social auto-post on publish (owner decision 2026-07-12): Bluesky first, Telegram second, in that priority order. Each channel is independently "enabled" by having credentials configured — no separate flag. These test the HTTP call shapes against mocked httpx clients (no real network) and the dispatcher's per-channel failure isolation."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -31,7 +27,8 @@ _SHARE = ArticleShare(
 
 def test_article_share_is_plain_data() -> None:
     # No article_id/DB coupling — a distributor is testable with just strings.
-    assert _SHARE.title and _SHARE.url
+    assert _SHARE.title
+    assert _SHARE.url
 
 
 # ── Hashtags / caption composition ──────────────────────────────────────
@@ -95,7 +92,7 @@ def test_bluesky_post_success() -> None:
     with patch("app.modules.distribution.bluesky.httpx.Client") as client_cls:
         client = client_cls.return_value.__enter__.return_value
 
-        def post_side_effect(path, **kwargs):
+        def post_side_effect(path: str, **_kwargs: object) -> MagicMock:
             resp = MagicMock()
             resp.raise_for_status = lambda: None
             if path == "/xrpc/com.atproto.server.createSession":
@@ -111,9 +108,7 @@ def test_bluesky_post_success() -> None:
         client.get.return_value.content = b"fake-image-bytes"
         client.get.return_value.headers = {"content-type": "image/png"}
 
-        result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(
-            _SHARE
-        )
+        result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(_SHARE)
 
     assert result.ok
     assert result.channel == "bluesky"
@@ -124,8 +119,7 @@ def test_bluesky_post_success() -> None:
     assert "/xrpc/com.atproto.repo.createRecord" in post_paths
     # The createRecord call must carry the external embed with our URL.
     create_record_call = next(
-        c for c in client.post.call_args_list
-        if c.args[0] == "/xrpc/com.atproto.repo.createRecord"
+        c for c in client.post.call_args_list if c.args[0] == "/xrpc/com.atproto.repo.createRecord"
     )
     record = create_record_call.kwargs["json"]["record"]
     assert record["embed"]["external"]["uri"] == _SHARE.url
@@ -142,7 +136,7 @@ def test_bluesky_post_survives_thumb_upload_failure() -> None:
     with patch("app.modules.distribution.bluesky.httpx.Client") as client_cls:
         client = client_cls.return_value.__enter__.return_value
 
-        def post_side_effect(path, **kwargs):
+        def post_side_effect(path: str, **_kwargs: object) -> MagicMock:
             resp = MagicMock()
             resp.raise_for_status = lambda: None
             if path == "/xrpc/com.atproto.server.createSession":
@@ -154,14 +148,11 @@ def test_bluesky_post_survives_thumb_upload_failure() -> None:
         client.post.side_effect = post_side_effect
         client.get.side_effect = ConnectionError("image host down")
 
-        result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(
-            _SHARE
-        )
+        result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(_SHARE)
 
     assert result.ok
     create_record_call = next(
-        c for c in client.post.call_args_list
-        if c.args[0] == "/xrpc/com.atproto.repo.createRecord"
+        c for c in client.post.call_args_list if c.args[0] == "/xrpc/com.atproto.repo.createRecord"
     )
     assert "thumb" not in create_record_call.kwargs["json"]["record"]["embed"]["external"]
 
@@ -171,9 +162,7 @@ def test_bluesky_post_failure_does_not_raise() -> None:
         client = client_cls.return_value.__enter__.return_value
         client.post.side_effect = ConnectionError("auth service down")
 
-        result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(
-            _SHARE
-        )
+        result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(_SHARE)
 
     assert not result.ok
     assert result.channel == "bluesky"
@@ -244,12 +233,8 @@ def test_telegram_reports_api_level_failure() -> None:
 
 def test_mastodon_disabled_without_credentials() -> None:
     assert not MastodonDistributor(instance_url="", access_token="").enabled
-    assert not MastodonDistributor(
-        instance_url="https://mastodon.social", access_token=""
-    ).enabled
-    assert MastodonDistributor(
-        instance_url="https://mastodon.social", access_token="tok"
-    ).enabled
+    assert not MastodonDistributor(instance_url="https://mastodon.social", access_token="").enabled
+    assert MastodonDistributor(instance_url="https://mastodon.social", access_token="tok").enabled
 
 
 def test_mastodon_post_success_with_media() -> None:
@@ -259,7 +244,7 @@ def test_mastodon_post_success_with_media() -> None:
         client.get.return_value.content = b"fake-image-bytes"
         client.get.return_value.headers = {"content-type": "image/png"}
 
-        def post_side_effect(path, **kwargs):
+        def post_side_effect(path: str, **_kwargs: object) -> MagicMock:
             resp = MagicMock()
             resp.raise_for_status = lambda: None
             if path == "/api/v1/media":
@@ -273,9 +258,7 @@ def test_mastodon_post_success_with_media() -> None:
         ).post_article(_SHARE)
 
     assert result.ok
-    status_call = next(
-        c for c in client.post.call_args_list if c.args[0] == "/api/v1/statuses"
-    )
+    status_call = next(c for c in client.post.call_args_list if c.args[0] == "/api/v1/statuses")
     assert status_call.kwargs["data"]["media_ids"] == ["media-42"]
     assert _SHARE.url in status_call.kwargs["data"]["status"]
     assert "#Algorand #Infrastructure #Layer1" in status_call.kwargs["data"]["status"]
@@ -328,7 +311,7 @@ class _FakeDistributor(SocialDistributor):
     def enabled(self) -> bool:
         return self._is_enabled
 
-    def post_article(self, share: ArticleShare) -> DistributionResult:
+    def post_article(self, _share: ArticleShare) -> DistributionResult:
         self.called = True
         return DistributionResult(channel=self.name, ok=self._ok)
 
@@ -351,7 +334,7 @@ def test_dispatcher_isolates_one_channel_failing_from_another() -> None:
         def enabled(self) -> bool:
             return True
 
-        def post_article(self, share: ArticleShare) -> DistributionResult:
+        def post_article(self, _share: ArticleShare) -> DistributionResult:
             raise RuntimeError("channel exploded")
 
     broken = _RaisingDistributor()

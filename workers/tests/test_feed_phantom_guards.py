@@ -15,9 +15,11 @@ feed API's defensive filter silently hides. Guards under test:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
+
+import pytest
 
 from app.core.statements import ArticleStmts, FeedStmts
 from app.modules.newspaper.article_store import (
@@ -26,7 +28,7 @@ from app.modules.newspaper.article_store import (
     update_article_translations,
 )
 
-_PUBLISHED_AT = datetime(2026, 7, 14, 18, 52, 10, 629000)
+_PUBLISHED_AT = datetime(2026, 7, 14, 18, 52, 10, 629000, tzinfo=UTC)
 
 
 def _stmt_cql(registry: type, name: str) -> str:
@@ -34,21 +36,20 @@ def _stmt_cql(registry: type, name: str) -> str:
 
 
 def test_feed_and_article_mutation_statements_are_conditional() -> None:
+    """The feed/article translation and image update statements all carry an "IF EXISTS" LWT guard."""
     assert _stmt_cql(FeedStmts, "UPDATE_IMAGE").endswith("IF EXISTS")
     assert _stmt_cql(FeedStmts, "UPDATE_TRANSLATIONS").endswith("IF EXISTS")
     assert _stmt_cql(ArticleStmts, "UPDATE_TRANSLATIONS").endswith("IF EXISTS")
 
 
-def _session(monkeypatch) -> MagicMock:
+def _session(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
     session = MagicMock()
-    monkeypatch.setattr(
-        "app.core.cassandra.get_cassandra_session", lambda: session
-    )
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: session)
     return session
 
 
-def _row(aid) -> MagicMock:
+def _row(aid: UUID) -> MagicMock:
     row = MagicMock()
     row.article_id = aid
     row.service_id = "svc-1"
@@ -68,8 +69,9 @@ def _row(aid) -> MagicMock:
 
 
 def test_update_article_image_missing_feed_row_is_a_noop_not_a_phantom(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A missing feed row on image update is a conditional no-op, never a partial phantom insert."""
     aid = uuid4()
     session = _session(monkeypatch)
     result = MagicMock()
@@ -90,8 +92,9 @@ def test_update_article_image_missing_feed_row_is_a_noop_not_a_phantom(
 
 
 def test_update_article_translations_dropped_when_article_deleted(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Skips the feed translations write entirely once the article-row LWT declines (article deleted)."""
     aid = uuid4()
     session = _session(monkeypatch)
     result = MagicMock()
@@ -106,26 +109,23 @@ def test_update_article_translations_dropped_when_article_deleted(
         stmt
         for stmt, _params in (c.args for c in session.execute.call_args_list)
         if isinstance(stmt, str)
-        and stmt.startswith(
-            "UPDATE algorand_platform.articles_feed SET translations"
-        )
+        and stmt.startswith("UPDATE algorand_platform.articles_feed SET translations")
     ]
     assert feed_updates == []
 
 
 def test_update_article_translations_survives_missing_feed_row(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Still reports success updating translations when the article row exists but the feed row is absent."""
     aid = uuid4()
     session = _session(monkeypatch)
 
-    def execute(stmt, params=None):
+    def execute(stmt: str, _params: tuple | None = None) -> MagicMock:
         result = MagicMock()
         result.one.return_value = _row(aid)
         # Article row exists; feed row is absent (held/moved by recompose).
-        result.was_applied = not (
-            isinstance(stmt, str) and "articles_feed" in stmt
-        )
+        result.was_applied = not (isinstance(stmt, str) and "articles_feed" in stmt)
         return result
 
     session.execute.side_effect = execute
@@ -133,20 +133,18 @@ def test_update_article_translations_survives_missing_feed_row(
     assert update_article_translations(str(aid), {"fr": "{}"})
 
 
-def test_update_article_writes_complete_feed_row(monkeypatch) -> None:
+def test_update_article_writes_complete_feed_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """update_article's feed INSERT carries every projection column, including image/source URL and the original published_at."""
     aid = uuid4()
     session = _session(monkeypatch)
     session.execute.return_value.one.return_value = _row(aid)
 
-    assert update_article(
-        article_id=str(aid), title="New", summary="NS", body="NB"
-    )
+    assert update_article(article_id=str(aid), title="New", summary="NS", body="NB")
 
     inserts = [
         (stmt, params)
         for stmt, params in (c.args for c in session.execute.call_args_list)
-        if isinstance(stmt, str)
-        and stmt.startswith("INSERT INTO algorand_platform.articles_feed")
+        if isinstance(stmt, str) and stmt.startswith("INSERT INTO algorand_platform.articles_feed")
     ]
     assert len(inserts) == 1
     stmt, params = inserts[0]

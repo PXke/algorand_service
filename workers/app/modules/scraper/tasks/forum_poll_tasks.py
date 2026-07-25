@@ -25,8 +25,7 @@ def _strip_html(cooked: str) -> str:
 
 
 def topic_is_hot(topic: dict[str, Any], *, min_posts: int, min_likes: int) -> bool:
-    """Engagement gate. Pinned topics (site housekeeping like the scam-warning
-    banner) never qualify no matter their stats."""
+    """Engagement gate. Pinned topics (site housekeeping like the scam-warning banner) never qualify no matter their stats."""
     if topic.get("pinned"):
         return False
     return (
@@ -35,10 +34,10 @@ def topic_is_hot(topic: dict[str, Any], *, min_posts: int, min_likes: int) -> bo
     )
 
 
-def fetch_topic_text(base_url: str, topic_id: int, *, max_posts: int = 5,
-                     max_chars: int = 8000) -> tuple[str, str]:
-    """(text, created_at) — the opening post plus the first replies, stripped
-    to plain text. Authors are attributed so the writer can quote properly."""
+def fetch_topic_text(
+    base_url: str, topic_id: int, *, max_posts: int = 5, max_chars: int = 8000
+) -> tuple[str, str]:
+    """(text, created_at) — the opening post plus the first replies, stripped to plain text. Authors are attributed so the writer can quote properly."""
     from app.core.net_guard import guarded_get
 
     resp = guarded_get(f"{base_url}/t/{topic_id}.json", timeout=15.0)
@@ -57,6 +56,7 @@ def fetch_topic_text(base_url: str, topic_id: int, *, max_posts: int = 5,
 
 @celery_app.task(name="app.tasks.scrape.poll_forum_topics")
 def poll_forum_topics() -> dict[str, object]:
+    """Celery task: poll the Discourse forum's latest topics and enqueue publish signals."""
     from app.core import config
     from app.core.net_guard import guarded_get
     from app.modules.newspaper.ingest_signal import ingest_publish_signal
@@ -80,8 +80,9 @@ def poll_forum_topics() -> dict[str, object]:
         title = str(topic.get("title") or "").strip()
         if not topic_id or not title:
             continue
-        if not topic_is_hot(topic, min_posts=config.FORUM_MIN_POSTS,
-                            min_likes=config.FORUM_MIN_LIKES):
+        if not topic_is_hot(
+            topic, min_posts=config.FORUM_MIN_POSTS, min_likes=config.FORUM_MIN_LIKES
+        ):
             continue
         service_id = f"forum-topic:{topic_id}"
         if get_latest_snapshot(source_id_for_service(service_id)) is not None:
@@ -89,8 +90,7 @@ def poll_forum_topics() -> dict[str, object]:
         try:
             text, created_at = fetch_topic_text(base, topic_id)
         except Exception as exc:
-            results.append({"topic_id": topic_id, "status": "error",
-                            "detail": str(exc)[:160]})
+            results.append({"topic_id": topic_id, "status": "error", "detail": str(exc)[:160]})
             continue
         if not text:
             continue

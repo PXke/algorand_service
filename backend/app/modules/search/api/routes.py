@@ -1,4 +1,10 @@
+"""HTTP routes for reader-facing article search."""
+
 from __future__ import annotations
+
+from typing import Any
+
+from robyn import Request, Robyn
 
 from app.core import serialization
 from app.core.http_errors import json_error_response
@@ -9,11 +15,12 @@ _DEFAULT_LIMIT = 20
 _MAX_LIMIT = 100
 
 
-def register_search_routes(app) -> None:
+def register_search_routes(app: Robyn) -> None:
+    """Register the reader-facing article search route."""
     search_service = SearchService()
 
     @app.get("/api/v1/search")
-    async def search(request):
+    async def search(request: Request) -> Any:  # noqa: ANN401 -- Robyn route handler returns a Response or any JSON-serializable builtin
         query = request.query_params.get("q", "").strip()
         if not query:
             return json_error_response(400, "invalid_request", "q query param required")

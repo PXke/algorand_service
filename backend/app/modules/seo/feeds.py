@@ -38,9 +38,7 @@ def rss_xml(
     channel_description: str | None = None,
     self_path: str = "/feed.xml",
 ) -> str:
-    """`bodies` maps article_id -> rendered HTML body; when provided the item
-    carries the FULL article as `content:encoded` (readers, aggregators and AI
-    crawlers get the whole piece instead of a 280-char teaser)."""
+    """`bodies` maps article_id -> rendered HTML body; when provided the item carries the FULL article as `content:encoded` (readers, aggregators and AI crawlers get the whole piece instead of a 280-char teaser)."""
     items = items[:limit]
     self_url = _absolute(self_path)
     newest = max((i.published_at_epoch for i in items), default=0)
@@ -84,8 +82,6 @@ def topic_rss_xml(tag: str, items: list[ArticleFeedItem], *, limit: int = 50) ->
         limit=limit,
         channel_title=f"{settings.site_name} — {slug}",
         channel_link=_absolute(f"/topic/{slug}"),
-        channel_description=(
-            f'Algorand stories tagged "{slug}" from {settings.site_name}.'
-        ),
+        channel_description=(f'Algorand stories tagged "{slug}" from {settings.site_name}.'),
         self_path=topic_feed_path(slug),
     )

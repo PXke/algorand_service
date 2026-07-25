@@ -1,3 +1,5 @@
+"""Compute a publish-queue row's priority from relevance, novelty, and signal bonuses/penalties."""
+
 from __future__ import annotations
 
 import re
@@ -11,6 +13,7 @@ from app.modules.newspaper.source_trust import source_trust_bonus
 
 @dataclass(frozen=True)
 class PriorityBreakdown:
+    """A publish-queue row's priority score and its components."""
     total: int
     topic_base: int
     source_trust: int
@@ -48,6 +51,7 @@ def compute_priority(
     classifier_confidence: float = 0.0,
     today: date | None = None,
 ) -> PriorityBreakdown:
+    """Compute a publish-queue row's priority breakdown from topic, trust, and signal inputs."""
     # topic_base/trust/service_weight/urgency are kept for observability on the
     # admin/debug view only — they do NOT decide selection (see `total` below).
     # `noise` is the one exception: it's subtracted from `total` further down.
@@ -105,9 +109,7 @@ def compute_priority(
 
     relevance_pts = round(rel * RELEVANCE_PRIORITY_WEIGHT)
     novelty_pts = round(rel * nov * NOVELTY_PRIORITY_WEIGHT)
-    timeliness_pts = (
-        0 if spam else round(rel * timeliness_score * RECENCY_PRIORITY_WEIGHT)
-    )
+    timeliness_pts = 0 if spam else round(rel * timeliness_score * RECENCY_PRIORITY_WEIGHT)
 
     # "Something happened" beats "this page exists": a detected event, urgency
     # phrasing, or an announcement-shaped TITLE earns a relevance-gated bonus
@@ -199,9 +201,25 @@ def compute_priority(
 _ANNOUNCE_TITLE_STEMS = (
     # "introducing/introduces", never the bare stem — "Introduction | Pera Docs"
     # is a docs landing page, not an announcement.
-    "introducing", "introduces", "launch", "announc", "unveil", "partner",
-    "integrat", "release", "ships", "goes live", "now live", "brings",
-    "acquir", "rebrand", "migrat", "upgrad", "raises", "secures", "debut",
+    "introducing",
+    "introduces",
+    "launch",
+    "announc",
+    "unveil",
+    "partner",
+    "integrat",
+    "release",
+    "ships",
+    "goes live",
+    "now live",
+    "brings",
+    "acquir",
+    "rebrand",
+    "migrat",
+    "upgrad",
+    "raises",
+    "secures",
+    "debut",
 )
 
 
@@ -228,9 +246,7 @@ def _noise_penalty(
     penalty = 0
     if publish_kind == PublishKind.CONTENT_UPDATE and diff:
         added = sum(
-            1
-            for line in diff.splitlines()
-            if line.startswith("+") and not line.startswith("+++")
+            1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++")
         )
         if added < 5:
             penalty += 5

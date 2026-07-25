@@ -1,3 +1,5 @@
+"""Redis-backed pacing clock deciding when the next standard publish is due."""
+
 from __future__ import annotations
 
 import logging
@@ -17,6 +19,7 @@ def _redis_client() -> redis.Redis:
 
 
 def last_standard_publish_epoch() -> int | None:
+    """Read the epoch of the last standard publish from Redis, or None if unset."""
     try:
         raw = _redis_client().get(_REDIS_KEY_LAST_STANDARD)
     except Exception:
@@ -31,6 +34,7 @@ def last_standard_publish_epoch() -> int | None:
 
 
 def record_standard_publish(*, epoch: int | None = None) -> None:
+    """Stamp the given (or current) time as the last standard-publish epoch in Redis."""
     moment = epoch if epoch is not None else int(time.time())
     try:
         _redis_client().set(_REDIS_KEY_LAST_STANDARD, str(moment))
@@ -43,6 +47,7 @@ def record_standard_publish(*, epoch: int | None = None) -> None:
 
 
 def standard_publish_interval_seconds() -> int:
+    """Return the configured standard-publish cadence in seconds."""
     return max(1, NEWS_STANDARD_INTERVAL_HOURS) * 3600
 
 
@@ -53,7 +58,8 @@ def is_standard_publish_due(*, now_epoch: int | None = None) -> tuple[bool, str]
     and publish" — that would silently bypass the pacing cadence entirely.
     Skipping this run and retrying later is the safe direction (matches the
     backend's AdminCassandraStore._is_standard_publish_due, which fails the
-    same way for the admin-approve release path)."""
+    same way for the admin-approve release path).
+    """
     now = now_epoch if now_epoch is not None else int(time.time())
     try:
         last = last_standard_publish_epoch()
@@ -66,4 +72,3 @@ def is_standard_publish_due(*, now_epoch: int | None = None) -> tuple[bool, str]
     if elapsed >= interval:
         return True, f"interval_elapsed ({elapsed}s >= {interval}s)"
     return False, f"wait_standard_interval ({interval - elapsed}s remaining)"
-

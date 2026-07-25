@@ -34,14 +34,20 @@ void main() {
   });
 
   testWidgets(
-      'app resume while the dialog is up fires onResumed (dead-socket revival)',
-      (tester) async {
+      'app resume after a real backgrounding fires onResumed (dead-socket revival), '
+      'a quick flicker does not', (tester) async {
     // Root cause of "login works on desktop, hangs on mobile" (2026-07-16):
     // deep-linking to Pera backgrounds the tab, the OS kills the bridge
     // WebSocket, and its reconnect budget (5 attempts) exhausts — so the
     // approval the wallet already sent never reaches the dapp. The dialog
     // must fire onResumed when the app foregrounds so the caller can
     // wakeTransport() and collect the queued response.
+    //
+    // But only after a real trip: onResumed also fires for the OS's own
+    // "Open in Pera?" consent prompt flickering over the page for under a
+    // second, and force-reconnecting on every one of those churns the
+    // transport mid-request (2026-07-16 v1 regression) — so a sub-2s
+    // backgrounding must NOT fire it.
     var resumed = 0;
     await tester.pumpWidget(
       MaterialApp(
@@ -63,17 +69,35 @@ void main() {
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
-    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
-    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    // Quick flicker: under the 2s threshold, must not fire. `DateTime.now()`
+    // is real wall-clock time (not the test binding's fake frame clock), so
+    // this needs an actual delay — real Timers only fire inside runAsync.
+    await tester.runAsync(() async {
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    });
+    await tester.pump();
+    expect(resumed, 0);
+
+    // A real trip to the wallet app and back: must fire.
+    await tester.runAsync(() async {
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      await Future<void>.delayed(const Duration(seconds: 2, milliseconds: 200));
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    });
     await tester.pump();
     expect(resumed, 1);
 
     // Dismissing the dialog detaches the observer — no leak, no late calls.
     Navigator.of(tester.element(find.byType(AlertDialog))).pop();
     await tester.pumpAndSettle();
-    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
-    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.runAsync(() async {
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      await Future<void>.delayed(const Duration(seconds: 2, milliseconds: 200));
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    });
     await tester.pump();
     expect(resumed, 1);
-  });
+  }, timeout: const Timeout(Duration(seconds: 30)));
 }

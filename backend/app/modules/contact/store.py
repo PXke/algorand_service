@@ -13,10 +13,12 @@ from app.schemas import ContactMessageItem
 
 
 def _bucket(dt: datetime) -> str:
+    """Month bucket key ("2026-07") for `dt`."""
     return dt.strftime("%Y-%m")
 
 
 def insert_message(*, name: str, email: str, message: str) -> str:
+    """Store a contact-form submission, returning its generated message id."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ContactStmts
 
@@ -39,15 +41,15 @@ def list_recent(limit: int = 200) -> list[ContactMessageItem]:
     buckets = [_bucket(now), _bucket(now.replace(day=1) - timedelta(days=1))]
     items: list[ContactMessageItem] = []
     for bucket in buckets:
-        for row in session.execute(ContactStmts.LIST_BUCKET, (bucket,)):
-            items.append(
-                ContactMessageItem(
-                    message_id=str(row.message_id),
-                    name=row.name or "",
-                    email=row.email or "",
-                    message=row.message or "",
-                    created_at_epoch=int(row.created_at.timestamp()) if row.created_at else 0,
-                )
+        items.extend(
+            ContactMessageItem(
+                message_id=str(row.message_id),
+                name=row.name or "",
+                email=row.email or "",
+                message=row.message or "",
+                created_at_epoch=int(row.created_at.timestamp()) if row.created_at else 0,
             )
+            for row in session.execute(ContactStmts.LIST_BUCKET, (bucket,))
+        )
     items.sort(key=lambda item: item.created_at_epoch, reverse=True)
     return items[:limit]

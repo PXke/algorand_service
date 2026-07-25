@@ -92,8 +92,7 @@ def _skippable(host: str) -> bool:
 
 
 def extract_directory_domains(markdown: str) -> set[str]:
-    """Candidate service domains from a directory's markdown: every linked
-    host minus forges/registries/socials/badges and www prefixes."""
+    """Candidate service domains from a directory's markdown: every linked host minus forges/registries/socials/badges and www prefixes."""
     domains: set[str] = set()
     for url in _URL_RE.findall(markdown or ""):
         host = (urlparse(url).hostname or "").lower().removeprefix("www.")
@@ -103,8 +102,7 @@ def extract_directory_domains(markdown: str) -> set[str]:
 
 
 def _reachable(domain: str) -> bool:
-    """Cheap liveness probe so we don't register weekly watches on dead sites
-    (awesome-list rot is real — algoamm.com black-holes connections)."""
+    """Cheap liveness probe so we don't register weekly watches on dead sites (awesome-list rot is real — algoamm.com black-holes connections)."""
     from app.core.net_guard import guarded_get
 
     try:
@@ -119,9 +117,7 @@ def _reachable(domain: str) -> bool:
 
 
 def _ingest_domain(domain: str, source_url: str, stats: dict[str, Any]) -> None:
-    """Approve + monitor one curated-listed domain (shared by the directory and
-    case-study paths). Admin rejects stay sovereign; already-monitored domains
-    just get the anchor flag stamped."""
+    """Approve + monitor one curated-listed domain (shared by the directory and case-study paths). Admin rejects stay sovereign; already-monitored domains just get the anchor flag stamped."""
     from app.modules.crawler.domain_tracker import (
         ensure_monitored_service,
         get_domain_status,
@@ -148,8 +144,7 @@ def _ingest_domain(domain: str, source_url: str, stats: dict[str, Any]) -> None:
                 update_domain_status(
                     domain,
                     relevance_score=float(status.get("relevance_score") or 0.45),
-                    metadata={"ecosystem_listed": "true",
-                              "ecosystem_source": source_url},
+                    metadata={"ecosystem_listed": "true", "ecosystem_source": source_url},
                 )
             stats["skipped_existing"] += 1
             return
@@ -162,8 +157,7 @@ def _ingest_domain(domain: str, source_url: str, stats: dict[str, Any]) -> None:
             category="service",
             is_relevant=True,
             frontier_status_override="approved",
-            metadata={"ecosystem_listed": "true",
-                      "ecosystem_source": source_url},
+            metadata={"ecosystem_listed": "true", "ecosystem_source": source_url},
         )
         if ensure_monitored_service(domain, scrape_url=f"https://{domain}/"):
             stats["created"] += 1
@@ -175,13 +169,19 @@ def _ingest_domain(domain: str, source_url: str, stats: dict[str, Any]) -> None:
 
 
 def sync_ecosystem_directories() -> dict[str, Any]:
-    """Ingest each configured directory URL; approve + monitor newly listed
-    domains. Idempotent: already-monitored domains are counted and skipped."""
+    """Ingest each configured directory URL; approve + monitor newly listed domains. Idempotent: already-monitored domains are counted and skipped."""
     from app.core import config
     from app.core.net_guard import guarded_get
 
-    stats = {"directories": 0, "domains": 0, "created": 0, "skipped_admin": 0,
-             "skipped_existing": 0, "skipped_unreachable": 0, "errors": 0}
+    stats = {
+        "directories": 0,
+        "domains": 0,
+        "created": 0,
+        "skipped_admin": 0,
+        "skipped_existing": 0,
+        "skipped_unreachable": 0,
+        "errors": 0,
+    }
 
     for directory_url in config.ECOSYSTEM_DIRECTORY_URLS:
         try:
@@ -213,15 +213,14 @@ _CASE_INDEX_PAGE_CAP = 10
 
 
 def case_study_detail_links(html: str, index_url: str) -> set[str]:
-    """Same-site, single-segment detail-page URLs under the index path
-    (tag/pagination/feed links excluded)."""
+    """Same-site, single-segment detail-page URLs under the index path (tag/pagination/feed links excluded)."""
     prefix = index_url.rstrip("/") + "/"
     out: set[str] = set()
     for href in _HREF_RE.findall(html or ""):
         clean = href.split("?")[0].rstrip("/")
         if not clean.startswith(prefix):
             continue
-        tail = clean[len(prefix):]
+        tail = clean[len(prefix) :]
         if not tail or "/" in tail or tail.endswith(".xml"):
             continue
         out.add(clean)
@@ -229,9 +228,7 @@ def case_study_detail_links(html: str, index_url: str) -> set[str]:
 
 
 def extract_case_study_domains(pages: dict[str, str]) -> dict[str, str]:
-    """domain -> the detail URL it appeared on. Domains present on ~every
-    detail page are site furniture (liquidauth.com lives in algorand.co's
-    footer), not case-study subjects, and are dropped."""
+    """Domain -> the detail URL it appeared on. Domains present on ~every detail page are site furniture (liquidauth.com lives in algorand.co's footer), not case-study subjects, and are dropped."""
     from collections import Counter
 
     per_page = {url: extract_directory_domains(html) for url, html in pages.items()}
@@ -248,30 +245,31 @@ def extract_case_study_domains(pages: dict[str, str]) -> dict[str, str]:
 
 
 def sync_ecosystem_case_studies() -> dict[str, Any]:
-    """Ingest each configured case-study index: walk its pagination, fetch each
-    detail page, and anchor + monitor every subject org domain found."""
+    """Ingest each configured case-study index: walk its pagination, fetch each detail page, and anchor + monitor every subject org domain found."""
     from app.core import config
     from app.core.net_guard import guarded_get
 
-    stats = {"indexes": 0, "case_studies": 0, "domains": 0, "created": 0,
-             "skipped_admin": 0, "skipped_existing": 0,
-             "skipped_unreachable": 0, "errors": 0}
+    stats = {
+        "indexes": 0,
+        "case_studies": 0,
+        "domains": 0,
+        "created": 0,
+        "skipped_admin": 0,
+        "skipped_existing": 0,
+        "skipped_unreachable": 0,
+        "errors": 0,
+    }
 
     for index_url in config.ECOSYSTEM_CASE_STUDY_INDEXES:
         details: set[str] = set()
         for page_no in range(1, _CASE_INDEX_PAGE_CAP + 1):
-            page_url = (
-                index_url if page_no == 1
-                else f"{index_url.rstrip('/')}/page/{page_no}"
-            )
+            page_url = index_url if page_no == 1 else f"{index_url.rstrip('/')}/page/{page_no}"
             try:
                 resp = guarded_get(page_url, timeout=20.0)
                 resp.raise_for_status()
             except Exception:
                 if page_no == 1:
-                    logger.warning(
-                        "case-study sync: failed to fetch %s", page_url, exc_info=True
-                    )
+                    logger.warning("case-study sync: failed to fetch %s", page_url, exc_info=True)
                     stats["errors"] += 1
                 break
             found = case_study_detail_links(resp.text, index_url)
@@ -308,8 +306,7 @@ def sync_ecosystem_case_studies() -> dict[str, Any]:
 
 
 def _domains_from_defillama() -> dict[str, str]:
-    """domain -> attribution for protocols deployed on Algorand. CEX listings
-    are skipped: Binance 'supporting' ALGO custody is not an Algorand service."""
+    """Domain -> attribution for protocols deployed on Algorand. CEX listings are skipped: Binance 'supporting' ALGO custody is not an Algorand service."""
     from app.core.net_guard import guarded_get
 
     resp = guarded_get("https://api.llama.fi/protocols", timeout=30.0)
@@ -330,9 +327,7 @@ def _domains_from_defillama() -> dict[str, str]:
 
 
 def _domains_from_pera_verified(*, asset_cap: int) -> dict[str, str]:
-    """domain -> attribution for Pera-verified ASAs, resolved through each
-    asset's on-chain `url` param (algod lookup, same connector the writer's
-    chain tools use). Content-pointer URLs (ipfs/arweave) are skipped."""
+    """Domain -> attribution for Pera-verified ASAs, resolved through each asset's on-chain `url` param (algod lookup, same connector the writer's chain tools use). Content-pointer URLs (ipfs/arweave) are skipped."""
     from app.core.net_guard import guarded_get
     from app.modules.ai.chain_tools import _tool_lookup_asset
     from app.modules.chain_tail.discovery import _ASSET_URL_SKIP_HINTS
@@ -346,7 +341,8 @@ def _domains_from_pera_verified(*, asset_cap: int) -> dict[str, str]:
     asset_ids = [
         int(a["asset_id"])
         for a in results
-        if isinstance(a, dict) and str(a.get("verification_tier")) == "verified"
+        if isinstance(a, dict)
+        and str(a.get("verification_tier")) == "verified"
         and a.get("asset_id")
     ][:asset_cap]
 
@@ -369,17 +365,25 @@ def _domains_from_pera_verified(*, asset_cap: int) -> dict[str, str]:
 
 
 def sync_ecosystem_apis() -> dict[str, Any]:
-    """Ingest the machine-readable ecosystem registries. Each source fails
-    independently — one API being down never blocks the others."""
+    """Ingest the machine-readable ecosystem registries. Each source fails independently — one API being down never blocks the others."""
     from app.core import config
 
-    stats = {"sources": 0, "domains": 0, "created": 0, "skipped_admin": 0,
-             "skipped_existing": 0, "skipped_unreachable": 0, "errors": 0}
+    stats = {
+        "sources": 0,
+        "domains": 0,
+        "created": 0,
+        "skipped_admin": 0,
+        "skipped_existing": 0,
+        "skipped_unreachable": 0,
+        "errors": 0,
+    }
 
     fetchers = [
         ("defillama", _domains_from_defillama),
-        ("pera-verified", lambda: _domains_from_pera_verified(
-            asset_cap=config.PERA_VERIFIED_ASSET_CAP)),
+        (
+            "pera-verified",
+            lambda: _domains_from_pera_verified(asset_cap=config.PERA_VERIFIED_ASSET_CAP),
+        ),
     ]
     for name, fetch in fetchers:
         try:
@@ -405,6 +409,7 @@ _ECOSYSTEM_CACHE_TTL_SECONDS = 3600.0
 
 
 def ecosystem_listed_domains() -> frozenset[str]:
+    """Return the cached set of directory-listed domains, refreshing from Cassandra hourly."""
     import time
 
     now = time.time()

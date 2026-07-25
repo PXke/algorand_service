@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
 def init_bugsnag(*, project_root: str = "", release_stage: str = "prod") -> None:
+    """Attach a Bugsnag logging handler if BUGSNAG_API_KEY is set; no-op otherwise."""
     try:
         # Opt-in: reporting only happens where the deploy env provides the key
         # (prod shared env). No key baked in — dev shells and test runs stay silent.
@@ -26,7 +28,7 @@ def init_bugsnag(*, project_root: str = "", release_stage: str = "prod") -> None
 
         bugsnag.configure(
             api_key=key,
-            project_root=project_root or os.getcwd(),
+            project_root=project_root or str(Path.cwd()),
             release_stage=os.getenv("BUGSNAG_RELEASE_STAGE", release_stage),
             auto_capture_sessions=True,
         )

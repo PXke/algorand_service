@@ -1,3 +1,5 @@
+"""Keyword inspection flags rekey/close/clawback in a transaction payload."""
+
 from __future__ import annotations
 
 import base64

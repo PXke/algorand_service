@@ -24,9 +24,7 @@ from statistics import fmean, pstdev
 
 @dataclass(frozen=True)
 class AnnotatedSample:
-    """One graded draft. ``error_types``/``severities`` describe its failures
-    (empty when clean). ``source`` distinguishes the biased dev-trace pool from
-    the unbiased anchor pool used for base rates and debiasing."""
+    """One graded draft. ``error_types``/``severities`` describe its failures (empty when clean). ``source`` distinguishes the biased dev-trace pool from the unbiased anchor pool used for base rates and debiasing."""
 
     factuality_fail: bool
     tone_fail: bool
@@ -37,19 +35,21 @@ class AnnotatedSample:
 
 @dataclass(frozen=True)
 class ErrorTypeStats:
+    """One error type's smoothed, debiased failure statistics."""
     name: str
-    marginal_p: float      # smoothed, debiased P(type | failure)
+    marginal_p: float  # smoothed, debiased P(type | failure)
     severity_mean: float
     severity_std: float
-    n: int                 # raw observations backing this type
+    n: int  # raw observations backing this type
 
 
 @dataclass
 class FailureProfile:
+    """Base failure rates and per-type stats for the annotator pool."""
     error_types: dict[str, ErrorTypeStats]
     base_fail_rate_factuality: float
     base_fail_rate_tone: float
-    cardinality_mean: float          # mean #error_types per failing sample
+    cardinality_mean: float  # mean #error_types per failing sample
     n_samples: int
     n_anchors: int
     provenance: dict = field(default_factory=dict)
@@ -67,8 +67,7 @@ class FailureProfile:
         return rng.choices(names, weights=weights, k=1)[0]
 
     def sample_severity(self, op: str, rng: random.Random) -> float:
-        """Sample a severity for ``op`` from its observed mean/std, clipped to
-        [0,1]. Falls back to a mid severity for unknown ops."""
+        """Sample a severity for ``op`` from its observed mean/std, clipped to [0,1]. Falls back to a mid severity for unknown ops."""
         st = self.error_types.get(op)
         if st is None:
             return 0.7
@@ -92,7 +91,8 @@ def build_profile(
 
     Base rates use the anchor pool when present (unbiased), else all samples.
     The type mix is Laplace-smoothed over the observed vocabulary, debiased
-    toward anchor frequencies, floored, and renormalized."""
+    toward anchor frequencies, floored, and renormalized.
+    """
     n = len(samples)
     anchors = [s for s in samples if s.source == "anchor"]
     base_pool = anchors or samples
@@ -124,9 +124,7 @@ def build_profile(
                 ac[t] += 1
         na = len(anchor_fails)
         anchor_mix = {t: (ac[t] + smoothing) / (na + smoothing * len(vocab)) for t in vocab}
-        weighted = {
-            t: dev_mix[t] * _clip(anchor_mix[t] / dev_mix[t], *debias_clip) for t in vocab
-        }
+        weighted = {t: dev_mix[t] * _clip(anchor_mix[t] / dev_mix[t], *debias_clip) for t in vocab}
     else:
         weighted = dict(dev_mix)
 

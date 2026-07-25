@@ -992,7 +992,18 @@ class AppLocalizationsEs extends AppLocalizations {
   String get domainsAddAsSeed => 'Añadir como fuente permanente';
 
   @override
+  String get domainsAddSinglePageOnly =>
+      'Solo esta página (solo cita, no rastrear el sitio)';
+
+  @override
   String get domainsScoreUnexplained => 'Desglose de puntuación no disponible';
+
+  @override
+  String get domainsPossibleService => '¿posible servicio?';
+
+  @override
+  String get domainsPossibleServiceHint =>
+      'Buena puntuación pero etiquetado como noticias/genérico — podría ser un producto real, no solo una fuente de cita. Considere \"Aprobar y explorar\" en vez de \"Rastrear una vez\".';
 
   @override
   String get paginationPrevious => 'Anterior';

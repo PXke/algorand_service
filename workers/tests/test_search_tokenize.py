@@ -1,9 +1,12 @@
+"""Search-token expansion (acronym clusters) and tag indexing."""
+
 from __future__ import annotations
 
 from app.modules.search.core.tokenize import build_article_search_tokens
 
 
 def test_us_in_body_expands_usa_cluster() -> None:
+    """Expands a whole-word "US" mention to the full USA synonym cluster."""
     tokens = build_article_search_tokens(
         title="Treasury flows",
         summary="",
@@ -14,6 +17,7 @@ def test_us_in_body_expands_usa_cluster() -> None:
 
 
 def test_usability_does_not_add_usa_cluster() -> None:
+    """Does not expand the USA cluster from a substring match inside "usability"."""
     tokens = build_article_search_tokens(
         title="Usability study",
         summary="",

@@ -37,14 +37,14 @@ def article_url(article_id: str, lang: str | None = None) -> str:
 
 
 def translation_lang_codes(translations: dict[str, str] | None) -> list[str]:
+    """Return the non-English language codes present in an article's translations map."""
     if not translations:
         return []
     return [lang for lang in translations if lang and lang != "en"]
 
 
-def article_urls(
-    article_id: str, translation_langs: Iterable[str] | None = None
-) -> list[str]:
+def article_urls(article_id: str, translation_langs: Iterable[str] | None = None) -> list[str]:
+    """Return the deduped English URL plus each translated-locale URL for an article."""
     langs: list[str] = []
     seen: set[str] = set()
     for lang in translation_langs or ():
@@ -59,10 +59,12 @@ def article_urls(
 
 
 def sitemap_url() -> str:
+    """Return the absolute URL of the main sitemap."""
     return f"{_site_url()}/sitemap.xml"
 
 
 def sitemap_news_url() -> str:
+    """Return the absolute URL of the Google News sitemap."""
     return f"{_site_url()}/sitemap-news.xml"
 
 
@@ -88,10 +90,12 @@ def ping_article(
     *,
     translation_langs: Iterable[str] | None = None,
 ) -> None:
+    """Ping IndexNow for an article's content change (publish, edit, or delete)."""
     ping(content_change_urls(article_id, translation_langs=translation_langs))
 
 
 def ping_translation(article_id: str, lang: str) -> None:
+    """Ping IndexNow for a newly landed translation of an article."""
     ping(translation_change_urls(article_id, lang))
 
 

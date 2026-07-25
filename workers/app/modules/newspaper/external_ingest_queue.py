@@ -1,3 +1,5 @@
+"""Redis queue the backend pushes external ingest signals onto for the workers to consume."""
+
 from __future__ import annotations
 
 import json
@@ -20,6 +22,7 @@ def push_external_signal(payload: dict[str, Any]) -> int:
 
 
 def pop_external_signal() -> dict[str, Any] | None:
+    """Dequeue and return the oldest pending external ingest signal, or None if empty/invalid."""
     raw = _client().rpop(QUEUE_KEY)
     if not raw:
         return None
@@ -30,4 +33,5 @@ def pop_external_signal() -> dict[str, Any] | None:
 
 
 def queue_depth() -> int:
+    """Return the number of pending external ingest signals."""
     return int(_client().llen(QUEUE_KEY))

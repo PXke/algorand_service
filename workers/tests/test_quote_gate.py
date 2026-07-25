@@ -1,11 +1,4 @@
-"""Quotation-integrity gate (2026-07-16): the RandGallery shutdown article
-attributed an INVENTED phrase to the Goanna Council in quotation marks —
-"stack of legacy systems layered on top of one another" existed nowhere in
-the research trace or the supplied announcement (the announcement didn't even
-contain the word "legacy"). Quotation marks are a verbatim-transcription
-claim; an unverifiable quote becomes a paraphrase (marks dropped, words
-kept), never a lost sentence.
-"""
+"""Quotation-integrity gate (2026-07-16): the RandGallery shutdown article attributed an INVENTED phrase to the Goanna Council in quotation marks — "stack of legacy systems layered on top of one another" existed nowhere in the research trace or the supplied announcement (the announcement didn't even contain the word "legacy"). Quotation marks are a verbatim-transcription claim; an unverifiable quote becomes a paraphrase (marks dropped, words kept), never a lost sentence."""
 
 from __future__ import annotations
 
@@ -29,11 +22,12 @@ _TRACE = [
 
 
 @pytest.fixture(autouse=True)
-def _gate_enabled(monkeypatch):
+def _gate_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.core.config.QUOTE_GATE_ENABLED", True, raising=False)
 
 
 def test_invented_quote_is_dequoted_but_words_survive() -> None:
+    """A quoted phrase absent from the trace and extra texts loses its quote marks but keeps its words."""
     payload = {
         "body": 'The codebase, described as a "stack of legacy systems layered '
         'on top of one another," lacked documentation.'
@@ -43,29 +37,28 @@ def test_invented_quote_is_dequoted_but_words_survive() -> None:
         "The codebase, described as a stack of legacy systems layered "
         "on top of one another, lacked documentation."
     )
-    assert out["_quotes_unquoted"] == [
-        "stack of legacy systems layered on top of one another,"
-    ]
+    assert out["_quotes_unquoted"] == ["stack of legacy systems layered on top of one another,"]
 
 
 def test_verbatim_quote_from_compose_input_is_kept() -> None:
+    """A quote verbatim in the compose-input extra_texts (not the trace) is kept intact."""
     # The announcement arrived via the editorial brief (compose input, not the
     # trace) — quoting it verbatim is legitimate journalism and must survive.
-    payload = {
-        "body": 'The Council promised every NFT is "returned to its rightful owner".'
-    }
+    payload = {"body": 'The Council promised every NFT is "returned to its rightful owner".'}
     out = unquote_ungrounded_quotes(payload, _TRACE, extra_texts=[_ANNOUNCEMENT])
     assert '"returned to its rightful owner"' in out["body"]
     assert "_quotes_unquoted" not in out
 
 
 def test_verbatim_quote_from_trace_is_kept() -> None:
+    """A quote verbatim in a fetch_url tool-trace result is kept intact."""
     payload = {"body": 'Its tagline reads "The Home of Algorand NFTs" today.'}
     out = unquote_ungrounded_quotes(payload, _TRACE, extra_texts=[])
     assert '"The Home of Algorand NFTs"' in out["body"]
 
 
 def test_matching_is_case_and_punctuation_insensitive() -> None:
+    """Grounding match survives curly quotes, punctuation, and capitalization differences from the source."""
     # Curly quotes, commas and capitalization must not defeat the match.
     payload = {"body": "They said “all NFTs are SAFU. before we WIND down” yesterday."}
     out = unquote_ungrounded_quotes(payload, [], extra_texts=[_ANNOUNCEMENT])
@@ -73,6 +66,7 @@ def test_matching_is_case_and_punctuation_insensitive() -> None:
 
 
 def test_short_quoted_fragments_are_left_alone() -> None:
+    """Short (1-3 word) quoted fragments like scare quotes or names are left alone even when ungrounded."""
     # Scare quotes / names carry little verbatim claim; 1-3 words pass.
     payload = {"body": 'The "messy" codebase and the "Goanna Council" remained.'}
     out = unquote_ungrounded_quotes(payload, [], extra_texts=[])
@@ -80,12 +74,14 @@ def test_short_quoted_fragments_are_left_alone() -> None:
 
 
 def test_curly_quoted_invention_also_dequoted() -> None:
+    """An ungrounded quote using curly (smart) quote marks is also dequoted."""
     payload = {"body": "He called it “a revolutionary paradigm shift for everyone involved”."}
     out = unquote_ungrounded_quotes(payload, _TRACE, extra_texts=[_ANNOUNCEMENT])
     assert out["body"] == "He called it a revolutionary paradigm shift for everyone involved."
 
 
-def test_gate_disabled_is_a_noop(monkeypatch) -> None:
+def test_gate_disabled_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With QUOTE_GATE_ENABLED off, even an ungrounded quote is left untouched."""
     monkeypatch.setattr("app.core.config.QUOTE_GATE_ENABLED", False, raising=False)
     body = 'X said "totally invented words that ground nowhere at all".'
     out = unquote_ungrounded_quotes({"body": body}, [], extra_texts=[])

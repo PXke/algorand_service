@@ -12,9 +12,12 @@ import json
 from collections.abc import Callable
 from contextlib import suppress
 from functools import lru_cache
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from app.core.config import settings
+
+if TYPE_CHECKING:
+    import redis
 
 T = TypeVar("T")
 
@@ -22,14 +25,14 @@ _PREFIX = "algorand:cache:"
 
 
 @lru_cache(maxsize=1)
-def _client():
+def _client() -> redis.Redis:
     import redis
 
     return redis.from_url(settings.redis_url, decode_responses=True, socket_connect_timeout=2)
 
 
 @lru_cache(maxsize=1)
-def _binary_client():
+def _binary_client() -> redis.Redis:
     import redis
 
     return redis.from_url(settings.redis_url, decode_responses=False, socket_connect_timeout=2)
@@ -37,7 +40,9 @@ def _binary_client():
 
 def cached_json(key: str, ttl_seconds: int, compute: Callable[[], T]) -> T:
     """Return cached JSON for `key`, else run `compute()`, cache it, and return it.
-    `compute`'s result must be JSON-serializable."""
+
+    `compute`'s result must be JSON-serializable.
+    """
     full = _PREFIX + key
     with suppress(Exception):  # cache miss / Redis down → recompute
         hit = _client().get(full)
@@ -50,8 +55,7 @@ def cached_json(key: str, ttl_seconds: int, compute: Callable[[], T]) -> T:
 
 
 def cached_bytes(key: str, ttl_seconds: int, compute: Callable[[], bytes]) -> bytes:
-    """Binary sibling of cached_json — for generated images and other
-    non-JSON payloads (a decode_responses=True client would mangle bytes)."""
+    """Binary sibling of cached_json — for generated images and other non-JSON payloads (a decode_responses=True client would mangle bytes)."""
     full = _PREFIX + key
     with suppress(Exception):
         hit = _binary_client().get(full)

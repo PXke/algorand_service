@@ -1,7 +1,4 @@
-"""Mastodon auto-poster. Free, open (ActivityPub) — create a bot account on
-any instance, generate an access token under Settings > Development > New
-Application (needs `write:statuses` and `write:media` scopes), no approval
-process.
+"""Mastodon auto-poster. Free, open (ActivityPub) — create a bot account on any instance, generate an access token under Settings > Development > New Application (needs `write:statuses` and `write:media` scopes), no approval process.
 
 Uploads the share-card image via /api/v1/media first (returns a media id),
 then posts the status with that media attached — Mastodon doesn't support
@@ -31,17 +28,21 @@ _MAX_STATUS_CHARS = 480
 
 
 class MastodonDistributor(SocialDistributor):
+    """SocialDistributor implementation for Mastodon."""
     name = "mastodon"
 
     def __init__(self, *, instance_url: str, access_token: str) -> None:
+        """Store the Mastodon instance URL and access token used to authenticate posts."""
         self._instance_url = instance_url.rstrip("/")
         self._access_token = access_token
 
     @property
     def enabled(self) -> bool:
+        """Whether the Mastodon instance URL and access token are configured."""
         return bool(self._instance_url and self._access_token)
 
     def post_article(self, share: ArticleShare) -> DistributionResult:
+        """Post an article to Mastodon as a status with the share image attached."""
         headers = {"Authorization": f"Bearer {self._access_token}"}
         try:
             with httpx.Client(base_url=self._instance_url, timeout=_TIMEOUT) as client:
@@ -57,9 +58,7 @@ class MastodonDistributor(SocialDistributor):
             log.warning("mastodon post failed for %s: %s", share.url, exc, exc_info=True)
             return DistributionResult(channel=self.name, ok=False, detail=str(exc)[:300])
 
-    def _upload_media(
-        self, client: httpx.Client, headers: dict, image_url: str
-    ) -> str | None:
+    def _upload_media(self, client: httpx.Client, headers: dict, image_url: str) -> str | None:
         if not image_url:
             return None
         try:

@@ -1,3 +1,5 @@
+"""Cached view of enabled services for the chain-tail matcher."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +8,7 @@ from functools import lru_cache
 
 @dataclass(frozen=True)
 class ServiceEntry:
+    """One enabled service's chain-matching config."""
     service_id: str
     display_name: str
     match_kind: str
@@ -16,6 +19,7 @@ class ServiceEntry:
 
 @lru_cache(maxsize=1)
 def load_enabled_services() -> tuple[ServiceEntry, ...]:
+    """Load and cache the enabled service registry rows for chain-tail matching."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ServiceRegistryStmts
 
@@ -38,4 +42,5 @@ def load_enabled_services() -> tuple[ServiceEntry, ...]:
 
 
 def clear_registry_cache() -> None:
+    """Evict the cached enabled-services registry so the next load re-queries Cassandra."""
     load_enabled_services.cache_clear()

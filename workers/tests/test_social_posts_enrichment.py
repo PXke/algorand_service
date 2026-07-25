@@ -1,3 +1,5 @@
+"""Extracting and enriching linked social-post URLs."""
+
 from unittest.mock import patch
 
 from app.modules.newspaper.writer_enrichment.collectors.social_posts import (
@@ -6,12 +8,12 @@ from app.modules.newspaper.writer_enrichment.collectors.social_posts import (
 )
 
 
-def test_extract_tweet_url():
+def test_extract_tweet_url() -> None:
     text = "See https://x.com/d13_co/status/2060386210732761317 for details"
     assert extract_post_urls(text) == ["https://x.com/d13_co/status/2060386210732761317"]
 
 
-def test_enrich_linked_posts_mocked():
+def test_enrich_linked_posts_mocked() -> None:
     fake = {
         "author_name": "D13",
         "author_url": "https://x.com/d13_co",

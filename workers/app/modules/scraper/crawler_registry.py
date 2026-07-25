@@ -1,3 +1,5 @@
+"""Per-crawler-type enable/disable flags and env overrides."""
+
 from __future__ import annotations
 
 import os
@@ -19,8 +21,8 @@ def _env_override(crawler_type: str) -> bool | None:
 
 
 def is_crawler_enabled(crawler_type: str | CrawlerType) -> bool:
-    """
-    Whether a crawler lane may run. Env `CRAWLER_<TYPE>_ENABLED` overrides DB.
+    """Whether a crawler lane may run. Env `CRAWLER_<TYPE>_ENABLED` overrides DB.
+
     Legacy: CRAWLER_HTTP_ENABLED → web; CRAWLER_BROWSER_ENABLED → web SPA sub-mode.
     """
     ctype = str(crawler_type).strip().lower()
@@ -50,12 +52,14 @@ def is_web_spa_enabled() -> bool:
 
 
 def infer_crawler_type(scrape_url: str) -> CrawlerType:
+    """Infer which crawler type handles this URL from its shape."""
     if is_youtube_scrape_url(scrape_url):
         return CrawlerType.YOUTUBE
     return CrawlerType.WEB
 
 
 def crawl_disabled_reason(scrape_url: str) -> str | None:
+    """Return why crawling this URL would be skipped, or None if it's allowed."""
     ctype = infer_crawler_type(scrape_url)
     if not is_crawler_enabled(ctype):
         return f"crawler_{ctype}_disabled"
@@ -68,18 +72,21 @@ def crawl_disabled_reason(scrape_url: str) -> str | None:
 
 
 def mail_crawl_disabled_reason() -> str | None:
+    """Return why mail crawling is disabled, or None if it's allowed."""
     if is_crawler_enabled(CrawlerType.MAIL):
         return None
     return "crawler_mail_disabled"
 
 
 def chain_crawl_disabled_reason() -> str | None:
+    """Return why chain crawling is disabled, or None if it's allowed."""
     if is_crawler_enabled(CrawlerType.CHAIN):
         return None
     return "crawler_chain_disabled"
 
 
 def metrics_crawl_disabled_reason() -> str | None:
+    """Return why metrics crawling is disabled, or None if it's allowed."""
     if is_crawler_enabled(CrawlerType.METRICS):
         return None
     return "crawler_metrics_disabled"

@@ -1,3 +1,5 @@
+"""Compose and publish the weekly digest article."""
+
 from __future__ import annotations
 
 import logging

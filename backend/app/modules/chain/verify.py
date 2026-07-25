@@ -1,3 +1,5 @@
+"""Verify an on-chain transaction actually satisfies a claimed submission (payment amount/receiver/type)."""
+
 from __future__ import annotations
 
 from app.modules.chain.models import IndexedTransaction
