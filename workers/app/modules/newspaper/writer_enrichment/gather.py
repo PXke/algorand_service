@@ -290,3 +290,38 @@ def format_enrichment_for_writer(bundle: WriterEnrichmentBundle) -> str:
         "or in the source crawl."
     )
     return "\n".join(lines)
+
+
+def enrichment_block_for_row(
+    row: object, payload: dict, topic: object, *, is_first_snapshot: bool
+) -> str:
+    """Gather + format the writer's enrichment block for one queued row, or "" when disabled or unavailable.
+
+    The compose and edit paths ran byte-identical copies of this that differed
+    only in `is_first_snapshot` (an edit is never a first snapshot), so it is a
+    parameter rather than two functions.
+
+    Best-effort by design: enrichment is extra context, never a precondition.
+    Any collector failing, or the feature flag being off, degrades to composing
+    without it rather than failing the article.
+    """
+    from app.core import config as worker_config
+
+    try:
+        if not worker_config.WRITER_ENRICHMENT_ENABLED:
+            return ""
+        bundle = gather_writer_enrichment(
+            service_id=row.service_id,
+            display_name=row.display_name,
+            source_url=row.scrape_url,
+            page_text=str(payload.get("page_text", "")),
+            page_title=str(payload.get("page_title", "")),
+            diff=payload.get("diff"),
+            is_first_snapshot=is_first_snapshot,
+            publish_topic=topic,
+            match_kind=str(payload.get("match_kind", "")),
+            match_value=str(payload.get("match_value", "")),
+        )
+        return format_enrichment_for_writer(bundle)
+    except Exception:
+        return ""

@@ -14,36 +14,10 @@ from app.modules.newspaper.compose_lock import ComposeBusyError
 from app.modules.newspaper.publish_policy import PublishTopic
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow
 from app.modules.newspaper.security import sanitize_body
+from app.modules.newspaper.writer_enrichment import enrichment_block_for_row
 from app.modules.search.tasks.index_tasks import index_article
 
 logger = logging.getLogger(__name__)
-
-
-def _gather_edit_enrichment(row: QueuedPublishRow, payload: dict, topic: PublishTopic) -> str:
-    try:
-        from app.core import config as worker_config
-        from app.modules.newspaper.writer_enrichment import (
-            format_enrichment_for_writer,
-            gather_writer_enrichment,
-        )
-
-        if not worker_config.WRITER_ENRICHMENT_ENABLED:
-            return ""
-        bundle = gather_writer_enrichment(
-            service_id=row.service_id,
-            display_name=row.display_name,
-            source_url=row.scrape_url,
-            page_text=str(payload.get("page_text", "")),
-            page_title=str(payload.get("page_title", "")),
-            diff=payload.get("diff"),
-            is_first_snapshot=False,
-            publish_topic=topic,
-            match_kind=str(payload.get("match_kind", "")),
-            match_value=str(payload.get("match_value", "")),
-        )
-        return format_enrichment_for_writer(bundle)
-    except Exception:
-        return ""
 
 
 def _compose_edit_fields(
@@ -117,7 +91,8 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
     except ValueError:
         topic = PublishTopic.GENERIC
 
-    enrichment_block = _gather_edit_enrichment(row, payload, topic)
+    # An edit is never a first snapshot — the article already exists.
+    enrichment_block = enrichment_block_for_row(row, payload, topic, is_first_snapshot=False)
     new_text = str(payload.get("page_text", ""))
     new_title = str(payload.get("page_title", ""))
 

@@ -24,6 +24,7 @@ from app.modules.newspaper.compose_lock import COMPOSE_LOCK_KEY, ComposeBusyErro
 from app.modules.newspaper.ingest_signal import ingest_publish_signal
 from app.modules.newspaper.publish_policy import PublishKind, PublishTier, PublishTopic
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow
+from app.modules.newspaper.writer_enrichment import enrichment_block_for_row
 from app.modules.scraper.core.factory import get_scraper_for_url
 from app.modules.search.tasks.index_tasks import index_article, index_crawled_page
 
@@ -658,33 +659,6 @@ def _resolve_classifier_signals(
     return signals, clf_category, clf_decision, clf_confidence
 
 
-def _gather_publish_enrichment(row: QueuedPublishRow, payload: dict, topic: PublishTopic) -> str:
-    try:
-        from app.core import config as worker_config
-        from app.modules.newspaper.writer_enrichment import (
-            format_enrichment_for_writer,
-            gather_writer_enrichment,
-        )
-
-        if not worker_config.WRITER_ENRICHMENT_ENABLED:
-            return ""
-        bundle = gather_writer_enrichment(
-            service_id=row.service_id,
-            display_name=row.display_name,
-            source_url=row.scrape_url,
-            page_text=str(payload.get("page_text", "")),
-            page_title=str(payload.get("page_title", "")),
-            diff=payload.get("diff"),
-            is_first_snapshot=bool(payload.get("is_first_snapshot", False)),
-            publish_topic=topic,
-            match_kind=str(payload.get("match_kind", "")),
-            match_value=str(payload.get("match_value", "")),
-        )
-        return format_enrichment_for_writer(bundle)
-    except Exception:
-        return ""
-
-
 def _is_first_coverage(row: QueuedPublishRow, publish_kind: PublishKind) -> bool:
     """A CONTENT_UPDATE for a service with no published article would report "what changed" on a service readers have never met (its one-shot discovery row may have expired unpublished) — compose an introduction instead. Checked at compose time, not enqueue, so it adds zero enqueue dynamics (the old prior==0 discovery re-fire caused a queue flood)."""
     if publish_kind != PublishKind.CONTENT_UPDATE:
@@ -926,29 +900,53 @@ def _maybe_auto_approve(
     return needs_review, route_to_backlog
 
 
-def _review_grade_metadata(
-    row: QueuedPublishRow,
-    payload: dict,
+def _grade_and_gate(
     composed: ArticleComposeResult,
     *,
-    held_title: str,
-    held_tags: tuple[str, ...],
-    page_text_for_clf: str,
-) -> dict[str, str]:
-    """Quality grade + gatekeeper metadata for a held-for-review draft, so the reviewer sees a score and reasons instead of the bare draft."""
-    grade_meta: dict[str, str] = {}
-    try:
-        import json as _json
+    title: str,
+    source_url: str,
+    page_text: str,
+    service_id: str,
+    published_at: str = "",
+    tags: tuple[str, ...] = (),
+    label: str = "",
+) -> tuple[dict[str, str], float | None, bool]:
+    """Quality grade + deterministic gatekeeper for one draft, in the shape every caller needs.
 
+    Returns (grade_meta, grade_value, gate_ok). The held-for-review and
+    recompose-review paths only want grade_meta — the metadata a human reviewer
+    sees next to the draft — and ignore the rest; the archive-refresh path also
+    needs the numbers to decide whether to auto-apply.
+
+    Both stages fail soft and independently: a grader or gatekeeper error must
+    never stop a draft being stored, it just means the reviewer sees less.
+
+    gate_ok reflects factuality (numeric entailment) only, not the completeness
+    rule's OSINT-tool-call check, and is True when the gatekeeper is disabled
+    entirely (no signal to fail on). Completeness fires on any source mentioning
+    a website/founder/company — nearly every service-profile source — while the
+    writer only sporadically calls the matching tools, so gating on it blocked
+    ~all Tier-2 recomposes regardless of quality (owner confirmed 2026-07-12:
+    grades were consistently 7.3-10 while completeness failed almost
+    universally). Still recorded in grade_meta for visibility.
+    """
+    import json as _json
+
+    from app.core import config as worker_config
+
+    grade_meta: dict[str, str] = {}
+    grade_value: float | None = None
+    try:
         from app.modules.newspaper.article_grader import grade_article_draft
 
         grade = grade_article_draft(
-            title=held_title,
+            title=title,
             body=composed.body,
-            source_url=row.scrape_url,
-            published_at=str(payload.get("published_at", "")),
-            tags=tuple(held_tags),
+            source_url=source_url,
+            published_at=published_at,
+            tags=tags,
         )
+        grade_value = float(grade["grade"])
         grade_meta = {
             "grade": str(grade["grade"]),
             "grade_detail": _json.dumps(
@@ -958,22 +956,24 @@ def _review_grade_metadata(
         }
     except Exception:
         grade_meta = {}
-    # Deterministic gatekeeper: completeness + trace<->article numeric
-    # entailment, surfaced to the reviewer. Shadow by default (computes and
-    # annotates); GATEKEEPER_ENFORCE wires through for an auto-publish path.
+
+    gate_ok = False
     try:
         from app.modules.gatekeeper.live import gate_draft
 
         gate = gate_draft(
-            source_text=page_text_for_clf,
-            article_text=f"{held_title}\n{composed.body}",
-            service_id=row.scrape_url,
+            source_text=page_text,
+            article_text=f"{title}\n{composed.body}",
+            service_id=service_id,
         )
         if gate is not None:
             grade_meta.update(gate.as_metadata())
+            gate_ok = gate.factuality_score >= worker_config.GATEKEEPER_FACT_MIN
+        else:
+            gate_ok = True  # gatekeeper disabled entirely — no signal to fail on
     except Exception:
-        logger.warning("gatekeeper grading failed for %s", row.scrape_url, exc_info=True)
-    return grade_meta
+        logger.warning("gatekeeper grading failed for %s", label or service_id, exc_info=True)
+    return grade_meta, grade_value, gate_ok
 
 
 def _hold_for_review(
@@ -1041,13 +1041,14 @@ def _hold_for_review(
         prompt_version=getattr(composed, "prompt_version", ""),
     )
     # Grade the draft so the human reviewer sees a quality score + reasons.
-    grade_meta = _review_grade_metadata(
-        row,
-        payload,
+    grade_meta, _grade_value, _gate_ok = _grade_and_gate(
         composed,
-        held_title=held_title,
-        held_tags=tuple(held_tags),
-        page_text_for_clf=page_text_for_clf,
+        title=held_title,
+        source_url=row.scrape_url,
+        page_text=page_text_for_clf,
+        service_id=row.scrape_url,
+        published_at=str(payload.get("published_at", "")),
+        tags=tuple(held_tags),
     )
     review_id = ""
     if not route_to_backlog:
@@ -1390,7 +1391,9 @@ def publish_from_queued_row(
     if veto_outcome is not None:
         return veto_outcome
 
-    enrichment_block = _gather_publish_enrichment(row, payload, topic)
+    enrichment_block = enrichment_block_for_row(
+        row, payload, topic, is_first_snapshot=bool(payload.get("is_first_snapshot", False))
+    )
     first_coverage = _is_first_coverage(row, publish_kind)
 
     composed, compose_error = _compose_or_error(
@@ -1812,41 +1815,6 @@ def _recompose_resolve_image(
         return "", ""
 
 
-def _recompose_grade_metadata(
-    composed: ArticleComposeResult, url: str, page_text: str
-) -> dict[str, str]:
-    """Grade + deterministic gate, mirroring publish_from_queued_row so the reviewer sees a fresh score and reasons next to the new draft."""
-    import json as _json
-
-    grade_meta: dict[str, str] = {}
-    try:
-        from app.modules.newspaper.article_grader import grade_article_draft
-
-        grade = grade_article_draft(title=composed.title, body=composed.body, source_url=url)
-        grade_meta = {
-            "grade": str(grade["grade"]),
-            "grade_detail": _json.dumps(
-                {"subscores": grade["subscores"], "issues": grade["issues"]},
-                separators=(",", ":"),
-            ),
-        }
-    except Exception:
-        grade_meta = {}
-    try:
-        from app.modules.gatekeeper.live import gate_draft
-
-        gate = gate_draft(
-            source_text=page_text,
-            article_text=f"{composed.title}\n{composed.body}",
-            service_id=url,
-        )
-        if gate is not None:
-            grade_meta.update(gate.as_metadata())
-    except Exception:
-        logger.warning("gatekeeper grading failed for %s", url, exc_info=True)
-    return grade_meta
-
-
 @celery_app.task(name="app.tasks.newspaper.recompose_review")
 def recompose_review(review_id: str) -> dict[str, str]:
     """Re-run composition on a pending review's stored source and REPLACE the review with a fresh proposal. Lets an admin watch a previously bad article improve as the writer/grader evolve, without waiting for the source to change. This is a deliberate manual replay, so it bypasses the dedup / novelty / domain gates the normal pipeline applies."""
@@ -1962,7 +1930,13 @@ def recompose_review(review_id: str) -> dict[str, str]:
 
     # Grade + deterministic gate, mirroring publish_from_queued_row so the
     # reviewer sees a fresh score and reasons next to the new draft.
-    grade_meta = _recompose_grade_metadata(composed, url, page_text)
+    grade_meta, _grade_value, _gate_ok = _grade_and_gate(
+        composed,
+        title=composed.title,
+        source_url=url,
+        page_text=page_text,
+        service_id=url,
+    )
 
     # The old review was already completed (slot freed on click); enqueue the
     # fresh proposal for the same URL so it lands in the queue the admin watches.
@@ -2216,65 +2190,6 @@ def _recompose_published_hero_image(
         return og_image, ""
 
 
-def _recompose_published_grade_and_gate(
-    composed: ArticleComposeResult, *, article_id: str, source_url: str, page_text: str
-) -> tuple[dict[str, str], float | None, bool]:
-    """Quality grade + factuality gate for an archive-refresh draft. Returns (grade_meta, grade_value, gate_ok).
-
-    gate_ok reflects factuality (numeric entailment) only, not the
-    completeness rule's OSINT-tool-call check. Completeness fires on any
-    source mentioning a website/founder/company — true for nearly every
-    service-profile source — but the writer only sporadically calls the
-    matching domain/registry/sanctions tools mid-compose, so in practice it
-    blocked ~all Tier-2 recomposes regardless of content quality (owner
-    confirmed 2026-07-12 after auditing review metadata: grades were
-    consistently 7.3-10 while completeness failed almost universally).
-    Completeness is designed to triage under-researched NEW candidates; a
-    recompose is a rewrite of a service a human already approved once, so
-    that diligence bar matters less here. Still recorded in grade_meta for
-    visibility, just no longer gates auto-apply.
-    """
-    import json as _json
-
-    from app.core import config as worker_config
-
-    grade_meta: dict[str, str] = {}
-    grade_value: float | None = None
-    try:
-        from app.modules.newspaper.article_grader import grade_article_draft
-
-        grade = grade_article_draft(title=composed.title, body=composed.body, source_url=source_url)
-        grade_value = float(grade["grade"])
-        grade_meta = {
-            "grade": str(grade["grade"]),
-            "grade_detail": _json.dumps(
-                {"subscores": grade["subscores"], "issues": grade["issues"]},
-                separators=(",", ":"),
-            ),
-        }
-    except Exception:
-        grade_meta = {}
-
-    gate_ok = False
-    try:
-        from app.modules.gatekeeper.live import gate_draft
-
-        gate = gate_draft(
-            source_text=page_text,
-            article_text=f"{composed.title}\n{composed.body}",
-            service_id=source_url or f"article:{article_id}",
-        )
-        if gate is not None:
-            grade_meta.update(gate.as_metadata())
-            gate_ok = gate.factuality_score >= worker_config.GATEKEEPER_FACT_MIN
-        else:
-            gate_ok = True  # gatekeeper disabled entirely — no signal to fail on
-    except Exception:
-        logger.warning("recompose gatekeeper check failed for %s", article_id, exc_info=True)
-
-    return grade_meta, grade_value, gate_ok
-
-
 @celery_app.task(name="app.tasks.newspaper.recompose_published", bind=True, max_retries=20)
 def recompose_published(self: Task, article_id: str) -> dict[str, str]:
     """Archive refresh: re-compose a PUBLISHED article into a NEW unlisted draft. When the draft clears the (strict) RECOMPOSE_AUTO_APPLY bar — grade, headline style, gatekeeper — it swaps onto the live article_id immediately (autonomous mode); otherwise it holds in the review queue for a human. Either way apply_recomposed_article does the swap: the URL survives and published_at is re-stamped to the apply time (recompose is a re-publish — owner policy 2026-07-15 — the story returns to the top of the feed).
@@ -2363,8 +2278,13 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
     # stricter than fresh-article auto-publish — this overwrites a page
     # that's already public, so any missing/errored signal (grade, gate) or
     # unmet check fails CLOSED to manual review, never open.
-    grade_meta, grade_value, gate_ok = _recompose_published_grade_and_gate(
-        composed, article_id=article_id, source_url=source_url, page_text=page_text
+    grade_meta, grade_value, gate_ok = _grade_and_gate(
+        composed,
+        title=composed.title,
+        source_url=source_url,
+        page_text=page_text,
+        service_id=source_url or f"article:{article_id}",
+        label=article_id,
     )
 
     from app.core import config as worker_config

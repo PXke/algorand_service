@@ -3,22 +3,18 @@
 from __future__ import annotations
 
 from app.core.config import settings
+from app.core.store_factory import StoreFactory
 from app.modules.kyc.stores.base import EnrollmentStore
 from app.modules.kyc.stores.cassandra import CassandraEnrollmentStore
 from app.modules.kyc.stores.memory import InMemoryEnrollmentStore
 
-_enrollment_store: EnrollmentStore | None = None
+_factory: StoreFactory[EnrollmentStore] = StoreFactory(
+    backend_name=lambda: settings.kyc_store,
+    cassandra=CassandraEnrollmentStore,
+    memory=InMemoryEnrollmentStore,
+)
 
 
 def get_enrollment_store() -> EnrollmentStore:
-    """Return the process-wide enrollment store, lazily built from settings."""
-    global _enrollment_store
-    if _enrollment_store is None:
-        backend = settings.kyc_store.strip().lower()
-        if backend == "cassandra":
-            _enrollment_store = CassandraEnrollmentStore()
-        else:
-            _enrollment_store = InMemoryEnrollmentStore()
-    return _enrollment_store
-
-
+    """Return the process-wide enrollment store, built from settings on first use."""
+    return _factory.get()

@@ -643,19 +643,27 @@ def _session_counts_from_rows(session_by_day: dict[str, list]) -> dict[str, int]
 
 
 # ── Geography (local GeoIP database, country-level, no IP stored) ─────────────
-@lru_cache(maxsize=1)
-def _geoip_reader() -> geoip2.database.Reader | None:
-    """Lazy DB-IP/MaxMind reader, or None when unavailable (lib or db missing)."""
-    path = settings.geoip_db_path
+def _open_geoip(path: str, what: str) -> geoip2.database.Reader | None:
+    """Open a local GeoIP database, or None when unavailable (lib or file missing).
+
+    Never raises: geo/hosting enrichment is optional, so a missing library or
+    database file degrades to "no signal" rather than breaking pageview writes.
+    """
     if not path:
         return None
     try:
         import geoip2.database
 
         return geoip2.database.Reader(path)
-    except Exception as exc:  # missing lib / db file — geo just stays empty
-        log.debug("geoip reader unavailable: %s", exc)
+    except Exception as exc:
+        log.debug("%s unavailable: %s", what, exc)
         return None
+
+
+@lru_cache(maxsize=1)
+def _geoip_reader() -> geoip2.database.Reader | None:
+    """Lazy DB-IP/MaxMind city reader (country lookups); None when unavailable."""
+    return _open_geoip(settings.geoip_db_path, "geoip reader")
 
 
 def country_for_ip(client_ip: str | None) -> str:
@@ -681,17 +689,8 @@ def country_for_ip(client_ip: str | None) -> str:
 # ── Hosting/datacenter ASN (local GeoIP-ASN database, no IP stored) ─────────
 @lru_cache(maxsize=1)
 def _geoip_asn_reader() -> geoip2.database.Reader | None:
-    """Lazy DB-IP ASN reader, or None when unavailable (lib or db missing)."""
-    path = settings.geoip_asn_db_path
-    if not path:
-        return None
-    try:
-        import geoip2.database
-
-        return geoip2.database.Reader(path)
-    except Exception as exc:  # missing lib / db file — hosting check stays off
-        log.debug("geoip asn reader unavailable: %s", exc)
-        return None
+    """Lazy DB-IP ASN reader (hosting/datacenter detection); None when unavailable."""
+    return _open_geoip(settings.geoip_asn_db_path, "geoip asn reader")
 
 
 # Substrings of the ASN organization name (lowercased) for providers that sell

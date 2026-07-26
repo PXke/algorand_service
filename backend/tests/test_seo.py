@@ -796,3 +796,30 @@ def test_chain_only_tag_gets_friendly_display_label() -> None:
     assert 'property="article:section" content="on-chain"' in head
     assert '"articleSection":"on-chain"' in head
     assert "/topic/chain-only" in head  # URL slug stays raw
+
+
+def test_section_redirect_map_matches_the_spa() -> None:
+    """The backend 301 map and the SPA's client-side copy must not drift.
+
+    Both are live: nginx proxies /section/* here for the 301 (which is what
+    Google follows), and App.svelte redirects the same paths client-side for a
+    reader who arrives via in-app navigation. They cannot share code across the
+    language boundary, so the only thing that can catch a one-sided edit is
+    reading the other side's source.
+    """
+    import re
+    from pathlib import Path
+
+    app_svelte = Path(__file__).resolve().parents[2] / "frontend" / "src" / "App.svelte"
+    if not app_svelte.is_file():
+        pytest.skip("frontend/ not present in this checkout")
+
+    block = re.search(
+        r"const SECTION_REDIRECTS:\s*Record<string,\s*string>\s*=\s*\{(.*?)\}",
+        app_svelte.read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    assert block, "SECTION_REDIRECTS not found in App.svelte — did it move or get renamed?"
+    spa_map = dict(re.findall(r"(\w+)\s*:\s*'([^']+)'", block.group(1)))
+
+    assert spa_map == SECTION_REDIRECTS
