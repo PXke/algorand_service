@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
-  import QRCode from 'qrcode'
   import { messages, t } from '../lib/i18n'
   import {
     authBusy,
@@ -12,12 +11,24 @@
     wakeWalletTransport,
     walletFlow,
   } from '../lib/auth/session'
-  import {
-    isMobileWalletClient,
-    walletDeepLink,
-  } from '../lib/auth/walletconnect'
 
   let { onclose }: { onclose: () => void } = $props()
+
+  function isMobileWalletClient(): boolean {
+    if (typeof navigator === 'undefined') return false
+    return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+  }
+
+  function walletDeepLink(wcUri: string): string {
+    const isIOS =
+      typeof navigator !== 'undefined' &&
+      (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1))
+    if (isIOS) {
+      return `perawallet-wc://wc?uri=${encodeURIComponent(wcUri)}`
+    }
+    return wcUri
+  }
 
   let mode = $state<'wallet' | 'manual'>('wallet')
   let address = $state('')
@@ -40,13 +51,15 @@
       return
     }
     let cancelled = false
-    void QRCode.toDataURL(uri, {
-      width: 280,
-      margin: 2,
-      color: { dark: '#111827', light: '#ffffff' },
-    }).then((url) => {
-      if (!cancelled) qrDataUrl = url
-    })
+    void import('qrcode').then((QRCode) =>
+      QRCode.toDataURL(uri, {
+        width: 280,
+        margin: 2,
+        color: { dark: '#111827', light: '#ffffff' },
+      }).then((url) => {
+        if (!cancelled) qrDataUrl = url
+      }),
+    )
     return () => {
       cancelled = true
     }

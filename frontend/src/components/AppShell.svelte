@@ -9,12 +9,13 @@
   import Icon from './Icon.svelte'
   import MarketsBar from './MarketsBar.svelte'
   import SiteFooter from './SiteFooter.svelte'
-  import WalletDialog from './WalletDialog.svelte'
+  import type { Component } from 'svelte'
 
   let { children }: { children: import('svelte').Snippet } = $props()
 
   let drawerOpen = $state(false)
   let walletOpen = $state(false)
+  let WalletDialog = $state<Component<{ onclose: () => void }> | null>(null)
   let appsOpen = $state(false)
   let localeOpen = $state(false)
   let appsWrapEl = $state<HTMLElement | null>(null)
@@ -23,6 +24,13 @@
   // Admin wallet → pxke_no_track cookie so our visits aren't counted.
   $effect(() => {
     setAnalyticsOptOut(!!$isAdmin)
+  })
+
+  $effect(() => {
+    if (!walletOpen || WalletDialog) return
+    void import('./WalletDialog.svelte').then((m) => {
+      WalletDialog = m.default
+    })
   })
 
   const nav = $derived([
@@ -439,7 +447,7 @@
   <SiteFooter />
 </div>
 
-{#if walletOpen}
+{#if walletOpen && WalletDialog}
   <WalletDialog onclose={() => (walletOpen = false)} />
 {/if}
 

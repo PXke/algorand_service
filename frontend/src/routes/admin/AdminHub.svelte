@@ -3,7 +3,6 @@
   import { messages, t } from '../../lib/i18n'
   import { walletAddress, sessionToken, isAdmin } from '../../lib/auth/session'
   import { createAdminApi } from '../../lib/api/admin'
-  import WalletDialog from '../../components/WalletDialog.svelte'
   import SeedsTab from './tabs/SeedsTab.svelte'
   import ArticlesTab from './tabs/ArticlesTab.svelte'
   import BriefsTab from './tabs/BriefsTab.svelte'
@@ -39,7 +38,15 @@
 
   let tab = $state<TabId>('Analytics')
   let walletOpen = $state(false)
+  let WalletDialog = $state<import('svelte').Component<{ onclose: () => void }> | null>(null)
   let toast = $state<string | null>(null)
+
+  $effect(() => {
+    if (!walletOpen || WalletDialog) return
+    void import('../../components/WalletDialog.svelte').then((m) => {
+      WalletDialog = m.default
+    })
+  })
 
   const admin = $derived(
     $walletAddress && $isAdmin ? createAdminApi($walletAddress, $sessionToken) : null,
@@ -121,6 +128,6 @@
   {/if}
 </div>
 
-{#if walletOpen}
+{#if walletOpen && WalletDialog}
   <WalletDialog onclose={() => (walletOpen = false)} />
 {/if}

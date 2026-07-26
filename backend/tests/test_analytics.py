@@ -973,3 +973,74 @@ def test_static_label_friendly_names() -> None:
     assert a._static_label("/section/defi") == "Section · defi"
     # article paths are resolved against the DB, so the static fallback is the path
     assert a._static_label("/news/articles/abc") == "/news/articles/abc"
+
+
+def test_beacon_accept_wildcard_is_not_treated_as_a_bot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A browser fetch() POST sends Accept: */*, which must not drop the pageview.
+
+    The bare-*/* rule is a scripting-library tell on a document NAVIGATION,
+    where browsers always send a rich versioned Accept. On the SPA's JSON
+    beacon it is what every real reader sends, so applying it there silently
+    discarded all in-app navigation from Chrome/Firefox (and left no trace,
+    since rejected hits aren't bucketed anywhere).
+    """
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake_redis)
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: _FakeSession())
+    monkeypatch.setattr(a, "record_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(a, "record_unique", lambda *_args, **_kwargs: None)
+    written: list = []
+    monkeypatch.setattr(a, "_write_pageview_counters", lambda **kw: written.append(kw))
+
+    chrome = "Mozilla/5.0 (X11; Linux x86_64) Chrome/128.0.0.0 Safari/537.36"
+    beacon = {
+        "referer": None,
+        "user_agent": chrome,
+        "sec_fetch_mode": "cors",  # browsers DO send this on fetch()
+        "accept": "*/*",
+    }
+
+    a.record_pageview(path="/topic/defi", navigation=False, **beacon)
+    assert [w["path"] for w in written] == ["/topic/defi"]
+
+    # Same headers on a document request stay a bot tell: a real navigation
+    # never sends bare */*.
+    written.clear()
+    a.record_pageview(path="/topic/sdk", navigation=True, **beacon)
+    assert written == []
+
+
+def test_missing_accept_language_flags_scripted_client_only_on_navigation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No Accept-Language from a browser-claiming UA is a bot tell on a navigation, but is never judged on the beacon."""
+    chrome = "Mozilla/5.0 (X11; Linux x86_64) Chrome/128.0.0.0 Safari/537.36"
+    assert a.is_missing_accept_language(chrome, None)
+    assert a.is_missing_accept_language(chrome, "   ")
+    assert not a.is_missing_accept_language(chrome, "en-US,en;q=0.9")
+    # Unrecognised UA is never judged on this signal.
+    assert not a.is_missing_accept_language("SomeNiche/1.0", None)
+
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake_redis)
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: _FakeSession())
+    monkeypatch.setattr(a, "record_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(a, "record_unique", lambda *_args, **_kwargs: None)
+    written: list = []
+    monkeypatch.setattr(a, "_write_pageview_counters", lambda **kw: written.append(kw))
+
+    hit = {
+        "referer": None,
+        "user_agent": chrome,
+        "sec_fetch_mode": "cors",
+        "accept": "*/*",
+        "accept_language": None,
+    }
+    a.record_pageview(path="/topic/defi", navigation=False, **hit)
+    assert [w["path"] for w in written] == ["/topic/defi"]  # beacon: not judged
+
+    written.clear()
+    a.record_pageview(path="/topic/sdk", navigation=True, **hit)
+    assert written == []  # navigation: dropped

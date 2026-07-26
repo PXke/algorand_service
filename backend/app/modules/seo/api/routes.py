@@ -96,8 +96,8 @@ def _query_params(request: Request) -> dict:
         return {}
 
 
-def _record(request: Request, path: str) -> None:
-    """Best-effort pageview record for a public document route."""
+def _record(request: Request, path: str, *, navigation: bool = True) -> None:
+    """Best-effort pageview record. `navigation` is False for the SPA's JSON beacon, whose Accept header legitimately differs from a document request's — see record_pageview."""
     if tracking_opted_out_from_headers(request.headers):
         return
     analytics_store.record_pageview(
@@ -112,8 +112,10 @@ def _record(request: Request, path: str) -> None:
         # Sent by every evergreen browser on both the initial document GET and
         # this same beacon POST — see analytics_store.is_missing_fetch_metadata.
         sec_fetch_mode=_header(request, "sec-fetch-mode"),
-        # See analytics_store.is_missing_accept_header.
+        # See analytics_store.is_missing_accept_header — only meaningful on a
+        # document request, hence `navigation`.
         accept=_header(request, "accept"),
+        navigation=navigation,
     )
 
 
@@ -406,6 +408,28 @@ async def admin(request: Request) -> Response:
     return _doc_response(render.render_noindex("Admin"), "no-store")
 
 
+def _beacon_origin_ok(request: Request) -> bool:
+    """Reject a beacon POST that carries no (or a foreign) Origin.
+
+    Stronger than any UA heuristic and free of false positives: the Fetch spec
+    makes browsers attach Origin to every non-GET/HEAD request, same-origin
+    included, so a real reader's beacon always has one — while curl/requests
+    send none unless explicitly told. The CORS middleware does not cover this:
+    it only rejects a WRONG origin (`if origin and not allowed`), so a request
+    with the header simply absent sails through and gets counted as human.
+
+    Skipped when no origins are configured (cors_origins empty = CORS disabled
+    for local dev), so this can't lock out a dev setup.
+    """
+    from app.core.cors import _origin_allowed
+
+    allowed = settings.cors_origins
+    if not allowed:
+        return True
+    origin = _header(request, "origin")
+    return bool(origin) and _origin_allowed(origin, allowed)
+
+
 async def beacon_pageview(request: Request) -> Response:
     """Client-side beacon for an SPA in-app route change — the initial document load is already recorded server-side; this covers navigation after that, which never hits a document route."""
     if tracking_opted_out_from_headers(request.headers):
@@ -414,9 +438,12 @@ async def beacon_pageview(request: Request) -> Response:
         payload = serialization.decode(request.body, PageviewBeaconRequest)
     except serialization.DecodeError as exc:
         return json_error_response(400, "invalid_request", str(exc))
+    if not _beacon_origin_ok(request):
+        logger.debug("pageview beacon rejected: missing/foreign Origin")
+        return json_error_response(400, "invalid_request", "bad origin")
     if not _is_known_app_path(payload.path):
         return json_error_response(400, "invalid_request", "unknown path")
-    _record(request, payload.path)
+    _record(request, payload.path, navigation=False)
     return {"ok": True}
 
 

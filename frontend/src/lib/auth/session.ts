@@ -2,13 +2,6 @@ import { writable, derived, get } from 'svelte/store'
 import { ApiException } from '../api/client'
 import { authApi } from '../api/auth'
 import { isAdminWallet } from '../config'
-import {
-  wcCancelPending,
-  wcConnect,
-  wcDisconnect,
-  wcSignLoginProof,
-  wcWakeTransport,
-} from './walletconnect'
 
 const TOKEN_KEY = 'wallet_auth_session_token'
 
@@ -181,6 +174,12 @@ export async function signInWithWalletConnect(): Promise<void> {
   authError.set(null)
   walletFlow.set({ phase: 'pairing', uri: null, walletAddress: null, error: null })
 
+  const {
+    wcConnect,
+    wcSignLoginProof,
+    wcDisconnect,
+  } = await import('./walletconnect')
+
   try {
     const address = await wcConnect({
       onDisplayUri: (uri) => {
@@ -249,11 +248,12 @@ export async function cancelWalletSignIn(): Promise<void> {
   authBusy.set(false)
   authError.set(null)
   resetWalletFlow()
+  const { wcCancelPending } = await import('./walletconnect')
   await wcCancelPending()
 }
 
 export function wakeWalletTransport(): void {
-  wcWakeTransport()
+  void import('./walletconnect').then((m) => m.wcWakeTransport())
 }
 
 export async function logout(): Promise<void> {
@@ -267,5 +267,10 @@ export async function logout(): Promise<void> {
   }
   writeToken(null)
   session.set(null)
-  await wcDisconnect()
+  try {
+    const { wcDisconnect } = await import('./walletconnect')
+    await wcDisconnect()
+  } catch {
+    /* ignore */
+  }
 }

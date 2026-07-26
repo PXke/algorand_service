@@ -11,17 +11,64 @@
     />
     <meta name="theme-color" content="#4F46E5" />
     <title>PXke Algorand</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- Self-hosted fonts (subset woff2). Weights 600/800 map to 700. -->
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Source+Serif+4:opsz,wght@8..60,700&display=swap"
-      rel="stylesheet"
+      rel="preload"
+      href="/fonts/Inter-w400.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
     />
+    <link
+      rel="preload"
+      href="/fonts/Inter-w700.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <style>
+      @font-face {
+        font-family: Inter;
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url('/fonts/Inter-w400.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: Inter;
+        font-style: normal;
+        font-weight: 600 800;
+        font-display: swap;
+        src: url('/fonts/Inter-w700.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'Source Serif 4';
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+        src: url('/fonts/SourceSerif4-w700.woff2') format('woff2');
+      }
+      /*
+        SSR #ssr-body is injected in-flow before #app. Taking it out of flow
+        so the SPA can mount underneath without a layout shift when it drops.
+      */
+      #ssr-body {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        overflow: auto;
+      }
+      #app {
+        position: relative;
+        z-index: 1;
+        min-height: 100vh;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>
     <script>
-      // WalletConnect / crypto bundles expect Node's `global` + `Buffer`.
+      // WalletConnect / crypto bundles expect Node's `global`.
       globalThis.global ??= globalThis
     </script>
     <script type="module" src="/src/main.ts"></script>

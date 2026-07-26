@@ -1,5 +1,4 @@
 import '../polyfills'
-import algosdk from 'algosdk'
 import { config } from '../config'
 
 export type WalletProof =
@@ -149,6 +148,7 @@ async function signArc0025Txn(
   walletAddress: string,
   signingMessage: string,
 ): Promise<string> {
+  const algosdk = (await import('algosdk')).default
   const algod = new algosdk.Algodv2('', config.algodApiUrl, '')
   const suggested = await algod.getTransactionParams().do()
   const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({

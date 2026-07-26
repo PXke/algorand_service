@@ -450,6 +450,23 @@ def is_missing_fetch_metadata(user_agent: str | None, sec_fetch_mode: str | None
 _BARE_WILDCARD_ACCEPT = "*/*"
 
 
+# ── Accept-Language presence ─────────────────────────────────────────────────
+# Every mainstream browser sends Accept-Language on a navigation (it comes from
+# the user's OS/browser locale settings, not from page code). Scripted clients
+# overwhelmingly omit it. Same conservative scoping as the two checks above:
+# only judged when the UA claims Chrome/Firefox, so an unusual-but-real client
+# is never dropped over it. NAVIGATION-ONLY, deliberately: whether browsers
+# attach Accept-Language to a cross-origin fetch() is far less uniform than on
+# a document request, and assuming header parity between those two surfaces is
+# exactly what silently discarded every in-app pageview (see record_pageview).
+def is_missing_accept_language(user_agent: str | None, accept_language: str | None) -> bool:
+    """True when a UA claiming to be Chrome/Firefox sent no Accept-Language at all."""
+    ua = user_agent or ""
+    if not (_CHROME_TOKEN_RE.search(ua) or _FIREFOX_VERSION_RE.search(ua)):
+        return False
+    return not (accept_language or "").strip()
+
+
 def is_missing_accept_header(user_agent: str | None, accept: str | None) -> bool:
     """True when a UA claiming to be Chrome/Firefox sent no Accept header, or the bare "*/*" default an HTTP client library sends when the caller never set one — something a real browser navigation request cannot produce."""
     ua = user_agent or ""
@@ -1178,13 +1195,24 @@ def record_pageview(
     accept_language: str | None = None,
     sec_fetch_mode: str | None = None,
     accept: str | None = None,
+    navigation: bool = True,
 ) -> None:
-    """Best-effort counter bumps for one document request. Never raises.
+    """Best-effort counter bumps for one pageview. Never raises.
 
     Bot/scraper traffic is detected only to EXCLUDE it — no bot-specific
     counters, breakdowns or KPIs are kept anymore (2026-07-22): the dashboard
     only cares about real human traffic, so a hit that trips any of these
     checks is simply dropped rather than recorded under a "bot" bucket.
+
+    ``navigation`` says whether this was a document request (SSR route) or the
+    SPA's JSON beacon, because one of those checks means opposite things on the
+    two surfaces. A browser NAVIGATION always sends a rich versioned Accept, so
+    a bare ``*/*`` there is a scripting library; but ``fetch()`` sends exactly
+    ``*/*`` by default, so on the beacon that same value is what every real
+    reader looks like. Applying it there discarded all in-app navigation from
+    Chrome and Firefox — invisibly, since rejects aren't bucketed anywhere.
+    Sec-Fetch-Mode is NOT conditioned: browsers send it on fetch() too, so it
+    stays a valid tell against a curl-style POST on either surface.
     """
     if is_internal_client(client_ip):
         return  # don't count the server itself / internal probes
@@ -1198,7 +1226,8 @@ def record_pageview(
         or is_malformed_ua(user_agent)
         or repeated
         or is_missing_fetch_metadata(user_agent, sec_fetch_mode)
-        or is_missing_accept_header(user_agent, accept)
+        or (navigation and is_missing_accept_header(user_agent, accept))
+        or (navigation and is_missing_accept_language(user_agent, accept_language))
         or is_hosting_ip(client_ip)
     ):
         return

@@ -7,7 +7,8 @@ export default defineConfig({
     svelte(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.svg', 'icons/*.png'],
+      injectRegister: false,
+      includeAssets: ['favicon.svg', 'icons/*.png', 'fonts/*.woff2'],
       manifest: {
         name: 'PXke Algorand',
         short_name: 'PXke',
