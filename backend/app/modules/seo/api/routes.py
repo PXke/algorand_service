@@ -333,6 +333,19 @@ async def hot(request: Request) -> Response:
     )
 
 
+async def top(request: Request) -> Response:
+    """SSR all-time-top reader-engagement page (the SPA's /top view; /hot is the recency-weighted one)."""
+    path = "/top"
+    _record(request, path)
+    items = news.hot_feed(limit=30, rank="top")
+    _feed, topics = cached_feed_snapshot(news.list_feed)
+    return _doc_response(
+        render.render_hot(items, topic_links=topics, canonical_path=path),
+        "public, max-age=300",
+        tracked_path=path,
+    )
+
+
 async def topics(request: Request) -> Response:
     """SSR topics index page."""
     path = "/topics"
@@ -548,6 +561,7 @@ def register_seo_routes(app: Robyn) -> None:
     app.get("/og/article/:article_id")(og_article_card)
     app.get("/section/:slug")(section)
     app.get("/hot")(hot)
+    app.get("/top")(top)
     app.get("/topics")(topics)
     app.get("/topic/:tag")(topic)
     app.get("/about")(about)

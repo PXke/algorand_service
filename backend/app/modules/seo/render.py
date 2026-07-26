@@ -847,11 +847,13 @@ def render_hot(
     items: list[ArticleFeedItem],
     *,
     topic_links: list[tuple[str, int]] | None = None,
+    canonical_path: str = "/hot",
 ) -> tuple[str, str]:
-    """Most-read ledger: the feed ranked by read tally."""
-    canonical = absolute("/hot")
-    title = f"Most read — {settings.site_name}"
-    trail = [("Home", site_url() + "/"), ("Most read", canonical)]
+    """Most-read ledger: the feed ranked by read tally. Serves both /hot (recency-weighted) and /top (all-time) — canonical_path keeps them from claiming each other's URL."""
+    canonical = absolute(canonical_path)
+    label = "Top stories" if canonical_path == "/top" else "Most read"
+    title = f"{label} — {settings.site_name}"
+    trail = [("Home", site_url() + "/"), (label, canonical)]
     head = _meta_block(
         title="Most read",
         description=f"The {settings.site_name} stories readers are opening most right now.",

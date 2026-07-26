@@ -56,8 +56,13 @@ main() {
   if [[ "$DEPLOY_SYNC_NPM" != "1" && "$DEPLOY_SYNC_PYTHON" != "1" ]]; then
     exit 0
   fi
-  [[ "$DEPLOY_SYNC_NPM" == "1" ]] && _sync_npm
-  [[ "$DEPLOY_SYNC_PYTHON" == "1" ]] && _sync_python
+  # Plain `if`, not `[[ ... ]] && _sync`: a false test at the END of this
+  # function makes the function (and so the script) exit 1, which deploy.sh's
+  # `set -e` reads as a failed step and aborts the whole deploy — silently,
+  # since nothing printed an error. That fired whenever exactly one of the two
+  # flags was set (an npm-only sync being the common case).
+  if [[ "$DEPLOY_SYNC_NPM" == "1" ]]; then _sync_npm; fi
+  if [[ "$DEPLOY_SYNC_PYTHON" == "1" ]]; then _sync_python; fi
 }
 
 main
