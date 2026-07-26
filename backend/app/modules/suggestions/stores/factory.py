@@ -22,7 +22,3 @@ def get_suggestion_store() -> SuggestionStore:
     return _suggestion_store
 
 
-def set_suggestion_store(store: SuggestionStore | None) -> None:
-    """Override the process-wide suggestion store, e.g. for tests."""
-    global _suggestion_store
-    _suggestion_store = store

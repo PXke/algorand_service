@@ -4,8 +4,6 @@ from app.schemas import (  # noqa: F401
     Arc0060Proof,
     Caip122Payload,
     NonceRequest,
-    NonceResponse,
     SessionInfo,
     VerifyRequest,
-    VerifyResponse,
 )

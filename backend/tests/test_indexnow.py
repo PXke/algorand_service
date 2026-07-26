@@ -15,17 +15,6 @@ def test_article_url_with_lang() -> None:
     assert indexnow.article_url("x", "en") == indexnow.article_url("x")
 
 
-def test_translation_change_urls(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Lists the translated article URL plus both sitemap URLs for a translation change."""
-    monkeypatch.setattr(indexnow.settings, "public_site_url", "https://algorand.pxke.me")
-    urls = indexnow.translation_change_urls("id1", "fa")
-    assert urls == [
-        "https://algorand.pxke.me/news/articles/id1?lang=fa",
-        "https://algorand.pxke.me/sitemap.xml",
-        "https://algorand.pxke.me/sitemap-news.xml",
-    ]
-
-
 def test_ping_article_includes_all_translation_urls(monkeypatch: pytest.MonkeyPatch) -> None:
     """Includes the base article URL, each translation URL, and the news sitemap in the IndexNow ping."""
     captured: dict = {}

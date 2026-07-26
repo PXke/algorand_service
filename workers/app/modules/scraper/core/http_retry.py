@@ -7,11 +7,6 @@ import time
 import httpx
 
 
-class HttpRetryError(Exception):
-    """Raised when a retried HTTP request exhausts its attempts."""
-    pass
-
-
 def request_with_retry(
     client: httpx.Client,
     method: str,

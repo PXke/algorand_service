@@ -11,10 +11,17 @@ keys missing from a locale file. Run from repo root:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from copy import deepcopy
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from deep_translator import GoogleTranslator
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 L10N = ROOT / "lib" / "l10n"
@@ -184,10 +191,12 @@ PATCHES: dict[str, dict[str, str]] = {
 
 
 def load_arb(path: Path) -> dict:
+    """Parse an ARB (JSON) locale file."""
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def message_keys(data: dict) -> list[str]:
+    """Translatable message keys in an ARB dict (excludes @-metadata and @@locale)."""
     return [k for k in data if not k.startswith("@") and k != "@@locale"]
 
 
@@ -207,7 +216,8 @@ def preserve_placeholders(en_val: str, translated: str) -> str:
     return out
 
 
-def translate_text(text: str, lang: str, translator) -> str:
+def translate_text(text: str, lang: str, translator: GoogleTranslator) -> str:
+    """Machine-translate one string, preserving ICU placeholders; falls back to the English text on any translator error."""
     if not text.strip():
         return text
     # Skip mostly-ICU strings — copy structure from English after naive translate
@@ -216,11 +226,12 @@ def translate_text(text: str, lang: str, translator) -> str:
         time.sleep(0.15)
         return preserve_placeholders(text, out)
     except Exception as exc:
-        print(f"  translate error ({lang}): {exc!r} for {text[:40]!r}")
+        logger.warning("  translate error (%s): %r for %r", lang, exc, text[:40])
         return text
 
 
-def build_locale(lang: str, en: dict, existing: dict | None, translator) -> dict:
+def build_locale(lang: str, en: dict, existing: dict | None, translator: GoogleTranslator) -> dict:
+    """Assemble one locale's ARB dict: patches first, then existing translations, then machine translation for anything still missing."""
     out: dict = {"@@locale": lang}
     patches = PATCHES.get(lang, {})
     for key in message_keys(en):
@@ -239,6 +250,7 @@ def build_locale(lang: str, en: dict, existing: dict | None, translator) -> dict
 
 
 def main() -> None:
+    """Fill missing/patched keys for every target locale and rewrite its ARB file."""
     try:
         from deep_translator import GoogleTranslator
     except ImportError as exc:
@@ -249,14 +261,15 @@ def main() -> None:
         path = L10N / f"app_{lang}.arb"
         existing = load_arb(path) if path.is_file() else None
         before = set(message_keys(existing)) if existing else set()
-        print(f"=== {lang} ===")
+        logger.info("=== %s ===", lang)
         translator = GoogleTranslator(source="en", target=lang if lang != "zh" else "zh-CN")
         data = build_locale(lang, en, existing, translator)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         after = set(message_keys(data))
         added = sorted(after - before)
-        print(f"  keys: {len(after)} (+{len(added)} new)")
+        logger.info("  keys: %s (+%s new)", len(after), len(added))
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

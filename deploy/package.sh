@@ -19,10 +19,10 @@ PACKAGE_PRECOMPRESS="${PACKAGE_PRECOMPRESS:-1}"
 PACKAGE_PRECOMPRESS_JOBS="${PACKAGE_PRECOMPRESS_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 PACKAGE_BROTLI_QUALITY="${PACKAGE_BROTLI_QUALITY:-${DEPLOY_BROTLI_QUALITY:-6}}"
 # xz level for archives only; -9e is ~8× slower than -3 for little extra gain on
-# an already-compressed payload (WASM/JS). CI can override.
+# an already-compressed payload (JS/CSS). CI can override.
 PACKAGE_XZ_LEVEL="${PACKAGE_XZ_LEVEL:-3}"
 
-# Frontend dart-defines (exported by deploy.sh): empty API base = same-origin.
+# Frontend Vite env (exported by deploy.sh): empty API base = same-origin.
 FRONTEND_API_BASE_URL="${FRONTEND_API_BASE_URL:-}"
 FRONTEND_AUTH_DOMAIN="${FRONTEND_AUTH_DOMAIN:-localhost}"
 FRONTEND_ADMIN_WALLETS="${FRONTEND_ADMIN_WALLETS:-}"
@@ -38,156 +38,68 @@ ARCHIVE="$OUT_DIR/algorand-platform-${STAMP}-${GIT_SHA}.tar.xz"
 LATEST_LINK="$OUT_DIR/algorand-platform-latest.tar.xz"
 BUILD_INFO="$OUT_DIR/BUILD_INFO-${STAMP}-${GIT_SHA}.txt"
 
-_font_inputs_hash() {
-  {
-    sha256sum "$REPO_ROOT/frontend_flutter/tool/subset_fonts.py"
-    find "$REPO_ROOT/frontend_flutter/assets/fonts-src" -type f 2>/dev/null | sort | xargs -r sha256sum
-    find "$REPO_ROOT/frontend_flutter/lib/l10n" -name 'app_*.arb' 2>/dev/null | sort | xargs -r sha256sum
-  } | sha256sum | awk '{print $1}'
-}
-
 _frontend_build_hash() {
   {
-    printf 'API_BASE_URL=%s\n' "$FRONTEND_API_BASE_URL"
-    printf 'AUTH_DOMAIN=%s\n' "$FRONTEND_AUTH_DOMAIN"
-    printf 'ADMIN_WALLETS=%s\n' "$FRONTEND_ADMIN_WALLETS"
-    printf 'ALGOD_API_URL=%s\n' "$FRONTEND_ALGOD_API_URL"
-    printf 'WALLET_CHAIN_ID=%s\n' "$FRONTEND_WALLET_CHAIN_ID"
-    printf 'EXPLORER_BASE_URL=%s\n' "$FRONTEND_EXPLORER_BASE_URL"
-    printf 'WALLET_CONNECT_BRIDGE=%s\n' "$FRONTEND_WALLET_CONNECT_BRIDGE"
-    # Font subset outputs (assets/fonts/) are derived from fonts-src + l10n —
-    # tracked separately via _font_inputs_hash; including them here would
-    # force a rebuild after every subset pass.
-    find "$REPO_ROOT/frontend_flutter/lib" "$REPO_ROOT/frontend_flutter/web" \
-      "$REPO_ROOT/frontend_flutter/assets" -type f ! -path '*/assets/fonts/*' \
-      2>/dev/null | sort | xargs -r sha256sum
-    sha256sum "$REPO_ROOT/frontend_flutter/pubspec.yaml" "$REPO_ROOT/frontend_flutter/pubspec.lock"
-    _font_inputs_hash
+    printf 'VITE_API_BASE_URL=%s\n' "$FRONTEND_API_BASE_URL"
+    printf 'VITE_AUTH_DOMAIN=%s\n' "$FRONTEND_AUTH_DOMAIN"
+    printf 'VITE_ADMIN_WALLETS=%s\n' "$FRONTEND_ADMIN_WALLETS"
+    printf 'VITE_ALGOD_API_URL=%s\n' "$FRONTEND_ALGOD_API_URL"
+    printf 'VITE_WALLET_CHAIN_ID=%s\n' "$FRONTEND_WALLET_CHAIN_ID"
+    printf 'VITE_EXPLORER_BASE_URL=%s\n' "$FRONTEND_EXPLORER_BASE_URL"
+    printf 'VITE_SUGGESTIONS_ENABLED=%s\n' "${FRONTEND_SUGGESTIONS_ENABLED:-false}"
+    find "$REPO_ROOT/frontend/src" "$REPO_ROOT/frontend/public" -type f 2>/dev/null | sort | xargs -r sha256sum
+    sha256sum "$REPO_ROOT/frontend/index.html" "$REPO_ROOT/frontend/vite.config.ts" \
+      "$REPO_ROOT/frontend/package.json" "$REPO_ROOT/frontend/package-lock.json"
+    [[ -f "$REPO_ROOT/frontend/svelte.config.js" ]] && sha256sum "$REPO_ROOT/frontend/svelte.config.js"
   } | sha256sum | awk '{print $1}'
 }
 
-_maybe_subset_fonts() {
-  local stamp="$OUT_DIR/.font-subset.sha256"
-  local hash
-  hash=$(_font_inputs_hash)
-  if [[ -f "$stamp" && "$(cat "$stamp")" == "$hash" ]]; then
-    echo ">>> Font inputs unchanged — skipping subset" >&2
-    return 0
-  fi
-  echo ">>> Subsetting bundled fonts" >&2
-  python3 "$REPO_ROOT/frontend_flutter/tool/subset_fonts.py" >&2
-  echo "$hash" >"$stamp"
-}
-
-_pub_lock_hash() {
-  sha256sum "$REPO_ROOT/frontend_flutter/pubspec.lock" | awk '{print $1}'
-}
-
-_write_flutter_defines() {
-  bash "$SCRIPT_DIR/scripts/write_flutter_defines.sh" "$OUT_DIR/flutter_defines.json"
+_write_vite_env() {
+  bash "$SCRIPT_DIR/scripts/write_vite_env.sh" "$REPO_ROOT/frontend/.env.production.local"
 }
 
 _maybe_build_frontend() {
   local stamp="$OUT_DIR/.frontend-build.sha256"
-  local pub_stamp="$OUT_DIR/.pubspec-lock.sha256"
-  local hash lock_hash defines="$OUT_DIR/flutter_defines.json"
-  local web="$REPO_ROOT/frontend_flutter/build/web/index.html"
-  local -a pub_flags=()
+  local lock_stamp="$OUT_DIR/.npm-lock.sha256"
+  local hash lock_hash
+  local web="$REPO_ROOT/frontend/dist/index.html"
 
   if [[ "$SKIP_FRONTEND_BUILD" == "1" ]]; then
     [[ -f "$web" ]] || {
-      echo "error: frontend skipped but no build at frontend_flutter/build/web (deploy frontend once first)" >&2
+      echo "error: frontend skipped but no build at frontend/dist (deploy frontend once first)" >&2
       exit 1
     }
-    echo ">>> Skipping Flutter web build (no frontend changes)" >&2
+    echo ">>> Skipping Vite frontend build (no frontend changes)" >&2
     return 0
   fi
 
   hash=$(_frontend_build_hash)
   if [[ -f "$stamp" && "$(cat "$stamp")" == "$hash" && -f "$web" ]]; then
-    echo ">>> Flutter inputs unchanged — skipping web build" >&2
+    echo ">>> Frontend inputs unchanged — skipping Vite build" >&2
     return 0
   fi
 
-  command -v flutter >/dev/null 2>&1 || {
-    echo "error: flutter not found (or set SKIP_FRONTEND_BUILD=1)" >&2
+  command -v npm >/dev/null 2>&1 || {
+    echo "error: npm not found (or set SKIP_FRONTEND_BUILD=1)" >&2
     exit 1
   }
-  _maybe_subset_fonts
-  _write_flutter_defines
+  _write_vite_env
 
-  lock_hash=$(_pub_lock_hash)
-  if [[ -f "$pub_stamp" && "$(cat "$pub_stamp")" == "$lock_hash" ]]; then
-    pub_flags=(--no-pub)
-    echo ">>> pubspec.lock unchanged — skipping pub get" >&2
+  lock_hash=$(sha256sum "$REPO_ROOT/frontend/package-lock.json" | awk '{print $1}')
+  if [[ ! -f "$lock_stamp" || "$(cat "$lock_stamp")" != "$lock_hash" || ! -d "$REPO_ROOT/frontend/node_modules" ]]; then
+    echo ">>> npm ci (package-lock changed or node_modules missing)" >&2
+    (cd "$REPO_ROOT/frontend" && npm ci >&2)
+    echo "$lock_hash" >"$lock_stamp"
   fi
 
-  echo ">>> Building Flutter web (AUTH_DOMAIN=${FRONTEND_AUTH_DOMAIN})" >&2
-  (
-    cd "$REPO_ROOT/frontend_flutter"
-    # --pwa-strategy=none: deprecated in Flutter 3.44 but still required to avoid
-    # registering a caching SW (index.html also purges legacy SW registrations).
-    flutter build web --release --wasm --no-web-resources-cdn \
-      --pwa-strategy=none \
-      -O4 \
-      --no-source-maps \
-      "${pub_flags[@]}" \
-      --dart-define-from-file="$defines" \
-      >&2
-  )
-  echo "$lock_hash" >"$pub_stamp"
+  echo ">>> Building Vite SPA (AUTH_DOMAIN=${FRONTEND_AUTH_DOMAIN})" >&2
+  (cd "$REPO_ROOT/frontend" && npm run build >&2)
   echo "$hash" >"$stamp"
 }
 
 _prune_web_build() {
-  local ck="$REPO_ROOT/frontend_flutter/build/web/canvaskit"
-  local web="$REPO_ROOT/frontend_flutter/build/web"
-  if [[ -d "$ck" ]]; then
-    rm -rf "$ck/experimental_webparagraph"
-    rm -f "$ck"/wimp.js "$ck"/wimp.wasm
-    rm -f "$ck"/skwasm_heavy.js "$ck"/skwasm_heavy.wasm
-  fi
+  local web="$REPO_ROOT/frontend/dist"
   find "$web" -name '*.map' -delete 2>/dev/null || true
-  find "$web" -name '*.symbols' -delete 2>/dev/null || true
-  _prune_orphan_deferred_parts "$web"
-}
-
-# Drop main.dart.js_N.part.js files (and .gz/.br siblings) that are not listed
-# in dart2js's deferredPartUris. Flutter rebuilds leave stale / unused hunks on
-# disk across compiles; nginx would otherwise precompress and ship them.
-_prune_orphan_deferred_parts() {
-  local web="$1"
-  local main="$web/main.dart.js"
-  [[ -f "$main" ]] || return 0
-
-  local -A live=()
-  local name
-  while IFS= read -r name; do
-    [[ -n "$name" ]] && live["$name"]=1
-  done < <(
-    python3 - "$main" <<'PY'
-import re, sys
-text = open(sys.argv[1], errors="ignore").read()
-m = re.search(r"deferredPartUris:\[(.*?)\]", text)
-if not m:
-    sys.exit(0)
-for name in re.findall(r"(main\.dart\.js_\d+\.part\.js)", m.group(1)):
-    print(name)
-PY
-  )
-
-  local f base removed=0
-  for f in "$web"/main.dart.js_*.part.js; do
-    [[ -f "$f" ]] || continue
-    base=$(basename "$f")
-    if [[ -z "${live[$base]:-}" ]]; then
-      rm -f "$f" "$f.gz" "$f.br"
-      removed=$((removed + 1))
-    fi
-  done
-  if (( removed > 0 )); then
-    echo ">>> Pruned $removed orphan deferred .part.js hunk(s)" >&2
-  fi
 }
 
 _web_tree_fingerprint() {
@@ -214,12 +126,12 @@ _assemble_stage() {
 
   local web_cache="$OUT_DIR/frontend_web_cache"
   local web_fp
-  web_fp=$(_web_tree_fingerprint "$REPO_ROOT/frontend_flutter/build/web")
+  web_fp=$(_web_tree_fingerprint "$REPO_ROOT/frontend/dist")
   if [[ -f "$web_cache/.fingerprint" && "$(cat "$web_cache/.fingerprint")" == "$web_fp" ]]; then
     echo ">>> Reusing cached precompressed frontend_web" >&2
     rsync -a "$web_cache/" "$STAGE_DIR/frontend_web/"
   else
-    rsync -a "$REPO_ROOT/frontend_flutter/build/web/" "$STAGE_DIR/frontend_web/"
+    rsync -a "$REPO_ROOT/frontend/dist/" "$STAGE_DIR/frontend_web/"
     if [[ "$PACKAGE_PRECOMPRESS" == "1" ]]; then
       bash "$REPO_ROOT/deploy/scripts/precompress_web.sh" \
         "$STAGE_DIR/frontend_web" "$PACKAGE_BROTLI_QUALITY" "$PACKAGE_PRECOMPRESS_JOBS"
@@ -262,11 +174,11 @@ _create_archive() {
 }
 
 _maybe_build_frontend
-[[ -f "$REPO_ROOT/frontend_flutter/build/web/index.html" ]] \
-  || { echo "error: no Flutter web build at frontend_flutter/build/web" >&2; exit 1; }
+[[ -f "$REPO_ROOT/frontend/dist/index.html" ]] \
+  || { echo "error: no Vite build at frontend/dist" >&2; exit 1; }
 
 if [[ -n "${INDEXNOW_KEY:-}" ]]; then
-  printf '%s' "$INDEXNOW_KEY" >"$REPO_ROOT/frontend_flutter/build/web/${INDEXNOW_KEY}.txt"
+  printf '%s' "$INDEXNOW_KEY" >"$REPO_ROOT/frontend/dist/${INDEXNOW_KEY}.txt"
   echo ">>> Wrote IndexNow key file: ${INDEXNOW_KEY}.txt" >&2
 else
   echo ">>> warning: INDEXNOW_KEY unset — skipping IndexNow key file" >&2

@@ -32,7 +32,3 @@ def get_upvote_store() -> UpvoteStore:
     return _upvote_store
 
 
-def set_upvote_store(store: UpvoteStore | None) -> None:
-    """Override the process-wide upvote store (test seam)."""
-    global _upvote_store
-    _upvote_store = store

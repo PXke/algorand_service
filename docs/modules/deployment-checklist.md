@@ -7,7 +7,7 @@ real host. Mechanics live in [deployment.md](deployment.md) and
 ## 1. Pre-flight (workstation)
 
 - [x] `make docker-test` green (canonical lint + pytest in container)
-- [x] `flutter analyze` clean in `frontend_flutter/`
+- [x] `npm run build` clean in `frontend/`
 - [x] CQL migration ledger up to date: `python deploy/scripts/cql_migrate.py status`
   ```
   (new tables this cycle: `019_official_channels.cql`)

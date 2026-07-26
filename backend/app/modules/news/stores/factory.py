@@ -22,7 +22,3 @@ def get_article_store() -> ArticleStore:
     return _article_store
 
 
-def set_article_store(store: ArticleStore | None) -> None:
-    """Override the process-wide article store, e.g. with a test double."""
-    global _article_store
-    _article_store = store

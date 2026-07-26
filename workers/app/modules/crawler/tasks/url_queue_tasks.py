@@ -192,53 +192,23 @@ def _external_corroboration(domain: str) -> tuple[str, str] | None:
 
 
 @celery_app.task(name="app.tasks.crawler.deep_classify_domain")
-def deep_classify_domain(
-    *, domain: str, seed_url: str = "", max_pages: int = 200
-) -> dict[str, object]:
-    """One-time, thorough relevance verdict for a domain the cheap FRONTIER_CLASSIFY_SAMPLE_PAGES sample couldn't resolve — before rejecting a domain for good, actually look at up to max_pages of it instead of trusting a handful of homepage-linked pages to represent the whole site.
+def _deep_crawl_for_relevance(
+    *, domain: str, landing_url: str, max_pages: int
+) -> tuple[tuple[str, object] | None, int, bool, int]:
+    """Random-order same-domain crawl that stops at the first page clearing score_page's threshold.
 
-    Crawls in RANDOM order (not link/DOM order) from a frontier seeded at the
-    landing page and grown as pages are visited, so it isn't stuck sampling
-    only whatever branch of the site the landing page happens to link to
-    first. Stops at the very first page that clears score_page's relevance
-    threshold — a real hit usually resolves in a handful of fetches; only a
-    genuinely off-topic domain pays the full max_pages cost, and that only
-    happens once per domain, ever.
-
-    If the in-domain crawl finds nothing, one last free check runs before
-    committing to a reject: _external_corroboration searches SearXNG for
-    outside confirmation (see its docstring) — a site can be entirely
-    chain-silent about its own Algorand affiliation while the outside world
-    (an ecosystem partner's own page, a community post) already states it.
-
-    The verdict here is FINAL and PERMANENT: approved domains get
-    frontier_status=approved same as any other approval; rejected ones get
-    is_relevant=False + frontier_status=dead_end, which should_recrawl_domain
-    treats as a permanent human-grade reject — this task must never be queued
-    again for the same domain once it's decided (root-caused 2026-07-21:
-    quantoz.com/EURQ is multi-chain and never says "algorand" in its own
-    prose — a shallow same-page-hop sample can legitimately miss a domain
-    that IS relevant, so a reject needs more evidence than that before it's
-    treated as permanent).
-
-    A rejection carries one of two different confidence levels, recorded in
-    metadata as deep_classify_exhaustive: "true" means the frontier ran dry —
-    every reachable same-domain page was actually checked, as conclusive a
-    negative as this task can produce. "false" means max_pages was hit while
-    pages were still unexplored — still a real negative signal (this is what
-    actually gets stored either way), but a budget limit, not proof the rest
-    of the site has nothing either; the note field says which, so a human
-    reviewing the domain list can tell the two apart.
+    Returns (found, fetched, exhaustive, landing_same_domain_link_count) where
+    found is (url, score_result) or None. `exhaustive` is True only when the
+    frontier ran dry — every reachable same-domain page really was checked —
+    versus stopping because max_pages was hit with pages still unexplored.
     """
     import random
     import time
 
-    from app.modules.crawler.domain_tracker import suggest_full_site, update_domain_status
     from app.modules.crawler.robots import is_allowed
     from app.modules.scraper.core.link_extractor import extract_page_links
     from app.modules.search.classifier.score import score_page
 
-    landing_url = seed_url or f"https://{domain}"
     driver = WebCrawlerDriver()
     visited: set[str] = set()
     frontier: list[str] = [landing_url]
@@ -294,7 +264,53 @@ def deep_classify_domain(
     # produce. Hitting max_pages with the frontier still non-empty means there
     # were more unexplored pages when it stopped — a real negative signal,
     # but a budget limit, not proof the rest of the site has nothing either.
-    exhaustive = not frontier
+    return found, fetched, not frontier, landing_same_domain_link_count
+
+
+def deep_classify_domain(
+    *, domain: str, seed_url: str = "", max_pages: int = 200
+) -> dict[str, object]:
+    """One-time, thorough relevance verdict for a domain the cheap FRONTIER_CLASSIFY_SAMPLE_PAGES sample couldn't resolve — before rejecting a domain for good, actually look at up to max_pages of it instead of trusting a handful of homepage-linked pages to represent the whole site.
+
+    Crawls in RANDOM order (not link/DOM order) from a frontier seeded at the
+    landing page and grown as pages are visited, so it isn't stuck sampling
+    only whatever branch of the site the landing page happens to link to
+    first. Stops at the very first page that clears score_page's relevance
+    threshold — a real hit usually resolves in a handful of fetches; only a
+    genuinely off-topic domain pays the full max_pages cost, and that only
+    happens once per domain, ever.
+
+    If the in-domain crawl finds nothing, one last free check runs before
+    committing to a reject: _external_corroboration searches SearXNG for
+    outside confirmation (see its docstring) — a site can be entirely
+    chain-silent about its own Algorand affiliation while the outside world
+    (an ecosystem partner's own page, a community post) already states it.
+
+    The verdict here is FINAL and PERMANENT: approved domains get
+    frontier_status=approved same as any other approval; rejected ones get
+    is_relevant=False + frontier_status=dead_end, which should_recrawl_domain
+    treats as a permanent human-grade reject — this task must never be queued
+    again for the same domain once it's decided (root-caused 2026-07-21:
+    quantoz.com/EURQ is multi-chain and never says "algorand" in its own
+    prose — a shallow same-page-hop sample can legitimately miss a domain
+    that IS relevant, so a reject needs more evidence than that before it's
+    treated as permanent).
+
+    A rejection carries one of two different confidence levels, recorded in
+    metadata as deep_classify_exhaustive: "true" means the frontier ran dry —
+    every reachable same-domain page was actually checked, as conclusive a
+    negative as this task can produce. "false" means max_pages was hit while
+    pages were still unexplored — still a real negative signal (this is what
+    actually gets stored either way), but a budget limit, not proof the rest
+    of the site has nothing either; the note field says which, so a human
+    reviewing the domain list can tell the two apart.
+    """
+    from app.modules.crawler.domain_tracker import suggest_full_site, update_domain_status
+
+    landing_url = seed_url or f"https://{domain}"
+    found, fetched, exhaustive, landing_same_domain_link_count = _deep_crawl_for_relevance(
+        domain=domain, landing_url=landing_url, max_pages=max_pages
+    )
 
     if found is not None:
         found_url, score_result = found
@@ -312,9 +328,7 @@ def deep_classify_domain(
                 "deep_classified": "true",
                 "deep_classify_pages_fetched": str(fetched),
                 "suggested_full_site": (
-                    "true"
-                    if suggest_full_site(domain, landing_same_domain_link_count)
-                    else "false"
+                    "true" if suggest_full_site(domain, landing_same_domain_link_count) else "false"
                 ),
                 "same_domain_link_count": str(landing_same_domain_link_count),
             },
@@ -351,9 +365,7 @@ def deep_classify_domain(
                 "deep_classify_pages_fetched": str(fetched),
                 "external_corroboration_snippet": corrob_snippet,
                 "suggested_full_site": (
-                    "true"
-                    if suggest_full_site(domain, landing_same_domain_link_count)
-                    else "false"
+                    "true" if suggest_full_site(domain, landing_same_domain_link_count) else "false"
                 ),
                 "same_domain_link_count": str(landing_same_domain_link_count),
             },
@@ -483,7 +495,9 @@ def _classify_and_store_domain(
         # suggest_full_site's docstring. Computed here (not at review-render
         # time) since it's a free by-product of the sampling already done for
         # content_relevance above.
-        "suggested_full_site": "true" if suggest_full_site(domain, same_domain_link_count) else "false",
+        "suggested_full_site": "true"
+        if suggest_full_site(domain, same_domain_link_count)
+        else "false",
         "same_domain_link_count": str(same_domain_link_count),
     }
     if will_reject and FRONTIER_DEEP_CLASSIFY_ENABLED:

@@ -86,12 +86,12 @@ main() {
     fi
   fi
 
-  local ch_front=0 ch_back=0 ch_workers=0 ch_schema=0 ch_pyproj=0 ch_pubspec=0 ch_deploy=0 ch_pylock=0
+  local ch_front=0 ch_back=0 ch_workers=0 ch_schema=0 ch_pyproj=0 ch_pkg=0 ch_deploy=0 ch_pylock=0
 
   if (( full )); then
     ch_front=1 ch_back=1 ch_workers=1 ch_schema=1 ch_pyproj=1 ch_deploy=1
   else
-    _any_match "frontend_flutter/*" "${files[@]}" && ch_front=1
+    _any_match "frontend/*" "${files[@]}" && ch_front=1
     _any_match "backend/*" "${files[@]}" && ch_back=1
     _any_match "workers/*" "${files[@]}" && ch_workers=1
     _any_match "schema/*" "${files[@]}" && ch_schema=1
@@ -99,17 +99,16 @@ main() {
     _any_match "backend/pyproject.toml" "${files[@]}" && ch_pyproj=1
     _any_match "workers/pyproject.toml" "${files[@]}" && ch_pyproj=1
     _any_match "requirements.lock.txt" "${files[@]}" && ch_pylock=1
-    _any_match "frontend_flutter/pubspec.yaml" "${files[@]}" && ch_pubspec=1
-    _any_match "frontend_flutter/pubspec.lock" "${files[@]}" && ch_pubspec=1
+    _any_match "frontend/package.json" "${files[@]}" && ch_pkg=1
+    _any_match "frontend/package-lock.json" "${files[@]}" && ch_pkg=1
     _any_match "deploy/nginx/*" "${files[@]}" && ch_deploy=1
     _any_match "deploy/systemd/*" "${files[@]}" && ch_deploy=1
     _any_match "deploy/deploy.sh" "${files[@]}" && ch_deploy=1
     _any_match "deploy/package.sh" "${files[@]}" && ch_deploy=1
   fi
 
-  # pyproject edits should refresh the lock before package; lock-only change skips compile.
-  local sync_flutter=0 sync_python=0
-  [[ "$ch_pubspec" == 1 ]] && _any_match "frontend_flutter/pubspec.yaml" "${files[@]}" && sync_flutter=1
+  local sync_npm=0 sync_python=0
+  [[ "$ch_pkg" == 1 ]] && _any_match "frontend/package.json" "${files[@]}" && sync_npm=1
   if [[ "$ch_pyproj" == 1 ]]; then
     sync_python=1
   fi
@@ -124,14 +123,8 @@ main() {
   fi
   [[ "$ch_schema" == 1 || "$full" == 1 ]] && skip_migrate=0 || skip_migrate=1
 
-  # Release install always does current→previous→rm previous. systemd units
-  # use WorkingDirectory=…/releases/current/…; after a swap the live process cwd
-  # follows the rename into previous, then the *next* deploy deletes previous
-  # and Path.cwd() raises FileNotFoundError (SSR 500s). Always bounce units
-  # that pin that path whenever we ship a release.
   local restart_backend=1 restart_workers=1
 
-  # Show plan
   _yn() { [[ "$1" == 1 ]] && echo yes || echo skip; }
   if (( full )); then
     log "  frontend:  build + ship"
@@ -144,12 +137,12 @@ main() {
     elif [[ ${#files[@]} -gt 12 ]]; then
       log "  ${#files[@]} paths changed"
     fi
-    log "  frontend:  $(_yn "$ch_front") (flutter build + precompress)"
+    log "  frontend:  $(_yn "$ch_front") (vite build + precompress)"
     log "  backend:   $(_yn "$ch_back") (code ship; always restart)"
     log "  workers:   $(_yn "$ch_workers") (code ship; always restart)"
     log "  schema:    $([[ "$skip_migrate" == 1 ]] && echo skip || echo migrate)"
     log "  nginx:     $(_yn "$ch_deploy")"
-    if [[ "$sync_flutter" == 1 ]]; then log "  deps:      flutter pub upgrade (pubspec.yaml changed)"; fi
+    if [[ "$sync_npm" == 1 ]]; then log "  deps:      npm install (package.json changed)"; fi
     if [[ "$sync_python" == 1 ]]; then log "  deps:      refresh requirements.lock.txt (pyproject changed)"; fi
     log "  restart:   backend + workers (release cwd hygiene)"
   fi
@@ -160,7 +153,7 @@ main() {
   _export DEPLOY_CHANGED_WORKERS "$ch_workers"
   _export DEPLOY_CHANGED_SCHEMA "$ch_schema"
   _export DEPLOY_CHANGED_DEPLOY_CONFIG "$ch_deploy"
-  _export DEPLOY_SYNC_FLUTTER "$sync_flutter"
+  _export DEPLOY_SYNC_NPM "$sync_npm"
   _export DEPLOY_SYNC_PYTHON "$sync_python"
   _export SKIP_FRONTEND_BUILD "$skip_front"
   _export PACKAGE_PRECOMPRESS "$precompress"

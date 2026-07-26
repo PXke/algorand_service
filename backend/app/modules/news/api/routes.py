@@ -99,6 +99,14 @@ async def article_detail(request: Request) -> Response:
     lang = query_param(request.query_params.get("lang", "")) or None
     detail = news_service.get_article(article_id, lang=lang)
     if detail is None:
+        # 410 for a deliberately deleted article, 404 for one that never
+        # existed — same split the HTML document route makes. The SPA needs
+        # it to tell "removed" (render a tombstone page, and let crawlers see
+        # the URL is permanently gone) from a plain bad id.
+        from app.modules.news.stores.tombstones import is_article_tombstoned
+
+        if is_article_tombstoned(article_id):
+            return json_error_response(410, "gone", "Article removed")
         return json_error_response(404, "not_found", "Article not found")
     # Count the read (best-effort). detail.views is the count before this
     # hit. Crawlers don't count: Googlebot's renderer boots the app and

@@ -1,27 +1,28 @@
 # Algorand Platform
 
 Monorepo for **PXke Algorand**, an Algorand-focused, largely autonomous
-newspaper — Robyn backend + SSR, Celery workers (frontier crawler, writer
-pipeline, gatekeeper, social distribution), and a Flutter web frontend.
+newspaper — Robyn backend, Celery workers (frontier crawler, writer
+pipeline, gatekeeper, social distribution), and a Vite + Svelte web SPA.
 
 ## Workspace Layout
 
 - `backend/`: Robyn API service
 - `conduit/`: Conduit + Cassandra exporter (algod → on-chain tables)
 - `workers/`: Celery asynchronous workers
-- `frontend_flutter/`: Flutter web client
+- `frontend/`: Vite + Svelte SPA (primary web client)
+- `frontend_flutter/`: **deprecated** Flutter web client (see `DEPRECATED.md`)
 - `deploy/`: deployment scripts and systemd templates
 - `docs/prd/`: product requirement documents
 - `docs/adr/`: architecture decision records
-- `opensource/`: open-source components (including Flutter wallet auth)
+- `opensource/`: open-source components (including Flutter wallet auth, used historically)
 
 ## Quick Start
 
-1. **Local UI dev:** `make dev-ui` — Docker API + workers, then Flutter in Chrome ([docker/README.md](docker/README.md))
+1. **Local UI dev:** `make dev-ui` — Docker API + workers, then Vite SPA on :5173 ([docker/README.md](docker/README.md))
 2. **Local testing (Docker):** `make docker-test` · `make lint` · [docker/README.md](docker/README.md) — deps, pytest, ruff, vulture (not production)
 3. Backend: see `backend/README.md`
 4. Workers: see `workers/README.md`
-5. Frontend: see `frontend_flutter/README.md`
+5. Frontend: see `frontend/README.md`
 6. Deployment: see `deploy/README.md`
 
 ## Initial Milestones
@@ -29,9 +30,9 @@ pipeline, gatekeeper, social distribution), and a Flutter web frontend.
 - **Done:** Product 0 — wallet auth (`wallet_auth_flutter`, ARC-0025 / ARC-0060 / SIWA, Robyn verify + session)
 - **Done:** Monorepo scaffold + deploy scripts
 - **Done:** Conduit → Cassandra exporter, Newspaper pipeline, Suggestions, Search API (Typesense + fallback)
-- **Done:** CORS, `/health/ready`, Flutter shell, CI workflows
+- **Done:** CORS, `/health/ready`, Vite SPA shell, CI workflows
 - **TestNet:** run `cql-migrate`, Conduit, Celery worker + beat, seed `service_registry`
-- **Client target:** Flutter **web first** (WalletConnect QR from browser)
+- **Client target:** Vite + Svelte **SPA** (wallet sign-in against `/api/v1/auth`)
 
 ## Platform today
 
@@ -41,10 +42,10 @@ milestones above:
 
 - **Frontier crawler** — autonomous domain discovery, per-URL politeness/cooldown, ecosystem-directory sync, admin approve/reject queue (`workers/app/modules/crawler/`)
 - **Two-stage writer pipeline** — research → gap-fill → write → grade → revise via Mistral, with a pre-publish gatekeeper (deterministic gate live in shadow mode; ModernBERT MTTH quality head staged, not yet serving) (`workers/app/modules/newspaper/`, `workers/app/modules/gatekeeper/`)
-- **SEO/SSR surface** — server-rendered `<title>`/OG/JSON-LD + sitemaps + feeds for crawlers, Flutter boots from the same HTML for humans (`backend/app/modules/seo/`)
-- **Admin console** — wallet-gated ops/CMS: article edit, source curation, classifier retrain, gatekeeper tuning, publish queue, analytics (`backend/app/modules/admin/`, Flutter `/admin`)
+- **SEO crawl surfaces** — sitemaps, RSS, robots, llms.txt, OG share cards; SPA serves app HTML (`backend/app/modules/seo/`, `frontend/`)
+- **Admin console** — wallet-gated ops/CMS: article edit, source curation, classifier retrain, gatekeeper tuning, publish queue, analytics (`backend/app/modules/admin/`, SPA `/admin`)
 - **Social auto-distribution** — Bluesky, Telegram, Mastodon posting on publish (`workers/app/modules/distribution/`)
-- **8-language article translation** (every non-English UI locale), 9-language UI (`lib/l10n/`)
+- **8-language article translation** (every non-English UI locale), 9-language UI (`frontend/src/lib/i18n/`)
 - **msgspec** for all wire schemas (pydantic fully removed); **prepared-statement registry** for all Cassandra queries (`backend/app/core/statements.py`)
 
 - **Weekly digest** — Monday beat + manual task; market + feed highlights → [docs/modules/weekly-price-analysis.md](docs/modules/weekly-price-analysis.md)

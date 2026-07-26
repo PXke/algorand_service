@@ -185,11 +185,6 @@ def utc_day_start_epoch(when: datetime | None = None) -> int:
     return int(start.timestamp())
 
 
-def remaining_daily_publish_slots(*, when: datetime | None = None) -> int:
-    """Remaining scheduled (standard-tier) articles for the UTC day."""
-    return remaining_standard_publish_slots(when=when)
-
-
 def remaining_standard_publish_slots(*, when: datetime | None = None) -> int:
     """Redundancy pruning (2026-07-18, deferred from the gate consolidation): the daily cap used to have two parallel counting implementations — this advisory read counted Cassandra feed rows while publish_daily_guard's atomic reserve counted Redis reservations, and the two drift intra-day (in-flight reservations are invisible to the feed count; backlog releases used to insert feed rows without reserving).
 
@@ -590,20 +585,6 @@ def evaluate_breaking_publish(
     return PublishDecision(kind=kind, allowed=True, reason="ok")
 
 
-def evaluate_publish(
-    kind: PublishKind,
-    *,
-    _service_id: str = "",
-    diff: str | None = None,
-    when: datetime | None = None,
-    tier: PublishTier = PublishTier.STANDARD,
-) -> PublishDecision:
-    """Dispatch to the standard or breaking publish evaluation for this tier."""
-    if tier == PublishTier.BREAKING:
-        return evaluate_breaking_publish(kind, diff=diff, when=when)
-    return evaluate_standard_publish(kind, diff=diff, when=when)
-
-
 def trim_text_to_chars(text: str, max_chars: int) -> str:
     """Truncate text to max_chars, preferring a paragraph/sentence boundary and appending an ellipsis."""
     text = text.strip()
@@ -617,7 +598,3 @@ def trim_text_to_chars(text: str, max_chars: int) -> str:
     return cut.rstrip() + "…"
 
 
-def strip_markdown_for_length_estimate(body: str) -> str:
-    """Rough plain length check (markdown kept for storage)."""
-    plain = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", body)
-    return re.sub(r"[#*_`]", "", plain)

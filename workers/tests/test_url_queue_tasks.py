@@ -48,7 +48,7 @@ def test_sample_domain_pages_follows_same_domain_links() -> None:
             "https://svc.example/docs": _result("https://svc.example/docs", "docs text"),
         }
     )
-    pages = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=3)
+    pages, _ = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=3)
     assert [u for u, _, _ in pages] == [
         "https://svc.example",
         "https://svc.example/product",
@@ -65,7 +65,7 @@ def test_sample_domain_pages_pool_of_one_skips_links() -> None:
             )
         }
     )
-    pages = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=1)
+    pages, _ = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=1)
     assert pages == [("https://svc.example", "landing text", ())]
 
 
@@ -79,7 +79,7 @@ def test_sample_domain_pages_skips_a_link_that_fails_to_fetch() -> None:
             # /broken deliberately absent — scrape_with_fallback raises for it.
         }
     )
-    pages = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=3)
+    pages, _ = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=3)
     assert [u for u, _, _ in pages] == ["https://svc.example", "https://svc.example/ok"]
 
 
@@ -101,7 +101,7 @@ def test_sample_domain_pages_carries_outbound_external_links() -> None:
             ),
         }
     )
-    pages = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=2)
+    pages, _ = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=2)
     by_url = {u: links for u, _, links in pages}
     assert by_url["https://svc.example"] == ("https://allo.info/asset/123/token",)
     assert by_url["https://svc.example/product"] == ("https://etherscan.io/address/0x1",)
@@ -126,7 +126,7 @@ def test_sample_domain_pages_uses_cache_instead_of_fetching(
         uq, "_cached_domain_urls", lambda _domain, _limit=20: ["https://svc.example/product"]
     )
     driver = _FakeDriver({})  # raises on any fetch — proves nothing hit the network
-    pages = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=3)
+    pages, _ = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=3)
     assert [(u, t) for u, t, _ in pages] == [
         ("https://svc.example", "landing text"),
         ("https://svc.example/product", "product text"),
@@ -141,7 +141,7 @@ def test_sample_domain_pages_cache_hit_has_no_outbound_links(
 
     monkeypatch.setattr(uq, "_cached_page_body", lambda _url: "landing text")
     driver = _FakeDriver({})
-    pages = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=1)
+    pages, _ = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=1)
     assert pages == [("https://svc.example", "landing text", ())]
 
 
@@ -155,7 +155,7 @@ def test_sample_domain_pages_cache_miss_falls_back_to_live_fetch(
     driver = _FakeDriver(
         {"https://svc.example": _result("https://svc.example", "live text", "<a href='/x'>x</a>")}
     )
-    pages = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=1)
+    pages, _ = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=1)
     assert pages == [("https://svc.example", "live text", ())]
 
 
@@ -284,7 +284,7 @@ def test_classify_pending_domains_escalates_instead_of_rejecting_outright(
     monkeypatch.setattr(
         uq,
         "_sample_domain_pages",
-        lambda _driver, url, _domain, _n: [(url, "off-topic content" * 10, ())],
+        lambda _driver, url, _domain, _n: ([(url, "off-topic content" * 10, ())], 0),
     )
     monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: object())
 
@@ -335,7 +335,7 @@ def test_classify_pending_domains_rejects_outright_when_deep_classify_disabled(
     monkeypatch.setattr(
         uq,
         "_sample_domain_pages",
-        lambda _driver, url, _domain, _n: [(url, "off-topic content" * 10, ())],
+        lambda _driver, url, _domain, _n: ([(url, "off-topic content" * 10, ())], 0),
     )
     monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: object())
     monkeypatch.setattr("app.modules.crawler.domain_tracker.is_protected_domain", lambda _d: False)
@@ -418,7 +418,7 @@ def test_classify_pending_domains_marks_unreadable_so_it_stops_recurring(
         ),
     )
     monkeypatch.setattr(
-        uq, "_sample_domain_pages", lambda _driver, url, _domain, _n: [(url, "too short", ())]
+        uq, "_sample_domain_pages", lambda _driver, url, _domain, _n: ([(url, "too short", ())], 0)
     )
     monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: object())
 

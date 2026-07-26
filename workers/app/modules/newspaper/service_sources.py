@@ -63,17 +63,6 @@ def list_sources(service_id: str) -> list[ServiceSource]:
     ]
 
 
-def web_domains_for_service(service_id: str) -> list[str]:
-    """Registrable domains of the service's enabled web sources (aggregation scope for the weekly service-watch context)."""
-    return sorted(
-        {
-            s.domain
-            for s in list_sources(service_id)
-            if s.enabled and s.source_type == "web" and s.domain
-        }
-    )
-
-
 def service_for_domain(domain: str) -> str:
     """service_id owning this registrable domain, or "" when unclaimed."""
     from app.core.cassandra import get_cassandra_session

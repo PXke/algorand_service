@@ -65,11 +65,19 @@ class SessionStore:
         return rec
 
     def get_session(self, token: str) -> SessionRecord | None:
-        """Look up an active session by token, or None if absent/expired."""
-        raw = self._redis.get(f"auth:session:{token}")
+        """Look up an active session by token, or None if absent/expired.
+
+        Successful lookups slide the Redis TTL so active users are not logged
+        out at a fixed wall-clock from login.
+        """
+        key = f"auth:session:{token}"
+        raw = self._redis.get(key)
         if not raw:
             return None
         data = json.loads(raw)
+        now = int(time.time())
+        data["expires_in_epoch"] = now + settings.session_ttl_seconds
+        self._redis.setex(key, settings.session_ttl_seconds, json.dumps(data))
         return SessionRecord(**data)
 
     def delete_session(self, token: str) -> None:

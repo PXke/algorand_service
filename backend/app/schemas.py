@@ -38,7 +38,7 @@ class ArticleFeedItem(msgspec.Struct, kw_only=True):
     trigger_kind: str = "editorial"
     image_url: str | None = None
     source_url: str | None = None
-    # Read tally, populated only on ranked ("hot") feed responses.
+    # Read tally — populated on hot/top rankings and the regular feed.
     views: int | None = None
     # Last content revision (edit/recompose); None = never revised.
     updated_at_epoch: int | None = None
@@ -65,20 +65,6 @@ class ArticleDetail(msgspec.Struct, kw_only=True):
     updated_at_epoch: int | None = None
 
 
-class NewsFeedResponse(msgspec.Struct, kw_only=True):
-    """Paginated article feed response."""
-    items: list[ArticleFeedItem]
-
-
-class ServiceEventItem(msgspec.Struct, kw_only=True):
-    """One service-watch event for the feed's event stream."""
-    service_id: str
-    event_id: str
-    txid: str
-    round: int
-    occurred_at_epoch: int
-
-
 # ── Auth ──────────────────────────────────────────────────────────────────────
 class NonceRequest(msgspec.Struct, kw_only=True):
     """Request body for issuing a wallet-auth nonce."""
@@ -101,15 +87,6 @@ class Caip122Payload(msgspec.Struct, kw_only=True):
     not_before: str | None = field(name="not-before", default=None)
     request_id: str | None = field(name="request-id", default=None)
     resources: list[str] | None = None
-
-
-class NonceResponse(msgspec.Struct, kw_only=True):
-    """Issued nonce and the message the wallet must sign."""
-    wallet_address: str
-    nonce: str
-    signing_message: str
-    caip122: Caip122Payload
-    expires_in_seconds: int
 
 
 class Arc0060Proof(msgspec.Struct, kw_only=True):
@@ -139,16 +116,6 @@ class VerifyRequest(msgspec.Struct, kw_only=True):
             raise ValueError("signed_txn_b64 is required when proof_method is arc0025_txn")
         elif self.proof_method in ("legacy_message", "signed_bytes") and not self.signature_b64:
             raise ValueError(f"signature_b64 is required when proof_method is {self.proof_method}")
-
-
-class VerifyResponse(msgspec.Struct, kw_only=True):
-    """Session issued after a successful wallet-auth verification."""
-    session_token: str
-    wallet_address: str
-    issued_at_epoch: int
-    expires_in_epoch: int
-    expires_in_seconds: int
-    proof_method: str
 
 
 class SessionInfo(msgspec.Struct, kw_only=True):
@@ -223,11 +190,6 @@ class ContactMessageItem(msgspec.Struct, kw_only=True):
     created_at_epoch: int
 
 
-class ContactMessagesResponse(msgspec.Struct, kw_only=True):
-    """List of stored contact messages for the admin view."""
-    items: list[ContactMessageItem]
-
-
 # ── Suggestions ───────────────────────────────────────────────────────────────
 class CreateSuggestionRequest(msgspec.Struct, kw_only=True):
     """Request body for a treasury-payment-gated service suggestion."""
@@ -255,20 +217,9 @@ class SuggestionConfigResponse(msgspec.Struct, kw_only=True):
     min_algo_display: str
 
 
-class SuggestionListResponse(msgspec.Struct, kw_only=True):
-    """List of stored service suggestions."""
-    items: list[SuggestionResponse]
-
-
 class UpvoteRequest(msgspec.Struct, kw_only=True):
     """Request body for upvoting a suggestion."""
     signature_b64: Annotated[str, Meta(min_length=16, max_length=2048)]
-
-
-class UpvoteResponse(msgspec.Struct, kw_only=True):
-    """A suggestion's upvote count after a vote."""
-    suggestion_id: str
-    upvote_count: int
 
 
 # ── KYC-as-a-service (x402 challenge) ───────────────────────────────────────
@@ -379,14 +330,6 @@ class EditorialBriefCreate(msgspec.Struct, kw_only=True):
     # 0 = one-off assignment; >0 = re-trigger an in-place edit of the resulting
     # article every N days (see app.tasks.newspaper.scan_editorial_brief_schedule).
     refresh_every_days: Annotated[int, Meta(ge=0, le=3650)] = 0
-
-
-class EditorialBriefUpdate(msgspec.Struct, kw_only=True):
-    """Request body for updating an editorial brief."""
-    title: Annotated[str, Meta(max_length=256)] | None = None
-    body_markdown: Annotated[str, Meta(max_length=100_000)] | None = None
-    keywords: Annotated[str, Meta(max_length=1024)] | None = None
-    status: Annotated[str, Meta(max_length=32)] | None = None
 
 
 class OfficialChannelCreate(msgspec.Struct, kw_only=True):

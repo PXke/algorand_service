@@ -8,7 +8,7 @@ One compose file for **local dependencies**, **unit tests**, optional **API + wo
 
 | Goal | Command |
 |------|---------|
-| **API in Docker + Flutter web** (public TestNet for chain) | `make dev-ui` or `./docker/bin/dev-ui.sh` |
+| **API in Docker + Vite SPA** (public TestNet for chain) | `make dev-ui` or `./docker/bin/dev-ui.sh` |
 | Same + **private localnet** (`algod` on :4001) | `make dev-ui-localnet` or `./docker/bin/dev-ui.sh --localnet` |
 | Docker only (no Flutter) | `./docker/bin/dev-ui.sh --docker-only` |
 | Tear down stack when script exits | add `--stop-docker` |
@@ -154,7 +154,7 @@ Verify in the app: `curl -s 'http://localhost:8080/api/v1/news/feed?limit=5' | j
 |------|------|
 | [Dockerfile](Dockerfile) | Shared image `algorand-platform-test:$PLATFORM_TAG` (default git short SHA) — Python **3.14-slim-bookworm** |
 | [Dockerfile.conduit](Dockerfile.conduit) | Conduit binary (profile `chain`) |
-| [bin/dev-ui.sh](bin/dev-ui.sh) | Docker app stack + Flutter web |
+| [bin/dev-ui.sh](bin/dev-ui.sh) | Docker app stack + Vite SPA |
 | [bin/compose-test.sh](bin/compose-test.sh) | `up` + lint + pytest (test container) |
 | [bin/run-tests.sh](bin/run-tests.sh) | lint (optional) + pytest |
 | [localnet/.env.example](localnet/.env.example) | Localnet + app env template |

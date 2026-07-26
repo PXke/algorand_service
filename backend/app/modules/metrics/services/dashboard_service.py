@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.core.config import settings
 from app.modules.metrics.models.dashboard_schemas import MetricsDashboardResponse, MetricTile
-from app.modules.metrics.services.network_service import fetch_algod_status
+from app.modules.metrics.services.network_service import fetch_algod_status, fetch_nodely_node_stats
 from app.modules.metrics.services.price_service import PriceMetricsService
 from app.modules.metrics.stores.cassandra import load_latest_price_sample
 from app.modules.news.services.news_service import NewsService
@@ -151,6 +151,29 @@ class MetricsDashboardService:
                     id="round_latency",
                     label="Round time",
                     value="—",
+                    available=False,
+                )
+            )
+
+        node_stats = fetch_nodely_node_stats()
+        node_count = node_stats.get("node_count")
+        if isinstance(node_count, int) and node_count > 0:
+            tiles.append(
+                MetricTile(
+                    id="validators",
+                    label="Validators",
+                    value=_fmt_int(node_count) or str(node_count),
+                    hint=str(node_stats.get("hint") or "Nodely"),
+                    available=True,
+                )
+            )
+        else:
+            tiles.append(
+                MetricTile(
+                    id="validators",
+                    label="Validators",
+                    value="—",
+                    hint="Nodely unavailable",
                     available=False,
                 )
             )

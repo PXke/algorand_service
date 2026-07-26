@@ -30,6 +30,3 @@ def load_official_channel_ids(kind: str) -> set[str]:
     return values
 
 
-def clear_official_channels_cache() -> None:
-    """Evict all cached official-channel allowlists."""
-    _cache.clear()

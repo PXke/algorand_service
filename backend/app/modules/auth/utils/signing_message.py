@@ -46,6 +46,3 @@ def build_auth_challenge(nonce: str, wallet_address: str) -> AuthChallenge:
     return AuthChallenge(nonce=nonce, signing_message=signing_message, caip122=caip122)
 
 
-def build_signing_message(nonce: str, wallet_address: str) -> str:
-    """Backward-compatible helper returning only the SIWA string."""
-    return build_auth_challenge(nonce, wallet_address).signing_message

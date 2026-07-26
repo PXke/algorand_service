@@ -81,12 +81,6 @@ def content_change_urls(
     return _dedupe_urls(urls)
 
 
-def translation_change_urls(article_id: str, lang: str) -> list[str]:
-    """New or updated locale URL plus sitemaps — use when a translation lands."""
-    urls = [article_url(article_id, lang), sitemap_url(), sitemap_news_url()]
-    return _dedupe_urls(urls)
-
-
 def ping_article(
     article_id: str,
     *,
@@ -94,11 +88,6 @@ def ping_article(
 ) -> None:
     """Ping IndexNow for an article's URL(s) after a publish, edit, or delete."""
     ping(content_change_urls(article_id, translation_langs=translation_langs))
-
-
-def ping_translation(article_id: str, lang: str) -> None:
-    """Ping IndexNow for a newly landed translation's URL."""
-    ping(translation_change_urls(article_id, lang))
 
 
 def _dedupe_urls(urls: Iterable[str]) -> list[str]:

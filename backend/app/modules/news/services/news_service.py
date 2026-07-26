@@ -54,14 +54,33 @@ class NewsService:
                     a for a in articles if any(t.strip().lower() == wanted for t in (a.tags or []))
                 ]
             articles = articles[:cap]
-            return [self._to_feed_item(a, lang) for a in articles], None
+            return (
+                self._with_feed_views([self._to_feed_item(a, lang) for a in articles]),
+                None,
+            )
         articles, next_cursor = self._store.list_feed_page(
             limit=cap, cursor_epoch_ms=cursor_epoch_ms
         )
         # Defensive: skip any malformed feed rows (e.g. a partial upsert that
         # left service_id/title null) so one bad row can't 500 the whole feed.
         articles = [a for a in articles if a.service_id and a.title]
-        return [self._to_feed_item(a, lang) for a in articles], next_cursor
+        return self._with_feed_views(
+            [self._to_feed_item(a, lang) for a in articles]
+        ), next_cursor
+
+    def _with_feed_views(self, items: list[ArticleFeedItem]) -> list[ArticleFeedItem]:
+        """Attach lifetime read tallies to feed items (best-effort)."""
+        if not items:
+            return items
+        try:
+            from app.modules.news.stores.view_counts import get_views_bulk
+
+            views = get_views_bulk([i.article_id for i in items])
+            for item in items:
+                item.views = views.get(item.article_id, 0)
+        except Exception:
+            pass
+        return items
 
     # ── Engagement views (tag cloud + most-read) ─────────────────────────────
     #

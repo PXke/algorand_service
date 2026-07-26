@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Any, TypeVar
 
 import msgspec
-from robyn import Response
 
 T = TypeVar("T")
 
@@ -22,30 +21,6 @@ _encoder = msgspec.json.Encoder()
 def encode(obj: Any) -> bytes:  # noqa: ANN401 -- any msgspec.Struct / dict / list / primitive
     """JSON-encode any msgspec.Struct / dict / list / primitive (datetimes -> RFC 3339) to bytes."""
     return _encoder.encode(obj)
-
-
-def json_response(
-    payload: Any,  # noqa: ANN401 -- any msgspec.Struct / dict / list / primitive
-    *,
-    status: int = 200,
-    headers: dict[str, str] | None = None,
-    cache: str | None = None,
-) -> Response:
-    """Build a Robyn JSON Response from `payload` (Struct/dict/list/...).
-
-    Robyn's Response body is a str, so the msgspec bytes are decoded once here —
-    the single place to revisit if Robyn gains native bytes support.
-    """
-    hdrs = {"Content-Type": "application/json"}
-    if cache:
-        hdrs["Cache-Control"] = cache
-    if headers:
-        hdrs.update(headers)
-    return Response(
-        status_code=status,
-        headers=hdrs,
-        description=encode(payload).decode("utf-8"),
-    )
 
 
 def to_builtins(obj: Any) -> Any:  # noqa: ANN401 -- any nested Struct/dict/list structure in or out

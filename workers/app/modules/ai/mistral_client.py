@@ -248,11 +248,6 @@ class MistralClient:
         # a multi-round session doesn't re-pay for the same rejection every round.
         self._reasoning_effort_unsupported = not self._metadata.get("reasoning", True)
 
-    @property
-    def is_configured(self) -> bool:
-        """Whether an API key is configured for this client."""
-        return bool(self._api_key)
-
     def usage_totals(self) -> dict[str, int]:
         """Cumulative token usage across every request this instance has made (a compose session's client(s) are created fresh per session, so this is the session total, not a lifetime counter)."""
         return dict(self._usage)

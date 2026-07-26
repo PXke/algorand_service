@@ -226,15 +226,6 @@ def order_for_drain(rows: list[QueuedPublishRow]) -> list[QueuedPublishRow]:
     return ordered
 
 
-def count_pending_queue() -> int:
-    """Count pending rows. A single-partition COUNT (status is the partition key) — does NOT materialise rows or hit the per-row detail table the way ``list_pending_queue`` does, so it stays cheap regardless of queue depth."""
-    from app.core.cassandra import get_cassandra_session
-    from app.core.statements import PublishQueueStmts
-
-    row = get_cassandra_session().execute(PublishQueueStmts.COUNT_PENDING, ("pending",)).one()
-    return int(row.n) if row is not None else 0
-
-
 def mark_queue_done(queue_id: str, *, reason: str = "") -> None:
     """Mark a publish-queue row done."""
     mark_queue_status(queue_id, "done", reason=reason)

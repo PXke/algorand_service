@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -78,6 +77,3 @@ def build_event_dedupe_key(
     return f"{service_id}:event:{event_id}:{phase.value}:{short_hash}"
 
 
-def new_event_id() -> str:
-    """Generate a fresh random event id."""
-    return f"evt-{uuid.uuid4().hex[:12]}"

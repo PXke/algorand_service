@@ -115,15 +115,6 @@ def is_standard_publish_saturated(*, when: datetime | None = None) -> bool:
     return count >= config.NEWS_MAX_ARTICLES_PER_DAY
 
 
-def is_any_publish_saturated(*, when: datetime | None = None) -> bool:
-    """Whether both the standard and breaking-tier daily caps are reached."""
-    return (
-        is_standard_publish_saturated(when=when)
-        and published_count_today(tier=PublishTier.BREAKING, when=when)
-        >= config.NEWS_MAX_BREAKING_PER_DAY
-    )
-
-
 def assert_publish_allowed(*, tier: PublishTier) -> None:
     """Raise if cap already reached (pre-check before reserve)."""
     cap = _cap_for_tier(tier)

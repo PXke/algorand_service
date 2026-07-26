@@ -303,12 +303,6 @@ def _retrain_category_model(cat_samples: list[tuple[str, str, str]]) -> dict[str
     return {"status": "ok", "samples": len(cat_samples), "classes": sorted(distinct)}
 
 
-def predict_category_model(text: str, url: str) -> str | None:
-    """Trained-model category prediction, or None when no model exists yet."""
-    cats = predict_categories(text, url, max_categories=1)
-    return cats[0] if cats else None
-
-
 def predict_categories(
     text: str,
     url: str,

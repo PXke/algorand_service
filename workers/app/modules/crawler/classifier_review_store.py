@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
-from typing import Any
 
 
 def enqueue_classifier_review(
@@ -85,48 +84,6 @@ def has_pending_review_for_url(url: str, *, scan_limit: int = 500) -> bool:
     rows = session.execute(ClassifierReviewStmts.LIST_PENDING_URLS, ("pending", scan_limit))
     normalized = url.strip().rstrip("/")
     return any((row.url or "").strip().rstrip("/") == normalized for row in rows)
-
-
-def list_pending_reviews(*, limit: int = 50) -> list[dict[str, Any]]:
-    """List pending classifier-review rows with their article detail joined in."""
-    from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
-    from app.core.statements import ClassifierReviewStmts
-
-    session = get_cassandra_session()
-    pending = list(session.execute(ClassifierReviewStmts.LIST_PENDING, ("pending", limit)))
-    # Fan the per-row detail lookups out concurrently (aligned with `pending`).
-    details = execute_parallel_with_args(
-        ClassifierReviewStmts.GET_DETAIL, [(row.review_id,) for row in pending]
-    )
-    items: list[dict[str, Any]] = []
-    for _row, (ok, result) in zip(pending, details, strict=True):
-        detail = result.one() if ok else None
-        if detail is None:
-            continue
-        article_id = ""
-        meta = detail.metadata or {}
-        if isinstance(meta, dict):
-            raw = meta.get("raw")
-            if raw:
-                try:
-                    parsed = json.loads(raw)
-                    article_id = str(parsed.get("article_id", ""))
-                except (json.JSONDecodeError, TypeError):
-                    article_id = str(meta.get("article_id", ""))
-            else:
-                article_id = str(meta.get("article_id", ""))
-        items.append(
-            {
-                "review_id": str(detail.review_id),
-                "url": detail.url,
-                "page_title": detail.page_title or "",
-                "page_text_preview": (detail.page_text or "")[:500],
-                "category": detail.category or "",
-                "storage_score": float(detail.storage_score or 0),
-                "article_id": article_id,
-            }
-        )
-    return items
 
 
 def complete_classifier_review(

@@ -25,7 +25,6 @@ from app.modules.ai.mistral_client import (
 from app.modules.ai.reference_block import append_reference_block
 from app.modules.ai.story_spike import StorySpikedError
 from app.modules.metrics.price_metrics_store import load_mistral_context
-from app.modules.newspaper.price_analysis import WeeklyPriceSnapshot
 from app.modules.newspaper.weekly_digest import WeeklyDigestContext
 
 logger = logging.getLogger(__name__)
@@ -2473,69 +2472,6 @@ Transcript:
         ],
         max_tokens=2048,
     )
-    return _parse_article_fields(payload)
-
-
-def compose_weekly_price_article_mistral(
-    snapshot: WeeklyPriceSnapshot,
-    *,
-    client: MistralClient | None = None,
-) -> MistralArticleFields:
-    """Generate weekly price analysis narrative via Mistral."""
-    mistral = client or get_mistral_client()
-    system = (
-        "You are a financial markets writer for a crypto newspaper. "
-        "Be factual and concise.\n\n"
-        "Write the analysis as a single JSON object with this schema:\n"
-        '{"title": "string", "summary": "string", "body": "string"}\n'
-        "- body: include a markdown table of the metrics and a short analysis "
-        "section\n\n"
-        f"{_JSON_ONLY}"
-    )
-    user = f"""Write a weekly price analysis article from the data below.
-
-Asset: {snapshot.asset_name} ({snapshot.asset_id})
-Currency: {snapshot.currency}
-Current price: {snapshot.price_usd}
-7d open: {snapshot.week_open_usd}
-7d high: {snapshot.week_high_usd}
-7d low: {snapshot.week_low_usd}
-7d change %: {snapshot.week_change_pct:+.2f}
-As of UTC: {snapshot.as_of.isoformat()}
-Data source: CoinGecko market chart.{_price_metrics_block(snapshot.asset_id)}"""
-
-    from app.core.config import WRITER_TOOLS_ENABLED
-
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
-    if WRITER_TOOLS_ENABLED:
-        try:
-            from app.modules.ai.writer_tools import all_tools
-
-            tool_schemas, tool_handlers = all_tools()
-            tool_system = system + _TOOLS_GUIDANCE
-            raw = mistral.chat_with_tools(
-                [{"role": "system", "content": tool_system}, {"role": "user", "content": user}],
-                tools=tool_schemas,
-                handlers=tool_handlers,
-                require_tool="review_draft",
-            )
-            import json as _json
-
-            payload = _json.loads(raw)
-            return _parse_article_fields(payload)
-        except MistralError:
-            # A real API error (rate limit, etc.) — already retried with backoff
-            # inside the client. Don't burn another call on a single-shot retry
-            # that will just fail the same way; let the caller fall to template.
-            raise
-        except Exception:
-            # Tool/parse failure (the API worked): fall back to single-shot.
-            logger.debug("tool-call compose failed; falling back to single-shot", exc_info=True)
-
-    payload = mistral.chat_json_object(messages)
     return _parse_article_fields(payload)
 
 

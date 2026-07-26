@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Emit nginx gzip_static / brotli_static siblings for a Flutter web tree.
+# Emit nginx gzip_static / brotli_static siblings for a static web tree.
 # Intended to run on the fast build machine during package.sh; deploy.sh skips
 # the remote pass when .precompress.sha256 is present and still valid.
 set -euo pipefail

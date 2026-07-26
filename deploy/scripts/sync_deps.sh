@@ -1,29 +1,32 @@
 #!/usr/bin/env bash
-# Refresh Flutter/Python locks when deploy scope says manifests changed.
+# Refresh npm/Python locks when deploy scope says manifests changed.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 BUILD_DIR="$REPO_ROOT/deploy/build"
 
-DEPLOY_SYNC_FLUTTER="${DEPLOY_SYNC_FLUTTER:-0}"
+DEPLOY_SYNC_NPM="${DEPLOY_SYNC_NPM:-0}"
 DEPLOY_SYNC_PYTHON="${DEPLOY_SYNC_PYTHON:-0}"
+# Back-compat if an old shell still exports the Flutter flag.
+DEPLOY_SYNC_FLUTTER="${DEPLOY_SYNC_FLUTTER:-0}"
+[[ "$DEPLOY_SYNC_FLUTTER" == "1" ]] && DEPLOY_SYNC_NPM=1
 
 log() { echo ">>> $*" >&2; }
 
-_sync_flutter() {
-  command -v flutter >/dev/null 2>&1 || {
-    echo "error: flutter not found" >&2
+_sync_npm() {
+  command -v npm >/dev/null 2>&1 || {
+    echo "error: npm not found" >&2
     exit 1
   }
-  local lock="$REPO_ROOT/frontend_flutter/pubspec.lock"
+  local lock="$REPO_ROOT/frontend/package-lock.json"
   local before="" after=""
   [[ -f "$lock" ]] && before=$(sha256sum "$lock" | awk '{print $1}')
-  log "Flutter pub upgrade (pubspec.yaml changed)"
-  (cd "$REPO_ROOT/frontend_flutter" && flutter pub upgrade >&2)
+  log "npm install (package.json changed)"
+  (cd "$REPO_ROOT/frontend" && npm install >&2)
   [[ -f "$lock" ]] && after=$(sha256sum "$lock" | awk '{print $1}')
   if [[ "$before" != "$after" ]]; then
-    log "Flutter lock updated — commit pubspec.lock"
+    log "npm lock updated — commit package-lock.json"
     rm -f "$BUILD_DIR/.frontend-build.sha256" "$BUILD_DIR/frontend_web_cache/.fingerprint"
     export DEPLOY_CHANGED_FRONTEND=1
     export SKIP_FRONTEND_BUILD=0
@@ -50,10 +53,10 @@ _sync_python() {
 }
 
 main() {
-  if [[ "$DEPLOY_SYNC_FLUTTER" != "1" && "$DEPLOY_SYNC_PYTHON" != "1" ]]; then
+  if [[ "$DEPLOY_SYNC_NPM" != "1" && "$DEPLOY_SYNC_PYTHON" != "1" ]]; then
     exit 0
   fi
-  [[ "$DEPLOY_SYNC_FLUTTER" == "1" ]] && _sync_flutter
+  [[ "$DEPLOY_SYNC_NPM" == "1" ]] && _sync_npm
   [[ "$DEPLOY_SYNC_PYTHON" == "1" ]] && _sync_python
 }
 

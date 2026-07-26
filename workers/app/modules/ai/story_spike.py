@@ -90,8 +90,6 @@ ABORT_ARTICLE_SCHEMA: dict[str, Any] = {
     },
 }
 
-# Backwards-compat alias (older imports referenced SPIKE_STORY_SCHEMA).
-SPIKE_STORY_SCHEMA = ABORT_ARTICLE_SCHEMA
 
 # The writer sometimes calls the abort tool to NARRATE a decision NOT to abort
 # ("No spike needed. I have verified six wallets…"), misusing a terminal tool as
@@ -144,5 +142,3 @@ def abort_article_handler(category: str = "", reason: str = "", **_: object) -> 
     raise StorySpikedError(reason, category)
 
 
-# Backwards-compat alias (older imports referenced spike_story_handler).
-spike_story_handler = abort_article_handler

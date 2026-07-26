@@ -120,16 +120,16 @@ def test_render_article_head_has_core_tags() -> None:
     # Visible SSR content, NOT noscript (Google renders JS and ignores noscript,
     # and the canvas Flutter app has no DOM text) + self-removal on app paint.
     assert "<noscript>" not in body
-    assert "flutter-first-frame" in body
+    assert "pxke-spa-ready" in body
 
 
-def test_ssr_script_restores_server_title_after_flutter_boot() -> None:
+def test_ssr_script_restores_server_title_after_spa_mount() -> None:
     """Flutter web's MaterialApp(title:) overwrites document.title with the static app name during its first build, so rendering crawlers (Bing, Google WRS) saw one generic title on every route (2026-07-09 Bing audit). The first-frame script must capture the server-sent title at parse time and restore it after Flutter paints."""
     body = render.ssr_container("<h1>x</h1>")
     assert "var pxkeSsrTitle=document.title" in body
     assert "document.title=pxkeSsrTitle" in body
     # Restore must run AFTER Flutter's own title write (post-first-frame).
-    assert body.index("flutter-first-frame") < body.index("document.title=pxkeSsrTitle")
+    assert body.index("pxke-spa-ready") > body.index("document.title=pxkeSsrTitle")
 
 
 def test_render_article_hreflang_for_translations() -> None:
@@ -600,7 +600,7 @@ def test_candidate_dirs_survives_deleted_cwd(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(shell, "_safe_cwd_roots", lambda: [])
     dirs = shell._candidate_dirs()
     assert dirs  # __file__-relative roots still present
-    assert all("frontend_web" in str(d) or "frontend_flutter" in str(d) for d in dirs)
+    assert all("frontend_web" in str(d) or "frontend/dist" in str(d) for d in dirs)
 
 
 def test_shell_injection_preserves_jsonld_escapes(
@@ -700,27 +700,6 @@ def test_llms_txt_lists_feed_and_topics() -> None:
     assert "/section/" not in txt
 
 
-def test_shell_injection_adds_engine_preloads(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Injects a Flutter renderer-preload script that gates the wasm branch on Blink, WasmGC and WebGL."""
-    (tmp_path / "index.html").write_text(_SHELL, encoding="utf-8")
-    monkeypatch.setattr(shell.settings, "frontend_dist_dir", str(tmp_path))
-    shell._cache["html"] = None  # bust the module cache
-
-    head, body = render.render_front(_feed(1), [])
-    doc = shell.render_document(head, body)
-    assert doc is not None
-    # Renderer preloads are injected by an inline script mirroring
-    # flutter_bootstrap.js's build selector (one stack per browser — skwasm OR
-    # canvaskit, never both). The wasm branch must gate on all three of the
-    # selector's conditions: Chromium/Blink (Flutter's default wasm allowlist
-    # is blink-only — Firefox has WasmGC yet runs dart2js), WasmGC, and WebGL.
-    assert "WebAssembly.validate" in doc
-    assert "cr&&gc&&gl" in doc
-    assert "main.dart.mjs" in doc
-    assert "skwasm.wasm" in doc
-    assert "canvaskit.wasm" in doc
     # API preconnect removed: feed/markets/auth are deferred; early preconnect
     # triggered Lighthouse "unused preconnect" and competed with WASM on boot.
 
@@ -758,12 +737,12 @@ def test_overlong_title_clamped_at_word_boundary() -> None:
     assert f'property="og:title" content="{t}"' in head
 
 
-def test_first_frame_script_removes_ssr_from_dom() -> None:
+def test_spa_ready_script_removes_ssr_from_dom() -> None:
     # SSR is in the initial HTML for crawlers; after Flutter paints the script
     # removes #ssr-body so Ctrl+F does not match text under the canvas.
     """Removes the SSR body from the DOM via the first-frame script after Flutter paints."""
     _, body = render.render_article(_article())
-    assert "flutter-first-frame" in body
+    assert "pxke-spa-ready" in body
     assert 'id="ssr-body"' in body
     assert "ssr-body" in body
     assert ".remove()" in body

@@ -109,11 +109,6 @@ def collect_recent_feed_articles(
     return recent[:max_articles]
 
 
-def fetch_price_only(asset_id: str) -> WeeklyPriceSnapshot:
-    """Backward-compatible price fetch."""
-    return fetch_weekly_price(asset_id)
-
-
 __all__ = [
     "DigestArticleItem",
     "PriceAnalysisError",

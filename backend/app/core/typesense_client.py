@@ -154,11 +154,6 @@ def expanded_search_terms(query: str) -> list[str]:
     return out
 
 
-def ensure_pages_collection() -> bool:
-    """Create the pages collection if it doesn't already exist."""
-    return ensure_collection(PAGES_SCHEMA)
-
-
 def clear_search_index() -> dict[str, object]:
     """Drop article/page search collections so a pipeline reset starts clean."""
     client = get_typesense_client()

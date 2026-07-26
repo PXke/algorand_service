@@ -2,7 +2,7 @@
 
 nginx (web vhost) proxies navigation requests for these paths to the backend so
 crawlers and social scrapers receive real `<title>`/meta/OG/JSON-LD and a
-visible `#ssr-body` content, while humans still boot the Flutter app from the same HTML.
+visible `#ssr-body` content, while humans still boot the Vite SPA from the same HTML.
 Static assets keep being served from disk by nginx.
 """
 
@@ -55,13 +55,15 @@ def _doc_response(
         body = shell.ssr_track_snippet(tracked_path) + body
     document = shell.render_document(head, body, html_lang=html_lang)
     if document is None:
-        # Shell template not found — still return valid HTML AND boot Flutter
-        # (the bootstrap script must be present or the app renders a blank page).
+        # Shell template not found (missing/So far unbuilt frontend). Still return
+        # valid crawlable HTML so meta/OG/JSON-LD survive; the SPA can't boot from
+        # here because Vite's entry script is content-hashed, so humans get the
+        # SSR body until a real build lands.
         track = shell.ssr_track_snippet(tracked_path) if tracked_path else ""
         document = (
             f'<!DOCTYPE html><html lang="{html.escape(html_lang, quote=True)}"><head><base href="/">'
             f"{head}</head><body>{track}{body}"
-            '<script src="/flutter_bootstrap.js" async></script>'
+            '<div id="app"></div>'
             "</body></html>"
         )
     return Response(
@@ -119,6 +121,8 @@ _BEACON_STATIC_PATHS = {
     "/",
     "/news",
     "/hot",
+    "/top",
+    "/sources",
     "/topics",
     "/about",
     "/contact",
@@ -128,7 +132,7 @@ _BEACON_STATIC_PATHS = {
 
 
 def _is_known_app_path(path: str) -> bool:
-    """True for a path the Flutter router can actually land on — keeps the unauthenticated beacon from letting a client bump counters for arbitrary made-up paths (cardinality/data-quality, not just a hard filter)."""
+    """True for a path the SPA router can actually land on — keeps the unauthenticated beacon from letting a client bump counters for arbitrary made-up paths (cardinality/data-quality, not just a hard filter)."""
     if path in _BEACON_STATIC_PATHS:
         return True
     if path.startswith("/news/articles/"):
@@ -138,7 +142,7 @@ def _is_known_app_path(path: str) -> bool:
             return False
         return True
     if path.startswith("/topic/"):
-        # Any non-empty slug: the Flutter router serves every /topic/:tag.
+        # Any non-empty slug: the SPA router serves every /topic/:tag.
         # Cap length to keep junk out of the analytics store.
         slug = path[len("/topic/") :]
         return 0 < len(slug) <= 48 and "/" not in slug
@@ -146,16 +150,10 @@ def _is_known_app_path(path: str) -> bool:
 
 
 def _article_tombstoned(article_id: str) -> bool:
-    """Was this article deliberately deleted (vs never existed)? Fail-open to False — a lookup error must degrade to the plain 404, never break SSR."""
-    try:
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import DeletedArticleStmts
+    """Was this article deliberately deleted (vs never existed)? Shared with the JSON article endpoint — see news.stores.tombstones."""
+    from app.modules.news.stores.tombstones import is_article_tombstoned
 
-        aid = UUID(article_id)
-        row = get_cassandra_session().execute(DeletedArticleStmts.GET, (aid,)).one()
-        return row is not None
-    except Exception:
-        return False
+    return is_article_tombstoned(article_id)
 
 
 def _record_notfound(request: Request, path: str) -> None:
@@ -396,7 +394,7 @@ async def admin(request: Request) -> Response:
 
 
 async def beacon_pageview(request: Request) -> Response:
-    """Client-side beacon for a Flutter in-app route change — the initial document load is already recorded server-side; this covers navigation after that, which never hits a document route."""
+    """Client-side beacon for an SPA in-app route change — the initial document load is already recorded server-side; this covers navigation after that, which never hits a document route."""
     if tracking_opted_out_from_headers(request.headers):
         return {"ok": True}
     try:

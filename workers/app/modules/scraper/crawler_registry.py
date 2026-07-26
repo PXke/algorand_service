@@ -92,19 +92,3 @@ def metrics_crawl_disabled_reason() -> str | None:
     return "crawler_metrics_disabled"
 
 
-def list_crawler_status() -> list[dict[str, object]]:
-    """Snapshot for ops/debug."""
-    rows = load_crawler_config()
-    out: list[dict[str, object]] = []
-    for ctype in CrawlerType:
-        row = rows.get(ctype.value)
-        out.append(
-            {
-                "crawler_type": ctype.value,
-                "display_name": row.display_name if row else ctype.value,
-                "enabled_db": row.enabled if row else False,
-                "enabled_effective": is_crawler_enabled(ctype),
-                "web_spa": is_web_spa_enabled() if ctype == CrawlerType.WEB else None,
-            }
-        )
-    return out

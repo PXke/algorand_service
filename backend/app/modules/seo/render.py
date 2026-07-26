@@ -1,11 +1,11 @@
-"""Builds the per-route `<head>` markup, JSON-LD and crawlable SSR body that get injected into the Flutter shell (see shell.render_document).
+"""Builds the per-route `<head>` markup, JSON-LD and crawlable SSR body that get injected into the Vite SPA shell (see shell.render_document).
 
 The SSR body is a REAL visible `<div id="ssr-body">`, not `<noscript>`:
-Googlebot renders JS, ignores noscript, and Flutter paints to canvas — so
-noscript-only content is invisible to exactly the crawler that matters most.
-The div is served identically to everyone (no user-agent cloaking), doubles as
-a fast first paint while Flutter boots, and is removed from the DOM on the
-engine's `flutter-first-frame` event so browser find does not match hidden text.
+Googlebot renders JS but ignores noscript, and many share scrapers never run
+JS at all — so noscript-only content is invisible to exactly the crawlers that
+matter. The div is served identically to everyone (no user-agent cloaking),
+doubles as a fast first paint while the SPA boots, and is removed from the DOM
+on the app's `pxke-spa-ready` event so browser find does not match duplicates.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ def _attr(value: str) -> str:
 
 
 def _ssr_feed_script(items: list[ArticleFeedItem]) -> str:
-    """Embed feed rows as JSON so Flutter can paint immediately without waiting on the API (SSR HTML is removed on first frame). Used on /, /news and /hot."""
+    """Embed feed rows as JSON so the SPA can paint immediately without waiting on the API (the SSR HTML is removed once it mounts). Used on /, /news and /hot."""
     rows = [msgspec.structs.asdict(i) for i in items]
     payload = json.dumps({"items": rows}, separators=(",", ":"), ensure_ascii=False)
     payload = payload.replace("</", "<\\/")
@@ -291,7 +291,7 @@ def article_hreflang_links(
 
 
 # Readable fallback styling for the pre-boot paint (and no-JS readers); the
-# Flutter app replaces it on first frame. Kept tiny and inline so the SSR body
+# SPA replaces it once mounted. Kept tiny and inline so the SSR body
 # needs no extra request.
 _SSR_STYLE = (
     "<style>"
@@ -313,25 +313,24 @@ _SSR_LOADING = (
     '<p id="ssr-loading">Live edition loading…</p>'
     "<script>document.getElementById('ssr-loading').style.display='block';</script>"
 )
-# Flutter's engine dispatches `flutter-first-frame` once the real UI has painted.
-# Until then #ssr-body is the fast first paint (and no-JS fallback). After that
-# the full-viewport canvas covers it, but the text stays in the DOM — so Ctrl+F
-# highlights invisible duplicate matches. Remove the SSR shell and the embedded
-# feed JSON once Flutter owns the page; crawlers still get the full HTML in the
-# initial response and JSON-LD in <head>.
-# The title restore below exists because Flutter web's MaterialApp(title:)
-# sets document.title to the static app name during its first build,
-# clobbering the per-route <title> this module injected — so any crawler
-# that RENDERS the page (Bing's does, Google's WRS does) saw one generic
-# title site-wide (flagged in the 2026-07-09 Bing audit). Flutter only sets
-# it once at boot (the Title widget is static), so capturing the server-sent
-# value at parse time and restoring it after first frame wins durably.
+# The SPA dispatches `pxke-spa-ready` on window once it has mounted and painted.
+# Until then #ssr-body is the fast first paint (and the no-JS fallback); after,
+# it would just be duplicate text sitting under the app, which browser find
+# would still match. The timeout is a safety net only: if the app throws before
+# dispatching, the SSR content stays readable rather than being torn out.
+#
+# The title restore exists because the SPA sets document.title on mount, which
+# clobbers the per-route <title> injected here — so any crawler that RENDERS
+# the page (Bing's does, Google's WRS does) saw one generic title site-wide
+# (flagged in the 2026-07-09 Bing audit). Capturing the server-sent value at
+# parse time and restoring it after mount wins durably.
 _SSR_REMOVE_SCRIPT = (
     "<script>var pxkeSsrTitle=document.title;"
-    "window.addEventListener('flutter-first-frame',function(){"
+    "function pxkeDropSsr(){"
     "var b=document.getElementById('ssr-body');b&&b.remove();"
     "var f=document.getElementById('pxke-ssr-feed');f&&f.remove();"
-    "setTimeout(function(){if(pxkeSsrTitle){document.title=pxkeSsrTitle;}},0);});"
+    "setTimeout(function(){if(pxkeSsrTitle){document.title=pxkeSsrTitle;}},0);}"
+    "window.addEventListener('pxke-spa-ready',pxkeDropSsr,{once:true});"
     "</script>"
 )
 
@@ -359,7 +358,7 @@ def pick_related_articles(
     *,
     limit: int = 5,
 ) -> list[ArticleFeedItem]:
-    """Stories sharing a tag with this article (mirrors the Flutter detail page)."""
+    """Stories sharing a tag with this article (mirrors the SPA detail page)."""
     tags = {t.strip().lower() for t in (article.tags or []) if t.strip()}
     if not tags:
         return []
@@ -690,7 +689,7 @@ def _feed_ssr(
     topic_links: list[tuple[str, int]] | None = None,
     intro_html: str = "",
 ) -> str:
-    """Crawlable (and pre-boot visible) feed listing — these are the only real internal links Google's renderer ever sees, since the Flutter app is canvas."""
+    """Crawlable (and pre-boot visible) feed listing — the internal links a crawler sees without executing the SPA's client-side router."""
     links = "".join(_story_li(item) for item in items)
     return ssr_container(
         f"<h1>{html.escape(heading)}</h1>{intro_html}<ul>{links}</ul>",
@@ -706,7 +705,7 @@ def render_front(
     *,
     topic_links: list[tuple[str, int]] | None = None,
 ) -> tuple[str, str]:
-    """Editorial front page at / — mirrors the Flutter FrontPage layout."""
+    """Editorial front page at / — mirrors the SPA front-page layout."""
     canonical = site_url() + "/"
     # Front-page <title>: what the paper IS, keyword-first, brand last — the
     # bare brand drew zero clicks on its own SERP (task #39). Ends with

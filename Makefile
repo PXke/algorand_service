@@ -26,8 +26,8 @@ help:
 	@echo "  make docker-reset     down -v, prune images/volumes"
 	@echo ""
 	@echo "Full-stack local dev:"
-	@echo "  make dev-ui           Docker app (TestNet algod) + Flutter web"
-	@echo "  make dev-ui-localnet  Docker app + private algod + Flutter web"
+	@echo "  make dev-ui           Docker app (TestNet algod) + Vite SPA"
+	@echo "  make dev-ui-localnet  Docker app + private algod + Vite SPA"
 
 lint:
 	docker compose build migrate

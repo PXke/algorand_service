@@ -26,12 +26,12 @@ Two SSH users are involved:
 
 | If git diff touches… | Action |
 |---|---|
-| `frontend_flutter/` | Flutter build + precompress + rsync web assets |
+| `frontend/` | Vite build + precompress + rsync web assets |
 | `backend/` | Ship backend + restart API |
 | `workers/` | Ship workers + restart Celery |
 | `schema/` or `conduit/schema/` | Run CQL migrations |
 | `*/pyproject.toml` | Refresh `requirements.lock.txt` + restart Python services |
-| `frontend_flutter/pubspec.yaml` | `flutter pub upgrade` + rebuild |
+| `frontend/package.json` | `npm install` + rebuild |
 | `deploy/nginx/` or `deploy/systemd/` | Reinstall nginx/systemd units |
 
 Frontend-only deploys **do not restart** backend or Celery. The script prints a
@@ -61,8 +61,8 @@ DEPLOY_FORCE_FULL=1 DEPLOY_CONFIRM=1 ./deploy/deploy.sh deploy
 ## What `deploy` does
 
 1. `detect_changes.sh`: infer scope from git diff since last deploy.
-2. `sync_deps.sh`: refresh locks only when `pubspec.yaml` or `pyproject.toml` changed.
-3. `package.sh`: assemble `deploy/build/stage/` (Flutter/fonts skipped when unchanged).
+2. `sync_deps.sh`: refresh locks only when `package.json` or `pyproject.toml` changed.
+3. `package.sh`: assemble `deploy/build/stage/` (Vite SPA skipped when unchanged).
 4. rsync the stage tree to the host (incremental via `--link-dest`).
 5. Backs up `releases/current` → `releases/previous`, activates the new tree.
 6. Shared venv at `TARGET_PATH/venv` with the union of backend+workers deps.
@@ -119,20 +119,19 @@ python deploy/scripts/cql_migrate.py apply --tier prod
 
 See [docs/architecture/cql-migrations.md](../docs/architecture/cql-migrations.md).
 
-## Flutter web build (`package.sh`)
+## Vite SPA build (`package.sh`)
 
 Production builds use:
 
 ```bash
-flutter build web --release --wasm --no-web-resources-cdn \
-  --pwa-strategy=none -O4 --no-source-maps \
-  [--no-pub] \
-  --dart-define-from-file=deploy/build/flutter_defines.json
+cd frontend
+# env from deploy/scripts/write_vite_env.sh → .env.production.local
+npm ci   # when package-lock changed
+npm run build
 ```
 
-- **`deploy/scripts/write_flutter_defines.sh`** — writes `flutter_defines.json` from
-  `FRONTEND_*` env vars (set by `deploy.sh` / `deploy.conf`).
-- **`--no-pub`** — skipped when `pubspec.lock` is unchanged since the last build.
-- **Fingerprint skip** — entire Flutter compile is skipped when sources + defines are
+- **`deploy/scripts/write_vite_env.sh`** — writes Vite `VITE_*` env from
+  `FRONTEND_*` vars (set by `deploy.sh` / `deploy.conf`).
+- **Fingerprint skip** — Vite build is skipped when sources + env are
   unchanged (`deploy/build/.frontend-build.sha256`).
-- **Post-build prune** — removes unused canvaskit variants, source maps, and symbols.
+- Output staged as `frontend_web/` for nginx (same release layout as before).

@@ -13,14 +13,6 @@ from nacl.signing import VerifyKey
 from app.modules.auth.utils.caip122 import Caip122Message
 from app.modules.auth.utils.json_canon import canonical_json_bytes
 
-SCOPE_AUTH = 1
-
-
-def build_authenticator_data(domain: str, *, flags: int = 0x05, sign_count: int = 0) -> bytes:
-    """Minimal WebAuthn-style authenticatorData: rpIdHash (32) + flags (1) + signCount (4)."""
-    rp_id_hash = hashlib.sha256(domain.encode("utf-8")).digest()
-    return rp_id_hash + bytes([flags & 0xFF]) + sign_count.to_bytes(4, "big")
-
 
 def arc0060_auth_digest(data_b64: str, authenticator_data: bytes) -> bytes:
     """ARC-0060 AUTH scope signing input (reference: assets/arc-0060/arc60wallet.api.ts)."""
@@ -72,6 +64,3 @@ def verify_arc0060_auth(
         return False
 
 
-def caip122_to_data_b64(caip122: Caip122Message) -> str:
-    """Encode a CAIP-122 message as the base64 clientData payload expected by ARC-60 signing."""
-    return base64.b64encode(canonical_json_bytes(caip122.to_dict())).decode("ascii")

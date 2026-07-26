@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import httpx
 from bs4 import BeautifulSoup, Tag
-
-from app.modules.scraper.core.http_retry import request_with_retry
 
 _BROWSER_UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -33,22 +30,6 @@ _DROP_HINTS = (
     "share",
     "related",
 )
-
-
-def fetch_html(
-    url: str,
-    *,
-    timeout: float = 25.0,
-) -> tuple[str, str]:
-    """HTTP fetch with browser-like User-Agent (public pages)."""
-    from app.core.net_guard import assert_public_url
-
-    assert_public_url(url)
-    headers = {"User-Agent": _BROWSER_UA, "Accept-Language": "en-US,en;q=0.9"}
-    with httpx.Client(timeout=timeout, headers=headers, follow_redirects=True) as client:
-        response = request_with_retry(client, "GET", url)
-        response.raise_for_status()
-    return response.text, str(response.url)
 
 
 # A content block must hold at least this much text to be treated as the article
@@ -156,13 +137,3 @@ def _strip_boilerplate(soup: BeautifulSoup) -> None:
             tag.decompose()
 
 
-def fetch_with_playwright(
-    url: str,
-    *,
-    timeout_ms: int = 35_000,
-) -> tuple[str, str, str]:
-    """Load SPA via shared Playwright engine. Returns (title, body_text, final_url)."""
-    from app.modules.scraper.core.browser_scrape import fetch_page
-
-    result = fetch_page(url, timeout_ms=timeout_ms)
-    return result.title, result.text, result.final_url

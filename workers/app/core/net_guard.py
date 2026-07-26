@@ -78,15 +78,6 @@ def assert_public_url(url: str) -> str:
     return url
 
 
-def is_public_url(url: str) -> bool:
-    """Return whether url resolves only to public (non-SSRF-able) addresses."""
-    try:
-        assert_public_url(url)
-        return True
-    except UnsafeUrlError:
-        return False
-
-
 def guarded_get(
     url: str,
     *,

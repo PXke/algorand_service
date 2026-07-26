@@ -164,20 +164,3 @@ def upsert_crawled_page(
     )
 
 
-def crawled_page_count_for_url(url: str) -> int:
-    """Pages already harvested for the URL's domain (single-partition COUNT).
-
-    Used to front-load a new domain's initial harvest at high priority.
-    """
-    from app.core.cassandra import get_cassandra_session
-    from app.core.statements import CrawledPageStmts
-
-    domain = _normalize_domain(url)
-    if not domain:
-        return 0
-    try:
-        session = get_cassandra_session()
-        row = session.execute(CrawledPageStmts.COUNT_BY_DOMAIN, (domain,)).one()
-        return int(row.c) if row and row.c is not None else 0
-    except Exception:
-        return 0

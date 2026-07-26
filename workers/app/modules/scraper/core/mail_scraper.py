@@ -15,7 +15,7 @@ from app.core.config import (
     MAIL_IMAP_PORT,
     MAIL_IMAP_USER,
 )
-from app.modules.scraper.core.base import BaseScraper, ScrapeResult
+from app.modules.scraper.core.base import ScrapeResult
 
 
 class MailScraperError(Exception):
@@ -35,15 +35,6 @@ def decode_mime_header(value: str | None) -> str:
         else:
             out.append(str(chunk))
     return "".join(out).strip()
-
-
-class MailMessageScraper(BaseScraper):
-    """Scrape a single mail://message/{uid} item (body fetched via IMAP in poll task)."""
-
-    def scrape(self, _url: str, _source_id: str) -> ScrapeResult:
-        """Always raises: mail items need a pre-fetched body from the IMAP poll task, not a URL fetch."""
-        msg = "MailScraper requires pre-fetched body; use mail poll task"
-        raise MailScraperError(msg)
 
 
 def fetch_unread_messages(*, limit: int = 20) -> list[dict[str, str]]:

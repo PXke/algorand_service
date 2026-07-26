@@ -22,7 +22,3 @@ def get_enrollment_store() -> EnrollmentStore:
     return _enrollment_store
 
 
-def set_enrollment_store(store: EnrollmentStore | None) -> None:
-    """Override the process-wide enrollment store, e.g. with a fake for tests."""
-    global _enrollment_store
-    _enrollment_store = store

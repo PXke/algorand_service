@@ -3,8 +3,6 @@
 from app.schemas import (  # noqa: F401
     CreateSuggestionRequest,
     SuggestionConfigResponse,
-    SuggestionListResponse,
     SuggestionResponse,
     UpvoteRequest,
-    UpvoteResponse,
 )

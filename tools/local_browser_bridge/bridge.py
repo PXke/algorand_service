@@ -23,14 +23,20 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
+
+if TYPE_CHECKING:
+    from playwright.sync_api import BrowserContext, Page
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CDP = "http://127.0.0.1:9222"
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "targets.json"
@@ -39,8 +45,8 @@ STATE_DIR = Path(os.environ.get("ALGORAND_BRIDGE_STATE", Path.home() / ".cache/a
 
 def _load_config(path: Path) -> dict[str, Any]:
     if not path.is_file():
-        print(f"Missing config: {path}", file=sys.stderr)
-        print("Copy targets.example.json to targets.json and edit it.", file=sys.stderr)
+        logger.error("Missing config: %s", path)
+        logger.error("Copy targets.example.json to targets.json and edit it.")
         sys.exit(1)
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -110,33 +116,34 @@ def _post_signal(
 
 
 def push_payload(config: dict[str, Any], payload: dict[str, Any], *, force: bool = False) -> bool:
+    """POST one snapshot to the ingest API unless its content hash is unchanged since the last push."""
     api_base = str(config.get("api_base", "")).strip()
     ingest_key = str(config.get("ingest_key", "")).strip() or os.environ.get("INGEST_API_KEY", "")
     if not api_base or not ingest_key:
-        print("Set api_base and ingest_key in targets.json (or INGEST_API_KEY).", file=sys.stderr)
+        logger.error("Set api_base and ingest_key in targets.json (or INGEST_API_KEY).")
         return False
 
     service_id = str(payload["service_id"]).strip()
     page_text = str(payload["page_text"]).strip()
     if len(page_text) < 40:
-        print(f"Skip {service_id}: text too short ({len(page_text)} chars)", file=sys.stderr)
+        logger.warning("Skip %s: text too short (%s chars)", service_id, len(page_text))
         return False
 
     digest = _content_hash(page_text)
     hashes = _load_hashes()
     if not force and hashes.get(service_id) == digest:
-        print(f"Unchanged: {service_id}")
+        logger.info("Unchanged: %s", service_id)
         return False
 
     body = _post_signal(api_base=api_base, ingest_key=ingest_key, payload=payload)
     hashes[service_id] = digest
     _save_hashes(hashes)
     depth = body.get("depth", "?")
-    print(f"Pushed {service_id} → queue depth {depth}")
+    logger.info("Pushed %s → queue depth %s", service_id, depth)
     return True
 
 
-def _find_or_open_page(context, target_url: str):
+def _find_or_open_page(context: BrowserContext, target_url: str) -> Page:
     want = _normalize_url(target_url)
     for page in context.pages:
         if _normalize_url(page.url).startswith(want) or want in _normalize_url(page.url):
@@ -147,7 +154,7 @@ def _find_or_open_page(context, target_url: str):
     return page
 
 
-def _snapshot_page_text(page) -> tuple[str, str]:
+def _snapshot_page_text(page: Page) -> tuple[str, str]:
     title = page.title() or "Channel snapshot"
     selectors = ("main", "article", "[role='main']", "[class*='messages']", "[class*='chat']")
     chunks: list[str] = []
@@ -165,16 +172,17 @@ def _snapshot_page_text(page) -> tuple[str, str]:
 
 
 def snapshot_targets(config: dict[str, Any], *, force: bool = False) -> int:
+    """Snapshot every configured target page via the CDP-attached browser and push changed ones."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print("Install: pip install playwright && playwright install chromium", file=sys.stderr)
+        logger.error("Install: pip install playwright && playwright install chromium")
         return 1
 
     cdp = str(config.get("cdp_url", DEFAULT_CDP)).strip() or DEFAULT_CDP
     targets = config.get("targets")
     if not isinstance(targets, list) or not targets:
-        print("No targets in config.", file=sys.stderr)
+        logger.error("No targets in config.")
         return 1
 
     pushed = 0
@@ -182,10 +190,11 @@ def snapshot_targets(config: dict[str, Any], *, force: bool = False) -> int:
         try:
             browser = playwright.chromium.connect_over_cdp(cdp)
         except Exception as exc:
-            print(
-                f"Cannot connect to browser at {cdp}: {exc}\n"
-                "Start Chrome with: google-chrome --remote-debugging-port=9222",
-                file=sys.stderr,
+            logger.error(
+                "Cannot connect to browser at %s: %s\nStart Chrome with: "
+                "google-chrome --remote-debugging-port=9222",
+                cdp,
+                exc,
             )
             return 1
 
@@ -201,7 +210,7 @@ def snapshot_targets(config: dict[str, Any], *, force: bool = False) -> int:
             page = _find_or_open_page(context, page_url)
             page_title, page_text = _snapshot_page_text(page)
             if len(page_text) < 40:
-                print(f"Skip {service_id}: could not read enough text from {page.url}", file=sys.stderr)
+                logger.warning("Skip %s: could not read enough text from %s", service_id, page.url)
                 continue
 
             payload = {
@@ -221,6 +230,7 @@ def snapshot_targets(config: dict[str, Any], *, force: bool = False) -> int:
 
 
 def cmd_push(args: argparse.Namespace) -> int:
+    """Manual one-off push of pasted or file-provided text."""
     config = _load_config(Path(args.config))
     text = args.text or ""
     if args.text_file:
@@ -237,20 +247,23 @@ def cmd_push(args: argparse.Namespace) -> int:
 
 
 def cmd_snapshot(args: argparse.Namespace) -> int:
+    """One-shot snapshot of every configured target."""
     config = _load_config(Path(args.config))
     return snapshot_targets(config, force=args.force)
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
+    """Poll and snapshot every configured target on an interval, forever."""
     config = _load_config(Path(args.config))
     interval = int(config.get("poll_seconds", args.interval))
-    print(f"Watching every {interval}s — Ctrl+C to stop")
+    logger.info("Watching every %ss — Ctrl+C to stop", interval)
     while True:
         snapshot_targets(config, force=args.force)
         time.sleep(interval)
 
 
 def main() -> int:
+    """Parse CLI args and dispatch to the requested subcommand."""
     parser = argparse.ArgumentParser(description="Local browser → platform ingest bridge")
     parser.add_argument("-c", "--config", default=str(DEFAULT_CONFIG), help="Path to targets.json")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -279,4 +292,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     raise SystemExit(main())

@@ -8,9 +8,12 @@ app actually uses, subsets to l10n glyphs, and writes assets/fonts/.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT / "assets" / "fonts-src"
@@ -40,6 +43,7 @@ JOBS = (
 
 
 def collect_chars() -> set[str]:
+    """Every character used in any localized ARB string, across all locales."""
     chars: set[str] = set()
     for arb in L10N_DIR.glob("app_*.arb"):
         data = json.loads(arb.read_text(encoding="utf-8"))
@@ -51,16 +55,19 @@ def collect_chars() -> set[str]:
 
 
 def unicodes_arg(chars: set[str]) -> str:
+    """Build a fonttools --unicodes value covering the given chars plus the fixed extra ranges."""
     codes = {f"U+{ord(c):04X}" for c in chars}
     codes.update(EXTRA_RANGES)
     return ",".join(sorted(codes))
 
 
 def run(cmd: list[str]) -> None:
+    """Run a subprocess command, raising on a non-zero exit."""
     subprocess.run(cmd, check=True)
 
 
 def instance(src: Path, weight: int, dst: Path) -> None:
+    """Instance a single static weight out of a variable font."""
     run(
         [
             sys.executable,
@@ -75,6 +82,7 @@ def instance(src: Path, weight: int, dst: Path) -> None:
 
 
 def subset(path: Path, unicodes: str) -> None:
+    """Subset a font file in place to the given unicode ranges."""
     tmp = path.with_suffix(".tmp.ttf")
     run(
         [
@@ -91,6 +99,7 @@ def subset(path: Path, unicodes: str) -> None:
 
 
 def build_job(src_stem: str, out_stem: str, weights: tuple[int, ...], italic: bool) -> None:
+    """Instance and subset every weight for one font family."""
     src = SRC_DIR / f"{src_stem}.ttf"
     if not src.is_file():
         raise SystemExit(f"missing source font: {src}")
@@ -104,18 +113,19 @@ def build_job(src_stem: str, out_stem: str, weights: tuple[int, ...], italic: bo
         subset(out, unicodes)
         after = out.stat().st_size
         label = f"{out_name} (italic)" if italic else out_name
-        print(f"  {label}: {before // 1024} KiB -> {after // 1024} KiB")
+        logger.info("  %s: %s KiB -> %s KiB", label, before // 1024, after // 1024)
 
 
 def main() -> int:
+    """Subset all configured font jobs into assets/fonts/, removing stale outputs."""
     try:
         import fontTools  # noqa: F401
     except ImportError:
-        print("error: pip install fonttools", file=sys.stderr)
+        logger.error("error: pip install fonttools")
         return 1
 
     if not SRC_DIR.is_dir():
-        print(f"error: missing {SRC_DIR}", file=sys.stderr)
+        logger.error("error: missing %s", SRC_DIR)
         return 1
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -126,13 +136,14 @@ def main() -> int:
     for stale in OUT_DIR.glob("*.ttf"):
         if stale.name not in expected:
             stale.unlink()
-            print(f"  removed stale {stale.name}")
+            logger.info("  removed stale %s", stale.name)
 
-    print(">>> Subsetting bundled fonts")
+    logger.info(">>> Subsetting bundled fonts")
     for job in JOBS:
         build_job(*job)
     return 0
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     raise SystemExit(main())

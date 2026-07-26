@@ -59,7 +59,7 @@ if settings.suggestions_enabled:
 if settings.x402_enabled:
     register_kyc_routes(app)
 
-# SEO document routes (/, /news/articles/:id, /section/:slug, robots, sitemaps).
+# SEO crawl surfaces (robots, sitemaps, feeds, OG cards) — SPA owns app HTML.
 # Registered last so nothing shadows the JSON API under /api/*; nginx decides
 # which paths reach these vs. the static Flutter build.
 register_seo_routes(app)

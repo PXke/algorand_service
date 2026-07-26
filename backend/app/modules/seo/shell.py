@@ -1,10 +1,10 @@
-"""Loads the built Flutter `index.html` and injects per-route SEO markup.
+"""Loads the built Vite SPA `index.html` and injects per-route SEO markup.
 
-Humans still boot Flutter normally (the bootstrap script is untouched); crawlers
+Humans still boot the SPA normally (its module scripts are untouched); crawlers
 read the injected `<head>` tags, JSON-LD and the visible `#ssr-body` content in
-the initial HTML. After Flutter paints, a first-frame script removes `#ssr-body`
-so browser find does not match text hidden under the canvas. Same bytes go to
-everyone — no User-Agent cloaking.
+the initial HTML. Once the app mounts it fires `pxke-spa-ready` and a small
+script removes `#ssr-body` so browser find does not match duplicated text. Same
+bytes go to everyone — no User-Agent cloaking.
 """
 
 from __future__ import annotations
@@ -33,55 +33,6 @@ _HTML_LANG_RE = re.compile(r'(<html[^>]*\s)lang=["\'][^"\']*["\']', re.IGNORECAS
 _cache: dict[str, object] = {"path": None, "mtime": 0.0, "html": None}
 
 
-# Without hints the engine critical path is discovered serially. A dual --wasm
-# build ships dart2wasm+skwasm AND dart2js+canvaskit; preloading BOTH stacks
-# wastes ~2MB on every visit. Mirror flutter_bootstrap.js's ACTUAL build
-# selector, not just WasmGC: skwasm requires supportsWasmGC AND webGL AND the
-# per-engine wasm allowlist, whose default is {blink: true, everything else:
-# false} — so Firefox (gecko, WasmGC-capable!) still runs dart2js+canvaskit,
-# and a WasmGC-only check preloads megabytes of wasm it never executes
-# (observed in Firefox devtools as "preloaded but not used" warnings).
-def _resource_hints() -> str:
-    return (
-        "<script>(function(){"
-        # Blink detection MUST match flutter_bootstrap.js's own browserEngine
-        # probe (navigator.vendor), not UA brands: headless Chrome reports no
-        # 'Chromium' brand yet Flutter still classes it blink and runs wasm —
-        # a brands-based check inverts the hints exactly there.
-        "var cr=navigator.vendor==='Google Inc.';"
-        "var gc=false;"
-        "try{gc=WebAssembly.validate(new Uint8Array("
-        "[0,97,115,109,1,0,0,0,1,5,1,95,1,120,0]));}catch(e){}"
-        "var gl=false;"
-        "try{var cv=document.createElement('canvas');"
-        "gl=!!(cv.getContext('webgl2')||cv.getContext('webgl'));}catch(e){}"
-        "function ps(h){var l=document.createElement('link');"
-        "l.rel='preload';l.href=h;l.as='script';document.head.appendChild(l);}"
-        "function pw(h){var l=document.createElement('link');"
-        "l.rel='preload';l.href=h;l.as='fetch';l.type='application/wasm';"
-        "l.crossOrigin='anonymous';document.head.appendChild(l);}"
-        "function pm(h){var l=document.createElement('link');"
-        "l.rel='modulepreload';l.href=h;document.head.appendChild(l);}"
-        "if(cr&&gc&&gl){"
-        # skwasm.js is a dynamic import() (ES module) — a classic as='script'
-        # preload has a different credentials mode and never matches, so the
-        # browser double-downloads it. modulepreload matches; main.dart.mjs
-        # already uses it for the same reason.
-        "pm('/main.dart.mjs');pw('/main.dart.wasm');"
-        "pm('/canvaskit/skwasm.js');pw('/canvaskit/skwasm.wasm');"
-        "}else{"
-        "ps('/main.dart.js');"
-        "var v=cr?'chromium/':'';"
-        "ps('/canvaskit/'+v+'canvaskit.js');"
-        "pw('/canvaskit/'+v+'canvaskit.wasm');"
-        "}"
-        "})();</script>"
-    )
-
-
-_PRELOADS = _resource_hints()
-
-
 def _safe_cwd_roots() -> list[Path]:
     """Return cwd / parent when getcwd works.
 
@@ -98,21 +49,21 @@ def _safe_cwd_roots() -> list[Path]:
 
 
 def _candidate_dirs() -> list[Path]:
-    """Directories to probe for the built Flutter web app, most likely first."""
+    """Directories to probe for the built Vite SPA, most likely first."""
     if settings.frontend_dist_dir:
         return [Path(settings.frontend_dist_dir)]
     # Auto-detect the built web dir. In prod it sits at <release>/frontend_web,
-    # in dev at <repo>/frontend_flutter/build/web. shell.py is at
+    # in dev at <repo>/frontend/dist. shell.py is at
     # backend/app/modules/seo/, so the release/repo root is parents[4]; we also
     # probe the systemd WorkingDirectory (releases/current/backend) via cwd, so a
-    # path-depth change can't silently strip the bootstrap script again.
+    # path-depth change can't silently strip the SPA's own scripts again.
     here = Path(__file__).resolve()
     roots: list[Path] = [here.parents[depth] for depth in (4, 3, 5) if depth < len(here.parents)]
     roots += _safe_cwd_roots()
     dirs: list[Path] = []
     seen: set[Path] = set()
     for root in roots:
-        for sub in ("frontend_web", "frontend_flutter/build/web"):
+        for sub in ("frontend_web", "frontend/dist"):
             cand = root / sub
             if cand not in seen:
                 seen.add(cand)
@@ -142,7 +93,7 @@ def load_template() -> str | None:
 
 
 def ssr_track_snippet(path: str) -> str:
-    """Inline script marking the SSR-recorded path so the Flutter beacon can skip a duplicate count for the same landing page."""
+    """Inline script marking the SSR-recorded path so the SPA beacon can skip a duplicate count for the same landing page (it reads sessionStorage.pxke_ssr_pv on boot)."""
     safe = path.replace("\\", "\\\\").replace('"', '\\"')
     return f'<script>try{{sessionStorage.setItem("pxke_ssr_pv","{safe}")}}catch(e){{}}</script>'
 
@@ -168,7 +119,7 @@ def render_document(head_html: str, body_html: str, *, html_lang: str = "en") ->
         # backslash escapes by re.sub, which turned the \n sequences json.dumps
         # wrote inside the JSON-LD articleBody into raw newlines — invalid JSON
         # that made Google drop the whole NewsArticle block.
-        injected = _PRELOADS + "\n" + head_html + "\n</head>"
+        injected = head_html + "\n</head>"
         doc = _HEAD_CLOSE_RE.sub(lambda _m: injected, doc, count=1)
     if _BODY_OPEN_RE.search(doc):
         doc = _BODY_OPEN_RE.sub(lambda m: m.group(0) + "\n" + body_html, doc, count=1)

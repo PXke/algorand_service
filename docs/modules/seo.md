@@ -1,41 +1,31 @@
-# Brick: SEO / SSR surface
+# Brick: SEO / crawl surfaces
 
 ## Goal
 
-Give crawlers (Googlebot, Bingbot, social-card fetchers) a real server-rendered
-`<title>`/OG/JSON-LD + `#ssr-body` for every navigable path, while humans boot
-the same HTML into the normal Flutter app.
+Give crawlers discovery files (sitemaps, RSS, robots, llms.txt) and generated
+OG share cards. App HTML is served as a static Vite SPA by nginx — document
+HTML SSR was removed.
 
 ## Status
 
-`done`
+`done` (SPA + crawl endpoints)
 
 ## Features (should do)
 
-- nginx proxies navigation paths to this module instead of the static Flutter shell
-- Document routes: `/`, `/news`, `/news/articles/:id`, `/section/:slug`, `/topic/:tag`, `/about`, `/contact`, `/search`, `/admin` — injects SSR content into `index.html`, mirrors `HEAD` for every `GET`
+- nginx proxies crawl/meta paths to this module; SPA handles `/`, `/news`, etc.
 - Feeds/discovery: `robots.txt`, `sitemap.xml`, `sitemap-pages.xml`, `sitemap-articles-:part`, `sitemap-news.xml`, `feed.xml`, `feed/topic/:tag`, `llms.txt`
-- `POST /api/v1/analytics/pageview` beacon, recorded search terms
-- `ssr-body` stays render-visible (`aria-hidden` only, not `display:none`) — verified Googlebot's WRS fires `flutter-first-frame` before indexing, so hiding it would strip content from the render path
-- Title clamp ~65 chars
-
-## Good to have
-
-- Branded OG cards per article (see newspaper-appeal-backlog)
+- `GET /og/article/:id` share-card PNG
+- `POST /api/v1/analytics/pageview` beacon
 
 ## Future improvements
 
-- `dateModified` update on article edit (needs a Cassandra migration, not started)
-- Bing H1-missing gap on shell-only routes
-
-## Standards & RFCs
-
-Open Graph, JSON-LD/schema.org Article, sitemaps.org protocol.
+- Optional prerender of critical article routes if Search Console needs it
+- `dateModified` update on article edit (needs a Cassandra migration)
 
 ## Depends on
 
-- `article-store`, `news-api`
+- `news-api`, `web-platform`
 
 ## Code map
 
-- `backend/app/modules/seo/` (`chrome.py`, `render.py`, `topics.py`, `analytics_store.py`, `api/routes.py`)
+- `backend/app/modules/seo/`
