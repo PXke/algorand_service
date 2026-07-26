@@ -32,7 +32,7 @@ _ASSETS = Path(__file__).parent / "assets" / "fonts"
 CARD_WIDTH = 1200
 CARD_HEIGHT = 630
 
-# Same palette as AppThemeColors.light (frontend_flutter/lib/core/theme) —
+# Same palette as the SPA's light theme tokens (frontend/src/app.css :root) —
 # the share card is always the light "paper" look regardless of the viewer's
 # app theme, matching how a printed front page has one identity.
 _PAPER = (248, 247, 244)
@@ -111,7 +111,7 @@ def _fit_headline(
 
 
 def _brand_mark(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int, size: int) -> None:
-    """Flat indigo tile + diagonal facet + white 'P' — mirrors BrandMark.dart (frontend_flutter/lib/core/ui/brand_mark.dart) so the card and the app show the same monogram. Base rect + facet triangle are drawn full-size on their own layer, then rounded together with one alpha mask (matching the Dart version's ClipRRect-wraps-CustomPaint: only the OUTER tile boundary is rounded, not the triangle itself)."""
+    """Flat indigo tile + diagonal facet + white 'P' — mirrors BrandMark.svelte (frontend/src/components/BrandMark.svelte) so the card and the app show the same monogram. Base rect + facet triangle are drawn full-size on their own layer, then rounded together with one alpha mask (only the OUTER tile boundary is rounded, not the triangle itself — same as the SVG's clip)."""
     radius = size * 0.23
     tile = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     tdraw = ImageDraw.Draw(tile)

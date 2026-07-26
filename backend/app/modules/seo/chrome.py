@@ -1,4 +1,11 @@
-"""Shared site chrome for SSR bodies: masthead, primary nav, breadcrumbs and footer. Mirrors the Flutter shell/footer so crawlers see the same link graph humans get after the app boots (canvas apps otherwise expose almost no <a>)."""
+"""Shared site chrome for SSR bodies: masthead, primary nav, breadcrumbs and footer.
+
+Mirrors the SPA's own shell/footer (frontend/src/components/AppShell.svelte,
+SiteFooter.svelte) so a crawler sees the same internal link graph a reader gets
+once the app mounts. Still needed with a DOM-based SPA: the links are built by
+the client router, so anything that does not execute JS — most share scrapers,
+and Bing far more often than Google — would otherwise see almost no <a>.
+"""
 
 from __future__ import annotations
 
@@ -130,10 +137,10 @@ def ssr_page(
     )
 
 
-# Palette mirrors AppThemeExtension.light (frontend_flutter/lib/core/theme/
+# Palette mirrors the SPA's light theme tokens (frontend/src/app.css :root,
 # app_theme_extension.dart) and share_card.py's _PAPER/_INK/_MUTED/_ACCENT, so
 # the pre-boot paint reads as the same paper instead of flashing to a
-# different look-and-feel the instant Flutter takes over.
+# different look-and-feel the instant the SPA takes over.
 SSR_CHROME_STYLE = (
     "#ssr-body{max-width:880px;margin:0 auto;padding:24px 20px 32px;"
     "border-top:4px solid #4F46E5;background:#F8F7F4;"

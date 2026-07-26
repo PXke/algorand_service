@@ -6,8 +6,8 @@ import { restoreSession } from './lib/auth/session'
 import { startPageviewTracking } from './lib/router'
 
 /**
- * Atomic SSR → SPA handoff: drop #ssr-body and reveal #app in one turn so
- * layout shifts from mounting stay invisible (and don't score as CLS).
+ * Reveal SPA: remove fixed SSR overlay (no layout impact) and make #app
+ * visible. #app already owns in-flow space at min-height 100vh while hidden.
  */
 function revealSpa(): void {
   const ssr = document.getElementById('ssr-body')
@@ -17,12 +17,10 @@ function revealSpa(): void {
   }
   document.getElementById('pxke-ssr-feed')?.remove()
   document.documentElement.classList.remove('spa-booting')
-  // Backend also listens; removal is already done, title restore still runs.
   window.dispatchEvent(new Event('pxke-spa-ready'))
 }
 
 function signalSpaReady(): void {
-  // Two rAFs: mount + style flush while #app is still hidden under spa-booting.
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       revealSpa()
