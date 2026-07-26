@@ -124,7 +124,6 @@ _BEACON_STATIC_PATHS = {
     "/news",
     "/hot",
     "/top",
-    "/sources",
     "/topics",
     "/about",
     "/contact",

@@ -41,8 +41,8 @@ class Settings(msgspec.Struct, kw_only=True):
         "reporting on wallets, DeFi, NFTs and infrastructure, fact-checked "
         "on-chain before it publishes."
     )
-    # Absolute path to the built Flutter web dir (holds index.html). Empty =
-    # auto-detect: <release>/frontend_web (prod) then frontend_flutter/build/web (dev).
+    # Absolute path to the built SPA dir (holds index.html). Empty =
+    # auto-detect: <release>/frontend_web (prod) then frontend/dist (dev).
     frontend_dist_dir: str = ""
     # OG/Twitter card image used when an article has no hero image (path or URL).
     seo_default_image: str = "/icons/Icon-512.png"

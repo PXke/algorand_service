@@ -5,16 +5,27 @@ import App from './App.svelte'
 import { restoreSession } from './lib/auth/session'
 import { startPageviewTracking } from './lib/router'
 
-function signalSpaReady(): void {
+/**
+ * Atomic SSR → SPA handoff: drop #ssr-body and reveal #app in one turn so
+ * layout shifts from mounting stay invisible (and don't score as CLS).
+ */
+function revealSpa(): void {
   const ssr = document.getElementById('ssr-body')
   if (ssr) {
     ssr.setAttribute('aria-hidden', 'true')
-    ssr.setAttribute('inert', '')
+    ssr.remove()
   }
-  // Let the SPA commit a frame under the fixed SSR overlay before removal.
+  document.getElementById('pxke-ssr-feed')?.remove()
+  document.documentElement.classList.remove('spa-booting')
+  // Backend also listens; removal is already done, title restore still runs.
+  window.dispatchEvent(new Event('pxke-spa-ready'))
+}
+
+function signalSpaReady(): void {
+  // Two rAFs: mount + style flush while #app is still hidden under spa-booting.
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
-      window.dispatchEvent(new Event('pxke-spa-ready'))
+      revealSpa()
     })
   })
 }
@@ -48,6 +59,10 @@ void restoreSession().finally(() => {
   mount(App, {
     target: document.getElementById('app')!,
   })
-  signalSpaReady()
+  if (document.documentElement.classList.contains('spa-booting')) {
+    signalSpaReady()
+  } else {
+    window.dispatchEvent(new Event('pxke-spa-ready'))
+  }
   registerSwWhenIdle()
 })
