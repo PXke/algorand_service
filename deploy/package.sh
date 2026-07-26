@@ -119,6 +119,7 @@ _assemble_stage() {
     "$REPO_ROOT/requirements.lock.txt" \
     "$REPO_ROOT/backend" \
     "$REPO_ROOT/workers" \
+    "$REPO_ROOT/shared" \
     "$REPO_ROOT/schema" \
     "$STAGE_DIR/"
   rsync -a "$REPO_ROOT/conduit/schema/" "$STAGE_DIR/conduit/schema/"
@@ -164,7 +165,7 @@ _create_archive() {
   XZ_OPT="-${PACKAGE_XZ_LEVEL} -T0" tar caf "$ARCHIVE" \
     --exclude='deploy/build' \
     -C "$STAGE_DIR" \
-    requirements.lock.txt backend workers schema conduit deploy frontend_web BUILD_INFO.txt
+    requirements.lock.txt backend workers shared schema conduit deploy frontend_web BUILD_INFO.txt
   (
     cd "$OUT_DIR"
     sha256sum "$(basename "$ARCHIVE")" >"$(basename "$ARCHIVE").sha256"

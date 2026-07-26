@@ -339,6 +339,12 @@ else
   fi
 fi
 
+# backend/ and workers/ import algorand_shared from shared/. A .pth on the venv
+# path is how (see deploy/scripts/link_shared.sh): no build backend or package
+# index needed, and it must be re-asserted every deploy — the deps hash above
+# can skip pip entirely, and a fresh venv would otherwise have no link at all.
+bash '${CURRENT}/deploy/scripts/link_shared.sh' '${VENV}' '${CURRENT}/shared'
+
 # Shared env files survive releases; bootstrap from templates on first deploy
 for side in backend workers; do
   if [[ ! -f "${SHARED}/\${side}.env" ]]; then

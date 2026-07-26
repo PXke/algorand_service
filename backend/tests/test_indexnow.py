@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from algorand_shared import indexnow as shared_indexnow
 
 from app.modules.seo import indexnow
 
@@ -29,7 +30,7 @@ def test_ping_article_includes_all_translation_urls(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(indexnow.settings, "indexnow_key", "KEY123")
     monkeypatch.setattr(indexnow.settings, "public_site_url", "https://algorand.pxke.me")
-    monkeypatch.setattr(indexnow.httpx, "post", fake_post)
+    monkeypatch.setattr(shared_indexnow.httpx, "post", fake_post)
     indexnow.ping_article("id1", translation_langs=["fa", "ar"])
     url_list = captured["json"]["urlList"]
     assert "https://algorand.pxke.me/news/articles/id1" in url_list

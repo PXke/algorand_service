@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from algorand_shared import indexnow as shared_indexnow
 
 from app.modules.newspaper import indexnow
 
@@ -44,7 +45,7 @@ def test_content_change_urls_includes_sitemaps(monkeypatch: pytest.MonkeyPatch) 
 def test_ping_noop_without_urls(monkeypatch: pytest.MonkeyPatch) -> None:
     """Skips the HTTP POST when the URL list is empty or contains only blanks."""
     called = {"n": 0}
-    monkeypatch.setattr(indexnow.httpx, "post", lambda *_a, **_k: called.__setitem__("n", 1))
+    monkeypatch.setattr(shared_indexnow.httpx, "post", lambda *_a, **_k: called.__setitem__("n", 1))
     indexnow.ping([])
     indexnow.ping([""])
     assert called["n"] == 0
@@ -54,7 +55,7 @@ def test_ping_noop_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Skips the HTTP POST when no IndexNow key is configured."""
     called = {"n": 0}
     monkeypatch.setattr(indexnow.config, "INDEXNOW_KEY", "")
-    monkeypatch.setattr(indexnow.httpx, "post", lambda *_a, **_k: called.__setitem__("n", 1))
+    monkeypatch.setattr(shared_indexnow.httpx, "post", lambda *_a, **_k: called.__setitem__("n", 1))
     indexnow.ping(["https://algorand.pxke.me/news/articles/x"])
     assert called["n"] == 0
 
@@ -73,7 +74,7 @@ def test_ping_dedupes_urls(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(indexnow.config, "INDEXNOW_KEY", "KEY123")
     monkeypatch.setattr(indexnow.config, "PUBLIC_SITE_URL", "https://algorand.pxke.me")
-    monkeypatch.setattr(indexnow.httpx, "post", fake_post)
+    monkeypatch.setattr(shared_indexnow.httpx, "post", fake_post)
     dup = "https://algorand.pxke.me/news/articles/x"
     indexnow.ping([dup, dup, ""])
     assert captured["json"]["urlList"] == [dup]
@@ -94,9 +95,9 @@ def test_ping_posts_expected_payload(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(indexnow.config, "INDEXNOW_KEY", "KEY123")
     monkeypatch.setattr(indexnow.config, "PUBLIC_SITE_URL", "https://algorand.pxke.me")
-    monkeypatch.setattr(indexnow.httpx, "post", fake_post)
+    monkeypatch.setattr(shared_indexnow.httpx, "post", fake_post)
     indexnow.ping(["https://algorand.pxke.me/news/articles/x"])
-    assert captured["url"] == indexnow._ENDPOINT
+    assert captured["url"] == shared_indexnow._ENDPOINT
     assert captured["json"]["host"] == "algorand.pxke.me"
     assert captured["json"]["key"] == "KEY123"
     assert captured["json"]["keyLocation"] == "https://algorand.pxke.me/KEY123.txt"
@@ -117,7 +118,7 @@ def test_ping_retries_on_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(indexnow.config, "INDEXNOW_KEY", "KEY123")
     monkeypatch.setattr(indexnow.config, "PUBLIC_SITE_URL", "https://algorand.pxke.me")
-    monkeypatch.setattr(indexnow.httpx, "post", fake_post)
-    monkeypatch.setattr(indexnow.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(shared_indexnow.httpx, "post", fake_post)
+    monkeypatch.setattr(shared_indexnow.time, "sleep", lambda _s: None)
     indexnow.ping(["https://algorand.pxke.me/news/articles/x"])
-    assert attempts["n"] == indexnow._MAX_ATTEMPTS
+    assert attempts["n"] == shared_indexnow._MAX_ATTEMPTS
