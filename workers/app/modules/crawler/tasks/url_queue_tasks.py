@@ -145,6 +145,20 @@ def _sample_domain_pages(
     return pages, same_domain_link_count
 
 
+# Auto-generated "connect X with Y" integration-marketplace pages exist for
+# nearly every popular SaaS product paired with nearly every other product —
+# IFTTT's "quickly connect algorand blockchain to zoom" applet page is a
+# templated listing, not evidence anyone built or uses that connection. A
+# result HOSTED on one of these must never count as corroboration, no matter
+# how well its blurb happens to pair the two names (root-caused 2026-07-26:
+# zoom.us/mailchimp.com/notion.so/clickup.com/blink.sh all got approved off
+# an IFTTT template page — the domains themselves have nothing to do with
+# Algorand).
+_AUTO_INTEGRATION_MARKETPLACES = frozenset(
+    {"ifttt.com", "zapier.com", "make.com", "pipedream.com", "unito.io"}
+)
+
+
 def _external_corroboration(domain: str) -> tuple[str, str] | None:
     """Last resort after an in-domain crawl finds nothing: search SearXNG for "{domain} algorand" and check whether any of the top 20 results' OWN title+snippet pairs the service with "algorand" — not just that the search engine matched the query terms somewhere. This is exactly the pattern behind every real corroboration found by hand the night this was built: txnlab.dev's own link text named zerosignal.ai next to "Algorand", a Reddit post was literally titled "Welcome Sow & Reap to Algorand", a LinkedIn post named both together at the Algorand India Summit. None of those pages are on any curated "credible domain" list — the connection being stated in that specific result's own blurb is the signal, not where it's hosted (root-caused/added 2026-07-22).
 
@@ -152,6 +166,8 @@ def _external_corroboration(domain: str) -> tuple[str, str] | None:
     (no corroboration) on any search error — a SearXNG hiccup must degrade to
     the existing dead_end verdict, never crash the classify task.
     """
+    from urllib.parse import urlparse
+
     from app.modules.ai.research_tools import _tool_search_web
 
     name_variants = {v for v in (domain.lower(), domain.split(".")[0].lower()) if v}
@@ -160,11 +176,18 @@ def _external_corroboration(domain: str) -> tuple[str, str] | None:
     except Exception:
         return None
     for item in result.get("results") or []:
+        result_url = str(item.get("url", ""))
+        result_host = (urlparse(result_url).hostname or "").lower()
+        if any(
+            result_host == m or result_host.endswith(f".{m}")
+            for m in _AUTO_INTEGRATION_MARKETPLACES
+        ):
+            continue
         blob = f"{item.get('title', '')} {item.get('snippet', '')}".lower()
         if "algorand" not in blob:
             continue
         if any(variant in blob for variant in name_variants):
-            return str(item.get("url", "")), blob[:300]
+            return result_url, blob[:300]
     return None
 
 
@@ -210,7 +233,7 @@ def deep_classify_domain(
     import random
     import time
 
-    from app.modules.crawler.domain_tracker import update_domain_status
+    from app.modules.crawler.domain_tracker import suggest_full_site, update_domain_status
     from app.modules.crawler.robots import is_allowed
     from app.modules.scraper.core.link_extractor import extract_page_links
     from app.modules.search.classifier.score import score_page
@@ -221,6 +244,16 @@ def deep_classify_domain(
     frontier: list[str] = [landing_url]
     fetched = 0
     found: tuple[str, object] | None = None
+    # Full Site / Single Page suggestion signal (see suggest_full_site) — a
+    # free by-product of the landing page's own link extraction below, which
+    # this task already does as part of its normal crawl. Captured only on
+    # the landing page itself, not later random-order fetches, since that's
+    # the same "front door" signal _sample_domain_pages uses elsewhere. This
+    # task deliberately stops at the first relevant page (see docstring), so
+    # without this the "how many pages fetched" count would badly understate
+    # a real site's size (root-caused 2026-07-26: quantozpay.com/opensea.io
+    # both resolved here in 1 fetch and wrongly suggested Single Page).
+    landing_same_domain_link_count = 0
 
     while frontier and fetched < max_pages:
         url = frontier.pop(random.randrange(len(frontier)))
@@ -239,6 +272,8 @@ def deep_classify_domain(
             if result.raw_html
             else ([], [])
         )
+        if url == landing_url:
+            landing_same_domain_link_count = len(same)
         score_result = score_page(
             url=url, text=result.text, outbound_links=tuple(u for u, _ in external)
         )
@@ -276,6 +311,12 @@ def deep_classify_domain(
                 "content_relevance_url": found_url,
                 "deep_classified": "true",
                 "deep_classify_pages_fetched": str(fetched),
+                "suggested_full_site": (
+                    "true"
+                    if suggest_full_site(domain, landing_same_domain_link_count)
+                    else "false"
+                ),
+                "same_domain_link_count": str(landing_same_domain_link_count),
             },
         )
         return {
@@ -309,6 +350,12 @@ def deep_classify_domain(
                 "deep_classified": "true",
                 "deep_classify_pages_fetched": str(fetched),
                 "external_corroboration_snippet": corrob_snippet,
+                "suggested_full_site": (
+                    "true"
+                    if suggest_full_site(domain, landing_same_domain_link_count)
+                    else "false"
+                ),
+                "same_domain_link_count": str(landing_same_domain_link_count),
             },
         )
         return {
