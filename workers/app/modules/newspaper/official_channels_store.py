@@ -28,5 +28,3 @@ def load_official_channel_ids(kind: str) -> set[str]:
 
     _cache[kind] = (now, values)
     return values
-
-

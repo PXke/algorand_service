@@ -135,5 +135,3 @@ def _strip_boilerplate(soup: BeautifulSoup) -> None:
         ).lower()
         if attrs and any(hint in attrs for hint in _DROP_HINTS):
             tag.decompose()
-
-

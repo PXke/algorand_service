@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class ComposeFixture:
     """One fixture case for the offline compose-prompt evaluation harness."""
+
     name: str
     service_name: str
     source_url: str

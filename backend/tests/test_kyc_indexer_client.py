@@ -48,6 +48,7 @@ def test_fetch_wallet_signals_parses_age_and_activity(monkeypatch: pytest.Monkey
 
 def test_fetch_wallet_signals_fails_open_on_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Returns neutral (None/0) signals instead of raising when the indexer client can't connect."""
+
     def _boom(**_kwargs: object) -> Never:
         raise httpx.ConnectError("no network", request=None)
 
@@ -63,6 +64,7 @@ def test_fetch_wallet_signals_fails_open_on_malformed_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Returns neutral (None/0) signals when the indexer response shape is unexpected."""
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"unexpected": "shape"})
 
@@ -78,6 +80,7 @@ def test_fetch_wallet_signals_keeps_age_when_only_txn_call_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Keeps the wallet-age signal from a successful account call even when the txn call errors."""
+
     # A partial failure (account lookup ok, txn lookup errors) must not throw
     # away the wallet_age signal it already had — same try/except wraps both
     # calls, but local var assignments persist across the exception.

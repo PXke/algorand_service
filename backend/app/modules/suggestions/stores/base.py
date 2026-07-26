@@ -9,6 +9,7 @@ from app.modules.suggestions.models.domain import StoredSuggestion
 
 class SuggestionStore(Protocol):
     """Storage interface for suggestions."""
+
     def insert(self, item: StoredSuggestion) -> None:
         """Insert a new suggestion."""
         ...

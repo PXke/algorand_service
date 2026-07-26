@@ -22,6 +22,7 @@ _RECENT_TX_LIMIT = 50
 @dataclass(frozen=True)
 class WalletSignals:
     """On-chain age/activity signals fetched from the indexer for a wallet."""
+
     wallet_age_round: int | None
     recent_tx_count: int
 

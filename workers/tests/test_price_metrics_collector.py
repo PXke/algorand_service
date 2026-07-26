@@ -11,6 +11,7 @@ from app.modules.metrics.price_metrics_collector import fetch_spot_tick
 
 def test_fetch_spot_tick_mocked(monkeypatch: pytest.MonkeyPatch) -> None:
     """Parses a spot price tick (price/change/market-cap/volume) from a mocked CoinGecko response."""
+
     class FakeResponse:
         def __init__(self, payload: dict) -> None:
             self._payload = payload

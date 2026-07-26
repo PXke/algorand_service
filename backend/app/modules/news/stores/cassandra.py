@@ -20,6 +20,7 @@ def _epoch(dt: datetime | None) -> int:
 
 class CassandraArticleStore:
     """Cassandra-backed article storage."""
+
     def insert(self, article: StoredArticle, *, _feed_bucket: str = "main") -> None:
         # UNREACHABLE IN PRODUCTION as of 2026-07-13: NewsService (the only
         # consumer of ArticleStore) never calls this — real article writes

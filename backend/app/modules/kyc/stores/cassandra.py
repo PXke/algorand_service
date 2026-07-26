@@ -9,6 +9,7 @@ from app.modules.kyc.models.domain import StoredEnrollment
 
 class CassandraEnrollmentStore:
     """Cassandra-backed KYC enrollment storage."""
+
     def upsert(self, item: StoredEnrollment) -> None:
         """Insert or update a KYC enrollment record."""
         from app.core.cassandra import get_cassandra_session

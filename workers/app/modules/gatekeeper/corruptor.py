@@ -32,6 +32,7 @@ TOLERANCE = 0.02
 @dataclass(frozen=True)
 class Sample:
     """One (source, trace, article) training sample."""
+
     source: str
     trace: str
     article: str

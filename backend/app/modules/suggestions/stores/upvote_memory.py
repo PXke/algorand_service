@@ -7,6 +7,7 @@ from app.modules.suggestions.models.domain import UpvoteError
 
 class InMemoryUpvoteStore:
     """In-memory upvote store for tests."""
+
     def __init__(self) -> None:
         """Start with an empty in-process vote set and per-suggestion counts."""
         self._votes: set[tuple[str, str]] = set()

@@ -9,6 +9,7 @@ from typing import Protocol
 @dataclass
 class StoredArticle:
     """A stored article's full data."""
+
     article_id: str
     service_id: str
     title: str
@@ -31,6 +32,7 @@ class StoredArticle:
 
 class ArticleStore(Protocol):
     """Storage interface for articles."""
+
     def insert(self, article: StoredArticle, *, feed_bucket: str = "main") -> None:
         """Insert a new article and its feed row."""
         ...

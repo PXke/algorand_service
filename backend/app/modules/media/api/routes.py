@@ -189,6 +189,7 @@ def _fetch_and_optimize(url: str) -> tuple[int, str, bytes]:
 
 def register_media_routes(app: Robyn) -> None:
     """Register the cached, size-limited image-proxy endpoint."""
+
     @app.get("/api/v1/img")
     async def proxy_image(request: Request) -> Response:
         import asyncio

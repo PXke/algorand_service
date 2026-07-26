@@ -7,6 +7,7 @@ from app.modules.news.stores.base import StoredArticle
 
 class InMemoryArticleStore:
     """In-memory article store for tests."""
+
     def __init__(self) -> None:
         """Start with an empty in-process article table and feed list."""
         self._by_id: dict[str, StoredArticle] = {}

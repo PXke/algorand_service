@@ -226,6 +226,7 @@ def test_curated_discovery_rows_survive_stale_parking(monkeypatch: pytest.Monkey
 
 def test_score_page_survives_lookup_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Scores a page as zero relevance, without raising, when the ecosystem-domains lookup itself fails."""
+
     def _boom() -> Never:
         raise RuntimeError("cassandra down")
 

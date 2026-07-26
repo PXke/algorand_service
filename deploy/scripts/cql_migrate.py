@@ -26,6 +26,7 @@ MANIFEST_PATH = REPO_ROOT / "schema" / "migrations" / "manifest.toml"
 
 class Migration(NamedTuple):
     """One discovered migration file: its stream, version, path, and prod tier."""
+
     stream: str
     version: str
     file: Path

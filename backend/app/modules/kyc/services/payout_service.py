@@ -29,6 +29,7 @@ _CONFIRM_WAIT_ROUNDS = 4
 @dataclass(frozen=True)
 class PayoutResult:
     """Outcome of one KYC lookup payout attempt."""
+
     status: str  # "sent" | "failed" | "skipped"
     txid: str | None = None
     error: str | None = None

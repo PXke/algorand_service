@@ -51,6 +51,7 @@ def _derive_kyc_level(signals: WalletSignals, *, current_round: int | None) -> s
 
 class EnrollmentService:
     """Verify consent, fetch on-chain signals, and store a wallet's KYC enrollment."""
+
     def __init__(
         self,
         store: EnrollmentStore | None = None,

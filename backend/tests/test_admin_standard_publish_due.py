@@ -28,6 +28,7 @@ def test_is_standard_publish_due_fails_closed_on_redis_error(
 
 def test_is_standard_publish_due_true_when_never_published(monkeypatch: pytest.MonkeyPatch) -> None:
     """Treats a never-published site (no cached timestamp) as due for a standard publish."""
+
     class _EmptyRedis:
         def get(self, _key: str) -> None:
             return None

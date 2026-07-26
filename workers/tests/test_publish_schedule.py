@@ -37,6 +37,7 @@ def test_record_standard_publish_swallows_redis_error(monkeypatch: pytest.Monkey
 
 def test_is_standard_publish_due_true_when_never_published(monkeypatch: pytest.MonkeyPatch) -> None:
     """Publishing is due immediately when Redis has no record of a prior standard publish."""
+
     class _EmptyRedis:
         def get(self, _key: str) -> None:
             return None

@@ -46,7 +46,14 @@ class _FakeClient:
         self.answer = answer
         self.seen: list[dict] = []
 
-    def chat_completion(self, messages: list[dict], *, json_object: bool = True, temperature: float = 0.3) -> str:  # noqa: ARG002 -- name must match the real callee's keyword arg
+    def chat_completion(
+        self,
+        messages: list[dict],
+        *,
+        # Unused here, but the names must match the real callee's keyword args.
+        json_object: bool = True,  # noqa: ARG002
+        temperature: float = 0.3,  # noqa: ARG002
+    ) -> str:
         self.seen = messages
         return self.answer
 

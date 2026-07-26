@@ -83,6 +83,7 @@ def test_omits_proxy_opt_when_not_configured(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_returns_none_on_download_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Returns None instead of raising when yt-dlp's extraction fails (e.g. bot-check block)."""
+
     class FakeYoutubeDL:
         def __init__(self, opts: dict) -> None:
             pass

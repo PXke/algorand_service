@@ -9,6 +9,7 @@ from functools import lru_cache
 @dataclass(frozen=True)
 class ServiceEntry:
     """One enabled service's chain-matching config."""
+
     service_id: str
     display_name: str
     match_kind: str

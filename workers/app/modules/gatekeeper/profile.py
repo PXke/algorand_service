@@ -36,6 +36,7 @@ class AnnotatedSample:
 @dataclass(frozen=True)
 class ErrorTypeStats:
     """One error type's smoothed, debiased failure statistics."""
+
     name: str
     marginal_p: float  # smoothed, debiased P(type | failure)
     severity_mean: float
@@ -46,6 +47,7 @@ class ErrorTypeStats:
 @dataclass
 class FailureProfile:
     """Base failure rates and per-type stats for the annotator pool."""
+
     error_types: dict[str, ErrorTypeStats]
     base_fail_rate_factuality: float
     base_fail_rate_tone: float

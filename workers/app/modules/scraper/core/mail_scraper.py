@@ -20,6 +20,7 @@ from app.modules.scraper.core.base import ScrapeResult
 
 class MailScraperError(Exception):
     """Raised when the mail inbox can't be read."""
+
     pass
 
 

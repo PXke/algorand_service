@@ -11,6 +11,7 @@ from app.modules.newspaper.publish_policy import PublishTopic
 
 class EventPhase(StrEnum):
     """Lifecycle phase of a detected event (announce/live/recap)."""
+
     ANNOUNCE = "announce"
     RECAP = "recap"
 
@@ -21,6 +22,7 @@ _VIDEO_HOSTS = ("youtube.com", "youtu.be", "vimeo.com")
 @dataclass(frozen=True)
 class EventContext:
     """Detected event phase and topic override for one draft."""
+
     event_id: str
     phase: EventPhase
     topic_override: PublishTopic | None
@@ -75,5 +77,3 @@ def build_event_dedupe_key(
     """Build the compose-cooldown dedupe key for one service/event/phase/content combination."""
     short_hash = content_hash[:16] if content_hash else "none"
     return f"{service_id}:event:{event_id}:{phase.value}:{short_hash}"
-
-

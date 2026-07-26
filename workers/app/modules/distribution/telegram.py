@@ -46,6 +46,7 @@ def _escape(text: str) -> str:
 
 class TelegramDistributor(SocialDistributor):
     """SocialDistributor implementation for Telegram."""
+
     name = "telegram"
 
     def __init__(self, *, bot_token: str, chat_id: str) -> None:

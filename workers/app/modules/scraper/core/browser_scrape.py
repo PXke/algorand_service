@@ -33,6 +33,7 @@ _LOGIN_MARKERS = (
 @dataclass(frozen=True)
 class BrowserPageResult:
     """A Playwright-fetched page's extracted content."""
+
     title: str
     text: str
     final_url: str
@@ -42,6 +43,7 @@ class BrowserPageResult:
 
 class BrowserScrapeError(Exception):
     """Raised when a browser-backed fetch fails."""
+
     pass
 
 

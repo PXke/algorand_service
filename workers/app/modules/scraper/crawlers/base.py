@@ -9,6 +9,7 @@ from app.modules.scraper.core.base import BaseScraper, ScrapeResult
 
 class CrawlerDriver(Protocol):
     """Driver interface implemented per source type."""
+
     crawler_type: str
 
     def get_scraper(self, scrape_url: str) -> BaseScraper:

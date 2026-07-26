@@ -7,6 +7,7 @@ from app.modules.suggestions.models.domain import StoredSuggestion, SuggestionEr
 
 class InMemorySuggestionStore:
     """In-memory suggestion store for tests."""
+
     def __init__(self) -> None:
         """Start with an empty in-process suggestion table and txid index."""
         self._items: dict[str, StoredSuggestion] = {}

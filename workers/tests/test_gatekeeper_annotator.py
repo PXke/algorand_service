@@ -51,6 +51,7 @@ def test_tier2_severity_clamped_and_defaulted() -> None:
 
 def test_annotate_unions_tiers() -> None:
     """Unions Tier-1's numeric-grounding failure with Tier-2's classifier-supplied tone failure."""
+
     # Tier-1 finds the numeric problem; Tier-2 adds a tone problem.
     def classify(_s: str, _tr: str, _a: str) -> dict:
         return {"tone_fail": True, "error_types": ["hype"], "severities": {"hype": 0.6}}
@@ -69,6 +70,7 @@ def test_annotate_unions_tiers() -> None:
 
 def test_annotate_degrades_to_tier1_when_classifier_raises() -> None:
     """Falls back to Tier-1-only results when the Tier-2 classifier raises."""
+
     def broken(_s: str, _tr: str, _a: str) -> Never:
         raise RuntimeError("LLM down")
 

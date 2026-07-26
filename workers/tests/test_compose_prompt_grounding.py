@@ -243,6 +243,7 @@ def test_tools_guidance_bans_memory_as_source() -> None:
 
 class TestExtractUnresolvedGaps:
     """Extracting the digest's Unresolved Gaps section for the revision prompt."""
+
     def test_none_returns_empty(self) -> None:
         """None input returns an empty string."""
         digest = "## Research Digest\n\n### Unresolved Gaps\n- None\n"

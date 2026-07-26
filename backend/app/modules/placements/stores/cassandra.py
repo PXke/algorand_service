@@ -10,6 +10,7 @@ from app.modules.placements.models import FeedPlacementItem
 
 class PlacementsStore:
     """Cassandra-backed sponsored-placement storage."""
+
     def list_active(self, *, slot: str, limit: int = 10) -> list[FeedPlacementItem]:
         """List active, currently-scheduled placements for a slot, priority order."""
         from app.core.cassandra import get_cassandra_session

@@ -350,6 +350,7 @@ def test_dispatcher_skips_disabled_channels_without_calling_them() -> None:
 
 def test_dispatcher_isolates_one_channel_failing_from_another() -> None:
     """One channel raising does not stop the dispatcher from posting to the others."""
+
     class _RaisingDistributor(SocialDistributor):
         name = "broken"
 

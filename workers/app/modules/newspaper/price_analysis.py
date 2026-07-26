@@ -13,6 +13,7 @@ COINGECKO_API = "https://api.coingecko.com/api/v3"
 @dataclass(frozen=True)
 class WeeklyPriceSnapshot:
     """One week's ALGO price snapshot for the digest."""
+
     asset_id: str
     asset_name: str
     currency: str
@@ -26,6 +27,7 @@ class WeeklyPriceSnapshot:
 
 class PriceAnalysisError(Exception):
     """Raised when the weekly price snapshot can't be fetched."""
+
     pass
 
 

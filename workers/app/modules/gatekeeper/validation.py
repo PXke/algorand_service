@@ -32,6 +32,7 @@ Pair = tuple[AnnotatedSample, AnnotatedSample]  # (human, machine)
 @dataclass(frozen=True)
 class TypeMetrics:
     """One error type's precision/recall against the anchor pool."""
+
     error_type: str
     tp: int
     fp: int
@@ -45,6 +46,7 @@ class TypeMetrics:
 @dataclass(frozen=True)
 class ValidationReport:
     """Per-type metrics and overall agreement for a validation run."""
+
     per_type: dict[str, TypeMetrics]
     factuality_agreement: float  # fraction of anchors where the fail flag matched
     tone_agreement: float

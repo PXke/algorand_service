@@ -21,6 +21,7 @@ from app.modules.gatekeeper.fact_align import numeric_entailment_score
 @dataclass(frozen=True)
 class DeterministicGate:
     """The deterministic factuality/completeness gate's verdict."""
+
     factuality_score: float  # grounded fraction of numeric claims
     completeness_passed: bool
     passed: bool  # overall, given the configured threshold
@@ -41,6 +42,7 @@ class DeterministicGate:
 @dataclass(frozen=True)
 class GateConfig:
     """Thresholds for the deterministic gate."""
+
     fact_min: float = 0.80
     enforce: bool = False
 

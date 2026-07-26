@@ -29,6 +29,7 @@ _MAX_STATUS_CHARS = 480
 
 class MastodonDistributor(SocialDistributor):
     """SocialDistributor implementation for Mastodon."""
+
     name = "mastodon"
 
     def __init__(self, *, instance_url: str, access_token: str) -> None:

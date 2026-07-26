@@ -9,6 +9,7 @@ from app.modules.suggestions.models.domain import UpvoteError
 
 class CassandraUpvoteStore:
     """Cassandra-backed upvote storage."""
+
     def record_upvote(self, suggestion_id: str, wallet_address: str) -> int:
         """Record a wallet's upvote on a suggestion and return the new count; raises UpvoteError on a duplicate vote."""
         from app.core.cassandra import get_cassandra_session

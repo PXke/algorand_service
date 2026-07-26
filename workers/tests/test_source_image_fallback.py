@@ -409,6 +409,7 @@ def test_validated_hero_checked_retries_once_on_transient_failure(
 
 def test_validated_hero_checked_drops_on_fetch_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """A persistent fetch failure drops the candidate after the retry is exhausted."""
+
     def _boom(*_a: object, **_kw: object) -> Never:
         raise RuntimeError("network down")
 

@@ -20,6 +20,7 @@ from app.modules.auth.utils.signing_message import AuthChallenge, build_auth_cha
 
 class AuthService:
     """Nonce issuance and signature verification for wallet login."""
+
     def __init__(self, session_store: SessionStore) -> None:
         """Wire the session/nonce store used for challenge issuance and verification."""
         self._store = session_store

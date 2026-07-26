@@ -32,6 +32,7 @@ _MAX_POST_CHARS = 280
 
 class BlueskyDistributor(SocialDistributor):
     """SocialDistributor implementation for Bluesky."""
+
     name = "bluesky"
 
     def __init__(self, *, handle: str, app_password: str) -> None:

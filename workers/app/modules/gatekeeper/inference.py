@@ -47,6 +47,7 @@ def calibrate(raw_logit: float, base_fail_rate: float) -> float:
 @dataclass(frozen=True)
 class GateDecision:
     """The gatekeeper's routing decision for one draft."""
+
     decision: str  # ROUTE | DROP_FACTUALITY | DROP_TONE | RETRY_COMPLETENESS
     prob_factuality: float
     prob_tone: float

@@ -9,6 +9,7 @@ from app.modules.kyc.models.domain import StoredEnrollment
 
 class EnrollmentStore(Protocol):
     """Storage interface for KYC enrollments."""
+
     def upsert(self, item: StoredEnrollment) -> None:
         """Insert or update a KYC enrollment record."""
         ...

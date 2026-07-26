@@ -126,4 +126,5 @@ def assert_publish_allowed(*, tier: PublishTier) -> None:
 
 class PublishCapExceededError(Exception):
     """Raised when a publish-slot reservation exceeds the daily cap."""
+
     pass

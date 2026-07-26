@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ArticleComposeResult:
     """The composer's output: fields, composer used, and heuristic grade."""
+
     title: str
     summary: str
     body: str

@@ -145,6 +145,7 @@ def test_discourse_query_searches_instead_of_listing(monkeypatch: pytest.MonkeyP
 
 def test_discourse_without_query_keeps_listing_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
     """A discourse_forum call without a query falls back to the original recent-topics listing behavior."""
+
     def fake_get(
         url: str,
         *,

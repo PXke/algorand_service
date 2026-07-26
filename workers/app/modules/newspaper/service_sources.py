@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 @dataclass(frozen=True)
 class ServiceSource:
     """One known web/social/mail source for a service."""
+
     source_id: str
     source_type: str  # web | youtube | mail | bluesky
     url: str

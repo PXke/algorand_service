@@ -30,6 +30,7 @@ def _fmt_int(value: int | None) -> str | None:
 
 class MetricsDashboardService:
     """Assemble the metrics-dashboard response from price and network data."""
+
     def __init__(
         self,
         *,

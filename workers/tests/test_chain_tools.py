@@ -79,6 +79,7 @@ def test_get_asset_holder_share_zero_when_address_does_not_hold_asset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Returns a 0.0 share_pct when the address holds none of the asset."""
+
     def fake_algod_get(path: str) -> dict:
         if path.startswith("/v2/assets/"):
             return {"params": {"total": 1000, "decimals": 0, "creator": "X"}}

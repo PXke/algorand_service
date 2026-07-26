@@ -30,6 +30,7 @@ MIN_N_NOVEL_MODE = 250
 @dataclass(frozen=True)
 class TriggerResult:
     """One drift trigger's evaluation outcome."""
+
     name: str
     fired: bool
     gated: bool  # True => not enough data yet; ``fired`` is meaningless

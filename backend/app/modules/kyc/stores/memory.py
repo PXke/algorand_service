@@ -20,6 +20,7 @@ class _LookupEvent:
 
 class InMemoryEnrollmentStore:
     """In-memory KYC enrollment store for tests."""
+
     def __init__(self) -> None:
         """Start with an empty in-process enrollment table and lookup-event log."""
         self._items: dict[str, StoredEnrollment] = {}

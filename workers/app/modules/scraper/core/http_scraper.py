@@ -15,6 +15,7 @@ _USER_AGENT = "algorand-platform-newspaper/1.0 (+https://algorand.pxke.me)"
 
 class HttpScraper(BaseScraper):
     """BaseScraper implementation backed by plain HTTP fetch."""
+
     def scrape(self, url: str, source_id: str) -> ScrapeResult:
         # guarded_get rejects internal/private targets and re-checks each
         # redirect hop, so a planted link can't pivot the crawler to localhost.

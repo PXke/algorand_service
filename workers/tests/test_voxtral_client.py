@@ -41,7 +41,13 @@ def test_transcribe_audio_returns_text(monkeypatch: pytest.MonkeyPatch, audio_fi
         def __exit__(self, *args: object) -> None:
             return None
 
-        def post(self, url: str, headers: dict | None = None, files: dict | None = None, data: dict | None = None) -> Any:  # noqa: ANN401 -- test double / fake response
+        def post(
+            self,
+            url: str,
+            headers: dict | None = None,
+            files: dict | None = None,
+            data: dict | None = None,
+        ) -> Any:  # noqa: ANN401 -- test double / fake response
             assert "audio/transcriptions" in url
             assert headers["Authorization"] == "Bearer test-key"
             assert data["model"] == voxtral_module.MISTRAL_VOXTRAL_MODEL
@@ -91,7 +97,14 @@ def test_transcribe_audio_raises_on_http_error(
         def __exit__(self, *args: object) -> None:
             return None
 
-        def post(self, _url: str, headers: dict | None = None, files: dict | None = None, data: dict | None = None) -> Any:  # noqa: ARG002, ANN401 -- name must match the real callee's keyword arg
+        def post(
+            self,
+            _url: str,
+            # Unused here, but the names must match the real callee's keyword args.
+            headers: dict | None = None,  # noqa: ARG002
+            files: dict | None = None,  # noqa: ARG002
+            data: dict | None = None,  # noqa: ARG002
+        ) -> Any:  # noqa: ANN401 -- test double / fake response
             return FakeResponse()
 
     monkeypatch.setattr(voxtral_module.httpx, "Client", FakeClient)

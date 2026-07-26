@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class CrawlerConfigRow:
     """One crawler type's stored configuration."""
+
     crawler_type: str
     display_name: str
     description: str

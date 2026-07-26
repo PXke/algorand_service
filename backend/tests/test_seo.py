@@ -699,7 +699,6 @@ def test_llms_txt_lists_feed_and_topics() -> None:
     assert "/feed/topic/" in txt
     assert "/section/" not in txt
 
-
     # API preconnect removed: feed/markets/auth are deferred; early preconnect
     # triggered Lighthouse "unused preconnect" and competed with WASM on boot.
 

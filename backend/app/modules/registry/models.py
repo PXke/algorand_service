@@ -10,6 +10,7 @@ from app.schemas import ServiceRegistryItem  # noqa: F401
 @dataclass(frozen=True)
 class ServiceEntry:
     """One entry in the service registry."""
+
     service_id: str
     display_name: str
     match_kind: str

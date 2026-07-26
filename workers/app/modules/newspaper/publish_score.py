@@ -14,6 +14,7 @@ from app.modules.newspaper.source_trust import source_trust_bonus
 @dataclass(frozen=True)
 class PriorityBreakdown:
     """A publish-queue row's priority score and its components."""
+
     total: int
     topic_base: int
     source_trust: int

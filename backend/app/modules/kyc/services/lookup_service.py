@@ -13,6 +13,7 @@ PayoutFn = Callable[..., PayoutResult]
 
 class LookupService:
     """Paid KYC-status lookup, paying out to the enrolled wallet on a hit."""
+
     def __init__(
         self,
         store: EnrollmentStore | None = None,

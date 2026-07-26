@@ -73,6 +73,7 @@ _SYSTEM_FRAMING = (
 @dataclass
 class RevivedSession:
     """A compose session's transcript, replayed and ready for interrogation."""
+
     source_url: str
     service_id: str
     model: str

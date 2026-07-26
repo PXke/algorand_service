@@ -11,6 +11,7 @@ from app.modules.news.stores.factory import get_article_store
 
 class NewsService:
     """Feed assembly, article reads, and engagement rankings (hot/top)."""
+
     def __init__(self, store: ArticleStore | None = None) -> None:
         """Wire the article store, defaulting to the configured backend."""
         self._store = store or get_article_store()
@@ -64,9 +65,7 @@ class NewsService:
         # Defensive: skip any malformed feed rows (e.g. a partial upsert that
         # left service_id/title null) so one bad row can't 500 the whole feed.
         articles = [a for a in articles if a.service_id and a.title]
-        return self._with_feed_views(
-            [self._to_feed_item(a, lang) for a in articles]
-        ), next_cursor
+        return self._with_feed_views([self._to_feed_item(a, lang) for a in articles]), next_cursor
 
     def _with_feed_views(self, items: list[ArticleFeedItem]) -> list[ArticleFeedItem]:
         """Attach lifetime read tallies to feed items (best-effort)."""

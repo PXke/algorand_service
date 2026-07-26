@@ -42,6 +42,7 @@ def configure_cpu_threads() -> dict[str, str]:
 @dataclass
 class TrainConfig:
     """Hyperparameters and output path for a training run."""
+
     model_name: str = "answerdotai/ModernBERT-base"
     lr: float = 2e-5
     epochs: int = 3

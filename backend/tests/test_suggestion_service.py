@@ -15,6 +15,7 @@ TREASURY = "T" * 58
 
 class StubChainRepo:
     """Stub ChainRepository returning a fixed transaction (or None) for every lookup."""
+
     def __init__(self, tx: IndexedTransaction | None) -> None:
         """Return `tx` (or None) for every get_transaction lookup."""
         self._tx = tx

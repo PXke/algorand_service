@@ -49,6 +49,7 @@ DEFAULT_RULES: tuple[CompletenessRule, ...] = (
 @dataclass(frozen=True)
 class CompletenessResult:
     """Outcome of the deterministic tool-completeness check."""
+
     score: float  # 1.0 pass, 0.0 any mandatory check missed
     failed_rules: tuple[str, ...] = ()
     detail: dict[str, str] = field(default_factory=dict)

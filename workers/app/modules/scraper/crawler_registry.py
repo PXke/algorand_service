@@ -90,5 +90,3 @@ def metrics_crawl_disabled_reason() -> str | None:
     if is_crawler_enabled(CrawlerType.METRICS):
         return None
     return "crawler_metrics_disabled"
-
-

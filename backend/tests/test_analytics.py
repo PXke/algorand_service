@@ -388,6 +388,7 @@ def test_record_session_new_then_returning(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_record_session_skips_without_ip(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never touches Redis when recording a session with no client IP."""
+
     # No client IP -> never touches Redis or Cassandra.
     def _boom() -> Never:
         raise AssertionError("must not touch Redis")
@@ -775,6 +776,7 @@ def test_is_hosting_ip_failopen_without_db() -> None:
 
 def test_is_hosting_ip_flags_known_cloud_providers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Flags known cloud/hosting ASN orgs, but not a residential/mobile ISP."""
+
     class _FakeAsn:
         def __init__(self, org: str) -> None:
             self.autonomous_system_organization = org
@@ -801,6 +803,7 @@ def test_is_hosting_ip_flags_known_cloud_providers(monkeypatch: pytest.MonkeyPat
 
 def test_is_hosting_ip_failopen_on_lookup_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Returns False (fails open) when the ASN reader raises during lookup."""
+
     class _FakeReader:
         def asn(self, _ip: str) -> Never:
             raise ValueError("address not in database")

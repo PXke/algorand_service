@@ -11,6 +11,7 @@ from app.modules.newspaper.price_analysis import fetch_weekly_price
 
 def test_fetch_weekly_price_mocked(monkeypatch: pytest.MonkeyPatch) -> None:
     """Builds a weekly price snapshot with the latest price and week-over-week change from mocked HTTP responses."""
+
     class FakeResponse:
         def __init__(self, payload: dict) -> None:
             self._payload = payload

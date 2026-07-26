@@ -36,6 +36,7 @@ def _check_ingest_auth(request: Request) -> Response | None:
 
 def register_ingest_routes(app: Robyn) -> None:
     """Register the external ingest-signal endpoint on the app."""
+
     @app.post("/api/v1/ingest/signal")
     async def ingest_signal(request: Request) -> Response:
         denied = _check_ingest_auth(request)

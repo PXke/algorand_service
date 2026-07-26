@@ -9,6 +9,7 @@ from app.modules.registry.source_kind import scrape_source_kind
 
 class RegistryService:
     """List registered services for the admin/registry API."""
+
     def list_services(self, *, seeds_only: bool = False) -> list[ServiceRegistryItem]:
         """List registered services for the admin/registry API, optionally seeds-only."""
         entries = get_service_registry_repository().list_all()

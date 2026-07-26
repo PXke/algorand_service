@@ -47,6 +47,7 @@ ClassifyFn = Callable[[str, str, str], dict]
 @dataclass(frozen=True)
 class Tier1Annotation:
     """Deterministic (rule-based) numeric-grounding annotation."""
+
     factuality_fail: bool
     error_types: tuple[str, ...]
     severities: dict[str, float]
@@ -57,6 +58,7 @@ class Tier1Annotation:
 @dataclass(frozen=True)
 class Tier2Annotation:
     """LLM-judged annotation, unioned with the Tier-1 result."""
+
     factuality_fail: bool
     tone_fail: bool
     error_types: tuple[str, ...]

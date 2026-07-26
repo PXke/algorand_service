@@ -776,9 +776,7 @@ def _admin_domains_full_list(status: str) -> list[dict]:
                 # (not False) when this domain predates the feature and hasn't
                 # been through classify_pending_domains since.
                 "suggested_full_site": (
-                    meta["suggested_full_site"] == "true"
-                    if "suggested_full_site" in meta
-                    else None
+                    meta["suggested_full_site"] == "true" if "suggested_full_site" in meta else None
                 ),
                 "same_domain_link_count": (
                     int(meta["same_domain_link_count"])

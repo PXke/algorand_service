@@ -12,6 +12,7 @@ from app.modules.crawler.domain_tracker import domain_from_url, update_domain_st
 @dataclass(frozen=True)
 class DiscoveryStoreOutcome:
     """Outcome of storing and scoring one crawled page."""
+
     status: str
     url: str
     storage_score: float = 0.0

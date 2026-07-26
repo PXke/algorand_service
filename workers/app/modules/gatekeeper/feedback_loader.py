@@ -10,6 +10,7 @@ from typing import Any
 @dataclass(frozen=True)
 class FeedbackBatchConfig:
     """Batch-loading parameters for classifier-feedback training data."""
+
     limit: int = 1000
     batch_size: int = 4
     max_length: int = 4096

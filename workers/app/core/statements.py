@@ -42,6 +42,7 @@ class _Stmt:
 # --------------------------------------------------------------------------- #
 class ArticleStmts:
     """Prepared statements for articles_by_id."""
+
     GET_BY_ID = _Stmt(
         "SELECT article_id, service_id, title, summary, body, "
         "trigger_txid, trigger_round, source_url, published_at, prompt_version, "
@@ -110,6 +111,7 @@ class ArticleStmts:
 
 class FeedStmts:
     """Prepared statements for the articles_feed projection."""
+
     BY_BUCKET = _Stmt(
         "SELECT article_id, service_id, title, summary, published_at, first_published_at "
         "FROM algorand_platform.articles_feed WHERE bucket = ? LIMIT ?"
@@ -167,6 +169,7 @@ class FeedStmts:
 
 class ServiceEventStmts:
     """Prepared statements for service-triggered events."""
+
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.service_events ("
         "service_id, occurred_at, event_id, txid, round, match_kind, match_value"
@@ -179,6 +182,7 @@ class ServiceEventStmts:
 # --------------------------------------------------------------------------- #
 class PublishQueueStmts:
     """Prepared statements for the publish queue."""
+
     DEDUPE_GET = _Stmt(
         "SELECT queue_id FROM algorand_platform.publish_queue_dedupe WHERE dedupe_key = ?"
     )
@@ -233,6 +237,7 @@ class PublishQueueStmts:
 # --------------------------------------------------------------------------- #
 class UrlQueueStmts:
     """Prepared statements for the crawl frontier URL queue."""
+
     BY_URL = _Stmt("SELECT queue_id, status FROM algorand_platform.url_queue_by_url WHERE url = ?")
     GET_STATUS = _Stmt("SELECT status FROM algorand_platform.url_queue WHERE queue_id = ?")
     INSERT = _Stmt(
@@ -277,6 +282,7 @@ class UrlQueueStmts:
 # --------------------------------------------------------------------------- #
 class ClassifierReviewStmts:
     """Prepared statements for the pending classifier-review queue."""
+
     INSERT_QUEUE = _Stmt(
         "INSERT INTO algorand_platform.classifier_review_queue ("
         "review_id, url, page_text, page_title, category, "
@@ -318,6 +324,7 @@ class ClassifierReviewStmts:
 # --------------------------------------------------------------------------- #
 class DomainTrackingStmts:
     """Prepared statements for per-domain crawl/frontier tracking."""
+
     GET_STATUS = _Stmt(
         "SELECT domain, last_crawled_at, last_online_at, relevance_score, "
         "category, is_relevant, metadata, frontier_status "
@@ -348,6 +355,7 @@ class DomainTrackingStmts:
 # --------------------------------------------------------------------------- #
 class CrawledPageStmts:
     """Prepared statements for crawled_pages."""
+
     INSERT_BY_ID = _Stmt(
         "INSERT INTO algorand_platform.crawled_pages_by_id ("
         "page_id, url, domain, title, description, body, service_id, source, "
@@ -379,6 +387,7 @@ class CrawledPageStmts:
 # --------------------------------------------------------------------------- #
 class ClassifierFeedbackStmts:
     """Prepared statements for classifier training feedback."""
+
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.classifier_feedback ("
         "feedback_id, url, text_sample, category, predicted_category, quality, "
@@ -409,6 +418,7 @@ class ClassifierFeedbackStmts:
 # --------------------------------------------------------------------------- #
 class PriceMetricsStmts:
     """Prepared statements for price-metrics samples and briefs."""
+
     INSERT_SAMPLE = _Stmt(
         "INSERT INTO algorand_platform.price_metric_samples ("
         "asset_id, collected_at, price_usd, currency, "
@@ -439,6 +449,7 @@ class PriceMetricsStmts:
 # --------------------------------------------------------------------------- #
 class SnapshotStmts:
     """Prepared statements for service-source content snapshots."""
+
     GET_LATEST = _Stmt(
         "SELECT content_hash, title, body FROM algorand_platform.page_snapshots "
         "WHERE source_id = ? LIMIT 1"
@@ -460,6 +471,7 @@ class SnapshotStmts:
 # --------------------------------------------------------------------------- #
 class ArticleVersionStmts:
     """Prepared statements for article edit-history versions."""
+
     LATEST = _Stmt(
         "SELECT version FROM algorand_platform.article_versions "
         "WHERE article_id = ? ORDER BY version DESC LIMIT 1"
@@ -480,6 +492,7 @@ class ArticleVersionStmts:
 # --------------------------------------------------------------------------- #
 class ArticleMatchStmts:
     """Prepared statements for article match-key lookups (edit-vs-create routing)."""
+
     FIND_BY_KEY = _Stmt(
         "SELECT article_id, edit_window_closes_at FROM algorand_platform.article_match_keys "
         "WHERE key_type = ? AND key_value = ?"
@@ -501,6 +514,7 @@ class ArticleMatchStmts:
 # --------------------------------------------------------------------------- #
 class IntelligenceStmts:
     """Prepared statements for a service's accumulated writer intelligence."""
+
     GET = _Stmt(
         "SELECT primary_domain, intelligence_json, first_seen_at "
         "FROM algorand_platform.service_intelligence WHERE service_id = ?"
@@ -520,6 +534,7 @@ class IntelligenceStmts:
 # --------------------------------------------------------------------------- #
 class ToolInsightStmts:
     """Prepared statements for writer tool-usage insights."""
+
     INSERT_SUGGESTION = _Stmt(
         "INSERT INTO algorand_platform.tool_suggestions ("
         "bucket, created_at, suggestion_id, capability, reason, "
@@ -560,6 +575,7 @@ class ToolInsightStmts:
 # --------------------------------------------------------------------------- #
 class ServiceProfileStmts:
     """Prepared statements for a service's computed profile weight."""
+
     GET_WEIGHT = _Stmt(
         "SELECT impressiveness_score FROM algorand_platform.service_profiles WHERE service_id = ?"
     )
@@ -575,6 +591,7 @@ class ServiceProfileStmts:
 # --------------------------------------------------------------------------- #
 class InvestigationStmts:
     """Prepared statements for investigative-tool findings."""
+
     LIST = _Stmt(
         "SELECT tool, arguments, result_json FROM algorand_platform.investigation_findings "
         "WHERE service_id = ? LIMIT ?"
@@ -591,6 +608,7 @@ class InvestigationStmts:
 # --------------------------------------------------------------------------- #
 class PendingFeedStmts:
     """Prepared statements for the pending-feed backlog."""
+
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.pending_feed_queue "
         "(bucket, interest_score, approved_at, article_id) "
@@ -615,6 +633,7 @@ class PendingFeedStmts:
 # --------------------------------------------------------------------------- #
 class ChainStmts:
     """Prepared statements for chain data indexed by Conduit."""
+
     CONDUIT_HEAD = _Stmt("SELECT value FROM algorand_platform.conduit_meta WHERE id = ?")
     TXNS_BY_ROUND = _Stmt(
         "SELECT txid, round, sender, txn_type, txn_json, receiver, amount_microalgos "
@@ -627,6 +646,7 @@ class ChainStmts:
 # --------------------------------------------------------------------------- #
 class ViewCountStmts:
     """Prepared statements for per-article view counters."""
+
     GET_BULK = _Stmt(
         "SELECT article_id, views FROM algorand_platform.article_view_counts WHERE article_id IN ?"
     )
@@ -637,6 +657,7 @@ class ViewCountStmts:
 # --------------------------------------------------------------------------- #
 class ServiceRegistryStmts:
     """Prepared statements for the service registry."""
+
     LIST_ALL = _Stmt(
         "SELECT service_id, display_name, match_kind, match_value, scrape_url, enabled "
         "FROM algorand_platform.service_registry"
@@ -663,6 +684,7 @@ class ServiceRegistryStmts:
 # --------------------------------------------------------------------------- #
 class ServiceSourceStmts:
     """Prepared statements for a service's known web sources."""
+
     UPSERT = _Stmt(
         "INSERT INTO algorand_platform.service_sources ("
         "service_id, source_id, source_type, url, domain, enabled, added_at"
@@ -686,6 +708,7 @@ class ServiceSourceStmts:
 # --------------------------------------------------------------------------- #
 class GatekeeperStmts:
     """Prepared statements for gatekeeper telemetry/training data."""
+
     INSERT_REPORT = _Stmt(
         "INSERT INTO algorand_platform.gatekeeper_validation_report "
         "(bucket, computed_at, report_json, n_anchors, trusted_count) "
@@ -703,6 +726,7 @@ class GatekeeperStmts:
 # --------------------------------------------------------------------------- #
 class EditorialBriefStmts:
     """Prepared statements for editorial briefs."""
+
     LIST = _Stmt(
         "SELECT brief_id, title, body_markdown, keywords, status, "
         "refresh_every_days, last_run_at, linked_article_id "
@@ -727,6 +751,7 @@ class EditorialBriefStmts:
 # --------------------------------------------------------------------------- #
 class CrawlerConfigStmts:
     """Prepared statements for crawler configuration rows."""
+
     LIST_ALL = _Stmt(
         "SELECT crawler_type, display_name, "
         "description, enabled FROM algorand_platform.crawler_config"
@@ -738,4 +763,5 @@ class CrawlerConfigStmts:
 # --------------------------------------------------------------------------- #
 class OfficialChannelStmts:
     """Prepared statements for the official-channels trust list."""
+
     BY_KIND = _Stmt("SELECT channel_id FROM algorand_platform.official_channels WHERE kind = ?")

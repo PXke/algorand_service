@@ -10,6 +10,7 @@ from app.modules.suggestions.models.domain import StoredSuggestion, SuggestionEr
 
 class CassandraSuggestionStore:
     """Cassandra-backed suggestion storage."""
+
     def insert(self, item: StoredSuggestion) -> None:
         """Insert a new suggestion; raises SuggestionError if the txid was already used."""
         from app.core.cassandra import get_cassandra_session

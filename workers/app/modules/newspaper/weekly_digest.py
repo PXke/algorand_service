@@ -23,6 +23,7 @@ from app.modules.newspaper.price_analysis import (
 @dataclass(frozen=True)
 class DigestArticleItem:
     """One article summarized for the weekly digest."""
+
     article_id: str
     service_id: str
     title: str
@@ -33,6 +34,7 @@ class DigestArticleItem:
 @dataclass(frozen=True)
 class WeeklyDigestContext:
     """Assembled price and article context for the weekly digest."""
+
     week_key: str
     week_label: str
     price: WeeklyPriceSnapshot

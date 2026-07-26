@@ -62,5 +62,3 @@ def verify_arc0060_auth(
         return False
     except Exception:
         return False
-
-

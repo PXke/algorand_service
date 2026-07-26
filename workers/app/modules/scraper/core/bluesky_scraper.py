@@ -17,6 +17,7 @@ _PUBLIC_APPVIEW = "https://public.api.bsky.app"
 @dataclass(frozen=True)
 class BlueskyPost:
     """One fetched Bluesky post."""
+
     uri: str  # at:// URI (stable id)
     rkey: str  # record key — the id segment, used for the post's web URL
     handle: str

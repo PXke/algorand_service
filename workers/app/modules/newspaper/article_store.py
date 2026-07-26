@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class FeedArticleRow:
     """One article row as it appears in the feed projection."""
+
     article_id: str
     service_id: str
     title: str
@@ -32,6 +33,7 @@ class FeedArticleRow:
 @dataclass(frozen=True)
 class ArticleDetail:
     """Full article detail for the article-detail route."""
+
     article_id: str
     service_id: str
     title: str

@@ -120,6 +120,7 @@ def test_fetch_model_metadata_returns_empty_on_network_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Returns an empty dict instead of raising when the models fetch fails."""
+
     def _boom(**_kw: object) -> Never:
         raise httpx.ConnectError("no network")
 

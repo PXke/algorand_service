@@ -30,6 +30,7 @@ _MAX_VIDEOS = 15
 @dataclass(frozen=True)
 class ChannelVideo:
     """One video from a YouTube channel's RSS feed."""
+
     video_id: str
     title: str
     description: str

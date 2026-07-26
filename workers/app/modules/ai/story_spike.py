@@ -140,5 +140,3 @@ def abort_article_handler(category: str = "", reason: str = "", **_: object) -> 
             ),
         }
     raise StorySpikedError(reason, category)
-
-

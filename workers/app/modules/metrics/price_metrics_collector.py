@@ -14,6 +14,7 @@ COINGECKO_API = "https://api.coingecko.com/api/v3"
 
 class PriceMetricsCollectorError(Exception):
     """Raised when a price tick can't be collected."""
+
     pass
 
 

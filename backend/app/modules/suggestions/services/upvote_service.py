@@ -20,6 +20,7 @@ def _default_signature_verifier(wallet_address: str, message: str, signature_b64
 
 class UpvoteService:
     """Verify a wallet signature and record an upvote on a suggestion."""
+
     def __init__(
         self,
         suggestion_store: SuggestionStore,

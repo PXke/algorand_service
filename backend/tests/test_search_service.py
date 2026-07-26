@@ -147,6 +147,7 @@ def test_parse_highlights_prefers_body_snippet() -> None:
 
 def test_search_typesense_parses_highlights(monkeypatch: pytest.MonkeyPatch) -> None:
     """Uses Typesense when configured, forwarding tuned query params and parsing hit highlights."""
+
     class _FakeDocuments:
         def search(self, params: tuple) -> dict:
             assert params["highlight_fields"] == "title,summary,body"

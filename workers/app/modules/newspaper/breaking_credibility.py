@@ -9,6 +9,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class BreakingAssessment:
     """Whether a breaking-tier draft is credible enough to auto-publish."""
+
     credible: bool
     reason: str
     method: str

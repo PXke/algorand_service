@@ -16,6 +16,7 @@ from app.modules.suggestions.stores.upvote_factory import UpvoteStore, get_upvot
 
 class SuggestionService:
     """Verify a treasury payment and record a new service suggestion."""
+
     def __init__(
         self,
         chain_repository: ChainRepository,

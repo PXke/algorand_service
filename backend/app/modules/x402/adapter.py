@@ -13,6 +13,7 @@ from robyn import Request
 
 class RobynAdapter:
     """Bridges robyn.Request to x402's HTTPAdapter protocol."""
+
     def __init__(self, request: Request) -> None:
         """Wrap a Robyn Request for the x402 HTTPAdapter protocol."""
         self._request = request

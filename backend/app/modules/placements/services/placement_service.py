@@ -9,6 +9,7 @@ from app.modules.placements.stores.cassandra import PlacementsStore
 
 class PlacementService:
     """Merge sponsored placements into the reader feed."""
+
     def __init__(self, store: PlacementsStore | None = None) -> None:
         """Wire the placements store, defaulting to a fresh instance."""
         self._store = store or PlacementsStore()

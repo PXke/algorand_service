@@ -120,6 +120,7 @@ def test_holder_is_dead_false_when_inspect_fails(monkeypatch: pytest.MonkeyPatch
     # with two writer loops running at once, which this lock exists to
     # prevent.
     """Never treats a lock as dead when the control-plane inspect() call itself fails."""
+
     def _boom(_timeout: int = 5) -> Never:
         raise TimeoutError("broker unreachable")
 

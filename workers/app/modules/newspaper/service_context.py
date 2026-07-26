@@ -25,6 +25,7 @@ from app.modules.pipeline.core.diffing import normalize_text
 @dataclass(frozen=True)
 class ContextPage:
     """One page's content aggregated into a service-watch snapshot."""
+
     url: str
     title: str
     body: str

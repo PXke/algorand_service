@@ -12,6 +12,7 @@ _CHANNEL_ID = re.compile(r"^UC[0-9A-Za-z_-]{20,}$")
 @dataclass(frozen=True)
 class YoutubeTarget:
     """A parsed YouTube scrape target (channel id)."""
+
     channel_id: str
 
 

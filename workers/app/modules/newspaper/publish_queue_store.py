@@ -70,6 +70,7 @@ def is_terminal_outcome(outcome: dict[str, Any]) -> bool:
 @dataclass(frozen=True)
 class QueuedPublishRow:
     """One row in the publish queue awaiting compose/publish."""
+
     queue_id: str
     priority: int
     topic: str

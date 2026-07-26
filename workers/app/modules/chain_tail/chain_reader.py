@@ -8,6 +8,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class RoundTransaction:
     """One transaction read from a newly-indexed round."""
+
     txid: str
     round: int
     sender: str

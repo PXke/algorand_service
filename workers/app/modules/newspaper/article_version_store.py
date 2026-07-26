@@ -47,5 +47,3 @@ def save_article_version(
         (aid, version, title, summary, body, edit_reason, editor, now),
     )
     return version
-
-

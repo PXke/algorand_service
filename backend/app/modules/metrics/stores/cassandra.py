@@ -9,6 +9,7 @@ from datetime import datetime
 @dataclass(frozen=True)
 class StoredPriceSample:
     """One stored price sample row."""
+
     market_cap_usd: float | None
     volume_24h_usd: float | None
 
@@ -16,6 +17,7 @@ class StoredPriceSample:
 @dataclass(frozen=True)
 class StoredPriceBrief:
     """A stored price-metrics brief (windowed stats snapshot)."""
+
     asset_id: str
     asset_name: str
     currency: str

@@ -9,6 +9,7 @@ from app.modules.registry.models import ServiceEntry
 
 class ServiceRegistryRepository(Protocol):
     """Storage interface for the service registry."""
+
     def list_enabled(self) -> list[ServiceEntry]:
         """List enabled service-registry entries."""
         ...
@@ -28,6 +29,7 @@ class ServiceRegistryRepository(Protocol):
 
 class InMemoryServiceRegistryRepository:
     """In-memory service registry for tests."""
+
     def __init__(self, entries: list[ServiceEntry] | None = None) -> None:
         """Seed the in-process registry with the given entries, or none."""
         self._entries = list(entries or [])
@@ -52,6 +54,7 @@ class InMemoryServiceRegistryRepository:
 
 class CassandraServiceRegistryRepository:
     """Cassandra-backed service registry."""
+
     def list_enabled(self) -> list[ServiceEntry]:
         """List enabled service-registry entries."""
         from app.core.cassandra import get_cassandra_session

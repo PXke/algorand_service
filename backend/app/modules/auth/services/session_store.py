@@ -14,6 +14,7 @@ from app.core.config import settings
 @dataclass
 class SessionRecord:
     """A wallet's active login session."""
+
     wallet_address: str
     issued_at_epoch: int
     expires_in_epoch: int
@@ -21,6 +22,7 @@ class SessionRecord:
 
 class SessionStore:
     """Redis-backed session and nonce storage for wallet auth."""
+
     def __init__(self) -> None:
         """Connect to the shared Redis instance backing nonces and sessions."""
         self._redis = redis.from_url(settings.redis_url, decode_responses=True)

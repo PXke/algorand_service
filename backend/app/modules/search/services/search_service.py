@@ -27,6 +27,7 @@ _HIGHLIGHT_AFFIX_TOKENS = 12
 
 class SearchService:
     """Article search: Typesense-backed with a feed-scan fallback."""
+
     def __init__(self, news_service: NewsService | None = None) -> None:
         """Wire the news service used for the feed-scan fallback path."""
         self._news = news_service or NewsService()

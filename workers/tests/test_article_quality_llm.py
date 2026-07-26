@@ -52,6 +52,7 @@ def test_quality_needs_revision_low_repetition() -> None:
 
 def test_grade_article_quality_llm_includes_repetition(monkeypatch: pytest.MonkeyPatch) -> None:
     """Carries the rubric's repetition score and a matching issue message through the LLM grading result."""
+
     class _StubClient:
         def chat_json_object(self, *_a: object, **_kw: object) -> dict:
             return {
@@ -105,6 +106,7 @@ def test_grade_article_quality_llm_includes_critical_distance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Carries the rubric's critical_distance score and a matching issue message through the LLM grading result."""
+
     class _StubClient:
         def chat_json_object(self, *_a: object, **_kw: object) -> dict:
             return {
@@ -177,6 +179,7 @@ def test_partial_rubric_recovered_by_retry_is_not_flagged(monkeypatch: pytest.Mo
 
 def test_grade_failure_falls_back_to_revision_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fails closed to a low-scoring "llm_rubric_error" result that still forces revision when the LLM call itself raises."""
+
     class _BadClient:
         def chat_json_object(self, *_a: object, **_kw: object) -> Never:
             from app.modules.ai.mistral_client import MistralError

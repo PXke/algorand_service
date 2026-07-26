@@ -15,6 +15,7 @@ import msgspec
 
 class Settings(msgspec.Struct, kw_only=True):
     """Backend service configuration, populated from environment variables."""
+
     app_name: str = "algorand-platform-api"
     app_env: str = "dev"
     app_host: str = "0.0.0.0"

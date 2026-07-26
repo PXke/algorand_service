@@ -13,6 +13,7 @@ from app.modules.newspaper.article_store import count_articles_published_on_utc_
 
 class PublishKind(StrEnum):
     """What kind of event triggered this publish candidate."""
+
     WEEKLY_DIGEST = "weekly_digest"
     SERVICE_DISCOVERY = "service_discovery"
     CONTENT_UPDATE = "content_update"
@@ -21,12 +22,14 @@ class PublishKind(StrEnum):
 
 class PublishTier(StrEnum):
     """Publish urgency tier (standard vs. breaking)."""
+
     STANDARD = "standard"
     BREAKING = "breaking"
 
 
 class PublishTopic(StrEnum):
     """Reader-facing topic classification for tags and match keys."""
+
     SCAM_ALERT = "scam_alert"
     NETWORK_INCIDENT = "network_incident"
     SDK_RELEASE = "sdk_release"
@@ -161,6 +164,7 @@ _PRICING_PHRASES = (
 @dataclass(frozen=True)
 class PublishDecision:
     """Whether a publish kind is currently allowed, and why."""
+
     kind: PublishKind
     allowed: bool
     reason: str
@@ -169,6 +173,7 @@ class PublishDecision:
 @dataclass(frozen=True)
 class PublishIntent:
     """The kind/topic/tier a queued row should publish as."""
+
     kind: PublishKind
     topic: PublishTopic
     tier: PublishTier
@@ -596,5 +601,3 @@ def trim_text_to_chars(text: str, max_chars: int) -> str:
         if idx > max_chars * 0.6:
             return cut[:idx].rstrip() + "…"
     return cut.rstrip() + "…"
-
-

@@ -10,6 +10,7 @@ from app.core.config import settings
 @dataclass
 class CheckResult:
     """One dependency's liveness/readiness check outcome."""
+
     name: str
     ok: bool
     detail: str = ""

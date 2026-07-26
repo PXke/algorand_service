@@ -84,6 +84,7 @@ def compose_caption(*, parts: Sequence[str], tags: Sequence[str], max_chars: int
 @dataclass(frozen=True)
 class DistributionResult:
     """Outcome of posting to one distribution channel."""
+
     channel: str
     ok: bool
     detail: str = ""

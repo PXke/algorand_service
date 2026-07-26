@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class ScraperAction:
     """One manually-triggerable admin scraper action."""
+
     action: str
     task: str
     queue: str

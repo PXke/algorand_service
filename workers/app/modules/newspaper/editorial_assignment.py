@@ -10,6 +10,7 @@ from typing import Any
 @dataclass(frozen=True)
 class EditorialBrief:
     """An owner-authored story assignment for the writer."""
+
     brief_id: str
     title: str
     body_markdown: str

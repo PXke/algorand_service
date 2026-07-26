@@ -95,6 +95,7 @@ def _distinct_metrics(text: str) -> list[str]:
 @dataclass(frozen=True)
 class Heuristic:
     """One structural-quality heuristic's observed value vs. threshold."""
+
     name: str
     observed: str
     threshold: str

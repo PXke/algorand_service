@@ -9,6 +9,7 @@ from app.modules.scraper.crawler_types import CrawlerType
 
 class YoutubeCrawlerDriver:
     """CrawlerDriver implementation for YouTube channel sources."""
+
     crawler_type = CrawlerType.YOUTUBE.value
 
     def get_scraper(self, _scrape_url: str) -> BaseScraper:

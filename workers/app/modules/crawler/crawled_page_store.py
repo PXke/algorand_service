@@ -45,6 +45,7 @@ _STOPWORDS = {
 @dataclass(frozen=True)
 class CrawledPageRecord:
     """One stored crawled page and its derived metadata."""
+
     page_id: str
     url: str
     domain: str
@@ -162,5 +163,3 @@ def upsert_crawled_page(
         classifier_score=float(classifier_score),
         crawled_at_epoch=int(now.timestamp()),
     )
-
-
