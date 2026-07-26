@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from celery import Task
 
     from app.modules.ai.content_signals import ContentSignals
+    from app.modules.newspaper.editorial_assignment import EditorialBrief
 
 from app.celery_app import celery_app
 from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
@@ -590,97 +591,59 @@ def _run_pre_compose_vetoes(ctx: _ComposeVetoCtx) -> dict | None:
     return None
 
 
-@single_flight(lambda row, **_kw: f"compose:{row.queue_id}", ttl=1800)
-def publish_from_queued_row(
-    row: QueuedPublishRow,
-    *,
-    publish_tier: PublishTier | None = None,
-    enforce_domain_cap: bool = True,
-) -> dict[str, str]:
-    """Compose and insert one queue item (caller marks queue done).
-
-    Two stacked single_flight locks:
-    - ``compose:{queue_id}`` (per-row): a row is never composed twice at once.
-
-    The global ``compose:article`` mutex is acquired inside the Mistral writer
-    entry points (``_compose_via_writer_tools``, edit compose) so every path —
-    queue drain, admin recompose, editorial assignment — shares one gate.
-
-    A concurrent caller gets ``already_running`` and leaves its row pending for
-    the next beat.
-    """
-    from app.modules.ai.mistral_client import MistralCreditError, MistralError
-    from app.modules.ai.story_spike import StorySpikedError
-    from app.modules.newspaper.security import sanitize_body
-
-    payload = row.payload
-    publish_kind = PublishKind(row.publish_kind)
-    try:
-        topic = PublishTopic(row.topic)
-    except ValueError:
-        topic = PublishTopic.GENERIC
-    mistral_only = bool(payload.get("mistral_only", False))
-    tier_raw = publish_tier or payload.get("tier", PublishTier.STANDARD.value)
-    try:
-        tier = PublishTier(tier_raw) if isinstance(tier_raw, str) else tier_raw
-    except ValueError:
-        tier = PublishTier.STANDARD
-
+def _try_composing_as_edit(row: QueuedPublishRow, payload: dict) -> dict[str, str] | None:
+    """If this row is a still-open-window edit, apply it and return the result. Otherwise (never routed to edit, or the edit window has since closed) mutates payload to the create path and returns None so the caller proceeds with a fresh compose."""
     publish_mode = str(payload.get("publish_mode", "create"))
     linked_article_id = str(payload.get("linked_article_id", "")).strip()
-    if publish_mode == "edit" and linked_article_id:
-        from app.modules.newspaper.article_matching import is_edit_window_open
+    if not (publish_mode == "edit" and linked_article_id):
+        return None
 
-        if is_edit_window_open(linked_article_id):
-            from app.modules.newspaper.article_edit_service import run_article_edit
+    from app.modules.newspaper.article_matching import is_edit_window_open
 
-            try:
-                return run_article_edit(row)
-            except ComposeBusyError:
-                return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
-        # publish_mode was decided at INGEST time; a row can sit pending for
-        # days behind cooldowns (observed: a 4-day-old edit row, 2026-07-17
-        # audit) and drain long after the linked article's edit window closed.
-        # Editing a days-old article from a stale routing decision is wrong —
-        # fall through to the create path instead, which is exactly what
-        # resolve_publish_mode would have decided today. Mutating the payload
-        # keeps the downstream match-key registration (keyed on publish_mode
-        # == "create") consistent with the path actually taken.
-        logger.info(
-            "edit window closed for linked article %s — composing as new article",
-            linked_article_id,
-        )
-        publish_mode = "create"
-        payload["publish_mode"] = "create"
-        payload.pop("linked_article_id", None)
+    if is_edit_window_open(linked_article_id):
+        from app.modules.newspaper.article_edit_service import run_article_edit
 
-    # We ALWAYS resolve the compose domain (registrable: domain_from_url
-    # collapses forum.folks.finance -> folks.finance, so subdomains of one
-    # project share the cap/cooldown) so the compose is RECORDED below —
-    # stamping the cooldown that spaces out the next article — even when
-    # enforce_domain_cap is False and the cap veto itself is skipped.
-    compose_domain = _compose_domain_for_row(row)
+        try:
+            return run_article_edit(row)
+        except ComposeBusyError:
+            return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
+    # publish_mode was decided at INGEST time; a row can sit pending for
+    # days behind cooldowns (observed: a 4-day-old edit row, 2026-07-17
+    # audit) and drain long after the linked article's edit window closed.
+    # Editing a days-old article from a stale routing decision is wrong —
+    # fall through to the create path instead, which is exactly what
+    # resolve_publish_mode would have decided today. Mutating the payload
+    # keeps the downstream match-key registration (keyed on publish_mode
+    # == "create") consistent with the path actually taken.
+    logger.info(
+        "edit window closed for linked article %s — composing as new article", linked_article_id
+    )
+    payload["publish_mode"] = "create"
+    payload.pop("linked_article_id", None)
+    return None
 
-    # Classifier signals for the ACTUAL context about to be handed to Mistral
-    # (page_text, same bundle compose_scrape_article receives — for web/service
-    # sources this is the aggregated service_context, not just the raw page).
-    # Computed once at ingest and carried on the payload; recompute only for
-    # rows queued before signals existed. Read BEFORE the vetoes so the
-    # content-quality one can skip the Mistral call entirely, not just the feed.
+
+def _resolve_classifier_signals(
+    row: QueuedPublishRow, payload: dict, page_text_for_clf: str
+) -> tuple[ContentSignals, str, bool | None, float]:
+    """Classifier verdict for the actual context about to be handed to Mistral.
+
+    Computed once at ingest and carried on the payload; recomputed here for
+    rows queued before signals existed. A null decision frozen into the
+    payload at INGEST time would otherwise hold the article for review
+    forever — even after the config that caused it changed (rows enqueued
+    under training mode's sampling=1.0 all carry null) and even after the
+    nightly retrain improves the model — so a frozen None is re-asked here
+    with today's model and thresholds; only a fresh None (a genuinely
+    low-confidence call) still routes to human review.
+    """
     from app.modules.ai.content_signals import ContentSignals, compute_content_signals
 
-    page_text_for_clf = str(payload.get("page_text", ""))
     signals = ContentSignals.from_payload(payload.get("signals")) or compute_content_signals(
         page_text_for_clf, row.scrape_url
     )
     clf_category = signals.category
     clf_decision, clf_confidence = signals.publish_decision, signals.confidence
-    # A null decision frozen into the payload at INGEST time holds the article
-    # for review forever — even after the config that caused it changed (rows
-    # enqueued under training mode's sampling=1.0 all carry null) and even
-    # after the nightly retrain improves the model. Re-ask the classifier at
-    # compose time with today's model and thresholds; only a fresh None (a
-    # genuinely low-confidence call) still routes to human review.
     if clf_decision is None:
         try:
             from app.modules.ai.publish_classifier import predict_publish
@@ -692,23 +655,10 @@ def publish_from_queued_row(
             logger.warning(
                 "compose-time classifier refresh failed for %s", row.scrape_url, exc_info=True
             )
+    return signals, clf_category, clf_decision, clf_confidence
 
-    # Pre-compose vetoes (_PRE_COMPOSE_VETOES): pending review already covers
-    # this URL, per-website daily cap, near-duplicate headline, content
-    # quality — in that order, before any enrichment gathering or Mistral spend.
-    veto_outcome = _run_pre_compose_vetoes(
-        _ComposeVetoCtx(
-            row=row,
-            publish_kind=publish_kind,
-            compose_domain=compose_domain,
-            enforce_domain_cap=enforce_domain_cap,
-            signals=signals,
-        )
-    )
-    if veto_outcome is not None:
-        return veto_outcome
 
-    enrichment_block = ""
+def _gather_publish_enrichment(row: QueuedPublishRow, payload: dict, topic: PublishTopic) -> str:
     try:
         from app.core import config as worker_config
         from app.modules.newspaper.writer_enrichment import (
@@ -716,33 +666,47 @@ def publish_from_queued_row(
             gather_writer_enrichment,
         )
 
-        if worker_config.WRITER_ENRICHMENT_ENABLED:
-            bundle = gather_writer_enrichment(
-                service_id=row.service_id,
-                display_name=row.display_name,
-                source_url=row.scrape_url,
-                page_text=str(payload.get("page_text", "")),
-                page_title=str(payload.get("page_title", "")),
-                diff=payload.get("diff"),
-                is_first_snapshot=bool(payload.get("is_first_snapshot", False)),
-                publish_topic=topic,
-                match_kind=str(payload.get("match_kind", "")),
-                match_value=str(payload.get("match_value", "")),
-            )
-            enrichment_block = format_enrichment_for_writer(bundle)
+        if not worker_config.WRITER_ENRICHMENT_ENABLED:
+            return ""
+        bundle = gather_writer_enrichment(
+            service_id=row.service_id,
+            display_name=row.display_name,
+            source_url=row.scrape_url,
+            page_text=str(payload.get("page_text", "")),
+            page_title=str(payload.get("page_title", "")),
+            diff=payload.get("diff"),
+            is_first_snapshot=bool(payload.get("is_first_snapshot", False)),
+            publish_topic=topic,
+            match_kind=str(payload.get("match_kind", "")),
+            match_value=str(payload.get("match_value", "")),
+        )
+        return format_enrichment_for_writer(bundle)
     except Exception:
-        enrichment_block = ""
+        return ""
 
-    # A CONTENT_UPDATE for a service with no published article would report
-    # "what changed" on a service readers have never met (its one-shot
-    # discovery row may have expired unpublished) — compose an introduction
-    # instead. Checked at compose time, not enqueue, so it adds zero enqueue
-    # dynamics (the old prior==0 discovery re-fire caused a queue flood).
-    first_coverage = False
-    if publish_kind == PublishKind.CONTENT_UPDATE:
-        from app.modules.newspaper.article_matching import service_has_article
 
-        first_coverage = not service_has_article(row.service_id)
+def _is_first_coverage(row: QueuedPublishRow, publish_kind: PublishKind) -> bool:
+    """A CONTENT_UPDATE for a service with no published article would report "what changed" on a service readers have never met (its one-shot discovery row may have expired unpublished) — compose an introduction instead. Checked at compose time, not enqueue, so it adds zero enqueue dynamics (the old prior==0 discovery re-fire caused a queue flood)."""
+    if publish_kind != PublishKind.CONTENT_UPDATE:
+        return False
+    from app.modules.newspaper.article_matching import service_has_article
+
+    return not service_has_article(row.service_id)
+
+
+def _compose_or_error(
+    row: QueuedPublishRow,
+    payload: dict,
+    *,
+    topic: PublishTopic,
+    publish_kind: PublishKind,
+    mistral_only: bool,
+    enrichment_block: str,
+    first_coverage: bool,
+) -> tuple[ArticleComposeResult | None, dict[str, str] | None]:
+    """Compose the article via Mistral. Returns (composed_result, None) on success, or (None, error_response) on a busy-lock, writer-spike, or Mistral failure."""
+    from app.modules.ai.mistral_client import MistralCreditError, MistralError
+    from app.modules.ai.story_spike import StorySpikedError
 
     try:
         composed = compose_scrape_article(
@@ -764,8 +728,9 @@ def publish_from_queued_row(
             brief_id=str(payload.get("brief_id", "")),
             first_coverage=first_coverage,
         )
+        return composed, None
     except ComposeBusyError:
-        return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
+        return None, {"status": "already_running", "key": COMPOSE_LOCK_KEY}
     except StorySpikedError as spike:
         # The writer refused to compose this story (abort_article tool) — a
         # judgment call, resolved cleanly (no retry this cycle). An admin can
@@ -777,7 +742,7 @@ def publish_from_queued_row(
             spike.category,
             spike.reason,
         )
-        return {
+        return None, {
             "status": "aborted_by_writer",
             "service_id": row.service_id,
             "reason": f"{spike.category}: {spike.reason}",
@@ -786,39 +751,37 @@ def publish_from_queued_row(
         credit_issue = isinstance(exc, MistralCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
         logger.error("Mistral compose failed for %s (%s): %s", row.service_id, row.scrape_url, exc)
-        return {
-            "status": status,
-            "service_id": row.service_id,
-            "detail": str(exc),
-        }
+        return None, {"status": status, "service_id": row.service_id, "detail": str(exc)}
 
-    # Writer-declared breaking news (mark_breaking_news tool) replaces the
-    # deterministic keyword classifier disabled 2026-07-17 — see
-    # classify_publish_tier's docstring. Upgrading tier here, before the cap
-    # check and the "Breaking:" prefix below, means the writer's call flows
-    # through the SAME tested cap/prefix/pacing-bypass machinery the old
-    # (broken-detection, sound-mechanics) system used — only the DECISION
-    # MAKER changed, from a page-text substring scan to the model that
-    # actually researched the story.
+
+def _maybe_upgrade_to_breaking(
+    tier: PublishTier, composed: ArticleComposeResult, row: QueuedPublishRow
+) -> PublishTier:
+    """Writer-declared breaking news (mark_breaking_news tool) replaces the deterministic keyword classifier disabled 2026-07-17 — see classify_publish_tier's docstring. Upgrading tier here, before the cap check and the "Breaking:" prefix downstream, means the writer's call flows through the SAME tested cap/prefix/pacing-bypass machinery the old (broken-detection, sound-mechanics) system used — only the DECISION MAKER changed, from a page-text substring scan to the model that actually researched the story."""
     if _writer_flagged_breaking(tier, composed):
         logger.info("writer marked %s breaking: %s", row.service_id, composed.breaking_reason)
-        tier = PublishTier.BREAKING
+        return PublishTier.BREAKING
+    return tier
 
-    # Classifier gate: only confidently publish-worthy content goes straight
-    # to the feed. Everything else is stored unpublished and queued for admin
-    # review — approving the review item publishes the article.
 
-    # Quality veto on the auto-publish path: a draft Classifier A would send
-    # straight to the feed is diverted into the human-review path below when the
-    # deterministic gatekeeper fails under GATEKEEPER_ENFORCE (default off).
-    # A defunct-entity hit (body links a domain the research proved unreachable)
-    # is a hard divert regardless of grade — the prose likely recommends
-    # something dead, which a human must judge (MyAlgo incident 2026-07-19).
+def _determine_review_divert(
+    composed: ArticleComposeResult,
+    *,
+    clf_decision: bool | None,
+    page_text_for_clf: str,
+    source_url: str,
+) -> tuple[bool, tuple[str, ...], str]:
+    """Whether this draft must be diverted to human review, and why. Returns (gate_enforced_review, defunct_domains, hold_reason).
+
+    A defunct-entity hit (body links a domain the research proved
+    unreachable) is a hard divert regardless of grade — the prose likely
+    recommends something dead, which a human must judge (MyAlgo incident
+    2026-07-19). Unsourced hard specifics (fabricated traction/funding
+    counts or named partners not in the research) are a hard divert too — a
+    human must judge whether the specific is real-but-unsourced or invented
+    (GoPlausible incident 2026-07-20).
+    """
     defunct_domains = tuple(getattr(composed, "defunct_domains", ()) or ())
-    # Unsourced hard specifics (fabricated traction/funding counts or named
-    # partners not in the research) are a hard divert too — a human must judge
-    # whether the specific is real-but-unsourced or invented (GoPlausible
-    # incident 2026-07-20). Empty unless unsourced_specifics_gate ENFORCE is on.
     unsourced_hold_reason = str(getattr(composed, "unsourced_hold_reason", "") or "")
     gate_enforced_review = (
         _gate_enforces_review(
@@ -826,7 +789,7 @@ def publish_from_queued_row(
             title=composed.title,
             body=composed.body,
             page_text=page_text_for_clf,
-            source_url=row.scrape_url,
+            source_url=source_url,
         )
         or _quality_floor_fails(getattr(composed, "heuristic_grade", None))
         or bool(defunct_domains)
@@ -835,283 +798,344 @@ def publish_from_queued_row(
     if defunct_domains:
         logger.warning(
             "defunct-entity gate diverting %s to review — dead linked domain(s): %s",
-            row.scrape_url,
+            source_url,
             ", ".join(defunct_domains),
         )
     if unsourced_hold_reason:
         logger.warning(
             "unsourced-specifics gate diverting %s to review — %s",
-            row.scrape_url,
+            source_url,
             unsourced_hold_reason,
         )
     # Human-readable divert reason for the review card, so a reviewer sees WHAT
     # tripped the hold (which dead domain / which unsourced specifics) instead of
     # a bare "diverted_by: gatekeeper" and having to re-read the whole draft.
-    _hold_reasons: list[str] = []
+    hold_reasons: list[str] = []
     if defunct_domains:
-        _hold_reasons.append("dead linked domain(s): " + ", ".join(defunct_domains[:5]))
+        hold_reasons.append("dead linked domain(s): " + ", ".join(defunct_domains[:5]))
     if unsourced_hold_reason:
-        _hold_reasons.append(unsourced_hold_reason)
-    hold_reason = "; ".join(_hold_reasons)
+        hold_reasons.append(unsourced_hold_reason)
+    return gate_enforced_review, defunct_domains, "; ".join(hold_reasons)
 
-    # Resolve a hero/brand image when the upstream payload carried none, so both
-    # the feed tile and the social/OG card show real artwork (best-effort). A
-    # true share image (og/twitter) is also embedded in the body; a brand logo
-    # populates image_url only (it's not a body banner).
-    _payload_og = _validated_hero_checked(str(payload.get("og_image", "")).strip(), row.scrape_url)
-    hero_image = _payload_og
-    image_field = _payload_og
-    if not _payload_og:
-        try:
-            from app.modules.newspaper.source_image import resolve_article_images
 
-            # body-sources fallback covers lanes with no fetchable source_url
-            # (editorial://brief/…, mail://message/…): the writer's own cited
-            # research links are the only place a real image can come from.
-            # Validation runs INSIDE the resolver (anchored to the page that
-            # declared each image) so a dead declared og:image can't
-            # short-circuit past the cited-links fallback.
-            _og, _logo = resolve_article_images(
-                source_url=row.scrape_url,
-                service_id=row.service_id,
-                body=composed.body,
-                validate=_validated_hero_checked,
-            )
-            hero_image = _og
-            image_field = _og or _logo
-        except Exception:
-            logger.warning("failed to resolve source images for %s", row.scrape_url, exc_info=True)
+def _resolve_hero_and_image(
+    payload: dict, row: QueuedPublishRow, composed: ArticleComposeResult
+) -> tuple[str, str]:
+    """Resolve a hero/brand image when the upstream payload carried none, so both the feed tile and the social/OG card show real artwork (best-effort). A true share image (og/twitter) is also embedded in the body; a brand logo populates image_url only (it's not a body banner). Returns (hero_image, image_field)."""
+    payload_og = _validated_hero_checked(str(payload.get("og_image", "")).strip(), row.scrape_url)
+    if payload_og:
+        return payload_og, payload_og
+    try:
+        from app.modules.newspaper.source_image import resolve_article_images
 
-    # Autonomous mode for fresh content (owner decision 2026-07-12): content
-    # the classifier wasn't confident about no longer waits on a human click
-    # if it clears the same strict AND-gate recompose uses (grade + headline +
-    # gatekeeper factuality). A review row is still written and immediately
-    # resolved "auto_approved" so the audit trail stays visible in admin —
-    # deliberately never fed into classifier_feedback (that table trains from
-    # HUMAN labels; an auto-decision isn't one).
-    needs_review = clf_decision is not True or gate_enforced_review
-    route_to_backlog = False
-    if needs_review:
-        fresh_auto_approved, fresh_auto_meta = _fresh_auto_approve_passes(
-            title=composed.title,
-            body=composed.body,
-            page_text=page_text_for_clf,
+        # body-sources fallback covers lanes with no fetchable source_url
+        # (editorial://brief/…, mail://message/…): the writer's own cited
+        # research links are the only place a real image can come from.
+        # Validation runs INSIDE the resolver (anchored to the page that
+        # declared each image) so a dead declared og:image can't
+        # short-circuit past the cited-links fallback.
+        og, logo = resolve_article_images(
             source_url=row.scrape_url,
-            defunct_domains=defunct_domains,
-            unsourced_hold_reason=unsourced_hold_reason,
-        )
-        if fresh_auto_approved:
-            # An auto-approved article is approved, not exempt from cadence:
-            # it may publish NOW only when the standard interval has elapsed
-            # and a daily slot is free; otherwise the finished draft is stored
-            # unlisted and queued in pending_feed_queue for the paced backlog
-            # release. Without this gate a drain run with several
-            # auto-approvable rows chain-published them minutes apart — three
-            # articles in a row on 2026-07-15, because the review branch
-            # bypasses publish pacing by design and an "auto-published"
-            # outcome advanced neither the pacing clock nor the run budget.
-            if tier == PublishTier.BREAKING:
-                pacing_open = True  # breaking is urgent by definition
-            else:
-                from app.modules.newspaper.publish_policy import (
-                    remaining_standard_publish_slots,
-                )
-                from app.modules.newspaper.publish_schedule import (
-                    is_standard_publish_due,
-                )
-
-                due, _due_detail = is_standard_publish_due()
-                pacing_open = due and remaining_standard_publish_slots() > 0
-            if pacing_open:
-                needs_review = False
-            else:
-                route_to_backlog = True
-            from app.modules.crawler.classifier_review_store import (
-                complete_classifier_review,
-                enqueue_classifier_review,
-            )
-
-            auto_review_id = enqueue_classifier_review(
-                url=row.scrape_url,
-                page_text=page_text_for_clf,
-                page_title=str(payload.get("page_title", "")) or composed.title,
-                category=clf_category,
-                storage_score=signals.storage_score,
-                metadata={
-                    "source": _source_kind_from_url(row.scrape_url) or "web",
-                    "confidence": f"{clf_confidence:.3f}",
-                    "categories": ",".join(signals.categories),
-                    "diverted_by": "gatekeeper" if gate_enforced_review else "classifier",
-                    "og_image": image_field,
-                    "service_id": row.service_id,
-                    "auto_route": "backlog" if route_to_backlog else "publish",
-                    **fresh_auto_meta,
-                },
-            )
-            complete_classifier_review(auto_review_id, resolution="auto_approved")
-
-    if needs_review or route_to_backlog:
-        from app.modules.crawler.classifier_review_store import (
-            enqueue_classifier_review,
-            has_pending_review_for_url,
-        )
-        from app.modules.newspaper.article_store import insert_stored_article
-
-        if has_pending_review_for_url(row.scrape_url):
-            return {
-                "status": "duplicate_review_pending",
-                "service_id": row.service_id,
-            }
-        from app.modules.crawler.classifier_review_store import review_queue_full
-
-        # Backlog-bound drafts are already approved — the review slot being
-        # occupied must not block them.
-        if not route_to_backlog and review_queue_full():
-            return {"status": "review_queue_full", "service_id": row.service_id}
-
-        held_kind = _source_kind_from_url(row.scrape_url)
-        held_title, held_summary = composed.title, composed.summary
-        held_tags = _merge_tags(
-            derive_article_tags(
-                service_id=row.service_id,
-                source_kind=held_kind,
-                title=held_title,
-                publish_kind=composed.publish_kind or publish_kind.value,
-                publish_topic=_effective_alert_topic(topic, composed).value,
-                publish_tier=tier.value,
-            ),
-            getattr(composed, "extra_tags", ()),
-        )
-        held_article_id, _ = insert_stored_article(
             service_id=row.service_id,
-            title=held_title,
-            summary=held_summary,
-            body=_with_hero_image(
-                sanitize_body(composed.body), hero_image, held_title, source_url=row.scrape_url
-            ),
-            trigger_txid=str(payload.get("txid", "")),
-            trigger_round=int(payload.get("round_num", 0)),
-            source_url=row.scrape_url,
-            publish_to_feed=False,
-            image_url=image_field,
-            tags=held_tags,
-            prompt_version=getattr(composed, "prompt_version", ""),
+            body=composed.body,
+            validate=_validated_hero_checked,
         )
-        # Grade the draft so the human reviewer sees a quality score + reasons.
-        grade_meta: dict[str, str] = {}
-        try:
-            import json as _json
+        return og, (og or logo)
+    except Exception:
+        logger.warning("failed to resolve source images for %s", row.scrape_url, exc_info=True)
+        return "", ""
 
-            from app.modules.newspaper.article_grader import grade_article_draft
 
-            grade = grade_article_draft(
-                title=held_title,
-                body=composed.body,
-                source_url=row.scrape_url,
-                published_at=str(payload.get("published_at", "")),
-                tags=tuple(held_tags),
-            )
-            grade_meta = {
-                "grade": str(grade["grade"]),
-                "grade_detail": _json.dumps(
-                    {"subscores": grade["subscores"], "issues": grade["issues"]},
-                    separators=(",", ":"),
-                ),
-            }
-        except Exception:
-            grade_meta = {}
-        # Deterministic gatekeeper: completeness + trace<->article numeric
-        # entailment, surfaced to the reviewer. Shadow by default (computes and
-        # annotates); GATEKEEPER_ENFORCE wires through for an auto-publish path.
-        try:
-            from app.modules.gatekeeper.live import gate_draft
+def _pacing_open_for_auto_approve(tier: PublishTier) -> bool:
+    if tier == PublishTier.BREAKING:
+        return True  # breaking is urgent by definition
+    from app.modules.newspaper.publish_policy import remaining_standard_publish_slots
+    from app.modules.newspaper.publish_schedule import is_standard_publish_due
 
-            gate = gate_draft(
-                source_text=page_text_for_clf,
-                article_text=f"{held_title}\n{composed.body}",
-                service_id=row.scrape_url,
-            )
-            if gate is not None:
-                grade_meta.update(gate.as_metadata())
-        except Exception:
-            logger.warning("gatekeeper grading failed for %s", row.scrape_url, exc_info=True)
-        review_id = ""
-        if not route_to_backlog:
-            review_id = enqueue_classifier_review(
-                url=row.scrape_url,
-                page_text=page_text_for_clf,
-                page_title=str(payload.get("page_title", "")) or held_title,
-                category=clf_category,
-                storage_score=signals.storage_score,
-                metadata={
-                    "article_id": held_article_id,
-                    "source": held_kind or "web",
-                    "confidence": f"{clf_confidence:.3f}",
-                    "categories": ",".join(signals.categories),
-                    "diverted_by": "gatekeeper" if gate_enforced_review else "classifier",
-                    # recompose_review carries these forward — without og_image
-                    # here, every recomposed article silently lost its image.
-                    "og_image": image_field,
-                    "service_id": row.service_id,
-                    **({"hold_reason": hold_reason[:400]} if hold_reason else {}),
-                    **grade_meta,
-                },
-            )
-        # A held-for-review draft is a created article — count it toward the
-        # per-website daily cap so a domain can't exceed its COMPOSE_MAX_PER_DOMAIN_PER_DAY.
-        if compose_domain:
-            from app.modules.crawler.domain_tracker import record_domain_compose
+    due, _due_detail = is_standard_publish_due()
+    return due and remaining_standard_publish_slots() > 0
 
-            record_domain_compose(compose_domain)
-        if row.service_id:
-            from app.modules.crawler.domain_tracker import record_service_compose
 
-            record_service_compose(row.service_id)
-        if payload.get("source_kind") == "editorial_assignment":
-            from app.modules.newspaper.editorial_assignment import mark_brief_run
+def _maybe_auto_approve(
+    *,
+    needs_review: bool,
+    tier: PublishTier,
+    composed: ArticleComposeResult,
+    page_text_for_clf: str,
+    row: QueuedPublishRow,
+    payload: dict,
+    defunct_domains: tuple[str, ...],
+    unsourced_hold_reason: str,
+    clf_category: str,
+    clf_confidence: float,
+    signals: ContentSignals,
+    gate_enforced_review: bool,
+    image_field: str,
+) -> tuple[bool, bool]:
+    """Autonomous mode for fresh content (owner decision 2026-07-12): content the classifier wasn't confident about no longer waits on a human click if it clears the same strict AND-gate recompose uses (grade + headline + gatekeeper factuality). A review row is still written and immediately resolved "auto_approved" so the audit trail stays visible in admin — deliberately never fed into classifier_feedback (that table trains from HUMAN labels; an auto-decision isn't one). Returns (needs_review, route_to_backlog)."""
+    if not needs_review:
+        return needs_review, False
+    fresh_auto_approved, fresh_auto_meta = _fresh_auto_approve_passes(
+        title=composed.title,
+        body=composed.body,
+        page_text=page_text_for_clf,
+        source_url=row.scrape_url,
+        defunct_domains=defunct_domains,
+        unsourced_hold_reason=unsourced_hold_reason,
+    )
+    if not fresh_auto_approved:
+        return needs_review, False
 
-            with contextlib.suppress(Exception):
-                mark_brief_run(
-                    brief_id=str(payload.get("brief_id", "")), article_id=held_article_id
-                )
-        if route_to_backlog:
-            # Approved but the cadence/cap is closed: hand the finished
-            # article to pending_feed_queue — _release_pending_feed_backlog
-            # ships it later at the standard pace (re-stamping published_at
-            # at release, same as the admin approve-when-capped path).
-            from datetime import UTC as _UTC
-            from datetime import datetime as _dt
-            from uuid import UUID
+    # An auto-approved article is approved, not exempt from cadence: it may
+    # publish NOW only when the standard interval has elapsed and a daily
+    # slot is free; otherwise the finished draft is stored unlisted and
+    # queued in pending_feed_queue for the paced backlog release. Without
+    # this gate a drain run with several auto-approvable rows chain-
+    # published them minutes apart — three articles in a row on 2026-07-15,
+    # because the review branch bypasses publish pacing by design and an
+    # "auto-published" outcome advanced neither the pacing clock nor the run
+    # budget.
+    pacing_open = _pacing_open_for_auto_approve(tier)
+    if pacing_open:
+        needs_review = False
+    route_to_backlog = not pacing_open
 
-            from app.core import config as worker_config
-            from app.core.cassandra import get_cassandra_session
-            from app.core.statements import PendingFeedStmts
+    from app.modules.crawler.classifier_review_store import (
+        complete_classifier_review,
+        enqueue_classifier_review,
+    )
 
-            get_cassandra_session().execute(
-                PendingFeedStmts.INSERT,
-                (
-                    worker_config.NEWS_FEED_BUCKET or "main",
-                    0.0,  # interest unknown here; FIFO within the day is fine
-                    _dt.now(tz=_UTC),
-                    UUID(held_article_id),
-                ),
-            )
-            return {
-                "status": "approved_backlog",
-                "service_id": row.service_id,
+    auto_review_id = enqueue_classifier_review(
+        url=row.scrape_url,
+        page_text=page_text_for_clf,
+        page_title=str(payload.get("page_title", "")) or composed.title,
+        category=clf_category,
+        storage_score=signals.storage_score,
+        metadata={
+            "source": _source_kind_from_url(row.scrape_url) or "web",
+            "confidence": f"{clf_confidence:.3f}",
+            "categories": ",".join(signals.categories),
+            "diverted_by": "gatekeeper" if gate_enforced_review else "classifier",
+            "og_image": image_field,
+            "service_id": row.service_id,
+            "auto_route": "backlog" if route_to_backlog else "publish",
+            **fresh_auto_meta,
+        },
+    )
+    complete_classifier_review(auto_review_id, resolution="auto_approved")
+    return needs_review, route_to_backlog
+
+
+def _review_grade_metadata(
+    row: QueuedPublishRow,
+    payload: dict,
+    composed: ArticleComposeResult,
+    *,
+    held_title: str,
+    held_tags: tuple[str, ...],
+    page_text_for_clf: str,
+) -> dict[str, str]:
+    """Quality grade + gatekeeper metadata for a held-for-review draft, so the reviewer sees a score and reasons instead of the bare draft."""
+    grade_meta: dict[str, str] = {}
+    try:
+        import json as _json
+
+        from app.modules.newspaper.article_grader import grade_article_draft
+
+        grade = grade_article_draft(
+            title=held_title,
+            body=composed.body,
+            source_url=row.scrape_url,
+            published_at=str(payload.get("published_at", "")),
+            tags=tuple(held_tags),
+        )
+        grade_meta = {
+            "grade": str(grade["grade"]),
+            "grade_detail": _json.dumps(
+                {"subscores": grade["subscores"], "issues": grade["issues"]},
+                separators=(",", ":"),
+            ),
+        }
+    except Exception:
+        grade_meta = {}
+    # Deterministic gatekeeper: completeness + trace<->article numeric
+    # entailment, surfaced to the reviewer. Shadow by default (computes and
+    # annotates); GATEKEEPER_ENFORCE wires through for an auto-publish path.
+    try:
+        from app.modules.gatekeeper.live import gate_draft
+
+        gate = gate_draft(
+            source_text=page_text_for_clf,
+            article_text=f"{held_title}\n{composed.body}",
+            service_id=row.scrape_url,
+        )
+        if gate is not None:
+            grade_meta.update(gate.as_metadata())
+    except Exception:
+        logger.warning("gatekeeper grading failed for %s", row.scrape_url, exc_info=True)
+    return grade_meta
+
+
+def _hold_for_review(
+    row: QueuedPublishRow,
+    payload: dict,
+    composed: ArticleComposeResult,
+    *,
+    tier: PublishTier,
+    topic: PublishTopic,
+    publish_kind: PublishKind,
+    compose_domain: str,
+    clf_category: str,
+    clf_confidence: float,
+    signals: ContentSignals,
+    gate_enforced_review: bool,
+    hold_reason: str,
+    hero_image: str,
+    image_field: str,
+    route_to_backlog: bool,
+    page_text_for_clf: str,
+) -> dict[str, str]:
+    """Store the composed draft unpublished and route it to the review queue (or the approved-but-capped backlog). Terminal — always returns a result dict."""
+    from app.modules.crawler.classifier_review_store import (
+        enqueue_classifier_review,
+        has_pending_review_for_url,
+    )
+    from app.modules.newspaper.article_store import insert_stored_article
+    from app.modules.newspaper.security import sanitize_body
+
+    if has_pending_review_for_url(row.scrape_url):
+        return {"status": "duplicate_review_pending", "service_id": row.service_id}
+    from app.modules.crawler.classifier_review_store import review_queue_full
+
+    # Backlog-bound drafts are already approved — the review slot being
+    # occupied must not block them.
+    if not route_to_backlog and review_queue_full():
+        return {"status": "review_queue_full", "service_id": row.service_id}
+
+    held_kind = _source_kind_from_url(row.scrape_url)
+    held_title, held_summary = composed.title, composed.summary
+    held_tags = _merge_tags(
+        derive_article_tags(
+            service_id=row.service_id,
+            source_kind=held_kind,
+            title=held_title,
+            publish_kind=composed.publish_kind or publish_kind.value,
+            publish_topic=_effective_alert_topic(topic, composed).value,
+            publish_tier=tier.value,
+        ),
+        getattr(composed, "extra_tags", ()),
+    )
+    held_article_id, _ = insert_stored_article(
+        service_id=row.service_id,
+        title=held_title,
+        summary=held_summary,
+        body=_with_hero_image(
+            sanitize_body(composed.body), hero_image, held_title, source_url=row.scrape_url
+        ),
+        trigger_txid=str(payload.get("txid", "")),
+        trigger_round=int(payload.get("round_num", 0)),
+        source_url=row.scrape_url,
+        publish_to_feed=False,
+        image_url=image_field,
+        tags=held_tags,
+        prompt_version=getattr(composed, "prompt_version", ""),
+    )
+    # Grade the draft so the human reviewer sees a quality score + reasons.
+    grade_meta = _review_grade_metadata(
+        row,
+        payload,
+        composed,
+        held_title=held_title,
+        held_tags=tuple(held_tags),
+        page_text_for_clf=page_text_for_clf,
+    )
+    review_id = ""
+    if not route_to_backlog:
+        review_id = enqueue_classifier_review(
+            url=row.scrape_url,
+            page_text=page_text_for_clf,
+            page_title=str(payload.get("page_title", "")) or held_title,
+            category=clf_category,
+            storage_score=signals.storage_score,
+            metadata={
                 "article_id": held_article_id,
-            }
+                "source": held_kind or "web",
+                "confidence": f"{clf_confidence:.3f}",
+                "categories": ",".join(signals.categories),
+                "diverted_by": "gatekeeper" if gate_enforced_review else "classifier",
+                # recompose_review carries these forward — without og_image
+                # here, every recomposed article silently lost its image.
+                "og_image": image_field,
+                "service_id": row.service_id,
+                **({"hold_reason": hold_reason[:400]} if hold_reason else {}),
+                **grade_meta,
+            },
+        )
+    # A held-for-review draft is a created article — count it toward the
+    # per-website daily cap so a domain can't exceed its COMPOSE_MAX_PER_DOMAIN_PER_DAY.
+    if compose_domain:
+        from app.modules.crawler.domain_tracker import record_domain_compose
+
+        record_domain_compose(compose_domain)
+    if row.service_id:
+        from app.modules.crawler.domain_tracker import record_service_compose
+
+        record_service_compose(row.service_id)
+    if payload.get("source_kind") == "editorial_assignment":
+        from app.modules.newspaper.editorial_assignment import mark_brief_run
+
+        with contextlib.suppress(Exception):
+            mark_brief_run(brief_id=str(payload.get("brief_id", "")), article_id=held_article_id)
+    if route_to_backlog:
+        # Approved but the cadence/cap is closed: hand the finished
+        # article to pending_feed_queue — _release_pending_feed_backlog
+        # ships it later at the standard pace (re-stamping published_at
+        # at release, same as the admin approve-when-capped path).
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from uuid import UUID
+
+        from app.core import config as worker_config
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import PendingFeedStmts
+
+        get_cassandra_session().execute(
+            PendingFeedStmts.INSERT,
+            (
+                worker_config.NEWS_FEED_BUCKET or "main",
+                0.0,  # interest unknown here; FIFO within the day is fine
+                _dt.now(tz=_UTC),
+                UUID(held_article_id),
+            ),
+        )
         return {
-            "status": "review",
+            "status": "approved_backlog",
             "service_id": row.service_id,
             "article_id": held_article_id,
-            "review_id": review_id,
         }
+    return {
+        "status": "review",
+        "service_id": row.service_id,
+        "article_id": held_article_id,
+        "review_id": review_id,
+    }
 
+
+def _reserve_slot_or_backlog(
+    row: QueuedPublishRow,
+    composed: ArticleComposeResult,
+    payload: dict,
+    *,
+    hero_image: str,
+    image_field: str,
+    publish_kind: PublishKind,
+    topic: PublishTopic,
+    tier: PublishTier,
+) -> dict[str, str] | None:
+    """Reserve a publish slot for this tier, or hand a STANDARD-tier draft to the capped-backlog stash when the cap/cadence is closed. Returns None when a slot was reserved (proceed to publish), else the terminal result dict."""
     from app.modules.newspaper.publish_daily_guard import (
         PublishCapExceededError,
         assert_publish_allowed,
-        release_publish_slot,
         reserve_publish_slot,
     )
 
@@ -1146,6 +1170,63 @@ def publish_from_queued_row(
                 reason=str(exc),
             )
         return {"status": "rate_limited", "reason": str(exc), "tier": tier.value}
+    return None
+
+
+def _register_publish_match_keys(
+    row: QueuedPublishRow,
+    payload: dict,
+    article_id: str,
+    *,
+    topic: PublishTopic,
+    composed: ArticleComposeResult,
+) -> None:
+    publish_mode = str(payload.get("publish_mode", "create"))
+    if publish_mode != "create":
+        return
+    from app.modules.newspaper.article_matching import (
+        build_match_keys,
+        register_article_match_keys,
+    )
+
+    eff_topic = _effective_alert_topic(topic, composed)
+    keys = payload.get("match_keys")
+    # Keys precomputed at INGEST carry the keyword topic's carve-outs
+    # (body domains/cashtags become edit-routing keys for scam topics).
+    # If the writer didn't confirm the alert, those carve-outs are
+    # exactly what must not register — rebuild under the effective topic.
+    if eff_topic != topic or not isinstance(keys, list) or not keys:
+        keys = build_match_keys(
+            service_id=row.service_id,
+            page_text=str(payload.get("page_text", "")),
+            source_url=row.scrape_url,
+            extra_keywords=("scam",) if eff_topic == PublishTopic.SCAM_ALERT else (),
+            topic=eff_topic.value,
+            match_kind=str(payload.get("match_kind", "")),
+            match_value=str(payload.get("match_value", "")),
+        )
+    else:
+        keys = [
+            (str(k[0]), str(k[1])) for k in keys if isinstance(k, (list, tuple)) and len(k) == 2
+        ]
+    register_article_match_keys(article_id=article_id, keys=keys)
+
+
+def _finalize_publish(
+    row: QueuedPublishRow,
+    payload: dict,
+    composed: ArticleComposeResult,
+    *,
+    hero_image: str,
+    image_field: str,
+    publish_kind: PublishKind,
+    topic: PublishTopic,
+    tier: PublishTier,
+    compose_domain: str,
+) -> dict[str, str]:
+    """Publish the composed draft straight to the live feed: insert, index, distribute, ping IndexNow, register match keys, record compose cadence, and enqueue translations."""
+    from app.modules.newspaper.publish_daily_guard import release_publish_slot
+    from app.modules.newspaper.security import sanitize_body
 
     title, summary, body = composed.title, composed.summary, sanitize_body(composed.body)
     body = _with_hero_image(body, hero_image, title, source_url=row.scrape_url)
@@ -1213,33 +1294,7 @@ def publish_from_queued_row(
             service_id=row.service_id,
         )
     publish_mode = str(payload.get("publish_mode", "create"))
-    if publish_mode == "create":
-        from app.modules.newspaper.article_matching import (
-            build_match_keys,
-            register_article_match_keys,
-        )
-
-        eff_topic = _effective_alert_topic(topic, composed)
-        keys = payload.get("match_keys")
-        # Keys precomputed at INGEST carry the keyword topic's carve-outs
-        # (body domains/cashtags become edit-routing keys for scam topics).
-        # If the writer didn't confirm the alert, those carve-outs are
-        # exactly what must not register — rebuild under the effective topic.
-        if eff_topic != topic or not isinstance(keys, list) or not keys:
-            keys = build_match_keys(
-                service_id=row.service_id,
-                page_text=str(payload.get("page_text", "")),
-                source_url=row.scrape_url,
-                extra_keywords=("scam",) if eff_topic == PublishTopic.SCAM_ALERT else (),
-                topic=eff_topic.value,
-                match_kind=str(payload.get("match_kind", "")),
-                match_value=str(payload.get("match_value", "")),
-            )
-        else:
-            keys = [
-                (str(k[0]), str(k[1])) for k in keys if isinstance(k, (list, tuple)) and len(k) == 2
-            ]
-        register_article_match_keys(article_id=article_id, keys=keys)
+    _register_publish_match_keys(row, payload, article_id, topic=topic, composed=composed)
 
     # Published straight to the feed is a created article — count it toward the
     # per-website daily cap.
@@ -1272,25 +1327,173 @@ def publish_from_queued_row(
     }
 
 
-def run_publish_pipeline(
+@single_flight(lambda row, **_kw: f"compose:{row.queue_id}", ttl=1800)
+def publish_from_queued_row(
+    row: QueuedPublishRow,
     *,
-    service_id: str,
-    display_name: str,
-    scrape_url: str,
-    match_kind: str,
-    match_value: str,
-    txid: str,
-    round_num: int,
-    mistral_only: bool = False,
+    publish_tier: PublishTier | None = None,
+    enforce_domain_cap: bool = True,
 ) -> dict[str, str]:
-    """Scrape source and enqueue via shared ingest path."""
+    """Compose and insert one queue item (caller marks queue done).
+
+    Two stacked single_flight locks:
+    - ``compose:{queue_id}`` (per-row): a row is never composed twice at once.
+
+    The global ``compose:article`` mutex is acquired inside the Mistral writer
+    entry points (``_compose_via_writer_tools``, edit compose) so every path —
+    queue drain, admin recompose, editorial assignment — shares one gate.
+
+    A concurrent caller gets ``already_running`` and leaves its row pending for
+    the next beat.
+    """
+    payload = row.payload
+    publish_kind = PublishKind(row.publish_kind)
+    try:
+        topic = PublishTopic(row.topic)
+    except ValueError:
+        topic = PublishTopic.GENERIC
+    mistral_only = bool(payload.get("mistral_only", False))
+    tier_raw = publish_tier or payload.get("tier", PublishTier.STANDARD.value)
+    try:
+        tier = PublishTier(tier_raw) if isinstance(tier_raw, str) else tier_raw
+    except ValueError:
+        tier = PublishTier.STANDARD
+
+    edit_result = _try_composing_as_edit(row, payload)
+    if edit_result is not None:
+        return edit_result
+
+    # We ALWAYS resolve the compose domain (registrable: domain_from_url
+    # collapses forum.folks.finance -> folks.finance, so subdomains of one
+    # project share the cap/cooldown) so the compose is RECORDED below —
+    # stamping the cooldown that spaces out the next article — even when
+    # enforce_domain_cap is False and the cap veto itself is skipped.
+    compose_domain = _compose_domain_for_row(row)
+
+    page_text_for_clf = str(payload.get("page_text", ""))
+    signals, clf_category, clf_decision, clf_confidence = _resolve_classifier_signals(
+        row, payload, page_text_for_clf
+    )
+
+    # Pre-compose vetoes (_PRE_COMPOSE_VETOES): pending review already covers
+    # this URL, per-website daily cap, near-duplicate headline, content
+    # quality — in that order, before any enrichment gathering or Mistral spend.
+    veto_outcome = _run_pre_compose_vetoes(
+        _ComposeVetoCtx(
+            row=row,
+            publish_kind=publish_kind,
+            compose_domain=compose_domain,
+            enforce_domain_cap=enforce_domain_cap,
+            signals=signals,
+        )
+    )
+    if veto_outcome is not None:
+        return veto_outcome
+
+    enrichment_block = _gather_publish_enrichment(row, payload, topic)
+    first_coverage = _is_first_coverage(row, publish_kind)
+
+    composed, compose_error = _compose_or_error(
+        row,
+        payload,
+        topic=topic,
+        publish_kind=publish_kind,
+        mistral_only=mistral_only,
+        enrichment_block=enrichment_block,
+        first_coverage=first_coverage,
+    )
+    if compose_error is not None:
+        return compose_error
+
+    tier = _maybe_upgrade_to_breaking(tier, composed, row)
+
+    # Classifier gate: only confidently publish-worthy content goes straight
+    # to the feed. Everything else is stored unpublished and queued for admin
+    # review — approving the review item publishes the article.
+
+    # Quality veto on the auto-publish path: a draft Classifier A would send
+    # straight to the feed is diverted into the human-review path below when the
+    # deterministic gatekeeper fails under GATEKEEPER_ENFORCE (default off).
+    gate_enforced_review, defunct_domains, hold_reason = _determine_review_divert(
+        composed,
+        clf_decision=clf_decision,
+        page_text_for_clf=page_text_for_clf,
+        source_url=row.scrape_url,
+    )
+    unsourced_hold_reason = str(getattr(composed, "unsourced_hold_reason", "") or "")
+
+    hero_image, image_field = _resolve_hero_and_image(payload, row, composed)
+
+    needs_review = clf_decision is not True or gate_enforced_review
+    needs_review, route_to_backlog = _maybe_auto_approve(
+        needs_review=needs_review,
+        tier=tier,
+        composed=composed,
+        page_text_for_clf=page_text_for_clf,
+        row=row,
+        payload=payload,
+        defunct_domains=defunct_domains,
+        unsourced_hold_reason=unsourced_hold_reason,
+        clf_category=clf_category,
+        clf_confidence=clf_confidence,
+        signals=signals,
+        gate_enforced_review=gate_enforced_review,
+        image_field=image_field,
+    )
+
+    if needs_review or route_to_backlog:
+        return _hold_for_review(
+            row,
+            payload,
+            composed,
+            tier=tier,
+            topic=topic,
+            publish_kind=publish_kind,
+            compose_domain=compose_domain,
+            clf_category=clf_category,
+            clf_confidence=clf_confidence,
+            signals=signals,
+            gate_enforced_review=gate_enforced_review,
+            hold_reason=hold_reason,
+            hero_image=hero_image,
+            image_field=image_field,
+            route_to_backlog=route_to_backlog,
+            page_text_for_clf=page_text_for_clf,
+        )
+
+    slot_result = _reserve_slot_or_backlog(
+        row,
+        composed,
+        payload,
+        hero_image=hero_image,
+        image_field=image_field,
+        publish_kind=publish_kind,
+        topic=topic,
+        tier=tier,
+    )
+    if slot_result is not None:
+        return slot_result
+
+    return _finalize_publish(
+        row,
+        payload,
+        composed,
+        hero_image=hero_image,
+        image_field=image_field,
+        publish_kind=publish_kind,
+        topic=topic,
+        tier=tier,
+        compose_domain=compose_domain,
+    )
+
+
+def _publish_pipeline_precheck(
+    service_id: str, scrape_url: str, txid: str
+) -> dict[str, str] | None:
+    """Early skip gates evaluated before the (paid) scrape: publish-cap saturation, per-source cooldown, a crawl-disabled domain, and a domain the content-relevance classifier has flagged poor-quality. Returns a skip result, or None to proceed."""
     from app.core import config as worker_config
     from app.modules.newspaper.publish_daily_guard import is_standard_publish_saturated
-    from app.modules.scraper.core.scrape_cooldown import (
-        clear_scrape_cooldown,
-        is_on_cooldown,
-        record_scrape_failure,
-    )
+    from app.modules.scraper.core.scrape_cooldown import is_on_cooldown
 
     if worker_config.CRAWL_PAUSE_WHEN_PUBLISH_CAP_FULL and is_standard_publish_saturated():
         return {
@@ -1314,14 +1517,102 @@ def run_publish_pipeline(
     # because it was approved before that verdict existed. Skip before the
     # scrape so we don't pay for fetching it either. Web-only — chain/mail
     # sources aren't domain-scored.
-    lower_scrape_url = scrape_url.lower()
-    if lower_scrape_url.startswith(("http://", "https://", "browser://")):
+    if scrape_url.lower().startswith(("http://", "https://", "browser://")):
         from app.modules.crawler.domain_tracker import domain_from_url, is_dead_end_domain
 
         early_domain = domain_from_url(scrape_url)
         if early_domain and is_dead_end_domain(early_domain):
             return {"status": "skipped", "reason": "poor_quality_source", "txid": txid}
+    return None
 
+
+def _domain_compose_cap_skip(
+    source_kind: str | None, scrape_url: str, txid: str
+) -> dict[str, str] | None:
+    """Per-domain daily article cap (web sources): a churning page must not be re-composed every poll. Early-out here to avoid enqueuing a candidate the compose stage would reject anyway — the count itself is incremented when an article is actually created (see publish_from_queued_row), so this read is purely an optimization."""
+    if source_kind != "web":
+        return None
+    from app.modules.crawler.domain_tracker import domain_compose_cap_reached, domain_from_url
+
+    compose_domain = domain_from_url(scrape_url)
+    if compose_domain and domain_compose_cap_reached(compose_domain):
+        return {"status": "skipped", "reason": "domain_daily_compose_cap", "txid": txid}
+    return None
+
+
+def _enqueue_web_page_links(source_kind: str | None, result: object, scrape_url: str) -> None:
+    if source_kind != "web":
+        return
+    try:
+        from app.modules.scraper.core.link_extractor import enqueue_page_links
+
+        enqueue_page_links(raw_html=result.raw_html, page_url=scrape_url, source="web")
+    except Exception:
+        logger.warning("failed to enqueue page links from %s", scrape_url, exc_info=True)
+
+
+def _publish_pipeline_page_text(
+    *, service_id: str, display_name: str, scrape_url: str, result: object, source_kind: str | None
+) -> str:
+    """Aggregated service-context text for web sources when enabled, else the raw scraped page text.
+
+    For web services the snapshot/diff/compose unit is the service's
+    aggregated recent pages (all its domains), never just this one URL.
+    Falls back to the single page when there is no harvest yet or
+    aggregation fails. Also re-queues the aggregate's pages for a fresh
+    crawl so next week's aggregate reflects current content.
+    """
+    from app.core import config as worker_config
+
+    if source_kind != "web" or not worker_config.SERVICE_CONTEXT_ENABLED:
+        return result.text
+    try:
+        from app.modules.newspaper.service_context import (
+            build_service_context,
+            refresh_service_pages,
+        )
+
+        page_text = build_service_context(
+            service_id=service_id,
+            display_name=display_name,
+            entry_url=scrape_url,
+            entry_title=result.title,
+            entry_text=result.text,
+        )
+        refresh_service_pages(service_id, entry_url=scrape_url)
+        return page_text
+    except Exception:
+        logger.warning(
+            "service context aggregation failed for %s — using entry page only",
+            service_id,
+            exc_info=True,
+        )
+        return result.text
+
+
+def run_publish_pipeline(
+    *,
+    service_id: str,
+    display_name: str,
+    scrape_url: str,
+    match_kind: str,
+    match_value: str,
+    txid: str,
+    round_num: int,
+    mistral_only: bool = False,
+) -> dict[str, str]:
+    """Scrape source and enqueue via shared ingest path."""
+    from app.core import config as worker_config
+    from app.modules.scraper.core.scrape_cooldown import (
+        clear_scrape_cooldown,
+        record_scrape_failure,
+    )
+
+    precheck_skip = _publish_pipeline_precheck(service_id, scrape_url, txid)
+    if precheck_skip is not None:
+        return precheck_skip
+
+    lower_scrape_url = scrape_url.lower()
     scraper = get_scraper_for_url(scrape_url)
     try:
         result = scraper.scrape(url=scrape_url, source_id=service_id)
@@ -1349,56 +1640,18 @@ def run_publish_pipeline(
                 "txid": txid,
             }
     source_kind = _source_kind_from_url(scrape_url)
-    # Per-domain daily article cap (web sources): a churning page must not be
-    # re-composed every poll. Early-out here to avoid enqueuing a candidate the
-    # compose stage would reject anyway. The count itself is incremented when an
-    # article is actually created (see publish_from_queued_row), so this read is
-    # purely an optimization.
-    if source_kind == "web":
-        from app.modules.crawler.domain_tracker import (
-            domain_compose_cap_reached,
-            domain_from_url,
-        )
+    cap_skip = _domain_compose_cap_skip(source_kind, scrape_url, txid)
+    if cap_skip is not None:
+        return cap_skip
+    _enqueue_web_page_links(source_kind, result, scrape_url)
 
-        compose_domain = domain_from_url(scrape_url)
-        if compose_domain and domain_compose_cap_reached(compose_domain):
-            return {"status": "skipped", "reason": "domain_daily_compose_cap", "txid": txid}
-    if source_kind == "web":
-        try:
-            from app.modules.scraper.core.link_extractor import enqueue_page_links
-
-            enqueue_page_links(raw_html=result.raw_html, page_url=scrape_url, source="web")
-        except Exception:
-            logger.warning("failed to enqueue page links from %s", scrape_url, exc_info=True)
-
-    # Service-watch aggregate: for web services the snapshot/diff/compose unit
-    # is the service's aggregated recent pages (all its domains), never just
-    # this one URL. Falls back to the single page when there is no harvest yet
-    # or aggregation fails. Also re-queues the aggregate's pages for a fresh
-    # crawl so next week's aggregate reflects current content.
-    page_text = result.text
-    if source_kind == "web" and worker_config.SERVICE_CONTEXT_ENABLED:
-        try:
-            from app.modules.newspaper.service_context import (
-                build_service_context,
-                refresh_service_pages,
-            )
-
-            page_text = build_service_context(
-                service_id=service_id,
-                display_name=display_name,
-                entry_url=scrape_url,
-                entry_title=result.title,
-                entry_text=result.text,
-            )
-            refresh_service_pages(service_id, entry_url=scrape_url)
-        except Exception:
-            logger.warning(
-                "service context aggregation failed for %s — using entry page only",
-                service_id,
-                exc_info=True,
-            )
-            page_text = result.text
+    page_text = _publish_pipeline_page_text(
+        service_id=service_id,
+        display_name=display_name,
+        scrape_url=scrape_url,
+        result=result,
+        source_kind=source_kind,
+    )
 
     return ingest_publish_signal(
         service_id=service_id,
@@ -1461,6 +1714,139 @@ def _source_kind_from_url(scrape_url: str) -> str | None:
     return "chain_only"
 
 
+def _recompose_via_writer(
+    *,
+    review_id: str,
+    url: str,
+    page_text: str,
+    page_title: str,
+    category: str,
+    storage_score: float,
+    kind: str | None,
+    old_article_id: str,
+) -> tuple[ArticleComposeResult | None, dict[str, str] | None]:
+    """Compose a fresh proposal for a recompose. Returns (composed, None) on success, or (None, error_response) on a busy-lock, writer-spike, or Mistral failure — restoring/re-enqueuing the review on failure so it isn't lost."""
+    from app.modules.ai.mistral_client import MistralCreditError, MistralError
+    from app.modules.ai.story_spike import StorySpikedError
+    from app.modules.crawler.classifier_review_store import enqueue_classifier_review
+
+    try:
+        composed = compose_scrape_article(
+            service_name=url,
+            source_url=url,
+            page_title=page_title,
+            page_text=page_text,
+            txid=f"recompose-{review_id[:12]}",
+            round_num=0,
+            diff=None,
+            is_first_snapshot=True,
+            publish_kind=PublishKind.SERVICE_DISCOVERY,
+            publish_topic=PublishTopic.GENERIC,
+        )
+        return composed, None
+    except ComposeBusyError:
+        enqueue_classifier_review(
+            url=url,
+            page_text=page_text,
+            page_title=page_title,
+            category=category,
+            storage_score=storage_score,
+            metadata={
+                "article_id": old_article_id,
+                "source": kind or "web",
+                "recompose_busy": True,
+            },
+        )
+        return None, {"status": "already_running", "key": COMPOSE_LOCK_KEY}
+    except StorySpikedError as spike:
+        logger.info(
+            "writer spiked recompose of review %s (%s): %s [%s]",
+            review_id,
+            url,
+            spike.category,
+            spike.reason,
+        )
+        return None, {
+            "status": "aborted_by_writer",
+            "reason": f"{spike.category}: {spike.reason}",
+        }
+    except MistralError as exc:
+        credit_issue = isinstance(exc, MistralCreditError)
+        status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
+        logger.error("Mistral recompose failed for review %s (%s): %s", review_id, url, exc)
+        # Compose failed — restore the original proposal so the review isn't lost.
+        enqueue_classifier_review(
+            url=url,
+            page_text=page_text,
+            page_title=page_title,
+            category=category,
+            storage_score=storage_score,
+            metadata={
+                "article_id": old_article_id,
+                "source": kind or "web",
+                "recompose_failed": str(exc)[:200],
+            },
+        )
+        return None, {"status": status, "detail": str(exc)[:200]}
+
+
+def _recompose_resolve_image(
+    og_image: str, url: str, service_id: str, composed: ArticleComposeResult
+) -> tuple[str, str]:
+    """Re-validate a carried-forward og_image, or resolve a fresh one when none survives. A bad image (foreign/stale template artwork) would otherwise survive every subsequent recompose unchanged, since it's never empty and this function only re-resolves when it IS empty. A true share image also becomes the body hero; a brand logo only populates image_url (same split as publish_from_queued_row)."""
+    og_image = _validated_hero_checked(og_image, url)
+    if og_image:
+        return og_image, og_image
+    try:
+        from app.modules.newspaper.source_image import resolve_article_images
+
+        og, logo = resolve_article_images(
+            source_url=url,
+            service_id=service_id,
+            body=composed.body,
+            validate=_validated_hero_checked,
+        )
+        return og, (og or logo)
+    except Exception:
+        logger.warning("failed to resolve source images for %s", url, exc_info=True)
+        return "", ""
+
+
+def _recompose_grade_metadata(
+    composed: ArticleComposeResult, url: str, page_text: str
+) -> dict[str, str]:
+    """Grade + deterministic gate, mirroring publish_from_queued_row so the reviewer sees a fresh score and reasons next to the new draft."""
+    import json as _json
+
+    grade_meta: dict[str, str] = {}
+    try:
+        from app.modules.newspaper.article_grader import grade_article_draft
+
+        grade = grade_article_draft(title=composed.title, body=composed.body, source_url=url)
+        grade_meta = {
+            "grade": str(grade["grade"]),
+            "grade_detail": _json.dumps(
+                {"subscores": grade["subscores"], "issues": grade["issues"]},
+                separators=(",", ":"),
+            ),
+        }
+    except Exception:
+        grade_meta = {}
+    try:
+        from app.modules.gatekeeper.live import gate_draft
+
+        gate = gate_draft(
+            source_text=page_text,
+            article_text=f"{composed.title}\n{composed.body}",
+            service_id=url,
+        )
+        if gate is not None:
+            grade_meta.update(gate.as_metadata())
+    except Exception:
+        logger.warning("gatekeeper grading failed for %s", url, exc_info=True)
+    return grade_meta
+
+
 @celery_app.task(name="app.tasks.newspaper.recompose_review")
 def recompose_review(review_id: str) -> dict[str, str]:
     """Re-run composition on a pending review's stored source and REPLACE the review with a fresh proposal. Lets an admin watch a previously bad article improve as the writer/grader evolve, without waiting for the source to change. This is a deliberate manual replay, so it bypasses the dedup / novelty / domain gates the normal pipeline applies."""
@@ -1468,8 +1854,6 @@ def recompose_review(review_id: str) -> dict[str, str]:
     from uuid import UUID
 
     from app.core.cassandra import get_cassandra_session
-    from app.modules.ai.mistral_client import MistralCreditError, MistralError
-    from app.modules.ai.story_spike import StorySpikedError
     from app.modules.crawler.classifier_review_store import (
         complete_classifier_review,
         enqueue_classifier_review,
@@ -1525,87 +1909,20 @@ def recompose_review(review_id: str) -> dict[str, str]:
     # fresh proposal is enqueued below when compose finishes.
     complete_classifier_review(review_id, resolution="recomposing")
 
-    try:
-        composed = compose_scrape_article(
-            service_name=url,
-            source_url=url,
-            page_title=page_title,
-            page_text=page_text,
-            txid=f"recompose-{review_id[:12]}",
-            round_num=0,
-            diff=None,
-            is_first_snapshot=True,
-            publish_kind=PublishKind.SERVICE_DISCOVERY,
-            publish_topic=PublishTopic.GENERIC,
-        )
-    except ComposeBusyError:
-        enqueue_classifier_review(
-            url=url,
-            page_text=page_text,
-            page_title=page_title,
-            category=category,
-            storage_score=storage_score,
-            metadata={
-                "article_id": old_article_id,
-                "source": kind or "web",
-                "recompose_busy": True,
-            },
-        )
-        return {"status": "already_running", "key": COMPOSE_LOCK_KEY}
-    except StorySpikedError as spike:
-        logger.info(
-            "writer spiked recompose of review %s (%s): %s [%s]",
-            review_id,
-            url,
-            spike.category,
-            spike.reason,
-        )
-        return {
-            "status": "aborted_by_writer",
-            "reason": f"{spike.category}: {spike.reason}",
-        }
-    except MistralError as exc:
-        credit_issue = isinstance(exc, MistralCreditError)
-        status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
-        logger.error("Mistral recompose failed for review %s (%s): %s", review_id, url, exc)
-        # Compose failed — restore the original proposal so the review isn't lost.
-        enqueue_classifier_review(
-            url=url,
-            page_text=page_text,
-            page_title=page_title,
-            category=category,
-            storage_score=storage_score,
-            metadata={
-                "article_id": old_article_id,
-                "source": kind or "web",
-                "recompose_failed": str(exc)[:200],
-            },
-        )
-        return {"status": status, "detail": str(exc)[:200]}
-    # Re-validate even a carried-forward og_image from prior review metadata —
-    # a bad image (foreign/stale template artwork) would otherwise survive
-    # every subsequent recompose unchanged, since it's never empty and this
-    # function only re-resolves when it IS empty.
-    og_image = _validated_hero_checked(og_image, url)
-    image_field = og_image
-    if not og_image:
-        # Older reviews (and any path that never resolved one) carry no image —
-        # resolve it now from the source page / the article's own cited links.
-        # A true share image also becomes the body hero; a brand logo only
-        # populates image_url (same split as publish_from_queued_row).
-        try:
-            from app.modules.newspaper.source_image import resolve_article_images
+    composed, compose_error = _recompose_via_writer(
+        review_id=review_id,
+        url=url,
+        page_text=page_text,
+        page_title=page_title,
+        category=category,
+        storage_score=storage_score,
+        kind=kind,
+        old_article_id=old_article_id,
+    )
+    if compose_error is not None:
+        return compose_error
 
-            _og, _logo = resolve_article_images(
-                source_url=url,
-                service_id=service_id,
-                body=composed.body,
-                validate=_validated_hero_checked,
-            )
-            og_image = _og
-            image_field = _og or _logo
-        except Exception:
-            logger.warning("failed to resolve source images for %s", url, exc_info=True)
+    og_image, image_field = _recompose_resolve_image(og_image, url, service_id, composed)
     tags = _merge_tags(
         derive_article_tags(
             service_id=service_id,
@@ -1645,32 +1962,7 @@ def recompose_review(review_id: str) -> dict[str, str]:
 
     # Grade + deterministic gate, mirroring publish_from_queued_row so the
     # reviewer sees a fresh score and reasons next to the new draft.
-    grade_meta: dict[str, str] = {}
-    try:
-        from app.modules.newspaper.article_grader import grade_article_draft
-
-        grade = grade_article_draft(title=composed.title, body=composed.body, source_url=url)
-        grade_meta = {
-            "grade": str(grade["grade"]),
-            "grade_detail": _json.dumps(
-                {"subscores": grade["subscores"], "issues": grade["issues"]},
-                separators=(",", ":"),
-            ),
-        }
-    except Exception:
-        grade_meta = {}
-    try:
-        from app.modules.gatekeeper.live import gate_draft
-
-        gate = gate_draft(
-            source_text=page_text,
-            article_text=f"{composed.title}\n{composed.body}",
-            service_id=url,
-        )
-        if gate is not None:
-            grade_meta.update(gate.as_metadata())
-    except Exception:
-        logger.warning("gatekeeper grading failed for %s", url, exc_info=True)
+    grade_meta = _recompose_grade_metadata(composed, url, page_text)
 
     # The old review was already completed (slot freed on click); enqueue the
     # fresh proposal for the same URL so it lands in the queue the admin watches.
@@ -1790,36 +2082,12 @@ def backfill_article_translations_task(limit: int = 500) -> dict:
     }
 
 
-@celery_app.task(name="app.tasks.newspaper.recompose_published", bind=True, max_retries=20)
-def recompose_published(self: Task, article_id: str) -> dict[str, str]:
-    """Archive refresh: re-compose a PUBLISHED article into a NEW unlisted draft. When the draft clears the (strict) RECOMPOSE_AUTO_APPLY bar — grade, headline style, gatekeeper — it swaps onto the live article_id immediately (autonomous mode); otherwise it holds in the review queue for a human. Either way apply_recomposed_article does the swap: the URL survives and published_at is re-stamped to the apply time (recompose is a re-publish — owner policy 2026-07-15 — the story returns to the top of the feed).
-
-    recompose_review cannot serve this case: it reuses the article_id at
-    compose time, which would replace the live page before any approval
-    (human or automatic) — and approving it would double-publish the feed row.
-    """
-    import json as _json
-    from uuid import UUID as _UUID
-
+def _recompose_published_source_text(
+    existing: object, service_id: str, source_url: str
+) -> tuple[str, str, str]:
+    """Fresh source text for an archive refresh: a live re-scrape of the source page when there is one, aggregated into the service's other already-crawled pages (same corpus the discovery path composes from — its previous omission caused a 2026-07-14 incident where a recompose kept missing a page a prior crawl had already found). Falls back to the article's own stored body when there's no page to re-scrape or the scrape/aggregation fails. Returns (page_text, page_title, scraped_og)."""
     from app.core import config as worker_config
-    from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts
-    from app.modules.ai.mistral_client import MistralCreditError, MistralError
-    from app.modules.ai.story_spike import StorySpikedError
-    from app.modules.crawler.classifier_review_store import enqueue_classifier_review
-    from app.modules.newspaper.article_store import get_article, insert_stored_article
-    from app.modules.newspaper.security import sanitize_body
 
-    existing = get_article(article_id)
-    if existing is None:
-        return {"status": "error", "reason": "article_not_found"}
-    service_id = existing.service_id or ""
-    source_url = (existing.source_url or "").strip()
-
-    # Fresh source when the article has a real page behind it; the article's
-    # own prose otherwise (editorial briefs, chain triggers) — the two-stage
-    # writer re-researches with tools either way, so this is a starting point,
-    # not the ceiling.
     page_text = existing.body or ""
     page_title = existing.title or ""
     scraped_og = ""
@@ -1839,16 +2107,6 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
                 exc_info=True,
             )
 
-    # Service-watch aggregate: the discovery path (run_publish_pipeline) never
-    # composes from a single page alone — it pulls in the service's other
-    # already-crawled pages so a distinct product/subpage a prior crawl found
-    # (e.g. a service's separate payments/API offering) is actually visible to
-    # the model instead of depending on it re-finding that page via live
-    # search every single time. An archive refresh re-researches the same
-    # service and deserves the same corpus — its previous omission is why a
-    # CompX recompose kept missing a page (compx.io/app/canix402) that had
-    # already been crawled three times before the recompose ever ran
-    # (root-caused 2026-07-14).
     is_web_source = bool(source_url) and _source_kind_from_url(source_url) == "web"
     if is_web_source and worker_config.SERVICE_CONTEXT_ENABLED:
         try:
@@ -1868,19 +2126,22 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
                 source_url,
                 exc_info=True,
             )
+    return page_text, page_title, scraped_og
 
-    # Recompose from the ORIGINAL INPUT, not the prior OUTPUT. An editorial-brief
-    # article has no page to re-scrape, so the generic path below would hand the
-    # writer its OWN previous article body as "source material" and it just
-    # re-launders whatever was in it — including a wrong premise (Pera Wallet
-    # incident 2026-07-20: two recomposes kept declaring Pera defunct because the
-    # prior draft said so, never re-checking). Re-run the assignment from the
-    # brief itself so the writer researches the topic from scratch.
-    brief_for_recompose = None
-    if source_url.lower().startswith("editorial://brief/"):
-        from app.modules.newspaper.editorial_assignment import get_brief
 
-        brief_for_recompose = get_brief(source_url.rsplit("/", 1)[-1])
+def _recompose_published_compose(
+    self: Task,
+    *,
+    article_id: str,
+    service_id: str,
+    source_url: str,
+    page_text: str,
+    page_title: str,
+    brief_for_recompose: EditorialBrief | None,
+) -> tuple[ArticleComposeResult | None, dict[str, str] | None]:
+    """Compose the archive-refresh draft. Recomposes from the ORIGINAL INPUT (the brief body, when this article came from an editorial brief) rather than the prior article's own OUTPUT — handing the writer its own previous body as "source material" just re-launders whatever was in it, including a wrong premise (Pera Wallet incident 2026-07-20: two recomposes kept declaring Pera defunct because the prior draft said so, never re-checking). Returns (composed, None) on success, or (None, error_response) on a writer spike or Mistral failure; raises via self.retry on a busy compose lock."""
+    from app.modules.ai.mistral_client import MistralCreditError, MistralError
+    from app.modules.ai.story_spike import StorySpikedError
 
     try:
         if brief_for_recompose is not None:
@@ -1911,6 +2172,7 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
                 publish_kind=PublishKind.SERVICE_DISCOVERY,
                 publish_topic=PublishTopic.GENERIC,
             )
+        return composed, None
     except ComposeBusyError as exc:
         # The global compose lock is held (a drain compose, or a sibling
         # archive-refresh task — the worker runs concurrency=4, so batched
@@ -1924,7 +2186,7 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
             spike.category,
             spike.reason,
         )
-        return {
+        return None, {
             "status": "aborted_by_writer",
             "reason": f"{spike.category}: {spike.reason}",
         }
@@ -1932,20 +2194,141 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
         credit_issue = isinstance(exc, MistralCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
         logger.error("recompose_published failed for %s: %s", article_id, exc)
-        return {"status": status, "detail": str(exc)[:200]}
+        return None, {"status": status, "detail": str(exc)[:200]}
+
+
+def _recompose_published_hero_image(
+    scraped_og: str, source_url: str, article_id: str
+) -> tuple[str, str]:
+    """Hero: fresh og when the re-scrape produced one, else the live article's current art (never downgrade a working hero to nothing)."""
+    from uuid import UUID
+
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts
+
+    og_image = _validated_hero_checked(scraped_og, source_url)
+    if og_image:
+        return og_image, og_image
+    try:
+        row = get_cassandra_session().execute(ArticleStmts.GET_IMAGE, (UUID(article_id),)).one()
+        return og_image, ((row.image_url or "") if row else "")
+    except Exception:
+        return og_image, ""
+
+
+def _recompose_published_grade_and_gate(
+    composed: ArticleComposeResult, *, article_id: str, source_url: str, page_text: str
+) -> tuple[dict[str, str], float | None, bool]:
+    """Quality grade + factuality gate for an archive-refresh draft. Returns (grade_meta, grade_value, gate_ok).
+
+    gate_ok reflects factuality (numeric entailment) only, not the
+    completeness rule's OSINT-tool-call check. Completeness fires on any
+    source mentioning a website/founder/company — true for nearly every
+    service-profile source — but the writer only sporadically calls the
+    matching domain/registry/sanctions tools mid-compose, so in practice it
+    blocked ~all Tier-2 recomposes regardless of content quality (owner
+    confirmed 2026-07-12 after auditing review metadata: grades were
+    consistently 7.3-10 while completeness failed almost universally).
+    Completeness is designed to triage under-researched NEW candidates; a
+    recompose is a rewrite of a service a human already approved once, so
+    that diligence bar matters less here. Still recorded in grade_meta for
+    visibility, just no longer gates auto-apply.
+    """
+    import json as _json
+
+    from app.core import config as worker_config
+
+    grade_meta: dict[str, str] = {}
+    grade_value: float | None = None
+    try:
+        from app.modules.newspaper.article_grader import grade_article_draft
+
+        grade = grade_article_draft(title=composed.title, body=composed.body, source_url=source_url)
+        grade_value = float(grade["grade"])
+        grade_meta = {
+            "grade": str(grade["grade"]),
+            "grade_detail": _json.dumps(
+                {"subscores": grade["subscores"], "issues": grade["issues"]},
+                separators=(",", ":"),
+            ),
+        }
+    except Exception:
+        grade_meta = {}
+
+    gate_ok = False
+    try:
+        from app.modules.gatekeeper.live import gate_draft
+
+        gate = gate_draft(
+            source_text=page_text,
+            article_text=f"{composed.title}\n{composed.body}",
+            service_id=source_url or f"article:{article_id}",
+        )
+        if gate is not None:
+            grade_meta.update(gate.as_metadata())
+            gate_ok = gate.factuality_score >= worker_config.GATEKEEPER_FACT_MIN
+        else:
+            gate_ok = True  # gatekeeper disabled entirely — no signal to fail on
+    except Exception:
+        logger.warning("recompose gatekeeper check failed for %s", article_id, exc_info=True)
+
+    return grade_meta, grade_value, gate_ok
+
+
+@celery_app.task(name="app.tasks.newspaper.recompose_published", bind=True, max_retries=20)
+def recompose_published(self: Task, article_id: str) -> dict[str, str]:
+    """Archive refresh: re-compose a PUBLISHED article into a NEW unlisted draft. When the draft clears the (strict) RECOMPOSE_AUTO_APPLY bar — grade, headline style, gatekeeper — it swaps onto the live article_id immediately (autonomous mode); otherwise it holds in the review queue for a human. Either way apply_recomposed_article does the swap: the URL survives and published_at is re-stamped to the apply time (recompose is a re-publish — owner policy 2026-07-15 — the story returns to the top of the feed).
+
+    recompose_review cannot serve this case: it reuses the article_id at
+    compose time, which would replace the live page before any approval
+    (human or automatic) — and approving it would double-publish the feed row.
+    """
+    from app.modules.crawler.classifier_review_store import enqueue_classifier_review
+    from app.modules.newspaper.article_store import get_article, insert_stored_article
+    from app.modules.newspaper.security import sanitize_body
+
+    existing = get_article(article_id)
+    if existing is None:
+        return {"status": "error", "reason": "article_not_found"}
+    service_id = existing.service_id or ""
+    source_url = (existing.source_url or "").strip()
+
+    # Fresh source when the article has a real page behind it; the article's
+    # own prose otherwise (editorial briefs, chain triggers) — the two-stage
+    # writer re-researches with tools either way, so this is a starting point,
+    # not the ceiling.
+    page_text, page_title, scraped_og = _recompose_published_source_text(
+        existing, service_id, source_url
+    )
+
+    # Recompose from the ORIGINAL INPUT, not the prior OUTPUT. An editorial-brief
+    # article has no page to re-scrape, so the generic path below would hand the
+    # writer its OWN previous article body as "source material" and it just
+    # re-launders whatever was in it — including a wrong premise (Pera Wallet
+    # incident 2026-07-20: two recomposes kept declaring Pera defunct because the
+    # prior draft said so, never re-checking). Re-run the assignment from the
+    # brief itself so the writer researches the topic from scratch.
+    brief_for_recompose = None
+    if source_url.lower().startswith("editorial://brief/"):
+        from app.modules.newspaper.editorial_assignment import get_brief
+
+        brief_for_recompose = get_brief(source_url.rsplit("/", 1)[-1])
+
+    composed, compose_error = _recompose_published_compose(
+        self,
+        article_id=article_id,
+        service_id=service_id,
+        source_url=source_url,
+        page_text=page_text,
+        page_title=page_title,
+        brief_for_recompose=brief_for_recompose,
+    )
+    if compose_error is not None:
+        return compose_error
 
     # Hero: fresh og when the re-scrape produced one, else the live article's
     # current art (never downgrade a working hero to nothing).
-    og_image = _validated_hero_checked(scraped_og, source_url)
-    image_field = og_image
-    if not image_field:
-        try:
-            row = (
-                get_cassandra_session().execute(ArticleStmts.GET_IMAGE, (_UUID(article_id),)).one()
-            )
-            image_field = (row.image_url or "") if row else ""
-        except Exception:
-            image_field = ""
+    og_image, image_field = _recompose_published_hero_image(scraped_og, source_url, article_id)
 
     kind = _source_kind_from_url(source_url) if source_url else None
     tags = _merge_tags(
@@ -1975,60 +2358,16 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
         prompt_version=getattr(composed, "prompt_version", ""),
     )
 
-    grade_meta: dict[str, str] = {}
-    grade_value: float | None = None
-    try:
-        from app.modules.newspaper.article_grader import grade_article_draft
-
-        grade = grade_article_draft(title=composed.title, body=composed.body, source_url=source_url)
-        grade_value = float(grade["grade"])
-        grade_meta = {
-            "grade": str(grade["grade"]),
-            "grade_detail": _json.dumps(
-                {"subscores": grade["subscores"], "issues": grade["issues"]},
-                separators=(",", ":"),
-            ),
-        }
-    except Exception:
-        grade_meta = {}
-
     # Autonomous mode (owner decision, 2026-07-12): swap the draft onto the
     # live article without a human click when EVERY signal clears a bar
     # stricter than fresh-article auto-publish — this overwrites a page
     # that's already public, so any missing/errored signal (grade, gate) or
     # unmet check fails CLOSED to manual review, never open.
-    #
-    # gate_ok reflects factuality (numeric entailment) only, not the
-    # completeness rule's OSINT-tool-call check. Completeness fires on any
-    # source mentioning a website/founder/company — true for nearly every
-    # service-profile source — but the writer only sporadically calls the
-    # matching domain/registry/sanctions tools mid-compose, so in practice
-    # it blocked ~all Tier-2 recomposes regardless of content quality (owner
-    # confirmed 2026-07-12 after auditing review metadata: grades were
-    # consistently 7.3-10 while completeness failed almost universally).
-    # Completeness is designed to triage under-researched NEW candidates;
-    # a recompose is a rewrite of a service a human already approved once,
-    # so that diligence bar matters less here. Still recorded in grade_meta
-    # for visibility, just no longer gates auto-apply.
+    grade_meta, grade_value, gate_ok = _recompose_published_grade_and_gate(
+        composed, article_id=article_id, source_url=source_url, page_text=page_text
+    )
+
     from app.core import config as worker_config
-
-    gate_ok = False
-    try:
-        from app.modules.gatekeeper.live import gate_draft
-
-        gate = gate_draft(
-            source_text=page_text,
-            article_text=f"{composed.title}\n{composed.body}",
-            service_id=source_url or f"article:{article_id}",
-        )
-        if gate is not None:
-            grade_meta.update(gate.as_metadata())
-            gate_ok = gate.factuality_score >= worker_config.GATEKEEPER_FACT_MIN
-        else:
-            gate_ok = True  # gatekeeper disabled entirely — no signal to fail on
-    except Exception:
-        logger.warning("recompose gatekeeper check failed for %s", article_id, exc_info=True)
-
     from app.modules.newspaper.article_grader import headline_violations
 
     auto_apply = (

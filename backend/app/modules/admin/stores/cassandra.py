@@ -54,6 +54,7 @@ def _rank_reviews(
 
 class AdminCassandraStore:
     """Cassandra reads/writes for the admin dashboard."""
+
     def get_article(self, article_id: str) -> StoredArticle | None:
         """Fetch one article by id, or None if it does not exist."""
         from app.modules.news.stores.cassandra import CassandraArticleStore
@@ -544,6 +545,7 @@ class AdminCassandraStore:
     ) -> dict:
         """Record a human correction to a classifier verdict for later retraining."""
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ClassifierFeedbackStmts
 
         predicted = (predicted_category or category).strip().lower()
         corrected = category.strip().lower()
@@ -552,34 +554,9 @@ class AdminCassandraStore:
             cats.insert(0, corrected)
         feedback_id = uuid.uuid4()
         now = datetime.now(tz=UTC)
-        # Capture the article grade + its point-in-time dimensions so each
-        # decision becomes a trainable row {dimensions -> approved}. Novelty /
-        # recency can't be recomputed later, so we must snapshot them here.
-        feedback_meta = self._grade_meta_for_review(review_id) if review_id else {}
-        # Human-corrected dimensions become ground truth (the grader trains on
-        # these in preference to the auto-scores).
-        if corrected_scores:
-            import json as _json
-
-            feedback_meta["corrected_scores"] = _json.dumps(
-                {k: float(v) for k, v in corrected_scores.items()}, separators=(",", ":")
-            )
-        # Snapshot the composed article text so the (text -> approved) pairs the
-        # text-aware grader needs accumulate from here. Source `text_sample` is
-        # the upstream page, not the article we actually grade.
-        if article_id:
-            try:
-                art = self.get_article(article_id)
-                if art is not None and getattr(art, "body", ""):
-                    feedback_meta["article_text"] = (f"{getattr(art, 'title', '')}\n{art.body}")[
-                        :8000
-                    ]
-            except Exception:
-                logger.warning(
-                    "failed to snapshot article text for feedback on %s",
-                    article_id,
-                    exc_info=True,
-                )
+        feedback_meta = self._classifier_feedback_meta(
+            review_id=review_id, corrected_scores=corrected_scores, article_id=article_id
+        )
         # Gatekeeper validation anchor: the human ground truth the annotator is
         # checked against. Written to the dedicated gatekeeper_anchors table (the
         # single source of truth), isolated from all model training.
@@ -595,7 +572,6 @@ class AdminCassandraStore:
                     error_types=[str(t) for t in (error_types or [])],
                     admin_wallet=admin_wallet,
                 )
-        from app.core.statements import ClassifierFeedbackStmts
 
         session = get_cassandra_session()
         session.execute(
@@ -627,6 +603,57 @@ class AdminCassandraStore:
             approved=approved,
             source_relevant=source_relevant,
         )
+        self._apply_classifier_feedback_effects(
+            url=url,
+            article_id=article_id,
+            review_id=review_id,
+            approved=approved,
+            training_only=training_only,
+        )
+        return {
+            "feedback_id": str(feedback_id),
+            "approved": approved,
+            "category": corrected,
+            "predicted_category": predicted,
+            "quality": quality,
+        }
+
+    def _classifier_feedback_meta(
+        self, *, review_id: str | None, corrected_scores: dict | None, article_id: str | None
+    ) -> dict:
+        """Build the trainable feedback_meta blob: point-in-time grade dimensions (novelty/recency can't be recomputed later, so must be snapshotted here), any human-corrected scores (ground truth the grader prefers over auto-scores), and a text snapshot of the graded article (text-aware grader training pairs)."""
+        feedback_meta = self._grade_meta_for_review(review_id) if review_id else {}
+        if corrected_scores:
+            import json as _json
+
+            feedback_meta["corrected_scores"] = _json.dumps(
+                {k: float(v) for k, v in corrected_scores.items()}, separators=(",", ":")
+            )
+        if article_id:
+            try:
+                art = self.get_article(article_id)
+                if art is not None and getattr(art, "body", ""):
+                    feedback_meta["article_text"] = (f"{getattr(art, 'title', '')}\n{art.body}")[
+                        :8000
+                    ]
+            except Exception:
+                logger.warning(
+                    "failed to snapshot article text for feedback on %s",
+                    article_id,
+                    exc_info=True,
+                )
+        return feedback_meta
+
+    def _apply_classifier_feedback_effects(
+        self,
+        *,
+        url: str,
+        article_id: str | None,
+        review_id: str | None,
+        approved: bool,
+        training_only: bool,
+    ) -> None:
+        """Post-write side effects of a classifier-feedback decision: resolve the pending review, blocklist a rejected URL, publish/apply-recompose an approved draft, and kick the next candidate."""
         if review_id:
             resolution = "approved" if approved else "rejected"
             self._complete_classifier_review(review_id, resolution=resolution)
@@ -648,13 +675,6 @@ class AdminCassandraStore:
         # A review slot just freed — generate the next-highest-interest
         # candidate now instead of waiting for the next scheduled drain.
         self._trigger_compose_next()
-        return {
-            "feedback_id": str(feedback_id),
-            "approved": approved,
-            "category": corrected,
-            "predicted_category": predicted,
-            "quality": quality,
-        }
 
     def record_gatekeeper_anchor(
         self,
@@ -1409,8 +1429,31 @@ class AdminCassandraStore:
 
     def list_classifier_reviews(self, *, limit: int = 50, scan_limit: int = 500) -> list[dict]:
         """List recent classifier reviews (human-corrected verdicts), newest first."""
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ArticleStmts, ClassifierReviewStmts
+        from app.core.statements import ArticleStmts
+
+        details = self._pending_review_details(scan_limit)
+        if not details:
+            return []
+
+        # Parse metadata (pure Python) and collect the article ids to batch-fetch.
+        parsed_rows = [self._parse_review_detail(detail) for detail in details]
+
+        # Phase 2: batch-fetch the referenced articles concurrently (was a second
+        # sequential SELECT per row).
+        uuid_args = []
+        for _d, article_id, *_rest in parsed_rows:
+            if article_id:
+                with contextlib.suppress(ValueError):
+                    uuid_args.append((UUID(article_id),))
+        article_by_id = self._articles_by_id(ArticleStmts.GET_SUMMARY_CARD, uuid_args)
+
+        items = [self._review_item_dict(row, article_by_id.get(row[1])) for row in parsed_rows]
+        return _rank_reviews(items, limit=limit)
+
+    def _pending_review_details(self, scan_limit: int) -> list:
+        """Every pending classifier-review's queue detail row, fetched in one concurrent batch (was the dominant cost of this tab: a sequential SELECT per pending row)."""
+        from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
+        from app.core.statements import ClassifierReviewStmts
 
         session = get_cassandra_session()
         try:
@@ -1420,16 +1463,9 @@ class AdminCassandraStore:
             rows = session.execute(ClassifierReviewStmts.LIST_PENDING, ("pending", scan_limit))
         except Exception:
             return []
-        import json
-
-        from app.core.cassandra import execute_parallel_with_args
-
         review_ids = [row.review_id for row in rows]
         if not review_ids:
             return []
-
-        # Phase 1: fetch every queue detail in ONE concurrent batch instead of a
-        # sequential SELECT per pending row (was the dominant cost of this tab).
         details = []
         for ok, res in execute_parallel_with_args(
             ClassifierReviewStmts.GET_DETAIL,
@@ -1442,99 +1478,80 @@ class AdminCassandraStore:
             d = res.one()
             if d is not None:
                 details.append(d)
+        return details
 
-        # Parse metadata (pure Python) and collect the article ids to batch-fetch.
-        parsed_rows: list[
-            tuple
-        ] = []  # (detail, article_id, confidence, grade, grade_detail, categories)
-        for detail in details:
-            article_id = ""
-            confidence: float | None = None
-            grade: float | None = None
-            grade_detail: dict | None = None
-            categories: list[str] = []
-            # Cassandra map columns come back as OrderedMapSerializedKey, which
-            # is NOT a dict subclass — coerce so .get works.
-            meta = dict(detail.metadata or {})
-            parsed: dict = {}
-            if meta:
-                raw = meta.get("raw")
-                if raw:
-                    try:
-                        parsed = json.loads(raw)
-                        article_id = str(parsed.get("article_id", ""))
-                        try:
-                            confidence = float(parsed["confidence"])
-                        except (KeyError, TypeError, ValueError):
-                            confidence = None
-                        try:
-                            grade = float(parsed["grade"])
-                        except (KeyError, TypeError, ValueError):
-                            grade = None
-                        gd = parsed.get("grade_detail")
-                        if gd:
-                            try:
-                                grade_detail = json.loads(gd) if isinstance(gd, str) else gd
-                            except (json.JSONDecodeError, TypeError):
-                                grade_detail = None
-                    except (json.JSONDecodeError, TypeError):
-                        article_id = str(meta.get("article_id", ""))
-                else:
-                    article_id = str(meta.get("article_id", ""))
-            cats_raw = parsed.get("categories") or meta.get("categories") or detail.category
-            if isinstance(cats_raw, str) and cats_raw.strip():
-                categories = [c.strip().lower() for c in cats_raw.split(",") if c.strip()]
-            elif isinstance(cats_raw, list):
-                categories = [str(c).strip().lower() for c in cats_raw if c]
-            if not categories and detail.category:
-                categories = [str(detail.category).strip().lower()]
-            categories = [
-                normalize_content_category(c, default="")
-                for c in categories
-                if is_content_category(c)
-            ]
-            if not categories and is_content_category(detail.category):
-                categories = [normalize_content_category(detail.category)]
-            # Why this draft was diverted, for the review card: which gate held it
-            # and the specific reason (dead domain / unsourced specifics).
-            diverted_by = str(parsed.get("diverted_by", "") or meta.get("diverted_by", "") or "")
-            hold_reason = str(parsed.get("hold_reason", "") or meta.get("hold_reason", "") or "")
-            parsed_rows.append(
-                (
-                    detail,
-                    article_id,
-                    confidence,
-                    grade,
-                    grade_detail,
-                    categories,
-                    diverted_by,
-                    hold_reason,
-                )
+    @staticmethod
+    def _parse_review_raw_json(meta: dict) -> tuple:
+        """Parse the review metadata's "raw" JSON blob into (parsed_dict, article_id, confidence, grade, grade_detail); article_id falls back to meta's own field on any parse failure or absence."""
+        import json
+
+        article_id = ""
+        confidence: float | None = None
+        grade: float | None = None
+        grade_detail: dict | None = None
+        parsed: dict = {}
+        raw = meta.get("raw") if meta else None
+        if not raw:
+            return (
+                parsed,
+                str(meta.get("article_id", "") if meta else ""),
+                confidence,
+                grade,
+                grade_detail,
             )
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return parsed, str(meta.get("article_id", "")), confidence, grade, grade_detail
+        article_id = str(parsed.get("article_id", ""))
+        try:
+            confidence = float(parsed["confidence"])
+        except (KeyError, TypeError, ValueError):
+            confidence = None
+        try:
+            grade = float(parsed["grade"])
+        except (KeyError, TypeError, ValueError):
+            grade = None
+        gd = parsed.get("grade_detail")
+        if gd:
+            try:
+                grade_detail = json.loads(gd) if isinstance(gd, str) else gd
+            except (json.JSONDecodeError, TypeError):
+                grade_detail = None
+        return parsed, article_id, confidence, grade, grade_detail
 
-        # Phase 2: batch-fetch the referenced articles concurrently (was a second
-        # sequential SELECT per row).
-        uuid_args = []
-        for _d, article_id, *_rest in parsed_rows:
-            if article_id:
-                with contextlib.suppress(ValueError):
-                    uuid_args.append((UUID(article_id),))
-        article_by_id: dict[str, object] = {}
-        if uuid_args:
-            for ok, res in execute_parallel_with_args(
-                ArticleStmts.GET_SUMMARY_CARD,
-                uuid_args,
-                concurrency=64,
-                raise_on_error=False,
-            ):
-                if not ok:
-                    continue
-                a = res.one()
-                if a is not None:
-                    article_by_id[str(a.article_id)] = a
+    @staticmethod
+    def _review_categories(parsed: dict, meta: dict, detail: Any) -> list[str]:  # noqa: ANN401 -- duck-typed Cassandra driver row, no formal class
+        """The review's normalized, valid content categories, falling back through raw JSON -> metadata -> the row's own category column."""
+        cats_raw = parsed.get("categories") or meta.get("categories") or detail.category
+        if isinstance(cats_raw, str) and cats_raw.strip():
+            categories = [c.strip().lower() for c in cats_raw.split(",") if c.strip()]
+        elif isinstance(cats_raw, list):
+            categories = [str(c).strip().lower() for c in cats_raw if c]
+        else:
+            categories = []
+        if not categories and detail.category:
+            categories = [str(detail.category).strip().lower()]
+        categories = [
+            normalize_content_category(c, default="") for c in categories if is_content_category(c)
+        ]
+        if not categories and is_content_category(detail.category):
+            categories = [normalize_content_category(detail.category)]
+        return categories
 
-        items: list[dict] = []
-        for (
+    @classmethod
+    def _parse_review_detail(cls, detail: Any) -> tuple:  # noqa: ANN401 -- duck-typed Cassandra driver row, no formal class
+        """Parse one review's metadata blob into (detail, article_id, confidence, grade, grade_detail, categories, diverted_by, hold_reason)."""
+        # Cassandra map columns come back as OrderedMapSerializedKey, which
+        # is NOT a dict subclass — coerce so .get works.
+        meta = dict(detail.metadata or {})
+        parsed, article_id, confidence, grade, grade_detail = cls._parse_review_raw_json(meta)
+        categories = cls._review_categories(parsed, meta, detail)
+        # Why this draft was diverted, for the review card: which gate held it
+        # and the specific reason (dead domain / unsourced specifics).
+        diverted_by = str(parsed.get("diverted_by", "") or meta.get("diverted_by", "") or "")
+        hold_reason = str(parsed.get("hold_reason", "") or meta.get("hold_reason", "") or "")
+        return (
             detail,
             article_id,
             confidence,
@@ -1543,30 +1560,59 @@ class AdminCassandraStore:
             categories,
             diverted_by,
             hold_reason,
-        ) in parsed_rows:
-            a = article_by_id.get(article_id)
-            items.append(
-                {
-                    "review_id": str(detail.review_id),
-                    "url": detail.url,
-                    "page_title": detail.page_title or "",
-                    "page_text_preview": (detail.page_text or "")[:500],
-                    "category": categories[0] if categories else "generic",
-                    "predicted_category": (detail.category or "").strip().lower() or None,
-                    "categories": categories,
-                    "storage_score": float(detail.storage_score or 0),
-                    "article_id": article_id,
-                    "confidence": confidence,
-                    "grade": grade,
-                    "grade_detail": grade_detail,
-                    "diverted_by": diverted_by,
-                    "hold_reason": hold_reason,
-                    "article_title": (a.title or "") if a else "",
-                    "article_summary": (a.summary or "") if a else "",
-                    "service_id": (a.service_id or "") if a else "",
-                }
-            )
-        return _rank_reviews(items, limit=limit)
+        )
+
+    @staticmethod
+    def _articles_by_id(stmt: Any, uuid_args: list) -> dict[str, object]:  # noqa: ANN401 -- prepared-statement handle, no formal class
+        """Batch-fetch articles by id concurrently (was a second sequential SELECT per row), keyed by string article_id."""
+        from app.core.cassandra import execute_parallel_with_args
+
+        article_by_id: dict[str, object] = {}
+        if not uuid_args:
+            return article_by_id
+        for ok, res in execute_parallel_with_args(
+            stmt, uuid_args, concurrency=64, raise_on_error=False
+        ):
+            if not ok:
+                continue
+            a = res.one()
+            if a is not None:
+                article_by_id[str(a.article_id)] = a
+        return article_by_id
+
+    @staticmethod
+    def _review_item_dict(row: tuple, article: Any) -> dict:  # noqa: ANN401 -- duck-typed Cassandra driver row, no formal class
+        """One parsed review row + its (possibly absent) article, as the admin review-card dict."""
+        (
+            detail,
+            article_id,
+            confidence,
+            grade,
+            grade_detail,
+            categories,
+            diverted_by,
+            hold_reason,
+        ) = row
+        a = article
+        return {
+            "review_id": str(detail.review_id),
+            "url": detail.url,
+            "page_title": detail.page_title or "",
+            "page_text_preview": (detail.page_text or "")[:500],
+            "category": categories[0] if categories else "generic",
+            "predicted_category": (detail.category or "").strip().lower() or None,
+            "categories": categories,
+            "storage_score": float(detail.storage_score or 0),
+            "article_id": article_id,
+            "confidence": confidence,
+            "grade": grade,
+            "grade_detail": grade_detail,
+            "diverted_by": diverted_by,
+            "hold_reason": hold_reason,
+            "article_title": (a.title or "") if a else "",
+            "article_summary": (a.summary or "") if a else "",
+            "service_id": (a.service_id or "") if a else "",
+        }
 
     @staticmethod
     def _queue_row_dict(row: Any) -> dict:  # noqa: ANN401 -- duck-typed Cassandra driver row, no formal class

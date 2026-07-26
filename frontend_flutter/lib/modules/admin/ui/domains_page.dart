@@ -31,8 +31,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
   String _filter = 'all';
   final Set<String> _busy = {};
   final _addDomainController = TextEditingController();
-  bool _addAsSeed = false;
-  bool _addSinglePageOnly = false;
+  bool _addFullSite = true;
   bool _adding = false;
 
   @override
@@ -68,8 +67,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
         walletAddress: wallet,
         domain: domain,
         isRelevant: true,
-        asSeed: _addAsSeed,
-        singlePageOnly: _addSinglePageOnly,
+        fullSite: _addFullSite,
       );
       _addDomainController.clear();
       await _load();
@@ -124,8 +122,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
   Future<void> _set(
     Map<String, dynamic> item, {
     required bool relevant,
-    bool asSeed = true,
-    bool singlePageOnly = false,
+    bool fullSite = true,
   }) async {
     final wallet = ref.read(sessionStateProvider).walletAddress;
     final domain = item['domain']?.toString() ?? '';
@@ -137,8 +134,7 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
         walletAddress: wallet,
         domain: domain,
         isRelevant: makeRelevant,
-        asSeed: asSeed,
-        singlePageOnly: singlePageOnly,
+        fullSite: fullSite,
       );
       await _load();
       if (!mounted) return;
@@ -251,28 +247,13 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
                 ],
               ),
               CheckboxListTile(
-                // Irrelevant once single_page_only is set — that mode never
-                // creates a monitored source regardless of this value.
-                value: _addAsSeed,
-                onChanged: _addSinglePageOnly
-                    ? null
-                    : (v) => setState(() => _addAsSeed = v ?? false),
+                value: _addFullSite,
+                onChanged: (v) => setState(() => _addFullSite = v ?? true),
                 controlAffinity: ListTileControlAffinity.leading,
                 dense: true,
                 contentPadding: EdgeInsets.zero,
                 title: Text(
-                  l10n.domainsAddAsSeed,
-                  style: theme.textTheme.bodySmall,
-                ),
-              ),
-              CheckboxListTile(
-                value: _addSinglePageOnly,
-                onChanged: (v) => setState(() => _addSinglePageOnly = v ?? false),
-                controlAffinity: ListTileControlAffinity.leading,
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                title: Text(
-                  l10n.domainsAddSinglePageOnly,
+                  l10n.domainsApproveExplore,
                   style: theme.textTheme.bodySmall,
                 ),
               ),
@@ -436,6 +417,8 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
     final score = (item['relevance_score'] as num?)?.toDouble() ?? 0;
     final category = item['category']?.toString() ?? '';
     final possibleService = item['possible_service'] == true;
+    final suggestedFullSite = item['suggested_full_site'] as bool?;
+    final sameDomainLinkCount = (item['same_domain_link_count'] as num?)?.toInt();
     final lastCrawled = (item['last_crawled_at']?.toString() ?? '').split('T').first;
     final pagesCrawled = (item['pages_crawled'] as num?)?.toInt() ?? 0;
     final busy = _busy.contains(domain);
@@ -581,28 +564,40 @@ class _DomainsTabState extends ConsumerState<DomainsTab> {
                   child: Text(l10n.domainsDeadEnd),
                 ),
                 const SizedBox(width: 8),
-                OutlinedButton(
-                  onPressed:
-                      busy ? null : () => _set(item, relevant: true, asSeed: false),
-                  style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact),
-                  child: Text(l10n.domainsCrawlOnce),
+                Tooltip(
+                  message: suggestedFullSite == false
+                      ? l10n.domainsSuggestedHint(sameDomainLinkCount ?? 0)
+                      : '',
+                  child: OutlinedButton(
+                    onPressed:
+                        busy ? null : () => _set(item, relevant: true, fullSite: false),
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      side: suggestedFullSite == false
+                          ? const BorderSide(color: Color(0xFF00897B), width: 2)
+                          : null,
+                    ),
+                    child: Text(l10n.domainsAddSinglePageOnly),
+                  ),
                 ),
                 const SizedBox(width: 8),
-                OutlinedButton(
-                  onPressed: busy
-                      ? null
-                      : () => _set(item, relevant: true, asSeed: false, singlePageOnly: true),
-                  style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact),
-                  child: Text(l10n.domainsAddSinglePageOnly),
-                ),
-                const SizedBox(width: 8),
-                FilledButton.tonal(
-                  onPressed: busy ? null : () => _set(item, relevant: true),
-                  style: FilledButton.styleFrom(visualDensity: VisualDensity.compact),
-                  child: busy
-                      ? const SizedBox(
-                          width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                      : Text(l10n.domainsApproveExplore),
+                Tooltip(
+                  message: suggestedFullSite == true
+                      ? l10n.domainsSuggestedHint(sameDomainLinkCount ?? 0)
+                      : '',
+                  child: FilledButton.tonal(
+                    onPressed: busy ? null : () => _set(item, relevant: true, fullSite: true),
+                    style: FilledButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      side: suggestedFullSite == true
+                          ? const BorderSide(color: Color(0xFF00897B), width: 2)
+                          : null,
+                    ),
+                    child: busy
+                        ? const SizedBox(
+                            width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                        : Text(l10n.domainsApproveExplore),
+                  ),
                 ),
               ] else
                 OutlinedButton(

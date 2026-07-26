@@ -20,6 +20,7 @@ from app.modules.newspaper.publish_policy import (
 
 
 def test_advisory_reads_delegate_to_guard_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Advisory remaining-slot reads delegate their count to the guard's reservation-aware counter."""
     seen: list[PublishTier] = []
 
     def _fake_count(*, tier: PublishTier, when: datetime | None = None) -> int:  # noqa: ARG001 -- name must match the real callee's keyword arg

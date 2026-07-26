@@ -119,6 +119,7 @@ def test_holder_is_dead_false_when_inspect_fails(monkeypatch: pytest.MonkeyPatch
     # Uncertainty must never be treated as "dead" — that's how you'd end up
     # with two writer loops running at once, which this lock exists to
     # prevent.
+    """Never treats a lock as dead when the control-plane inspect() call itself fails."""
     def _boom(_timeout: int = 5) -> Never:
         raise TimeoutError("broker unreachable")
 
@@ -127,6 +128,7 @@ def test_holder_is_dead_false_when_inspect_fails(monkeypatch: pytest.MonkeyPatch
 
 
 def test_holder_is_dead_false_when_task_still_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never treats a lock as dead while its owning task is still reported active."""
     monkeypatch.setattr(
         "app.celery_app.celery_app.control.inspect",
         lambda _timeout=5: MagicMock(active=lambda: {"worker@host": [{"id": "task-123"}]}),
@@ -135,6 +137,7 @@ def test_holder_is_dead_false_when_task_still_active(monkeypatch: pytest.MonkeyP
 
 
 def test_holder_is_dead_true_when_inspect_confirms_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treats a lock as dead once inspect() confirms no worker is running its task."""
     monkeypatch.setattr(
         "app.celery_app.celery_app.control.inspect",
         lambda timeout=5: MagicMock(active=lambda: {"worker@host": []}),  # noqa: ARG005 -- name must match the real callee's keyword arg
@@ -143,6 +146,7 @@ def test_holder_is_dead_true_when_inspect_confirms_gone(monkeypatch: pytest.Monk
 
 
 def test_try_reclaim_clears_lock_only_when_dead(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clears both the lock and its metadata key only when the holder is confirmed dead."""
     deleted: list[str] = []
     monkeypatch.setattr(
         "app.modules.newspaper.compose_lock.get_compose_lock_status",
@@ -158,6 +162,7 @@ def test_try_reclaim_clears_lock_only_when_dead(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_try_reclaim_leaves_lock_alone_when_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leaves the lock and its metadata untouched when the holder is confirmed alive."""
     monkeypatch.setattr(
         "app.modules.newspaper.compose_lock.get_compose_lock_status",
         lambda: _fresh_meta(),
@@ -174,6 +179,7 @@ def test_compose_lock_reclaims_dead_lock_instead_of_raising(
 ) -> None:
     # First acquire() call fails (someone else holds it); reclaim succeeds;
     # second acquire() call succeeds — the caller never sees ComposeBusyError.
+    """Reclaims a dead lock transparently and retries acquire, so the caller never sees ComposeBusyError."""
     calls = {"n": 0}
 
     def _fake_acquire(_key: str, _ttl: int) -> str | None:
@@ -191,6 +197,7 @@ def test_compose_lock_reclaims_dead_lock_instead_of_raising(
 
 
 def test_compose_lock_still_raises_when_reclaim_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Still raises ComposeBusyError, carrying the holder's label, when reclaim fails."""
     monkeypatch.setattr("app.modules.newspaper.compose_lock.acquire", lambda _key, _ttl: None)
     monkeypatch.setattr("app.modules.newspaper.compose_lock._try_reclaim", lambda: False)
     monkeypatch.setattr(
@@ -203,6 +210,7 @@ def test_compose_lock_still_raises_when_reclaim_fails(monkeypatch: pytest.Monkey
 
 
 def test_get_compose_lock_status_none_when_not_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Returns None when the lock key does not exist in Redis."""
     fake_client = MagicMock()
     fake_client.ttl.return_value = -2  # key doesn't exist
     monkeypatch.setattr("app.modules.newspaper.compose_lock._redis_client", lambda: fake_client)

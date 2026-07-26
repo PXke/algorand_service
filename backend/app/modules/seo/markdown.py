@@ -80,99 +80,123 @@ def _fence_html(info: str, lines: list[str]) -> str:
     return f"<pre><code>{code}</code></pre>"
 
 
-def md_to_html(md: str) -> str:
-    """Block-level Markdown -> HTML covering headings, lists, tables, fenced blocks (charts get a caption, not raw JSON), blockquotes, rules and paragraphs."""
-    lines = (md or "").replace("\r\n", "\n").split("\n")
-    out: list[str] = []
-    list_tag: str | None = None  # "ul" | "ol" while inside a list
-    para: list[str] = []
-    fence_info: str | None = None  # fence language while inside ``` ... ```
-    fence_lines: list[str] = []
-    table_rows: list[str] = []
+class _MdBlockParser:
+    """Line-by-line accumulator state for md_to_html's block-level parser."""
 
-    def flush_para() -> None:
-        if para:
-            out.append(f"<p>{_inline(' '.join(para).strip())}</p>")
-            para.clear()
+    def __init__(self) -> None:
+        self.out: list[str] = []
+        self.list_tag: str | None = None  # "ul" | "ol" while inside a list
+        self.para: list[str] = []
+        self.fence_info: str | None = None  # fence language while inside ``` ... ```
+        self.fence_lines: list[str] = []
+        self.table_rows: list[str] = []
 
-    def close_list() -> None:
-        nonlocal list_tag
-        if list_tag:
-            out.append(f"</{list_tag}>")
-            list_tag = None
+    def flush_para(self) -> None:
+        if self.para:
+            self.out.append(f"<p>{_inline(' '.join(self.para).strip())}</p>")
+            self.para.clear()
 
-    def flush_table() -> None:
-        if table_rows:
-            out.append(_table_html(table_rows))
-            table_rows.clear()
+    def close_list(self) -> None:
+        if self.list_tag:
+            self.out.append(f"</{self.list_tag}>")
+            self.list_tag = None
 
-    for raw in lines:
-        line = raw.rstrip()
-        stripped = line.strip()
-        if fence_info is not None:
+    def flush_table(self) -> None:
+        if self.table_rows:
+            self.out.append(_table_html(self.table_rows))
+            self.table_rows.clear()
+
+    def _handle_fence(self, stripped: str, line: str) -> bool:
+        """Consume a line that's inside, or opens, a fenced block. Returns whether the line was consumed."""
+        if self.fence_info is not None:
             if stripped.startswith("```"):
-                block = _fence_html(fence_info, fence_lines)
+                block = _fence_html(self.fence_info, self.fence_lines)
                 if block:
-                    out.append(block)
-                fence_info = None
-                fence_lines.clear()
+                    self.out.append(block)
+                self.fence_info = None
+                self.fence_lines.clear()
             else:
-                fence_lines.append(line)
-            continue
+                self.fence_lines.append(line)
+            return True
         if stripped.startswith("```"):
-            flush_para()
-            close_list()
-            flush_table()
-            fence_info = stripped[3:].strip().lower()
-            continue
+            self.flush_para()
+            self.close_list()
+            self.flush_table()
+            self.fence_info = stripped[3:].strip().lower()
+            return True
+        return False
+
+    def _handle_table(self, stripped: str) -> bool:
         if stripped.startswith("|") and stripped.count("|") >= 2:
-            flush_para()
-            close_list()
-            table_rows.append(stripped)
-            continue
-        flush_table()
-        if not stripped:
-            flush_para()
-            close_list()
-            continue
+            self.flush_para()
+            self.close_list()
+            self.table_rows.append(stripped)
+            return True
+        return False
+
+    def _handle_block(self, stripped: str) -> bool:
+        """Heading, horizontal rule, list item, or blockquote. Returns whether the line was consumed."""
         heading = re.match(r"^(#{1,6})\s+(.*)$", stripped)
         if heading:
-            flush_para()
-            close_list()
+            self.flush_para()
+            self.close_list()
             level = len(heading.group(1))
-            out.append(f"<h{level}>{_inline(heading.group(2).strip())}</h{level}>")
-            continue
+            self.out.append(f"<h{level}>{_inline(heading.group(2).strip())}</h{level}>")
+            return True
         if re.match(r"^([-*_])\1{2,}$", stripped):  # --- *** ___ horizontal rule
-            flush_para()
-            close_list()
-            out.append("<hr>")
-            continue
+            self.flush_para()
+            self.close_list()
+            self.out.append("<hr>")
+            return True
         ol = re.match(r"^\d+\.\s+(.*)$", stripped)
         ul = re.match(r"^[-*+]\s+(.*)$", stripped)
         if ol or ul:
-            flush_para()
+            self.flush_para()
             want = "ol" if ol else "ul"
-            if list_tag != want:
-                close_list()
-                out.append(f"<{want}>")
-                list_tag = want
-            out.append(f"<li>{_inline((ol or ul).group(1).strip())}</li>")
-            continue
+            if self.list_tag != want:
+                self.close_list()
+                self.out.append(f"<{want}>")
+                self.list_tag = want
+            self.out.append(f"<li>{_inline((ol or ul).group(1).strip())}</li>")
+            return True
         if stripped.startswith(">"):
-            flush_para()
-            close_list()
-            out.append(f"<blockquote>{_inline(stripped[1:].strip())}</blockquote>")
-            continue
-        para.append(stripped)
+            self.flush_para()
+            self.close_list()
+            self.out.append(f"<blockquote>{_inline(stripped[1:].strip())}</blockquote>")
+            return True
+        return False
 
-    flush_para()
-    close_list()
-    flush_table()
-    if fence_info is not None:  # unterminated fence — flush what was collected
-        block = _fence_html(fence_info, fence_lines)
-        if block:
-            out.append(block)
-    return "\n".join(out)
+    def feed(self, raw: str) -> None:
+        line = raw.rstrip()
+        stripped = line.strip()
+        if self._handle_fence(stripped, line) or self._handle_table(stripped):
+            return
+        self.flush_table()
+        if not stripped:
+            self.flush_para()
+            self.close_list()
+            return
+        if self._handle_block(stripped):
+            return
+        self.para.append(stripped)
+
+    def finish(self) -> str:
+        self.flush_para()
+        self.close_list()
+        self.flush_table()
+        if self.fence_info is not None:  # unterminated fence — flush what was collected
+            block = _fence_html(self.fence_info, self.fence_lines)
+            if block:
+                self.out.append(block)
+        return "\n".join(self.out)
+
+
+def md_to_html(md: str) -> str:
+    """Block-level Markdown -> HTML covering headings, lists, tables, fenced blocks (charts get a caption, not raw JSON), blockquotes, rules and paragraphs."""
+    parser = _MdBlockParser()
+    for raw in (md or "").replace("\r\n", "\n").split("\n"):
+        parser.feed(raw)
+    return parser.finish()
 
 
 def md_to_text(md: str) -> str:

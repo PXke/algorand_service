@@ -196,11 +196,13 @@ def test_lookup_asset_by_name_falls_back_to_display_name_search(
 
 
 def test_lookup_asset_by_name_requires_nonempty_name() -> None:
+    """An empty asset name returns an error instead of searching."""
     result = chain_tools._tool_lookup_asset_by_name("")
     assert "error" in result
 
 
 def test_lookup_asset_by_name_propagates_indexer_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An indexer error from the display-name fallback search is propagated to the caller."""
     monkeypatch.setattr(
         chain_tools,
         "_mainnet_idx_get",
@@ -211,6 +213,7 @@ def test_lookup_asset_by_name_propagates_indexer_error(monkeypatch: pytest.Monke
 
 
 def test_lookup_asset_by_name_tool_registered() -> None:
+    """lookup_asset_by_name is registered as a callable chain tool."""
     schemas, handlers = chain_tools.chain_tools()
     names = {s["function"]["name"] for s in schemas}
     assert "lookup_asset_by_name" in names
@@ -231,6 +234,7 @@ def test_is_valid_address_rejects_the_real_fabricated_addresses() -> None:
 def test_is_valid_address_accepts_a_real_checksum() -> None:
     # _encode_address is the exact inverse of the check under test — a
     # genuine round-trip, not a hand-picked string that happens to look right.
+    """Accepts a genuine checksum-valid address round-tripped through the encoder."""
     real = chain_tools._encode_address(b"\x00" * 32)
     assert len(real) == 58
     assert chain_tools._is_valid_address(real)
@@ -239,6 +243,7 @@ def test_is_valid_address_accepts_a_real_checksum() -> None:
 def test_lookup_account_rejects_invalid_address_without_hitting_algod(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Rejects an invalid address before ever calling algod, so no network call is wasted on a fabricated string."""
     calls = []
     monkeypatch.setattr(chain_tools, "_algod_get", lambda path: calls.append(path) or {})
 
@@ -251,6 +256,7 @@ def test_lookup_account_rejects_invalid_address_without_hitting_algod(
 
 
 def test_lookup_account_proceeds_for_a_valid_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proceeds to call algod and return the balance for a genuinely valid address."""
     real = chain_tools._encode_address(b"\x01" * 32)
     monkeypatch.setattr(
         chain_tools, "_algod_get", lambda _path: {"amount": 5_000_000, "assets": []}
@@ -282,6 +288,7 @@ def test_testnet_lookup_rejects_invalid_address_without_hitting_indexer(
 
 
 def test_testnet_lookup_proceeds_for_a_valid_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    """testnet_lookup proceeds to call the indexer for a genuinely valid address."""
     real = chain_tools._encode_address(b"\x04" * 32)
     monkeypatch.setattr(
         chain_tools,

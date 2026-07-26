@@ -28,6 +28,7 @@ def test_usability_does_not_add_usa_cluster() -> None:
 
 
 def test_tags_are_indexed_as_tokens() -> None:
+    """Article tags are indexed as lowercase search tokens."""
     tokens = build_article_search_tokens(
         title="Story",
         summary="",
@@ -39,6 +40,7 @@ def test_tags_are_indexed_as_tokens() -> None:
 
 
 def test_dotted_acronym_normalizes() -> None:
+    """A dotted acronym (U.S.) normalizes into the same tokens as the plain form."""
     tokens = build_article_search_tokens(
         title="Policy shift",
         summary="",

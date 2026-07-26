@@ -7,6 +7,7 @@ from app.modules.crawler import domain_tracker
 
 
 def test_compose_stamps_cooldown(patch_redis_from_url: FakeRedis) -> None:  # noqa: ARG001 -- name must match the real callee's keyword arg
+    """Composing for a domain stamps its cooldown; a different domain is unaffected."""
     assert domain_tracker.domain_in_cooldown("perawallet.app") is False
     domain_tracker.record_domain_compose("perawallet.app")
     assert domain_tracker.domain_in_cooldown("perawallet.app") is True
@@ -15,6 +16,7 @@ def test_compose_stamps_cooldown(patch_redis_from_url: FakeRedis) -> None:  # no
 
 
 def test_blank_domain_is_safe(patch_redis_from_url: FakeRedis) -> None:
+    """An empty domain is a safe no-op that touches no Redis keys."""
     assert domain_tracker.domain_in_cooldown("") is False
     domain_tracker.record_domain_compose("")  # no-op
     assert patch_redis_from_url.store == {}
@@ -24,6 +26,7 @@ def test_cooldown_disabled_when_hours_zero(
     monkeypatch: pytest.MonkeyPatch,
     patch_redis_from_url: FakeRedis,  # noqa: ARG001 -- name must match the real callee's keyword arg
 ) -> None:
+    """The cooldown never engages when its configured duration is zero hours."""
     monkeypatch.setattr("app.core.config.COMPOSE_DOMAIN_COOLDOWN_HOURS", 0, raising=False)
     domain_tracker.record_domain_compose("perawallet.app")
     assert domain_tracker.domain_in_cooldown("perawallet.app") is False

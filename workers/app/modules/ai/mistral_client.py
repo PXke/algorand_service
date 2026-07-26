@@ -53,6 +53,21 @@ def _strip_markdown_json_fence(raw: str) -> str:
     return body
 
 
+def _string_scan_step(ch: str, *, in_string: bool, escape: bool) -> tuple[bool, bool]:
+    """Advance the quoted-string tracking state by one character. Returns (in_string, escape)."""
+    if in_string:
+        if escape:
+            return in_string, False
+        if ch == "\\":
+            return in_string, True
+        if ch == '"':
+            return False, False
+        return in_string, escape
+    if ch == '"':
+        return True, False
+    return in_string, escape
+
+
 def _balanced_object_span(raw: str) -> str | None:
     """First top-level `{...}` span, respecting strings — safer than rfind('}')."""
     start = raw.find("{")
@@ -63,17 +78,11 @@ def _balanced_object_span(raw: str) -> str | None:
     escape = False
     for i in range(start, len(raw)):
         ch = raw[i]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
+        was_in_string = in_string
+        in_string, escape = _string_scan_step(ch, in_string=in_string, escape=escape)
+        if was_in_string:
             continue
-        if ch == '"':
-            in_string = True
-        elif ch == "{":
+        if ch == "{":
             depth += 1
         elif ch == "}":
             depth -= 1
@@ -82,13 +91,9 @@ def _balanced_object_span(raw: str) -> str | None:
     return None
 
 
-def _parse_json_object(raw: str) -> dict[str, Any] | None:
-    """Parse a model reply as a JSON object, salvaging fences and prose wrappers.
-
-    None when nothing object-like parses.
-    """
+def _json_object_candidates(stripped: str) -> list[str]:
+    """Ordered, deduped candidate substrings worth trying as the model's JSON object: the raw reply, its fence-stripped form, and the balanced `{...}` span of each."""
     candidates: list[str] = []
-    stripped = raw.strip()
     if stripped:
         candidates.append(stripped)
     unfenced = _strip_markdown_json_fence(stripped)
@@ -101,27 +106,39 @@ def _parse_json_object(raw: str) -> dict[str, Any] | None:
     span = _balanced_object_span(stripped)
     if span and span not in candidates:
         candidates.append(span)
+    return candidates
 
-    for candidate in candidates:
+
+def _salvage_scores_from_broken_json(stripped: str) -> dict[str, Any] | None:
+    """Regex-salvage narrative_synthesis/technical_depth scores when the model's JSON itself won't parse (e.g. an unescaped quote inside an issue string) — these two numeric fields often survive even when the rest breaks."""
+    import re
+
+    narrative_m = re.search(r'"narrative_synthesis"\s*:\s*(\d+)', stripped)
+    technical_m = re.search(r'"technical_depth"\s*:\s*(\d+)', stripped)
+    if not narrative_m and not technical_m:
+        return None
+    out: dict[str, Any] = {"issues": []}
+    if narrative_m:
+        out["narrative_synthesis"] = int(narrative_m.group(1))
+    if technical_m:
+        out["technical_depth"] = int(technical_m.group(1))
+    return out
+
+
+def _parse_json_object(raw: str) -> dict[str, Any] | None:
+    """Parse a model reply as a JSON object, salvaging fences and prose wrappers.
+
+    None when nothing object-like parses.
+    """
+    stripped = raw.strip()
+    for candidate in _json_object_candidates(stripped):
         try:
             parsed = json.loads(candidate)
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
             return parsed
-    # Scores often survive when issue strings break JSON (unescaped quotes).
-    import re
-
-    narrative_m = re.search(r'"narrative_synthesis"\s*:\s*(\d+)', stripped)
-    technical_m = re.search(r'"technical_depth"\s*:\s*(\d+)', stripped)
-    if narrative_m or technical_m:
-        out: dict[str, Any] = {"issues": []}
-        if narrative_m:
-            out["narrative_synthesis"] = int(narrative_m.group(1))
-        if technical_m:
-            out["technical_depth"] = int(technical_m.group(1))
-        return out
-    return None
+    return _salvage_scores_from_broken_json(stripped)
 
 
 def _message_text(message: dict[str, Any]) -> str:
@@ -145,6 +162,7 @@ def _message_text(message: dict[str, Any]) -> str:
 
 class MistralError(Exception):
     """Raised on a Mistral API failure."""
+
     pass
 
 
@@ -239,6 +257,72 @@ class MistralClient:
         """Cumulative token usage across every request this instance has made (a compose session's client(s) are created fresh per session, so this is the session total, not a lifetime counter)."""
         return dict(self._usage)
 
+    def _retry_after_network_error(
+        self, exc: httpx.RequestError, *, attempt: int, last_attempt: bool
+    ) -> None:
+        """Log and sleep before retrying a transport-level failure (connection/read timeout, DNS, reset), or raise on the final attempt."""
+        if last_attempt:
+            raise MistralError(
+                f"Mistral request failed after {attempt + 1} attempts: {exc}"
+            ) from exc
+        wait = min(MISTRAL_BACKOFF_MAX_SECONDS, MISTRAL_BACKOFF_BASE_SECONDS * (2**attempt))
+        logger.warning(
+            "Mistral network error (attempt %d/%d): %s; backing off %.1fs",
+            attempt + 1,
+            MISTRAL_MAX_RETRIES + 1,
+            exc,
+            wait,
+        )
+        time.sleep(wait)
+
+    def _retry_after_retryable_status(
+        self, resp: httpx.Response, *, attempt: int, last_attempt: bool
+    ) -> None:
+        """Log and sleep (honoring Retry-After) before retrying a 429/5xx, or raise on the final attempt."""
+        if last_attempt:
+            if resp.status_code == 429:
+                raise MistralRateLimitError(
+                    f"Mistral API 429 after {attempt + 1} attempts: {resp.text[:300]}"
+                )
+            raise MistralError(
+                f"Mistral API {resp.status_code} after {attempt + 1} attempts: {resp.text[:300]}"
+            )
+        wait = _retry_after_seconds(resp) or min(
+            MISTRAL_BACKOFF_MAX_SECONDS, MISTRAL_BACKOFF_BASE_SECONDS * (2**attempt)
+        )
+        logger.warning(
+            "Mistral %d (attempt %d/%d); backing off %.1fs",
+            resp.status_code,
+            attempt + 1,
+            MISTRAL_MAX_RETRIES + 1,
+            wait,
+        )
+        time.sleep(wait)
+
+    @staticmethod
+    def _wants_reasoning_effort_retry(resp: httpx.Response, payload: dict[str, Any]) -> bool:
+        return (
+            resp.status_code == 400
+            and "reasoning_effort" in payload
+            and "reasoning_effort" in resp.text
+            and "not enabled" in resp.text
+        )
+
+    @staticmethod
+    def _raise_for_error_status(resp: httpx.Response) -> None:
+        """Raise the appropriate MistralError subtype for a non-retryable error status."""
+        if resp.status_code in (401, 402):
+            mark_credit_exhausted()
+            raise MistralCreditError(f"Mistral API {resp.status_code}: {resp.text[:500]}")
+        if resp.status_code >= 400:
+            raise MistralError(f"Mistral API {resp.status_code}: {resp.text[:500]}")
+
+    def _record_usage(self, data: dict[str, Any]) -> None:
+        usage = data.get("usage") or {}
+        self._usage["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+        self._usage["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+        self._usage["total_tokens"] += int(usage.get("total_tokens") or 0)
+
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         """POST one chat/completions request through the shared rate-limit gate, retrying on 429 with Retry-After / exponential backoff. Returns the parsed JSON body or raises MistralError."""
         if is_credit_exhausted():
@@ -260,50 +344,13 @@ class MistralClient:
                 with httpx.Client(timeout=self._timeout) as client:
                     resp = client.post(url, headers=headers, json=payload)
             except httpx.RequestError as exc:
-                # Connection/read timeout, DNS, reset — transient transport error.
-                if last_attempt:
-                    raise MistralError(
-                        f"Mistral request failed after {attempt + 1} attempts: {exc}"
-                    ) from exc
-                wait = min(MISTRAL_BACKOFF_MAX_SECONDS, MISTRAL_BACKOFF_BASE_SECONDS * (2**attempt))
-                logger.warning(
-                    "Mistral network error (attempt %d/%d): %s; backing off %.1fs",
-                    attempt + 1,
-                    MISTRAL_MAX_RETRIES + 1,
-                    exc,
-                    wait,
-                )
-                time.sleep(wait)
+                self._retry_after_network_error(exc, attempt=attempt, last_attempt=last_attempt)
                 continue
 
             if resp.status_code in _RETRYABLE_STATUS:
-                if last_attempt:
-                    if resp.status_code == 429:
-                        raise MistralRateLimitError(
-                            f"Mistral API 429 after {attempt + 1} attempts: {resp.text[:300]}"
-                        )
-                    raise MistralError(
-                        f"Mistral API {resp.status_code} after {attempt + 1} attempts: "
-                        f"{resp.text[:300]}"
-                    )
-                wait = _retry_after_seconds(resp) or min(
-                    MISTRAL_BACKOFF_MAX_SECONDS, MISTRAL_BACKOFF_BASE_SECONDS * (2**attempt)
-                )
-                logger.warning(
-                    "Mistral %d (attempt %d/%d); backing off %.1fs",
-                    resp.status_code,
-                    attempt + 1,
-                    MISTRAL_MAX_RETRIES + 1,
-                    wait,
-                )
-                time.sleep(wait)
+                self._retry_after_retryable_status(resp, attempt=attempt, last_attempt=last_attempt)
                 continue
-            if (
-                resp.status_code == 400
-                and "reasoning_effort" in payload
-                and "reasoning_effort" in resp.text
-                and "not enabled" in resp.text
-            ):
+            if self._wants_reasoning_effort_retry(resp, payload):
                 self._reasoning_effort_unsupported = True
                 payload = {k: v for k, v in payload.items() if k != "reasoning_effort"}
                 logger.warning(
@@ -311,16 +358,9 @@ class MistralClient:
                     self._model,
                 )
                 continue
-            if resp.status_code in (401, 402):
-                mark_credit_exhausted()
-                raise MistralCreditError(f"Mistral API {resp.status_code}: {resp.text[:500]}")
-            if resp.status_code >= 400:
-                raise MistralError(f"Mistral API {resp.status_code}: {resp.text[:500]}")
+            self._raise_for_error_status(resp)
             data = resp.json()
-            usage = data.get("usage") or {}
-            self._usage["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
-            self._usage["completion_tokens"] += int(usage.get("completion_tokens") or 0)
-            self._usage["total_tokens"] += int(usage.get("total_tokens") or 0)
+            self._record_usage(data)
             return data
         raise MistralError("Mistral request retry loop exhausted")  # unreachable
 
@@ -411,6 +451,207 @@ class MistralClient:
             raise MistralError(f"Mistral returned non-JSON content: {raw[:200]}")
         return parsed
 
+    def _merged_convo_with_prior_debug(
+        self, messages: list[dict[str, Any]], debug: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        """Prepend any prior chat_with_tools round's transcript stashed on a shared debug dict, so a multi-pass compose (initial research, RESEARCH_FLOOR nudge, digest gap-fill) keeps every round's tool calls in the persisted transcript instead of a later pass silently overwriting it with its own fresh 2-message start."""
+        convo = list(messages)
+        if debug is not None:
+            prior = debug.get("messages")
+            if isinstance(prior, list) and prior:
+                convo = prior + convo
+            debug["messages"] = convo  # mutated in place → full transcript
+            debug["model"] = self._model
+        return convo
+
+    @staticmethod
+    def _seed_seen_calls_from_trace(trace: list[dict[str, Any]] | None) -> set[str]:
+        """Cross-pass tool-call dedup cache (2026-07-16), seeded from a shared trace's non-errored calls so an exact repeat in a later pass is nudged instead of silently re-executed (a real RandGallery session once repeated 5 of its 35 calls, ~970k tokens). Errored calls are NOT seeded — retrying a transient failure in a later pass is legitimate."""
+        seen_calls: set[str] = set()
+        for entry in trace or ():
+            result = entry.get("result")
+            if isinstance(result, dict) and result.get("error"):
+                continue
+            try:
+                seen_calls.add(
+                    f"{entry.get('tool')}:"
+                    f"{json.dumps(entry.get('arguments') or {}, sort_keys=True)}"
+                )
+            except (TypeError, ValueError):
+                continue
+        return seen_calls
+
+    def _run_tool_call(
+        self,
+        call: dict[str, Any],
+        *,
+        handlers: dict[str, Any],
+        seen_calls: set[str],
+        require_tool: str | None,
+        trace: list[dict[str, Any]] | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Execute one model-requested tool call (or nudge past an exact repeat this session), record it to the trace, and return (tool_result_message, satisfied_require_tool). A StorySpikedError (the writer aborting the article) is recorded to the trace then re-raised uncaught — every other tool failure is caught and fed back as an error result."""
+        fn = call.get("function") or {}
+        name = fn.get("name", "")
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        sig = f"{name}:{json.dumps(args, sort_keys=True)}"
+        if sig in seen_calls and name != "suggest_tool":
+            # Identical call already executed this session — don't re-run
+            # the handler or resend the (unchanged) data; nudge to write.
+            note = (
+                "You already called this tool with these exact arguments "
+                "this session; its data has not changed. Do NOT call it "
+                "again — use the result you already have and write the "
+                "article now."
+            )
+            if name == "fetch_url" and not args.get("continue_reading"):
+                note += (
+                    " If you meant to read more of a long page, call fetch_url "
+                    "again with the same url and continue_reading=true."
+                )
+            result = {"note": note}
+        else:
+            seen_calls.add(sig)
+            handler = handlers.get(name)
+            try:
+                result = handler(**args) if handler else {"error": f"unknown tool {name}"}
+            except StorySpikedError as spike:
+                # The one tool "failure" that MUST abort the article —
+                # abort_article is the writer refusing to compose at all.
+                # Record it in the trace first so the session shows the
+                # writer's own reasoning, then let it escape the loop.
+                if trace is not None:
+                    trace.append(
+                        {
+                            "tool": name,
+                            "arguments": args,
+                            "result": {
+                                "spiked": True,
+                                "category": spike.category,
+                                "reason": spike.reason,
+                            },
+                        }
+                    )
+                raise
+            except Exception as exc:  # tool failure must not abort the article
+                result = {"error": str(exc)}
+        satisfied_require_tool = name == require_tool
+        if trace is not None:
+            trace.append({"tool": name, "arguments": args, "result": result})
+        message = {
+            "role": "tool",
+            "name": name,
+            "tool_call_id": call.get("id", ""),
+            # Structure-preserving cap: trims only the biggest string field
+            # (e.g. page text) so links/url/title still survive, unlike the
+            # old blind json.dumps(result)[:4000].
+            "content": serialize_tool_result(result, MISTRAL_TOOL_RESULT_MAX_CHARS),
+        }
+        return message, satisfied_require_tool
+
+    def _tool_round_payload(
+        self,
+        convo: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        response_reserve: int,
+        temperature: float,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": convo,
+            "max_tokens": response_reserve,
+            "temperature": temperature,
+            "tools": tools,
+            "tool_choice": "auto",
+        }
+        if MISTRAL_REASONING_EFFORT and not self._reasoning_effort_unsupported:
+            payload["reasoning_effort"] = MISTRAL_REASONING_EFFORT
+        return payload
+
+    @staticmethod
+    def _extract_message(data: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return data["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise MistralError("unexpected Mistral response shape") from exc
+
+    @staticmethod
+    def _handle_no_tool_calls_round(
+        convo: list[dict[str, Any]],
+        msg: dict[str, Any],
+        *,
+        last_content: str,
+        required_satisfied: bool,
+        required_nudged: bool,
+        require_tool: str | None,
+        round_idx: int,
+        debug: dict[str, Any] | None,
+    ) -> tuple[bool, bool, str | None]:
+        """The model produced no tool calls this round. Returns (should_continue_loop, required_nudged, final_content_or_None).
+
+        Model wants to finish but hasn't called the mandatory tool yet: send it
+        back once with an explicit instruction. Only nudges once (via
+        required_nudged) so a stubborn model can't loop forever.
+        """
+        if not required_satisfied and not required_nudged:
+            convo.append(msg)
+            convo.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Before finishing you MUST call the `{require_tool}` tool "
+                        "once on your current draft (title + full body) and address "
+                        "its feedback. Do that now, then output the final JSON article."
+                    ),
+                }
+            )
+            return True, True, None
+        if debug is not None:
+            debug["rounds"] = round_idx + 1
+        return False, required_nudged, last_content
+
+    def _process_tool_calls_round(
+        self,
+        convo: list[dict[str, Any]],
+        msg: dict[str, Any],
+        tool_calls: list[dict[str, Any]],
+        *,
+        handlers: dict[str, Any],
+        seen_calls: set[str],
+        require_tool: str | None,
+        trace: list[dict[str, Any]] | None,
+        required_satisfied: bool,
+        round_idx: int,
+        debug: dict[str, Any] | None,
+    ) -> tuple[str | None, bool]:
+        """Handle a round where the model made tool calls: salvage a bogus-tool-call final article, or execute every real call and append its result. Returns (salvaged_final_or_None, required_satisfied)."""
+        # Some models emit their final JSON article as a bogus tool call
+        # (function name like ```json or the article itself) instead of
+        # message content. Recover it so the article is not lost.
+        salvaged = _salvage_final_article(tool_calls, handlers)
+        if salvaged is not None:
+            if debug is not None:
+                debug["rounds"] = round_idx + 1
+                debug["salvaged"] = True
+            return salvaged, required_satisfied
+        convo.append(msg)
+        for call in tool_calls:
+            tool_message, satisfied = self._run_tool_call(
+                call,
+                handlers=handlers,
+                seen_calls=seen_calls,
+                require_tool=require_tool,
+                trace=trace,
+            )
+            if satisfied:
+                required_satisfied = True
+            convo.append(tool_message)
+        return None, required_satisfied
+
     def chat_with_tools(
         self,
         messages: list[dict[str, Any]],
@@ -432,45 +673,13 @@ class MistralClient:
         self._log_task_context("chat_with_tools")
 
         rounds = max_rounds if max_rounds is not None else MISTRAL_MAX_TOOL_ROUNDS
-        convo = list(messages)
-        if debug is not None:
-            # Two-stage compose invokes chat_with_tools multiple times sharing
-            # one debug dict (initial research, a RESEARCH_FLOOR nudge pass,
-            # a digest gap-fill pass) — prepend any prior round's transcript so
-            # it survives instead of being silently overwritten by this round's
-            # fresh 2-message start (previously lost every earlier round's tool
-            # calls from the persisted/audited transcript, though not from
-            # `trace`, which accumulates by reference regardless).
-            prior = debug.get("messages")
-            if isinstance(prior, list) and prior:
-                convo = prior + convo
-            debug["messages"] = convo  # mutated in place → full transcript
-            debug["model"] = self._model
+        convo = self._merged_convo_with_prior_debug(messages, debug)
         last_content = ""
         # Guard against runaway loops: the data tools (price, market, chain head)
         # return stable data, but the model otherwise re-calls them dozens of
         # times. Cache (name+args) signatures and refuse to re-run an identical
         # call, nudging the model to write instead.
-        seen_calls: set[str] = set()
-        # Cross-pass dedup (2026-07-16): the research floor and gap-fill passes
-        # call chat_with_tools again with a FRESH conversation but the SAME
-        # shared trace — an empty cache here let a later pass re-run an earlier
-        # pass's identical searches verbatim (a real RandGallery session
-        # repeated 5 of its 35 calls; ~970k tokens total). Seed from the trace
-        # so exact repeats get the "already called" nudge across passes too.
-        # Errored calls are NOT seeded: retrying a transient failure in a later
-        # pass is legitimate.
-        for entry in trace or ():
-            result = entry.get("result")
-            if isinstance(result, dict) and result.get("error"):
-                continue
-            try:
-                seen_calls.add(
-                    f"{entry.get('tool')}:"
-                    f"{json.dumps(entry.get('arguments') or {}, sort_keys=True)}"
-                )
-            except (TypeError, ValueError):
-                continue
+        seen_calls = self._seed_seen_calls_from_trace(trace)
         # Enforce a mandatory tool (e.g. review_draft): the model is not allowed
         # to produce its final answer until it has called this tool at least once.
         required_satisfied = require_tool is None
@@ -492,117 +701,41 @@ class MistralClient:
             # OLDEST tool results (in place) so the request never overflows.
             if convo_budget > 0:
                 fit_messages_to_budget(convo, convo_budget)
-            payload: dict[str, Any] = {
-                "model": self._model,
-                "messages": convo,
-                "max_tokens": response_reserve,
-                "temperature": temperature,
-                "tools": tools,
-                "tool_choice": "auto",
-            }
-            if MISTRAL_REASONING_EFFORT and not self._reasoning_effort_unsupported:
-                payload["reasoning_effort"] = MISTRAL_REASONING_EFFORT
+            payload = self._tool_round_payload(
+                convo, tools=tools, response_reserve=response_reserve, temperature=temperature
+            )
             data = self._post(payload)
-            try:
-                msg = data["choices"][0]["message"]
-            except (KeyError, IndexError, TypeError) as exc:
-                raise MistralError("unexpected Mistral response shape") from exc
+            msg = self._extract_message(data)
             last_content = _message_text(msg) or last_content
             tool_calls = msg.get("tool_calls") or []
             if not tool_calls:
-                # Model wants to finish but hasn't called the mandatory tool yet:
-                # send it back once with an explicit instruction. Only nudge once
-                # so a stubborn model can't loop forever.
-                if not required_satisfied and not required_nudged:
-                    required_nudged = True
-                    convo.append(msg)
-                    convo.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                f"Before finishing you MUST call the `{require_tool}` tool "
-                                "once on your current draft (title + full body) and address "
-                                "its feedback. Do that now, then output the final JSON article."
-                            ),
-                        }
-                    )
-                    continue
-                if debug is not None:
-                    debug["rounds"] = round_idx + 1
-                return last_content
-            # Some models emit their final JSON article as a bogus tool call
-            # (function name like ```json or the article itself) instead of
-            # message content. Recover it so the article is not lost.
-            salvaged = _salvage_final_article(tool_calls, handlers)
-            if salvaged is not None:
-                if debug is not None:
-                    debug["rounds"] = round_idx + 1
-                    debug["salvaged"] = True
-                return salvaged
-            convo.append(msg)
-            for call in tool_calls:
-                fn = call.get("function") or {}
-                name = fn.get("name", "")
-                try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                sig = f"{name}:{json.dumps(args, sort_keys=True)}"
-                if sig in seen_calls and name != "suggest_tool":
-                    # Identical call already executed this session — don't re-run
-                    # the handler or resend the (unchanged) data; nudge to write.
-                    note = (
-                        "You already called this tool with these exact arguments "
-                        "this session; its data has not changed. Do NOT call it "
-                        "again — use the result you already have and write the "
-                        "article now."
-                    )
-                    if name == "fetch_url" and not args.get("continue_reading"):
-                        note += (
-                            " If you meant to read more of a long page, call fetch_url "
-                            "again with the same url and continue_reading=true."
-                        )
-                    result = {"note": note}
-                else:
-                    seen_calls.add(sig)
-                    handler = handlers.get(name)
-                    try:
-                        result = handler(**args) if handler else {"error": f"unknown tool {name}"}
-                    except StorySpikedError as spike:
-                        # The one tool "failure" that MUST abort the article —
-                        # abort_article is the writer refusing to compose at all.
-                        # Record it in the trace first so the session shows the
-                        # writer's own reasoning, then let it escape the loop.
-                        if trace is not None:
-                            trace.append(
-                                {
-                                    "tool": name,
-                                    "arguments": args,
-                                    "result": {
-                                        "spiked": True,
-                                        "category": spike.category,
-                                        "reason": spike.reason,
-                                    },
-                                }
-                            )
-                        raise
-                    except Exception as exc:  # tool failure must not abort the article
-                        result = {"error": str(exc)}
-                if name == require_tool:
-                    required_satisfied = True
-                if trace is not None:
-                    trace.append({"tool": name, "arguments": args, "result": result})
-                convo.append(
-                    {
-                        "role": "tool",
-                        "name": name,
-                        "tool_call_id": call.get("id", ""),
-                        # Structure-preserving cap: trims only the biggest string
-                        # field (e.g. page text) so links/url/title still survive,
-                        # unlike the old blind json.dumps(result)[:4000].
-                        "content": serialize_tool_result(result, MISTRAL_TOOL_RESULT_MAX_CHARS),
-                    }
+                should_continue, required_nudged, final = self._handle_no_tool_calls_round(
+                    convo,
+                    msg,
+                    last_content=last_content,
+                    required_satisfied=required_satisfied,
+                    required_nudged=required_nudged,
+                    require_tool=require_tool,
+                    round_idx=round_idx,
+                    debug=debug,
                 )
+                if should_continue:
+                    continue
+                return final
+            salvaged, required_satisfied = self._process_tool_calls_round(
+                convo,
+                msg,
+                tool_calls,
+                handlers=handlers,
+                seen_calls=seen_calls,
+                require_tool=require_tool,
+                trace=trace,
+                required_satisfied=required_satisfied,
+                round_idx=round_idx,
+                debug=debug,
+            )
+            if salvaged is not None:
+                return salvaged
         # Out of rounds: ask once more without tools for a final write-up.
         if debug is not None:
             debug["rounds"] = rounds

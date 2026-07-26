@@ -425,22 +425,18 @@ class AdminApi {
     required String walletAddress,
     required String domain,
     required bool isRelevant,
-    // False approves the domain for one-time frontier crawling only — no
-    // permanent monitored source gets created, so it won't be repeatedly
-    // re-scraped going forward. Defaults true to match prior behavior.
-    bool asSeed = true,
-    // True: this one page is a citation, not "watch this whole domain" —
-    // fetches only this URL, never follows its links, and is excluded from
-    // every future domain-wide sweep. Implies asSeed=false server-side.
-    bool singlePageOnly = false,
+    // Exactly two modes. True: permanent monitored source, watched weekly,
+    // articles about how it changes. False: single page — fetches only this
+    // URL, never follows its links, excluded from every domain-wide sweep,
+    // and composed into a one-shot article about that page's content.
+    bool fullSite = true,
   }) async {
     return _client.postJson(
       '/api/v1/admin/domains/set',
       body: {
         'domain': domain,
         'is_relevant': isRelevant,
-        'as_seed': asSeed,
-        'single_page_only': singlePageOnly,
+        'full_site': fullSite,
       },
       headers: _adminHeaders(walletAddress),
     );

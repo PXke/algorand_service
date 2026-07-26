@@ -973,20 +973,13 @@ class AppLocalizationsHi extends AppLocalizations {
   String get domainsDeadEnd => 'गतिरोध';
 
   @override
-  String get domainsApproveExplore => 'स्वीकृत करें और अन्वेषण करें';
-
-  @override
-  String get domainsCrawlOnce => 'एक बार क्रॉल करें, स्रोत नहीं';
+  String get domainsApproveExplore => 'पूरी साइट';
 
   @override
   String get domainsAddButton => 'जोड़ें';
 
   @override
-  String get domainsAddAsSeed => 'स्थायी स्रोत के रूप में जोड़ें';
-
-  @override
-  String get domainsAddSinglePageOnly =>
-      'केवल यह पेज (केवल उद्धरण, पूरी साइट को क्रॉल न करें)';
+  String get domainsAddSinglePageOnly => 'एकल पेज';
 
   @override
   String get domainsScoreUnexplained => 'स्कोर का विवरण उपलब्ध नहीं है';
@@ -996,7 +989,12 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get domainsPossibleServiceHint =>
-      'स्कोर अच्छा है पर समाचार/सामान्य के रूप में टैग किया गया है — यह एक वास्तविक उत्पाद हो सकता है, सिर्फ उद्धरण स्रोत नहीं। \"एक बार क्रॉल करें\" के बजाय \"स्वीकृत करें और खोजें\" पर विचार करें।';
+      'स्कोर अच्छा है पर समाचार/सामान्य के रूप में टैग किया गया है — यह एक वास्तविक उत्पाद हो सकता है, सिर्फ उद्धरण स्रोत नहीं। \"एकल पेज\" के बजाय \"पूरी साइट\" पर विचार करें।';
+
+  @override
+  String domainsSuggestedHint(int count) {
+    return 'सुझाया गया — $count समान-डोमेन पेज मिले';
+  }
 
   @override
   String get paginationPrevious => 'पिछला';

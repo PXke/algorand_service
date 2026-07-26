@@ -23,6 +23,7 @@ def _tick(price: float, when: datetime) -> PriceTick:
 
 
 def test_build_mistral_context_includes_windows() -> None:
+    """build_mistral_context includes both 24h and 7d windows plus the CoinGecko chart note."""
     now = datetime(2026, 6, 2, 12, 0, tzinfo=UTC)
     samples = [
         PriceSampleRow(
@@ -66,6 +67,7 @@ def test_build_mistral_context_includes_windows() -> None:
 
 
 def test_build_brief_counts_samples() -> None:
+    """build_brief counts the 24h samples it was given."""
     now = datetime(2026, 6, 2, 12, 0, tzinfo=UTC)
     samples = [
         PriceSampleRow(

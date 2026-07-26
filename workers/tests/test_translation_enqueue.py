@@ -8,6 +8,7 @@ from app.modules.newspaper.tasks import publish_tasks as pt
 
 
 def test_enqueue_missing_skips_existing_langs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enqueues only the languages missing from the article's stored translations."""
     sent: list[str] = []
 
     monkeypatch.setattr(

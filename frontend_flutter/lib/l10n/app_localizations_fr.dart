@@ -979,20 +979,13 @@ class AppLocalizationsFr extends AppLocalizations {
   String get domainsDeadEnd => 'Impasse';
 
   @override
-  String get domainsApproveExplore => 'Approuver et explorer';
-
-  @override
-  String get domainsCrawlOnce => 'Explorer une fois, sans source';
+  String get domainsApproveExplore => 'Site complet';
 
   @override
   String get domainsAddButton => 'Ajouter';
 
   @override
-  String get domainsAddAsSeed => 'Ajouter comme source permanente';
-
-  @override
-  String get domainsAddSinglePageOnly =>
-      'Juste cette page (citation uniquement, ne pas explorer le site)';
+  String get domainsAddSinglePageOnly => 'Page unique';
 
   @override
   String get domainsScoreUnexplained => 'Détail du score non disponible';
@@ -1002,7 +995,12 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get domainsPossibleServiceHint =>
-      'Bien noté mais classé actualité/générique — pourrait être un vrai produit, pas juste une source de citation. Envisagez « Approuver et explorer » plutôt que « Explorer une fois ».';
+      'Bien noté mais classé actualité/générique — pourrait être un vrai produit, pas juste une source de citation. Envisagez « Site complet » plutôt que « Page unique ».';
+
+  @override
+  String domainsSuggestedHint(int count) {
+    return 'Suggéré — $count pages du même domaine trouvées';
+  }
 
   @override
   String get paginationPrevious => 'Précédent';

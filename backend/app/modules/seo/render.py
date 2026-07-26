@@ -96,6 +96,61 @@ def _publisher() -> dict:
 _TITLE_MAX_CHARS = 65
 
 
+def _clamped_title(title: str) -> str:
+    """The <title> tag text: brand-suffixed when the result still fits the ~65-char SERP budget (before SERPs truncate and audit tools warn), otherwise the bare headline (brand already rides in og:site_name), word-boundary clamped if even that alone overflows. Only the <title> tag is clamped this way — og:/twitter:/JSON-LD keep the full headline."""
+    suffixed = title if title.endswith(settings.site_name) else f"{title} — {settings.site_name}"
+    if len(suffixed) <= _TITLE_MAX_CHARS:
+        return suffixed
+    if len(title) <= _TITLE_MAX_CHARS:
+        return title
+    cut = title[: _TITLE_MAX_CHARS - 1]
+    space = cut.rfind(" ")
+    if space > _TITLE_MAX_CHARS // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:—-") + "…"
+
+
+def _og_locale_parts(
+    og_locale_alternates: list[str] | None, hreflang_links: list[tuple[str, str]] | None
+) -> list[str]:
+    """og:locale:alternate tags plus hreflang <link> tags for every translation."""
+    parts = [
+        f'<meta property="og:locale:alternate" content="{_attr(alt)}">'
+        for alt in og_locale_alternates or []
+    ]
+    parts.extend(
+        f'<link rel="alternate" hreflang="{_attr(hreflang)}" href="{_attr(url)}">'
+        for hreflang, url in hreflang_links or []
+    )
+    return parts
+
+
+def _og_article_meta_parts(
+    *,
+    image_alt: str,
+    image_dims: tuple[int, int] | None,
+    published_iso: str | None,
+    modified_iso: str | None,
+    og_section: str | None,
+    tags: list[str] | None,
+) -> list[str]:
+    """Optional og:image alt/dims and article:published_time/modified_time/section/tag meta tags."""
+    parts: list[str] = []
+    if image_alt:
+        parts.append(f'<meta property="og:image:alt" content="{_attr(image_alt)}">')
+    if image_dims:
+        parts.append(f'<meta property="og:image:width" content="{image_dims[0]}">')
+        parts.append(f'<meta property="og:image:height" content="{image_dims[1]}">')
+    if published_iso:
+        parts.append(f'<meta property="article:published_time" content="{_attr(published_iso)}">')
+    if modified_iso:
+        parts.append(f'<meta property="article:modified_time" content="{_attr(modified_iso)}">')
+    if og_section:
+        parts.append(f'<meta property="article:section" content="{_attr(og_section)}">')
+    parts.extend(f'<meta property="article:tag" content="{_attr(tag)}">' for tag in tags or [])
+    return parts
+
+
 def _meta_block(
     *,
     title: str,
@@ -115,22 +170,7 @@ def _meta_block(
     hreflang_links: list[tuple[str, str]] | None = None,
     og_section: str | None = None,
 ) -> str:
-    # <title> length budget (~65 chars before SERPs truncate and audit tools
-    # warn): brand-suffix the title only when the result still fits; a long
-    # article headline stands alone (brand already rides in og:site_name), and
-    # a headline that is itself over budget is word-boundary clamped. Only the
-    # <title> tag is clamped — og:/twitter:/JSON-LD keep the full headline.
-    suffixed = title if title.endswith(settings.site_name) else f"{title} — {settings.site_name}"
-    if len(suffixed) <= _TITLE_MAX_CHARS:
-        full_title = suffixed
-    elif len(title) <= _TITLE_MAX_CHARS:
-        full_title = title
-    else:
-        cut = title[: _TITLE_MAX_CHARS - 1]
-        space = cut.rfind(" ")
-        if space > _TITLE_MAX_CHARS // 2:
-            cut = cut[:space]
-        full_title = cut.rstrip(" ,;:—-") + "…"
+    full_title = _clamped_title(title)
     parts = [
         f"<title>{html.escape(full_title)}</title>",
         f'<meta name="description" content="{_attr(description)}">',
@@ -152,23 +192,15 @@ def _meta_block(
         f'<meta property="og:image" content="{_attr(image)}">',
         f'<meta property="og:locale" content="{_attr(og_locale)}">',
     ]
-    for alt in og_locale_alternates or []:
-        parts.append(f'<meta property="og:locale:alternate" content="{_attr(alt)}">')
-    for hreflang, url in hreflang_links or []:
-        parts.append(f'<link rel="alternate" hreflang="{_attr(hreflang)}" href="{_attr(url)}">')
-    if image_alt:
-        parts.append(f'<meta property="og:image:alt" content="{_attr(image_alt)}">')
-    if image_dims:
-        parts.append(f'<meta property="og:image:width" content="{image_dims[0]}">')
-        parts.append(f'<meta property="og:image:height" content="{image_dims[1]}">')
-    if published_iso:
-        parts.append(f'<meta property="article:published_time" content="{_attr(published_iso)}">')
-    if modified_iso:
-        parts.append(f'<meta property="article:modified_time" content="{_attr(modified_iso)}">')
-    if og_section:
-        parts.append(f'<meta property="article:section" content="{_attr(og_section)}">')
-    for tag in tags or []:
-        parts.append(f'<meta property="article:tag" content="{_attr(tag)}">')
+    parts += _og_locale_parts(og_locale_alternates, hreflang_links)
+    parts += _og_article_meta_parts(
+        image_alt=image_alt,
+        image_dims=image_dims,
+        published_iso=published_iso,
+        modified_iso=modified_iso,
+        og_section=og_section,
+        tags=tags,
+    )
     # Twitter
     parts += [
         '<meta name="twitter:card" content="summary_large_image">',

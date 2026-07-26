@@ -1770,14 +1770,8 @@ abstract class AppLocalizations {
   /// No description provided for @domainsApproveExplore.
   ///
   /// In en, this message translates to:
-  /// **'Approve & explore'**
+  /// **'Full site'**
   String get domainsApproveExplore;
-
-  /// No description provided for @domainsCrawlOnce.
-  ///
-  /// In en, this message translates to:
-  /// **'Crawl once, no seed'**
-  String get domainsCrawlOnce;
 
   /// No description provided for @domainsAddButton.
   ///
@@ -1785,16 +1779,10 @@ abstract class AppLocalizations {
   /// **'Add'**
   String get domainsAddButton;
 
-  /// No description provided for @domainsAddAsSeed.
-  ///
-  /// In en, this message translates to:
-  /// **'Add as permanent source'**
-  String get domainsAddAsSeed;
-
   /// No description provided for @domainsAddSinglePageOnly.
   ///
   /// In en, this message translates to:
-  /// **'Just this page (citation only, don\'t crawl the site)'**
+  /// **'Single page'**
   String get domainsAddSinglePageOnly;
 
   /// No description provided for @domainsScoreUnexplained.
@@ -1812,8 +1800,14 @@ abstract class AppLocalizations {
   /// No description provided for @domainsPossibleServiceHint.
   ///
   /// In en, this message translates to:
-  /// **'Scored well but tagged news/generic — this may be a real product, not just a citation source. Consider \"Approve & explore\" instead of \"Crawl once\".'**
+  /// **'Scored well but tagged news/generic — this may be a real product, not just a citation source. Consider \"Full site\" instead of \"Single page\".'**
   String get domainsPossibleServiceHint;
+
+  /// No description provided for @domainsSuggestedHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Suggested — {count} same-domain pages found'**
+  String domainsSuggestedHint(int count);
 
   /// No description provided for @paginationPrevious.
   ///

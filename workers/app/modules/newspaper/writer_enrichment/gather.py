@@ -160,52 +160,64 @@ def _should_probe_domain(source_url: str) -> bool:
     return lower.startswith("http")
 
 
-def format_enrichment_for_writer(bundle: WriterEnrichmentBundle) -> str:
-    """Markdown block appended to Mistral user prompt or template context."""
-    lines = [f"## Writer enrichment ({bundle.phase})"]
-    if bundle.primary_domain:
-        lines.append(f"Primary domain: **{bundle.primary_domain}**")
-
+def _internal_history_lines(bundle: WriterEnrichmentBundle) -> list[str]:
     internal = bundle.sections.get("internal", {})
-    if internal.get("prior_articles"):
-        lines.append(
-            f"Platform history: {internal['prior_articles']} prior article(s); "
-            f"{internal.get('latest_snapshot', '')}"
-        )
+    if not internal.get("prior_articles"):
+        return []
+    return [
+        f"Platform history: {internal['prior_articles']} prior article(s); "
+        f"{internal.get('latest_snapshot', '')}"
+    ]
 
+
+def _app_store_lines(bundle: WriterEnrichmentBundle) -> list[str]:
     apps = bundle.sections.get("app_stores", {})
     if apps.get("has_mobile_app_links"):
-        lines.append(f"Mobile app links detected: {', '.join(apps.get('stores_linked', []))}")
-    else:
-        lines.append("Mobile app store links: none detected in crawl text")
+        return [f"Mobile app links detected: {', '.join(apps.get('stores_linked', []))}"]
+    return ["Mobile app store links: none detected in crawl text"]
 
+
+def _domain_probe_lines(bundle: WriterEnrichmentBundle) -> list[str]:
     probe = bundle.sections.get("domain_probe")
-    if probe:
-        hint = probe.get("safety_hint", "unknown")
-        https = probe.get("https", False)
-        lines.append(f"HTTPS surface check: {hint} (https={https})")
-        if probe.get("headers"):
-            lines.append(f"Notable headers: {probe['headers']}")
+    if not probe:
+        return []
+    hint = probe.get("safety_hint", "unknown")
+    https = probe.get("https", False)
+    lines = [f"HTTPS surface check: {hint} (https={https})"]
+    if probe.get("headers"):
+        lines.append(f"Notable headers: {probe['headers']}")
+    return lines
 
+
+def _profile_diff_lines(bundle: WriterEnrichmentBundle) -> list[str]:
     pdiff = bundle.sections.get("profile_diff", {})
-    if bundle.phase == "update" and pdiff.get("kind") == "update":
-        if pdiff.get("domain_changed"):
-            lines.append(
-                f"⚠ Domain changed: {pdiff.get('previous_primary_domain')} → "
-                f"{pdiff.get('current_primary_domain')}"
-            )
-        if pdiff.get("domains_added"):
-            lines.append(f"New domains in copy: {', '.join(pdiff['domains_added'])}")
-        lines.append(f"Text diff added lines: {pdiff.get('text_diff_lines', 0)}")
-
-    chain = bundle.sections.get("chain", {})
-    if chain.get("match_kind"):
+    if not (bundle.phase == "update" and pdiff.get("kind") == "update"):
+        return []
+    lines: list[str] = []
+    if pdiff.get("domain_changed"):
         lines.append(
-            f"On-chain watch: {chain['match_kind']}={chain.get('match_value', '')} "
-            f"({chain.get('tx_stats', 'pending')})"
+            f"⚠ Domain changed: {pdiff.get('previous_primary_domain')} → "
+            f"{pdiff.get('current_primary_domain')}"
         )
+    if pdiff.get("domains_added"):
+        lines.append(f"New domains in copy: {', '.join(pdiff['domains_added'])}")
+    lines.append(f"Text diff added lines: {pdiff.get('text_diff_lines', 0)}")
+    return lines
 
+
+def _chain_watch_lines(bundle: WriterEnrichmentBundle) -> list[str]:
+    chain = bundle.sections.get("chain", {})
+    if not chain.get("match_kind"):
+        return []
+    return [
+        f"On-chain watch: {chain['match_kind']}={chain.get('match_value', '')} "
+        f"({chain.get('tx_stats', 'pending')})"
+    ]
+
+
+def _social_post_lines(bundle: WriterEnrichmentBundle) -> list[str]:
     social = bundle.sections.get("social", {})
+    lines: list[str] = []
     for post in social.get("linked_posts", []):
         if post.get("text"):
             author = post.get("author", "unknown")
@@ -213,38 +225,65 @@ def format_enrichment_for_writer(bundle: WriterEnrichmentBundle) -> str:
             lines.append(f"  URL: {post.get('url', '')}")
         elif post.get("error"):
             lines.append(f"Linked post fetch failed: {post.get('url', '')} ({post['error']})")
+    return lines
 
+
+def _platform_search_lines(bundle: WriterEnrichmentBundle) -> list[str]:
     platform = bundle.sections.get("platform_search", {})
-    if platform.get("matches"):
-        lines.append(
-            "Prior platform articles mentioning this service/domain: "
-            + "; ".join(m["title"] for m in platform["matches"][:3])
-        )
+    if not platform.get("matches"):
+        return []
+    return [
+        "Prior platform articles mentioning this service/domain: "
+        + "; ".join(m["title"] for m in platform["matches"][:3])
+    ]
 
+
+def _scam_lines(bundle: WriterEnrichmentBundle) -> list[str]:
+    if not bundle.sections.get("scam"):
+        return []
+    from app.modules.newspaper.scam_enrichment import ScamEnrichmentContext
+
+    scam_sec = bundle.sections["scam"]
+    return [
+        "",
+        format_scam_block(
+            ScamEnrichmentContext(
+                mentioned_urls=tuple(scam_sec.get("urls", [])),
+                mentioned_domains=tuple(scam_sec.get("domains", [])),
+                mentioned_algo_addresses=tuple(scam_sec.get("algo_addresses", [])),
+                fetch_notes=tuple(scam_sec.get("notes", [])),
+            )
+        ),
+    ]
+
+
+def _warning_lines(bundle: WriterEnrichmentBundle) -> list[str]:
+    if not bundle.warnings:
+        return []
+    return ["", "**Editor warnings:** " + "; ".join(bundle.warnings)]
+
+
+def format_enrichment_for_writer(bundle: WriterEnrichmentBundle) -> str:
+    """Markdown block appended to Mistral user prompt or template context."""
+    lines = [f"## Writer enrichment ({bundle.phase})"]
+    if bundle.primary_domain:
+        lines.append(f"Primary domain: **{bundle.primary_domain}**")
+
+    lines.extend(_internal_history_lines(bundle))
+    lines.extend(_app_store_lines(bundle))
+    lines.extend(_domain_probe_lines(bundle))
+    lines.extend(_profile_diff_lines(bundle))
+    lines.extend(_chain_watch_lines(bundle))
+    lines.extend(_social_post_lines(bundle))
+    lines.extend(_platform_search_lines(bundle))
+
+    social = bundle.sections.get("social", {})
     lines.append(f"Social lane note: {social.get('note', '')}")
-
     whois = bundle.sections.get("whois", {})
     lines.append(f"Domain registration / owner: {whois.get('note', 'pending')}")
 
-    if bundle.sections.get("scam"):
-        from app.modules.newspaper.scam_enrichment import ScamEnrichmentContext
-
-        scam_sec = bundle.sections["scam"]
-        lines.append("")
-        lines.append(
-            format_scam_block(
-                ScamEnrichmentContext(
-                    mentioned_urls=tuple(scam_sec.get("urls", [])),
-                    mentioned_domains=tuple(scam_sec.get("domains", [])),
-                    mentioned_algo_addresses=tuple(scam_sec.get("algo_addresses", [])),
-                    fetch_notes=tuple(scam_sec.get("notes", [])),
-                )
-            )
-        )
-
-    if bundle.warnings:
-        lines.append("")
-        lines.append("**Editor warnings:** " + "; ".join(bundle.warnings))
+    lines.extend(_scam_lines(bundle))
+    lines.extend(_warning_lines(bundle))
 
     lines.append(
         "\nUse enrichment as background only; do not invent facts not supported above "

@@ -6,10 +6,12 @@ import contextlib
 import inspect
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
+from uuid import UUID
 
 from app.core.config import MISTRAL_MAX_SOURCE_CHARS
 from app.modules.ai.mistral_client import (
@@ -38,6 +40,7 @@ PROMPT_VERSION = "2026-07-20"
 @dataclass(frozen=True)
 class MistralArticleFields:
     """The composed article's title/summary/body plus grading metadata."""
+
     title: str
     summary: str
     body: str
@@ -830,6 +833,290 @@ def _debug_tool_turn(debug: dict | None, name: str, arguments: dict, result: dic
     debug["messages"].append({"role": "tool", "name": name, "content": _json.dumps(result)[:4000]})
 
 
+def _record_grade(
+    trace: list[dict],
+    debug: dict | None,
+    current: dict,
+    review: dict,
+    *,
+    title: str,
+    body: str,
+    revise_count: int,
+) -> None:
+    """Record the grading result in the trace/debug transcript (like a review_draft tool call) and attach it to the current draft, so every return below carries this grade even when no (further) revision is attempted — the caller (publish gate) reads it via MistralArticleFields.heuristic_grade."""
+    # The grader reads the FULL title+body; we record only a compact label in
+    # the trace (title + word count) to avoid dumping the whole body into it.
+    grade_args = {"title": title, "words": len(body.split())}
+    if revise_count > 0:
+        grade_args["recheck"] = True
+    trace.append({"tool": "review_draft", "arguments": grade_args, "result": review})
+    _debug_tool_turn(debug, "review_draft", grade_args, review)
+    current["_heuristic_grade"] = review
+
+
+def _draft_score(review: dict, *, needs_revision: bool) -> float:
+    """The best-of-N comparison score for one graded pass: the heuristic grade, penalized when the LLM quality rubric also flags a revision."""
+    grade_val = review.get("grade")
+    score = float(grade_val) if isinstance(grade_val, int | float) else 0.0
+    if needs_revision:
+        score -= 2.0
+    return score
+
+
+def _grade_current_draft(
+    title: str, summary: str, body: str, quality_mistral: MistralClient
+) -> dict:
+    """Run the deterministic heuristic grader and the LLM quality rubric, merging the rubric result into the returned review dict under "quality". Either grader's failure degrades to an error marker rather than raising."""
+    from app.modules.newspaper.article_grader import grade_article_draft
+    from app.modules.newspaper.article_quality_llm import grade_article_quality_llm
+
+    try:
+        review = grade_article_draft(title=title, summary=summary, body=body)
+    except Exception as exc:
+        review = {"error": str(exc)[:200], "grade": None}
+    try:
+        quality = grade_article_quality_llm(title=title, body=body, client=quality_mistral)
+    except Exception as exc:
+        quality = {"model": "llm_rubric_error", "error": str(exc)[:200], "issues": []}
+    review["quality"] = quality
+    return review
+
+
+def _link_gate_issues(body: str, trace: list[dict], link_check_cache: dict) -> list[str]:
+    """Dead-link feedback: an untraced url that doesn't resolve forces a revision pass with the specific url named, so the writer can swap in a working alternative from its research instead of the final gate silently delinking it (which loses the citation entirely)."""
+    from app.core.config import LINK_GATE_ENABLED
+
+    if not LINK_GATE_ENABLED:
+        return []
+    try:
+        from app.modules.newspaper.link_gate import dead_untraced_links
+
+        return [
+            f"dead link: {_dead_url} is unreachable and never appeared "
+            "in your research — replace it with a working URL you "
+            "actually researched, or drop the link and keep plain text"
+            for _dead_url in dead_untraced_links(body, trace, checked=link_check_cache)
+        ]
+    except Exception:
+        logger.warning("dead-link check failed during revision", exc_info=True)
+        return []
+
+
+def _chain_entity_gate_issues(
+    body: str, trace: list[dict], gen_user: str, chain_check_cache: dict
+) -> list[str]:
+    """Chain-entity feedback: an invalid/untraced/nonexistent ASA id, address, or txid forces a revision pass naming the exact entity — same rationale as dead-link feedback (AlgoGlyph incident 2026-07-17), catching fabricated numbers the numeric gatekeeper can't see because the chain data was never wrong, only the model's arithmetic/attribution on top of it."""
+    from app.core.config import CHAIN_ENTITY_GATE_ENABLED
+
+    if not CHAIN_ENTITY_GATE_ENABLED:
+        return []
+    try:
+        from app.modules.newspaper.chain_entity_gate import unverifiable_chain_entities
+
+        return unverifiable_chain_entities(
+            body, trace, extra_texts=[gen_user], checked=chain_check_cache
+        )
+    except Exception:
+        logger.warning("chain-entity check failed during revision", exc_info=True)
+        return []
+
+
+def _authority_gate_issues(body: str) -> list[str]:
+    """Unattributed-authority feedback: "industry research suggests" / "experts say" constructions force a revision naming the phrase, so the writer can cite its actual trace source or delete the claim — the post-hoc gate can only excise the sentence (2026-07-18: a fabricated "10-100x slower to verify" Falcon benchmark shipped wearing exactly this costume in a pre-release draft)."""
+    from app.core.config import AUTHORITY_GATE_ENABLED
+
+    if not AUTHORITY_GATE_ENABLED:
+        return []
+    try:
+        from app.modules.newspaper.authority_gate import authority_revision_issues
+
+        return authority_revision_issues(body)
+    except Exception:
+        logger.warning("authority-phrase check failed during revision", exc_info=True)
+        return []
+
+
+def _unsourced_specifics_gate_issues(
+    body: str, trace: list[dict], user: str, research_user: str | None
+) -> list[str]:
+    """Unsourced-specifics feedback: a traction/funding count or named partner that isn't in the research is fed back so the writer removes or corrects it here — better than the post-hoc gate holding the whole draft for a human (GoPlausible 2026-07-20). The hold stays as the backstop for anything that survives revision.
+
+    Grounds against [user, research_user] — the ORIGINAL prompt/source
+    material — not gen_user alone. gen_user embeds the stage-1 digest, the
+    researcher's own paraphrase of the source; checking a claim against the
+    digest that produced it is circular and can rubber-stamp drift the digest
+    already introduced (root-caused 2026-07-20: a "25% increase in
+    engagement" source fact became "Monthly Active Users +25%" in the draft,
+    grounded fine against the digest's own loose phrasing in-loop, then
+    correctly flagged by the post-hoc gate — which already checks against
+    user/research_user — after the revision loop had no more passes left to
+    fix it). Must match the post-hoc call's extra_texts so the model sees the
+    SAME verdict it'll be held on.
+    """
+    from app.core.config import UNSOURCED_SPECIFICS_GATE_ENABLED
+
+    if not UNSOURCED_SPECIFICS_GATE_ENABLED:
+        return []
+    try:
+        from app.modules.newspaper.unsourced_specifics_gate import (
+            unsourced_specifics_revision_issues,
+        )
+
+        return unsourced_specifics_revision_issues(
+            body, trace, extra_texts=[user, research_user or ""]
+        )
+    except Exception:
+        logger.warning("unsourced-specifics check failed during revision", exc_info=True)
+        return []
+
+
+def _collect_fixable_issues(
+    review: dict,
+    quality: dict,
+    *,
+    needs_revision: bool,
+    body: str,
+    trace: list[dict],
+    gen_user: str,
+    user: str,
+    research_user: str | None,
+    link_check_cache: dict,
+    chain_check_cache: dict,
+) -> list[str]:
+    """Gather every revision-worthy issue across the schema check, quality rubric, and the four deterministic gates, stashing each gate's own findings onto `review` for the trace/telemetry record."""
+    issues = list(review.get("issues") or [])
+    # "headline" issues are the structural enforcement of the house headline
+    # style: the prompt states the rules, but only this deterministic check +
+    # forced revision makes them invariants (prompts drift; regexes don't).
+    schema_fixable = [
+        i for i in issues if i.startswith(("too long", "structure", "schema", "headline"))
+    ]
+    quality_fixable: list[str] = list(quality.get("issues") or []) if needs_revision else []
+
+    link_fixable = _link_gate_issues(body, trace, link_check_cache)
+    if link_fixable:
+        review["dead_links"] = link_fixable
+    chain_fixable = _chain_entity_gate_issues(body, trace, gen_user, chain_check_cache)
+    if chain_fixable:
+        review["chain_entities"] = chain_fixable
+    authority_fixable = _authority_gate_issues(body)
+    if authority_fixable:
+        review["unattributed_authority"] = authority_fixable
+    unsourced_fixable = _unsourced_specifics_gate_issues(body, trace, user, research_user)
+    if unsourced_fixable:
+        review["unsourced_specifics"] = unsourced_fixable
+
+    return (
+        schema_fixable
+        + quality_fixable
+        + link_fixable
+        + chain_fixable
+        + authority_fixable
+        + unsourced_fixable
+    )
+
+
+def _revision_length_rule(*, too_long: bool, needs_depth: bool, draft_words: int) -> str:
+    """The word-budget instruction for a revision prompt. The reviser is judged by the 75% word-count guard downstream; give it that constraint as a CONCRETE number — "keep roughly the same length" alone still lost >25% of the words in ~10% of prod revisions, wasting the call."""
+    if too_long:
+        rule = "Trim padding/filler to bring it under the limit, but keep every real fact."
+    elif needs_depth:
+        rule = (
+            "Improve narrative synthesis, Algorand technical depth, and critical "
+            "distance — use verified facts from the Research Digest and, where "
+            "sources are thin, your expert knowledge of Algorand layer-1 mechanics "
+            "to explain legacy friction vs protocol solutions. Move multi-item data "
+            "into a Markdown table (Concept / Real-World Implication). If the subject "
+            "has a conflict of interest (a centralized exchange's product, a reward "
+            "structure that incentivizes holding the SAME platform's token, an "
+            "unaudited protocol), name the actual risk/tradeoff a reader needs "
+            "instead of just relaying the subject's own marketing framing. If a "
+            "specific fact or judgment (a number, a named risk, a conclusion) "
+            "currently appears in more than one section, CUT the later restatements "
+            "and keep only the first mention — do not just reword the same point "
+            "each time it comes up. PRESERVE every verified fact. Do NOT invent "
+            "quotes, partnerships, or numbers. "
+        )
+    else:
+        rule = (
+            "PRESERVE every fact AND keep the same length — only REORGANIZE "
+            "the existing prose into section headings and short paragraphs; move "
+            "comparative data into a Markdown table if needed. Do NOT use narrative "
+            "bullet lists. Do NOT drop information, summarize away detail, or shorten "
+            "the article: "
+        )
+    if not too_long and not needs_depth:
+        min_words = int(draft_words * 0.8)
+        rule += (
+            f"the draft is {draft_words} words and your revision MUST stay above "
+            f"{min_words} words or it will be rejected."
+        )
+    return rule
+
+
+def _build_revision_prompt(
+    gen_user: str,
+    fixable: list[str],
+    already_fixed: list[str],
+    *,
+    too_long: bool,
+    needs_depth: bool,
+    draft_words: int,
+) -> str:
+    issues_block = "\n".join(f"- {i}" for i in fixable[:10])
+    carried_block = ""
+    if already_fixed:
+        carried_block = (
+            "\n\nThese issues were already fixed in an earlier revision pass — "
+            "do NOT reintroduce them while addressing the list above:\n"
+            + "\n".join(f"- {i}" for i in already_fixed[:10])
+        )
+    length_rule = _revision_length_rule(
+        too_long=too_long, needs_depth=needs_depth, draft_words=draft_words
+    )
+    return (
+        gen_user + f"\n\nA reviewer flagged these problems:\n{issues_block}\n\n"
+        f"{length_rule} Do NOT add, invent, or restate facts beyond the research "
+        "digest above, and do not pad with new filler. Return the full revised "
+        f"article as the same JSON object.{carried_block}"
+    )
+
+
+def _attempt_revision(
+    mistral: MistralClient,
+    gen_system: str,
+    revise_user: str,
+    *,
+    temperature: float,
+    too_long: bool,
+    orig_words: int,
+    note_failure: Callable[[str], None],
+) -> dict | None:
+    """Call the reviser and apply the word-count safety net (a structure-only fix must not gut the article — losing more than ~25% of the words when we weren't trimming an over-long piece has lost real content). Returns the revised fields, or None — having already called note_failure — if the call failed or the revision looks unsafe."""
+    try:
+        revised = mistral.chat_json_object(
+            [
+                {"role": "system", "content": gen_system},
+                {"role": "user", "content": revise_user},
+            ],
+            temperature=temperature,
+        )
+    except Exception as exc:
+        note_failure(f"revision call failed: {type(exc).__name__}: {exc}")
+        return None
+    if not str(revised.get("body", "") or "").strip():
+        note_failure("revision returned an empty body")
+        return None
+    new_words = len(str(revised.get("body", "")).split())
+    if not too_long and orig_words and new_words < 0.75 * orig_words:
+        note_failure(
+            f"revision dropped too much content ({orig_words} -> {new_words} words); "
+            "kept prior draft"
+        )
+        return None
+    return revised
+
+
 def _review_and_revise(
     mistral: MistralClient,
     payload: dict,
@@ -857,11 +1144,7 @@ def _review_and_revise(
         WRITER_REVIEW_ENABLED,
         WRITER_REVISION_MAX_PASSES,
     )
-    from app.modules.newspaper.article_grader import grade_article_draft
-    from app.modules.newspaper.article_quality_llm import (
-        grade_article_quality_llm,
-        quality_needs_revision,
-    )
+    from app.modules.newspaper.article_quality_llm import quality_needs_revision
 
     if not WRITER_REVIEW_ENABLED:
         return payload
@@ -918,143 +1201,27 @@ def _review_and_revise(
         if not body:
             return current
 
-        try:
-            review = grade_article_draft(title=title, summary=summary, body=body)
-        except Exception as exc:
-            review = {"error": str(exc)[:200], "grade": None}
-        try:
-            quality = grade_article_quality_llm(title=title, body=body, client=quality_mistral)
-        except Exception as exc:
-            quality = {"model": "llm_rubric_error", "error": str(exc)[:200], "issues": []}
-        review["quality"] = quality
-        # The grader reads the FULL title+body; we record only a compact label in
-        # the trace (title + word count) to avoid dumping the whole body into it.
-        grade_args = {"title": title, "words": len(body.split())}
-        if revise_count > 0:
-            grade_args["recheck"] = True
-        trace.append({"tool": "review_draft", "arguments": grade_args, "result": review})
-        _debug_tool_turn(debug, "review_draft", grade_args, review)
-        # Attach to the current draft (mutated in place) so every return below
-        # carries this grade even when no (further) revision is attempted — the
-        # caller (publish gate) reads it via MistralArticleFields.heuristic_grade.
-        current["_heuristic_grade"] = review
-
-        issues = list(review.get("issues") or [])
-        # "headline" issues are the structural enforcement of the house headline
-        # style: the prompt states the rules, but only this deterministic check +
-        # forced revision makes them invariants (prompts drift; regexes don't).
-        schema_fixable = [
-            i for i in issues if i.startswith(("too long", "structure", "schema", "headline"))
-        ]
-        needs_revision = quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE)
-        quality_fixable: list[str] = list(quality.get("issues") or []) if needs_revision else []
-        # Dead-link feedback: an untraced url that doesn't resolve forces a
-        # revision pass with the specific url named, so the writer can swap in
-        # a working alternative from its research instead of the final gate
-        # silently delinking it (which loses the citation entirely).
-        link_fixable: list[str] = []
-        from app.core.config import LINK_GATE_ENABLED
-
-        if LINK_GATE_ENABLED:
-            try:
-                from app.modules.newspaper.link_gate import dead_untraced_links
-
-                link_fixable.extend(
-                    f"dead link: {_dead_url} is unreachable and never appeared "
-                    "in your research — replace it with a working URL you "
-                    "actually researched, or drop the link and keep plain text"
-                    for _dead_url in dead_untraced_links(body, trace, checked=link_check_cache)
-                )
-            except Exception:
-                logger.warning("dead-link check failed during revision", exc_info=True)
-        if link_fixable:
-            review["dead_links"] = link_fixable
-        # Chain-entity feedback: an invalid/untraced/nonexistent ASA id,
-        # address, or txid forces a revision pass naming the exact entity —
-        # same rationale as dead-link feedback (AlgoGlyph incident
-        # 2026-07-17), catching fabricated numbers the numeric gatekeeper
-        # can't see because the chain data was never wrong, only the model's
-        # arithmetic/attribution on top of it.
-        chain_fixable: list[str] = []
-        from app.core.config import CHAIN_ENTITY_GATE_ENABLED
-
-        if CHAIN_ENTITY_GATE_ENABLED:
-            try:
-                from app.modules.newspaper.chain_entity_gate import (
-                    unverifiable_chain_entities,
-                )
-
-                chain_fixable = unverifiable_chain_entities(
-                    body, trace, extra_texts=[gen_user], checked=chain_check_cache
-                )
-            except Exception:
-                logger.warning("chain-entity check failed during revision", exc_info=True)
-        if chain_fixable:
-            review["chain_entities"] = chain_fixable
-        # Unattributed-authority feedback: "industry research suggests" /
-        # "experts say" constructions force a revision naming the phrase, so
-        # the writer can cite its actual trace source or delete the claim —
-        # the post-hoc gate can only excise the sentence (2026-07-18: a
-        # fabricated "10-100x slower to verify" Falcon benchmark shipped
-        # wearing exactly this costume in a pre-release draft).
-        authority_fixable: list[str] = []
-        from app.core.config import AUTHORITY_GATE_ENABLED
-
-        if AUTHORITY_GATE_ENABLED:
-            try:
-                from app.modules.newspaper.authority_gate import authority_revision_issues
-
-                authority_fixable = authority_revision_issues(body)
-            except Exception:
-                logger.warning("authority-phrase check failed during revision", exc_info=True)
-        if authority_fixable:
-            review["unattributed_authority"] = authority_fixable
-        # Unsourced-specifics feedback: a traction/funding count or named partner
-        # that isn't in the research is fed back so the writer removes or corrects
-        # it here — better than the post-hoc gate holding the whole draft for a
-        # human (GoPlausible 2026-07-20). The hold stays as the backstop for
-        # anything that survives revision.
-        #
-        # Grounds against [user, research_user] — the ORIGINAL prompt/source
-        # material — not gen_user alone. gen_user embeds the stage-1 digest,
-        # the researcher's own paraphrase of the source; checking a claim
-        # against the digest that produced it is circular and can rubber-stamp
-        # drift the digest already introduced (root-caused 2026-07-20: a "25%
-        # increase in engagement" source fact became "Monthly Active Users
-        # +25%" in the draft, grounded fine against the digest's own loose
-        # phrasing in-loop, then correctly flagged by the post-hoc gate — which
-        # already checks against user/research_user — after the revision loop
-        # had no more passes left to fix it). Must match the post-hoc call's
-        # extra_texts below so the model sees the SAME verdict it'll be held on.
-        unsourced_fixable: list[str] = []
-        from app.core.config import UNSOURCED_SPECIFICS_GATE_ENABLED
-
-        if UNSOURCED_SPECIFICS_GATE_ENABLED:
-            try:
-                from app.modules.newspaper.unsourced_specifics_gate import (
-                    unsourced_specifics_revision_issues,
-                )
-
-                unsourced_fixable = unsourced_specifics_revision_issues(
-                    body, trace, extra_texts=[user, research_user or ""]
-                )
-            except Exception:
-                logger.warning("unsourced-specifics check failed during revision", exc_info=True)
-        if unsourced_fixable:
-            review["unsourced_specifics"] = unsourced_fixable
-        fixable = (
-            schema_fixable
-            + quality_fixable
-            + link_fixable
-            + chain_fixable
-            + authority_fixable
-            + unsourced_fixable
+        review = _grade_current_draft(title, summary, body, quality_mistral)
+        quality = review["quality"]
+        _record_grade(
+            trace, debug, current, review, title=title, body=body, revise_count=revise_count
         )
 
-        grade_val = review.get("grade")
-        score = float(grade_val) if isinstance(grade_val, int | float) else 0.0
-        if needs_revision:
-            score -= 2.0
+        needs_revision = quality_needs_revision(quality, min_score=WRITER_QUALITY_LLM_MIN_SCORE)
+        fixable = _collect_fixable_issues(
+            review,
+            quality,
+            needs_revision=needs_revision,
+            body=body,
+            trace=trace,
+            gen_user=gen_user,
+            user=user,
+            research_user=research_user,
+            link_check_cache=link_check_cache,
+            chain_check_cache=chain_check_cache,
+        )
+
+        score = _draft_score(review, needs_revision=needs_revision)
         # Ties favor the LATER pass: a revision that plateaus on the same
         # numeric grade (e.g. a stuck quality-rubric score) has still likely
         # addressed whatever was flagged, so prefer the freshest draft over
@@ -1073,85 +1240,29 @@ def _review_and_revise(
 
         already_fixed = sorted(ever_raised - set(fixable))
         ever_raised.update(fixable)
-        issues_block = "\n".join(f"- {i}" for i in fixable[:10])
-        carried_block = ""
-        if already_fixed:
-            carried_block = (
-                "\n\nThese issues were already fixed in an earlier revision pass — "
-                "do NOT reintroduce them while addressing the list above:\n"
-                + "\n".join(f"- {i}" for i in already_fixed[:10])
-            )
         too_long = any(i.startswith("too long") for i in fixable)
         needs_depth = needs_revision
-        # The reviser is judged by the 75% word-count guard below; give it that
-        # constraint as a CONCRETE number — "keep roughly the same length" alone
-        # still lost >25% of the words in ~10% of prod revisions, wasting the call.
         draft_words = len(body.split())
-        min_words = int(draft_words * 0.8)
-        length_rule = (
-            "Trim padding/filler to bring it under the limit, but keep every real fact."
-            if too_long
-            else (
-                "Improve narrative synthesis, Algorand technical depth, and critical "
-                "distance — use verified facts from the Research Digest and, where "
-                "sources are thin, your expert knowledge of Algorand layer-1 mechanics "
-                "to explain legacy friction vs protocol solutions. Move multi-item data "
-                "into a Markdown table (Concept / Real-World Implication). If the subject "
-                "has a conflict of interest (a centralized exchange's product, a reward "
-                "structure that incentivizes holding the SAME platform's token, an "
-                "unaudited protocol), name the actual risk/tradeoff a reader needs "
-                "instead of just relaying the subject's own marketing framing. If a "
-                "specific fact or judgment (a number, a named risk, a conclusion) "
-                "currently appears in more than one section, CUT the later restatements "
-                "and keep only the first mention — do not just reword the same point "
-                "each time it comes up. PRESERVE every verified fact. Do NOT invent "
-                "quotes, partnerships, or numbers. "
-                if needs_depth
-                else "PRESERVE every fact AND keep the same length — only REORGANIZE "
-                "the existing prose into section headings and short paragraphs; move "
-                "comparative data into a Markdown table if needed. Do NOT use narrative "
-                "bullet lists. Do NOT drop information, summarize away detail, or shorten "
-                "the article: "
-            )
-        )
-        if not too_long and not needs_depth:
-            length_rule += (
-                f"the draft is {draft_words} words and your revision MUST stay above "
-                f"{min_words} words or it will be rejected."
-            )
-        revise_user = (
-            gen_user + f"\n\nA reviewer flagged these problems:\n{issues_block}\n\n"
-            f"{length_rule} Do NOT add, invent, or restate facts beyond the research "
-            "digest above, and do not pad with new filler. Return the full revised "
-            f"article as the same JSON object.{carried_block}"
+        revise_user = _build_revision_prompt(
+            gen_user,
+            fixable,
+            already_fixed,
+            too_long=too_long,
+            needs_depth=needs_depth,
+            draft_words=draft_words,
         )
         gen_system = system + _STAGE2_GENERATION_GUIDANCE
 
-        try:
-            revised = mistral.chat_json_object(
-                [
-                    {"role": "system", "content": gen_system},
-                    {"role": "user", "content": revise_user},
-                ],
-                temperature=MISTRAL_TEMP_WRITE,
-            )
-        except Exception as exc:
-            _note_revision_failure(f"revision call failed: {type(exc).__name__}: {exc}")
-            return best_current
-        if not str(revised.get("body", "") or "").strip():
-            _note_revision_failure("revision returned an empty body")
-            return best_current
-        # Safety net: a structure-only fix must not gut the article. If it dropped
-        # more than ~25% of the words (and we weren't trimming an over-long piece),
-        # keep the current draft — a reformat that loses that much has lost real
-        # content.
-        orig_words = len(body.split())
-        new_words = len(str(revised.get("body", "")).split())
-        if not too_long and orig_words and new_words < 0.75 * orig_words:
-            _note_revision_failure(
-                f"revision dropped too much content ({orig_words} -> {new_words} words); "
-                "kept prior draft"
-            )
+        revised = _attempt_revision(
+            mistral,
+            gen_system,
+            revise_user,
+            temperature=MISTRAL_TEMP_WRITE,
+            too_long=too_long,
+            orig_words=draft_words,
+            note_failure=_note_revision_failure,
+        )
+        if revised is None:
             return best_current
 
         # Default to this pass's grade if the next pass's regrade itself fails,
@@ -1686,6 +1797,320 @@ def _compose_via_writer_tools(
         )
 
 
+def _run_research_floor(
+    research_mistral: MistralClient,
+    system: str,
+    stage1_user: str,
+    research_schemas: list[dict],
+    research_handlers: dict,
+    trace: list,
+    debug: dict,
+) -> None:
+    """Research FLOOR: if the cold-research pass stopped too early (the exact failure where it reads an existing profile and quits), send it back to dig deeper — bounded to RESEARCH_FLOOR_MAX_PASSES extra passes."""
+    from app.core.config import (
+        MISTRAL_TEMP_RESEARCH,
+        RESEARCH_FLOOR_ENABLED,
+        RESEARCH_FLOOR_MAX_PASSES,
+        RESEARCH_MIN_TOOL_CALLS,
+    )
+
+    if not RESEARCH_FLOOR_ENABLED:
+        return
+    for _ in range(max(0, RESEARCH_FLOOR_MAX_PASSES)):
+        have = _distinct_research_calls(trace)
+        if have >= RESEARCH_MIN_TOOL_CALLS:
+            break
+        nudge = _research_floor_nudge(have, RESEARCH_MIN_TOOL_CALLS, _format_research_digest(trace))
+        research_mistral.chat_with_tools(
+            [
+                {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
+                {"role": "user", "content": stage1_user + nudge},
+            ],
+            tools=research_schemas,
+            handlers=research_handlers,
+            trace=trace,
+            debug=debug,
+            temperature=MISTRAL_TEMP_RESEARCH,
+            require_tool=None,
+            finalize_on_exhaustion=False,
+        )
+
+
+def _run_digest_gap_fill(
+    research_mistral: MistralClient,
+    system: str,
+    stage1_user: str,
+    research_schemas: list[dict],
+    research_handlers: dict,
+    trace: list,
+    debug: dict,
+    digest: str,
+) -> str:
+    """Gap-fill: the digest may flag specific unresolved-but-material gaps. Give the model ONE bounded extra research pass targeting exactly those before handing off to the tool-less writer, which otherwise either omits the gap (fine) or invents/recalls something to fill it. Re-synthesizes the digest afterward so the writer sees whatever was actually found (or an honest "still unresolved") rather than the pre-gap-fill digest."""
+    from app.core.config import (
+        DIGEST_GAP_FILL_ENABLED,
+        DIGEST_GAP_FILL_MAX_ROUNDS,
+        MISTRAL_TEMP_RESEARCH,
+    )
+
+    if not DIGEST_GAP_FILL_ENABLED:
+        return digest
+    gaps = _extract_unresolved_gaps(digest)
+    if not gaps:
+        return digest
+    research_mistral.chat_with_tools(
+        [
+            {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
+            {"role": "user", "content": stage1_user + _gap_fill_nudge(gaps)},
+        ],
+        tools=research_schemas,
+        handlers=research_handlers,
+        trace=trace,
+        debug=debug,
+        temperature=MISTRAL_TEMP_RESEARCH,
+        require_tool=None,
+        max_rounds=DIGEST_GAP_FILL_MAX_ROUNDS,
+        # The 2026-07-14 gap-fill pass ran out of rounds here and burned a
+        # full discarded article write.
+        finalize_on_exhaustion=False,
+    )
+    return _synthesize_research_digest(trace=trace, research_context=stage1_user)
+
+
+def _append_stage2_debug_turn(debug: dict, digest: str, payload: dict) -> None:
+    """The warm pass runs outside the tool loop, so its turn isn't in the debug transcript — add it so Sessions shows the draft. Store the ACTUAL digest text (not a placeholder): it's the only place to audit whether the research→write handoff (small-model synthesis) preserved or lost/garbled facts from the raw trace — previously this turn was a stub and the digest was never visible anywhere, so a bad handoff was undiagnosable after the fact."""
+    if not isinstance(debug.get("messages"), list):
+        return
+    debug["messages"].append(
+        {
+            "role": "user",
+            "content": (
+                "[stage 2 handoff] Research Digest:\n" + digest
+                if digest.strip()
+                else "[stage 2] generate the article from research findings"
+            ),
+        }
+    )
+    debug["messages"].append({"role": "assistant", "content": json.dumps(payload)[:4000]})
+
+
+def _run_two_stage_compose(
+    *,
+    research_mistral: MistralClient,
+    mistral: MistralClient,
+    system: str,
+    user: str,
+    research_user: str | None,
+    tool_schemas: list[dict],
+    tool_handlers: dict,
+    trace: list,
+    debug: dict,
+    checkpoint: Callable[[str], None],
+) -> dict:
+    """Two-stage compose: cold research (tools, low temp) on the Small research tier, a floor + gap-fill pass if it under-researched, a structured digest handoff, then a warm no-tools generation on the writer tier, and finally deterministic grade/revise."""
+    from app.core.config import MISTRAL_MODEL_RESEARCH, MISTRAL_TEMP_RESEARCH, MISTRAL_TEMP_WRITE
+
+    checkpoint("researching")
+    debug["research_model"] = MISTRAL_MODEL_RESEARCH
+    # Stage 1 — cold research: tools available (minus review_draft, no
+    # draft yet), low temp for deterministic tool selection. We keep the
+    # trace; the model's prose here is discarded. Research rounds
+    # re-send the whole conversation every round, so they get the
+    # slimmer research_user when the caller provided one. Runs on the
+    # Small research tier — better tool-calling, cheaper per round.
+    stage1_user = research_user or user
+    research_schemas = [
+        s for s in tool_schemas if (s.get("function") or {}).get("name") != "review_draft"
+    ]
+    research_handlers = {k: v for k, v in tool_handlers.items() if k != "review_draft"}
+    research_mistral.chat_with_tools(
+        [
+            {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
+            {"role": "user", "content": stage1_user},
+        ],
+        tools=research_schemas,
+        handlers=research_handlers,
+        trace=trace,
+        debug=debug,
+        temperature=MISTRAL_TEMP_RESEARCH,
+        require_tool=None,
+        # Research runs for its tool side-effects (the trace); the
+        # return value is discarded — never pay for a final
+        # article completion on round exhaustion.
+        finalize_on_exhaustion=False,
+    )
+    _run_research_floor(
+        research_mistral, system, stage1_user, research_schemas, research_handlers, trace, debug
+    )
+    # Stage 1b — synthesize a structured Research Digest handoff so Stage 2
+    # grounds on high-signal facts, not raw tool JSON.
+    digest = _synthesize_research_digest(trace=trace, research_context=stage1_user)
+    digest = _run_digest_gap_fill(
+        research_mistral,
+        system,
+        stage1_user,
+        research_schemas,
+        research_handlers,
+        trace,
+        debug,
+        digest,
+    )
+    checkpoint("writing")  # research (+ gap-fill) done, now generating
+    gen_user = _build_stage2_user(user=user, digest=digest)
+    gen_system = system + _STAGE2_GENERATION_GUIDANCE
+    payload = mistral.chat_json_object(
+        [
+            {"role": "system", "content": gen_system},
+            {"role": "user", "content": gen_user},
+        ],
+        temperature=MISTRAL_TEMP_WRITE,
+    )
+    _append_stage2_debug_turn(debug, digest, payload)
+    # Stage 3+4 — deterministic grade, then one revision if weak.
+    return _review_and_revise(
+        mistral,
+        payload,
+        system=system,
+        gen_user=gen_user,
+        trace=trace,
+        debug=debug,
+        user=user,
+        research_user=research_user,
+    )
+
+
+def _apply_post_compose_gates(
+    payload: dict, trace: list, *, user: str, research_user: str | None
+) -> dict:
+    """Sequential deterministic post-compose gates plus writer-declared judgment flags read from the trace. Order matters: the defunct-entity veto must precede the link-gate delinker below, so it still sees the writer's original links."""
+    # Stage-2 assembly: append every successfully fetched research URL the
+    # body doesn't already cite, so deep links survive into the published
+    # article (lifts citation density; preserves existing prose).
+    payload = append_reference_block(payload, trace)
+    # Defunct-entity veto: if the body links any domain that no longer
+    # resolves to a usable address — whether the research fetched it or
+    # the writer recommended it blind — hold the whole draft for review.
+    # Delinking can't undo a defunct entity recommended in prose (MyAlgo
+    # incident 2026-07-19).
+    from app.modules.newspaper.defunct_entity_gate import flag_defunct_entities
+
+    payload = flag_defunct_entities(payload, trace)
+    # Deterministic link gate: delink body urls the research never
+    # surfaced and that don't resolve live (invented-url pattern the
+    # numeric gatekeeper can't see — RandGallery incident 2026-07-16).
+    from app.modules.newspaper.link_gate import sanitize_untraced_links
+
+    payload = sanitize_untraced_links(payload, trace)
+    # Quotation-integrity gate: quotation marks are a verbatim claim —
+    # de-quote any 4+-word quotation that isn't word-for-word in the
+    # research trace or the compose input (same incident: an invented
+    # phrase was attributed to the Goanna Council in quotes).
+    from app.modules.newspaper.quote_gate import unquote_ungrounded_quotes
+
+    payload = unquote_ungrounded_quotes(payload, trace, extra_texts=[user, research_user or ""])
+    # Chain-entity gate: cited ASA ids / addresses / txids must exist
+    # on-chain — verified ones get auto-linked to an explorer,
+    # provably-missing ones are delinked (AlgoGlyph incident
+    # 2026-07-17: a real asset's holder share was reported as double
+    # its true percentage; a clickable explorer link on the cited
+    # asset/address makes that class of error checkable by anyone).
+    from app.modules.newspaper.chain_entity_gate import link_and_verify_chain_entities
+
+    payload = link_and_verify_chain_entities(
+        payload, trace, extra_texts=[user, research_user or ""]
+    )
+    # Authority backstop: any "experts say"/"industry research
+    # suggests" sentence the revision loop didn't fix is excised —
+    # unattributable by construction, and the one that shipped
+    # (2026-07-18 quantum draft) was a fabricated benchmark.
+    from app.modules.newspaper.authority_gate import excise_unattributed_authority
+
+    payload = excise_unattributed_authority(payload)
+    # Unsourced-specifics gate (read-only for now): record hard specifics
+    # — traction/funding numbers, named partners/backers — that don't
+    # trace to a fetched tool result, so we can measure extraction
+    # precision before enforcing. Catches the GoPlausible class (fetched
+    # zero-counters overwritten with "1,000 issuers / 70+ events /
+    # Borderless Capital") that every other gate misses.
+    from app.modules.newspaper.unsourced_specifics_gate import flag_unsourced_specifics
+
+    payload = flag_unsourced_specifics(payload, trace, extra_texts=[user, research_user or ""])
+    # Writer-declared breaking news (replaces the deterministic keyword
+    # classifier, disabled 2026-07-17): scanned from the trace like the
+    # gates above, since mark_breaking_news never mutates the draft —
+    # it's a judgment call the publish gate reads afterward.
+    from app.modules.ai.breaking_news_tool import breaking_reason_from_trace
+
+    breaking_reason = breaking_reason_from_trace(trace)
+    if breaking_reason is not None:
+        payload["_breaking_reason"] = breaking_reason
+    # Writer-confirmed alert class (confirm_alert_topic tool) — same
+    # post-hoc trace scan; the publish gate uses it to decide whether
+    # a keyword-routed scam/incident topic earns its reader-facing
+    # tag and match-key carve-out.
+    from app.modules.ai.alert_topic_tool import confirmed_alert_from_trace
+
+    confirmed_alert = confirmed_alert_from_trace(trace)
+    if confirmed_alert is not None:
+        payload["_confirmed_alert"] = confirmed_alert
+    return payload
+
+
+def _record_compose_telemetry(
+    source_url: str,
+    trace: list,
+    raw: str,
+    *,
+    report_errors_model: str,
+    duration_ms: int,
+    session_id: UUID,
+    created_at: datetime,
+    debug: dict,
+    usage_so_far: Callable[[], dict[str, int]],
+) -> None:
+    """Best-effort: store investigation findings and tool-insight telemetry for this compose session. Never raises — a telemetry failure must not fail the compose."""
+    from app.core.config import MISTRAL_MODEL_WRITER
+
+    try:
+        from app.modules.newspaper.investigation_store import store_investigation_findings
+
+        store_investigation_findings(service_id=source_url, source_url=source_url, trace=trace)
+    except Exception:
+        logger.warning("failed to store investigation findings for %s", source_url, exc_info=True)
+    try:
+        from app.modules.ai.tool_insights_store import (
+            record_compose_session,
+            record_tool_usage_from_trace,
+            report_tool_errors_from_trace,
+        )
+
+        report_tool_errors_from_trace(
+            trace,
+            service_id=source_url,
+            source_url=source_url,
+            model=report_errors_model,
+        )
+        record_tool_usage_from_trace(trace)
+        final_usage = usage_so_far()
+        record_compose_session(
+            debug=debug,
+            trace=trace,
+            service_id=source_url,
+            source_url=source_url,
+            model=MISTRAL_MODEL_WRITER,
+            final_output=raw,
+            status="ok",
+            duration_ms=duration_ms,
+            session_id=session_id,
+            created_at=created_at,
+            prompt_tokens=final_usage["prompt_tokens"],
+            completion_tokens=final_usage["completion_tokens"],
+            total_tokens=final_usage["total_tokens"],
+        )
+    except Exception:
+        logger.warning("failed to record tool-insights session", exc_info=True)
+
+
 def _compose_via_writer_tools_locked(
     *,
     system: str,
@@ -1706,8 +2131,6 @@ def _compose_via_writer_tools_locked(
             from app.core.config import (
                 MISTRAL_MODEL_RESEARCH,
                 MISTRAL_MODEL_WRITER,
-                MISTRAL_TEMP_RESEARCH,
-                MISTRAL_TEMP_WRITE,
                 WRITER_TWO_STAGE,
             )
             from app.modules.ai.writer_tools import all_tools
@@ -1721,7 +2144,6 @@ def _compose_via_writer_tools_locked(
             tool_schemas, tool_handlers = all_tools(context=tool_context, topic=topic)
             trace: list = []
             debug: dict = {}
-            import json as _json
             import time as _time
 
             _t0 = _time.monotonic()
@@ -1768,146 +2190,18 @@ def _compose_via_writer_tools_locked(
                     )
 
             if WRITER_TWO_STAGE:
-                _checkpoint("researching")
-                if isinstance(debug, dict):
-                    debug["research_model"] = MISTRAL_MODEL_RESEARCH
-                # Stage 1 — cold research: tools available (minus review_draft, no
-                # draft yet), low temp for deterministic tool selection. We keep the
-                # trace; the model's prose here is discarded. Research rounds
-                # re-send the whole conversation every round, so they get the
-                # slimmer research_user when the caller provided one. Runs on the
-                # Small research tier — better tool-calling, cheaper per round.
-                stage1_user = research_user or user
-                research_schemas = [
-                    s
-                    for s in tool_schemas
-                    if (s.get("function") or {}).get("name") != "review_draft"
-                ]
-                research_handlers = {k: v for k, v in tool_handlers.items() if k != "review_draft"}
-                research_mistral.chat_with_tools(
-                    [
-                        {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
-                        {"role": "user", "content": stage1_user},
-                    ],
-                    tools=research_schemas,
-                    handlers=research_handlers,
-                    trace=trace,
-                    debug=debug,
-                    temperature=MISTRAL_TEMP_RESEARCH,
-                    require_tool=None,
-                    # Research runs for its tool side-effects (the trace); the
-                    # return value is discarded — never pay for a final
-                    # article completion on round exhaustion.
-                    finalize_on_exhaustion=False,
-                )
-                # Research FLOOR: if it stopped too early (the exact failure where
-                # it reads an existing profile and quits), send it back to dig
-                # deeper — bounded to RESEARCH_FLOOR_MAX_PASSES extra passes.
-                from app.core.config import (
-                    RESEARCH_FLOOR_ENABLED,
-                    RESEARCH_FLOOR_MAX_PASSES,
-                    RESEARCH_MIN_TOOL_CALLS,
-                )
-
-                if RESEARCH_FLOOR_ENABLED:
-                    for _ in range(max(0, RESEARCH_FLOOR_MAX_PASSES)):
-                        have = _distinct_research_calls(trace)
-                        if have >= RESEARCH_MIN_TOOL_CALLS:
-                            break
-                        nudge = _research_floor_nudge(
-                            have, RESEARCH_MIN_TOOL_CALLS, _format_research_digest(trace)
-                        )
-                        research_mistral.chat_with_tools(
-                            [
-                                {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
-                                {"role": "user", "content": stage1_user + nudge},
-                            ],
-                            tools=research_schemas,
-                            handlers=research_handlers,
-                            trace=trace,
-                            debug=debug,
-                            temperature=MISTRAL_TEMP_RESEARCH,
-                            require_tool=None,
-                            finalize_on_exhaustion=False,
-                        )
-                # Stage 1b — synthesize a structured Research Digest handoff so Stage 2
-                # grounds on high-signal facts, not raw tool JSON.
-                digest = _synthesize_research_digest(trace=trace, research_context=stage1_user)
-                # Gap-fill: the digest may flag specific unresolved-but-material
-                # gaps. Give the model ONE bounded extra research pass targeting
-                # exactly those before handing off to the tool-less writer, which
-                # otherwise either omits the gap (fine) or invents/recalls
-                # something to fill it. Re-synthesize afterward so the writer
-                # sees whatever was actually found (or an honest "still
-                # unresolved") rather than the pre-gap-fill digest.
-                from app.core.config import DIGEST_GAP_FILL_ENABLED, DIGEST_GAP_FILL_MAX_ROUNDS
-
-                if DIGEST_GAP_FILL_ENABLED:
-                    gaps = _extract_unresolved_gaps(digest)
-                    if gaps:
-                        research_mistral.chat_with_tools(
-                            [
-                                {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
-                                {"role": "user", "content": stage1_user + _gap_fill_nudge(gaps)},
-                            ],
-                            tools=research_schemas,
-                            handlers=research_handlers,
-                            trace=trace,
-                            debug=debug,
-                            temperature=MISTRAL_TEMP_RESEARCH,
-                            require_tool=None,
-                            max_rounds=DIGEST_GAP_FILL_MAX_ROUNDS,
-                            # The 2026-07-14 gap-fill pass ran out of rounds
-                            # here and burned a full discarded article write.
-                            finalize_on_exhaustion=False,
-                        )
-                        digest = _synthesize_research_digest(
-                            trace=trace, research_context=stage1_user
-                        )
-                _checkpoint("writing")  # research (+ gap-fill) done, now generating
-                gen_user = _build_stage2_user(user=user, digest=digest)
-                gen_system = system + _STAGE2_GENERATION_GUIDANCE
-                payload = mistral.chat_json_object(
-                    [
-                        {"role": "system", "content": gen_system},
-                        {"role": "user", "content": gen_user},
-                    ],
-                    temperature=MISTRAL_TEMP_WRITE,
-                )
-                # The warm pass runs outside the tool loop, so its turn isn't in
-                # the debug transcript — add it so Sessions shows the draft. Store
-                # the ACTUAL digest text (not a placeholder): it's the only place
-                # to audit whether the research→write handoff (small-model
-                # synthesis) preserved or lost/garbled facts from the raw trace —
-                # previously this turn was a stub and the digest was never
-                # visible anywhere, so a bad handoff was undiagnosable after the
-                # fact.
-                if isinstance(debug.get("messages"), list):
-                    debug["messages"].append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "[stage 2 handoff] Research Digest:\n" + digest
-                                if digest.strip()
-                                else "[stage 2] generate the article from research findings"
-                            ),
-                        }
-                    )
-                    debug["messages"].append(
-                        {"role": "assistant", "content": _json.dumps(payload)[:4000]}
-                    )
-                # Stage 3+4 — deterministic grade, then one revision if weak.
-                payload = _review_and_revise(
-                    mistral,
-                    payload,
+                payload = _run_two_stage_compose(
+                    research_mistral=research_mistral,
+                    mistral=mistral,
                     system=system,
-                    gen_user=gen_user,
-                    trace=trace,
-                    debug=debug,
                     user=user,
                     research_user=research_user,
+                    tool_schemas=tool_schemas,
+                    tool_handlers=tool_handlers,
+                    trace=trace,
+                    debug=debug,
+                    checkpoint=_checkpoint,
                 )
-                raw = _json.dumps(payload)
             else:
                 # Legacy single agentic loop: tools + final article in one pass.
                 raw = mistral.chat_with_tools(
@@ -1921,126 +2215,26 @@ def _compose_via_writer_tools_locked(
                     debug=debug,
                     require_tool="review_draft",
                 )
-                payload = _json.loads(raw)
-            # Stage-2 assembly: append every successfully fetched research URL the
-            # body doesn't already cite, so deep links survive into the published
-            # article (lifts citation density; preserves existing prose).
-            payload = append_reference_block(payload, trace)
-            # Defunct-entity veto (MUST precede the link-gate delinker below, so
-            # it still sees the writer's original links): if the body links any
-            # domain that no longer resolves to a usable address — whether the
-            # research fetched it or the writer recommended it blind — hold the
-            # whole draft for review. Delinking can't undo a defunct entity
-            # recommended in prose (MyAlgo incident 2026-07-19).
-            from app.modules.newspaper.defunct_entity_gate import flag_defunct_entities
+                payload = json.loads(raw)
 
-            payload = flag_defunct_entities(payload, trace)
-            # Deterministic link gate: delink body urls the research never
-            # surfaced and that don't resolve live (invented-url pattern the
-            # numeric gatekeeper can't see — RandGallery incident 2026-07-16).
-            from app.modules.newspaper.link_gate import sanitize_untraced_links
-
-            payload = sanitize_untraced_links(payload, trace)
-            # Quotation-integrity gate: quotation marks are a verbatim claim —
-            # de-quote any 4+-word quotation that isn't word-for-word in the
-            # research trace or the compose input (same incident: an invented
-            # phrase was attributed to the Goanna Council in quotes).
-            from app.modules.newspaper.quote_gate import unquote_ungrounded_quotes
-
-            payload = unquote_ungrounded_quotes(
-                payload, trace, extra_texts=[user, research_user or ""]
+            payload = _apply_post_compose_gates(
+                payload, trace, user=user, research_user=research_user
             )
-            # Chain-entity gate: cited ASA ids / addresses / txids must exist
-            # on-chain — verified ones get auto-linked to an explorer,
-            # provably-missing ones are delinked (AlgoGlyph incident
-            # 2026-07-17: a real asset's holder share was reported as double
-            # its true percentage; a clickable explorer link on the cited
-            # asset/address makes that class of error checkable by anyone).
-            from app.modules.newspaper.chain_entity_gate import link_and_verify_chain_entities
-
-            payload = link_and_verify_chain_entities(
-                payload, trace, extra_texts=[user, research_user or ""]
-            )
-            # Authority backstop: any "experts say"/"industry research
-            # suggests" sentence the revision loop didn't fix is excised —
-            # unattributable by construction, and the one that shipped
-            # (2026-07-18 quantum draft) was a fabricated benchmark.
-            from app.modules.newspaper.authority_gate import excise_unattributed_authority
-
-            payload = excise_unattributed_authority(payload)
-            # Unsourced-specifics gate (read-only for now): record hard specifics
-            # — traction/funding numbers, named partners/backers — that don't
-            # trace to a fetched tool result, so we can measure extraction
-            # precision before enforcing. Catches the GoPlausible class (fetched
-            # zero-counters overwritten with "1,000 issuers / 70+ events /
-            # Borderless Capital") that every other gate misses.
-            from app.modules.newspaper.unsourced_specifics_gate import flag_unsourced_specifics
-
-            payload = flag_unsourced_specifics(
-                payload, trace, extra_texts=[user, research_user or ""]
-            )
-            # Writer-declared breaking news (replaces the deterministic keyword
-            # classifier, disabled 2026-07-17): scanned from the trace like the
-            # gates above, since mark_breaking_news never mutates the draft —
-            # it's a judgment call the publish gate reads afterward.
-            from app.modules.ai.breaking_news_tool import breaking_reason_from_trace
-
-            breaking_reason = breaking_reason_from_trace(trace)
-            if breaking_reason is not None:
-                payload["_breaking_reason"] = breaking_reason
-            # Writer-confirmed alert class (confirm_alert_topic tool) — same
-            # post-hoc trace scan; the publish gate uses it to decide whether
-            # a keyword-routed scam/incident topic earns its reader-facing
-            # tag and match-key carve-out.
-            from app.modules.ai.alert_topic_tool import confirmed_alert_from_trace
-
-            confirmed_alert = confirmed_alert_from_trace(trace)
-            if confirmed_alert is not None:
-                payload["_confirmed_alert"] = confirmed_alert
-            raw = _json.dumps(payload)
+            raw = json.dumps(payload)
             _duration_ms = int((_time.monotonic() - _t0) * 1000)
-            try:
-                from app.modules.newspaper.investigation_store import store_investigation_findings
-
-                store_investigation_findings(
-                    service_id=source_url, source_url=source_url, trace=trace
-                )
-            except Exception:
-                logger.warning(
-                    "failed to store investigation findings for %s", source_url, exc_info=True
-                )
-            try:
-                from app.modules.ai.tool_insights_store import (
-                    record_compose_session,
-                    record_tool_usage_from_trace,
-                    report_tool_errors_from_trace,
-                )
-
-                report_tool_errors_from_trace(
-                    trace,
-                    service_id=source_url,
-                    source_url=source_url,
-                    model=MISTRAL_MODEL_RESEARCH if WRITER_TWO_STAGE else MISTRAL_MODEL_WRITER,
-                )
-                record_tool_usage_from_trace(trace)
-                _final_usage = _usage_so_far()
-                record_compose_session(
-                    debug=debug,
-                    trace=trace,
-                    service_id=source_url,
-                    source_url=source_url,
-                    model=MISTRAL_MODEL_WRITER,
-                    final_output=raw,
-                    status="ok",
-                    duration_ms=_duration_ms,
-                    session_id=_sid,
-                    created_at=_screated,
-                    prompt_tokens=_final_usage["prompt_tokens"],
-                    completion_tokens=_final_usage["completion_tokens"],
-                    total_tokens=_final_usage["total_tokens"],
-                )
-            except Exception:
-                logger.warning("failed to record tool-insights session", exc_info=True)
+            _record_compose_telemetry(
+                source_url,
+                trace,
+                raw,
+                report_errors_model=(
+                    MISTRAL_MODEL_RESEARCH if WRITER_TWO_STAGE else MISTRAL_MODEL_WRITER
+                ),
+                duration_ms=_duration_ms,
+                session_id=_sid,
+                created_at=_screated,
+                debug=debug,
+                usage_so_far=_usage_so_far,
+            )
             return _parse_article_fields(payload)
         except StorySpikedError as spike:
             # The writer refused the story (abort_article tool) — a judgment,

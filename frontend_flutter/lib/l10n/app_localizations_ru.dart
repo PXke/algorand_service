@@ -981,20 +981,13 @@ class AppLocalizationsRu extends AppLocalizations {
   String get domainsDeadEnd => 'Тупик';
 
   @override
-  String get domainsApproveExplore => 'Одобрить и исследовать';
-
-  @override
-  String get domainsCrawlOnce => 'Обход один раз, без источника';
+  String get domainsApproveExplore => 'Весь сайт';
 
   @override
   String get domainsAddButton => 'Добавить';
 
   @override
-  String get domainsAddAsSeed => 'Добавить как постоянный источник';
-
-  @override
-  String get domainsAddSinglePageOnly =>
-      'Только эта страница (только цитирование, без сканирования сайта)';
+  String get domainsAddSinglePageOnly => 'Одна страница';
 
   @override
   String get domainsScoreUnexplained => 'Разбивка оценки недоступна';
@@ -1004,7 +997,12 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get domainsPossibleServiceHint =>
-      'Хороший балл, но помечено как новости/общее — возможно, это реальный продукт, а не просто источник цитаты. Рассмотрите «Одобрить и исследовать» вместо «Обойти один раз».';
+      'Хороший балл, но помечено как новости/общее — возможно, это реальный продукт, а не просто источник цитаты. Рассмотрите «Весь сайт» вместо «Одна страница».';
+
+  @override
+  String domainsSuggestedHint(int count) {
+    return 'Рекомендуется — найдено страниц того же домена: $count';
+  }
 
   @override
   String get paginationPrevious => 'Назад';

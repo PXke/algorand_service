@@ -38,6 +38,7 @@ class _FakeClient:
 
 
 def test_search_web_requests_general_and_news_categories(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_web requests both the general and news categories in one call."""
     captured: list = []
     monkeypatch.setattr(
         "httpx.Client", lambda **_kw: _FakeClient({"results": []}, captured=captured)
@@ -51,6 +52,7 @@ def test_search_web_requests_general_and_news_categories(monkeypatch: pytest.Mon
 
 
 def test_search_web_surfaces_published_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_web surfaces each result's published date when SearXNG provides one."""
     payload = {
         "results": [
             {"title": "Old general hit", "url": "https://a.example/", "content": "x"},
@@ -95,6 +97,7 @@ def test_search_web_ranks_dated_results_before_undated_when_truncating(
 
 
 def test_search_web_not_configured_without_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_web reports not-configured when no SearXNG URL is set."""
     monkeypatch.setattr("app.core.config.SEARXNG_URL", "")
 
     result = _tool_search_web("anything")
@@ -104,6 +107,7 @@ def test_search_web_not_configured_without_url(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_search_web_surfaces_suggestions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_web surfaces SearXNG's query suggestions when present."""
     payload = {
         "results": [],
         "suggestions": ["algorand nft marketplaces", "algo nft market"],
@@ -117,6 +121,7 @@ def test_search_web_surfaces_suggestions(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_search_web_omits_suggestions_key_when_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_web omits the suggestions key entirely when there are none."""
     payload = {"results": [], "suggestions": []}
     monkeypatch.setattr("httpx.Client", lambda **_kw: _FakeClient(payload, captured=[]))
     monkeypatch.setattr("app.core.config.SEARXNG_URL", "http://127.0.0.1:8888")

@@ -536,14 +536,18 @@
     }
   },
   "domainsDeadEnd": "Тупик",
-  "domainsApproveExplore": "Одобрить и исследовать",
-  "domainsCrawlOnce": "Обход один раз, без источника",
+  "domainsApproveExplore": "Весь сайт",
   "domainsAddButton": "Добавить",
-  "domainsAddAsSeed": "Добавить как постоянный источник",
-  "domainsAddSinglePageOnly": "Только эта страница (только цитирование, без сканирования сайта)",
+  "domainsAddSinglePageOnly": "Одна страница",
   "domainsScoreUnexplained": "Разбивка оценки недоступна",
   "domainsPossibleService": "возможно сервис?",
-  "domainsPossibleServiceHint": "Хороший балл, но помечено как новости/общее — возможно, это реальный продукт, а не просто источник цитаты. Рассмотрите «Одобрить и исследовать» вместо «Обойти один раз».",
+  "domainsPossibleServiceHint": "Хороший балл, но помечено как новости/общее — возможно, это реальный продукт, а не просто источник цитаты. Рассмотрите «Весь сайт» вместо «Одна страница».",
+  "domainsSuggestedHint": "Рекомендуется — найдено страниц того же домена: {count}",
+  "@domainsSuggestedHint": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
   "paginationPrevious": "Назад",
   "paginationNext": "Далее",
   "paginationPageOf": "Страница {page} из {total}",

@@ -40,6 +40,66 @@ def algo_price_series(*, days: int = 7) -> list[tuple[str, float]]:
     return [(t[0].strftime("%m-%d"), round(t[1], 5)) for t in sampled]
 
 
+def _validate_chart_labels(x: list[str]) -> tuple[list[str] | None, str | None]:
+    """Validate the x-axis category/time labels. Returns (labels, error)."""
+    if not isinstance(x, list) or len(x) < 2:
+        return None, "x must be a list of at least 2 category/time labels"
+    if len(x) > _MAX_POINTS:
+        return None, f"x may have at most {_MAX_POINTS} labels"
+    labels: list[str] = []
+    for i, raw in enumerate(x):
+        label = str(raw).strip()
+        if not label:
+            return None, f"x[{i}] must be a non-empty label"
+        if len(label) > 40:
+            label = label[:37] + "..."
+        labels.append(label)
+    return labels, None
+
+
+def _validate_chart_series_values(ys: list, si: int) -> tuple[list[float] | None, str | None]:
+    """Validate one series' y-values are finite numbers. Returns (values, error)."""
+    nums: list[float] = []
+    for yi, raw in enumerate(ys):
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None, f"series[{si}].y[{yi}] must be a number"
+        if not math.isfinite(val):
+            return None, f"series[{si}].y[{yi}] must be a finite number"
+        nums.append(round(val, 6))
+    return nums, None
+
+
+def _validate_chart_series(
+    series: list[dict[str, Any]], labels: list[str]
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """Validate the chart's series list against the already-validated labels. Returns (series, error)."""
+    if not isinstance(series, list) or not series:
+        return None, "series must be a non-empty list of {name, y} objects"
+    if len(series) > _MAX_SERIES:
+        return None, f"at most {_MAX_SERIES} series per chart"
+
+    out_series: list[dict[str, Any]] = []
+    for si, item in enumerate(series):
+        if not isinstance(item, dict):
+            return None, f"series[{si}] must be an object with name and y"
+        name = str(item.get("name") or "").strip() or f"Series {si + 1}"
+        if len(name) > 60:
+            name = name[:57] + "..."
+        ys = item.get("y")
+        if not isinstance(ys, list) or len(ys) != len(labels):
+            return None, (
+                f"series[{si}].y must be a list of numbers with "
+                f"exactly {len(labels)} values (same length as x)"
+            )
+        nums, error = _validate_chart_series_values(ys, si)
+        if error:
+            return None, error
+        out_series.append({"name": name, "y": nums})
+    return out_series, None
+
+
 def build_chart(
     *,
     chart_type: str,
@@ -58,48 +118,13 @@ def build_chart(
     if len(clean_title) > 120:
         return {"error": "title must be at most 120 characters"}
 
-    if not isinstance(x, list) or len(x) < 2:
-        return {"error": "x must be a list of at least 2 category/time labels"}
-    if len(x) > _MAX_POINTS:
-        return {"error": f"x may have at most {_MAX_POINTS} labels"}
+    labels, error = _validate_chart_labels(x)
+    if error:
+        return {"error": error}
 
-    labels: list[str] = []
-    for i, raw in enumerate(x):
-        label = str(raw).strip()
-        if not label:
-            return {"error": f"x[{i}] must be a non-empty label"}
-        if len(label) > 40:
-            label = label[:37] + "..."
-        labels.append(label)
-
-    if not isinstance(series, list) or not series:
-        return {"error": "series must be a non-empty list of {name, y} objects"}
-    if len(series) > _MAX_SERIES:
-        return {"error": f"at most {_MAX_SERIES} series per chart"}
-
-    out_series: list[dict[str, Any]] = []
-    for si, item in enumerate(series):
-        if not isinstance(item, dict):
-            return {"error": f"series[{si}] must be an object with name and y"}
-        name = str(item.get("name") or "").strip() or f"Series {si + 1}"
-        if len(name) > 60:
-            name = name[:57] + "..."
-        ys = item.get("y")
-        if not isinstance(ys, list) or len(ys) != len(labels):
-            return {
-                "error": f"series[{si}].y must be a list of numbers with "
-                f"exactly {len(labels)} values (same length as x)"
-            }
-        nums: list[float] = []
-        for yi, raw in enumerate(ys):
-            try:
-                val = float(raw)
-            except (TypeError, ValueError):
-                return {"error": f"series[{si}].y[{yi}] must be a number"}
-            if not math.isfinite(val):
-                return {"error": f"series[{si}].y[{yi}] must be a finite number"}
-            nums.append(round(val, 6))
-        out_series.append({"name": name, "y": nums})
+    out_series, error = _validate_chart_series(series, labels)
+    if error:
+        return {"error": error}
 
     chart = {"type": ctype, "title": clean_title, "x": labels, "series": out_series}
     fence_body = json.dumps(chart, separators=(",", ":"))

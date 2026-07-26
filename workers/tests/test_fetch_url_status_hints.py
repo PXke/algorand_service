@@ -35,6 +35,7 @@ def _status_response(url: str, status_code: int) -> httpx.Response:
 def test_status_code_surfaces_targeted_hint(
     monkeypatch: pytest.MonkeyPatch, status_code: int, expected_snippet: str
 ) -> None:
+    """Each HTTP status code surfaces its own targeted hint (blocked, rate-limited, transient, or gone)."""
     url = "https://example.com/article"
     monkeypatch.setattr(
         "app.modules.ai.research_tools._guarded_get",
@@ -50,6 +51,7 @@ def test_status_code_surfaces_targeted_hint(
 def test_host_specific_hint_takes_priority_over_status_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A host-specific hint takes priority over the generic status-code hint."""
     url = "https://medium.com/@someone/a-post"
     monkeypatch.setattr(
         "app.modules.ai.research_tools._guarded_get",
@@ -63,6 +65,7 @@ def test_host_specific_hint_takes_priority_over_status_code(
 
 
 def test_non_http_exception_has_no_status_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-HTTP exception (e.g. connect timeout) has no status_code in the result, only an error."""
     url = "https://example.com/article"
 
     def _boom(*_a: object, **_k: object) -> Never:

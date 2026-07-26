@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Local browser bridge — use *your* logged-in Chrome/Edge for Discord/Telegram.
+"""Local browser bridge — use *your* logged-in Chrome/Edge for Discord/Telegram.
 
 You stay signed in on your machine. This script snapshots visible text and POSTs
 to the platform ingest API (same queue as manual push). No worker Playwright,

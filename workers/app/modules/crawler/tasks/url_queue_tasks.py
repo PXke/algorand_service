@@ -12,6 +12,8 @@ from app.modules.scraper.crawlers.web_crawler import WebCrawlerDriver
 if TYPE_CHECKING:
     from cassandra.cluster import Session as CassandraSession
 
+    from app.modules.search.classifier.score import ClassifierResult
+
 
 @celery_app.task(name="app.tasks.crawler.drain_url_queue")
 def drain_url_queue(*, max_items: int = 5) -> dict[str, object]:
@@ -89,8 +91,14 @@ def _cached_domain_urls(domain: str, limit: int = 20) -> list[str]:
 
 def _sample_domain_pages(
     driver: WebCrawlerDriver, landing_url: str, domain: str, max_pages: int
-) -> list[tuple[str, str, tuple[str, ...]]]:
-    """(url, text, outbound_external_links) for the landing page plus up to max_pages-1 same-domain links found on it. Best-effort — a same-domain page that fails to fetch is just skipped, never counted as an error against the domain. The external links travel with each page so the caller can feed them to score_page's explorer-link signal — a multi-chain service's product page can link straight to its Algorand explorer entry without ever using the word "algorand" in its own text (quantoz.com/EURQ, 2026-07-21).
+) -> tuple[list[tuple[str, str, tuple[str, ...]]], int]:
+    """(pages, same_domain_link_count). pages: (url, text, outbound_external_links) for the landing page plus up to max_pages-1 same-domain links found on it. Best-effort — a same-domain page that fails to fetch is just skipped, never counted as an error against the domain. The external links travel with each page so the caller can feed them to score_page's explorer-link signal — a multi-chain service's product page can link straight to its Algorand explorer entry without ever using the word "algorand" in its own text (quantoz.com/EURQ, 2026-07-21).
+
+    same_domain_link_count is the landing page's TRUE same-domain link fan-out
+    (before truncating to max_pages-1) — a free by-product of the link
+    extraction already happening here, used as a full-site-vs-single-page
+    density signal (see suggest_full_site in domain_tracker.py). 0 when the
+    landing page was a cache hit with no raw_html to parse (rare — see below).
 
     Each fetch checks the crawled-page cache first (_cached_page_body) so a
     page drain_url_queue or an earlier sample already harvested isn't
@@ -114,9 +122,10 @@ def _sample_domain_pages(
         if landing_html
         else ([], [])
     )
+    same_domain_link_count = len(landing_same)
     pages = [(landing_url, landing_text, tuple(u for u, _ in landing_external))]
     if max_pages <= 1:
-        return pages
+        return pages, same_domain_link_count
 
     candidate_urls = [u for u, _ in landing_same]
     if not candidate_urls:
@@ -133,7 +142,7 @@ def _sample_domain_pages(
             extract_page_links(html, link_url, limit=_LINK_SCAN_LIMIT) if html else ([], [])
         )
         pages.append((link_url, text, tuple(u for u, _ in external)))
-    return pages
+    return pages, same_domain_link_count
 
 
 def _external_corroboration(domain: str) -> tuple[str, str] | None:
@@ -366,23 +375,10 @@ def _mark_unscoreable(
 
 
 @celery_app.task(name="app.tasks.crawler.classify_pending_domains")
-def classify_pending_domains(
-    *, limit: int = 40, dry_run: bool = True, auto_reject: bool = False
-) -> dict[str, object]:
-    """Content-based domain relevance: crawl each pending domain's landing page (plus a same-domain link sample — see _sample_domain_pages and FRONTIER_CLASSIFY_SAMPLE_PAGES), classify the REAL page text (not the <head> preview that wrongly blocked pact.fi etc.), take the best-scoring sampled page as the domain's relevance, store it, and OPTIONALLY auto-reject only the clearly off-topic ones. Safe by default: auto_reject=False so the scores can be validated first; protected domains are never auto-rejected."""
-    from app.core.cassandra import get_cassandra_session
-    from app.core.config import (
-        FRONTIER_CLASSIFY_SAMPLE_PAGES,
-        FRONTIER_CONTENT_REJECT_SCORE,
-        FRONTIER_DEEP_CLASSIFY_ENABLED,
-        FRONTIER_DEEP_CLASSIFY_MAX_PAGES,
-    )
+def _pending_domains_to_classify(session: CassandraSession, limit: int) -> list[tuple[str, dict]]:
+    """Domains with frontier_status=pending, unscored ones first (the LIST scan returns token order, so without this a periodic caller re-scores the same first slice forever and the rest of the pool never gets a content score), capped to limit."""
     from app.core.statements import DomainTrackingStmts
-    from app.modules.crawler.domain_tracker import is_protected_domain, update_domain_status
-    from app.modules.scraper.crawlers.web_crawler import WebCrawlerDriver
-    from app.modules.search.classifier.score import score_page
 
-    session = get_cassandra_session()
     rows = session.execute(DomainTrackingStmts.LIST, (limit * 30,))
     pending = []
     for r in rows:
@@ -390,11 +386,111 @@ def classify_pending_domains(
         status = r.frontier_status or meta.get("frontier_status")
         if status == "pending":
             pending.append((r.domain, meta))
-    # Unscored first: the LIST scan returns token order, so without this a
-    # periodic caller re-scores the same first slice forever and the rest of
-    # the pool never gets a content score.
     pending.sort(key=lambda item: "content_relevance" in item[1])
-    pending = pending[:limit]
+    return pending[:limit]
+
+
+def _best_scored_page(pages: list[tuple[str, str, list]]) -> tuple[str, ClassifierResult]:
+    """The best-scoring sampled page and its score_page() result. A chain-silent service's homepage can score 0 while a deeper page scores well; one bad page must not sink a domain the sample otherwise shows is relevant."""
+    from app.modules.search.classifier.score import score_page
+
+    best_url, best_text, best_links = pages[0]
+    best_result = score_page(url=best_url, text=best_text, outbound_links=best_links)
+    for page_url, page_text, page_links in pages[1:]:
+        candidate = score_page(url=page_url, text=page_text, outbound_links=page_links)
+        if candidate.score > best_result.score:
+            best_result, best_url = candidate, page_url
+    return best_url, best_result
+
+
+def _classify_and_store_domain(
+    session: CassandraSession,
+    domain: str,
+    meta: dict,
+    url: str,
+    score: float,
+    score_result: ClassifierResult,
+    best_url: str,
+    *,
+    will_reject: bool,
+    same_domain_link_count: int = 0,
+) -> str:
+    """Write the classification back and apply the reject/escalate/keep-pending decision. Returns 'escalated' | 'rejected' | 'pending' ('pending' also covers the deep-classify-already-in-flight no-op, which makes no state change)."""
+    from app.core.config import FRONTIER_DEEP_CLASSIFY_ENABLED, FRONTIER_DEEP_CLASSIFY_MAX_PAGES
+    from app.core.statements import DomainTrackingStmts
+    from app.modules.crawler.domain_tracker import suggest_full_site, update_domain_status
+
+    new_meta = {
+        **meta,
+        "content_relevance": f"{score:.3f}",
+        # Why the score landed where it did — shown next to the score
+        # chip in the admin Domains tab; previously computed by
+        # score_page() and thrown away, so a reviewer had a number
+        # with no explanation (owner feedback 2026-07-12).
+        "content_relevance_reasons": "; ".join(score_result.reasons),
+        # Which sampled page actually produced the score — no longer
+        # always the landing page now that a domain is judged on its
+        # best page, not just the first one.
+        "content_relevance_url": best_url,
+        # Full Site / Single Page reviewer nudge — advisory only, see
+        # suggest_full_site's docstring. Computed here (not at review-render
+        # time) since it's a free by-product of the sampling already done for
+        # content_relevance above.
+        "suggested_full_site": "true" if suggest_full_site(domain, same_domain_link_count) else "false",
+        "same_domain_link_count": str(same_domain_link_count),
+    }
+    if will_reject and FRONTIER_DEEP_CLASSIFY_ENABLED:
+        # The shallow sample's reject is a lead, not a verdict — before
+        # rejecting for good, escalate to a thorough one-time crawl
+        # (deep_classify_domain) instead of trusting a handful of
+        # homepage-linked pages to represent the whole site. Dedup on
+        # deep_classify_queued so a still-in-flight domain doesn't get
+        # re-queued every time this task runs.
+        if meta.get("deep_classify_queued") == "true":
+            return "pending"
+        new_meta["deep_classify_queued"] = "true"
+        new_meta["frontier_status"] = "pending"
+        session.execute(DomainTrackingStmts.UPDATE_METADATA, (new_meta, domain))
+        from app.celery_app import celery_app as _celery_app
+
+        _celery_app.send_task(
+            "app.tasks.crawler.deep_classify_domain",
+            kwargs={
+                "domain": domain,
+                "seed_url": url,
+                "max_pages": FRONTIER_DEEP_CLASSIFY_MAX_PAGES,
+            },
+            queue="scrape",
+        )
+        return "escalated"
+    if will_reject:
+        new_meta["frontier_status"] = "dead_end"
+        new_meta["auto_rejected"] = "content_off_topic"
+        update_domain_status(
+            domain,
+            relevance_score=score,
+            is_relevant=False,
+            online=True,
+            metadata=new_meta,
+            frontier_status_override="dead_end",
+        )
+        return "rejected"
+    new_meta["frontier_status"] = "pending"
+    session.execute(DomainTrackingStmts.UPDATE_METADATA, (new_meta, domain))
+    return "pending"
+
+
+def classify_pending_domains(
+    *, limit: int = 40, dry_run: bool = True, auto_reject: bool = False
+) -> dict[str, object]:
+    """Content-based domain relevance: crawl each pending domain's landing page (plus a same-domain link sample — see _sample_domain_pages and FRONTIER_CLASSIFY_SAMPLE_PAGES), classify the REAL page text (not the <head> preview that wrongly blocked pact.fi etc.), take the best-scoring sampled page as the domain's relevance, store it, and OPTIONALLY auto-reject only the clearly off-topic ones. Safe by default: auto_reject=False so the scores can be validated first; protected domains are never auto-rejected."""
+    from app.core.cassandra import get_cassandra_session
+    from app.core.config import FRONTIER_CLASSIFY_SAMPLE_PAGES, FRONTIER_CONTENT_REJECT_SCORE
+    from app.modules.crawler.domain_tracker import is_protected_domain
+    from app.modules.scraper.crawlers.web_crawler import WebCrawlerDriver
+
+    session = get_cassandra_session()
+    pending = _pending_domains_to_classify(session, limit)
 
     driver = WebCrawlerDriver()
     scored = rejected = errors = unreadable = escalated = 0
@@ -404,7 +500,9 @@ def classify_pending_domains(
         try:
             # HTTP first, transparent Playwright fallback for thin/SPA pages, so a
             # JS dApp gets its REAL rendered text instead of mis-scoring 0.
-            pages = _sample_domain_pages(driver, url, domain, FRONTIER_CLASSIFY_SAMPLE_PAGES)
+            pages, same_domain_link_count = _sample_domain_pages(
+                driver, url, domain, FRONTIER_CLASSIFY_SAMPLE_PAGES
+            )
         except Exception:
             errors += 1
             _mark_unscoreable(session, domain, meta, url, "fetch_error", dry_run=dry_run)
@@ -416,15 +514,8 @@ def classify_pending_domains(
             unreadable += 1
             _mark_unscoreable(session, domain, meta, url, "unreadable", dry_run=dry_run)
             continue
-        # Best-scoring sampled page wins — a chain-silent service's homepage
-        # can score 0 while a deeper page scores well; one bad page must not
-        # sink a domain the sample otherwise shows is relevant.
-        best_url = url
-        score_result = score_page(url=pages[0][0], text=pages[0][1], outbound_links=pages[0][2])
-        for page_url, page_text, page_links in pages[1:]:
-            candidate = score_page(url=page_url, text=page_text, outbound_links=page_links)
-            if candidate.score > score_result.score:
-                score_result, best_url = candidate, page_url
+
+        best_url, score_result = _best_scored_page(pages)
         score = round(float(score_result.score), 3)
         scored += 1
         will_reject = (
@@ -435,60 +526,21 @@ def classify_pending_domains(
         if len(samples) < 40:
             samples.append({"domain": domain, "score": score, "reject": will_reject})
         if not dry_run:
-            new_meta = {
-                **meta,
-                "content_relevance": f"{score:.3f}",
-                # Why the score landed where it did — shown next to the score
-                # chip in the admin Domains tab; previously computed by
-                # score_page() and thrown away, so a reviewer had a number
-                # with no explanation (owner feedback 2026-07-12).
-                "content_relevance_reasons": "; ".join(score_result.reasons),
-                # Which sampled page actually produced the score — no longer
-                # always the landing page now that a domain is judged on its
-                # best page, not just the first one.
-                "content_relevance_url": best_url,
-            }
-            if will_reject and FRONTIER_DEEP_CLASSIFY_ENABLED:
-                # The shallow sample's reject is a lead, not a verdict — before
-                # rejecting for good, escalate to a thorough one-time crawl
-                # (deep_classify_domain) instead of trusting a handful of
-                # homepage-linked pages to represent the whole site. Dedup on
-                # deep_classify_queued so a still-in-flight domain doesn't get
-                # re-queued every time this task runs.
-                if meta.get("deep_classify_queued") != "true":
-                    new_meta["deep_classify_queued"] = "true"
-                    new_meta["frontier_status"] = "pending"
-                    session.execute(DomainTrackingStmts.UPDATE_METADATA, (new_meta, domain))
-                    from app.celery_app import celery_app as _celery_app
-
-                    _celery_app.send_task(
-                        "app.tasks.crawler.deep_classify_domain",
-                        kwargs={
-                            "domain": domain,
-                            "seed_url": url,
-                            "max_pages": FRONTIER_DEEP_CLASSIFY_MAX_PAGES,
-                        },
-                        queue="scrape",
-                    )
-                    escalated += 1
-            elif will_reject:
-                new_meta["frontier_status"] = "dead_end"
-                new_meta["auto_rejected"] = "content_off_topic"
-                update_domain_status(
-                    domain,
-                    relevance_score=score,
-                    is_relevant=False,
-                    online=True,
-                    metadata=new_meta,
-                    frontier_status_override="dead_end",
-                )
+            outcome = _classify_and_store_domain(
+                session,
+                domain,
+                meta,
+                url,
+                score,
+                score_result,
+                best_url,
+                will_reject=will_reject,
+                same_domain_link_count=same_domain_link_count,
+            )
+            if outcome == "escalated":
+                escalated += 1
+            elif outcome == "rejected":
                 rejected += 1
-            else:
-                new_meta["frontier_status"] = "pending"
-                session.execute(
-                    DomainTrackingStmts.UPDATE_METADATA,
-                    (new_meta, domain),
-                )
     samples.sort(key=lambda s: s["score"])
     return {
         "status": "ok",

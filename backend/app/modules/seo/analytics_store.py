@@ -350,18 +350,8 @@ _CHROME_STALE_MAJOR_FLOOR = 100
 _FIREFOX_STALE_MAJOR_FLOOR = 100
 
 
-def is_malformed_ua(user_agent: str | None) -> bool:
-    """True when a UA claims to be a specific mainstream browser but violates that vendor's own fixed/frozen string conventions — something a real install of that browser cannot produce. Catches fakes on the first request, unlike is_repeated_ua(). Fails open: an unrecognized (but internally consistent) UA shape is never flagged, only a proven contradiction."""
-    ua = (user_agent or "").strip()
-    if not ua:
-        return False
-
-    if _KHTML_TOKEN_RE.search(ua) and not _LIKE_GECKO_RE.search(ua):
-        return True
-
-    if _PPC_MAC_RE.search(ua):
-        return True
-
+def _chrome_ua_malformed(ua: str) -> bool:
+    """True when a UA carries a Chrome token but its WebKit/Safari-trailer version, major version, or Windows-NT pairing contradicts what a real Chrome install can produce."""
     if _CHROME_TOKEN_RE.search(ua):
         webkit_match = _APPLEWEBKIT_VERSION_RE.search(ua)
         safari_match = _TRAILING_SAFARI_VERSION_RE.search(ua)
@@ -377,7 +367,11 @@ def is_malformed_ua(user_agent: str | None) -> bool:
             return True
         if chrome_major < _CHROME_STALE_MAJOR_FLOOR:
             return True
+    return False
 
+
+def _firefox_ua_malformed(ua: str) -> bool:
+    """True when a UA carries a Firefox token but its rv:/Gecko version, or overall major version, contradicts what a real Firefox install can produce."""
     firefox_match = _FIREFOX_VERSION_RE.search(ua)
     if firefox_match:
         rv_match = _GECKO_RV_RE.search(ua)
@@ -396,6 +390,21 @@ def is_malformed_ua(user_agent: str | None) -> bool:
     return bool(
         firefox_major_match and int(firefox_major_match.group(1)) < _FIREFOX_STALE_MAJOR_FLOOR
     )
+
+
+def is_malformed_ua(user_agent: str | None) -> bool:
+    """True when a UA claims to be a specific mainstream browser but violates that vendor's own fixed/frozen string conventions — something a real install of that browser cannot produce. Catches fakes on the first request, unlike is_repeated_ua(). Fails open: an unrecognized (but internally consistent) UA shape is never flagged, only a proven contradiction."""
+    ua = (user_agent or "").strip()
+    if not ua:
+        return False
+
+    if _KHTML_TOKEN_RE.search(ua) and not _LIKE_GECKO_RE.search(ua):
+        return True
+
+    if _PPC_MAC_RE.search(ua):
+        return True
+
+    return _chrome_ua_malformed(ua) or _firefox_ua_malformed(ua)
 
 
 # ── Fetch Metadata (Sec-Fetch-*) presence ────────────────────────────────────
@@ -1093,6 +1102,72 @@ def _is_recent_duplicate_pageview(client_ip: str | None, user_agent: str | None,
         return False
 
 
+def _repeated_ua_for_today(user_agent: str | None, day: str) -> bool:
+    """Whether this UA has already exceeded today's per-UA frequency threshold, purging its earlier human-counted hits the moment it tips over."""
+    ua_count = _ua_repeat_count(user_agent, day)
+    repeated = ua_count is not None and ua_count > _UA_FREQ_THRESHOLD
+    if ua_count == _UA_FREQ_THRESHOLD + 1:
+        # THIS request is the one that tips the UA over the threshold — its
+        # own earlier hits today were already counted as human. Claw them
+        # back now, from the one bucket ('(direct)') with enough per-request
+        # detail to reconstruct the correction (see _purge_direct_sample_ua).
+        try:
+            from app.core.cassandra import get_cassandra_session
+
+            _purge_direct_sample_ua(get_cassandra_session(), user_agent or "", day)
+        except Exception as exc:
+            log.debug("ua purge trigger skipped: %s", exc)
+    return repeated
+
+
+def _write_pageview_counters(
+    *,
+    day: str,
+    path: str,
+    referer: str | None,
+    user_agent: str | None,
+    client_ip: str | None,
+    campaign: str | None,
+    accept_language: str | None,
+) -> None:
+    """Bump every Cassandra/Redis pageview counter for one confirmed-human hit."""
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import AnalyticsStmts
+
+    session = get_cassandra_session()
+    # Privacy-safe unique visitor count (Redis HLL), independent of Cassandra.
+    record_unique("human", client_ip, user_agent, day)
+    session.execute_async(AnalyticsStmts.PAGEVIEW_BUMP, ("human", day))
+    session.execute_async(AnalyticsStmts.PATH_KIND_BUMP, (day, path[:200], "human"))
+    # Server-side session stitching + new-vs-returning split.
+    record_session(session, client_ip, user_agent, day)
+    # Country (GeoIP, no IP stored) and campaign tag (utm/ref).
+    country = country_for_ip(client_ip)
+    if country:
+        session.execute_async(AnalyticsStmts.GEO_BUMP, (day, country))
+    if campaign:
+        session.execute_async(AnalyticsStmts.CAMPAIGN_BUMP, (day, campaign[:80]))
+    # Site-wide device + browser + hour-of-day segmentation.
+    session.execute_async(AnalyticsStmts.DEVICE_BUMP, (day, ua_class(user_agent)))
+    session.execute_async(AnalyticsStmts.BROWSER_BUMP, (day, browser_family(user_agent)))
+    session.execute_async(AnalyticsStmts.HOUR_BUMP, (day, datetime.now(UTC).hour))
+    lang = primary_language(accept_language)
+    if lang:
+        session.execute_async(AnalyticsStmts.LANGUAGE_BUMP, (day, lang[:8]))
+    referrer = referrer_host(referer)
+    session.execute_async(AnalyticsStmts.REFERRER_BUMP, (day, referrer))
+    # Source -> landing-page attribution (which referrer drove which page).
+    session.execute_async(AnalyticsStmts.REFERRER_PATH_BUMP, (day, referrer, path[:200]))
+    if referrer == "(direct)":
+        _record_direct(session, day, path, referer, user_agent)
+    else:
+        # Full external referrer URL (which exact thread/page, not just the
+        # host). Skipped for direct/internal by normalize_referrer_url.
+        ref_url = normalize_referrer_url(referer)
+        if ref_url:
+            session.execute_async(AnalyticsStmts.REFERRER_URL_BUMP, (day, ref_url))
+
+
 def record_pageview(
     *,
     path: str,
@@ -1117,20 +1192,7 @@ def record_pageview(
         return
 
     day = _today()
-    ua_count = _ua_repeat_count(user_agent, day)
-    repeated = ua_count is not None and ua_count > _UA_FREQ_THRESHOLD
-    if ua_count == _UA_FREQ_THRESHOLD + 1:
-        # THIS request is the one that tips the UA over the threshold — its
-        # own earlier hits today were already counted as human. Claw them
-        # back now, from the one bucket ('(direct)') with enough per-request
-        # detail to reconstruct the correction (see _purge_direct_sample_ua).
-        try:
-            from app.core.cassandra import get_cassandra_session
-
-            _purge_direct_sample_ua(get_cassandra_session(), user_agent or "", day)
-        except Exception as exc:
-            log.debug("ua purge trigger skipped: %s", exc)
-
+    repeated = _repeated_ua_for_today(user_agent, day)
     if (
         is_bot(user_agent)
         or is_malformed_ua(user_agent)
@@ -1141,41 +1203,15 @@ def record_pageview(
     ):
         return
     try:
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import AnalyticsStmts
-
-        session = get_cassandra_session()
-        # Privacy-safe unique visitor count (Redis HLL), independent of Cassandra.
-        record_unique("human", client_ip, user_agent, day)
-        session.execute_async(AnalyticsStmts.PAGEVIEW_BUMP, ("human", day))
-        session.execute_async(AnalyticsStmts.PATH_KIND_BUMP, (day, path[:200], "human"))
-        # Server-side session stitching + new-vs-returning split.
-        record_session(session, client_ip, user_agent, day)
-        # Country (GeoIP, no IP stored) and campaign tag (utm/ref).
-        country = country_for_ip(client_ip)
-        if country:
-            session.execute_async(AnalyticsStmts.GEO_BUMP, (day, country))
-        if campaign:
-            session.execute_async(AnalyticsStmts.CAMPAIGN_BUMP, (day, campaign[:80]))
-        # Site-wide device + browser + hour-of-day segmentation.
-        session.execute_async(AnalyticsStmts.DEVICE_BUMP, (day, ua_class(user_agent)))
-        session.execute_async(AnalyticsStmts.BROWSER_BUMP, (day, browser_family(user_agent)))
-        session.execute_async(AnalyticsStmts.HOUR_BUMP, (day, datetime.now(UTC).hour))
-        lang = primary_language(accept_language)
-        if lang:
-            session.execute_async(AnalyticsStmts.LANGUAGE_BUMP, (day, lang[:8]))
-        referrer = referrer_host(referer)
-        session.execute_async(AnalyticsStmts.REFERRER_BUMP, (day, referrer))
-        # Source -> landing-page attribution (which referrer drove which page).
-        session.execute_async(AnalyticsStmts.REFERRER_PATH_BUMP, (day, referrer, path[:200]))
-        if referrer == "(direct)":
-            _record_direct(session, day, path, referer, user_agent)
-        else:
-            # Full external referrer URL (which exact thread/page, not just the
-            # host). Skipped for direct/internal by normalize_referrer_url.
-            ref_url = normalize_referrer_url(referer)
-            if ref_url:
-                session.execute_async(AnalyticsStmts.REFERRER_URL_BUMP, (day, ref_url))
+        _write_pageview_counters(
+            day=day,
+            path=path,
+            referer=referer,
+            user_agent=user_agent,
+            client_ip=client_ip,
+            campaign=campaign,
+            accept_language=accept_language,
+        )
     except Exception as exc:  # missing tables / cassandra down — analytics is non-critical
         log.debug("pageview record skipped: %s", exc)
 

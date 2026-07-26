@@ -48,6 +48,29 @@ def mark_transcript_attempted(video_id: str) -> None:
         logger.warning("failed to mark transcript attempted for %s", video_id, exc_info=True)
 
 
+def _extract_from_dict(data: dict[str, Any]) -> str:
+    for key in ("transcript", "text", "content", "data", "result", "segments"):
+        if key in data:
+            inner = _extract_transcript_text(data[key])
+            if inner:
+                return inner
+    return ""
+
+
+def _extract_from_list(data: list[Any]) -> str:
+    parts: list[str] = []
+    for seg in data:
+        if isinstance(seg, str):
+            parts.append(seg)
+        elif isinstance(seg, dict):
+            for key in ("text", "snippet", "content", "transcript"):
+                val = seg.get(key)
+                if isinstance(val, str) and val.strip():
+                    parts.append(val.strip())
+                    break
+    return " ".join(p for p in parts if p).strip()
+
+
 def _extract_transcript_text(data: Any) -> str:  # noqa: ANN401 -- arbitrary third-party transcript response shape
     """Pull plain transcript text out of common third-party response shapes.
 
@@ -59,24 +82,9 @@ def _extract_transcript_text(data: Any) -> str:  # noqa: ANN401 -- arbitrary thi
     if isinstance(data, str):
         return data.strip()
     if isinstance(data, dict):
-        for key in ("transcript", "text", "content", "data", "result", "segments"):
-            if key in data:
-                inner = _extract_transcript_text(data[key])
-                if inner:
-                    return inner
-        return ""
+        return _extract_from_dict(data)
     if isinstance(data, list):
-        parts: list[str] = []
-        for seg in data:
-            if isinstance(seg, str):
-                parts.append(seg)
-            elif isinstance(seg, dict):
-                for key in ("text", "snippet", "content", "transcript"):
-                    val = seg.get(key)
-                    if isinstance(val, str) and val.strip():
-                        parts.append(val.strip())
-                        break
-        return " ".join(p for p in parts if p).strip()
+        return _extract_from_list(data)
     return ""
 
 

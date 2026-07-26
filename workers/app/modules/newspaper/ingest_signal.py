@@ -9,6 +9,7 @@ from app.core import config
 from app.modules.newspaper.article_matching import resolve_publish_mode
 from app.modules.newspaper.event_lifecycle import EventPhase, build_event_dedupe_key
 from app.modules.newspaper.publish_policy import (
+    PublishIntent,
     PublishKind,
     PublishTier,
     build_dedupe_key,
@@ -50,6 +51,34 @@ _VOLATILE_PATTERNS = (
     re.compile(r"\d[\d,]*(?:\.\d+)?\s*%"),
     re.compile(r"\d[\d,]*(?:\.\d+)?"),
 )
+
+
+def _dedupe_key_for(
+    intent: PublishIntent, *, mode_info: dict, service_id: str, content_hash: str
+) -> str:
+    """The queue dedupe key for this publish intent: an edit re-uses the target article's id, a first-ever discovery is keyed on service alone (never content), an event gets its phase-aware key, everything else the standard topic/content/tier key."""
+    if mode_info["publish_mode"] == "edit" and mode_info.get("linked_article_id"):
+        return f"edit:{mode_info['linked_article_id']}:{content_hash[:16]}"
+    if intent.kind == PublishKind.SERVICE_DISCOVERY:
+        # No content hash: ONE discovery candidate per service, ever. A hashed
+        # key let every homepage churn mint a "new" discovery row (the ~700-row
+        # queue flood). After this row resolves, a snapshot exists, so the kind
+        # can never be SERVICE_DISCOVERY again — the dedupe row being cleaned up
+        # on resolve does not reopen the door.
+        return f"discovery:{service_id}"
+    if intent.event_id and intent.event_phase:
+        return build_event_dedupe_key(
+            service_id=service_id,
+            event_id=intent.event_id,
+            phase=EventPhase(intent.event_phase),
+            content_hash=content_hash,
+        )
+    return build_dedupe_key(
+        service_id=service_id,
+        topic=intent.topic.value,
+        content_hash=content_hash,
+        tier=intent.tier.value,
+    )
 
 
 def _stable_content_hash(text: str) -> str:
@@ -213,29 +242,9 @@ def ingest_publish_signal(
         match_kind=match_kind,
         match_value=match_value,
     )
-    if mode_info["publish_mode"] == "edit" and mode_info.get("linked_article_id"):
-        dedupe_key = f"edit:{mode_info['linked_article_id']}:{content_hash[:16]}"
-    elif intent.kind == PublishKind.SERVICE_DISCOVERY:
-        # No content hash: ONE discovery candidate per service, ever. A hashed
-        # key let every homepage churn mint a "new" discovery row (the ~700-row
-        # queue flood). After this row resolves, a snapshot exists, so the kind
-        # can never be SERVICE_DISCOVERY again — the dedupe row being cleaned up
-        # on resolve does not reopen the door.
-        dedupe_key = f"discovery:{service_id}"
-    elif intent.event_id and intent.event_phase:
-        dedupe_key = build_event_dedupe_key(
-            service_id=service_id,
-            event_id=intent.event_id,
-            phase=EventPhase(intent.event_phase),
-            content_hash=content_hash,
-        )
-    else:
-        dedupe_key = build_dedupe_key(
-            service_id=service_id,
-            topic=intent.topic.value,
-            content_hash=content_hash,
-            tier=intent.tier.value,
-        )
+    dedupe_key = _dedupe_key_for(
+        intent, mode_info=mode_info, service_id=service_id, content_hash=content_hash
+    )
 
     queue_id, created = enqueue_publish(
         service_id=service_id,

@@ -24,6 +24,7 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,114 @@ def _result_is_error(content: str) -> bool:
     return '"error"' in content[:300]
 
 
+@dataclass
+class _ScanStats:
+    """Accumulated counters and examples for one full compose_sessions scan."""
+
+    calls: Counter[str] = field(default_factory=Counter)
+    errors: Counter[str] = field(default_factory=Counter)
+    by_model: Counter[str] = field(default_factory=Counter)
+    n_sessions: int = 0
+    n_failed_status: int = 0
+    onchain_refs: int = 0  # stories whose body references an on-chain id
+    onchain_verified: int = 0  # ... and that called an on-chain tool
+    onchain_examples: list[str] = field(default_factory=list)
+
+
+def _onchain_hits(body: str) -> list[str]:
+    hits = []
+    if _RE_ADDRESS.search(body):
+        hits.append("address")
+    if _RE_TXID.search(body):
+        hits.append("txid")
+    am = _RE_ASSET.search(body)
+    if am:
+        hits.append(f"asset#{am.group(1)}")
+    pm = _RE_APP.search(body)
+    if pm:
+        hits.append(f"app#{pm.group(1)}")
+    return hits
+
+
+def _scan_session_messages(row: Any, stats: _ScanStats) -> bool:  # noqa: ANN401 -- duck-typed Cassandra driver row, no formal class
+    """Tally tool calls/errors from one session's transcript. Returns whether an on-chain tool was used."""
+    used_onchain_tool = False
+    try:
+        messages = json.loads(row.messages or "[]")
+    except Exception:
+        messages = []
+    for m in messages:
+        for tc in m.get("tool_calls") or []:
+            name = tc.get("name") or "?"
+            stats.calls[name] += 1
+            if name in _ONCHAIN_TOOLS:
+                used_onchain_tool = True
+        if m.get("role") == "tool":
+            name = m.get("name") or "?"
+            if _result_is_error(m.get("content") or ""):
+                stats.errors[name] += 1
+    return used_onchain_tool
+
+
+def _scan_session(row: Any, stats: _ScanStats) -> None:  # noqa: ANN401 -- duck-typed Cassandra driver row, no formal class
+    """Fold one compose_sessions row into the running scan stats."""
+    stats.n_sessions += 1
+    stats.by_model[row.model or "?"] += 1
+    if (row.status or "") not in ("ok", "researching", "writing"):
+        stats.n_failed_status += 1
+
+    used_onchain_tool = _scan_session_messages(row, stats)
+
+    hits = _onchain_hits(row.final_output or "")
+    if not hits:
+        return
+    stats.onchain_refs += 1
+    if used_onchain_tool:
+        stats.onchain_verified += 1
+    elif len(stats.onchain_examples) < 12:
+        ts = row.created_at.strftime("%Y-%m-%d") if row.created_at else "?"
+        src = (row.source_url or "")[:60]
+        stats.onchain_examples.append(f"    {ts}  [{', '.join(hits)}]  {src}")
+
+
+def _report_tool_usage(stats: _ScanStats) -> None:
+    logger.info("\n== TOOL USAGE (calls, errors, error-rate) ==")
+    if not stats.calls:
+        logger.info("  no tool calls recorded")
+    for name, c in stats.calls.most_common():
+        e = stats.errors.get(name, 0)
+        rate = f"{100 * e / c:4.0f}%" if c else "  - "
+        logger.info("  %-28s %6d calls  %5d err  %s", name, c, e, rate)
+    # tools that ONLY appear as errored results (rare) still show via errors map
+    for name in sorted(set(stats.errors) - set(stats.calls)):
+        logger.info("  %-28s %6s        %5d err  (results only)", name, "-", stats.errors[name])
+
+
+def _report_dead_tools(known: set[str], stats: _ScanStats) -> None:
+    if not known:
+        return
+    dead = sorted(known - set(stats.calls))
+    logger.info("\n== DEAD TOOLS (registered, never called) ==")
+    logger.info("  %s", ", ".join(dead) if dead else "none — every registered tool was used")
+
+
+def _report_onchain_demand(stats: _ScanStats) -> None:
+    logger.info("\n== SILENT ON-CHAIN DEMAND ==")
+    logger.info("  %d stories reference an on-chain id in the body", stats.onchain_refs)
+    logger.info(
+        "  %d of those used an on-chain tool (%d such tools exist)",
+        stats.onchain_verified,
+        len(_ONCHAIN_TOOLS),
+    )
+    unverified = stats.onchain_refs - stats.onchain_verified
+    logger.info(
+        "  -> %d stories wrote about on-chain entities with NO way to verify them", unverified
+    )
+    if stats.onchain_examples:
+        logger.info("  examples (date, what was referenced, source):")
+        logger.info("%s", "\n".join(stats.onchain_examples))
+
+
 def main() -> None:
     """CLI entrypoint: scan recent compose sessions and print tool-usage/error stats."""
     ap = argparse.ArgumentParser(description=__doc__)
@@ -102,93 +211,17 @@ def main() -> None:
     args = ap.parse_args()
 
     known = _known_tools()
-    calls: Counter[str] = Counter()
-    errors: Counter[str] = Counter()
-    by_model: Counter[str] = Counter()
-
-    n_sessions = 0
-    n_failed_status = 0
-    onchain_refs = 0  # stories whose body references an on-chain id
-    onchain_verified = 0  # ... and that called an on-chain tool
-    onchain_examples: list[str] = []
-
+    stats = _ScanStats()
     for row in _iter_sessions(args.limit):
-        n_sessions += 1
-        by_model[row.model or "?"] += 1
-        if (row.status or "") not in ("ok", "researching", "writing"):
-            n_failed_status += 1
+        _scan_session(row, stats)
 
-        used_onchain_tool = False
-        try:
-            messages = json.loads(row.messages or "[]")
-        except Exception:
-            messages = []
-        for m in messages:
-            for tc in m.get("tool_calls") or []:
-                name = tc.get("name") or "?"
-                calls[name] += 1
-                if name in _ONCHAIN_TOOLS:
-                    used_onchain_tool = True
-            if m.get("role") == "tool":
-                name = m.get("name") or "?"
-                if _result_is_error(m.get("content") or ""):
-                    errors[name] += 1
-
-        body = row.final_output or ""
-        hits = []
-        if _RE_ADDRESS.search(body):
-            hits.append("address")
-        if _RE_TXID.search(body):
-            hits.append("txid")
-        am = _RE_ASSET.search(body)
-        if am:
-            hits.append(f"asset#{am.group(1)}")
-        pm = _RE_APP.search(body)
-        if pm:
-            hits.append(f"app#{pm.group(1)}")
-        if hits:
-            onchain_refs += 1
-            if used_onchain_tool:
-                onchain_verified += 1
-            elif len(onchain_examples) < 12:
-                ts = row.created_at.strftime("%Y-%m-%d") if row.created_at else "?"
-                src = (row.source_url or "")[:60]
-                onchain_examples.append(f"    {ts}  [{', '.join(hits)}]  {src}")
-
-    # ---- report ----------------------------------------------------------
-    logger.info("\nScanned %d compose sessions  (%d non-ok status)", n_sessions, n_failed_status)
-    logger.info("Models: %s", ", ".join(f"{m}={c}" for m, c in by_model.most_common()))
-
-    logger.info("\n== TOOL USAGE (calls, errors, error-rate) ==")
-    if not calls:
-        logger.info("  no tool calls recorded")
-    for name, c in calls.most_common():
-        e = errors.get(name, 0)
-        rate = f"{100 * e / c:4.0f}%" if c else "  - "
-        logger.info("  %-28s %6d calls  %5d err  %s", name, c, e, rate)
-    # tools that ONLY appear as errored results (rare) still show via errors map
-    for name in sorted(set(errors) - set(calls)):
-        logger.info("  %-28s %6s        %5d err  (results only)", name, "-", errors[name])
-
-    if known:
-        dead = sorted(known - set(calls))
-        logger.info("\n== DEAD TOOLS (registered, never called) ==")
-        logger.info("  %s", ", ".join(dead) if dead else "none — every registered tool was used")
-
-    logger.info("\n== SILENT ON-CHAIN DEMAND ==")
-    logger.info("  %d stories reference an on-chain id in the body", onchain_refs)
     logger.info(
-        "  %d of those used an on-chain tool (%d such tools exist)",
-        onchain_verified,
-        len(_ONCHAIN_TOOLS),
+        "\nScanned %d compose sessions  (%d non-ok status)", stats.n_sessions, stats.n_failed_status
     )
-    unverified = onchain_refs - onchain_verified
-    logger.info(
-        "  -> %d stories wrote about on-chain entities with NO way to verify them", unverified
-    )
-    if onchain_examples:
-        logger.info("  examples (date, what was referenced, source):")
-        logger.info("%s", "\n".join(onchain_examples))
+    logger.info("Models: %s", ", ".join(f"{m}={c}" for m, c in stats.by_model.most_common()))
+    _report_tool_usage(stats)
+    _report_dead_tools(known, stats)
+    _report_onchain_demand(stats)
 
 
 if __name__ == "__main__":

@@ -536,14 +536,18 @@
   },
   "domainsPagesCrawled": "{count} صفحة",
   "domainsDeadEnd": "مسار مسدود",
-  "domainsApproveExplore": "اعتماد واستكشاف",
-  "domainsCrawlOnce": "زحف مرة واحدة، بدون تأسيس",
+  "domainsApproveExplore": "الموقع بالكامل",
   "domainsAddButton": "إضافة",
-  "domainsAddAsSeed": "إضافة كمصدر دائم",
-  "domainsAddSinglePageOnly": "هذه الصفحة فقط (استشهاد فقط، دون زحف الموقع)",
+  "domainsAddSinglePageOnly": "صفحة واحدة",
   "domainsScoreUnexplained": "تفصيل النتيجة غير متاح",
   "domainsPossibleService": "خدمة محتملة؟",
-  "domainsPossibleServiceHint": "نتيجة جيدة لكن مصنّف كأخبار/عام — قد يكون منتجًا حقيقيًا وليس مجرد مصدر استشهاد. فكر في \"الموافقة والاستكشاف\" بدلاً من \"الزحف مرة واحدة\".",
+  "domainsPossibleServiceHint": "نتيجة جيدة لكن مصنّف كأخبار/عام — قد يكون منتجًا حقيقيًا وليس مجرد مصدر استشهاد. فكر في \"الموقع بالكامل\" بدلاً من \"صفحة واحدة\".",
+  "domainsSuggestedHint": "مقترح — تم العثور على {count} صفحة من نفس النطاق",
+  "@domainsSuggestedHint": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
   "paginationPrevious": "السابق",
   "paginationNext": "التالي",
   "paginationPageOf": "صفحة {page} من {total}",

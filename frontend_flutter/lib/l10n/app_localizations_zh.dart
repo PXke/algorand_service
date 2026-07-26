@@ -941,19 +941,13 @@ class AppLocalizationsZh extends AppLocalizations {
   String get domainsDeadEnd => '死胡同';
 
   @override
-  String get domainsApproveExplore => '批准并探索';
-
-  @override
-  String get domainsCrawlOnce => '仅爬取一次，不作为来源';
+  String get domainsApproveExplore => '整站';
 
   @override
   String get domainsAddButton => '添加';
 
   @override
-  String get domainsAddAsSeed => '添加为永久来源';
-
-  @override
-  String get domainsAddSinglePageOnly => '仅此页面（仅作引用，不抓取整个网站）';
+  String get domainsAddSinglePageOnly => '单页';
 
   @override
   String get domainsScoreUnexplained => '暂无评分明细';
@@ -963,7 +957,12 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get domainsPossibleServiceHint =>
-      '评分较高但被标记为新闻/通用——可能是真实产品，而非仅是引用来源。建议选择「批准并探索」而非「仅爬取一次」。';
+      '评分较高但被标记为新闻/通用——可能是真实产品，而非仅是引用来源。建议选择「整站」而非「单页」。';
+
+  @override
+  String domainsSuggestedHint(int count) {
+    return '建议 — 发现 $count 个同域页面';
+  }
 
   @override
   String get paginationPrevious => '上一页';

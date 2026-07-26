@@ -970,20 +970,13 @@ class AppLocalizationsFa extends AppLocalizations {
   String get domainsDeadEnd => 'بن‌بست';
 
   @override
-  String get domainsApproveExplore => 'تأیید و کاوش';
-
-  @override
-  String get domainsCrawlOnce => 'یک‌بار بخزد، بدون منبع';
+  String get domainsApproveExplore => 'کل سایت';
 
   @override
   String get domainsAddButton => 'افزودن';
 
   @override
-  String get domainsAddAsSeed => 'افزودن به‌عنوان منبع دائمی';
-
-  @override
-  String get domainsAddSinglePageOnly =>
-      'فقط همین صفحه (فقط استناد، بدون خزیدن در کل سایت)';
+  String get domainsAddSinglePageOnly => 'تک‌صفحه';
 
   @override
   String get domainsScoreUnexplained => 'جزئیات امتیاز در دسترس نیست';
@@ -993,7 +986,12 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get domainsPossibleServiceHint =>
-      'امتیاز خوبی دارد اما به‌عنوان خبر/عمومی برچسب خورده — ممکن است یک محصول واقعی باشد، نه فقط منبع استناد. به‌جای «یک‌بار بخزد» به «تأیید و کاوش» فکر کنید.';
+      'امتیاز خوبی دارد اما به‌عنوان خبر/عمومی برچسب خورده — ممکن است یک محصول واقعی باشد، نه فقط منبع استناد. به‌جای «تک‌صفحه» به «کل سایت» فکر کنید.';
+
+  @override
+  String domainsSuggestedHint(int count) {
+    return 'پیشنهادی — $count صفحه هم‌دامنه یافت شد';
+  }
 
   @override
   String get paginationPrevious => 'قبلی';

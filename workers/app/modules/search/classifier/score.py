@@ -167,6 +167,7 @@ def keyword_hits(text: str) -> int:
 @dataclass(frozen=True)
 class ClassifierResult:
     """One page's keyword-relevance scoring result."""
+
     score: float
     in_scope: bool
     reasons: tuple[str, ...]
@@ -178,6 +179,43 @@ def _hostname(url: str) -> str:
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def _explorer_link_signal(outbound_links: tuple[str, ...]) -> tuple[float, str | None]:
+    for link in outbound_links:
+        link_host = _hostname(link)
+        if link_host and any(
+            link_host == d or link_host.endswith(f".{d}") for d in EXPLORER_DOMAINS
+        ):
+            return 0.5, f"links_to_explorer:{link_host}"
+    return 0.0, None
+
+
+def _domain_signal(host: str) -> tuple[float, str | None]:
+    """Known-domain or curated ecosystem-directory anchor. A directory listing is a stronger relevance signal than the page's own text, which for chain-silent services (HesabPay/Lofty class) contains no Algorand mention at all."""
+    if not host:
+        return 0.0, None
+    for domain in KNOWN_DOMAINS:
+        if host == domain or host.endswith(f".{domain}"):
+            return 0.45, f"known_domain:{domain}"
+    for domain in _ecosystem_listed():
+        if host == domain or host.endswith(f".{domain}"):
+            return 0.45, f"ecosystem_domain:{domain}"
+    return 0.0, None
+
+
+def _reject_signal(text: str, keyword_hits: int) -> tuple[float, str | None]:
+    reject_hits = sum(1 for pat in REJECT_PATTERNS if pat.search(text))
+    if reject_hits and keyword_hits == 0:
+        return -0.25, f"reject_noise:{reject_hits}"
+    return 0.0, None
+
+
+def _spam_signal(text: str) -> tuple[float, str | None]:
+    spam_hits = seo_spam_hits(text)
+    if not spam_hits:
+        return 0.0, None
+    return -min(0.45, spam_hits * 0.15), f"seo_spam:{spam_hits}"
 
 
 def score_page(
@@ -193,53 +231,25 @@ def score_page(
     host = _hostname(url)
     lowered = text.lower()
 
-    for link in outbound_links:
-        link_host = _hostname(link)
-        if link_host and any(
-            link_host == d or link_host.endswith(f".{d}") for d in EXPLORER_DOMAINS
-        ):
-            score += 0.5
-            reasons.append(f"links_to_explorer:{link_host}")
-            break
-
-    if host:
-        for domain in KNOWN_DOMAINS:
-            if host == domain or host.endswith(f".{domain}"):
-                score += 0.45
-                reasons.append(f"known_domain:{domain}")
-                break
-        else:
-            # Curated ecosystem-directory listings (synced into domain_tracking
-            # by ecosystem_sync) anchor exactly like KNOWN_DOMAINS — a listing
-            # is a stronger relevance signal than the page's own text, which
-            # for chain-silent services (HesabPay/Lofty class) contains no
-            # Algorand mention at all. Best-effort: empty set if DB is away.
-            listed = _ecosystem_listed()
-            for domain in listed:
-                if host == domain or host.endswith(f".{domain}"):
-                    score += 0.45
-                    reasons.append(f"ecosystem_domain:{domain}")
-                    break
+    for delta, reason in (_explorer_link_signal(outbound_links), _domain_signal(host)):
+        if reason:
+            score += delta
+            reasons.append(reason)
 
     # Weighted like keyword_hits() below: each phrase contributes its
     # occurrence count (capped so one repeated phrase can't dominate), not
     # just presence/absence — a page repeating "algorand" several times in
     # body copy should outscore one that name-drops it once, same fix as
     # the quality-floor gate (urvote.ca, 2026-07-24).
-    keyword_hits = sum(min(lowered.count(kw), _KEYWORD_FAMILY_CAP) for kw in POSITIVE_KEYWORDS)
-    if keyword_hits:
-        score += min(0.5, keyword_hits * 0.08)
-        reasons.append(f"keywords:{keyword_hits}")
+    keyword_hit_count = sum(min(lowered.count(kw), _KEYWORD_FAMILY_CAP) for kw in POSITIVE_KEYWORDS)
+    if keyword_hit_count:
+        score += min(0.5, keyword_hit_count * 0.08)
+        reasons.append(f"keywords:{keyword_hit_count}")
 
-    reject_hits = sum(1 for pat in REJECT_PATTERNS if pat.search(text))
-    if reject_hits and keyword_hits == 0:
-        score -= 0.25
-        reasons.append(f"reject_noise:{reject_hits}")
-
-    spam_hits = seo_spam_hits(text)
-    if spam_hits:
-        score -= min(0.45, spam_hits * 0.15)
-        reasons.append(f"seo_spam:{spam_hits}")
+    for delta, reason in (_reject_signal(text, keyword_hit_count), _spam_signal(text)):
+        if reason:
+            score += delta
+            reasons.append(reason)
 
     if "algorand" in lowered:
         score += 0.15

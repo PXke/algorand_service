@@ -34,22 +34,26 @@ _COLON_TITLE = "HesabPay: Afghanistan's Everyday Payments, Built on Algorand"
 
 
 def test_auto_applies_when_every_signal_clears() -> None:
+    """Auto-applies when every signal (enabled, grade, headline, gate) clears."""
     assert _auto_apply_decision(enabled=True, grade=8.6, floor=8.0, title=_GOOD_TITLE, gate_ok=True)
 
 
 def test_disabled_flag_blocks_regardless_of_quality() -> None:
+    """The disabled flag blocks auto-apply regardless of how good the other signals are."""
     assert not _auto_apply_decision(
         enabled=False, grade=10.0, floor=8.0, title=_GOOD_TITLE, gate_ok=True
     )
 
 
 def test_grade_below_floor_blocks() -> None:
+    """A grade below the floor blocks auto-apply."""
     assert not _auto_apply_decision(
         enabled=True, grade=7.9, floor=8.0, title=_GOOD_TITLE, gate_ok=True
     )
 
 
 def test_missing_grade_fails_closed() -> None:
+    """A missing grade fails closed and blocks auto-apply."""
     assert not _auto_apply_decision(
         enabled=True, grade=None, floor=8.0, title=_GOOD_TITLE, gate_ok=True
     )

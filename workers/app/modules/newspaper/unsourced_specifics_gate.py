@@ -191,6 +191,32 @@ def _number_grounded(digits: str, noun: str, corpus_ctx: str) -> bool:
     return bool(pat.search(corpus_ctx))
 
 
+def _skip_non_count_token(tok: str, nxt: str) -> bool:
+    """True when a number-shaped token is out of scope for count-claim checking: a currency figure, a bare decimal (version/ratio/block-time), a bare year, or the day inside a written date."""
+    # v1 scope = discrete COUNTS. Currency figures ($ prices, TVL, volumes)
+    # come from live market/chain tools and are reformatted/rounded in the
+    # body (0.083787 → 0.0838), so literal digit-matching false-positives on
+    # grounded data; neither fabrication incident involved currency. Out of
+    # scope — skip. (Chain/on-chain values are covered by chain_entity_gate.)
+    if tok.strip().startswith("$"):
+        return True
+    # A bare decimal (2.2, 2.8) is a version/ratio/block-time, never a
+    # headcount — traction counts are integers or magnitude (K/M/B). Skip
+    # decimals unless they carry a magnitude suffix.
+    if "." in tok and not re.search(r"[kmb]", tok, re.I):
+        return True
+    # A bare 4-digit year (1900-2099) is a date, not a count, even when it
+    # sits next to a traction noun ("the 2019 validators", "sunset in 2023").
+    # Counts of this magnitude are written with a separator ("2,000 users"),
+    # which this pattern (no comma) does not match — so we keep those.
+    if re.fullmatch(r"(?:19|20)\d\d", tok.strip(".,:;!?()+")):
+        return True
+    # A day inside a written date ("June 12, 2027") — the number is followed
+    # by ", <year>". Not a count; skip so it can't grab a nearby noun via the
+    # proximity window (the "12, … validators" false positive, birthday site).
+    return bool(tok.rstrip(",").isdigit() and re.fullmatch(r"(?:19|20)\d\d", nxt))
+
+
 def _numeric_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
     """Count-shaped numbers adjacent to a traction/funding noun whose value is not grounded (near its noun) in the corpus. ``corpus_ctx`` is the folded, comma-stripped ground corpus."""
     out: list[dict[str, str]] = []
@@ -205,42 +231,14 @@ def _numeric_findings(body: str, corpus_ctx: str) -> list[dict[str, str]]:
         digits = "".join(_DIGIT_RUN_RE.findall(tok.replace(",", "")))
         if not digits:
             continue
-        # v1 scope = discrete COUNTS. Currency figures ($ prices, TVL, volumes)
-        # come from live market/chain tools and are reformatted/rounded in the
-        # body (0.083787 → 0.0838), so literal digit-matching false-positives on
-        # grounded data; neither fabrication incident involved currency. Out of
-        # scope — skip. (Chain/on-chain values are covered by chain_entity_gate.)
-        if tok.strip().startswith("$"):
-            continue
-        # A bare decimal (2.2, 2.8) is a version/ratio/block-time, never a
-        # headcount — traction counts are integers or magnitude (K/M/B). Skip
-        # decimals unless they carry a magnitude suffix.
-        if "." in tok and not re.search(r"[kmb]", tok, re.I):
-            continue
-        # A bare 4-digit year (1900-2099) is a date, not a count, even when it
-        # sits next to a traction noun ("the 2019 validators", "sunset in 2023").
-        # Counts of this magnitude are written with a separator ("2,000 users"),
-        # which this pattern (no comma) does not match — so we keep those.
-        if re.fullmatch(r"(?:19|20)\d\d", tok.strip(".,:;!?()+")):
-            continue
-        # A day inside a written date ("June 12, 2027") — the number is followed
-        # by ", <year>". Not a count; skip so it can't grab a nearby noun via the
-        # proximity window (the "12, … validators" false positive, birthday site).
         nxt = lowered[i + 1] if i + 1 < len(lowered) else ""
-        if tok.rstrip(",").isdigit() and re.fullmatch(r"(?:19|20)\d\d", nxt):
+        if _skip_non_count_token(tok, nxt):
             continue
         # Only a claim when a COUNT noun sits within a few words — this excludes
         # protocol names (x402), years (2027) and version strings, which have no
         # count noun beside them. Financial nouns (TVL, valuation) are omitted:
         # currency is out of v1 scope, and raw TVL integers were pure noise.
-        noun = next(
-            (
-                w
-                for w in (list(lowered[i + 1 : i + 4]) + list(lowered[max(0, i - 3) : i]))
-                if w in _TRACTION_NOUNS
-            ),
-            "",
-        )
+        noun = _noun_near(lowered, i, _TRACTION_NOUNS)
         if not noun:
             continue
         if _number_grounded(digits, noun, corpus_ctx):

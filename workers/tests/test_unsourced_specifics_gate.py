@@ -83,6 +83,7 @@ def test_flags_fabricated_percentage_on_traction_noun() -> None:
 
 
 def test_grounded_percentage_passes() -> None:
+    """A traction count fabricated over a corpus showing zero counters is flagged."""
     corpus = _trace("A survey found 60% of users completed onboarding.")
     body = "60% of users completed onboarding."
     assert [f for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "percent"] == []
@@ -91,12 +92,14 @@ def test_grounded_percentage_passes() -> None:
 def test_onchain_share_percentage_left_to_chain_entity_gate() -> None:
     # % of supply/market is on-chain data and chain_entity_gate's job — this gate
     # deliberately does not flag it (it was the dominant false-positive class).
+    """A named partner/backer absent from the research corpus is flagged as an unsourced named claim."""
     corpus = _trace("no on-chain figures fetched")
     body = "A single address holds 40% of the supply and 5.5% of the market."
     assert [f for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "percent"] == []
 
 
 def test_grounded_partner_passes() -> None:
+    """A count figure that matches the research corpus is not flagged."""
     corpus = _trace("GoPlausible partners with Tinyman for AMM swaps.")
     body = "GoPlausible partners with Tinyman on decentralized trading."
     named = [f for f in gate.find_unsourced_specifics(body, corpus) if f["kind"] == "named"]
@@ -118,6 +121,7 @@ def test_grounded_partner_passes() -> None:
 )
 def test_non_traction_numbers_ignored(body: str) -> None:
     # empty corpus: if any of these flagged, it would flag here.
+    """Live market figures like price and TVL are ignored, not treated as checkable funding claims."""
     assert gate.find_unsourced_specifics(body, _trace("")) == []
 
 
@@ -130,11 +134,13 @@ def test_non_traction_numbers_ignored(body: str) -> None:
     ],
 )
 def test_bare_year_not_a_count(body: str) -> None:
+    """A funding-round dollar figure absent from the corpus is flagged."""
     assert gate.find_unsourced_specifics(body, _trace("")) == []
 
 
 def test_comma_number_that_looks_like_year_still_checked() -> None:
     # "2,000 users" is a count (written with a separator), not the year 2000.
+    """A funding figure that matches the research corpus is not flagged."""
     body = "It onboarded 2,000 users last quarter."
     claims = [f["claim"] for f in gate.find_unsourced_specifics(body, _trace("no numbers"))]
     assert "2,000" in claims
@@ -144,6 +150,7 @@ def test_date_day_not_a_count() -> None:
     # "June 12, 2027 ... validators" — the day in a written date must not be
     # flagged by grabbing a nearby count noun across the date (real false
     # positive from the birthday-site session).
+    """A percentage attached to a traction noun and absent from the corpus is flagged."""
     body = "A countdown to June 12, 2027 celebrates the network's validators."
     assert gate.find_unsourced_specifics(body, _trace("")) == []
 
@@ -153,6 +160,7 @@ def test_number_grounded_only_near_its_own_noun() -> None:
     # pixel size) — not near "events". A count is grounded only in context, so
     # this must still flag. (This is the exact flaw the prod tuning pass found:
     # bare digit-run matching spuriously grounded GoPlausible's fabricated "70".)
+    """A percentage figure that matches the research corpus is not flagged."""
     corpus = _trace("Hero image uses a 70px margin. The site lists 0+ events.")
     body = "The project has run 70 events this year."
     claims = [f["claim"] for f in gate.find_unsourced_specifics(body, corpus)]
@@ -160,6 +168,7 @@ def test_number_grounded_only_near_its_own_noun() -> None:
 
 
 def test_number_grounded_when_near_noun_in_corpus() -> None:
+    """An on-chain supply/market-share percentage is deliberately left ungated here, for chain_entity_gate to handle."""
     corpus = _trace("The platform reports 1,200 issuers onboarded to date.")
     body = "It now serves 1,200 issuers."
     assert gate.find_unsourced_specifics(body, corpus) == []
@@ -167,6 +176,7 @@ def test_number_grounded_when_near_noun_in_corpus() -> None:
 
 def test_digit_run_not_partial_matched() -> None:
     # "70" must NOT be considered grounded just because the corpus contains 1970.
+    """A named partner already present in the research corpus is not flagged."""
     corpus = _trace("Founded reference to the year 1970 somewhere.")
     body = "The project counts 70 validators."
     claims = [f["claim"] for f in gate.find_unsourced_specifics(body, corpus)]
@@ -177,6 +187,7 @@ def test_digit_run_not_partial_matched() -> None:
 # gate wrapper: read-only records, enforce sets hold reason, disabled no-ops
 # --------------------------------------------------------------------------- #
 def test_flag_records_but_does_not_mutate_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-traction numbers (years, protocol names, block times, version strings) are never flagged."""
     monkeypatch.setattr("app.core.config.UNSOURCED_SPECIFICS_GATE_ENABLED", True, raising=False)
     monkeypatch.setattr("app.core.config.UNSOURCED_SPECIFICS_GATE_ENFORCE", False, raising=False)
     body = "It has over 1,000 issuers."
@@ -189,6 +200,7 @@ def test_flag_records_but_does_not_mutate_body(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_flag_enforce_sets_hold_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare year beside a count noun is not mistaken for a count claim."""
     monkeypatch.setattr("app.core.config.UNSOURCED_SPECIFICS_GATE_ENABLED", True, raising=False)
     monkeypatch.setattr("app.core.config.UNSOURCED_SPECIFICS_GATE_ENFORCE", True, raising=False)
     payload = {"body": "It has over 1,000 issuers."}
@@ -197,12 +209,14 @@ def test_flag_enforce_sets_hold_reason(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_flag_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A comma-separated number that resembles a year is still checked as a count."""
     monkeypatch.setattr("app.core.config.UNSOURCED_SPECIFICS_GATE_ENABLED", False, raising=False)
     payload = {"body": "It has over 1,000 issuers."}
     assert "_unsourced_specifics" not in gate.flag_unsourced_specifics(payload, _trace(""))
 
 
 def test_revision_issues_name_each_specific(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A day-of-month inside a written date is not mistaken for a count near a nearby noun."""
     monkeypatch.setattr("app.core.config.UNSOURCED_SPECIFICS_GATE_ENABLED", True, raising=False)
     body = "It has over 1,000 issuers and partners with Borderless Capital."
     issues = gate.unsourced_specifics_revision_issues(body, _trace("nothing relevant"))
@@ -215,18 +229,21 @@ def test_revision_issues_name_each_specific(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_revision_issues_empty_when_grounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A digit run is grounded only when it appears near its own noun in the corpus, not any nearby number."""
     monkeypatch.setattr("app.core.config.UNSOURCED_SPECIFICS_GATE_ENABLED", True, raising=False)
     body = "It has 1,200 issuers."
     assert gate.unsourced_specifics_revision_issues(body, _trace("reported 1,200 issuers")) == []
 
 
 def test_revision_issues_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A number matching the corpus only in an unrelated context is still grounded by proximity, so this case still flags."""
     monkeypatch.setattr("app.core.config.UNSOURCED_SPECIFICS_GATE_ENABLED", False, raising=False)
     body = "It has over 1,000 issuers."
     assert gate.unsourced_specifics_revision_issues(body, _trace("")) == []
 
 
 def test_clean_body_no_findings() -> None:
+    """A digit run is not considered grounded just because it partially matches a longer number in the corpus."""
     corpus = _trace("Pera and Defly are the leading wallets.")
     payload = {"body": "Pera and Defly are the leading Algorand wallets."}
     out = gate.flag_unsourced_specifics(payload, corpus)

@@ -25,6 +25,7 @@ def _names(schemas: list[dict]) -> set[str]:
 
 
 def test_fetch_hint_steers_medium_and_reddit_to_dedicated_tools() -> None:
+    """fetch_url failure hints steer the writer to dedicated tools for Medium/GitHub and admit no Reddit data exists."""
     assert "medium_api_article_list" in _fetch_failure_hint(
         "https://medium.com/@author/post-123", "Client error '403 Forbidden'"
     )
@@ -54,6 +55,7 @@ def test_reddit_tool_is_not_offered_but_stub_answers_without_network() -> None:
 
 
 def test_fetch_hint_suggests_archive_for_gone_pages_only() -> None:
+    """fetch_url failure hints suggest the archive tool only for gone (404) pages, not other failures."""
     assert "fetch_archive_text" in _fetch_failure_hint(
         "https://algonaut.space", "Client error '404 Not Found'"
     )
@@ -61,6 +63,7 @@ def test_fetch_hint_suggests_archive_for_gone_pages_only() -> None:
 
 
 def test_entity_osint_tools_gated_to_investigative_lanes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entity-background OSINT tools are gated to investigative topics (scam_alert), absent from the generic lane."""
     monkeypatch.setenv("OPENCORPORATES_API_TOKEN", "tok")
     generic, _ = all_tools(topic="generic")
     scam, _ = all_tools(topic="scam_alert")
@@ -80,6 +83,7 @@ def test_entity_osint_tools_gated_to_investigative_lanes(monkeypatch: pytest.Mon
 
 
 def test_corporate_registry_needs_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """query_corporate_registry is only registered when its API token is configured."""
     monkeypatch.delenv("OPENCORPORATES_API_TOKEN", raising=False)
     schemas, handlers = all_tools(topic="scam_alert")
     assert "query_corporate_registry" not in _names(schemas)
@@ -88,6 +92,7 @@ def test_corporate_registry_needs_token(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_github_activity_bare_owner_lists_repos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """github_activity given a bare owner name lists their public repos."""
     import app.modules.ai.research_tools as rt
 
     class _Resp:

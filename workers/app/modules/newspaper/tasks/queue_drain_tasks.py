@@ -296,6 +296,45 @@ def _run_breaking_vetoes(ctx: _BreakingVetoCtx) -> dict | None:
     return None
 
 
+def _record_breaking_veto_outcome(row: QueuedPublishRow, veto_outcome: dict) -> dict:
+    """Persist a breaking-drain veto's disposition on the row and return its results-list entry.
+
+    A veto may carry queue_status (credibility: a permanent verdict on
+    static text) to retire the row; the transient vetoes (daily cap, review
+    slot) leave it pending for a later beat.
+    """
+    veto_queue_status = str(veto_outcome.get("queue_status", ""))
+    veto_reason = str(veto_outcome.get("reason", "skipped"))
+    if veto_queue_status:
+        mark_queue_status(row.queue_id, veto_queue_status, reason=veto_reason)
+    else:
+        record_queue_reason(row.queue_id, veto_reason)
+    return {"queue_id": row.queue_id, **veto_outcome}
+
+
+def _publish_breaking_row(
+    row: QueuedPublishRow, ctx: _BreakingVetoCtx, review_full: bool
+) -> tuple[dict, str, bool]:
+    """Compose+publish one vetted breaking row. Returns (results_entry, status, updated_review_full).
+
+    Breaking news (scams/incidents) is urgent and rare — exempt from the
+    per-website daily article cap so a critical alert is never held.
+    """
+    from app.modules.crawler.classifier_review_store import review_queue_full
+
+    outcome = publish_from_queued_row(
+        row, publish_tier=PublishTier.BREAKING, enforce_domain_cap=False
+    )
+    status = _resolve(row, outcome)
+    if status in ("review", "duplicate", "duplicate_review_pending"):
+        # Filling the review slot closes it for the rest of this run.
+        review_full = review_queue_full()
+    # ctx.assessment is guaranteed set: the credibility veto (last gate) ran
+    # and passed for any row that reaches a compose.
+    entry = {"queue_id": row.queue_id, **outcome, "credibility": ctx.assessment.method}
+    return entry, status, review_full
+
+
 @celery_app.task(name="app.tasks.newspaper.drain_breaking_publish_queue")
 def drain_breaking_publish_queue() -> dict[str, object]:
     """Publish breaking-tier items immediately up to the separate daily cap."""
@@ -326,41 +365,20 @@ def drain_breaking_publish_queue() -> dict[str, object]:
             ctx = _BreakingVetoCtx(row=row, review_full=review_full)
             veto_outcome = _run_breaking_vetoes(ctx)
             if veto_outcome is not None:
-                # A veto may carry queue_status (credibility: permanent verdict
-                # on static text) to retire the row; the transient vetoes
-                # (daily cap, review slot) leave it pending for a later beat.
-                veto_queue_status = str(veto_outcome.get("queue_status", ""))
-                veto_reason = str(veto_outcome.get("reason", "skipped"))
-                if veto_queue_status:
-                    mark_queue_status(row.queue_id, veto_queue_status, reason=veto_reason)
-                else:
-                    record_queue_reason(row.queue_id, veto_reason)
-                results.append({"queue_id": row.queue_id, **veto_outcome})
+                results.append(_record_breaking_veto_outcome(row, veto_outcome))
                 continue
 
-            # Breaking news (scams/incidents) is urgent and rare — exempt from
-            # the per-website daily article cap so a critical alert is never held.
-            outcome = publish_from_queued_row(
-                row, publish_tier=PublishTier.BREAKING, enforce_domain_cap=False
-            )
-            status = _resolve(row, outcome)
+            entry, status, review_full = _publish_breaking_row(row, ctx, review_full)
             if status == "published":
                 published += 1
-            elif status in ("review", "duplicate", "duplicate_review_pending"):
-                # Filling the review slot closes it for the rest of this run.
-                review_full = review_queue_full()
             elif status == "rate_limited":
                 return {
                     "status": "skipped",
-                    "reason": outcome.get("reason", "rate_limited"),
+                    "reason": entry.get("reason", "rate_limited"),
                     "published": published,
                     "results": results,
                 }
-            # ctx.assessment is guaranteed set: the credibility veto (last
-            # gate) ran and passed for any row that reaches a compose.
-            results.append(
-                {"queue_id": row.queue_id, **outcome, "credibility": ctx.assessment.method}
-            )
+            results.append(entry)
     except SoftTimeLimitExceeded:
         # Killed mid-compose: the in-flight row was never marked done, so it
         # stays pending. Return partial progress instead of crashing.
@@ -381,32 +399,122 @@ def drain_breaking_publish_queue() -> dict[str, object]:
     }
 
 
-@celery_app.task(name="app.tasks.newspaper.drain_standard_publish_queue")
-def drain_standard_publish_queue() -> dict[str, object]:
-    """Publish standard-tier items on the ~3h schedule, up to 7/day."""
-    slots = remaining_standard_publish_slots()
-    if slots <= 0:
-        return {"status": "skipped", "reason": "standard_daily_cap_reached", "published": 0}
-
-    # Release an admin-approved backlog item first (held because the cap was
-    # full when it was approved) — cheap, no compose cost, and shares this
-    # exact pacing gate/budget with composing something new below (folded in
-    # from the old standalone drain_approved_feed_queue task/beat entry). Only
-    # gates THIS step on the interval, same as before — review composition
-    # below intentionally bypasses publish pacing (it doesn't hit the feed
-    # until approved), so a blanket check up here would wrongly delay it too.
-    # Backlog release never composes (it only publishes already-paid-for
-    # work), so it must run even while Mistral credit is exhausted.
+def _release_due_backlog(slots: int) -> dict | None:
+    """Release an admin-approved backlog item first (held because the cap was full when it was approved) — cheap, no compose cost, and shares this exact pacing gate/budget with composing something new below (folded in from the old standalone drain_approved_feed_queue task/beat entry). Only gates THIS step on the interval, same as before — review composition below intentionally bypasses publish pacing (it doesn't hit the feed until approved), so a blanket check up here would wrongly delay it too. Returns a terminal drain result when something was released, else None to fall through to fresh composition."""
     from app.modules.newspaper.publish_schedule import is_standard_publish_due
 
     due, _detail = is_standard_publish_due()
-    if due:
-        backlog = _release_pending_feed_backlog(slots=slots)
-        if backlog.get("published", 0):
-            return {**backlog, "tier": "standard", "source": "pending_feed_backlog"}
+    if not due:
+        return None
+    backlog = _release_pending_feed_backlog(slots=slots)
+    if backlog.get("published", 0):
+        return {**backlog, "tier": "standard", "source": "pending_feed_backlog"}
+    return None
+
+
+def _record_pre_compose_gate(row: QueuedPublishRow, fired: _DrainGate) -> dict:
+    """Persist a fired pre-compose gate's disposition on the row and return its results-list entry."""
+    if fired.mark_status:
+        mark_queue_status(row.queue_id, fired.mark_status, reason=fired.name)
+    else:
+        record_queue_reason(row.queue_id, fired.name)
+    return {"queue_id": row.queue_id, "status": fired.name}
+
+
+def _process_review_row(
+    row: QueuedPublishRow, *, review_full: bool, backlog_full: bool, reviews_composed: int
+) -> tuple[dict | None, bool, int, int]:
+    """Compose a review-bound row (or skip it for this run). Returns (results_entry_or_None, updated_review_full, updated_reviews_composed, published_delta)."""
+    if review_full or reviews_composed >= config.REVIEW_COMPOSE_BATCH_LIMIT:
+        return None, review_full, reviews_composed, 0
+    if backlog_full:
+        # A full day of releases is already queued — composing more now is
+        # pure cost. Rows stay pending; composing resumes once the paced
+        # release drains the backlog below the cap.
+        return None, review_full, reviews_composed, 0
+
+    from app.modules.crawler.classifier_review_store import review_queue_full
+
+    outcome = _compose_review_row(row)
+    outcome_status = outcome.get("status")
+    published_delta = 0
+    if outcome_status == "review":
+        reviews_composed += 1
+        # The slot we just filled may now be full (MAX_PENDING_REVIEWS is
+        # typically 1) — re-check so we don't compose more reviews this run
+        # only to discard them with "review_queue_full".
+        review_full = review_queue_full()
+    elif outcome_status == "published":
+        # Fresh-auto-approve published straight to the feed: that is a real
+        # standard-tier release. Advance the pacing clock and spend this
+        # run's feed budget — on 2026-07-15 neither happened and one drain
+        # run chain-published three articles minutes apart.
+        record_standard_publish()
+        published_delta = 1
+    elif outcome_status == "approved_backlog":
+        # A full compose was spent even though nothing hit the feed — count
+        # it toward the per-run compose budget.
+        reviews_composed += 1
+    entry = {"queue_id": row.queue_id, **outcome}
+    return entry, review_full, reviews_composed, published_delta
+
+
+def _publish_standard_row(
+    row: QueuedPublishRow, published: int
+) -> tuple[dict | None, int, dict | None]:
+    """Evaluate policy and compose+publish one non-review standard row. Returns (results_entry, published_delta, early_stop_result)."""
+    kind = PublishKind(row.publish_kind)
+    diff = row.payload.get("diff")
+    decision = evaluate_standard_publish(
+        kind, diff=diff, source_kind=row.payload.get("source_kind")
+    )
+    if not decision.allowed:
+        return None, 0, {"status": "skipped", "reason": decision.reason, "published": 0}
+
+    outcome = publish_from_queued_row(row, publish_tier=PublishTier.STANDARD)
+    status = _resolve(row, outcome)
+    if status == "published":
+        record_standard_publish()
+        return {"queue_id": row.queue_id, **outcome}, 1, None
+    if status == "rate_limited":
+        return (
+            None,
+            0,
+            {
+                "status": "skipped",
+                "reason": outcome.get("reason", "rate_limited"),
+                "published": published,
+            },
+        )
+    return {"queue_id": row.queue_id, **outcome}, 0, None
+
+
+def _standard_drain_setup() -> tuple[int, dict | None]:
+    """Slot budget and early-exit checks before composing anything: daily cap, admin-approved backlog release, and credit exhaustion. Returns (slots, early_result) — early_result is a terminal drain result the caller should return immediately, else None to proceed.
+
+    Backlog release never composes (it only publishes already-paid-for
+    work), so it must run even while Mistral credit is exhausted.
+    """
+    slots = remaining_standard_publish_slots()
+    if slots <= 0:
+        return slots, {"status": "skipped", "reason": "standard_daily_cap_reached", "published": 0}
+
+    backlog_result = _release_due_backlog(slots)
+    if backlog_result is not None:
+        return slots, backlog_result
 
     if is_credit_exhausted():
-        return {"status": "skipped", "reason": "mistral_credit_exhausted", "published": 0}
+        return slots, {"status": "skipped", "reason": "mistral_credit_exhausted", "published": 0}
+
+    return slots, None
+
+
+@celery_app.task(name="app.tasks.newspaper.drain_standard_publish_queue")
+def drain_standard_publish_queue() -> dict[str, object]:
+    """Publish standard-tier items on the ~3h schedule, up to 7/day."""
+    slots, early_result = _standard_drain_setup()
+    if early_result is not None:
+        return early_result
 
     pending = _pending_for_tier(PublishTier.STANDARD, limit=config.PUBLISH_QUEUE_BATCH_LIMIT)
     published = 0
@@ -429,72 +537,29 @@ def drain_standard_publish_queue() -> dict[str, object]:
             # review draft still re-covers the same project/story).
             fired = _run_pre_compose_gates(row)
             if fired is not None:
-                if fired.mark_status:
-                    mark_queue_status(row.queue_id, fired.mark_status, reason=fired.name)
-                else:
-                    record_queue_reason(row.queue_id, fired.name)
-                results.append({"queue_id": row.queue_id, "status": fired.name})
+                results.append(_record_pre_compose_gate(row, fired))
                 continue
 
             if _row_needs_review(row):
-                if review_full or reviews_composed >= config.REVIEW_COMPOSE_BATCH_LIMIT:
-                    continue
-                if backlog_full:
-                    # A full day of releases is already queued — composing more
-                    # now is pure cost. Rows stay pending; composing resumes
-                    # once the paced release drains the backlog below the cap.
-                    continue
-                outcome = _compose_review_row(row)
-                outcome_status = outcome.get("status")
-                if outcome_status == "review":
-                    reviews_composed += 1
-                    # The slot we just filled may now be full (MAX_PENDING_REVIEWS
-                    # is typically 1) — re-check so we don't compose more reviews
-                    # this run only to discard them with "review_queue_full".
-                    review_full = review_queue_full()
-                elif outcome_status == "published":
-                    # Fresh-auto-approve published straight to the feed: that
-                    # is a real standard-tier release. Advance the pacing
-                    # clock and spend this run's feed budget — on 2026-07-15
-                    # neither happened and one drain run chain-published
-                    # three articles minutes apart.
-                    record_standard_publish()
-                    published += 1
-                elif outcome_status == "approved_backlog":
-                    # A full compose was spent even though nothing hit the
-                    # feed — count it toward the per-run compose budget.
-                    reviews_composed += 1
-                results.append({"queue_id": row.queue_id, **outcome})
+                entry, review_full, reviews_composed, published_delta = _process_review_row(
+                    row,
+                    review_full=review_full,
+                    backlog_full=backlog_full,
+                    reviews_composed=reviews_composed,
+                )
+                published += published_delta
+                if entry is not None:
+                    results.append(entry)
                 continue
 
             if published >= 1:
                 break
-            kind = PublishKind(row.publish_kind)
-            diff = row.payload.get("diff")
-            decision = evaluate_standard_publish(
-                kind, diff=diff, source_kind=row.payload.get("source_kind")
-            )
-            if not decision.allowed:
-                return {
-                    "status": "skipped",
-                    "reason": decision.reason,
-                    "published": 0,
-                    "results": results,
-                }
-
-            outcome = publish_from_queued_row(row, publish_tier=PublishTier.STANDARD)
-            status = _resolve(row, outcome)
-            if status == "published":
-                record_standard_publish()
-                published += 1
-            elif status == "rate_limited":
-                return {
-                    "status": "skipped",
-                    "reason": outcome.get("reason", "rate_limited"),
-                    "published": published,
-                    "results": results,
-                }
-            results.append({"queue_id": row.queue_id, **outcome})
+            entry, published_delta, early_stop = _publish_standard_row(row, published)
+            if early_stop is not None:
+                return {**early_stop, "results": results}
+            published += published_delta
+            if entry is not None:
+                results.append(entry)
     except SoftTimeLimitExceeded:
         # Killed mid-compose despite the budget guard: return partial progress.
         # The in-flight row was never marked done, so it stays pending.

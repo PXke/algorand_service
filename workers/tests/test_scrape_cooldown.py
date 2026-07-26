@@ -10,6 +10,7 @@ from app.modules.scraper.core.scrape_cooldown import (
 
 
 def test_backoff_grows_exponentially() -> None:
+    """Backoff duration grows exponentially with the failure streak."""
     base = config.SCRAPE_BACKOFF_BASE_SECONDS
     mult = config.SCRAPE_BACKOFF_MULTIPLIER
     assert backoff_duration(1) == base
@@ -18,6 +19,7 @@ def test_backoff_grows_exponentially() -> None:
 
 
 def test_backoff_capped_and_floored() -> None:
+    """Backoff is capped at the configured max and floored at the base for non-positive streaks."""
     assert backoff_duration(99) == config.SCRAPE_BACKOFF_MAX_SECONDS
     # Zero/negative streaks never dip below the base.
     assert backoff_duration(0) == config.SCRAPE_BACKOFF_BASE_SECONDS
@@ -26,6 +28,7 @@ def test_backoff_capped_and_floored() -> None:
 
 def test_dead_host_is_permanent_through_wrapping() -> None:
     # Scrapers wrap the SSRF guard's UnsafeUrlError; walk the cause chain.
+    """A wrapped DNS-failure cause is still recognized as a permanent failure with the dead-host cooldown."""
     root = UnsafeUrlError("dns resolution failed for algoexplorer.io")
     wrapped = RuntimeError("playwright scrape failed: dns resolution failed")
     wrapped.__cause__ = root
@@ -34,6 +37,7 @@ def test_dead_host_is_permanent_through_wrapping() -> None:
 
 
 def test_transient_failure_uses_exponential() -> None:
+    """A generic transient failure is not permanent and has no fixed cooldown."""
     transient = RuntimeError("403 Forbidden")
     assert not is_permanent_failure(transient)
     assert cooldown_for_exception(transient) is None

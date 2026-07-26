@@ -558,14 +558,18 @@
     }
   },
   "domainsDeadEnd": "Dead end",
-  "domainsApproveExplore": "Approve & explore",
-  "domainsCrawlOnce": "Crawl once, no seed",
+  "domainsApproveExplore": "Full site",
   "domainsAddButton": "Add",
-  "domainsAddAsSeed": "Add as permanent source",
-  "domainsAddSinglePageOnly": "Just this page (citation only, don't crawl the site)",
+  "domainsAddSinglePageOnly": "Single page",
   "domainsScoreUnexplained": "Score breakdown not available",
   "domainsPossibleService": "possible service?",
-  "domainsPossibleServiceHint": "Scored well but tagged news/generic — this may be a real product, not just a citation source. Consider \"Approve & explore\" instead of \"Crawl once\".",
+  "domainsPossibleServiceHint": "Scored well but tagged news/generic — this may be a real product, not just a citation source. Consider \"Full site\" instead of \"Single page\".",
+  "domainsSuggestedHint": "Suggested — {count} same-domain pages found",
+  "@domainsSuggestedHint": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
   "paginationPrevious": "Previous",
   "paginationNext": "Next",
   "paginationPageOf": "Page {page} of {total}",

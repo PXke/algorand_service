@@ -975,20 +975,13 @@ class AppLocalizationsEn extends AppLocalizations {
   String get domainsDeadEnd => 'Dead end';
 
   @override
-  String get domainsApproveExplore => 'Approve & explore';
-
-  @override
-  String get domainsCrawlOnce => 'Crawl once, no seed';
+  String get domainsApproveExplore => 'Full site';
 
   @override
   String get domainsAddButton => 'Add';
 
   @override
-  String get domainsAddAsSeed => 'Add as permanent source';
-
-  @override
-  String get domainsAddSinglePageOnly =>
-      'Just this page (citation only, don\'t crawl the site)';
+  String get domainsAddSinglePageOnly => 'Single page';
 
   @override
   String get domainsScoreUnexplained => 'Score breakdown not available';
@@ -998,7 +991,12 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get domainsPossibleServiceHint =>
-      'Scored well but tagged news/generic — this may be a real product, not just a citation source. Consider \"Approve & explore\" instead of \"Crawl once\".';
+      'Scored well but tagged news/generic — this may be a real product, not just a citation source. Consider \"Full site\" instead of \"Single page\".';
+
+  @override
+  String domainsSuggestedHint(int count) {
+    return 'Suggested — $count same-domain pages found';
+  }
 
   @override
   String get paginationPrevious => 'Previous';

@@ -17,6 +17,7 @@ def _review_call() -> list[dict]:
 
 
 def test_require_tool_forces_review_before_finishing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The compose loop nudges the model to call review_draft before accepting its final output."""
     client = MistralClient(api_key="test-key")
     seq = [
         _msg(content='{"title":"t","body":"b"}'),  # tries to finish, no review
@@ -46,6 +47,7 @@ def test_require_tool_forces_review_before_finishing(monkeypatch: pytest.MonkeyP
 def test_require_tool_nudges_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
     # If the model keeps refusing, we nudge once then accept its output (no
     # infinite loop).
+    """A model that keeps refusing the required tool is nudged only once, then its output is accepted."""
     client = MistralClient(api_key="test-key")
     calls = {"n": 0}
 
@@ -177,6 +179,7 @@ def test_cross_pass_dedup_still_allows_retry_of_errored_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A transient failure in pass 1 must stay retryable in pass 2.
+    """An earlier pass's errored tool call is still retried, not treated as an already-seen duplicate."""
     client = MistralClient(api_key="test-key")
     executed = {"n": 0}
 

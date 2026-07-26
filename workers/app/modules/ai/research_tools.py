@@ -269,7 +269,11 @@ def _guarded_get_with_retry(
 
 
 def _guarded_post(
-    url: str, *, json: Any = None, headers: dict | None = None, timeout: float = 12.0  # noqa: ANN401 -- arbitrary JSON POST body
+    url: str,
+    *,
+    json: Any = None,  # noqa: ANN401 -- arbitrary JSON POST body
+    headers: dict | None = None,
+    timeout: float = 12.0,
 ) -> httpx.Response:
     """SSRF-guarded POST for a known external JSON API. Validates the host is public and does NOT follow redirects (so it can't be bounced to an internal one). Used for fixed endpoints we choose, not LLM-supplied URLs."""
     import httpx
@@ -385,23 +389,8 @@ def _owner_liveness(owner: str, *, exclude: str = "", recent_days: int = 120) ->
     return {"owner": owner, "active_repos": active[:8], "verdict": verdict}
 
 
-def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
-    """Recent activity for a GitHub repo: metadata, latest releases and commits.
-
-    Accepts 'owner/name' or a github.com URL; a bare owner/org lists its repos.
-    """
-    slug = (repo or "").strip().rstrip("/")
-    if "github.com/" in slug:
-        slug = slug.split("github.com/", 1)[1]
-    slug = "/".join(slug.split("/")[:2])
-    if slug.endswith(".git"):
-        slug = slug[:-4]
-    n = max(1, min(int(limit), 10))
-    if "/" not in slug and slug:
-        # An org/user, not a repo — list its repos instead of erroring.
-        return _github_owner_repos(slug)
-    if slug.count("/") != 1 or not all(slug.split("/")):
-        return {"error": f"expected owner/name, got '{repo}'"}
+def _github_repo_metadata(slug: str) -> dict[str, Any]:
+    """Repo description/stars/pushed_at/archived, plus owner-liveness when archived (an archived repo is NOT a dead project — check whether the owner is still shipping code elsewhere, so the writer doesn't over-conclude "defunct" from one archived repo, per the Pera Wallet incident 2026-07-20). On a 404, falls back to the owner's repo listing (a wrong guess under a real owner) or an error dict — either always carries an "error" key, the caller's signal to stop."""
     out: dict[str, Any] = {"repo": slug}
     try:
         meta_resp = _github_get(f"https://api.github.com/repos/{slug}")
@@ -422,20 +411,20 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
             pushed_at=meta.get("pushed_at"),
             archived=meta.get("archived"),
         )
-        # An archived repo is NOT a dead project — check whether the OWNER is
-        # still shipping code in other repos (the repo may have been superseded
-        # or migrated). Without this the writer over-concludes "defunct" from a
-        # single archived repo (Pera Wallet incident 2026-07-20).
         if meta.get("archived"):
             out["owner_liveness"] = _owner_liveness(slug.split("/")[0], exclude=slug)
     except Exception as exc:
         return {"repo": slug, "error": str(exc)[:200]}
+    return out
+
+
+def _github_releases(slug: str, n: int) -> list[dict[str, Any]]:
     try:
         rel = _github_get(
             f"https://api.github.com/repos/{slug}/releases",
             params={"per_page": n},
         ).json()
-        out["releases"] = [
+        return [
             {
                 "name": x.get("name") or x.get("tag_name"),
                 "tag": x.get("tag_name"),
@@ -446,13 +435,16 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
             if isinstance(x, dict)
         ][:n]
     except Exception:
-        out["releases"] = []
+        return []
+
+
+def _github_recent_commits(slug: str, n: int) -> list[dict[str, Any]]:
     try:
         commits = _github_get(
             f"https://api.github.com/repos/{slug}/commits",
             params={"per_page": n},
         ).json()
-        out["recent_commits"] = [
+        return [
             {
                 "message": (c.get("commit", {}).get("message") or "").splitlines()[0][:140],
                 "date": c.get("commit", {}).get("author", {}).get("date"),
@@ -462,21 +454,48 @@ def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
             if isinstance(c, dict)
         ][:n]
     except Exception:
-        out["recent_commits"] = []
+        return []
+
+
+def _github_top_contributors(slug: str, n: int) -> list[dict[str, Any]]:
+    """Top contributors by total commit count — who really built the project, a stronger "anonymous team" signal than the last few commit authors."""
     try:
-        # Top contributors by total commit count — who really built the project,
-        # a stronger "anonymous team" signal than the last few commit authors.
         contributors = _github_get(
             f"https://api.github.com/repos/{slug}/contributors",
             params={"per_page": n},
         ).json()
-        out["top_contributors"] = [
+        return [
             {"login": c.get("login"), "contributions": c.get("contributions")}
             for c in contributors
             if isinstance(c, dict)
         ][:n]
     except Exception:
-        out["top_contributors"] = []
+        return []
+
+
+def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
+    """Recent activity for a GitHub repo: metadata, latest releases and commits.
+
+    Accepts 'owner/name' or a github.com URL; a bare owner/org lists its repos.
+    """
+    slug = (repo or "").strip().rstrip("/")
+    if "github.com/" in slug:
+        slug = slug.split("github.com/", 1)[1]
+    slug = "/".join(slug.split("/")[:2])
+    if slug.endswith(".git"):
+        slug = slug[:-4]
+    n = max(1, min(int(limit), 10))
+    if "/" not in slug and slug:
+        # An org/user, not a repo — list its repos instead of erroring.
+        return _github_owner_repos(slug)
+    if slug.count("/") != 1 or not all(slug.split("/")):
+        return {"error": f"expected owner/name, got '{repo}'"}
+    out = _github_repo_metadata(slug)
+    if "error" in out:
+        return out
+    out["releases"] = _github_releases(slug, n)
+    out["recent_commits"] = _github_recent_commits(slug, n)
+    out["top_contributors"] = _github_top_contributors(slug, n)
     return out
 
 
@@ -698,64 +717,39 @@ def _publicize_fetch_result(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _fetch_url_internal(
-    url: str,
-    max_chars: int = 6000,
-    offset: int = 0,
-) -> dict[str, Any]:
-    """Fetch and slice a URL; returns raw dict (may include ``_next_offset``)."""
-    import httpx
+def _fetch_url_error(u: str, exc: Exception, *, status_code: int | None = None) -> dict[str, Any]:
+    """Build the {url, error, [status_code], [hint]} response for a failed fetch."""
+    out: dict[str, Any] = {"url": u, "error": str(exc)[:200]}
+    if status_code is not None:
+        out["status_code"] = status_code
+    hint = _fetch_failure_hint(u, out["error"], status_code=status_code)
+    if hint:
+        out["hint"] = hint
+    return out
 
-    cap = max(500, min(int(max_chars), 12000))
-    u = (url or "").strip()
-    if not u:
-        return {"error": "url required"}
-    if not u.startswith(("http://", "https://")):
-        u = "https://" + u
+
+def _fetch_pdf_document(resp: Any, *, base: str, cap: int, offset: int) -> dict[str, Any]:  # noqa: ANN401 -- httpx.Response, kept loosely typed to match the caller
+    """Extract text from a PDF response (whitepapers, audits, tokenomics docs are common source links) and slice it like any other fetched document."""
     try:
-        resp = _guarded_get_with_retry(
-            u, headers={"Accept": "text/html,application/xhtml+xml"}, timeout=15.0
-        )
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        status = exc.response.status_code
-        out: dict[str, Any] = {"url": u, "error": str(exc)[:200], "status_code": status}
-        hint = _fetch_failure_hint(u, out["error"], status_code=status)
-        if hint:
-            out["hint"] = hint
-        return out
+        from io import BytesIO
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(resp.content))
+        md = reader.metadata
+        title = (getattr(md, "title", None) or "")[:200] if md else ""
+        text = "\n".join((pg.extract_text() or "") for pg in reader.pages[:40]).strip()
     except Exception as exc:
-        out = {"url": u, "error": str(exc)[:200]}
-        hint = _fetch_failure_hint(u, out["error"])
-        if hint:
-            out["hint"] = hint
-        return out
-    ctype = resp.headers.get("content-type", "")
-    base = str(resp.url)
-    # PDFs (whitepapers, audits, tokenomics docs) are common source links; read
-    # their text instead of refusing them. pypdf is already a dependency.
-    if "pdf" in ctype.lower() or base.lower().split("?")[0].endswith(".pdf"):
-        try:
-            from io import BytesIO
+        return {"url": base, "error": f"pdf parse failed: {str(exc)[:160]}"}
+    return _slice_document_text(text, url=base, title=title, links=[], max_chars=cap, offset=offset)
 
-            from pypdf import PdfReader
 
-            reader = PdfReader(BytesIO(resp.content))
-            md = reader.metadata
-            title = (getattr(md, "title", None) or "")[:200] if md else ""
-            text = "\n".join((pg.extract_text() or "") for pg in reader.pages[:40]).strip()
-        except Exception as exc:
-            return {"url": base, "error": f"pdf parse failed: {str(exc)[:160]}"}
-        return _slice_document_text(
-            text,
-            url=base,
-            title=title,
-            links=[],
-            max_chars=cap,
-            offset=offset,
-        )
-    if "html" not in ctype and "text" not in ctype:
-        return {"url": u, "error": f"unsupported content-type: {ctype[:60]}"}
+def _extract_html_text_and_links(
+    resp: Any,  # noqa: ANN401 -- httpx.Response, kept loosely typed to match the caller
+    *,
+    base: str,
+) -> tuple[str, str, str, list[dict[str, str]]]:
+    """Parse an HTML response into (title, keep-links text, plain text, absolute-URL links list). Falls back to plain-text-only on any parse failure."""
     from urllib.parse import urljoin
 
     from bs4 import BeautifulSoup
@@ -783,26 +777,74 @@ def _fetch_url_internal(
         plain_text = html_to_plain_text(resp.text)
     except Exception:
         text = plain_text = html_to_plain_text(resp.text)
+    return title, text, plain_text, links
 
-    # Thin / SPA-shaped response (React/Vue/Next shell, or a "please enable
-    # JavaScript" fallback page) — same signal the web crawler uses to decide a
-    # page needs its Playwright fallback. Retry rendered before reporting a
-    # near-empty page as the page's real content.
+
+def _maybe_render_spa_fallback(
+    resp: Any,  # noqa: ANN401 -- httpx.Response, kept loosely typed to match the caller
+    *,
+    base: str,
+    title: str,
+    text: str,
+    plain_text: str,
+    links: list[dict[str, str]],
+) -> tuple[str, str, list[dict[str, str]], str]:
+    """Retry a thin/SPA-shaped response (React/Vue/Next shell, or a "please enable JavaScript" page) with the Playwright renderer — same signal the web crawler uses. Returns (title, text, links, base), rendered values if it helped, the original ones otherwise (a failed render beats no result at all)."""
     from app.modules.scraper.crawler_registry import is_web_spa_enabled
     from app.modules.scraper.crawlers.web_crawler import needs_spa_fallback
 
-    if is_web_spa_enabled() and needs_spa_fallback(plain_text, raw_html=resp.text):
-        try:
-            from app.modules.scraper.core.browser_scraper import BrowserScraper
+    if not (is_web_spa_enabled() and needs_spa_fallback(plain_text, raw_html=resp.text)):
+        return title, text, links, base
+    try:
+        from app.modules.scraper.core.browser_scraper import BrowserScraper
 
-            rendered = BrowserScraper().scrape(base, "research-fetch_url")
-            title = rendered.title or title
-            text = rendered.text or text
-            links = rendered.links or links
-            base = rendered.url or base
-        except Exception:
-            pass  # keep the HTTP result — a failed render beats no result at all
+        rendered = BrowserScraper().scrape(base, "research-fetch_url")
+        return (
+            rendered.title or title,
+            rendered.text or text,
+            rendered.links or links,
+            rendered.url or base,
+        )
+    except Exception:
+        return title, text, links, base
 
+
+def _fetch_url_internal(
+    url: str,
+    max_chars: int = 6000,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Fetch and slice a URL; returns raw dict (may include ``_next_offset``)."""
+    import httpx
+
+    cap = max(500, min(int(max_chars), 12000))
+    u = (url or "").strip()
+    if not u:
+        return {"error": "url required"}
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u
+    try:
+        resp = _guarded_get_with_retry(
+            u, headers={"Accept": "text/html,application/xhtml+xml"}, timeout=15.0
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        return _fetch_url_error(u, exc, status_code=exc.response.status_code)
+    except Exception as exc:
+        return _fetch_url_error(u, exc)
+    ctype = resp.headers.get("content-type", "")
+    base = str(resp.url)
+    # PDFs (whitepapers, audits, tokenomics docs) are common source links; read
+    # their text instead of refusing them. pypdf is already a dependency.
+    if "pdf" in ctype.lower() or base.lower().split("?")[0].endswith(".pdf"):
+        return _fetch_pdf_document(resp, base=base, cap=cap, offset=offset)
+    if "html" not in ctype and "text" not in ctype:
+        return {"url": u, "error": f"unsupported content-type: {ctype[:60]}"}
+
+    title, text, plain_text, links = _extract_html_text_and_links(resp, base=base)
+    title, text, links, base = _maybe_render_spa_fallback(
+        resp, base=base, title=title, text=text, plain_text=plain_text, links=links
+    )
     return _slice_document_text(
         text,
         url=base,
@@ -963,6 +1005,114 @@ def _tool_get_node_stats() -> dict[str, Any]:
     return result
 
 
+def _discourse_about(base: str, hdr: dict[str, str]) -> dict[str, Any]:
+    """Site title/description/stats from /about.json, or an {"error": ...} dict when the host isn't reachable as a Discourse forum."""
+    try:
+        ab = (_guarded_get(f"{base}/about.json", headers=hdr).json() or {}).get("about", {})
+        stats = ab.get("stats", {}) or {}
+        return {
+            "title": ab.get("title"),
+            "description": (ab.get("description") or "")[:300],
+            "stats": {
+                k: stats[k]
+                for k in (
+                    "topic_count",
+                    "post_count",
+                    "user_count",
+                    "topics_last_day",
+                    "posts_last_day",
+                    "active_users_last_day",
+                )
+                if k in stats
+            },
+        }
+    except Exception as exc:
+        # A non-Discourse site (or one with the API disabled) — say so plainly.
+        return {"error": f"not reachable as a Discourse forum: {str(exc)[:140]}"}
+
+
+def _discourse_search(base: str, hdr: dict[str, str], q: str, n: int) -> dict[str, Any]:
+    """Search results (topic/excerpt/author/date/replies/url) from the forum's public /search.json."""
+    try:
+        data = _guarded_get(f"{base}/search.json", headers=hdr, params={"q": q[:200]}).json() or {}
+        topics_by_id = {t.get("id"): t for t in data.get("topics", []) or [] if isinstance(t, dict)}
+        results = []
+        for p in (data.get("posts", []) or [])[:n]:
+            if not isinstance(p, dict):
+                continue
+            topic = topics_by_id.get(p.get("topic_id"), {})
+            results.append(
+                {
+                    "topic": topic.get("title") or "",
+                    "excerpt": (p.get("blurb") or "")[:300],
+                    "author": p.get("username"),
+                    "date": (p.get("created_at") or "")[:10],
+                    "replies": topic.get("posts_count"),
+                    "url": (
+                        f"{base}/t/{topic.get('slug')}/{topic.get('id')}"
+                        if topic.get("slug") and topic.get("id")
+                        else ""
+                    ),
+                }
+            )
+        return {"results": results, "count": len(results)}
+    except Exception as exc:
+        return {"error": f"search failed: {str(exc)[:160]}"}
+
+
+def _discourse_categories(base: str, hdr: dict[str, str]) -> tuple[list[dict[str, Any]], dict]:
+    """Top categories (name/topic count/description) plus an id -> name lookup for topic annotation."""
+    try:
+        clist = (
+            (_guarded_get(f"{base}/categories.json", headers=hdr).json() or {}).get(
+                "category_list", {}
+            )
+            or {}
+        ).get("categories", []) or []
+        categories = [
+            {
+                "name": c.get("name"),
+                "topics": c.get("topic_count"),
+                "description": (c.get("description_text") or "")[:160],
+            }
+            for c in clist[:15]
+            if isinstance(c, dict)
+        ]
+        cat_names = {c.get("id"): c.get("name") or "" for c in clist if isinstance(c, dict)}
+        return categories, cat_names
+    except Exception:
+        return [], {}
+
+
+def _discourse_recent_topics(
+    base: str, hdr: dict[str, str], n: int, cat_names: dict
+) -> tuple[list[dict[str, Any]], str]:
+    """Recent topics from /latest.json, annotated with category names. Returns (topics, error_message)."""
+    try:
+        topics = (
+            (_guarded_get(f"{base}/latest.json", headers=hdr).json() or {}).get("topic_list", {})
+            or {}
+        ).get("topics", []) or []
+        return [
+            {
+                "title": t.get("title"),
+                "replies": t.get("reply_count", t.get("posts_count")),
+                "views": t.get("views"),
+                "category": cat_names.get(t.get("category_id"), ""),
+                "last_activity": t.get("last_posted_at") or t.get("bumped_at"),
+                "url": (
+                    f"{base}/t/{t.get('slug')}/{t.get('id')}"
+                    if t.get("slug") and t.get("id")
+                    else ""
+                ),
+            }
+            for t in topics[:n]
+            if isinstance(t, dict)
+        ], ""
+    except Exception as exc:
+        return [], str(exc)[:160]
+
+
 def _tool_discourse_forum(forum_url: str, limit: int = 10, query: str = "") -> dict[str, Any]:
     """Live activity from a Discourse community forum (most crypto project forums, incl. Folks Finance) via its public JSON API — site stats, top categories, and recent topics with reply/view counts. Pass ``query`` to search the forum's public /search.json instead of listing latest topics (prod writers kept wanting 'search the Algorand forum for <project>', which latest-topics can't answer). Read this instead of a static page snapshot to gauge what the community is actually discussing right now."""
     from urllib.parse import urlsplit
@@ -986,107 +1136,24 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10, query: str = "") -> d
     hdr = {"Accept": "application/json"}
     out: dict[str, Any] = {"forum": base}
 
-    try:
-        ab = (_guarded_get(f"{base}/about.json", headers=hdr).json() or {}).get("about", {})
-        stats = ab.get("stats", {}) or {}
-        out["title"] = ab.get("title")
-        out["description"] = (ab.get("description") or "")[:300]
-        out["stats"] = {
-            k: stats[k]
-            for k in (
-                "topic_count",
-                "post_count",
-                "user_count",
-                "topics_last_day",
-                "posts_last_day",
-                "active_users_last_day",
-            )
-            if k in stats
-        }
-    except Exception as exc:
-        # A non-Discourse site (or one with the API disabled) — say so plainly.
-        return {"forum": base, "error": f"not reachable as a Discourse forum: {str(exc)[:140]}"}
+    about = _discourse_about(base, hdr)
+    if "error" in about:
+        out.update(about)
+        return out
+    out.update(about)
 
     q = (query or "").strip()
     if q:
         out["query"] = q
-        try:
-            data = (
-                _guarded_get(f"{base}/search.json", headers=hdr, params={"q": q[:200]}).json() or {}
-            )
-            topics_by_id = {
-                t.get("id"): t for t in data.get("topics", []) or [] if isinstance(t, dict)
-            }
-            results = []
-            for p in (data.get("posts", []) or [])[:n]:
-                if not isinstance(p, dict):
-                    continue
-                topic = topics_by_id.get(p.get("topic_id"), {})
-                results.append(
-                    {
-                        "topic": topic.get("title") or "",
-                        "excerpt": (p.get("blurb") or "")[:300],
-                        "author": p.get("username"),
-                        "date": (p.get("created_at") or "")[:10],
-                        "replies": topic.get("posts_count"),
-                        "url": (
-                            f"{base}/t/{topic.get('slug')}/{topic.get('id')}"
-                            if topic.get("slug") and topic.get("id")
-                            else ""
-                        ),
-                    }
-                )
-            out["results"] = results
-            out["count"] = len(results)
-        except Exception as exc:
-            out["error"] = f"search failed: {str(exc)[:160]}"
+        out.update(_discourse_search(base, hdr, q, n))
         return out
 
-    cat_names: dict[Any, str] = {}
-    try:
-        clist = (
-            (_guarded_get(f"{base}/categories.json", headers=hdr).json() or {}).get(
-                "category_list", {}
-            )
-            or {}
-        ).get("categories", []) or []
-        out["categories"] = [
-            {
-                "name": c.get("name"),
-                "topics": c.get("topic_count"),
-                "description": (c.get("description_text") or "")[:160],
-            }
-            for c in clist[:15]
-            if isinstance(c, dict)
-        ]
-        cat_names = {c.get("id"): c.get("name") or "" for c in clist if isinstance(c, dict)}
-    except Exception:
-        out["categories"] = []
-
-    try:
-        topics = (
-            (_guarded_get(f"{base}/latest.json", headers=hdr).json() or {}).get("topic_list", {})
-            or {}
-        ).get("topics", []) or []
-        out["recent_topics"] = [
-            {
-                "title": t.get("title"),
-                "replies": t.get("reply_count", t.get("posts_count")),
-                "views": t.get("views"),
-                "category": cat_names.get(t.get("category_id"), ""),
-                "last_activity": t.get("last_posted_at") or t.get("bumped_at"),
-                "url": (
-                    f"{base}/t/{t.get('slug')}/{t.get('id')}"
-                    if t.get("slug") and t.get("id")
-                    else ""
-                ),
-            }
-            for t in topics[:n]
-            if isinstance(t, dict)
-        ]
-    except Exception as exc:
-        out["latest_error"] = str(exc)[:160]
-        out.setdefault("recent_topics", [])
+    categories, cat_names = _discourse_categories(base, hdr)
+    out["categories"] = categories
+    recent_topics, latest_error = _discourse_recent_topics(base, hdr, n, cat_names)
+    out["recent_topics"] = recent_topics
+    if latest_error:
+        out["latest_error"] = latest_error
     return out
 
 
@@ -1155,36 +1222,35 @@ def _tool_github_repo_contents(repo: str, path: str = "", ref: str = "") -> dict
     return {"repo": slug, "path": p, "error": "unexpected contents response"}
 
 
-def _tool_medium_articles(source: str, limit: int = 15) -> dict[str, Any]:
-    """List a Medium author's or publication's recent articles via its public RSS feed (no auth). Accepts an @handle, a medium.com URL, or a Medium-backed custom domain (e.g. algonaut.space). Returns title, link, published date and tags — use to quantify a blog's output and spot cross-posting patterns."""
+def _medium_feed_url_for(source: str) -> str:
+    """Normalize an @handle, a medium.com URL, or a Medium-backed custom domain to its RSS feed URL."""
     from urllib.parse import urlsplit
 
-    from lxml import etree
-
-    s = (source or "").strip()
-    if not s:
-        return {"error": "source required"}
+    s = source
     has_scheme = s.startswith(("http://", "https://"))
     if s.startswith("@") or (not has_scheme and "." not in s.split("/")[0]):
         # an @handle or a bare handle (no dot, no scheme)
-        feed_url = f"https://medium.com/feed/{s if s.startswith('@') else '@' + s}"
-    else:  # a URL or a bare domain/path — normalize to one URL code path
-        if not has_scheme:
-            s = "https://" + s
-        parts = urlsplit(s)
-        path = parts.path.strip("/")
-        if "medium.com" in parts.netloc:
-            if path.startswith("feed"):  # already a feed URL — use as-is
-                feed_url = f"https://medium.com/{path}"
-            elif path:  # /@handle or /publication
-                feed_url = f"https://medium.com/feed/{path.split('/')[0]}"
-            else:
-                feed_url = "https://medium.com/feed"
-        elif path.startswith("feed"):  # custom domain feed URL
-            feed_url = f"{parts.scheme}://{parts.netloc}/{path}"
-        else:  # custom domain backed by Medium
-            feed_url = f"{parts.scheme}://{parts.netloc}/feed"
-    n = max(1, min(int(limit), 30))
+        return f"https://medium.com/feed/{s if s.startswith('@') else '@' + s}"
+    # a URL or a bare domain/path — normalize to one URL code path
+    if not has_scheme:
+        s = "https://" + s
+    parts = urlsplit(s)
+    path = parts.path.strip("/")
+    if "medium.com" in parts.netloc:
+        if path.startswith("feed"):  # already a feed URL — use as-is
+            return f"https://medium.com/{path}"
+        if path:  # /@handle or /publication
+            return f"https://medium.com/feed/{path.split('/')[0]}"
+        return "https://medium.com/feed"
+    if path.startswith("feed"):  # custom domain feed URL
+        return f"{parts.scheme}://{parts.netloc}/{path}"
+    return f"{parts.scheme}://{parts.netloc}/feed"  # custom domain backed by Medium
+
+
+def _parse_medium_rss(feed_url: str, n: int) -> dict[str, Any]:
+    """Fetch and parse a Medium RSS feed into (title, link, published, categories) articles."""
+    from lxml import etree
+
     try:
         resp = _guarded_get(
             feed_url,
@@ -1211,6 +1277,16 @@ def _tool_medium_articles(source: str, limit: int = 15) -> dict[str, Any]:
             }
         )
     return {"feed": feed_url, "count": len(articles), "articles": articles}
+
+
+def _tool_medium_articles(source: str, limit: int = 15) -> dict[str, Any]:
+    """List a Medium author's or publication's recent articles via its public RSS feed (no auth). Accepts an @handle, a medium.com URL, or a Medium-backed custom domain (e.g. algonaut.space). Returns title, link, published date and tags — use to quantify a blog's output and spot cross-posting patterns."""
+    s = (source or "").strip()
+    if not s:
+        return {"error": "source required"}
+    feed_url = _medium_feed_url_for(s)
+    n = max(1, min(int(limit), 30))
+    return _parse_medium_rss(feed_url, n)
 
 
 def _tool_reddit_history(user: str, _kind: str = "submitted", _limit: int = 15) -> dict[str, Any]:
@@ -1251,48 +1327,36 @@ def _xgov_abstract(md: str) -> str:
     return " ".join(m.group(1).split())[:400] if m else ""
 
 
-def _tool_xgov_proposal(proposal_id: int = 0, limit: int = 8) -> dict[str, Any]:
-    """Status of Algorand xGov grant proposals from the canonical algorandfoundation/xGov repo: frontmatter (title, author, amount_requested, category, status Draft/Final/Approved/Rejected/Withdrawn, forum link) plus an abstract snippet. With proposal_id, one proposal in full; without, the newest proposals' summaries."""
+def _xgov_fetch_one(pid: int, *, with_abstract: bool) -> dict[str, Any] | None:
+    """One proposal's frontmatter summary (plus abstract if requested); None if it doesn't exist, or an {"id","error"} dict on fetch/parse failure."""
+    try:
+        resp = _guarded_get(f"{_XGOV_RAW}/Proposals/xgov-{pid}.md")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+    except Exception as exc:
+        return {"id": pid, "error": str(exc)[:160]}
+    fm = _xgov_frontmatter(resp.text)
+    if not fm:
+        return {"id": pid, "error": "no frontmatter in proposal file"}
+    entry: dict[str, Any] = {
+        "id": pid,
+        "title": fm.get("title", ""),
+        "status": fm.get("status", ""),
+        "author": fm.get("author", ""),
+        "amount_requested_algo": fm.get("amount_requested", ""),
+        "category": fm.get("category", ""),
+        "period": fm.get("period", ""),
+        "discussion": fm.get("discussions-to", ""),
+        "url": f"https://github.com/algorandfoundation/xGov/blob/main/Proposals/xgov-{pid}.md",
+    }
+    if with_abstract:
+        entry["abstract"] = _xgov_abstract(resp.text)
+    return entry
 
-    def _fetch_one(pid: int, with_abstract: bool) -> dict[str, Any] | None:
-        try:
-            resp = _guarded_get(f"{_XGOV_RAW}/Proposals/xgov-{pid}.md")
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-        except Exception as exc:
-            return {"id": pid, "error": str(exc)[:160]}
-        fm = _xgov_frontmatter(resp.text)
-        if not fm:
-            return {"id": pid, "error": "no frontmatter in proposal file"}
-        entry: dict[str, Any] = {
-            "id": pid,
-            "title": fm.get("title", ""),
-            "status": fm.get("status", ""),
-            "author": fm.get("author", ""),
-            "amount_requested_algo": fm.get("amount_requested", ""),
-            "category": fm.get("category", ""),
-            "period": fm.get("period", ""),
-            "discussion": fm.get("discussions-to", ""),
-            "url": f"https://github.com/algorandfoundation/xGov/blob/main/Proposals/xgov-{pid}.md",
-        }
-        if with_abstract:
-            entry["abstract"] = _xgov_abstract(resp.text)
-        return entry
 
-    if proposal_id:
-        entry = _fetch_one(int(proposal_id), with_abstract=True)
-        if entry is None:
-            return {
-                "id": int(proposal_id),
-                "error": "no such proposal in the xGov repo — note proposal ids are "
-                "the repo's small sequential numbers (e.g. 100), not on-chain "
-                "app/asset ids; for live on-chain vote tallies use "
-                "lookup_application on the voting app instead",
-            }
-        return entry
-
-    n = max(1, min(int(limit), 10))
+def _xgov_list_recent(n: int) -> dict[str, Any]:
+    """Newest xGov proposal summaries (no abstract), via the repo's Proposals directory listing."""
     try:
         resp = _github_get(f"{_XGOV_API}/Proposals")
         resp.raise_for_status()
@@ -1305,7 +1369,7 @@ def _tool_xgov_proposal(proposal_id: int = 0, limit: int = 8) -> dict[str, Any]:
         if m:
             ids.append(int(m.group(1)))
     ids.sort(reverse=True)
-    proposals = [p for pid in ids[:n] if (p := _fetch_one(pid, with_abstract=False))]
+    proposals = [p for pid in ids[:n] if (p := _xgov_fetch_one(pid, with_abstract=False))]
     return {
         "source": "github.com/algorandfoundation/xGov",
         "total_proposals": len(ids),
@@ -1313,6 +1377,23 @@ def _tool_xgov_proposal(proposal_id: int = 0, limit: int = 8) -> dict[str, Any]:
         "proposals": proposals,
         "note": "pass proposal_id for full detail incl. abstract",
     }
+
+
+def _tool_xgov_proposal(proposal_id: int = 0, limit: int = 8) -> dict[str, Any]:
+    """Status of Algorand xGov grant proposals from the canonical algorandfoundation/xGov repo: frontmatter (title, author, amount_requested, category, status Draft/Final/Approved/Rejected/Withdrawn, forum link) plus an abstract snippet. With proposal_id, one proposal in full; without, the newest proposals' summaries."""
+    if proposal_id:
+        entry = _xgov_fetch_one(int(proposal_id), with_abstract=True)
+        if entry is None:
+            return {
+                "id": int(proposal_id),
+                "error": "no such proposal in the xGov repo — note proposal ids are "
+                "the repo's small sequential numbers (e.g. 100), not on-chain "
+                "app/asset ids; for live on-chain vote tallies use "
+                "lookup_application on the voting app instead",
+            }
+        return entry
+    n = max(1, min(int(limit), 10))
+    return _xgov_list_recent(n)
 
 
 _GITHUB_SCHEMA = {

@@ -80,6 +80,70 @@ def _parse_quality_response(raw: Any) -> dict[str, Any] | None:  # noqa: ANN401 
     return _parse_json_object(raw.strip())
 
 
+_QUALITY_DIMS = ("narrative_synthesis", "technical_depth", "critical_distance", "repetition")
+
+
+def _graded_scores(
+    mistral: MistralClient, messages: list[dict], *, temperature: float
+) -> tuple[dict[str, int | None], dict, list[str]]:
+    """Call the rubric, retrying once for any dimension the first pass left null. Returns (scores, parsed_first_response, missing_dims_after_retry).
+
+    Partial responses must not silently pass (2026-07-16: a real draft got
+    narrative_synthesis=3 with the other three dimensions null — graded on 1
+    of 4, and quality_needs_revision treats None as fine). One retry, then
+    any still-missing dimension FAILS CLOSED at 2 (below every revision
+    threshold), same stance as _FALLBACK_QUALITY.
+    """
+    parsed = mistral.chat_json_object(messages, temperature=temperature, max_tokens=800)
+    if not isinstance(parsed, dict):
+        raise ValueError("non-object LLM grade")
+    scores = {k: _clamp_score(parsed.get(k)) for k in _QUALITY_DIMS}
+    if any(v is None for v in scores.values()):
+        retry = mistral.chat_json_object(messages, temperature=temperature, max_tokens=800)
+        if isinstance(retry, dict):
+            for k in _QUALITY_DIMS:
+                if scores[k] is None:
+                    scores[k] = _clamp_score(retry.get(k))
+            if isinstance(retry.get("issues"), list) and not parsed.get("issues"):
+                parsed["issues"] = retry["issues"]
+    missing = [k for k, v in scores.items() if v is None]
+    for k in missing:
+        scores[k] = 2
+    return scores, parsed, missing
+
+
+def _dimension_issues(scores: dict[str, int | None]) -> list[str]:
+    """Actionable feedback for each dimension scoring below the 4/5 quality bar."""
+    issues = []
+    narrative = scores["narrative_synthesis"]
+    technical = scores["technical_depth"]
+    critical_distance = scores["critical_distance"]
+    repetition = scores["repetition"]
+    if narrative is not None and narrative < 4:
+        issues.append(
+            f"narrative synthesis scored {narrative}/5 — weave facts into "
+            "connected prose, not comma lists or PR filler"
+        )
+    if technical is not None and technical < 4:
+        issues.append(
+            f"technical depth scored {technical}/5 — explain why Algorand's "
+            "layer-1 mechanics fit this story, not just name-drop the foundation"
+        )
+    if critical_distance is not None and critical_distance < 4:
+        issues.append(
+            f"critical distance scored {critical_distance}/5 — name the actual "
+            "risk/tradeoff (custodial risk, conflict of interest, lack of audit) "
+            "instead of just relaying the subject's own marketing framing"
+        )
+    if repetition is not None and repetition < 4:
+        issues.append(
+            f"repetition scored {repetition}/5 — a specific fact or judgment is "
+            "restated as a fresh observation in more than one section; keep the "
+            "first mention and cut (or reference back to) the rest"
+        )
+    return issues
+
+
 def grade_article_quality_llm(
     *,
     title: str,
@@ -117,39 +181,9 @@ def grade_article_quality_llm(
                 "content": (f"Title: {title}\n\nBody:\n{snippet}\n\nReturn JSON only."),
             },
         ]
-        parsed = mistral.chat_json_object(
-            messages,
-            temperature=MISTRAL_TEMP_RESEARCH,
-            max_tokens=800,
+        scores, parsed, missing = _graded_scores(
+            mistral, messages, temperature=MISTRAL_TEMP_RESEARCH
         )
-        if not isinstance(parsed, dict):
-            raise ValueError("non-object LLM grade")
-        dims = ("narrative_synthesis", "technical_depth", "critical_distance", "repetition")
-        scores = {k: _clamp_score(parsed.get(k)) for k in dims}
-        # Partial responses must not silently pass (2026-07-16: a real draft
-        # got narrative_synthesis=3 with the other three dimensions null —
-        # graded on 1 of 4, and quality_needs_revision treats None as fine).
-        # One retry, then any still-missing dimension FAILS CLOSED at 2
-        # (below every revision threshold), same stance as _FALLBACK_QUALITY.
-        if any(v is None for v in scores.values()):
-            retry = mistral.chat_json_object(
-                messages,
-                temperature=MISTRAL_TEMP_RESEARCH,
-                max_tokens=800,
-            )
-            if isinstance(retry, dict):
-                for k in dims:
-                    if scores[k] is None:
-                        scores[k] = _clamp_score(retry.get(k))
-                if isinstance(retry.get("issues"), list) and not parsed.get("issues"):
-                    parsed["issues"] = retry["issues"]
-        missing = [k for k, v in scores.items() if v is None]
-        for k in missing:
-            scores[k] = 2
-        narrative = scores["narrative_synthesis"]
-        technical = scores["technical_depth"]
-        critical_distance = scores["critical_distance"]
-        repetition = scores["repetition"]
         issues = [str(i).strip() for i in (parsed.get("issues") or []) if str(i).strip()][:6]
         if missing:
             logger.warning("LLM rubric returned partial scores; missing %s", missing)
@@ -158,34 +192,13 @@ def grade_article_quality_llm(
                 + ", ".join(missing)
                 + " (twice) — treated as failing; re-grade on revision"
             )
-        if narrative is not None and narrative < 4:
-            issues.append(
-                f"narrative synthesis scored {narrative}/5 — weave facts into "
-                "connected prose, not comma lists or PR filler"
-            )
-        if technical is not None and technical < 4:
-            issues.append(
-                f"technical depth scored {technical}/5 — explain why Algorand's "
-                "layer-1 mechanics fit this story, not just name-drop the foundation"
-            )
-        if critical_distance is not None and critical_distance < 4:
-            issues.append(
-                f"critical distance scored {critical_distance}/5 — name the actual "
-                "risk/tradeoff (custodial risk, conflict of interest, lack of audit) "
-                "instead of just relaying the subject's own marketing framing"
-            )
-        if repetition is not None and repetition < 4:
-            issues.append(
-                f"repetition scored {repetition}/5 — a specific fact or judgment is "
-                "restated as a fresh observation in more than one section; keep the "
-                "first mention and cut (or reference back to) the rest"
-            )
+        issues.extend(_dimension_issues(scores))
         return {
             "model": "llm_rubric_partial" if missing else "llm_rubric",
-            "narrative_synthesis": narrative,
-            "technical_depth": technical,
-            "critical_distance": critical_distance,
-            "repetition": repetition,
+            "narrative_synthesis": scores["narrative_synthesis"],
+            "technical_depth": scores["technical_depth"],
+            "critical_distance": scores["critical_distance"],
+            "repetition": scores["repetition"],
             "issues": issues,
         }
     except Exception as exc:

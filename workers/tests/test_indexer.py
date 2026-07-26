@@ -18,6 +18,7 @@ def test_classifier_accepts_algorand_page() -> None:
 
 
 def test_indexer_skips_when_typesense_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skips indexing when Typesense is not configured."""
     monkeypatch.setattr(
         "app.modules.search.core.indexer.is_typesense_configured",
         lambda: False,
@@ -34,6 +35,7 @@ def test_indexer_skips_when_typesense_not_configured(monkeypatch: pytest.MonkeyP
 
 
 def test_page_index_skips_when_classifier_rejects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skips indexing a crawled page the classifier rejects as out of scope."""
     from app.modules.search.tasks import index_tasks
 
     monkeypatch.setattr(
@@ -52,6 +54,7 @@ def test_page_index_skips_when_classifier_rejects(monkeypatch: pytest.MonkeyPatc
 
 
 def test_index_article_reads_tags_from_article_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reads an article's tags off its ArticleDetail before indexing it."""
     from app.modules.newspaper.article_store import ArticleDetail
     from app.modules.search.tasks import index_tasks
 

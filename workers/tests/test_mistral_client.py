@@ -18,6 +18,7 @@ def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_chat_json_object_parses_response() -> None:
+    """chat_json_object parses a well-formed choices[0].message.content JSON reply."""
     payload = {
         "choices": [
             {
@@ -115,6 +116,7 @@ def test_chat_json_object_empty_reply_retries_without_assistant_echo() -> None:
 
 
 def test_chat_completion_raises_on_http_error() -> None:
+    """chat_completion raises MistralError on an HTTP error response."""
     class FakeResponse:
         status_code = 401
         text = "unauthorized"

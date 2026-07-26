@@ -19,6 +19,7 @@ def test_reaps_old_non_terminal_rows(
     monkeypatch: pytest.MonkeyPatch,  # noqa: ARG001 -- name must match the real callee's keyword arg
     fake_cassandra_session: MagicMock,
 ) -> None:
+    """Reaps only the non-terminal rows older than the staleness window, leaving recent and terminal rows alone."""
     now = datetime.now(tz=UTC)
     rows = [
         _Row(now - timedelta(minutes=120), "old-researching", "researching"),
@@ -35,12 +36,14 @@ def test_reaps_old_non_terminal_rows(
 
 
 def test_no_rows_is_a_noop(fake_cassandra_session: MagicMock) -> None:
+    """No rows to check is a no-op that reaps nothing."""
     fake_cassandra_session.execute.return_value = []
     result = reap_stale_compose_sessions(stale_minutes=60)
     assert result == {"checked": 0, "reaped": 0}
 
 
 def test_failure_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Cassandra failure is swallowed, returning a zeroed result instead of raising."""
     monkeypatch.setattr(
         "app.core.cassandra.get_cassandra_session",
         lambda: (_ for _ in ()).throw(RuntimeError("cassandra down")),

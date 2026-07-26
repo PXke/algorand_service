@@ -12,11 +12,13 @@ from app.modules.newspaper.weekly_digest import (
 
 
 def test_digest_ids_are_stable_per_week() -> None:
+    """Digest ids are stable and unique per week key."""
     assert weekly_digest_trigger_id("2026-W23") == "weekly-digest-2026-W23"
     assert digest_article_id("2026-W23") == digest_article_id("2026-W23")
     assert digest_article_id("2026-W23") != digest_article_id("2026-W24")
 
 
 def test_current_week_key() -> None:
+    """current_week_key formats a datetime into its ISO week key."""
     key = current_week_key(datetime(2026, 6, 2, tzinfo=UTC))
     assert key.startswith("2026-W")

@@ -536,14 +536,18 @@
     }
   },
   "domainsDeadEnd": "بن‌بست",
-  "domainsApproveExplore": "تایید او پلټل",
-  "domainsCrawlOnce": "یوځل وڅارل شي، پرته له سرچینې",
+  "domainsApproveExplore": "ټول سایټ",
   "domainsAddButton": "زیاتول",
-  "domainsAddAsSeed": "د دایمي سرچینې په توګه یې زیات کړئ",
-  "domainsAddSinglePageOnly": "یوازې دا مخ (یوازې حواله، ټول سایټ مه سکن کوئ)",
+  "domainsAddSinglePageOnly": "یو مخ",
   "domainsScoreUnexplained": "د نمرې تفصیل شتون نلري",
   "domainsPossibleService": "ښایي یوه خدمت وي؟",
-  "domainsPossibleServiceHint": "ښه نمره لري خو د خبر/عمومي په توګه نښه شوی — دا ممکن یو ریښتینی محصول وي، نه یوازې د حواله سرچینه. \"یوځل وڅارل شي\" پرځای \"تصویب او پلټنه\" وګورئ.",
+  "domainsPossibleServiceHint": "ښه نمره لري خو د خبر/عمومي په توګه نښه شوی — دا ممکن یو ریښتینی محصول وي، نه یوازې د حواله سرچینه. \"یو مخ\" پرځای \"ټول سایټ\" وګورئ.",
+  "domainsSuggestedHint": "وړاندیز شوی — {count} ورته-ډومین مخونه وموندل شول",
+  "@domainsSuggestedHint": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
   "paginationPrevious": "پخوانی",
   "paginationNext": "راتلونکی",
   "paginationPageOf": "مخ {page} د {total} څخه",

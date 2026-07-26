@@ -16,6 +16,54 @@ from app.modules.newspaper.scam_enrichment import (
 _KEYWORD_RE = re.compile(r"\$([A-Za-z][A-Za-z0-9]{1,15})\b")
 
 
+def _source_match_key(
+    *, match_kind: str, match_value: str, source_url: str
+) -> tuple[str, str] | None:
+    """The (domain|source_url) key derived from the registry match, or the raw source URL when there's no domain-kind registry match."""
+    kind = match_kind.strip().lower()
+    if kind == "domain":
+        registry_domain = match_value.strip().lower()
+        if registry_domain:
+            return "domain", registry_domain
+        if source_url.strip().startswith(("http://", "https://")):
+            from app.modules.crawler.domain_tracker import domain_from_url
+
+            return "domain", domain_from_url(source_url)
+        return None
+    if source_url.strip():
+        return "source_url", _normalize_source_url(source_url)
+    return None
+
+
+def _topic_gated_body_keys(page_text: str, *, topic: str) -> list[tuple[str, str]]:
+    """Domains MENTIONED in the body text and cashtags, gated to scam_alert/network_incident topics only.
+
+    Only a meaningful "this belongs to that story" signal for scam/incident
+    continuity — a scam alert about algoblow.com should attach a LATER report
+    about algoblow.com to the same article. For ordinary content this is
+    dangerously broad: nearly every article cites
+    algorand.co/forum.algorand.co/github.com in its own Sources section, so
+    extracting those as match keys turned the most-cited article into a
+    magnet for every unrelated future update mentioning any of them — a real
+    runaway loop (2026-07-17): six unrelated sources (the Algorand blog,
+    forum, Nodely, Haystack, a GitHub repo) all got routed to "edit" the same
+    live article, which then got re-edited on every ~2-minute beat forever
+    (see publish_queue_store.TERMINAL_OUTCOMES) — 165 edits / 330 versions in
+    under 4 hours before this was caught by hand. Cashtags get the same gate
+    for the same reason: $ALGO/$USDC appear in ordinary market coverage
+    constantly, so an ungated "keyword" key routes unrelated future updates
+    into editing whatever article happened to mention the ticker last
+    ($SCAMTOKEN continuity on an alert is the signal this key type exists for).
+    """
+    if topic not in ("scam_alert", "network_incident"):
+        return []
+    pairs: list[tuple[str, str]] = []
+    _urls, domains = extract_domains_and_urls(page_text)
+    pairs.extend(("domain", domain) for domain in domains)
+    pairs.extend(("keyword", match.group(1).lower()) for match in _KEYWORD_RE.finditer(page_text))
+    return pairs
+
+
 def build_match_keys(
     *,
     service_id: str,
@@ -41,48 +89,17 @@ def build_match_keys(
         keys.append(pair)
 
     add("service_id", service_id)
-    kind = match_kind.strip().lower()
-    if kind == "domain":
-        registry_domain = match_value.strip().lower()
-        if registry_domain:
-            add("domain", registry_domain)
-        elif source_url.strip().startswith(("http://", "https://")):
-            from app.modules.crawler.domain_tracker import domain_from_url
-
-            add("domain", domain_from_url(source_url))
-    elif source_url.strip():
-        add("source_url", _normalize_source_url(source_url))
-
-    # Domains MENTIONED in the body text (as opposed to the source's own
-    # domain above) are only a meaningful "this belongs to that story" signal
-    # for scam/incident continuity — a scam alert about algoblow.com should
-    # attach a LATER report about algoblow.com to the same article. For
-    # ordinary content this is dangerously broad: nearly every article cites
-    # algorand.co/forum.algorand.co/github.com in its own Sources section,
-    # so extracting those as match keys turned the most-cited article into a
-    # magnet for every unrelated future update mentioning any of them — a
-    # real runaway loop (2026-07-17): six unrelated sources (the Algorand
-    # blog, forum, Nodely, Haystack, a GitHub repo) all got routed to "edit"
-    # the same live article, which then got re-edited on every ~2-minute
-    # beat forever (see publish_queue_store.TERMINAL_OUTCOMES) — 165 edits /
-    # 330 versions in under 4 hours before this was caught by hand.
-    # Cashtags get the same topic gate as body domains, for the same reason:
-    # $ALGO/$USDC appear in ordinary market coverage constantly, so an
-    # ungated "keyword" key routes unrelated future updates into editing
-    # whatever article happened to mention the ticker last ($SCAMTOKEN
-    # continuity on an alert is the signal this key type exists for).
-    if topic in ("scam_alert", "network_incident"):
-        _urls, domains = extract_domains_and_urls(page_text)
-        for domain in domains:
-            add("domain", domain)
-        for match in _KEYWORD_RE.finditer(page_text):
-            add("keyword", match.group(1).lower())
-
+    source_key = _source_match_key(
+        match_kind=match_kind, match_value=match_value, source_url=source_url
+    )
+    if source_key:
+        add(*source_key)
+    for key_type, value in _topic_gated_body_keys(page_text, topic=topic):
+        add(key_type, value)
     # Addresses stay ungated: 58-char checksummed strings are high-precision
     # "same story" signals in any topic, unlike domains/tickers.
     for addr in extract_algorand_addresses(page_text):
         add("algo_address", addr.upper())
-
     for kw in extra_keywords:
         add("keyword", kw.lower())
 

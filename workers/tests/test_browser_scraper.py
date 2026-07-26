@@ -9,6 +9,7 @@ from app.modules.scraper.core.browser_scraper import BrowserScraper
 
 
 def test_browser_scraper_happy_path() -> None:
+    """Scrapes a resolved browser:// URL and returns its rendered title, text, and content hash."""
     page = BrowserPageResult(
         title="Roadmap",
         text=(
@@ -32,5 +33,6 @@ def test_browser_scraper_happy_path() -> None:
 
 
 def test_browser_scraper_unresolved_url() -> None:
+    """Raises BrowserScrapeError for a URL that cannot be resolved to a real target."""
     with pytest.raises(BrowserScrapeError, match="cannot resolve"):
         BrowserScraper().scrape("not-a-url", "svc-1")

@@ -536,14 +536,18 @@
   },
   "domainsPagesCrawled": "{count} páginas",
   "domainsDeadEnd": "Callejón sin salida",
-  "domainsApproveExplore": "Aprobar y explorar",
-  "domainsCrawlOnce": "Rastrear una vez, sin fuente",
+  "domainsApproveExplore": "Sitio completo",
   "domainsAddButton": "Añadir",
-  "domainsAddAsSeed": "Añadir como fuente permanente",
-  "domainsAddSinglePageOnly": "Solo esta página (solo cita, no rastrear el sitio)",
+  "domainsAddSinglePageOnly": "Página única",
   "domainsScoreUnexplained": "Desglose de puntuación no disponible",
   "domainsPossibleService": "¿posible servicio?",
-  "domainsPossibleServiceHint": "Buena puntuación pero etiquetado como noticias/genérico — podría ser un producto real, no solo una fuente de cita. Considere \"Aprobar y explorar\" en vez de \"Rastrear una vez\".",
+  "domainsPossibleServiceHint": "Buena puntuación pero etiquetado como noticias/genérico — podría ser un producto real, no solo una fuente de cita. Considere \"Sitio completo\" en vez de \"Página única\".",
+  "domainsSuggestedHint": "Sugerido — {count} páginas del mismo dominio encontradas",
+  "@domainsSuggestedHint": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
   "paginationPrevious": "Anterior",
   "paginationNext": "Siguiente",
   "paginationPageOf": "Página {page} de {total}",

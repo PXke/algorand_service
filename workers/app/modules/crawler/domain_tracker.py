@@ -321,6 +321,76 @@ def domain_from_url(url: str) -> str:
     return last_two
 
 
+def single_page_service_id(url: str) -> str:
+    """Per-URL identity for a one-shot "single page" compose.
+
+    domain_from_url() alone isn't enough here: it already keeps SUBDOMAIN-based
+    multi-tenant platforms distinct (foo.medium.com vs bar.medium.com, via
+    _PLATFORM_SUFFIXES), but PATH-based ones — github.com/owner/repo,
+    npmjs.com/package/x — aren't subdomain-based, so domain_from_url alone
+    would collapse every repo/package to the same domain. Since enqueue_publish
+    allows only one SERVICE_DISCOVERY candidate per service_id EVER (dedupe key
+    "discovery:{service_id}"), a second unrelated repo approved later would
+    silently vanish. Folding the path into the id avoids that collision for
+    both multi-tenancy shapes uniformly, with no platform list needed here.
+    """
+    import re
+
+    host = domain_from_url(url)
+    path = urlparse(url.strip()).path.strip("/").lower()
+    raw = f"{host}/{path}" if path else host
+    slug = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+    return slug[:120] or host.replace(".", "-")
+
+
+# Big multi-tenant platforms whose same-domain link COUNT can't be trusted as
+# a "how big is this site" signal: any page on them carries dozens of
+# same-domain nav-chrome links (other repos/threads/videos, login, pricing,
+# notifications) that have nothing to do with the specific thing being cited.
+# Forces suggest_full_site() to "single page" regardless of link count —
+# unlike _PLATFORM_SUFFIXES above, this is about density reliability, not
+# domain identity, so it's a flat exact/subdomain match, not folded into
+# domain_from_url. Follows the same curation style as KNOWN_DOMAINS in
+# search/classifier/score.py, for a different purpose.
+_DENSITY_UNRELIABLE_PLATFORMS = frozenset(
+    {
+        "github.com",
+        "npmjs.com",
+        "pypi.org",
+        "crates.io",
+        "reddit.com",
+        "twitter.com",
+        "x.com",
+        "discord.com",
+        "discord.gg",
+        "t.me",
+        "youtube.com",
+        "linkedin.com",
+        "stackoverflow.com",
+    }
+)
+
+
+def suggest_full_site(domain: str, same_domain_link_count: int) -> bool:
+    """Advisory suggestion for the Full Site / Single Page review choice — never authoritative, a human always decides. True: this looks like a real site worth monitoring. False: looks like a single citation page.
+
+    Density is the primary signal (a real product site has many pages, a
+    citation doesn't), EXCEPT on _DENSITY_UNRELIABLE_PLATFORMS where the
+    count is dominated by site chrome, not the cited content — there it
+    always suggests single page regardless of count. Everywhere else,
+    including subdomain-based platforms like readthedocs.io/gitbook.io/
+    medium.com (already kept distinct by domain_from_url), density alone
+    decides — a small SDK's docs subdomain with a real page tree still
+    correctly suggests Full Site.
+    """
+    from app.core.config import FULL_SITE_LINK_THRESHOLD
+
+    host = domain.lower()
+    if any(host == plat or host.endswith(f".{plat}") for plat in _DENSITY_UNRELIABLE_PLATFORMS):
+        return False
+    return same_domain_link_count >= FULL_SITE_LINK_THRESHOLD
+
+
 def get_domain_status(domain: str) -> dict[str, Any] | None:
     """Fetch a domain's tracked crawl status row, or None if never tracked."""
     from app.core.cassandra import get_cassandra_session

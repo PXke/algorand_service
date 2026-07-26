@@ -15,6 +15,7 @@ def _row() -> SimpleNamespace:
 
 
 def test_resolve_terminal_passes_reason_to_mark_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A terminal outcome's reason is passed through to mark_queue_done."""
     calls = {}
     monkeypatch.setattr(
         qdt, "mark_queue_done", lambda qid, *, reason="": calls.update(qid=qid, reason=reason)
@@ -33,6 +34,7 @@ def test_resolve_terminal_passes_reason_to_mark_done(monkeypatch: pytest.MonkeyP
 
 
 def test_resolve_terminal_defaults_reason_to_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A terminal outcome with no explicit reason defaults the persisted reason to its status."""
     calls = {}
     monkeypatch.setattr(
         qdt, "mark_queue_done", lambda _qid, *, reason="": calls.update(reason=reason)
@@ -44,6 +46,7 @@ def test_resolve_terminal_defaults_reason_to_status(monkeypatch: pytest.MonkeyPa
 def test_resolve_non_terminal_records_reason_and_stays_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A non-terminal outcome records its reason and leaves the row pending, never marking it done."""
     calls = {}
     monkeypatch.setattr(
         qdt,

@@ -482,21 +482,16 @@ class DomainSetRequest(msgspec.Struct, kw_only=True):
     """Request body for setting a domain's frontier status."""
     domain: Annotated[str, Meta(min_length=3, max_length=256)]
     is_relevant: bool
-    # Default True preserves existing behavior for every caller that predates
-    # this field (approving a domain always became a permanent monitored
-    # source). False approves the domain for one-time frontier crawling only
-    # — no service_registry row, so it won't be repeatedly re-scraped/diffed
-    # going forward, just explored for whatever's linked from it right now.
-    as_seed: bool = True
-    # True: this ONE page is a legitimate citation, not "watch this whole
-    # domain" — skips one-hop link-following and the domain-wide "approved"
-    # status entirely (frontier_status becomes "reference"), so it's excluded
-    # from every domain-wide sweep (backfills, bulk re-crawls). Implies
-    # as_seed=False — a single-page citation is never a monitored service.
-    # Added after python.org/nytimes.com/climatetrade.com/wfp.medium.com got
-    # approved for one article each and were then treated as full ecosystem
-    # services — dozens of irrelevant subpages crawled and indexed (2026-07-21).
-    single_page_only: bool = False
+    # Exactly two modes on approval (2026-07-26 simplification — replaces the
+    # old independent as_seed/single_page_only pair, which allowed a third,
+    # dead-end state: crawled but never monitored AND never composed into an
+    # article). True: the domain becomes a permanent monitored service_registry
+    # source, watched weekly for changes (articles about how it evolves).
+    # False: single-page mode — fetch exactly this one URL, never follow its
+    # links, excluded from every domain-wide sweep (backfills, bulk re-crawls),
+    # and composed into a one-shot article about that page's content (see
+    # ingest_publish_signal call in web_crawler.py's scrape_from_queue_item).
+    full_site: bool = True
 
 
 class ToolSuggestionResolveRequest(msgspec.Struct, kw_only=True):

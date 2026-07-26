@@ -32,6 +32,7 @@ def test_format_enrichment_never_renders_market_section() -> None:
 
 
 def test_format_enrichment_omits_market_when_absent() -> None:
+    """gather_writer_enrichment itself never populates the bundle's market section."""
     bundle = WriterEnrichmentBundle(service_id="svc", phase="discovery")
     block = format_enrichment_for_writer(bundle)
     assert "ALGO market" not in block

@@ -9,11 +9,13 @@ from app.modules.newspaper.writer_enrichment.collectors.social_posts import (
 
 
 def test_extract_tweet_url() -> None:
+    """Extracts a linked social-post URL (tweet) out of free text."""
     text = "See https://x.com/d13_co/status/2060386210732761317 for details"
     assert extract_post_urls(text) == ["https://x.com/d13_co/status/2060386210732761317"]
 
 
 def test_enrich_linked_posts_mocked() -> None:
+    """Enriches a linked post URL via its oEmbed response into author and text fields."""
     fake = {
         "author_name": "D13",
         "author_url": "https://x.com/d13_co",

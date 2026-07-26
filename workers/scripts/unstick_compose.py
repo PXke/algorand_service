@@ -73,6 +73,78 @@ def _decode(key: bytes | bytearray | str) -> str:
     return key.decode() if isinstance(key, (bytes, bytearray)) else str(key)
 
 
+def _log_lock_state(r: redis.Redis) -> tuple[bool, list, int | None]:
+    """Log the global (and any stray) lock state. Returns (held, locks, ttl)."""
+    held = r.get(_GLOBAL_LOCK) is not None
+    ttl = r.ttl(_GLOBAL_LOCK)
+    lock_state = f"HELD (ttl {ttl}s)" if held else "free"
+    logger.info("global lock %s: %s", _GLOBAL_LOCK, lock_state)
+    locks = list(r.scan_iter(match=_LOCK_PATTERN))
+    for k in locks:
+        logger.info("  lock present: %s  ttl=%ss", _decode(k), r.ttl(k))
+    return held, locks, ttl
+
+
+def _check_staleness(held: bool, max_age: int) -> bool:
+    """Log the newest compose session's status and return whether the held lock looks dead (in-progress past max_age, or terminal with a lock still orphaned)."""
+    try:
+        latest = _latest_session()
+    except Exception as exc:
+        logger.info("(could not read compose_sessions: %s)", exc)
+        return False
+    if not latest:
+        logger.info("newest session: none found")
+        return False
+    status, _created, age = latest
+    terminal = status in _TERMINAL
+    logger.info(
+        "newest session: status=%r age=%ds (%s)",
+        status,
+        int(age),
+        "terminal" if terminal else "IN-PROGRESS",
+    )
+    return bool(held) and (terminal or age > max_age)
+
+
+def _report_diagnosis(stale: bool, *, max_age: int, ttl: int | None) -> None:
+    if stale:
+        logger.info(
+            "\n=> A compose lock is held and the newest compose looks DEAD. "
+            "Re-run with --clear to release it (add --drain to retry the "
+            "pending row now)."
+        )
+    else:
+        logger.info(
+            "\n=> A compose lock is held and the newest compose may still be "
+            "running (in-progress, age <= %ss). Wait for it to finish "
+            "or the lock to expire (ttl %ss); re-run with --force only if you "
+            "are certain no compose is running.",
+            max_age,
+            ttl,
+        )
+
+
+def _clear_locks(r: redis.Redis, locks: list) -> int:
+    deleted = 0
+    for k in locks or [_GLOBAL_LOCK]:
+        with contextlib.suppress(Exception):
+            deleted += int(r.delete(k))
+    return deleted
+
+
+def _maybe_trigger_drain(drain: bool) -> None:
+    if not drain:
+        logger.info("the pending row will retry on the next drain beat (add --drain to do it now).")
+        return
+    try:
+        from app.modules.newspaper.tasks.queue_drain_tasks import drain_standard_publish_queue
+
+        drain_standard_publish_queue.delay()
+        logger.info("enqueued drain_standard_publish_queue — workers will retry pending rows.")
+    except Exception as exc:
+        logger.info("(could not enqueue drain: %s; the safety-net beat will still retry)", exc)
+
+
 def main() -> None:
     """Diagnose, and optionally clear, a stuck compose lock per the CLI flags."""
     ap = argparse.ArgumentParser(
@@ -90,37 +162,8 @@ def main() -> None:
     args = ap.parse_args()
 
     r = _redis()
-
-    # --- lock state ---
-    held = r.get(_GLOBAL_LOCK) is not None
-    ttl = r.ttl(_GLOBAL_LOCK)
-    lock_state = f"HELD (ttl {ttl}s)" if held else "free"
-    logger.info("global lock %s: %s", _GLOBAL_LOCK, lock_state)
-    locks = list(r.scan_iter(match=_LOCK_PATTERN))
-    for k in locks:
-        logger.info("  lock present: %s  ttl=%ss", _decode(k), r.ttl(k))
-
-    # --- newest session ---
-    stale = False
-    try:
-        latest = _latest_session()
-    except Exception as exc:
-        latest = None
-        logger.info("(could not read compose_sessions: %s)", exc)
-    if latest:
-        status, _created, age = latest
-        terminal = status in _TERMINAL
-        logger.info(
-            "newest session: status=%r age=%ds (%s)",
-            status,
-            int(age),
-            "terminal" if terminal else "IN-PROGRESS",
-        )
-        # Dead if it's still in-progress past the threshold, or already finished
-        # yet a lock is somehow still held (orphaned — release never ran).
-        stale = bool(held) and (terminal or age > args.max_age)
-    else:
-        logger.info("newest session: none found")
+    held, locks, ttl = _log_lock_state(r)
+    stale = _check_staleness(held, args.max_age)
 
     if not held and not locks:
         logger.info(
@@ -129,26 +172,10 @@ def main() -> None:
         )
         return
 
-    # --- diagnose-only (no action flag) ---
     if not args.clear and not args.force:
-        if stale:
-            logger.info(
-                "\n=> A compose lock is held and the newest compose looks DEAD. "
-                "Re-run with --clear to release it (add --drain to retry the "
-                "pending row now)."
-            )
-        else:
-            logger.info(
-                "\n=> A compose lock is held and the newest compose may still be "
-                "running (in-progress, age <= %ss). Wait for it to finish "
-                "or the lock to expire (ttl %ss); re-run with --force only if you "
-                "are certain no compose is running.",
-                args.max_age,
-                ttl,
-            )
+        _report_diagnosis(stale, max_age=args.max_age, ttl=ttl)
         return
 
-    # --- act ---
     if args.clear and not stale and not args.force:
         logger.info(
             "\n=> Refusing to clear: the newest compose does not look dead "
@@ -158,24 +185,9 @@ def main() -> None:
         )
         return
 
-    deleted = 0
-    for k in locks or [_GLOBAL_LOCK]:
-        with contextlib.suppress(Exception):
-            deleted += int(r.delete(k))
+    deleted = _clear_locks(r, locks)
     logger.info("\ncleared %d compose lock(s).", deleted)
-
-    if args.drain:
-        try:
-            from app.modules.newspaper.tasks.queue_drain_tasks import (
-                drain_standard_publish_queue,
-            )
-
-            drain_standard_publish_queue.delay()
-            logger.info("enqueued drain_standard_publish_queue — workers will retry pending rows.")
-        except Exception as exc:
-            logger.info("(could not enqueue drain: %s; the safety-net beat will still retry)", exc)
-    else:
-        logger.info("the pending row will retry on the next drain beat (add --drain to do it now).")
+    _maybe_trigger_drain(args.drain)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from app.modules.scraper.core.web_fetch import html_to_plain_text
 
 
 def test_html_to_plain_text_removes_common_boilerplate() -> None:
+    """Strips header/nav/cookie-banner/footer boilerplate while keeping the real article content."""
     html = """
     <html>
       <body>

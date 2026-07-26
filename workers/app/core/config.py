@@ -658,6 +658,11 @@ FRONTIER_CONTENT_REJECT_SCORE = env_float("FRONTIER_CONTENT_REJECT_SCORE", 0.2)
 # around by hand — this generalizes it without curating every domain by name).
 # 1 restores the old landing-page-only behavior.
 FRONTIER_CLASSIFY_SAMPLE_PAGES = env_int("FRONTIER_CLASSIFY_SAMPLE_PAGES", 4)
+# Full Site / Single Page reviewer suggestion (advisory only — see
+# suggest_full_site in domain_tracker.py): a landing page with at least this
+# many same-domain links suggests Full Site (a real site has many pages), else
+# Single Page. Ignored on the curated chrome-heavy platform list.
+FULL_SITE_LINK_THRESHOLD = env_int("FULL_SITE_LINK_THRESHOLD", 5)
 # Before permanently rejecting a domain the cheap FRONTIER_CLASSIFY_SAMPLE_PAGES
 # pass couldn't clear, escalate to a thorough one-time crawl instead of taking
 # the shallow sample's word for it (deep_classify_domain task) — slow, but
@@ -680,6 +685,12 @@ CONTENT_UPDATE_QUALITY_FLOOR = env_float("CONTENT_UPDATE_QUALITY_FLOOR", 0.35)
 # to be stricter, lower it for more reach.
 FRONTIER_AUTO_APPROVE_ENABLED = env_bool("FRONTIER_AUTO_APPROVE_ENABLED", False)
 FRONTIER_AUTO_APPROVE_SCORE = env_float("FRONTIER_AUTO_APPROVE_SCORE", 3.0)
+# A domain approved as "single page" (full_site=False) is composed into a
+# one-shot article right after its one-time crawl, via the same shared
+# ingest_publish_signal path every other lane uses (see
+# scrape_from_queue_item in web_crawler.py). Kill-switch for the 2026-07-26
+# rollout — off falls back to the old behavior (crawl once, no article).
+SINGLE_PAGE_AUTOCOMPOSE_ENABLED = env_bool("SINGLE_PAGE_AUTOCOMPOSE_ENABLED", True)
 # Cap on inline landing-page previews fetched per crawled page. Each preview is a
 # blocking HTTP GET + classifier pass, so a link-heavy page could otherwise stall
 # one drain task for minutes; unknown domains past the cap are still HELD pending

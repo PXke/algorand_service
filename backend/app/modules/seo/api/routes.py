@@ -194,344 +194,378 @@ def _mirror_head(
         return _response_for_head(await get_handler(request))
 
 
+news = NewsService()
+
+
+async def home(request: Request) -> Response:
+    """SSR front page: latest feed items plus the hot-reads rail."""
+    path = "/"
+    _record(request, path)
+    items = news.list_feed(limit=_HOME_LIMIT)
+    hot = news.hot_feed(limit=_FRONT_HOT_LIMIT)
+    feed, topics = cached_feed_snapshot(news.list_feed)
+    _ = feed
+    return _doc_response(
+        render.render_front(items, hot, topic_links=topics),
+        "public, max-age=120",
+        tracked_path=path,
+    )
+
+
+async def news_index(request: Request) -> Response:
+    """SSR news index: the full recent feed."""
+    path = "/news"
+    _record(request, path)
+    feed, topics = cached_feed_snapshot(news.list_feed)
+    items = feed[:_NEWS_SSR_LIMIT]
+    return _doc_response(
+        render.render_news_feed(items, topic_links=topics, total_count=len(feed)),
+        "public, max-age=120",
+        tracked_path=path,
+    )
+
+
+async def article(request: Request) -> Response:
+    """SSR article detail, or a 410/404 noindex page for a removed/missing article."""
+    article_id = request.path_params.get("article_id", "")
+    qp = _query_params(request)
+    lang = query_param(qp.get("lang")) or None
+    if lang == "en":
+        lang = None
+    detail = news.get_article(article_id, lang=lang) if article_id else None
+    if detail is None:
+        _record_notfound(request, f"/news/articles/{article_id}")
+        # 410 Gone for tombstoned (deliberately deleted) articles: their
+        # URLs live on in old sitemaps/crawl queues, and Google drops a 410
+        # promptly instead of re-trying a 404 for months. Fail-open to 404
+        # when the tombstone lookup itself errors.
+        if _article_tombstoned(article_id):
+            return _doc_response(
+                render.render_noindex("Article removed"),
+                "public, max-age=86400",
+                status=410,
+            )
+        return _doc_response(
+            render.render_noindex("Article not found"), "public, max-age=60", status=404
+        )
+    translation_langs = news.translation_langs_for(article_id)
+    path = f"/news/articles/{article_id}"
+    _record(request, path)
+    # Footer topic links + related stories reuse the cached topics-index feed.
+    feed, topics = cached_feed_snapshot(news.list_feed)
+    related = render.pick_related_articles(detail, feed, limit=5)
+    return _doc_response(
+        render.render_article(
+            detail,
+            lang=lang,
+            translation_langs=translation_langs,
+            topic_links=topics,
+            related=related,
+        ),
+        "public, max-age=300, stale-while-revalidate=600",
+        tracked_path=path,
+        html_lang=html_lang_for(lang),
+    )
+
+
+async def og_article_card(request: Request) -> Response:
+    """Generated share-card PNG (accent slug, kicker, serif headline — see seo/share_card.py) for an article's title/primary tag. Always generates regardless of whether the article has a real photo; the DECISION to use this vs. a real og:image lives in render.py, which is the only caller that should ever link here."""
+    import asyncio
+    import hashlib
+
+    from app.core.cache import cached_bytes
+    from app.modules.seo.topics import display_tag_label, primary_tag
+
+    article_id = request.path_params.get("article_id", "")
+    if article_id.endswith(".png"):
+        article_id = article_id[: -len(".png")]
+    detail = news.get_article(article_id) if article_id else None
+    if detail is None:
+        return Response(
+            status_code=404,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            description="Not found",
+        )
+    raw_tag = primary_tag(detail.tags)
+    kicker = display_tag_label(raw_tag) if raw_tag else ""
+    # Deterministic across processes (unlike builtin hash(), which is
+    # PYTHONHASHSEED-randomized per run) — title/kicker baked into the
+    # key so an edit or recompose auto-busts the cache, no invalidation
+    # call needed; the stale entry just ages out of Redis unread.
+    digest = hashlib.sha256(f"{detail.title}\x00{kicker}".encode()).hexdigest()[:16]
+    cache_key = f"ogcard:{article_id}:{digest}"
+
+    def compute() -> bytes:
+        from app.modules.seo.share_card import render_share_card
+
+        return render_share_card(title=detail.title, kicker=kicker)
+
+    data = await asyncio.to_thread(cached_bytes, cache_key, 2_592_000, compute)
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "image/png", "Cache-Control": "public, max-age=86400"},
+        description=data,
+    )
+
+
+async def section(request: Request) -> Response:
+    # The human-defined sections were retired in favour of writer-tag
+    # topics; their URLs are Google-indexed, so 301 to the closest topic.
+    """301-redirect a retired human-defined section to its closest writer-tag topic."""
+    slug = request.path_params.get("slug", "").strip().lower()
+    target = SECTION_REDIRECTS.get(slug)
+    location = f"/topic/{target}" if target else "/topics"
+    return Response(
+        status_code=301,
+        headers={"Location": location, "Cache-Control": "public, max-age=86400"},
+        description="",
+    )
+
+
+async def hot(request: Request) -> Response:
+    """SSR hot/top reader-engagement page."""
+    path = "/hot"
+    _record(request, path)
+    items = news.hot_feed(limit=30)
+    _feed, topics = cached_feed_snapshot(news.list_feed)
+    return _doc_response(
+        render.render_hot(items, topic_links=topics),
+        "public, max-age=300",
+        tracked_path=path,
+    )
+
+
+async def topics(request: Request) -> Response:
+    """SSR topics index page."""
+    path = "/topics"
+    _record(request, path)
+    _feed, picked = cached_feed_snapshot(news.list_feed)
+    return _doc_response(render.render_topics(picked), "public, max-age=300", tracked_path=path)
+
+
+async def topic(request: Request) -> Response:
+    """SSR one topic's article list, noindexed if the topic is too thin to be reliable."""
+    tag = request.path_params.get("tag", "").strip().lower()
+    feed, topic_list = cached_feed_snapshot(news.list_feed)
+    matching = items_for_tag(feed, tag)
+    items = matching[:_SECTION_LIMIT]
+    if not items:
+        _record_notfound(request, f"/topic/{tag}")
+        return _doc_response(
+            render.render_noindex("Topic not found"), "public, max-age=60", status=404
+        )
+    path = f"/topic/{tag}"
+    _record(request, path)
+    head, body = render.render_topic(tag, items, topic_links=topic_list, total_count=len(matching))
+    # Thin topics (single story) stay reachable but out of the index.
+    if not is_reliable_tag(tag, feed):
+        head += '\n<meta name="robots" content="noindex, follow">'
+    return _doc_response((head, body), "public, max-age=120", tracked_path=path)
+
+
+async def about(request: Request) -> Response:
+    """SSR static about page."""
+    path = "/about"
+    _record(request, path)
+    return _doc_response(render.render_about(), "public, max-age=3600", tracked_path=path)
+
+
+async def contact(request: Request) -> Response:
+    """SSR static contact page."""
+    path = "/contact"
+    _record(request, path)
+    return _doc_response(render.render_contact(), "public, max-age=3600", tracked_path=path)
+
+
+async def search(request: Request) -> Response:
+    """SSR noindex shell for the client-side search page."""
+    _ = request
+    return _doc_response(render.render_noindex("Search", active="/search"), "public, max-age=300")
+
+
+async def suggestions(request: Request) -> Response:
+    """SSR noindex shell for the client-side suggestions page."""
+    _ = request
+    return _doc_response(render.render_noindex("Suggestions"), "public, max-age=300")
+
+
+async def admin(request: Request) -> Response:
+    """SSR noindex, no-store shell for the admin dashboard."""
+    _ = request
+    return _doc_response(render.render_noindex("Admin"), "no-store")
+
+
+async def beacon_pageview(request: Request) -> Response:
+    """Client-side beacon for a Flutter in-app route change — the initial document load is already recorded server-side; this covers navigation after that, which never hits a document route."""
+    if tracking_opted_out_from_headers(request.headers):
+        return {"ok": True}
+    try:
+        payload = serialization.decode(request.body, PageviewBeaconRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+    if not _is_known_app_path(payload.path):
+        return json_error_response(400, "invalid_request", "unknown path")
+    _record(request, payload.path)
+    return {"ok": True}
+
+
+async def robots(request: Request) -> Response:
+    """robots.txt, cached briefly."""
+    _ = request
+    return _text_response(sitemap.robots_txt(), "text/plain; charset=utf-8", "public, max-age=3600")
+
+
+async def rss_feed(request: Request) -> Response:
+    """Site-wide RSS feed, with full article HTML for the newest items."""
+    _ = request
+    items = news.list_feed(limit=50)
+    # Full article HTML for the newest items only: readers and AI crawlers
+    # get whole pieces, without 50 point-reads on every feed render (the
+    # response is cached 15 min anyway).
+    bodies: dict[str, str] = {}
+    for item in items[:_FEED_FULL_CONTENT_LIMIT]:
+        try:
+            detail = news.get_article(item.article_id)
+            if detail is not None and detail.body:
+                bodies[item.article_id] = md_to_html(detail.body)
+        except Exception:  # a missing body never breaks the feed
+            continue
+    return _text_response(
+        feeds.rss_xml(items, bodies=bodies),
+        "application/rss+xml; charset=utf-8",
+        "public, max-age=900",
+    )
+
+
+async def topic_rss_feed(request: Request) -> Response:
+    """Per-topic RSS feed, or 404 for an unknown/malformed tag."""
+    tag = request.path_params.get("tag", "").strip().lower()
+    if tag.endswith(".xml"):
+        tag = tag[: -len(".xml")]
+    if not tag or "/" in tag or len(tag) > 48:
+        return Response(
+            status_code=404,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            description="Not found",
+        )
+    feed, _ = cached_feed_snapshot(news.list_feed)
+    items = items_for_tag(feed, tag)
+    if not items:
+        return Response(
+            status_code=404,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            description="Not found",
+        )
+    return _text_response(
+        feeds.topic_rss_xml(tag, items),
+        "application/rss+xml; charset=utf-8",
+        "public, max-age=900",
+    )
+
+
+async def llms_txt(request: Request) -> Response:
+    """llms.txt, cached briefly."""
+    _ = request
+    return _text_response(sitemap.llms_txt(), "text/plain; charset=utf-8", "public, max-age=3600")
+
+
+async def sitemap_root(request: Request) -> Response:
+    """Root sitemap index."""
+    _ = request
+    items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
+    build = sitemap.build_sitemaps(items, translations)
+    return _text_response(build.root_xml, "application/xml; charset=utf-8", "public, max-age=900")
+
+
+async def sitemap_pages(request: Request) -> Response:
+    """The static-pages sitemap chunk, or 404 if it doesn't exist."""
+    _ = request
+    items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
+    build = sitemap.build_sitemaps(items, translations)
+    xml = build.parts.get("sitemap-pages.xml")
+    if xml is None:
+        return Response(
+            status_code=404,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            description="Not found",
+        )
+    return _text_response(xml, "application/xml; charset=utf-8", "public, max-age=900")
+
+
+async def sitemap_articles_part(request: Request) -> Response:
+    """One numbered article-sitemap chunk, or 404 for an out-of-range/malformed part."""
+    _ = request
+    part = request.path_params.get("part", "")
+    if part.endswith(".xml"):
+        part = part[: -len(".xml")]
+    try:
+        chunk = int(part)
+    except ValueError:
+        return Response(
+            status_code=404,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            description="Not found",
+        )
+    if chunk < 1:
+        return Response(
+            status_code=404,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            description="Not found",
+        )
+    items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
+    build = sitemap.build_sitemaps(items, translations)
+    xml = build.parts.get(f"sitemap-articles-{chunk}.xml")
+    if xml is None:
+        return Response(
+            status_code=404,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            description="Not found",
+        )
+    return _text_response(xml, "application/xml; charset=utf-8", "public, max-age=900")
+
+
+async def sitemap_news(request: Request) -> Response:
+    """Google News sitemap, 404 unless the site has been accepted into News Publisher Center."""
+    _ = request
+    # Off until accepted into Google News Publisher Center (see config).
+    if not settings.seo_news_sitemap_enabled:
+        return Response(
+            status_code=404,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            description="Not found",
+        )
+    items = news.list_feed(limit=_SITEMAP_LIMIT)
+    return _text_response(
+        sitemap.news_sitemap_xml(items),
+        "application/xml; charset=utf-8",
+        "public, max-age=900",
+    )
+
+
 def register_seo_routes(app: Robyn) -> None:
     """Attach the server-rendered SEO document routes (front page, articles, sitemaps) to the app."""
-    news = NewsService()
-
-    @app.get("/")
-    async def home(request: Request) -> Response:
-        path = "/"
-        _record(request, path)
-        items = news.list_feed(limit=_HOME_LIMIT)
-        hot = news.hot_feed(limit=_FRONT_HOT_LIMIT)
-        feed, topics = cached_feed_snapshot(news.list_feed)
-        _ = feed
-        return _doc_response(
-            render.render_front(items, hot, topic_links=topics),
-            "public, max-age=120",
-            tracked_path=path,
-        )
-
-    @app.get("/news")
-    async def news_index(request: Request) -> Response:
-        path = "/news"
-        _record(request, path)
-        feed, topics = cached_feed_snapshot(news.list_feed)
-        items = feed[:_NEWS_SSR_LIMIT]
-        return _doc_response(
-            render.render_news_feed(items, topic_links=topics, total_count=len(feed)),
-            "public, max-age=120",
-            tracked_path=path,
-        )
-
-    @app.get("/news/articles/:article_id")
-    async def article(request: Request) -> Response:
-        article_id = request.path_params.get("article_id", "")
-        qp = _query_params(request)
-        lang = query_param(qp.get("lang")) or None
-        if lang == "en":
-            lang = None
-        detail = news.get_article(article_id, lang=lang) if article_id else None
-        if detail is None:
-            _record_notfound(request, f"/news/articles/{article_id}")
-            # 410 Gone for tombstoned (deliberately deleted) articles: their
-            # URLs live on in old sitemaps/crawl queues, and Google drops a 410
-            # promptly instead of re-trying a 404 for months. Fail-open to 404
-            # when the tombstone lookup itself errors.
-            if _article_tombstoned(article_id):
-                return _doc_response(
-                    render.render_noindex("Article removed"),
-                    "public, max-age=86400",
-                    status=410,
-                )
-            return _doc_response(
-                render.render_noindex("Article not found"), "public, max-age=60", status=404
-            )
-        translation_langs = news.translation_langs_for(article_id)
-        path = f"/news/articles/{article_id}"
-        _record(request, path)
-        # Footer topic links + related stories reuse the cached topics-index feed.
-        feed, topics = cached_feed_snapshot(news.list_feed)
-        related = render.pick_related_articles(detail, feed, limit=5)
-        return _doc_response(
-            render.render_article(
-                detail,
-                lang=lang,
-                translation_langs=translation_langs,
-                topic_links=topics,
-                related=related,
-            ),
-            "public, max-age=300, stale-while-revalidate=600",
-            tracked_path=path,
-            html_lang=html_lang_for(lang),
-        )
-
-    @app.get("/og/article/:article_id")
-    async def og_article_card(request: Request) -> Response:
-        """Generated share-card PNG (accent slug, kicker, serif headline — see seo/share_card.py) for an article's title/primary tag. Always generates regardless of whether the article has a real photo; the DECISION to use this vs. a real og:image lives in render.py, which is the only caller that should ever link here."""
-        import asyncio
-        import hashlib
-
-        from app.core.cache import cached_bytes
-        from app.modules.seo.topics import display_tag_label, primary_tag
-
-        article_id = request.path_params.get("article_id", "")
-        if article_id.endswith(".png"):
-            article_id = article_id[: -len(".png")]
-        detail = news.get_article(article_id) if article_id else None
-        if detail is None:
-            return Response(
-                status_code=404,
-                headers={"Content-Type": "text/plain; charset=utf-8"},
-                description="Not found",
-            )
-        raw_tag = primary_tag(detail.tags)
-        kicker = display_tag_label(raw_tag) if raw_tag else ""
-        # Deterministic across processes (unlike builtin hash(), which is
-        # PYTHONHASHSEED-randomized per run) — title/kicker baked into the
-        # key so an edit or recompose auto-busts the cache, no invalidation
-        # call needed; the stale entry just ages out of Redis unread.
-        digest = hashlib.sha256(f"{detail.title}\x00{kicker}".encode()).hexdigest()[:16]
-        cache_key = f"ogcard:{article_id}:{digest}"
-
-        def compute() -> bytes:
-            from app.modules.seo.share_card import render_share_card
-
-            return render_share_card(title=detail.title, kicker=kicker)
-
-        data = await asyncio.to_thread(cached_bytes, cache_key, 2_592_000, compute)
-        return Response(
-            status_code=200,
-            headers={"Content-Type": "image/png", "Cache-Control": "public, max-age=86400"},
-            description=data,
-        )
-
-    @app.get("/section/:slug")
-    async def section(request: Request) -> Response:
-        # The human-defined sections were retired in favour of writer-tag
-        # topics; their URLs are Google-indexed, so 301 to the closest topic.
-        slug = request.path_params.get("slug", "").strip().lower()
-        target = SECTION_REDIRECTS.get(slug)
-        location = f"/topic/{target}" if target else "/topics"
-        return Response(
-            status_code=301,
-            headers={"Location": location, "Cache-Control": "public, max-age=86400"},
-            description="",
-        )
-
-    @app.get("/hot")
-    async def hot(request: Request) -> Response:
-        path = "/hot"
-        _record(request, path)
-        items = news.hot_feed(limit=30)
-        _feed, topics = cached_feed_snapshot(news.list_feed)
-        return _doc_response(
-            render.render_hot(items, topic_links=topics),
-            "public, max-age=300",
-            tracked_path=path,
-        )
-
-    @app.get("/topics")
-    async def topics(request: Request) -> Response:
-        path = "/topics"
-        _record(request, path)
-        _feed, picked = cached_feed_snapshot(news.list_feed)
-        return _doc_response(render.render_topics(picked), "public, max-age=300", tracked_path=path)
-
-    @app.get("/topic/:tag")
-    async def topic(request: Request) -> Response:
-        tag = request.path_params.get("tag", "").strip().lower()
-        feed, topic_list = cached_feed_snapshot(news.list_feed)
-        matching = items_for_tag(feed, tag)
-        items = matching[:_SECTION_LIMIT]
-        if not items:
-            _record_notfound(request, f"/topic/{tag}")
-            return _doc_response(
-                render.render_noindex("Topic not found"), "public, max-age=60", status=404
-            )
-        path = f"/topic/{tag}"
-        _record(request, path)
-        head, body = render.render_topic(
-            tag, items, topic_links=topic_list, total_count=len(matching)
-        )
-        # Thin topics (single story) stay reachable but out of the index.
-        if not is_reliable_tag(tag, feed):
-            head += '\n<meta name="robots" content="noindex, follow">'
-        return _doc_response((head, body), "public, max-age=120", tracked_path=path)
-
-    @app.get("/about")
-    async def about(request: Request) -> Response:
-        path = "/about"
-        _record(request, path)
-        return _doc_response(render.render_about(), "public, max-age=3600", tracked_path=path)
-
-    @app.get("/contact")
-    async def contact(request: Request) -> Response:
-        path = "/contact"
-        _record(request, path)
-        return _doc_response(render.render_contact(), "public, max-age=3600", tracked_path=path)
-
-    @app.get("/search")
-    async def search(request: Request) -> Response:
-        _ = request
-        return _doc_response(
-            render.render_noindex("Search", active="/search"), "public, max-age=300"
-        )
-
-    @app.get("/suggestions")
-    async def suggestions(request: Request) -> Response:
-        _ = request
-        return _doc_response(render.render_noindex("Suggestions"), "public, max-age=300")
-
-    @app.get("/admin")
-    async def admin(request: Request) -> Response:
-        _ = request
-        return _doc_response(render.render_noindex("Admin"), "no-store")
-
-    @app.post("/api/v1/analytics/pageview")
-    async def beacon_pageview(request: Request) -> Response:
-        """Client-side beacon for a Flutter in-app route change — the initial document load is already recorded server-side; this covers navigation after that, which never hits a document route."""
-        if tracking_opted_out_from_headers(request.headers):
-            return {"ok": True}
-        try:
-            payload = serialization.decode(request.body, PageviewBeaconRequest)
-        except serialization.DecodeError as exc:
-            return json_error_response(400, "invalid_request", str(exc))
-        if not _is_known_app_path(payload.path):
-            return json_error_response(400, "invalid_request", "unknown path")
-        _record(request, payload.path)
-        return {"ok": True}
-
-    @app.get("/robots.txt")
-    async def robots(request: Request) -> Response:
-        _ = request
-        return _text_response(
-            sitemap.robots_txt(), "text/plain; charset=utf-8", "public, max-age=3600"
-        )
-
-    @app.get("/feed.xml")
-    async def rss_feed(request: Request) -> Response:
-        _ = request
-        items = news.list_feed(limit=50)
-        # Full article HTML for the newest items only: readers and AI crawlers
-        # get whole pieces, without 50 point-reads on every feed render (the
-        # response is cached 15 min anyway).
-        bodies: dict[str, str] = {}
-        for item in items[:_FEED_FULL_CONTENT_LIMIT]:
-            try:
-                detail = news.get_article(item.article_id)
-                if detail is not None and detail.body:
-                    bodies[item.article_id] = md_to_html(detail.body)
-            except Exception:  # a missing body never breaks the feed
-                continue
-        return _text_response(
-            feeds.rss_xml(items, bodies=bodies),
-            "application/rss+xml; charset=utf-8",
-            "public, max-age=900",
-        )
-
-    @app.get("/feed/topic/:tag")
-    async def topic_rss_feed(request: Request) -> Response:
-        tag = request.path_params.get("tag", "").strip().lower()
-        if tag.endswith(".xml"):
-            tag = tag[: -len(".xml")]
-        if not tag or "/" in tag or len(tag) > 48:
-            return Response(
-                status_code=404,
-                headers={"Content-Type": "text/plain; charset=utf-8"},
-                description="Not found",
-            )
-        feed, _ = cached_feed_snapshot(news.list_feed)
-        items = items_for_tag(feed, tag)
-        if not items:
-            return Response(
-                status_code=404,
-                headers={"Content-Type": "text/plain; charset=utf-8"},
-                description="Not found",
-            )
-        return _text_response(
-            feeds.topic_rss_xml(tag, items),
-            "application/rss+xml; charset=utf-8",
-            "public, max-age=900",
-        )
-
-    @app.get("/llms.txt")
-    async def llms_txt(request: Request) -> Response:
-        _ = request
-        return _text_response(
-            sitemap.llms_txt(), "text/plain; charset=utf-8", "public, max-age=3600"
-        )
-
-    @app.get("/sitemap.xml")
-    async def sitemap_root(request: Request) -> Response:
-        _ = request
-        items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
-        build = sitemap.build_sitemaps(items, translations)
-        return _text_response(
-            build.root_xml, "application/xml; charset=utf-8", "public, max-age=900"
-        )
-
-    @app.get("/sitemap-pages.xml")
-    async def sitemap_pages(request: Request) -> Response:
-        _ = request
-        items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
-        build = sitemap.build_sitemaps(items, translations)
-        xml = build.parts.get("sitemap-pages.xml")
-        if xml is None:
-            return Response(
-                status_code=404,
-                headers={"Content-Type": "text/plain; charset=utf-8"},
-                description="Not found",
-            )
-        return _text_response(xml, "application/xml; charset=utf-8", "public, max-age=900")
-
-    @app.get("/sitemap-articles-:part")
-    async def sitemap_articles_part(request: Request) -> Response:
-        _ = request
-        part = request.path_params.get("part", "")
-        if part.endswith(".xml"):
-            part = part[: -len(".xml")]
-        try:
-            chunk = int(part)
-        except ValueError:
-            return Response(
-                status_code=404,
-                headers={"Content-Type": "text/plain; charset=utf-8"},
-                description="Not found",
-            )
-        if chunk < 1:
-            return Response(
-                status_code=404,
-                headers={"Content-Type": "text/plain; charset=utf-8"},
-                description="Not found",
-            )
-        items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
-        build = sitemap.build_sitemaps(items, translations)
-        xml = build.parts.get(f"sitemap-articles-{chunk}.xml")
-        if xml is None:
-            return Response(
-                status_code=404,
-                headers={"Content-Type": "text/plain; charset=utf-8"},
-                description="Not found",
-            )
-        return _text_response(xml, "application/xml; charset=utf-8", "public, max-age=900")
-
-    @app.get("/sitemap-news.xml")
-    async def sitemap_news(request: Request) -> Response:
-        _ = request
-        # Off until accepted into Google News Publisher Center (see config).
-        if not settings.seo_news_sitemap_enabled:
-            return Response(
-                status_code=404,
-                headers={"Content-Type": "text/plain; charset=utf-8"},
-                description="Not found",
-            )
-        items = news.list_feed(limit=_SITEMAP_LIMIT)
-        return _text_response(
-            sitemap.news_sitemap_xml(items),
-            "application/xml; charset=utf-8",
-            "public, max-age=900",
-        )
+    app.get("/")(home)
+    app.get("/news")(news_index)
+    app.get("/news/articles/:article_id")(article)
+    app.get("/og/article/:article_id")(og_article_card)
+    app.get("/section/:slug")(section)
+    app.get("/hot")(hot)
+    app.get("/topics")(topics)
+    app.get("/topic/:tag")(topic)
+    app.get("/about")(about)
+    app.get("/contact")(contact)
+    app.get("/search")(search)
+    app.get("/suggestions")(suggestions)
+    app.get("/admin")(admin)
+    app.post("/api/v1/analytics/pageview")(beacon_pageview)
+    app.get("/robots.txt")(robots)
+    app.get("/feed.xml")(rss_feed)
+    app.get("/feed/topic/:tag")(topic_rss_feed)
+    app.get("/llms.txt")(llms_txt)
+    app.get("/sitemap.xml")(sitemap_root)
+    app.get("/sitemap-pages.xml")(sitemap_pages)
+    app.get("/sitemap-articles-:part")(sitemap_articles_part)
+    app.get("/sitemap-news.xml")(sitemap_news)
 
     # Mirror HEAD for every GET document/feed route (see _response_for_head).
     for path, handler in (

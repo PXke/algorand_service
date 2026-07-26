@@ -67,6 +67,7 @@ _ENTITY_RE = re.compile(
 @dataclass(frozen=True)
 class Quantity:
     """One numeric claim extracted from article text."""
+
     value: float  # normalized magnitude (suffix applied)
     unit: str  # "currency" | "percent" | "plain"
     raw: str  # exact source substring
@@ -169,6 +170,7 @@ def _matches(a: Quantity, b: Quantity, tol: float) -> bool:
 @dataclass(frozen=True)
 class EntailmentResult:
     """Fraction of an article's numeric claims grounded in the trace."""
+
     score: float  # grounded fraction in [0,1] (1.0 when no claims)
     total: int  # numeric claims found in the article
     grounded: int  # claims with a matching trace anchor
@@ -243,6 +245,36 @@ def _safe_date(year: int, month: int, day: int) -> date | None:
         return None
 
 
+def _parse_slash_date(a: int, b: int, y: int) -> date | None:
+    """A slashed a/b/y date, read as DAY/MONTH/YEAR, falling back to MONTH/DAY when the first field is > 12; ambiguous cases default to DAY/MONTH (platform locale)."""
+    if a > 12 >= b:  # unambiguously DAY/MONTH
+        return _safe_date(y, b, a)
+    if b > 12 >= a:  # unambiguously MONTH/DAY
+        return _safe_date(y, a, b)
+    return _safe_date(y, b, a)  # ambiguous → DAY/MONTH
+
+
+def _dates_in_range(text: str, *, min_year: int, max_year: int) -> list[date]:
+    """Every regex-recognized date in text (ISO, slashed, month-name forms), filtered to [min_year, max_year]."""
+    out: list[date] = []
+
+    def keep(d: date | None) -> None:
+        if d and min_year <= d.year <= max_year:
+            out.append(d)
+
+    for m in _ISO_RE.finditer(text):
+        keep(_safe_date(int(m[1]), int(m[2]), int(m[3])))
+    for m in _SLASH_RE.finditer(text):
+        keep(_parse_slash_date(int(m[1]), int(m[2]), int(m[3])))
+    for m in _MDY_RE.finditer(text):
+        keep(_safe_date(int(m[3]), _MONTHS[m[1].lower()], int(m[2])))
+    for m in _DMY_RE.finditer(text):
+        keep(_safe_date(int(m[3]), _MONTHS[m[2].lower()], int(m[1])))
+    for m in _MY_RE.finditer(text):
+        keep(_safe_date(int(m[2]), _MONTHS[m[1].lower()], 1))
+    return out
+
+
 def extract_dates(text: str, *, min_year: int = 1990, max_year: int | None = None) -> list[date]:
     """All calendar dates mentioned in ``text`` (deterministic parse).
 
@@ -254,29 +286,7 @@ def extract_dates(text: str, *, min_year: int = 1990, max_year: int | None = Non
     if not text:
         return []
     cap = (max_year or _today().year) + 1
-    out: list[date] = []
-
-    def keep(d: date | None) -> None:
-        if d and min_year <= d.year <= cap:
-            out.append(d)
-
-    for m in _ISO_RE.finditer(text):
-        keep(_safe_date(int(m[1]), int(m[2]), int(m[3])))
-    for m in _SLASH_RE.finditer(text):
-        a, b, y = int(m[1]), int(m[2]), int(m[3])
-        if a > 12 >= b:  # unambiguously DAY/MONTH
-            keep(_safe_date(y, b, a))
-        elif b > 12 >= a:  # unambiguously MONTH/DAY
-            keep(_safe_date(y, a, b))
-        else:  # ambiguous → DAY/MONTH (platform locale)
-            keep(_safe_date(y, b, a))
-    for m in _MDY_RE.finditer(text):
-        keep(_safe_date(int(m[3]), _MONTHS[m[1].lower()], int(m[2])))
-    for m in _DMY_RE.finditer(text):
-        keep(_safe_date(int(m[3]), _MONTHS[m[2].lower()], int(m[1])))
-    for m in _MY_RE.finditer(text):
-        keep(_safe_date(int(m[2]), _MONTHS[m[1].lower()], 1))
-    return out
+    return _dates_in_range(text, min_year=min_year, max_year=cap)
 
 
 _LEAD_CHARS = 500

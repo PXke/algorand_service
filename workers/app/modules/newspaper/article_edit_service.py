@@ -19,13 +19,81 @@ from app.modules.search.tasks.index_tasks import index_article
 logger = logging.getLogger(__name__)
 
 
+def _gather_edit_enrichment(row: QueuedPublishRow, payload: dict, topic: PublishTopic) -> str:
+    try:
+        from app.core import config as worker_config
+        from app.modules.newspaper.writer_enrichment import (
+            format_enrichment_for_writer,
+            gather_writer_enrichment,
+        )
+
+        if not worker_config.WRITER_ENRICHMENT_ENABLED:
+            return ""
+        bundle = gather_writer_enrichment(
+            service_id=row.service_id,
+            display_name=row.display_name,
+            source_url=row.scrape_url,
+            page_text=str(payload.get("page_text", "")),
+            page_title=str(payload.get("page_title", "")),
+            diff=payload.get("diff"),
+            is_first_snapshot=False,
+            publish_topic=topic,
+            match_kind=str(payload.get("match_kind", "")),
+            match_value=str(payload.get("match_value", "")),
+        )
+        return format_enrichment_for_writer(bundle)
+    except Exception:
+        return ""
+
+
+def _compose_edit_fields(
+    row: QueuedPublishRow,
+    existing: object,
+    payload: dict,
+    *,
+    new_title: str,
+    new_text: str,
+    enrichment_block: str,
+    linked_id: str,
+) -> tuple[object | None, dict[str, str] | None]:
+    """Compose the edited title/summary/body via Mistral. Returns (fields, None) on success, or (None, error_response) on a Mistral failure. Raises ComposeBusyError, propagated so the caller (a Celery task) retries."""
+    from app.modules.ai.mistral_client import MistralCreditError, MistralError
+
+    try:
+        # No template fallback exists (owner decision 2026-07-14: a lesser,
+        # robotic article is worse than no article) — Mistral or nothing.
+        if not mistral_configured():
+            raise MistralError(
+                "MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback"
+            )
+        from app.modules.ai.mistral_compose import compose_article_edit_mistral
+
+        fields = compose_article_edit_mistral(
+            service_name=row.display_name or existing.service_id,
+            source_url=row.scrape_url,
+            existing_title=existing.title,
+            existing_summary=existing.summary,
+            existing_body=existing.body,
+            new_page_title=new_title,
+            new_page_text=new_text,
+            diff=payload.get("diff"),
+            enrichment_block=enrichment_block,
+        )
+        return fields, None
+    except ComposeBusyError:
+        raise
+    except MistralError as exc:
+        credit_issue = isinstance(exc, MistralCreditError)
+        status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
+        logger.error("Mistral article-edit compose failed for %s: %s", linked_id, exc)
+        return None, {"status": status, "linked_article_id": linked_id, "detail": str(exc)}
+
+
 def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
     """Apply follow-up ingest to an existing article (within edit window).
 
     Saves prior body to article_versions, then updates live article.
     """
-    from app.modules.ai.mistral_client import MistralCreditError, MistralError
-
     payload = row.payload
     linked_id = str(payload.get("linked_article_id", "")).strip()
     if not linked_id:
@@ -49,66 +117,22 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
     except ValueError:
         topic = PublishTopic.GENERIC
 
-    enrichment_block = ""
-    try:
-        from app.core import config as worker_config
-        from app.modules.newspaper.writer_enrichment import (
-            format_enrichment_for_writer,
-            gather_writer_enrichment,
-        )
-
-        if worker_config.WRITER_ENRICHMENT_ENABLED:
-            bundle = gather_writer_enrichment(
-                service_id=row.service_id,
-                display_name=row.display_name,
-                source_url=row.scrape_url,
-                page_text=str(payload.get("page_text", "")),
-                page_title=str(payload.get("page_title", "")),
-                diff=payload.get("diff"),
-                is_first_snapshot=False,
-                publish_topic=topic,
-                match_kind=str(payload.get("match_kind", "")),
-                match_value=str(payload.get("match_value", "")),
-            )
-            enrichment_block = format_enrichment_for_writer(bundle)
-    except Exception:
-        enrichment_block = ""
-
+    enrichment_block = _gather_edit_enrichment(row, payload, topic)
     new_text = str(payload.get("page_text", ""))
     new_title = str(payload.get("page_title", ""))
 
-    try:
-        # No template fallback exists (owner decision 2026-07-14: a lesser,
-        # robotic article is worse than no article) — Mistral or nothing.
-        if not mistral_configured():
-            raise MistralError(
-                "MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback"
-            )
-        from app.modules.ai.mistral_compose import compose_article_edit_mistral
-
-        fields = compose_article_edit_mistral(
-            service_name=row.display_name or existing.service_id,
-            source_url=row.scrape_url,
-            existing_title=existing.title,
-            existing_summary=existing.summary,
-            existing_body=existing.body,
-            new_page_title=new_title,
-            new_page_text=new_text,
-            diff=payload.get("diff"),
-            enrichment_block=enrichment_block,
-        )
-        title, summary, body, composer = fields.title, fields.summary, fields.body, "mistral"
-    except ComposeBusyError:
-        raise
-    except MistralError as exc:
-        credit_issue = isinstance(exc, MistralCreditError)
-        status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
-        logger.error("Mistral article-edit compose failed for %s: %s", linked_id, exc)
-        return {
-            "status": status,
-            "linked_article_id": linked_id,
-            "detail": str(exc),
-        }
+    fields, error_response = _compose_edit_fields(
+        row,
+        existing,
+        payload,
+        new_title=new_title,
+        new_text=new_text,
+        enrichment_block=enrichment_block,
+        linked_id=linked_id,
+    )
+    if error_response is not None:
+        return error_response
+    title, summary, body, composer = fields.title, fields.summary, fields.body, "mistral"
 
     body = sanitize_body(body)
     edit_reason = f"follow_up_ingest:{row.scrape_url[:120]}"

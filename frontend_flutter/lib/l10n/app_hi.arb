@@ -536,14 +536,18 @@
     }
   },
   "domainsDeadEnd": "गतिरोध",
-  "domainsApproveExplore": "स्वीकृत करें और अन्वेषण करें",
-  "domainsCrawlOnce": "एक बार क्रॉल करें, स्रोत नहीं",
+  "domainsApproveExplore": "पूरी साइट",
   "domainsAddButton": "जोड़ें",
-  "domainsAddAsSeed": "स्थायी स्रोत के रूप में जोड़ें",
-  "domainsAddSinglePageOnly": "केवल यह पेज (केवल उद्धरण, पूरी साइट को क्रॉल न करें)",
+  "domainsAddSinglePageOnly": "एकल पेज",
   "domainsScoreUnexplained": "स्कोर का विवरण उपलब्ध नहीं है",
   "domainsPossibleService": "संभावित सेवा?",
-  "domainsPossibleServiceHint": "स्कोर अच्छा है पर समाचार/सामान्य के रूप में टैग किया गया है — यह एक वास्तविक उत्पाद हो सकता है, सिर्फ उद्धरण स्रोत नहीं। \"एक बार क्रॉल करें\" के बजाय \"स्वीकृत करें और खोजें\" पर विचार करें।",
+  "domainsPossibleServiceHint": "स्कोर अच्छा है पर समाचार/सामान्य के रूप में टैग किया गया है — यह एक वास्तविक उत्पाद हो सकता है, सिर्फ उद्धरण स्रोत नहीं। \"एकल पेज\" के बजाय \"पूरी साइट\" पर विचार करें।",
+  "domainsSuggestedHint": "सुझाया गया — {count} समान-डोमेन पेज मिले",
+  "@domainsSuggestedHint": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
   "paginationPrevious": "पिछला",
   "paginationNext": "अगला",
   "paginationPageOf": "पृष्ठ {page} में से {total}",

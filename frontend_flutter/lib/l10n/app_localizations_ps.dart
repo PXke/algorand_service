@@ -972,20 +972,13 @@ class AppLocalizationsPs extends AppLocalizations {
   String get domainsDeadEnd => 'بن‌بست';
 
   @override
-  String get domainsApproveExplore => 'تایید او پلټل';
-
-  @override
-  String get domainsCrawlOnce => 'یوځل وڅارل شي، پرته له سرچینې';
+  String get domainsApproveExplore => 'ټول سایټ';
 
   @override
   String get domainsAddButton => 'زیاتول';
 
   @override
-  String get domainsAddAsSeed => 'د دایمي سرچینې په توګه یې زیات کړئ';
-
-  @override
-  String get domainsAddSinglePageOnly =>
-      'یوازې دا مخ (یوازې حواله، ټول سایټ مه سکن کوئ)';
+  String get domainsAddSinglePageOnly => 'یو مخ';
 
   @override
   String get domainsScoreUnexplained => 'د نمرې تفصیل شتون نلري';
@@ -995,7 +988,12 @@ class AppLocalizationsPs extends AppLocalizations {
 
   @override
   String get domainsPossibleServiceHint =>
-      'ښه نمره لري خو د خبر/عمومي په توګه نښه شوی — دا ممکن یو ریښتینی محصول وي، نه یوازې د حواله سرچینه. \"یوځل وڅارل شي\" پرځای \"تصویب او پلټنه\" وګورئ.';
+      'ښه نمره لري خو د خبر/عمومي په توګه نښه شوی — دا ممکن یو ریښتینی محصول وي، نه یوازې د حواله سرچینه. \"یو مخ\" پرځای \"ټول سایټ\" وګورئ.';
+
+  @override
+  String domainsSuggestedHint(int count) {
+    return 'وړاندیز شوی — $count ورته-ډومین مخونه وموندل شول';
+  }
 
   @override
   String get paginationPrevious => 'پخوانی';

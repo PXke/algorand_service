@@ -11,6 +11,7 @@ from app.modules.newspaper.article_store import get_article, insert_stored_artic
 def test_insert_stored_article_passes_prompt_version_last_positional(
     fake_cassandra_session: MagicMock,
 ) -> None:
+    """prompt_version is passed as the last positional bind param on insert."""
     insert_stored_article(
         service_id="svc",
         title="T",
@@ -31,6 +32,7 @@ def test_insert_stored_article_passes_prompt_version_last_positional(
 def test_insert_stored_article_defaults_prompt_version_to_none(
     fake_cassandra_session: MagicMock,
 ) -> None:
+    """prompt_version defaults to None when not supplied on insert."""
     insert_stored_article(
         service_id="svc",
         title="T",
@@ -48,6 +50,7 @@ def test_insert_stored_article_defaults_prompt_version_to_none(
 
 
 def test_get_article_reads_prompt_version(fake_cassandra_session: MagicMock) -> None:
+    """get_article reads prompt_version back off the stored row."""
     aid = uuid4()
     row = MagicMock()
     row.article_id = aid

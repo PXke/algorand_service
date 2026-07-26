@@ -40,4 +40,5 @@ VECTORS = [
 
 @pytest.mark.parametrize(("url", "expected"), VECTORS)
 def test_domain_from_url(url: str, expected: str) -> None:
+    """domain_from_url resolves each vector URL to its expected registrable domain."""
     assert domain_from_url(url) == expected

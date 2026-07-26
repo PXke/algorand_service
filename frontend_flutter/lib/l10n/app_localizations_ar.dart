@@ -970,20 +970,13 @@ class AppLocalizationsAr extends AppLocalizations {
   String get domainsDeadEnd => 'مسار مسدود';
 
   @override
-  String get domainsApproveExplore => 'اعتماد واستكشاف';
-
-  @override
-  String get domainsCrawlOnce => 'زحف مرة واحدة، بدون تأسيس';
+  String get domainsApproveExplore => 'الموقع بالكامل';
 
   @override
   String get domainsAddButton => 'إضافة';
 
   @override
-  String get domainsAddAsSeed => 'إضافة كمصدر دائم';
-
-  @override
-  String get domainsAddSinglePageOnly =>
-      'هذه الصفحة فقط (استشهاد فقط، دون زحف الموقع)';
+  String get domainsAddSinglePageOnly => 'صفحة واحدة';
 
   @override
   String get domainsScoreUnexplained => 'تفصيل النتيجة غير متاح';
@@ -993,7 +986,12 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get domainsPossibleServiceHint =>
-      'نتيجة جيدة لكن مصنّف كأخبار/عام — قد يكون منتجًا حقيقيًا وليس مجرد مصدر استشهاد. فكر في \"الموافقة والاستكشاف\" بدلاً من \"الزحف مرة واحدة\".';
+      'نتيجة جيدة لكن مصنّف كأخبار/عام — قد يكون منتجًا حقيقيًا وليس مجرد مصدر استشهاد. فكر في \"الموقع بالكامل\" بدلاً من \"صفحة واحدة\".';
+
+  @override
+  String domainsSuggestedHint(int count) {
+    return 'مقترح — تم العثور على $count صفحة من نفس النطاق';
+  }
 
   @override
   String get paginationPrevious => 'السابق';

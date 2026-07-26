@@ -28,6 +28,7 @@ _PAGE = f"""
 
 
 def test_article_body_kept_boilerplate_dropped() -> None:
+    """The real article body survives extraction while nav/cookie/footer boilerplate is dropped."""
     text = html_to_plain_text(_PAGE)
     assert "strategic expansion into Algorand-based settlement" in text
     # Boilerplate that previously ate the character budget is gone.
@@ -37,6 +38,7 @@ def test_article_body_kept_boilerplate_dropped() -> None:
 
 
 def test_picks_content_div_without_semantic_article() -> None:
+    """Content is picked from a content-shaped div even without a semantic <article> tag."""
     page = f"""
     <html><body>
       <div class="menu"><a href="/a">One</a><a href="/b">Two</a><a href="/c">Three</a></div>
@@ -50,6 +52,7 @@ def test_picks_content_div_without_semantic_article() -> None:
 
 
 def test_keep_links_renders_inline_urls() -> None:
+    """keep_links renders inline links as "text (url)" in the extracted text."""
     page = (
         "<html><body><article><p>"
         'Read the full proposal at <a href="https://algorand.foundation/gov">governance</a> '
@@ -62,6 +65,7 @@ def test_keep_links_renders_inline_urls() -> None:
 
 def test_degenerate_page_falls_back() -> None:
     # No real content blocks → fall back to the whole cleaned document, not "".
+    """A degenerate page with no real content blocks falls back to the whole cleaned document instead of returning nothing."""
     text = html_to_plain_text("<html><body><p>Short note about ALGO.</p></body></html>")
     assert "Short note about ALGO." in text
     assert html_to_plain_text("<html><body></body></html>") == ""

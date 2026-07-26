@@ -980,20 +980,13 @@ class AppLocalizationsEs extends AppLocalizations {
   String get domainsDeadEnd => 'Callejón sin salida';
 
   @override
-  String get domainsApproveExplore => 'Aprobar y explorar';
-
-  @override
-  String get domainsCrawlOnce => 'Rastrear una vez, sin fuente';
+  String get domainsApproveExplore => 'Sitio completo';
 
   @override
   String get domainsAddButton => 'Añadir';
 
   @override
-  String get domainsAddAsSeed => 'Añadir como fuente permanente';
-
-  @override
-  String get domainsAddSinglePageOnly =>
-      'Solo esta página (solo cita, no rastrear el sitio)';
+  String get domainsAddSinglePageOnly => 'Página única';
 
   @override
   String get domainsScoreUnexplained => 'Desglose de puntuación no disponible';
@@ -1003,7 +996,12 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get domainsPossibleServiceHint =>
-      'Buena puntuación pero etiquetado como noticias/genérico — podría ser un producto real, no solo una fuente de cita. Considere \"Aprobar y explorar\" en vez de \"Rastrear una vez\".';
+      'Buena puntuación pero etiquetado como noticias/genérico — podría ser un producto real, no solo una fuente de cita. Considere \"Sitio completo\" en vez de \"Página única\".';
+
+  @override
+  String domainsSuggestedHint(int count) {
+    return 'Sugerido — $count páginas del mismo dominio encontradas';
+  }
 
   @override
   String get paginationPrevious => 'Anterior';

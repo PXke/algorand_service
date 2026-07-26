@@ -59,6 +59,71 @@ def _print_header(rev: RevivedSession) -> None:
     logger.info("=" * 78)
 
 
+def _revive_target(target: str, *, session_id: str) -> RevivedSession:
+    """Revive the compose session for `target` (an article id or source_url substring), falling back to a plain source_url match if an article-id lookup misses. Exits the process if nothing matches."""
+    from app.modules.ai.interrogate import _looks_like_uuid, revive_session
+
+    kwargs: dict = {}
+    if session_id:
+        kwargs["session_id"] = session_id
+    if _looks_like_uuid(target):
+        # Could be an article id OR (rarely) a session id substring; try article
+        # first, fall back to source_url substring match.
+        kwargs["article_id"] = target
+    else:
+        kwargs["source_url"] = target
+
+    try:
+        return revive_session(**kwargs)
+    except LookupError:
+        # article-id path missed → try it as a plain source_url substring
+        if "article_id" in kwargs and not session_id:
+            try:
+                return revive_session(source_url=target)
+            except LookupError as exc:
+                logger.error("%s", exc)
+                sys.exit(1)
+        logger.error("no matching compose session")
+        sys.exit(1)
+
+
+def _print_ground_truth(rev: RevivedSession, *, ground_truth: bool) -> None:
+    if not ground_truth:
+        return
+    from app.modules.ai.interrogate import ground_truth_note
+
+    note = ground_truth_note(rev)
+    if note:
+        logger.info("\n%s\n", note)
+    else:
+        logger.info(
+            "\n(no ground-truth flags: every linked domain resolves and no "
+            "fetch failures in the transcript)\n"
+        )
+
+
+def _run_repl(rev: RevivedSession, *, ground_truth: bool) -> None:
+    from app.modules.ai.interrogate import interrogate
+
+    history: list[dict] = []
+
+    def ask(q: str) -> None:
+        nonlocal history
+        answer, history = interrogate(rev, q, ground_truth=ground_truth, history=history)
+        logger.info("\nwriter> %s\n", answer)
+
+    logger.info("Interactive interrogation. Blank line or Ctrl-D to quit.\n")
+    while True:
+        try:
+            q = input("you> ").strip()
+        except EOFError:
+            logger.info("")
+            break
+        if not q:
+            break
+        ask(q)
+
+
 def main() -> None:
     """Parse CLI args, revive the target compose session, and run the Q&A loop."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -76,73 +141,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    from app.modules.ai.interrogate import (
-        ground_truth_note,
-        interrogate,
-        revive_session,
-    )
-
-    target = args.target.strip()
-    kwargs: dict = {}
-    if args.session_id:
-        kwargs["session_id"] = args.session_id
-    from app.modules.ai.interrogate import _looks_like_uuid
-
-    if _looks_like_uuid(target):
-        # Could be an article id OR (rarely) a session id substring; try article
-        # first, fall back to source_url substring match.
-        kwargs["article_id"] = target
-    else:
-        kwargs["source_url"] = target
-
-    try:
-        rev = revive_session(**kwargs)
-    except LookupError:
-        # article-id path missed → try it as a plain source_url substring
-        if "article_id" in kwargs and not args.session_id:
-            try:
-                rev = revive_session(source_url=target)
-            except LookupError as exc:
-                logger.error("%s", exc)
-                sys.exit(1)
-        else:
-            logger.error("no matching compose session")
-            sys.exit(1)
-
+    rev = _revive_target(args.target.strip(), session_id=args.session_id)
     _print_header(rev)
 
     ground_truth = not args.no_ground_truth
-    if ground_truth:
-        note = ground_truth_note(rev)
-        if note:
-            logger.info("\n%s\n", note)
-        else:
-            logger.info(
-                "\n(no ground-truth flags: every linked domain resolves and no "
-                "fetch failures in the transcript)\n"
-            )
-
-    history: list[dict] = []
-
-    def ask(q: str) -> None:
-        nonlocal history
-        answer, history = interrogate(rev, q, ground_truth=ground_truth, history=history)
-        logger.info("\nwriter> %s\n", answer)
+    _print_ground_truth(rev, ground_truth=ground_truth)
 
     if args.question:
-        ask(args.question)
+        from app.modules.ai.interrogate import interrogate
+
+        answer, _history = interrogate(rev, args.question, ground_truth=ground_truth, history=[])
+        logger.info("\nwriter> %s\n", answer)
         return
 
-    logger.info("Interactive interrogation. Blank line or Ctrl-D to quit.\n")
-    while True:
-        try:
-            q = input("you> ").strip()
-        except EOFError:
-            logger.info("")
-            break
-        if not q:
-            break
-        ask(q)
+    _run_repl(rev, ground_truth=ground_truth)
 
 
 if __name__ == "__main__":
