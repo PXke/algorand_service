@@ -25,13 +25,20 @@ class Settings(msgspec.Struct, kw_only=True):
     # worker threads per process. Default 1/1 serialises everything behind one slow
     # request, so we run several. Tune per box via APP_PROCESSES / APP_WORKERS.
     app_processes: int = 4
-    # `workers` also sizes the pool Robyn runs plain-`def` handlers in, and the
-    # reader-facing routes are declared that way precisely so their blocking
-    # Cassandra reads stay off the event loop. At 2 that pool was the new ceiling
-    # (2 threads x 4 processes = 8 concurrent reads); measured against a 100ms
-    # handler, raising it moved throughput from ~20 to ~70 req/s. These threads
-    # are idle-blocked on socket reads, not CPU-bound, so they are cheap.
-    app_workers: int = 8
+    # `workers` does NOT size the pool that plain-`def` handlers run in -- measured,
+    # after briefly believing otherwise: 32 concurrent requests are served by 32
+    # distinct Python threads in ONE process whether workers is 2 or 8, so the
+    # runtime hands each sync request its own blocking-pool thread and `workers`
+    # only governs the Rust-side I/O threads above them. Raising it therefore buys
+    # no handler concurrency, and measured slightly worse throughput/p95 at 8+ than
+    # at 4 (more actix threads contending for the same single GIL).
+    #
+    # What actually caps a process is that GIL: sync-handler threads release it
+    # while blocked on a Cassandra/Redis socket, but every request also runs
+    # Robyn's own Python layer plus our decode/encode, and that part serialises.
+    # A 20ms-query handler plateaued at ~110-160 req/s per process regardless of
+    # thread count. So scale with `processes` (one GIL each), not `workers`.
+    app_workers: int = 2
 
     # Public-facing site (used to build absolute canonical / OG / sitemap URLs
     # in the SEO-rendered document routes). Override per-env via PUBLIC_SITE_URL.
