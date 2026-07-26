@@ -34,8 +34,8 @@ lint:
 	docker compose run --rm --no-deps --entrypoint /usr/local/bin/platform-docker/lint.sh migrate
 
 lint-fix:
-	ruff check --fix backend workers deploy/scripts
-	ruff format backend workers deploy/scripts
+	ruff check --fix backend workers shared deploy/scripts
+	ruff format backend workers shared deploy/scripts
 
 docker-build:
 	docker compose build migrate

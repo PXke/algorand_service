@@ -14,10 +14,10 @@ if ! command -v ruff >/dev/null 2>&1; then
 fi
 
 echo "ruff check..."
-ruff check backend workers deploy/scripts
+ruff check backend workers shared deploy/scripts
 
 echo "ruff format --check..."
-ruff format --check backend workers deploy/scripts
+ruff format --check backend workers shared deploy/scripts
 
 echo "vulture..."
 vulture

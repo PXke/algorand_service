@@ -38,7 +38,11 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+# "../shared" mirrors what deploy/scripts/link_shared.sh does in the prod venv
+# (a .pth pointing at releases/current/shared). Declaring it here instead of
+# relying on that link means tests resolve algorand_shared from repo state, so
+# they keep passing after a venv rebuild wipes the .pth.
+pythonpath = [".", "../shared"]
 
 [tool.setuptools.packages.find]
 where = ["."]

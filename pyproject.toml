@@ -5,6 +5,7 @@ paths = [
   "backend/app",
   "workers/app",
   "workers/tests",
+  "shared/algorand_shared",
   "deploy/scripts/cql_migrate.py",
   "deploy/scripts/seed_service_registry.py",
 ]

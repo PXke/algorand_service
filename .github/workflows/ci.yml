@@ -14,9 +14,9 @@ jobs:
         with:
           python-version: "3.14"
       - name: Ruff check
-        run: pip install ruff && ruff check backend workers deploy/scripts
+        run: pip install ruff && ruff check backend workers shared deploy/scripts
       - name: Ruff format
-        run: ruff format --check backend workers deploy/scripts
+        run: ruff format --check backend workers shared deploy/scripts
       - name: Vulture
         run: pip install vulture && vulture
       - name: Shellcheck deploy scripts
@@ -61,7 +61,7 @@ jobs:
         run: PYTHONPATH=. pytest tests/ -q
       - name: Import smoke
         working-directory: workers
-        run: PYTHONPATH=. python -c "from app.celery_app import celery_app; print(celery_app.main)"
+        run: PYTHONPATH=.:../shared python -c "from app.celery_app import celery_app; print(celery_app.main)"
 
   conduit:
     runs-on: ubuntu-latest

@@ -40,7 +40,9 @@ ml = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+# See the note in backend/pyproject.toml: resolve algorand_shared from the repo
+# rather than from the venv .pth that link_shared.sh writes in prod.
+pythonpath = [".", "../shared"]
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -47,6 +47,10 @@ COPY backend/schema backend/schema
 COPY backend/tests backend/tests
 COPY workers/app workers/app
 COPY workers/tests workers/tests
+# Code shared by both deployables. Both pyproject.toml files put "../shared" on
+# pytest's pythonpath, so this must land as a sibling of backend/ and workers/
+# (prod gets the same package via deploy/scripts/link_shared.sh instead).
+COPY shared shared
 COPY deploy deploy
 COPY schema schema
 COPY conduit/schema conduit/schema
