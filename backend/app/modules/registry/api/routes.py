@@ -13,7 +13,7 @@ def register_registry_routes(app: Robyn) -> None:
     registry_service = RegistryService()
 
     @app.get("/api/v1/registry/services")
-    async def list_services(request: Request) -> dict:
+    def list_services(request: Request) -> dict:
         seeds_only = (request.query_params.get("seeds_only", "") or "").lower() in {
             "1",
             "true",

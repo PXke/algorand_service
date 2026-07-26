@@ -19,7 +19,7 @@ from app.modules.news.services.news_service import NewsService
 news_service = NewsService()
 
 
-async def stats(request: Request) -> dict:
+def stats(request: Request) -> dict:
     """Article count and configured feed bucket."""
     _ = request
     return {
@@ -28,7 +28,7 @@ async def stats(request: Request) -> dict:
     }
 
 
-async def tags(request: Request) -> dict:
+def tags(request: Request) -> dict:
     """Per-tag coverage/readership aggregate for the topics cloud. The scan joins view counters across the recent feed, so it hides behind a short cache; the cloud tolerates minutes-stale heat."""
     _ = request
     from app.core.cache import cached_json
@@ -36,7 +36,7 @@ async def tags(request: Request) -> dict:
     return cached_json("news:tags", 300, news_service.tag_stats)
 
 
-async def hot(request: Request) -> dict:
+def hot(request: Request) -> dict:
     """Reader-engagement ranking (hot/top) over the recent feed, cached briefly."""
     limit_param = query_param(request.query_params.get("limit", ""))
     limit = min(int(limit_param), 50) if limit_param.isdigit() else 20
@@ -52,7 +52,7 @@ async def hot(request: Request) -> dict:
     return cached_json(f"news:hot:{rank}:{limit}:{lang or 'en'}", 300, compute)
 
 
-async def feed(request: Request) -> Response:
+def feed(request: Request) -> Response:
     """Keyset-paginated article feed, ETag/Last-Modified cacheable."""
     limit_param = query_param(request.query_params.get("limit", ""))
     limit = int(limit_param) if limit_param.isdigit() else None
@@ -90,7 +90,7 @@ async def feed(request: Request) -> Response:
     return Response(status_code=200, headers=headers, description=body)
 
 
-async def article_detail(request: Request) -> Response:
+def article_detail(request: Request) -> Response:
     """Fetch one article's full detail, recording a best-effort read (bots and opted-out readers excluded)."""
     article_id = request.path_params.get("article_id", "")
     if not article_id:

@@ -32,7 +32,7 @@ enrollment_service = EnrollmentService(current_round_fetcher=_current_round)
 lookup_service = LookupService()
 
 
-async def kyc_test_ping(request: Request) -> Response:
+def kyc_test_ping(request: Request) -> Response:
     """Throwaway: proves the x402 402 -> pay -> verify -> settle round-trip through Robyn on TestNet. No attestation data, no Cassandra, no payout leg yet — those land once this is confirmed working end to end."""
     result = require_payment(
         request,
@@ -51,7 +51,7 @@ async def kyc_test_ping(request: Request) -> Response:
     )
 
 
-async def kyc_consent_message(request: Request) -> Response:
+def kyc_consent_message(request: Request) -> Response:
     """Free, self-service: proves the requesting wallet's address to itself for the caller to display before they sign. No payment gate — the enrolled wallet is the one who benefits from being listed, not us."""
     wallet = request.query_params.get("wallet_address") or ""
     if not wallet:
@@ -60,7 +60,7 @@ async def kyc_consent_message(request: Request) -> Response:
     return {"message": message, "wallet_address": wallet}
 
 
-async def kyc_enroll(request: Request) -> Response:
+def kyc_enroll(request: Request) -> Response:
     """Free enrollment: wallet-signed consent is the only gate. Computes trust signals from the public indexer and stores/overwrites the wallet's current KYC level — see EnrollmentService."""
     try:
         payload = serialization.decode(request.body, EnrollRequest)

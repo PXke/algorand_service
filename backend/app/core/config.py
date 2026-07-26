@@ -25,7 +25,13 @@ class Settings(msgspec.Struct, kw_only=True):
     # worker threads per process. Default 1/1 serialises everything behind one slow
     # request, so we run several. Tune per box via APP_PROCESSES / APP_WORKERS.
     app_processes: int = 4
-    app_workers: int = 2
+    # `workers` also sizes the pool Robyn runs plain-`def` handlers in, and the
+    # reader-facing routes are declared that way precisely so their blocking
+    # Cassandra reads stay off the event loop. At 2 that pool was the new ceiling
+    # (2 threads x 4 processes = 8 concurrent reads); measured against a 100ms
+    # handler, raising it moved throughput from ~20 to ~70 req/s. These threads
+    # are idle-blocked on socket reads, not CPU-bound, so they are cheap.
+    app_workers: int = 8
 
     # Public-facing site (used to build absolute canonical / OG / sitemap URLs
     # in the SEO-rendered document routes). Override per-env via PUBLIC_SITE_URL.

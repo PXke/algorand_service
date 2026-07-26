@@ -13,7 +13,7 @@ def register_placement_routes(app: Robyn) -> None:
     service = PlacementService()
 
     @app.get("/api/v1/news/placements")
-    async def list_placements(request: Request) -> dict:
+    def list_placements(request: Request) -> dict:
         slot = request.query_params.get("slot", "") or None
         limit_param = request.query_params.get("limit", "")
         limit = int(limit_param) if limit_param.isdigit() else None

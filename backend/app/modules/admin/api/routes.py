@@ -352,7 +352,7 @@ async def admin_training_stats(request: Request) -> Response:
     return await asyncio.to_thread(cached_json, "admin:training_stats", 30, store.training_stats)
 
 
-async def admin_retrain(request: Request) -> Response:
+def admin_retrain(request: Request) -> Response:
     """Trigger a retrain of the publish classifier + gatekeeper quality head now."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -452,7 +452,7 @@ async def admin_add_gatekeeper_anchor(request: Request) -> Response:
         return json_error_response(500, "anchor_failed", str(exc))
 
 
-async def admin_run_gatekeeper_validation(request: Request) -> Response:
+def admin_run_gatekeeper_validation(request: Request) -> Response:
     """Trigger the annotator-validation task (runs in a worker)."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -481,7 +481,7 @@ async def admin_gatekeeper_validation_report(request: Request) -> Response:
     return report if report is not None else {"report": None}
 
 
-async def admin_upsert_source(request: Request) -> Response:
+def admin_upsert_source(request: Request) -> Response:
     """Create or update a service-registry entry and claim its domain as a web source."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -556,7 +556,7 @@ async def admin_list_service_sources(request: Request) -> Response:
     return {"service_id": service_id, "items": items}
 
 
-async def admin_delete_source(request: Request) -> Response:
+def admin_delete_source(request: Request) -> Response:
     """Delete a service-registry entry."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -570,7 +570,7 @@ async def admin_delete_source(request: Request) -> Response:
     return {"deleted": True, "service_id": service_id}
 
 
-async def admin_list_scrapers(request: Request) -> Response:
+def admin_list_scrapers(request: Request) -> Response:
     """List the available manual scraper actions."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -582,7 +582,7 @@ async def admin_list_scrapers(request: Request) -> Response:
     return {"items": [dc_asdict(a) for a in SCRAPER_ACTIONS.values()]}
 
 
-async def admin_run_scraper(request: Request) -> Response:
+def admin_run_scraper(request: Request) -> Response:
     """Trigger a manual scraper action by name."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -1333,7 +1333,7 @@ async def admin_compose_next(request: Request) -> Response:
     return {"triggered": True}
 
 
-async def admin_recompose_review(request: Request) -> Response:
+def admin_recompose_review(request: Request) -> Response:
     """Re-run composition on a pending review's source and replace it with a fresh proposal — lets an admin watch a bad article improve as the writer evolves. The new draft lands in the review queue once the worker finishes."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -1362,7 +1362,7 @@ async def admin_recompose_review(request: Request) -> Response:
     return {"triggered": True, "review_id": review_id}
 
 
-async def admin_backfill_translations(request: Request) -> Response:
+def admin_backfill_translations(request: Request) -> Response:
     """Queue missing article translations (fa/ps/ru/…) for feed-visible stories."""
     denied = require_admin_wallet(request)
     if denied is not None:

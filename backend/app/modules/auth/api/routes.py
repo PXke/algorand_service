@@ -16,7 +16,7 @@ from app.modules.auth.services.session_store import SessionStore
 auth_service = AuthService(session_store=SessionStore())
 
 
-async def auth_nonce(request: Request) -> Response:
+def auth_nonce(request: Request) -> Response:
     """Issue a fresh login nonce and CAIP-122 challenge for a wallet."""
     try:
         payload = serialization.decode(request.body, NonceRequest)
@@ -38,7 +38,7 @@ async def auth_nonce(request: Request) -> Response:
     }
 
 
-async def auth_verify(request: Request) -> Response:
+def auth_verify(request: Request) -> Response:
     """Verify a signed nonce and, on success, mint a new session token."""
     try:
         payload = serialization.decode(request.body, VerifyRequest)
@@ -71,7 +71,7 @@ async def auth_verify(request: Request) -> Response:
     }
 
 
-async def auth_session(request: Request) -> Response:
+def auth_session(request: Request) -> Response:
     """Look up the active session for the given session token."""
     token = request.headers.get("x-session-token") or ""
     if not token:
@@ -87,7 +87,7 @@ async def auth_session(request: Request) -> Response:
     return serialization.to_builtins(info)
 
 
-async def auth_logout(request: Request) -> dict[str, bool]:
+def auth_logout(request: Request) -> dict[str, bool]:
     """Revoke the session behind the given session token, if any."""
     token = request.headers.get("x-session-token") or ""
     if token:

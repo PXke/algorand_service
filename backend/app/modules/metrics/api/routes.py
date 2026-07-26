@@ -15,12 +15,12 @@ def register_metrics_routes(app: Robyn) -> None:
     dashboard = MetricsDashboardService()
 
     @app.get("/api/v1/metrics/price")
-    async def price_metrics(request: Request) -> dict:
+    def price_metrics(request: Request) -> dict:
         asset_id = request.query_params.get("asset_id", None)
         return serialization.to_builtins(service.get_spot(asset_id=asset_id))
 
     @app.get("/api/v1/metrics/price/history")
-    async def price_history(request: Request) -> dict:
+    def price_history(request: Request) -> dict:
         """~Hourly (epoch, price) points for the front-page sparkline.
 
         Cached: the sampler writes about once an hour, so minutes-stale is invisible.
@@ -45,6 +45,6 @@ def register_metrics_routes(app: Robyn) -> None:
         return cached_json(f"metrics:price-history:{asset_id}", 300, compute)
 
     @app.get("/api/v1/metrics/dashboard")
-    async def metrics_dashboard(request: Request) -> dict:
+    def metrics_dashboard(request: Request) -> dict:
         asset_id = request.query_params.get("asset_id", None)
         return serialization.to_builtins(dashboard.get_dashboard(asset_id=asset_id))

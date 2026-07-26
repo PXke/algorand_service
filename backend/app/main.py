@@ -28,13 +28,13 @@ register_cors(app)
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
+def health() -> dict[str, str]:
     """Report basic liveness for the API process."""
     return {"status": "ok", "service": settings.app_name, "env": settings.app_env}
 
 
 @app.get("/health/ready")
-async def health_ready() -> dict[str, object]:
+def health_ready() -> dict[str, object]:
     """Report readiness, degraded if Redis or Cassandra checks fail."""
     checks = run_readiness_checks()
     ok = all(check.ok for check in checks if check.name in {"redis", "cassandra"})

@@ -9,6 +9,7 @@ Static assets keep being served from disk by nginx.
 from __future__ import annotations
 
 import html
+import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from uuid import UUID
@@ -184,19 +185,29 @@ def _response_for_head(response: Response) -> Response:
 
 
 def _mirror_head(
-    app: Robyn, path: str, get_handler: Callable[[Request], Awaitable[Response]]
+    app: Robyn,
+    path: str,
+    get_handler: Callable[[Request], Response | Awaitable[Response]],
 ) -> None:
     """Register HEAD on `path` with the same status/headers as GET, no body."""
 
     @app.head(path)
     async def _head(request: Request) -> Response:
-        return _response_for_head(await get_handler(request))
+        # The GET handlers are plain `def` (Robyn runs those in a worker thread,
+        # which is what keeps their blocking queries off the event loop). Accept
+        # either shape so this keeps working whichever way a handler is declared
+        # -- awaiting a plain Response would raise, and nothing in the test suite
+        # calls handlers directly, so that break would only show up in prod.
+        result = get_handler(request)
+        if inspect.isawaitable(result):
+            result = await result
+        return _response_for_head(result)
 
 
 news = NewsService()
 
 
-async def home(request: Request) -> Response:
+def home(request: Request) -> Response:
     """SSR front page: latest feed items plus the hot-reads rail."""
     path = "/"
     _record(request, path)
@@ -211,7 +222,7 @@ async def home(request: Request) -> Response:
     )
 
 
-async def news_index(request: Request) -> Response:
+def news_index(request: Request) -> Response:
     """SSR news index: the full recent feed."""
     path = "/news"
     _record(request, path)
@@ -224,7 +235,7 @@ async def news_index(request: Request) -> Response:
     )
 
 
-async def article(request: Request) -> Response:
+def article(request: Request) -> Response:
     """SSR article detail, or a 410/404 noindex page for a removed/missing article."""
     article_id = request.path_params.get("article_id", "")
     qp = _query_params(request)
@@ -307,7 +318,7 @@ async def og_article_card(request: Request) -> Response:
     )
 
 
-async def section(request: Request) -> Response:
+def section(request: Request) -> Response:
     # The human-defined sections were retired in favour of writer-tag
     # topics; their URLs are Google-indexed, so 301 to the closest topic.
     """301-redirect a retired human-defined section to its closest writer-tag topic."""
@@ -321,7 +332,7 @@ async def section(request: Request) -> Response:
     )
 
 
-async def hot(request: Request) -> Response:
+def hot(request: Request) -> Response:
     """SSR hot/top reader-engagement page."""
     path = "/hot"
     _record(request, path)
@@ -334,7 +345,7 @@ async def hot(request: Request) -> Response:
     )
 
 
-async def top(request: Request) -> Response:
+def top(request: Request) -> Response:
     """SSR all-time-top reader-engagement page (the SPA's /top view; /hot is the recency-weighted one)."""
     path = "/top"
     _record(request, path)
@@ -347,7 +358,7 @@ async def top(request: Request) -> Response:
     )
 
 
-async def topics(request: Request) -> Response:
+def topics(request: Request) -> Response:
     """SSR topics index page."""
     path = "/topics"
     _record(request, path)
@@ -355,7 +366,7 @@ async def topics(request: Request) -> Response:
     return _doc_response(render.render_topics(picked), "public, max-age=300", tracked_path=path)
 
 
-async def topic(request: Request) -> Response:
+def topic(request: Request) -> Response:
     """SSR one topic's article list, noindexed if the topic is too thin to be reliable."""
     tag = request.path_params.get("tag", "").strip().lower()
     feed, topic_list = cached_feed_snapshot(news.list_feed)
@@ -375,33 +386,33 @@ async def topic(request: Request) -> Response:
     return _doc_response((head, body), "public, max-age=120", tracked_path=path)
 
 
-async def about(request: Request) -> Response:
+def about(request: Request) -> Response:
     """SSR static about page."""
     path = "/about"
     _record(request, path)
     return _doc_response(render.render_about(), "public, max-age=3600", tracked_path=path)
 
 
-async def contact(request: Request) -> Response:
+def contact(request: Request) -> Response:
     """SSR static contact page."""
     path = "/contact"
     _record(request, path)
     return _doc_response(render.render_contact(), "public, max-age=3600", tracked_path=path)
 
 
-async def search(request: Request) -> Response:
+def search(request: Request) -> Response:
     """SSR noindex shell for the client-side search page."""
     _ = request
     return _doc_response(render.render_noindex("Search", active="/search"), "public, max-age=300")
 
 
-async def suggestions(request: Request) -> Response:
+def suggestions(request: Request) -> Response:
     """SSR noindex shell for the client-side suggestions page."""
     _ = request
     return _doc_response(render.render_noindex("Suggestions"), "public, max-age=300")
 
 
-async def admin(request: Request) -> Response:
+def admin(request: Request) -> Response:
     """SSR noindex, no-store shell for the admin dashboard."""
     _ = request
     return _doc_response(render.render_noindex("Admin"), "no-store")
@@ -429,7 +440,7 @@ def _beacon_origin_ok(request: Request) -> bool:
     return bool(origin) and _origin_allowed(origin, allowed)
 
 
-async def beacon_pageview(request: Request) -> Response:
+def beacon_pageview(request: Request) -> Response:
     """Client-side beacon for an SPA in-app route change — the initial document load is already recorded server-side; this covers navigation after that, which never hits a document route."""
     if tracking_opted_out_from_headers(request.headers):
         return {"ok": True}
@@ -446,13 +457,13 @@ async def beacon_pageview(request: Request) -> Response:
     return {"ok": True}
 
 
-async def robots(request: Request) -> Response:
+def robots(request: Request) -> Response:
     """robots.txt, cached briefly."""
     _ = request
     return _text_response(sitemap.robots_txt(), "text/plain; charset=utf-8", "public, max-age=3600")
 
 
-async def rss_feed(request: Request) -> Response:
+def rss_feed(request: Request) -> Response:
     """Site-wide RSS feed, with full article HTML for the newest items."""
     _ = request
     items = news.list_feed(limit=50)
@@ -474,7 +485,7 @@ async def rss_feed(request: Request) -> Response:
     )
 
 
-async def topic_rss_feed(request: Request) -> Response:
+def topic_rss_feed(request: Request) -> Response:
     """Per-topic RSS feed, or 404 for an unknown/malformed tag."""
     tag = request.path_params.get("tag", "").strip().lower()
     if tag.endswith(".xml"):
@@ -500,13 +511,13 @@ async def topic_rss_feed(request: Request) -> Response:
     )
 
 
-async def llms_txt(request: Request) -> Response:
+def llms_txt(request: Request) -> Response:
     """llms.txt, cached briefly."""
     _ = request
     return _text_response(sitemap.llms_txt(), "text/plain; charset=utf-8", "public, max-age=3600")
 
 
-async def sitemap_root(request: Request) -> Response:
+def sitemap_root(request: Request) -> Response:
     """Root sitemap index."""
     _ = request
     items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
@@ -514,7 +525,7 @@ async def sitemap_root(request: Request) -> Response:
     return _text_response(build.root_xml, "application/xml; charset=utf-8", "public, max-age=900")
 
 
-async def sitemap_pages(request: Request) -> Response:
+def sitemap_pages(request: Request) -> Response:
     """The static-pages sitemap chunk, or 404 if it doesn't exist."""
     _ = request
     items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
@@ -529,7 +540,7 @@ async def sitemap_pages(request: Request) -> Response:
     return _text_response(xml, "application/xml; charset=utf-8", "public, max-age=900")
 
 
-async def sitemap_articles_part(request: Request) -> Response:
+def sitemap_articles_part(request: Request) -> Response:
     """One numbered article-sitemap chunk, or 404 for an out-of-range/malformed part."""
     _ = request
     part = request.path_params.get("part", "")
@@ -561,7 +572,7 @@ async def sitemap_articles_part(request: Request) -> Response:
     return _text_response(xml, "application/xml; charset=utf-8", "public, max-age=900")
 
 
-async def sitemap_news(request: Request) -> Response:
+def sitemap_news(request: Request) -> Response:
     """Google News sitemap, 404 unless the site has been accepted into News Publisher Center."""
     _ = request
     # Off until accepted into Google News Publisher Center (see config).

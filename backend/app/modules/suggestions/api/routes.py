@@ -43,7 +43,7 @@ def _session_wallet(request: Request) -> str | None:
     return session.wallet_address if session else None
 
 
-async def suggestions_config(request: Request) -> Response:
+def suggestions_config(request: Request) -> Response:
     """Treasury address and minimum payment required to submit a suggestion."""
     _ = request
     min_micro = settings.suggestion_min_microalgos
@@ -56,7 +56,7 @@ async def suggestions_config(request: Request) -> Response:
     return serialization.to_builtins(payload)
 
 
-async def create_suggestion(request: Request) -> Response:
+def create_suggestion(request: Request) -> Response:
     """Verify the treasury payment and record a new service suggestion."""
     wallet = _session_wallet(request)
     if not wallet:
@@ -75,14 +75,14 @@ async def create_suggestion(request: Request) -> Response:
     return serialization.to_builtins(created)
 
 
-async def list_suggestions(request: Request) -> Response:
+def list_suggestions(request: Request) -> Response:
     """List open suggestions with their current upvote counts."""
     _ = request
     items = suggestion_service.list_open_suggestions()
     return {"items": serialization.to_builtins(items)}
 
 
-async def upvote_suggestion(request: Request) -> Response:
+def upvote_suggestion(request: Request) -> Response:
     """Verify a wallet's signature and record its upvote on a suggestion."""
     wallet = _session_wallet(request)
     if not wallet:
@@ -109,7 +109,7 @@ async def upvote_suggestion(request: Request) -> Response:
     return result
 
 
-async def upvote_message(request: Request) -> Response:
+def upvote_message(request: Request) -> Response:
     """The canonical message a wallet must sign to prove its upvote on a suggestion."""
     wallet = _session_wallet(request)
     if not wallet:
