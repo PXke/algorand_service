@@ -54,13 +54,23 @@ def check_typesense() -> CheckResult:
 
 
 def check_conduit_index() -> CheckResult:
-    """Report the latest indexed chain round, failing if none has been ingested yet."""
+    """Report the latest indexed chain round, treating a deployment without Conduit as healthy.
+
+    Conduit is an optional component: this host runs no conduit unit, so
+    `last_ingested_round` is never written and the check sat permanently red —
+    which is worse than useless, because a check that is always failing trains
+    everyone to skim past the whole readiness payload.
+
+    Absent round => Conduit was never deployed here, reported not_configured
+    (same stance as check_typesense). A real query error still fails: that
+    means Cassandra answered wrongly, not that the component is absent.
+    """
     try:
         from app.modules.chain.repository import get_chain_repository
 
         head = get_chain_repository().get_chain_head_round()
         if head is None:
-            return CheckResult("conduit_index", False, "no last_ingested_round")
+            return CheckResult("conduit_index", True, "not_configured")
         return CheckResult("conduit_index", True, f"round={head}")
     except Exception as exc:
         return CheckResult("conduit_index", False, str(exc))
