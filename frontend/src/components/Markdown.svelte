@@ -131,8 +131,10 @@
 
   .md :global(blockquote) {
     margin: 0 0 18px;
-    padding: 4px 8px 4px 18px;
-    border-inline-start: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    padding: 10px 14px 10px 18px;
+    border-inline-start: 3px solid var(--accent);
+    border-radius: 0 10px 10px 0;
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
     font-style: italic;
     font-size: 17px;
     line-height: 1.7;
@@ -187,11 +189,11 @@
     font-size: 0.86em;
     padding: 0.12em 0.38em;
     border-radius: 5px;
-    color: #1a4aa0;
+    color: var(--primary);
     background: var(--callout);
   }
   :global([data-theme='dark']) .md :global(code) {
-    color: #a7c5ff;
+    color: var(--accent);
   }
   .md :global(pre) {
     overflow: auto;

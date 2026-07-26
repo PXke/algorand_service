@@ -1,11 +1,12 @@
 <script lang="ts">
   import type { ArticleItem } from '../lib/api/news'
   import { articleLogoUrl, proxiedImageUrl } from '../lib/images'
+  import { articleHref } from '../lib/paths'
   import { navigate } from '../lib/router'
 
   let { article }: { article: ArticleItem } = $props()
 
-  const href = $derived(`/news/articles/${article.article_id}`)
+  const href = $derived(articleHref(article.article_id))
   /** Server already dimension-vets image_url — trust it; favicon only if absent. */
   const media = $derived.by(() => {
     const u = article.image_url?.trim()
@@ -40,7 +41,11 @@
       <img
         src={media.src}
         alt=""
+        width={media.logo ? 160 : 680}
+        height={media.logo ? 160 : 425}
         loading="eager"
+        fetchpriority="high"
+        decoding="async"
         onerror={(e) => ((e.currentTarget as HTMLImageElement).style.display = 'none')}
       />
     </div>
@@ -68,6 +73,10 @@
   .lead:hover .title {
     color: var(--primary);
   }
+  .lead:hover .media img {
+    transform: scale(1.035);
+    filter: saturate(1);
+  }
   .copy {
     display: flex;
     flex-direction: column;
@@ -81,6 +90,7 @@
     font-size: clamp(28px, 4vw, 38px);
     line-height: 1.12;
     letter-spacing: -0.6px;
+    transition: color 0.28s ease;
   }
   .deck {
     margin: 0;
@@ -93,8 +103,10 @@
     overflow: hidden;
   }
   .media {
+    display: grid;
+    place-items: center;
     aspect-ratio: 16 / 10;
-    max-height: 224px;
+    max-height: 260px;
     border-radius: 12px;
     overflow: hidden;
     background: var(--callout);
@@ -103,17 +115,20 @@
     .media {
       width: 100%;
       max-width: 340px;
-      height: 224px;
-      aspect-ratio: auto;
+      height: auto;
+      min-height: 160px;
+      max-height: 260px;
+      aspect-ratio: 4 / 3;
       justify-self: end;
     }
   }
   .media img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
-    object-position: center 30%;
-    filter: saturate(0.85);
+    object-fit: contain;
+    object-position: center;
+    filter: saturate(0.92);
+    transition: transform 0.55s cubic-bezier(0.22, 1, 0.36, 1), filter 0.45s ease;
   }
   .media.logo img {
     object-fit: contain;
@@ -121,5 +136,14 @@
     padding: 16%;
     filter: none;
     box-sizing: border-box;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .title,
+    .media img {
+      transition: none;
+    }
+    .lead:hover .media img {
+      transform: none;
+    }
   }
 </style>

@@ -76,7 +76,13 @@
   .site-footer {
     margin-top: auto;
     border-top: 1px solid var(--border);
-    background: var(--panel);
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--accent) 5%, transparent) 0%,
+        var(--panel) 48px
+      ),
+      var(--panel);
   }
   .inner {
     max-width: var(--max-content);

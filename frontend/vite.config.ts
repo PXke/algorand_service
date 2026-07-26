@@ -8,13 +8,13 @@ export default defineConfig({
     VitePWA({
       registerType: 'autoUpdate',
       injectRegister: false,
-      includeAssets: ['favicon.svg', 'icons/*.png', 'fonts/*.woff2'],
+      includeAssets: ['favicon.svg', 'icons/*.png', 'fonts/*.woff2', 'offline.html'],
       manifest: {
         name: 'PXke Algorand',
         short_name: 'PXke',
         description: 'Independent coverage of the Algorand ecosystem',
-        theme_color: '#4F46E5',
-        background_color: '#F8F7F4',
+        theme_color: '#0A5F59',
+        background_color: '#F2F4F2',
         display: 'standalone',
         start_url: '/',
         icons: [
@@ -31,8 +31,28 @@ export default defineConfig({
         ],
       },
       workbox: {
+        // Precache the reading shell — not the lazy wallet/admin hunks.
         globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png,webp}'],
+        globIgnores: ['**/wallet-connect-*.js', '**/AdminHub-*'],
         navigateFallback: '/index.html',
+        navigateFallbackDenylist: [/^\/api\//, /^\/assets\//, /^\/fonts\//],
+        runtimeCaching: [
+          {
+            urlPattern: ({ request }) => request.mode === 'navigate',
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'pages',
+              networkTimeoutSeconds: 4,
+              plugins: [
+                {
+                  handlerDidError: async () => {
+                    return (await caches.match('/offline.html')) || Response.error()
+                  },
+                },
+              ],
+            },
+          },
+        ],
       },
     }),
   ],
@@ -49,6 +69,10 @@ export default defineConfig({
     include: ['@walletconnect/client', 'algosdk', 'qrcode', 'buffer'],
   },
   build: {
+    // Modern browsers only — smaller transforms, no legacy polyfill tax.
+    target: 'es2022',
+    cssMinify: true,
+    modulePreload: { polyfill: false },
     chunkSizeWarningLimit: 900,
     rolldownOptions: {
       output: {

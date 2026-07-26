@@ -771,10 +771,16 @@ def test_icon_named_png_also_treated_as_icon() -> None:
 
 
 def test_real_share_image_still_renders_hero() -> None:
-    """Renders a real (non-icon-like) image as both the share image and the body hero."""
+    """Renders a real (non-icon-like) image as both the share image and the body hero.
+
+    The two surfaces use different URLs on purpose: og:/twitter: tags need an
+    absolute URL a remote scraper can fetch, while the in-page hero goes through
+    the same-origin image proxy so the document and its LCP image share one
+    connection (no extra DNS/TLS hop to the origin host).
+    """
     head, body = render.render_article(_article())
     assert "img.io/hero.png" in head
-    assert '<img src="https://img.io/hero.png"' in body
+    assert '<img src="/api/v1/img?url=https%3A%2F%2Fimg.io%2Fhero.png"' in body
 
 
 def test_icon_word_boundary_matching() -> None:

@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
   import { newsApi, type ArticleItem } from '../lib/api/news'
   import { messages, t, activeLocale } from '../lib/i18n'
+  import { navigate } from '../lib/router'
   import StoryRow from '../components/StoryRow.svelte'
   import PageMeta from '../components/PageMeta.svelte'
+  import FeedSkeleton from '../components/FeedSkeleton.svelte'
   import { ApiException } from '../lib/api/client'
   import { ogLocaleFor } from '../lib/seo'
 
@@ -13,20 +14,27 @@
   let loading = $state(true)
   let error = $state<string | null>(null)
 
-  async function load() {
+  $effect(() => {
+    const lang = $activeLocale
+    const r = rank
+    let cancelled = false
     loading = true
     error = null
-    try {
-      items = await newsApi.fetchHot(30, rank, $activeLocale)
-    } catch (e) {
-      error = e instanceof ApiException ? e.userMessage : t($messages, 'errorGeneric')
-    } finally {
-      loading = false
+    void (async () => {
+      try {
+        const next = await newsApi.fetchHot(30, r, lang)
+        if (cancelled) return
+        items = next
+      } catch (e) {
+        if (cancelled) return
+        error = e instanceof ApiException ? e.userMessage : t($messages, 'errorGeneric')
+      } finally {
+        if (!cancelled) loading = false
+      }
+    })()
+    return () => {
+      cancelled = true
     }
-  }
-
-  onMount(() => {
-    void load()
   })
 
   const pageTitle = $derived(rank === 'top' ? t($messages, 'navTop') : t($messages, 'hotTitle'))
@@ -50,11 +58,22 @@
   </header>
 
   {#if loading}
-    <p class="muted">{t($messages, 'loading')}</p>
+    <FeedSkeleton rows={10} />
   {:else if error}
     <p class="err">{error}</p>
   {:else if !items.length}
-    <p class="muted">{t($messages, 'sectionEmptyMessage')}</p>
+    <div class="empty">
+      <h2>{t($messages, 'sectionEmptyTitle')}</h2>
+      <p class="muted">{t($messages, 'sectionEmptyMessage')}</p>
+      <div class="empty-actions">
+        <button class="btn btn-primary" type="button" onclick={() => navigate('/news')}>
+          {t($messages, 'emptyBrowseLatest')}
+        </button>
+        <button class="btn" type="button" onclick={() => navigate('/topics')}>
+          {t($messages, 'emptyBrowseTopics')}
+        </button>
+      </div>
+    </div>
   {:else}
     <div class="ledger">
       {#each items as article, i}
@@ -76,6 +95,16 @@
   .ledger {
     display: flex;
     flex-direction: column;
+  }
+  .empty h2 {
+    margin: 0 0 8px;
+    font-size: 1.35rem;
+  }
+  .empty-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 16px;
   }
   .err {
     color: var(--danger);

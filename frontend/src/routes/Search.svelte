@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { searchApi } from '../lib/api/search'
   import { messages, t } from '../lib/i18n'
+  import { articleHref } from '../lib/paths'
   import { route, navigate } from '../lib/router'
   import { ApiException } from '../lib/api/client'
   import Icon from '../components/Icon.svelte'
@@ -166,11 +167,11 @@
     {@const id = String(item.article_id ?? '')}
     <a
       class="hit panel"
-      href={id ? `/news/articles/${id}` : undefined}
+      href={id ? articleHref(id) : undefined}
       onclick={(e) => {
         if (!id) return
         e.preventDefault()
-        navigate(`/news/articles/${id}`)
+        navigate(articleHref(id))
       }}
     >
       <span class="hit-icon">
@@ -208,6 +209,13 @@
     align-items: flex-end;
     padding: 20px;
     border-radius: 18px;
+    border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
+    background:
+      linear-gradient(
+        165deg,
+        color-mix(in srgb, var(--accent) 7%, var(--panel)) 0%,
+        var(--panel) 55%
+      );
     box-shadow: 0 6px 16px var(--card-shadow);
   }
   .query-field {
@@ -333,13 +341,16 @@
     border-radius: 16px;
     color: inherit;
     text-decoration: none;
-    box-shadow: 0 1px 0 transparent;
-    transition: box-shadow 0.15s ease, border-color 0.15s ease;
+    transition:
+      box-shadow 0.22s ease,
+      border-color 0.22s ease,
+      transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
   }
   .hit:hover {
     text-decoration: none;
-    border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
     box-shadow: 0 8px 18px var(--card-hover-shadow);
+    transform: translateY(-1px);
   }
   .hit-icon {
     width: 40px;

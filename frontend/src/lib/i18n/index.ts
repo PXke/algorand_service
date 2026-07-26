@@ -1,9 +1,10 @@
-import { writable, derived } from 'svelte/store'
+import { writable, derived, get } from 'svelte/store'
 import en from './locales/en.json'
 
 export type LocaleCode = 'en' | 'es' | 'ar' | 'fa' | 'fr' | 'hi' | 'ps' | 'ru' | 'zh'
 
 const LOCALE_KEY = 'app_locale'
+const RTL = new Set<LocaleCode>(['ar', 'fa', 'ps'])
 
 const catalogs: Record<string, Record<string, string>> = { en: en as Record<string, string> }
 
@@ -56,10 +57,20 @@ export const activeLocale = derived(localePreference, ($p) =>
 
 export const messages = writable<Record<string, string>>(en as Record<string, string>)
 
+/** BCP 47 tag for Date#toLocale* (zh → zh-Hans). */
+export function localeTag(code: LocaleCode = get(activeLocale)): string {
+  if (code === 'zh') return 'zh-Hans'
+  return code
+}
+
+let catalogGeneration = 0
 activeLocale.subscribe((code) => {
-  void loadCatalog(code).then((cat) => messages.set(cat))
+  const gen = ++catalogGeneration
   document.documentElement.lang = code
-  document.documentElement.dir = ['ar', 'fa', 'ps'].includes(code) ? 'rtl' : 'ltr'
+  document.documentElement.dir = RTL.has(code) ? 'rtl' : 'ltr'
+  void loadCatalog(code).then((cat) => {
+    if (gen === catalogGeneration) messages.set(cat)
+  })
 })
 
 localePreference.subscribe((pref) => {

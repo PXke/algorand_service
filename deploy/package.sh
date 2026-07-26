@@ -17,7 +17,7 @@ SKIP_FRONTEND_BUILD="${SKIP_FRONTEND_BUILD:-0}"
 # Precompress .gz/.br on the build machine (parallel); deploy skips remote pass.
 PACKAGE_PRECOMPRESS="${PACKAGE_PRECOMPRESS:-1}"
 PACKAGE_PRECOMPRESS_JOBS="${PACKAGE_PRECOMPRESS_JOBS:-$(nproc 2>/dev/null || echo 4)}"
-PACKAGE_BROTLI_QUALITY="${PACKAGE_BROTLI_QUALITY:-${DEPLOY_BROTLI_QUALITY:-6}}"
+PACKAGE_BROTLI_QUALITY="${PACKAGE_BROTLI_QUALITY:-${DEPLOY_BROTLI_QUALITY:-9}}"
 # xz level for archives only; -9e is ~8× slower than -3 for little extra gain on
 # an already-compressed payload (JS/CSS). CI can override.
 PACKAGE_XZ_LEVEL="${PACKAGE_XZ_LEVEL:-3}"

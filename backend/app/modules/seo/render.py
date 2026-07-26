@@ -14,6 +14,7 @@ import html
 import json
 import re
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 import msgspec
 
@@ -40,6 +41,15 @@ def absolute(path: str) -> str:
     if path.startswith(("http://", "https://")):
         return path
     return f"{site_url()}/{path.lstrip('/')}"
+
+
+def _content_img_src(image_url: str) -> str:
+    """Same-origin image-proxy URL for in-page content (LCP-friendly)."""
+    abs_url = absolute(image_url)
+    if "/api/v1/img?" in abs_url:
+        return abs_url
+    # Relative so the document and LCP image share one connection.
+    return f"/api/v1/img?url={quote(abs_url, safe='')}"
 
 
 def _iso(epoch: int) -> str:
@@ -297,7 +307,7 @@ _SSR_STYLE = (
     "<style>"
     # Paints the paper background under #ssr-body's own gutters too, so there
     # is no flash of default-white margin around the centered column.
-    "html,body{background:#F8F7F4}"
+    "html,body{background:#F2F4F2}"
     + SSR_CHROME_STYLE
     # The loading notice only exists for humans watching the app boot, so it is
     # hidden from the reading flow's start: JS reveals it, and it dies with the
@@ -306,7 +316,7 @@ _SSR_STYLE = (
     # than an apologetic status line, since the content right below it is the
     # real page, not a placeholder.
     + "#ssr-loading{display:none;font:600 11px/1.4 system-ui,sans-serif;"
-    "letter-spacing:.06em;text-transform:uppercase;color:#4F46E5;margin:0 0 18px}"
+    "letter-spacing:.06em;text-transform:uppercase;color:#0E7A72;margin:0 0 18px}"
     "</style>"
 )
 _SSR_LOADING = (
@@ -582,7 +592,11 @@ def render_article(
     # which rendered the hero twice back-to-back at the top of the document).
     img_html = ""
     if article.image_url and not icon_like and _attr(image) not in body_html:
-        img_html = f'<img src="{_attr(image)}" alt="{_attr(article.title)}">'
+        hero_src = image if og_card else _content_img_src(article.image_url)
+        img_html = (
+            f'<img src="{_attr(hero_src)}" alt="{_attr(article.title)}" '
+            f'width="1200" height="630" decoding="async">'
+        )
     source = (
         f'<p>Source: <a href="{_attr(article.source_url)}" rel="noopener nofollow">'
         f"{_attr(article.source_url)}</a></p>"
@@ -669,7 +683,11 @@ def _lead_index(items: list[ArticleFeedItem]) -> int:
 def _lead_html(item: ArticleFeedItem) -> str:
     img = ""
     if item.image_url and not _is_icon_like(absolute(item.image_url)):
-        img = f'<img src="{_attr(absolute(item.image_url))}" alt="{_attr(item.title)}">'
+        src = _attr(_content_img_src(item.image_url))
+        img = (
+            f'<img src="{src}" alt="{_attr(item.title)}" '
+            f'width="680" height="425" fetchpriority="high" decoding="async">'
+        )
     path = _attr(article_path(item.article_id))
     return (
         f'<article class="ssr-lead">'
@@ -782,6 +800,9 @@ def render_front(
             _feed_list_jsonld(items, canonical, f"{settings.site_name} — Front page"),
         ],
     )
+    if lead.image_url and not _is_icon_like(absolute(lead.image_url)):
+        lcp = _attr(_content_img_src(lead.image_url))
+        head = f'{head}\n<link rel="preload" as="image" href="{lcp}" fetchpriority="high">'
     head = f"{head}\n{_ssr_feed_script(items)}"
     body = ssr_container(
         main_html,

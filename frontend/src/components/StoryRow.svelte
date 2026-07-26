@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { ArticleItem } from '../lib/api/news'
-  import { messages, tPlural } from '../lib/i18n'
+  import { messages, t, tPlural, activeLocale, localeTag } from '../lib/i18n'
   import { articleLogoUrl, proxiedImageUrl } from '../lib/images'
+  import { articleHref } from '../lib/paths'
   import { navigate } from '../lib/router'
 
   let {
@@ -13,16 +14,14 @@
     article: ArticleItem
     dense?: boolean
     rank?: number
-    /** Override: force show/hide reads. Default: show when ranked or views present. */
     showReads?: boolean
   } = $props()
 
-  const href = $derived(`/news/articles/${article.article_id}`)
+  const href = $derived(articleHref(article.article_id))
   const views = $derived(typeof article.views === 'number' ? article.views : 0)
   const displayReads = $derived(
     showReads ?? ((rank != null || views > 0) && views > 0),
   )
-  /** Server already dimension-vets image_url — trust it; favicon only if absent. */
   const media = $derived.by(() => {
     const u = article.image_url?.trim()
     if (u) return { src: proxiedImageUrl(u), logo: false }
@@ -34,10 +33,10 @@
   })
   const kicker = $derived.by(() => {
     const kind = article.trigger_kind?.toLowerCase()
-    if (kind === 'chain' || kind === 'onchain') return 'On-chain'
-    if (kind === 'scheduled') return 'Scheduled'
+    if (kind === 'chain' || kind === 'onchain') return t($messages, 'sourceKindOnChain')
+    if (kind === 'scheduled') return t($messages, 'sourceKindScheduled')
     if (article.tags?.[0]) return article.tags[0]
-    return 'News'
+    return t($messages, 'kickerNews')
   })
   const kickerColor = $derived.by(() => {
     const kind = article.trigger_kind?.toLowerCase()
@@ -48,12 +47,13 @@
   const when = $derived.by(() => {
     const epoch = article.published_at_epoch
     if (!epoch) return ''
+    const lang = $activeLocale
     const diff = Date.now() / 1000 - epoch
-    if (diff < 60) return 'just now'
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-    if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}d ago`
-    return new Date(epoch * 1000).toLocaleDateString(undefined, {
+    if (diff < 60) return t($messages, 'timeJustNow')
+    if (diff < 3600) return t($messages, 'timeMinutesAgo', { count: Math.floor(diff / 60) })
+    if (diff < 86400) return t($messages, 'timeHoursAgo', { count: Math.floor(diff / 3600) })
+    if (diff < 86400 * 7) return t($messages, 'timeDaysAgo', { count: Math.floor(diff / 86400) })
+    return new Date(epoch * 1000).toLocaleDateString(localeTag(lang), {
       month: 'short',
       day: 'numeric',
     })
@@ -92,7 +92,10 @@
       <img
         src={media.src}
         alt=""
+        width={dense ? 64 : 88}
+        height={dense ? 64 : 88}
         loading="lazy"
+        decoding="async"
         onerror={(e) => ((e.currentTarget as HTMLImageElement).style.display = 'none')}
       />
     </div>
@@ -118,6 +121,10 @@
   }
   .row:hover .title {
     color: var(--primary);
+  }
+  .row:hover .thumb img {
+    transform: scale(1.06);
+    filter: saturate(1);
   }
   .rank {
     width: 34px;
@@ -158,6 +165,7 @@
     font-size: 18.5px;
     line-height: 1.3;
     letter-spacing: -0.2px;
+    transition: color 0.25s ease;
   }
   .dense .title {
     font-size: 17px;
@@ -183,6 +191,8 @@
     overflow: hidden;
     background: var(--callout);
     flex-shrink: 0;
+    display: grid;
+    place-items: center;
   }
   .dense .thumb {
     width: 64px;
@@ -191,9 +201,10 @@
   .thumb img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
-    object-position: center center;
-    filter: saturate(0.85);
+    object-fit: contain;
+    object-position: center;
+    filter: saturate(0.92);
+    transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1), filter 0.35s ease;
   }
   /* Favicon/fallback: letterbox instead of blowing up a tiny icon. */
   .thumb.logo img {
@@ -202,5 +213,14 @@
     padding: 18%;
     filter: none;
     box-sizing: border-box;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .title,
+    .thumb img {
+      transition: none;
+    }
+    .row:hover .thumb img {
+      transform: none;
+    }
   }
 </style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { messages, t, localePreference, localeOptions } from '../lib/i18n'
+  import { messages, t, localePreference, localeOptions, activeLocale, localeTag } from '../lib/i18n'
   import { themeMode, resolvedTheme, toggleLightDark } from '../lib/theme'
   import { walletAddress, isAdmin, logout } from '../lib/auth/session'
   import { setAnalyticsOptOut } from '../lib/analyticsOptOut'
@@ -128,7 +128,7 @@
   )
 
   const dateline = $derived(
-    new Date().toLocaleDateString(undefined, {
+    new Date().toLocaleDateString(localeTag($activeLocale), {
       weekday: 'long',
       year: 'numeric',
       month: 'long',
@@ -456,13 +456,16 @@
     min-height: 100vh;
     display: flex;
     flex-direction: column;
-    background: var(--surface);
+    background: transparent;
   }
   .masthead {
     position: sticky;
     top: 0;
     z-index: 40;
-    background: var(--app-bar);
+    background: color-mix(in srgb, var(--app-bar) 86%, transparent);
+    backdrop-filter: saturate(1.2) blur(10px);
+    -webkit-backdrop-filter: saturate(1.2) blur(10px);
+    border-top: 3px solid var(--accent);
   }
   .bar {
     height: 64px;
@@ -661,6 +664,25 @@
     border-radius: 14px;
     background: var(--panel);
     box-shadow: 0 12px 32px var(--card-hover-shadow);
+    animation: pop-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: translateY(-6px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .popover {
+      animation: none;
+    }
+    .underline {
+      transition: none;
+    }
   }
   .popover-hint {
     margin: 0;
@@ -775,6 +797,7 @@
     font-weight: 600;
     letter-spacing: 0.3px;
     text-decoration: none;
+    transition: color 0.2s ease;
   }
   .tab:hover {
     color: var(--on-surface);
@@ -788,24 +811,26 @@
     position: absolute;
     left: 50%;
     bottom: 0;
-    width: 0;
+    width: 22px;
     height: 2.5px;
     border-radius: 2px;
     background: var(--primary);
-    transform: translateX(-50%);
-    transition: width 0.2s ease;
+    transform: translateX(-50%) scaleX(0);
+    transform-origin: center;
+    transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
   }
   .tab:hover .underline {
-    width: 12px;
+    transform: translateX(-50%) scaleX(0.55);
   }
   .tab.active .underline {
-    width: 22px;
+    transform: translateX(-50%) scaleX(1);
   }
   .drawer-backdrop {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.35);
     z-index: 50;
+    animation: fade-in 0.2s ease both;
   }
   .drawer {
     position: fixed;
@@ -821,6 +846,32 @@
     overflow: auto;
     background: var(--panel);
     border-inline-end: 1px solid var(--border);
+    box-shadow: 12px 0 40px var(--card-hover-shadow);
+    animation: drawer-in 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes drawer-in {
+    from {
+      opacity: 0.6;
+      transform: translateX(-12px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .drawer-backdrop,
+    .drawer {
+      animation: none;
+    }
   }
   .drawer-header {
     display: flex;

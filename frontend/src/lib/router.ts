@@ -1,5 +1,6 @@
 import { writable, derived } from 'svelte/store'
 import { config } from './config'
+import { withLang } from './paths'
 
 export type RouteMatch = {
   path: string
@@ -15,12 +16,22 @@ function parse(): RouteMatch {
 
 export const route = writable<RouteMatch>(parse())
 
-export function navigate(to: string, replace = false): void {
-  if (replace) history.replaceState({}, '', to)
-  else history.pushState({}, '', to)
+export function navigate(to: string, replace = false, scroll = true): void {
+  const target = withLang(to)
+  if (replace) history.replaceState({}, '', target)
+  else history.pushState({}, '', target)
   route.set(parse())
-  window.scrollTo(0, 0)
+  if (scroll) window.scrollTo(0, 0)
   void trackPageview()
+}
+
+/** Keep `?lang=` aligned with the active content language (no scroll jump). */
+export function syncLangQuery(lang: string): void {
+  const cur = `${window.location.pathname}${window.location.search}`
+  const next = withLang(cur, lang)
+  if (next === cur) return
+  history.replaceState({}, '', next)
+  route.set(parse())
 }
 
 window.addEventListener('popstate', () => {

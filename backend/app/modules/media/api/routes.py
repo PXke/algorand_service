@@ -209,7 +209,7 @@ def register_media_routes(app: Robyn) -> None:
                 status_code=200,
                 headers={
                     "Content-Type": ctype,
-                    "Cache-Control": "public, max-age=604800",
+                    "Cache-Control": "public, max-age=2592000",
                     "X-Cache": "HIT",
                 },
                 description=data,
@@ -241,7 +241,7 @@ def register_media_routes(app: Robyn) -> None:
             status_code=200,
             headers={
                 "Content-Type": ctype,
-                "Cache-Control": "public, max-age=604800",
+                "Cache-Control": "public, max-age=2592000",
                 "X-Cache": "MISS",
             },
             description=data,

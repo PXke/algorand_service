@@ -1,32 +1,33 @@
 :root,
 [data-theme='light'] {
-  --seed: #4f46e5;
-  --accent: #4f46e5;
-  --primary: #4338ca;
-  --surface: #f8f7f4;
-  --on-surface: #13161c;
-  --body: #2c3340;
-  --md-ink: #1f242d;
-  --muted: #5c6573;
-  --subtle: #67707c;
-  --border: #dadde4;
-  --panel: #ffffff;
-  --callout: #efedfc;
-  --accent-soft: #edebfe;
-  --hero-start: #171238;
-  --hero-end: #4338ca;
-  --app-bar: #ffffff;
+  /* Ink & tide — cool mineral paper + deep teal (not indigo / cream). */
+  --seed: #0e7a72;
+  --accent: #0e7a72;
+  --primary: #0a5f59;
+  --surface: #f2f4f2;
+  --on-surface: #121816;
+  --body: #2a3330;
+  --md-ink: #1a221f;
+  --muted: #5a6662;
+  --subtle: #6b7571;
+  --border: #d5dbd7;
+  --panel: #fafbfa;
+  --callout: #e6f1ef;
+  --accent-soft: #e6f1ef;
+  --hero-start: #0a2422;
+  --hero-end: #0e7a72;
+  --app-bar: #fafbfa;
   --danger: #b42318;
   --gain: #0e7c50;
   --loss: #c0392b;
   --chain: #0e7c70;
-  --scheduled: #6b46c1;
-  --card-shadow: rgba(16, 24, 40, 0.06);
-  --card-hover-shadow: rgba(16, 24, 40, 0.14);
+  --scheduled: #5b6b4a;
+  --card-shadow: rgba(12, 28, 24, 0.06);
+  --card-hover-shadow: rgba(12, 28, 24, 0.14);
   --radius-card: 16px;
   --radius-control: 12px;
   --radius-thumb: 8px;
-  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-sans: 'Source Sans 3', system-ui, sans-serif;
   --font-display: 'Source Serif 4', Georgia, 'Times New Roman', serif;
   --max-content: 880px;
   --max-reading: 660px;
@@ -34,27 +35,27 @@
 }
 
 [data-theme='dark'] {
-  --seed: #9aa0c8;
-  --accent: #9aa0c8;
-  --primary: #9aa0c8;
-  --surface: #0e121a;
-  --on-surface: #eaeef4;
-  --body: #cdd4de;
-  --md-ink: #e6eaf1;
-  --muted: #9aa3b2;
-  --subtle: #7e8899;
-  --border: #272f3d;
-  --panel: #161b24;
-  --callout: #1c2030;
-  --accent-soft: #20242e;
-  --hero-start: #1b2030;
-  --hero-end: #2e3550;
-  --app-bar: #12161f;
+  --seed: #4aafa6;
+  --accent: #4aafa6;
+  --primary: #5fbbb4;
+  --surface: #0c1211;
+  --on-surface: #e8eeec;
+  --body: #c5d0cc;
+  --md-ink: #e2eae7;
+  --muted: #8a9692;
+  --subtle: #6f7b77;
+  --border: #24302d;
+  --panel: #141c1a;
+  --callout: #1a2624;
+  --accent-soft: #1a2624;
+  --hero-start: #0a1a18;
+  --hero-end: #1a4a45;
+  --app-bar: #101816;
   --danger: #f97066;
   --gain: #7fc0a8;
   --loss: #f97066;
   --chain: #7fc0b8;
-  --scheduled: #a99bcb;
+  --scheduled: #a3b58e;
   --card-shadow: rgba(0, 0, 0, 0.2);
   --card-hover-shadow: rgba(0, 0, 0, 0.35);
   color-scheme: dark;
@@ -70,13 +71,62 @@ html,
 body {
   margin: 0;
   min-height: 100%;
-  background: var(--surface);
+  background-color: var(--surface);
+  /* Atmosphere: soft tide wash at the top + paper grain. */
+  background-image:
+    radial-gradient(
+      ellipse 110% 70% at 50% -18%,
+      color-mix(in srgb, var(--accent) 9%, transparent),
+      transparent 58%
+    ),
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent) 4%, var(--surface)) 0%,
+      var(--surface) 32%
+    ),
+    url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+  background-blend-mode: normal, normal, multiply;
+  background-attachment: fixed, fixed, fixed;
   color: var(--on-surface);
   font-family: var(--font-sans);
   font-size: 16px;
   font-weight: 400;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+}
+
+@supports not (background-blend-mode: multiply) {
+  html,
+  body {
+    background-image:
+      radial-gradient(
+        ellipse 110% 70% at 50% -18%,
+        color-mix(in srgb, var(--accent) 9%, transparent),
+        transparent 58%
+      ),
+      linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--accent) 4%, var(--surface)) 0%,
+        var(--surface) 32%
+      );
+  }
+}
+
+html[data-theme='dark'],
+html[data-theme='dark'] body {
+  background-blend-mode: normal, normal, soft-light;
+  background-image:
+    radial-gradient(
+      ellipse 110% 70% at 50% -18%,
+      color-mix(in srgb, var(--accent) 14%, transparent),
+      transparent 58%
+    ),
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent) 7%, var(--surface)) 0%,
+      var(--surface) 36%
+    ),
+    url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
 }
 
 a {
@@ -146,6 +196,23 @@ h3 {
   background: transparent;
 }
 
+/* Keyboard focus — mouse clicks stay quiet; tab/keyboard get a clear ring. */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+a:focus-visible {
+  border-radius: 4px;
+}
+.btn:focus-visible,
+.icon-btn:focus-visible,
+button:focus-visible {
+  outline-offset: 3px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -196,6 +263,18 @@ h3 {
   max-width: var(--max-content);
   margin: 0 auto;
   padding: 28px 32px 48px;
+  animation: page-enter 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 @media (max-width: 519px) {
@@ -208,11 +287,51 @@ h3 {
   max-width: var(--max-reading);
 }
 
+/* Presence: SPA shell rises in after SSR handoff (see main.ts spa-revealed). */
+@keyframes spa-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes slug-draw {
+  from {
+    transform: scaleX(0);
+    opacity: 0;
+  }
+  to {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+
+@keyframes rule-draw {
+  from {
+    transform: scaleX(0);
+    opacity: 0.35;
+  }
+  to {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+
+#app.spa-revealed {
+  animation: spa-enter 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 .accent-slug {
   width: 34px;
   height: 3px;
   background: var(--accent);
   border-radius: 1px;
+  transform-origin: left center;
+  animation: slug-draw 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .kicker {
@@ -246,6 +365,8 @@ h3 {
   height: 1px;
   background: var(--border);
   border: 0;
+  transform-origin: left center;
+  animation: rule-draw 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.08s both;
 }
 
 .hairline {
@@ -268,3 +389,13 @@ h3 {
     padding-inline-end: 20px;
   }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  #app.spa-revealed,
+  .accent-slug,
+  .section-rule .rule,
+  .page {
+    animation: none;
+  }
+}
+

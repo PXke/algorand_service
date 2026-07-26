@@ -3,15 +3,6 @@
   import { route, matchPath, navigate } from './lib/router'
   import { config } from './lib/config'
   import Home from './routes/Home.svelte'
-  import News from './routes/News.svelte'
-  import Article from './routes/Article.svelte'
-  import Hot from './routes/Hot.svelte'
-  import Topics from './routes/Topics.svelte'
-  import Topic from './routes/Topic.svelte'
-  import Search from './routes/Search.svelte'
-  import About from './routes/About.svelte'
-  import Contact from './routes/Contact.svelte'
-  import Suggestions from './routes/Suggestions.svelte'
   import NotFound from './routes/NotFound.svelte'
   import type { Component } from 'svelte'
 
@@ -37,6 +28,33 @@
     | { name: 'suggestions' }
     | { name: 'admin' }
     | { name: 'notfound' }
+
+  type LazyName =
+    | 'news'
+    | 'article'
+    | 'hot'
+    | 'topics'
+    | 'topic'
+    | 'search'
+    | 'about'
+    | 'contact'
+    | 'suggestions'
+    | 'admin'
+
+  const loaders: Record<LazyName, () => Promise<{ default: Component<any> }>> = {
+    news: () => import('./routes/News.svelte'),
+    article: () => import('./routes/Article.svelte'),
+    hot: () => import('./routes/Hot.svelte'),
+    topics: () => import('./routes/Topics.svelte'),
+    topic: () => import('./routes/Topic.svelte'),
+    search: () => import('./routes/Search.svelte'),
+    about: () => import('./routes/About.svelte'),
+    contact: () => import('./routes/Contact.svelte'),
+    suggestions: () => import('./routes/Suggestions.svelte'),
+    admin: () => import('./routes/admin/AdminHub.svelte'),
+  }
+
+  let lazy = $state<Partial<Record<LazyName, Component<any>>>>({})
 
   const view = $derived.by((): View => {
     const path = $route.path
@@ -72,51 +90,78 @@
     return { name: 'notfound' }
   })
 
-  let AdminHub = $state<Component | null>(null)
+  async function reloadOnceForStaleChunk(): Promise<void> {
+    // After a deploy, an open tab (or SW precache) may still hold an old
+    // entrypoint that points at deleted hashed chunks. Drop the SW + caches
+    // so the reload fetches a fresh index instead of looping on the stale one.
+    try {
+      const key = 'pxke-chunk-reload'
+      if (sessionStorage.getItem(key)) return
+      sessionStorage.setItem(key, '1')
+    } catch {
+      /* ignore */
+    }
+    try {
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations()
+        await Promise.all(regs.map((r) => r.unregister()))
+      }
+      if ('caches' in window) {
+        const keys = await caches.keys()
+        await Promise.all(keys.map((k) => caches.delete(k)))
+      }
+    } catch {
+      /* ignore */
+    }
+    window.location.reload()
+  }
 
   $effect(() => {
-    if (view.name === 'admin' && !AdminHub) {
-      void import('./routes/admin/AdminHub.svelte').then((m) => {
-        AdminHub = m.default
+    const name = view.name
+    if (name === 'home' || name === 'notfound') return
+    const key = name as LazyName
+    if (lazy[key] || !loaders[key]) return
+    void loaders[key]()
+      .then((m) => {
+        lazy = { ...lazy, [key]: m.default }
+        try {
+          sessionStorage.removeItem('pxke-chunk-reload')
+        } catch {
+          /* ignore */
+        }
       })
-    }
+      .catch(() => {
+        void reloadOnceForStaleChunk()
+      })
   })
 </script>
 
 <AppShell>
   {#if view.name === 'home'}
     <Home />
-  {:else if view.name === 'news'}
-    <News />
-  {:else if view.name === 'article'}
-    {#key view.id}
-      <Article articleId={view.id} />
-    {/key}
-  {:else if view.name === 'hot'}
-    {#key view.rank}
-      <Hot rank={view.rank} />
-    {/key}
-  {:else if view.name === 'topics'}
-    <Topics />
-  {:else if view.name === 'topic'}
-    {#key view.tag}
-      <Topic tag={view.tag} />
-    {/key}
-  {:else if view.name === 'search'}
-    <Search />
-  {:else if view.name === 'about'}
-    <About />
-  {:else if view.name === 'contact'}
-    <Contact />
-  {:else if view.name === 'suggestions'}
-    <Suggestions />
-  {:else if view.name === 'admin'}
-    {#if AdminHub}
-      <AdminHub />
+  {:else if view.name === 'notfound'}
+    <NotFound />
+  {:else if lazy[view.name]}
+    {#if view.name === 'article'}
+      {#key view.id}
+        {@const C = lazy.article!}
+        <C articleId={view.id} />
+      {/key}
+    {:else if view.name === 'hot'}
+      {#key view.rank}
+        {@const C = lazy.hot!}
+        <C rank={view.rank} />
+      {/key}
+    {:else if view.name === 'topic'}
+      {#key view.tag}
+        {@const C = lazy.topic!}
+        <C tag={view.tag} />
+      {/key}
     {:else}
-      <div class="page"><p class="muted">Loading admin…</p></div>
+      {@const C = lazy[view.name]!}
+      <C />
     {/if}
   {:else}
-    <NotFound />
+    <div class="page"><p class="muted">Loading…</p></div>
   {/if}
 </AppShell>

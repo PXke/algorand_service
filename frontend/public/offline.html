@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0A5F59" />
+    <title>Offline · PXke Algorand</title>
+    <link rel="icon" href="/favicon.svg" />
+    <style>
+      :root {
+        --surface: #f2f4f2;
+        --on-surface: #121816;
+        --muted: #5a6662;
+        --primary: #0a5f59;
+        --accent: #0e7a72;
+        --panel: #fafbfa;
+        --border: #d5dbd7;
+        --font-sans: 'Source Sans 3', system-ui, sans-serif;
+        --font-display: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background:
+          radial-gradient(
+            ellipse 110% 70% at 50% -18%,
+            color-mix(in srgb, var(--accent) 9%, transparent),
+            transparent 58%
+          ),
+          var(--surface);
+        color: var(--on-surface);
+        font-family: var(--font-sans);
+        line-height: 1.55;
+      }
+      main {
+        max-width: 28rem;
+        margin: 0 auto;
+        padding: 18vh 28px 48px;
+        text-align: start;
+      }
+      .mark {
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(145deg, #0a2422, var(--accent));
+        color: #fff;
+        font-family: var(--font-display);
+        font-weight: 700;
+        font-size: 22px;
+        margin-bottom: 20px;
+      }
+      h1 {
+        margin: 0 0 10px;
+        font-family: var(--font-display);
+        font-size: clamp(28px, 5vw, 34px);
+        line-height: 1.15;
+        letter-spacing: -0.4px;
+      }
+      p {
+        margin: 0 0 24px;
+        color: var(--muted);
+        font-size: 1.05rem;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 42px;
+        padding: 0 16px;
+        border-radius: 12px;
+        font-weight: 700;
+        font-size: 0.95rem;
+        text-decoration: none;
+      }
+      .primary {
+        background: var(--primary);
+        color: #fff;
+      }
+      .ghost {
+        background: var(--panel);
+        color: var(--on-surface);
+        border: 1px solid var(--border);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark" aria-hidden="true">A</div>
+      <h1>You're offline</h1>
+      <p>
+        This page isn't cached yet. Reconnect to keep reading PXke Algorand, or open the
+        cached home if you've visited before.
+      </p>
+      <div class="actions">
+        <a class="primary" href="/" onclick="location.reload(); return false">Try again</a>
+        <a class="ghost" href="/">Cached home</a>
+      </div>
+    </main>
+  </body>
+</html>

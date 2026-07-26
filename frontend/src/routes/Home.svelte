@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { get } from 'svelte/store'
   import { newsApi, type ArticleItem } from '../lib/api/news'
   import { messages, t, activeLocale } from '../lib/i18n'
   import { navigate } from '../lib/router'
@@ -7,46 +7,100 @@
   import StoryRow from '../components/StoryRow.svelte'
   import SectionRule from '../components/SectionRule.svelte'
   import ByTheNumbers from '../components/ByTheNumbers.svelte'
+  import ContinueReading from '../components/ContinueReading.svelte'
   import PageMeta from '../components/PageMeta.svelte'
+  import FeedSkeleton from '../components/FeedSkeleton.svelte'
   import { ApiException } from '../lib/api/client'
   import { SITE_NAME, SITE_TAGLINE, ogLocaleFor } from '../lib/seo'
+  import { proxiedImageUrl } from '../lib/images'
+  import { takeSsrFeed } from '../lib/ssrFeed'
 
-  let items: ArticleItem[] = $state([])
+  function seedFromSsr(): ArticleItem[] {
+    const data = takeSsrFeed<{ items?: ArticleItem[] }>()
+    // SSR homepage feed is English-only — skip seed for other locales.
+    if (get(activeLocale) !== 'en') return []
+    const items = data?.items
+    return Array.isArray(items) ? items : []
+  }
+
+  const seeded = seedFromSsr()
+  let items: ArticleItem[] = $state(seeded)
   let hot: ArticleItem[] = $state([])
   let price = $state<Record<string, unknown> | null>(null)
   let history: Array<{ epoch: number; price: number }> = $state([])
   let error = $state<string | null>(null)
-  let loading = $state(true)
+  let loading = $state(seeded.length === 0)
+  let marketsLoaded = $state(false)
 
   const lead = $derived(items[0])
   const secondary = $derived(items.slice(1, 5))
   const more = $derived(items.slice(5, 18))
 
-  onMount(() => {
+  $effect(() => {
+    const raw = lead?.image_url?.trim()
+    if (!raw) return
+    const href = proxiedImageUrl(raw)
+    if (!href || document.querySelector(`link[rel="preload"][as="image"][href="${href.replace(/"/g, '')}"]`))
+      return
+    const link = document.createElement('link')
+    link.rel = 'preload'
+    link.as = 'image'
+    link.href = href
+    link.dataset.lcp = href
+    document.head.appendChild(link)
+  })
+
+  // Re-fetch feed/hot whenever the active language changes.
+  $effect(() => {
+    const lang = $activeLocale
+    let cancelled = false
+    loading = items.length === 0
+    error = null
     void (async () => {
       try {
-        const feed = await newsApi.fetchFeedPage({ limit: 30, lang: $activeLocale })
+        const feed = await newsApi.fetchFeedPage({ limit: 30, lang })
+        if (cancelled) return
         items = feed.items
         loading = false
-        const [hotItems, priceRes, histRes] = await Promise.all([
-          newsApi.fetchHot(6, 'hot', $activeLocale).catch(() => []),
-          newsApi.fetchPrice().catch(() => null),
-          newsApi.fetchPriceHistory().catch(() => null),
-        ])
+        const hotItems = await newsApi.fetchHot(6, 'hot', lang).catch(() => [])
+        if (cancelled) return
         hot = hotItems
-        if (priceRes?.available) price = priceRes
-        const pts = Array.isArray(histRes?.points) ? histRes.points : []
-        history = pts
-          .map((p: Record<string, unknown>) => ({
-            epoch: Number(p.epoch ?? 0),
-            price: Number(p.price_usd ?? 0),
-          }))
-          .filter((p: { epoch: number; price: number }) => p.epoch > 0 && p.price > 0)
       } catch (e) {
-        error = e instanceof ApiException ? e.userMessage : t($messages, 'errorGeneric')
+        if (cancelled) return
+        if (!items.length) {
+          error = e instanceof ApiException ? e.userMessage : t($messages, 'errorGeneric')
+        }
         loading = false
       }
     })()
+    return () => {
+      cancelled = true
+    }
+  })
+
+  // Markets data is language-agnostic — load once.
+  $effect(() => {
+    if (marketsLoaded) return
+    let cancelled = false
+    void (async () => {
+      const [priceRes, histRes] = await Promise.all([
+        newsApi.fetchPrice().catch(() => null),
+        newsApi.fetchPriceHistory().catch(() => null),
+      ])
+      if (cancelled) return
+      marketsLoaded = true
+      if (priceRes?.available) price = priceRes
+      const pts = Array.isArray(histRes?.points) ? histRes.points : []
+      history = pts
+        .map((p: Record<string, unknown>) => ({
+          epoch: Number(p.epoch ?? 0),
+          price: Number(p.price_usd ?? 0),
+        }))
+        .filter((p: { epoch: number; price: number }) => p.epoch > 0 && p.price > 0)
+    })()
+    return () => {
+      cancelled = true
+    }
   })
 </script>
 
@@ -58,12 +112,24 @@
 />
 
 <div class="page stack front">
+  <ContinueReading />
   {#if loading}
-    <p class="muted">{t($messages, 'loading')}</p>
+    <FeedSkeleton lead rows={6} />
   {:else if error}
     <p class="err">{error}</p>
   {:else if !lead}
-    <p class="muted">{t($messages, 'newsEmptyTitle')}</p>
+    <div class="empty">
+      <h2>{t($messages, 'newsEmptyTitle')}</h2>
+      <p class="muted">{t($messages, 'newsEmptyMessage')}</p>
+      <div class="empty-actions">
+        <button class="btn btn-primary" type="button" onclick={() => navigate('/topics')}>
+          {t($messages, 'emptyBrowseTopics')}
+        </button>
+        <button class="btn" type="button" onclick={() => navigate('/news')}>
+          {t($messages, 'emptyBrowseLatest')}
+        </button>
+      </div>
+    </div>
   {:else}
     <LeadStory article={lead} />
 
@@ -110,6 +176,12 @@
   .more {
     align-self: flex-start;
     margin-top: 8px;
+  }
+  .empty-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 16px;
   }
   .err {
     color: var(--danger);

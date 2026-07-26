@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { messages, t } from '../lib/i18n'
+  import { messages, t, localeTag, activeLocale } from '../lib/i18n'
 
   let {
     price,
@@ -39,6 +39,29 @@
     ].filter((x): x is { label: string; value: string } => x != null),
   )
 
+  type Pt = { x: number; y: number; price: number; epoch: number }
+
+  /** Smooth cubic path through points (Catmull-Rom → Bezier). */
+  function smoothPath(pts: Pt[]): string {
+    if (pts.length < 2) return ''
+    if (pts.length === 2) {
+      return `M ${pts[0].x} ${pts[0].y} L ${pts[1].x} ${pts[1].y}`
+    }
+    let d = `M ${pts[0].x.toFixed(2)} ${pts[0].y.toFixed(2)}`
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i === 0 ? 0 : i - 1]
+      const p1 = pts[i]
+      const p2 = pts[i + 1]
+      const p3 = pts[i + 2] ?? p2
+      const cp1x = p1.x + (p2.x - p0.x) / 6
+      const cp1y = p1.y + (p2.y - p0.y) / 6
+      const cp2x = p2.x - (p3.x - p1.x) / 6
+      const cp2y = p2.y - (p3.y - p1.y) / 6
+      d += ` C ${cp1x.toFixed(2)} ${cp1y.toFixed(2)}, ${cp2x.toFixed(2)} ${cp2y.toFixed(2)}, ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`
+    }
+    return d
+  }
+
   const spark = $derived.by(() => {
     if (history.length < 2) return null
     const minEpoch = history[0].epoch
@@ -51,33 +74,103 @@
     }
     const epochSpan = maxEpoch - minEpoch > 0 ? maxEpoch - minEpoch : 1
     const priceSpan = Math.abs(maxPrice - minPrice) < 1e-12 ? 1 : maxPrice - minPrice
-    const w = 100
-    const h = 44
-    const pts = history.map((p) => {
+    const w = 320
+    const h = 72
+    const padY = 6
+    const pts: Pt[] = history.map((p) => {
       const x = ((p.epoch - minEpoch) / epochSpan) * w
-      const y = h * 0.92 - ((p.price - minPrice) / priceSpan) * h * 0.84
-      return `${x.toFixed(2)},${y.toFixed(2)}`
+      const y = h - padY - ((p.price - minPrice) / priceSpan) * (h - padY * 2)
+      return { x, y, price: p.price, epoch: p.epoch }
     })
-    const line = pts.join(' ')
-    const first = pts[0]
+    const line = smoothPath(pts)
     const last = pts[pts.length - 1]
-    const fill = `${first} ${line} ${last.split(',')[0]},${h} 0,${h}`
-    return { line, fill, w, h }
+    const first = pts[0]
+    const area = `${line} L ${last.x.toFixed(2)} ${h} L ${first.x.toFixed(2)} ${h} Z`
+    return {
+      line,
+      area,
+      w,
+      h,
+      pts,
+      last,
+      minPrice,
+      maxPrice,
+    }
   })
+
+  let tip = $state<{ x: number; y: number; price: number; label: string } | null>(null)
+  let chartEl = $state<SVGSVGElement | null>(null)
+
+  /** Draw the stroke using the real path length so it always finishes full-width. */
+  function drawStroke(node: SVGPathElement) {
+    const reduce =
+      typeof matchMedia === 'function' &&
+      matchMedia('(prefers-reduced-motion: reduce)').matches
+    const len = node.getTotalLength()
+    node.style.strokeDasharray = `${len}`
+    if (reduce) {
+      node.style.strokeDashoffset = '0'
+      return {}
+    }
+    node.style.strokeDashoffset = `${len}`
+    node.style.transition = 'none'
+    // Force layout so the starting offset sticks before we animate.
+    void node.getBoundingClientRect()
+    requestAnimationFrame(() => {
+      node.style.transition = 'stroke-dashoffset 1.05s cubic-bezier(0.22, 1, 0.36, 1)'
+      node.style.strokeDashoffset = '0'
+    })
+    return {
+      destroy() {
+        node.style.transition = ''
+      },
+    }
+  }
+
+  function onMove(e: PointerEvent) {
+    if (!spark || !chartEl) return
+    const rect = chartEl.getBoundingClientRect()
+    const x = ((e.clientX - rect.left) / rect.width) * spark.w
+    let best = spark.pts[0]
+    let bestDist = Math.abs(best.x - x)
+    for (const p of spark.pts) {
+      const d = Math.abs(p.x - x)
+      if (d < bestDist) {
+        best = p
+        bestDist = d
+      }
+    }
+    tip = {
+      x: best.x,
+      y: best.y,
+      price: best.price,
+      label: new Date(best.epoch * 1000).toLocaleDateString(localeTag($activeLocale), {
+        month: 'short',
+        day: 'numeric',
+      }),
+    }
+  }
+
+  function onLeave() {
+    tip = null
+  }
 </script>
 
 {#if priceUsd > 0}
-  <section class="numbers" aria-label="ALGO">
-    <p class="slug">ALGO</p>
+  <section class="numbers" aria-label="ALGO" class:up class:down={!up}>
+    <div class="head">
+      <p class="slug">ALGO</p>
+      {#if change != null}
+        <span class="pill" class:up class:down={!up}>
+          {up ? '▲' : '▼'}
+          {Math.abs(change).toFixed(2)}%
+          <span class="pill-sub">24h</span>
+        </span>
+      {/if}
+    </div>
     <div class="row">
       <div class="spot">
         <span class="price">${priceUsd.toFixed(4)}</span>
-        {#if change != null}
-          <span class="chg" class:up class:down={!up}>
-            {up ? '▲' : '▼'}
-            {Math.abs(change).toFixed(2)}%
-          </span>
-        {/if}
       </div>
       {#if figures.length}
         <div class="side wide-only">
@@ -92,17 +185,51 @@
     </div>
 
     {#if spark}
-      <svg
-        class="spark"
-        viewBox="0 0 {spark.w} {spark.h}"
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={t($messages, 'byTheNumbersRange')}
-      >
-        <polygon points={spark.fill} class="fill" />
-        <polyline points={spark.line} class="line" fill="none" />
-      </svg>
-      <p class="range">{t($messages, 'byTheNumbersRange')}</p>
+      <div class="chart-wrap">
+        <svg
+          bind:this={chartEl}
+          class="spark"
+          viewBox="0 0 {spark.w} {spark.h}"
+          preserveAspectRatio="none"
+          role="img"
+          aria-label={t($messages, 'byTheNumbersRange')}
+          onpointermove={onMove}
+          onpointerleave={onLeave}
+        >
+          <defs>
+            <linearGradient id="algo-fill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" class="g-top" />
+              <stop offset="100%" class="g-bot" />
+            </linearGradient>
+          </defs>
+          <line class="baseline" x1="0" y1={spark.h - 0.5} x2={spark.w} y2={spark.h - 0.5} />
+          <path d={spark.area} class="fill" />
+          <path d={spark.line} class="line" fill="none" use:drawStroke />
+          {#if tip}
+            <line class="cross" x1={tip.x} y1="0" x2={tip.x} y2={spark.h} />
+          {/if}
+        </svg>
+        <span
+          class="mark end"
+          style="left: {(spark.last.x / spark.w) * 100}%; top: {(spark.last.y / spark.h) * 100}%"
+        ></span>
+        {#if tip}
+          <span
+            class="mark tip-dot"
+            style="left: {(tip.x / spark.w) * 100}%; top: {(tip.y / spark.h) * 100}%"
+          ></span>
+          <div class="tip" style="left: {(tip.x / spark.w) * 100}%">
+            <strong>${tip.price.toFixed(4)}</strong>
+            <span>{tip.label}</span>
+          </div>
+        {/if}
+      </div>
+      <div class="range-row">
+        <span class="range">{t($messages, 'byTheNumbersRange')}</span>
+        <span class="minmax muted">
+          ${spark.minPrice.toFixed(4)} – ${spark.maxPrice.toFixed(4)}
+        </span>
+      </div>
     {/if}
 
     {#if figures.length}
@@ -120,9 +247,17 @@
 
 <style>
   .numbers {
-    padding: 20px 0;
-    border-top: 3px solid var(--accent);
+    --tone: var(--accent);
+    --tone-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+    padding: 22px 0 18px;
+    border-top: 3px solid var(--tone);
     border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, var(--tone-soft) 0%, transparent 70%);
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
   .slug {
     margin: 0;
@@ -132,11 +267,38 @@
     text-transform: uppercase;
     color: var(--subtle);
   }
+  .pill {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 5px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+  }
+  .pill.up {
+    color: var(--gain);
+    background: color-mix(in srgb, var(--gain) 12%, transparent);
+  }
+  .pill.down {
+    color: var(--loss);
+    background: color-mix(in srgb, var(--loss) 12%, transparent);
+  }
+  .pill-sub {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    opacity: 0.75;
+  }
   .row {
     display: flex;
     align-items: flex-end;
     gap: 16px;
-    margin-top: 6px;
+    margin-top: 8px;
   }
   .spot {
     display: flex;
@@ -150,17 +312,18 @@
     font-weight: 700;
     line-height: 1;
     letter-spacing: -1px;
+    font-variant-numeric: tabular-nums;
+    animation: price-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
-  .chg {
-    padding-bottom: 4px;
-    font-size: 0.95rem;
-    font-weight: 700;
-  }
-  .chg.up {
-    color: var(--gain);
-  }
-  .chg.down {
-    color: var(--loss);
+  @keyframes price-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
   .side {
     display: flex;
@@ -201,29 +364,142 @@
     font-size: 22px;
     font-weight: 700;
     line-height: 1;
+    font-variant-numeric: tabular-nums;
   }
   .narrow-only .fig-value {
     font-size: 20px;
   }
+  .chart-wrap {
+    position: relative;
+    margin-top: 14px;
+  }
   .spark {
     display: block;
     width: 100%;
-    height: 44px;
-    margin-top: 16px;
+    height: 72px;
+    cursor: crosshair;
+    touch-action: none;
   }
-  .spark .fill {
-    fill: color-mix(in srgb, var(--accent) 10%, transparent);
+  .baseline {
+    stroke: var(--border);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
   }
-  .spark .line {
-    stroke: var(--accent);
-    stroke-width: 1.6;
+  .g-top {
+    stop-color: var(--tone);
+    stop-opacity: 0.28;
+  }
+  .g-bot {
+    stop-color: var(--tone);
+    stop-opacity: 0;
+  }
+  .fill {
+    fill: url(#algo-fill);
+    opacity: 0;
+    animation: fill-in 0.55s ease 0.45s forwards;
+  }
+  .line {
+    stroke: var(--tone);
+    stroke-width: 2.25;
     stroke-linejoin: round;
     stroke-linecap: round;
     vector-effect: non-scaling-stroke;
   }
+  .cross {
+    stroke: color-mix(in srgb, var(--tone) 45%, transparent);
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+  }
+  .mark {
+    position: absolute;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    box-sizing: border-box;
+  }
+  .mark.end {
+    background: var(--panel);
+    border: 2px solid var(--tone);
+    opacity: 0;
+    animation: fill-in 0.35s ease 1s forwards;
+  }
+  .mark.tip-dot {
+    width: 11px;
+    height: 11px;
+    background: var(--tone);
+    border: 2px solid var(--panel);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone) 22%, transparent);
+  }
+  .tip {
+    position: absolute;
+    top: 0;
+    transform: translate(-50%, -110%);
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 6px 9px;
+    border-radius: 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: 0 8px 20px var(--card-shadow);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 2;
+    animation: tip-in 0.15s ease both;
+  }
+  .tip strong {
+    font-size: 13px;
+    color: var(--on-surface);
+  }
+  .tip span {
+    color: var(--subtle);
+  }
+  @keyframes tip-in {
+    from {
+      opacity: 0;
+      transform: translate(-50%, -95%);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, -110%);
+    }
+  }
+  @keyframes fill-in {
+    to {
+      opacity: 1;
+    }
+  }
+  .range-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    margin-top: 8px;
+  }
   .range {
-    margin: 6px 0 0;
     font-size: 10.5px;
     color: var(--subtle);
+  }
+  .minmax {
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .price,
+    .fill,
+    .mark.end,
+    .tip {
+      animation: none;
+    }
+    .fill,
+    .mark.end {
+      opacity: 1;
+    }
   }
 </style>

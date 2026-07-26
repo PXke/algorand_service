@@ -16,9 +16,12 @@ export function looksLikeLogoUrl(url: string): boolean {
 
 export function proxiedImageUrl(url: string): string {
   if (!url || !url.startsWith('http')) return url
+  // Same-origin proxy (site nginx + Vite dev both expose /api → backend).
+  // Prefer relative URLs so LCP images share the document's connection.
   const base = config.apiBaseUrl
-  if (!base || url.startsWith(base)) return url
-  return `${base}/api/v1/img?url=${encodeURIComponent(url)}`
+  if (base && url.startsWith(base)) return url
+  if (url.includes('/api/v1/img?')) return url
+  return `/api/v1/img?url=${encodeURIComponent(url)}`
 }
 
 export function faviconUrl(sourceUrl?: string | null): string | null {

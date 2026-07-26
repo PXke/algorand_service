@@ -43,7 +43,8 @@
         keywords: keywords
           .split(',')
           .map((s) => s.trim())
-          .filter(Boolean),
+          .filter(Boolean)
+          .join(', '),
         status: 'active',
         refresh_every_days: refreshDays,
       })
