@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import ipaddress
 import socket
+from functools import lru_cache
 from typing import TYPE_CHECKING
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -14,6 +15,7 @@ from robyn import Request, Response, Robyn
 
 if TYPE_CHECKING:
     import redis
+    import redis.asyncio
 
 # Same-origin image proxy. Flutter web (CanvasKit) renders Image.network by
 # FETCHING the image via XHR, which needs CORS headers most external hosts
@@ -63,12 +65,18 @@ def _redis() -> redis.Redis:
     return redis.from_url(settings.redis_url, decode_responses=False)
 
 
-def _cache_get(url: str) -> tuple[str, bytes] | None:
-    r"""Return (content_type, data) from Redis, or None. Packed as ctype\\0data."""
-    try:
-        raw = _redis().get(_cache_key(url))
-    except Exception:
-        return None
+@lru_cache(maxsize=1)
+def _async_redis() -> redis.asyncio.Redis:
+    """Awaitable Redis for the cache-HIT path (see _cache_get_await)."""
+    import redis.asyncio
+
+    from app.core.config import settings
+
+    return redis.asyncio.from_url(settings.redis_url, decode_responses=False)
+
+
+def _unpack_cached(raw: bytes | None) -> tuple[str, bytes] | None:
+    r"""Split a cached ctype\\0data blob, or None if absent/malformed."""
     if not raw:
         return None
     sep = raw.find(b"\0")
@@ -77,7 +85,25 @@ def _cache_get(url: str) -> tuple[str, bytes] | None:
     return raw[:sep].decode("latin-1"), raw[sep + 1 :]
 
 
+async def _cache_get_await(url: str) -> tuple[str, bytes] | None:
+    r"""Return (content_type, data) from Redis, or None. Packed as ctype\\0data.
+
+    Awaits rather than blocks: this is the HIT path, which serves most requests,
+    and since the SSR hero images are proxied through here it sits on the LCP
+    path for every page view. A blocking GET here would stall the whole event
+    loop -- the expensive MISS path was already kept off it via to_thread, so
+    only the cheap common case was still on it.
+    """
+    try:
+        raw = await _async_redis().get(_cache_key(url))
+    except Exception:
+        return None
+    return _unpack_cached(raw)
+
+
 def _cache_set(url: str, ctype: str, data: bytes) -> None:
+    # Stays blocking on purpose: only called from _fetch_and_optimize, which
+    # already runs in a worker thread via to_thread, so it is off the loop.
     with contextlib.suppress(Exception):
         _redis().set(_cache_key(url), ctype.encode("latin-1") + b"\0" + data, ex=_CACHE_TTL)
 
@@ -203,7 +229,7 @@ def register_media_routes(app: Robyn) -> None:
         if parsed.scheme not in _ALLOWED_SCHEMES or not parsed.netloc:
             return Response(status_code=400, headers={}, description="bad url")
 
-        cached = _cache_get(url)
+        cached = await _cache_get_await(url)
         if cached is not None:
             ctype, data = cached
             return Response(
