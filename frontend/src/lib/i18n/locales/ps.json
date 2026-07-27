@@ -23,7 +23,6 @@
   "homeNewsDescription": "د مقالو غوره شوی فیډ چې کله monitored سرچینې یا د زنځیرې پیښې بدلېږي خپروي.",
   "homeSourcesDescription": "ثبت شوي Discord، Reddit او ویب کرالرونه چې د خبرونو پایپلاین ځواکمنوي.",
   "homeSuggestionsDescription": "د بټۍ تایید سره د ټولنې نظرونه وسپارئ او مثبت رای ورکړئ.",
-  "homeSearchDescription": "په خپور شویو مقالو کې بشپړ متن لټون.",
   "homeOpenProduct": "خلاصول",
   "themeLight": "روښانه",
   "themeDark": "تیاره",
@@ -41,6 +40,7 @@
   "localeDari": "دری",
   "localePashto": "پښتو",
   "navLanguage": "ژبه",
+  "skipToContent": "محتوا ته ورشئ",
   "walletConnected": "وصل شوی",
   "walletDisconnect": "قطع کول",
   "walletSignInTitle": "د بټۍ له لارې ننوتل",
@@ -64,6 +64,8 @@
   "walletRetry": "بیا هڅه",
   "walletShowQr": "QR کوډ ښودل",
   "walletMobileHint": "لاندې تڼۍ ووهئ ترڅو Algorand بټۍ خلاصه شي، اتصال تایید کړئ او بیا دلته راشئ.",
+  "walletMobileFallbackHint": "If Pera opened but nothing happened: Copy URI, then open Pera and add the WalletConnect session from QR or paste.",
+  "walletOpenPeraOnly": "Open Pera app",
   "walletSignExplainer": "ستاسو بټۍ به له تاسو څخه د ننوتلو پیغام لاسلیک وغواړي (زاړه بټۍ پرځای 0-ALGO معامله ښیي). لاسلیک وړیا دی او هیڅ څه شبکې ته نه لیږل کیږي — یوازې د آدرس مالکیت ثابتوي.",
   "newsFeedTitle": "وروستي مقالې",
   "newsSubtitleDefault": "on-chain تریګرونه او کرال شوي سرچینې کله چې مینځپانګه بدلېږي دلته خپروي.",
@@ -302,5 +304,6 @@
   "walletPasteSignature": "Paste signature (base64)",
   "walletComplete": "Complete sign-in",
   "walletAddressLabel": "Wallet address",
-  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below."
+  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below.",
+  "walletOpenHttps": "Open Pera link"
 }

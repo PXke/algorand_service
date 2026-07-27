@@ -23,6 +23,21 @@
       if (!url || looksLikeLogoUrl(url)) return ''
       return baseImage({ href: proxiedImageUrl(url), title, text })
     }
+    /* Mark the opening paragraph at parse time. Doing it after render meant
+       the lede's font-size landed a frame late — a layout shift on every
+       article. Image-only and empty paragraphs are skipped, so a body that
+       opens with lead art still tags the first real prose. */
+    let ledeSeen = false
+    const baseParagraph = renderer.paragraph.bind(renderer)
+    renderer.paragraph = (token) => {
+      const out = baseParagraph(token)
+      if (ledeSeen) return out
+      const bare = out.replace(/<[^>]*>/g, '').trim()
+      if (!bare || /<img\b/i.test(out)) return out
+      ledeSeen = true
+      return out.replace('<p>', '<p class="lede">')
+    }
+
     const baseLink = renderer.link.bind(renderer)
     renderer.link = ({ href, title, tokens }) => {
       const out = baseLink({ href, title, tokens })
@@ -40,6 +55,7 @@
       renderer,
     }) as string
   })
+
 </script>
 
 {#if html}
@@ -71,6 +87,14 @@
     margin-bottom: 0;
   }
 
+  /* Lede — marked in JS above, since the opening paragraph may sit after a
+     lead image, a heading, or both. */
+  .md :global(> p.lede) {
+    font-size: 1.1em;
+    line-height: 1.62;
+    color: var(--on-surface);
+  }
+
   .md :global(h1),
   .md :global(h2),
   .md :global(h3) {
@@ -80,19 +104,41 @@
     line-height: 1.25;
   }
   .md :global(h1) {
-    font-size: 30px;
+    font-size: 26px;
     letter-spacing: -0.5px;
     margin: 12px 0 16px;
   }
+  /* h2 carries a hairline above it so section breaks register while
+     scanning — previously h2 and body were nearly the same weight. */
   .md :global(h2) {
-    font-size: 24px;
+    font-size: 23px;
     letter-spacing: -0.4px;
-    margin: 34px 0 12px;
+    margin: 38px 0 14px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
+  }
+  .md :global(h2:first-child) {
+    padding-top: 0;
+    border-top: 0;
   }
   .md :global(h3) {
-    font-size: 20px;
+    font-size: 18px;
     letter-spacing: -0.3px;
-    margin: 26px 0 10px;
+    margin: 22px 0 10px;
+  }
+  @media (min-width: 520px) {
+    .md :global(h1) {
+      font-size: 30px;
+      margin: 12px 0 16px;
+    }
+    .md :global(h2) {
+      font-size: 27px;
+      margin: 44px 0 14px;
+    }
+    .md :global(h3) {
+      font-size: 20px;
+      margin: 26px 0 10px;
+    }
   }
   .md :global(h4) {
     font-family: var(--font-sans);
@@ -129,16 +175,26 @@
     text-decoration-color: var(--accent);
   }
 
+  /* Pull quote, not a tinted callout box: display serif at reading scale,
+     set off by a heavy tone rule and air. Quotes are the one place the body
+     column is allowed to change voice. */
   .md :global(blockquote) {
-    margin: 0 0 18px;
-    padding: 10px 14px 10px 18px;
-    border-inline-start: 3px solid var(--accent);
-    border-radius: 0 10px 10px 0;
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
-    font-style: italic;
-    font-size: 17px;
-    line-height: 1.7;
-    color: var(--muted);
+    margin: 26px 0;
+    padding: 2px 0 2px 22px;
+    border-inline-start: 4px solid var(--tone, var(--accent));
+    border-radius: 0;
+    background: transparent;
+    font-family: var(--font-display);
+    font-style: normal;
+    font-size: 1.22em;
+    line-height: 1.45;
+    letter-spacing: -0.2px;
+    color: var(--on-surface);
+  }
+  @media (min-width: 700px) {
+    .md :global(blockquote) {
+      margin-inline: -22px 0;
+    }
   }
   .md :global(blockquote p) {
     margin-bottom: 10px;
@@ -184,6 +240,25 @@
     background: var(--callout);
   }
 
+  /* Lead art: the first image gets to breathe past the reading measure
+     instead of sitting letterboxed inside it. */
+  @media (min-width: 900px) {
+    .md :global(> p:first-child > img:only-child),
+    .md :global(> p:nth-child(2) > img:only-child),
+    .md :global(> img:first-child) {
+      width: calc(100% + 140px);
+      max-width: calc(100% + 140px);
+      margin-inline: -70px;
+      max-height: 420px;
+    }
+  }
+  @media (max-width: 519px) {
+    .md :global(img) {
+      max-height: 280px;
+      border-radius: 8px;
+    }
+  }
+
   .md :global(code) {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 0.86em;
@@ -204,6 +279,8 @@
     border-radius: 10px;
     font-size: 0.88em;
     line-height: 1.55;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
   }
   .md :global(pre code) {
     padding: 0;
@@ -213,33 +290,45 @@
     border-radius: 0;
   }
 
+  /* Data tables: smaller, tabular figures, and allowed to use the full
+     column width rather than wrapping every cell to two lines. */
   .md :global(table) {
-    width: 100%;
+    width: max-content;
+    min-width: 100%;
     border-collapse: collapse;
-    margin: 0 0 22px;
-    font-size: 0.92em;
-    line-height: 1.55;
+    margin: 0 0 24px;
+    font-family: var(--font-sans);
+    font-size: 0.86em;
+    line-height: 1.45;
+    font-variant-numeric: tabular-nums;
     overflow-x: auto;
     display: block;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
   }
   .md :global(thead) {
-    border-bottom: 1px solid var(--border);
+    border-bottom: 2px solid var(--on-surface);
   }
   .md :global(th) {
     text-align: start;
-    font-weight: 700;
-    padding: 10px 12px;
-    color: var(--on-surface);
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+    padding: 8px 14px 8px 0;
+    color: var(--muted);
     white-space: nowrap;
   }
   .md :global(td) {
-    padding: 10px 12px;
+    padding: 9px 14px 9px 0;
     border-top: 1px solid var(--border);
     color: var(--md-ink);
     vertical-align: top;
+    white-space: nowrap;
   }
+  /* Zebra fought the hairlines; rules alone separate rows more cleanly. */
   .md :global(tr:nth-child(even) td) {
-    background: color-mix(in srgb, var(--callout) 55%, transparent);
+    background: transparent;
   }
 
   .md :global(figure) {

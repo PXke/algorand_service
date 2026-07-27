@@ -23,7 +23,6 @@
   "homeNewsDescription": "当受监控的来源或连锁事件发生变化时发布的文章的精选提要。",
   "homeSourcesDescription": "注册了 Discord、Reddit 和网络爬虫，为新闻管道提供动力。",
   "homeSuggestionsDescription": "通过钱包支持的身份验证提交并支持社区想法。",
-  "homeSearchDescription": "对已发表文章进行全文搜索。",
   "homeOpenProduct": "打开",
   "themeLight": "光",
   "themeDark": "黑暗的",
@@ -41,6 +40,7 @@
   "localeDari": "دری",
   "localePashto": "پښتو",
   "navLanguage": "语言",
+  "skipToContent": "跳到主要内容",
   "walletConnected": "已连接",
   "walletDisconnect": "断开",
   "walletSignInTitle": "使用钱包登录",
@@ -64,6 +64,8 @@
   "walletRetry": "重试",
   "walletShowQr": "显示二维码",
   "walletMobileHint": "点击下方按钮打开您的 Algorand 钱包，批准连接后返回此页面。",
+  "walletMobileFallbackHint": "If Pera opened but nothing happened: Copy URI, then open Pera and add the WalletConnect session from QR or paste.",
+  "walletOpenPeraOnly": "Open Pera app",
   "walletSignExplainer": "您的钱包会请求签署一条登录消息（旧版钱包会改为显示一笔 0 ALGO 交易）。签名免费且不会向网络提交任何内容——仅用于证明地址归您所有。",
   "newsFeedTitle": "最新文章",
   "newsSubtitleDefault": "当内容发生变化时，链上触发器和爬网源会在此处发布。",
@@ -302,5 +304,6 @@
   "walletPasteSignature": "Paste signature (base64)",
   "walletComplete": "Complete sign-in",
   "walletAddressLabel": "Wallet address",
-  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below."
+  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below.",
+  "walletOpenHttps": "Open Pera link"
 }

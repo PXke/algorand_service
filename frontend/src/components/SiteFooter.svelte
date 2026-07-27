@@ -41,7 +41,6 @@
           <p class="heading">{t($messages, 'footerAboutHeading')}</p>
           <div class="links">
             <a href="/about" onclick={(e) => go('/about', e)}>{t($messages, 'navAbout')}</a>
-            <a href="/search" onclick={(e) => go('/search', e)}>{t($messages, 'navSearch')}</a>
             <a href="/contact" onclick={(e) => go('/contact', e)}>{t($messages, 'navContact')}</a>
           </div>
         </div>
@@ -91,7 +90,28 @@
   }
   @media (max-width: 519px) {
     .inner {
-      padding: 40px 16px 32px;
+      padding: 18px 16px calc(14px + env(safe-area-inset-bottom, 0px));
+    }
+    .grid {
+      gap: 16px;
+    }
+    .cols {
+      gap: 12px;
+    }
+    .tagline {
+      margin-top: 6px;
+      font-size: 0.85rem;
+    }
+    .heading {
+      margin-bottom: 6px;
+    }
+    .links a {
+      min-height: 32px;
+      padding: 4px 2px;
+      font-size: 0.9rem;
+    }
+    .rule {
+      margin: 16px 0 10px;
     }
   }
   .grid {

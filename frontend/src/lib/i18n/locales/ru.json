@@ -23,7 +23,6 @@
   "homeNewsDescription": "Подборка статей, публикуемых при изменении отслеживаемых источников или событий в сети.",
   "homeSourcesDescription": "Зарегистрированные краулеры Discord, Reddit и веб-источников, питающие новостной конвейер.",
   "homeSuggestionsDescription": "Отправляйте и голосуйте за идеи сообщества с аутентификацией через кошелёк.",
-  "homeSearchDescription": "Полнотекстовый поиск по опубликованным статьям.",
   "homeOpenProduct": "Открыть",
   "themeLight": "Светлая",
   "themeDark": "Тёмная",
@@ -41,6 +40,7 @@
   "localeDari": "دری",
   "localePashto": "پښتو",
   "navLanguage": "ЯЗЫК",
+  "skipToContent": "Перейти к содержимому",
   "walletConnected": "Подключён",
   "walletDisconnect": "Отключить",
   "walletSignInTitle": "Войти через кошелёк",
@@ -64,6 +64,8 @@
   "walletRetry": "Повторить",
   "walletShowQr": "Показать QR-код",
   "walletMobileHint": "Нажмите кнопку ниже, чтобы открыть кошелёк Algorand, подтвердите подключение и вернитесь сюда.",
+  "walletMobileFallbackHint": "If Pera opened but nothing happened: Copy URI, then open Pera and add the WalletConnect session from QR or paste.",
+  "walletOpenPeraOnly": "Open Pera app",
   "walletSignExplainer": "Кошелёк попросит подписать сообщение для входа (в старых кошельках вместо этого показывается транзакция на 0 ALGO). Подпись бесплатна и ничего не отправляется в сеть — она лишь подтверждает владение адресом.",
   "newsFeedTitle": "Последние статьи",
   "newsSubtitleDefault": "On-chain-триггеры и обходимые источники публикуют здесь при изменении контента.",
@@ -302,5 +304,6 @@
   "walletPasteSignature": "Paste signature (base64)",
   "walletComplete": "Complete sign-in",
   "walletAddressLabel": "Wallet address",
-  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below."
+  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below.",
+  "walletOpenHttps": "Open Pera link"
 }

@@ -23,7 +23,6 @@
   "homeNewsDescription": "فید گزینش‌شده مقالات که هنگام تغییر منابع رصدشده یا رویدادهای زنجیره منتشر می‌شوند.",
   "homeSourcesDescription": "کرالرهای ثبت‌شده Discord، Reddit و وب که خط لوله خبری را تغذیه می‌کنند.",
   "homeSuggestionsDescription": "ایده‌های جامعه را با احراز هویت مبتنی بر کیف پول ارسال و رای مثبت دهید.",
-  "homeSearchDescription": "جستجوی تمام‌متن در مقالات منتشرشده.",
   "homeOpenProduct": "باز کردن",
   "themeLight": "روشن",
   "themeDark": "تیره",
@@ -41,6 +40,7 @@
   "localeDari": "دری",
   "localePashto": "پښتو",
   "navLanguage": "زبان",
+  "skipToContent": "پرش به محتوا",
   "walletConnected": "متصل",
   "walletDisconnect": "قطع اتصال",
   "walletSignInTitle": "ورود با کیف پول",
@@ -64,6 +64,8 @@
   "walletRetry": "تلاش دوباره",
   "walletShowQr": "نمایش کد QR",
   "walletMobileHint": "دکمه زیر را بزنید تا کیف پول Algorand باز شود، اتصال را تأیید کنید و سپس اینجا بازگردید.",
+  "walletMobileFallbackHint": "If Pera opened but nothing happened: Copy URI, then open Pera and add the WalletConnect session from QR or paste.",
+  "walletOpenPeraOnly": "Open Pera app",
   "walletSignExplainer": "کیف پول از شما می‌خواهد یک پیام ورود را امضا کنید (کیف پول‌های قدیمی‌تر به‌جای آن تراکنش 0-ALGO نشان می‌دهند). امضا رایگان است و چیزی به شبکه ارسال نمی‌شود — فقط مالکیت آدرس را اثبات می‌کند.",
   "newsFeedTitle": "آخرین مقالات",
   "newsSubtitleDefault": "تریگرهای on-chain و منابع کرال‌شده هنگام تغییر محتوا اینجا منتشر می‌شوند.",
@@ -302,5 +304,6 @@
   "walletPasteSignature": "Paste signature (base64)",
   "walletComplete": "Complete sign-in",
   "walletAddressLabel": "Wallet address",
-  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below."
+  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below.",
+  "walletOpenHttps": "Open Pera link"
 }

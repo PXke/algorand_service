@@ -99,7 +99,11 @@
 
   onMount(() => {
     if (q.trim()) void run(q)
-    queueMicrotask(() => inputEl?.focus())
+    // Don't pop the soft keyboard on phones when opening Search empty.
+    const fine = window.matchMedia('(pointer: fine)').matches
+    if (fine || q.trim()) {
+      queueMicrotask(() => inputEl?.focus())
+    }
   })
 </script>
 
@@ -408,5 +412,31 @@
   }
   .err {
     color: var(--danger);
+  }
+  @media (max-width: 519px) {
+    .search-card {
+      padding: 14px;
+      gap: 10px;
+      border-radius: 14px;
+    }
+    .go {
+      flex: 1 1 100%;
+      width: 100%;
+    }
+    .hit {
+      padding: 14px;
+      gap: 10px;
+    }
+    .hit-icon,
+    .hit-chevron {
+      display: none;
+    }
+    .hit-title {
+      font-size: 17px;
+    }
+    .hit-excerpt {
+      -webkit-line-clamp: 3;
+      line-clamp: 3;
+    }
   }
 </style>

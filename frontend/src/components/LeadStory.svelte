@@ -3,6 +3,7 @@
   import { articleLogoUrl, proxiedImageUrl } from '../lib/images'
   import { articleHref } from '../lib/paths'
   import { navigate } from '../lib/router'
+  import { primaryTopic, topicColor } from '../lib/tags'
 
   let { article }: { article: ArticleItem } = $props()
 
@@ -17,12 +18,15 @@
     })
     return logo ? { src: logo, logo: true } : null
   })
-  const kicker = $derived(article.tags?.[0] ?? 'Lead')
+  const topic = $derived(primaryTopic(article.tags))
+  const kicker = $derived(topic ?? 'Lead')
+  const tone = $derived(topicColor(topic))
 </script>
 
 <a
   class="lead"
   {href}
+  style="--tone:{tone}"
   onclick={(e) => {
     e.preventDefault()
     navigate(href)
@@ -62,16 +66,16 @@
   }
   @media (min-width: 640px) {
     .lead {
-      grid-template-columns: 1fr minmax(240px, 38%);
+      grid-template-columns: 1fr minmax(260px, 43%);
       align-items: start;
-      gap: 28px;
+      gap: 32px;
     }
   }
   .lead:hover {
     text-decoration: none;
   }
   .lead:hover .title {
-    color: var(--primary);
+    color: var(--tone, var(--primary));
   }
   .lead:hover .media img {
     transform: scale(1.035);
@@ -102,6 +106,20 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
+  @media (max-width: 639px) {
+    .title {
+      font-size: clamp(24px, 7vw, 30px);
+    }
+    .deck {
+      font-size: 15.5px;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+    }
+    .media {
+      max-height: 180px;
+      border-radius: 10px;
+    }
+  }
   .media {
     display: grid;
     place-items: center;
@@ -114,20 +132,23 @@
   @media (min-width: 640px) {
     .media {
       width: 100%;
-      max-width: 340px;
+      max-width: none;
       height: auto;
-      min-height: 160px;
-      max-height: 260px;
-      aspect-ratio: 4 / 3;
-      justify-self: end;
+      min-height: 200px;
+      max-height: 320px;
+      aspect-ratio: 16 / 10;
+      justify-self: stretch;
     }
   }
+  /* `contain`, not `cover`: our art is overwhelmingly wordmarks, logos and
+     UI screenshots. Cover clipped "AlgoRank" to "AlgoRan" and magnified
+     light screenshots into featureless white. */
   .media img {
     width: 100%;
     height: 100%;
     object-fit: contain;
     object-position: center;
-    filter: saturate(0.92);
+    filter: saturate(0.96);
     transition: transform 0.55s cubic-bezier(0.22, 1, 0.36, 1), filter 0.45s ease;
   }
   .media.logo img {

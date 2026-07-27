@@ -23,7 +23,6 @@
   "homeNewsDescription": "Curated feed of articles published when monitored sources or chain events change.",
   "homeSourcesDescription": "Registered Discord, Reddit, and web crawlers that power the news pipeline.",
   "homeSuggestionsDescription": "Submit and upvote community ideas with wallet-backed authentication.",
-  "homeSearchDescription": "Full-text search across published articles.",
   "homeOpenProduct": "فتح",
   "themeLight": "Light",
   "themeDark": "Dark",
@@ -41,6 +40,7 @@
   "localeDari": "دری",
   "localePashto": "پښتو",
   "navLanguage": "اللغة",
+  "skipToContent": "تخطَّ إلى المحتوى",
   "walletConnected": "متصل",
   "walletDisconnect": "قطع الاتصال",
   "walletSignInTitle": "Sign in with wallet",
@@ -64,6 +64,8 @@
   "walletRetry": "إعادة المحاولة",
   "walletShowQr": "إظهار رمز QR",
   "walletMobileHint": "اضغط على الزر أدناه لفتح محفظة Algorand الخاصة بك، ووافق على الاتصال، ثم عد إلى هنا.",
+  "walletMobileFallbackHint": "If Pera opened but nothing happened: Copy URI, then open Pera and add the WalletConnect session from QR or paste.",
+  "walletOpenPeraOnly": "Open Pera app",
   "walletSignExplainer": "ستطلب محفظتك توقيع رسالة تسجيل الدخول (تعرض المحافظ الأقدم معاملة بقيمة 0 ALGO بدلاً من ذلك). التوقيع مجاني ولا يُرسل أي شيء إلى الشبكة — إنه يثبت فقط ملكيتك للعنوان.",
   "newsFeedTitle": "أحدث المقالات",
   "newsSubtitleDefault": "On-chain triggers and crawled sources publish here when content changes.",
@@ -302,5 +304,6 @@
   "walletPasteSignature": "Paste signature (base64)",
   "walletComplete": "Complete sign-in",
   "walletAddressLabel": "Wallet address",
-  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below."
+  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below.",
+  "walletOpenHttps": "Open Pera link"
 }

@@ -40,6 +40,10 @@ themeMode.subscribe((mode) => {
 
 resolvedTheme.subscribe((t) => {
   document.documentElement.dataset.theme = t
+  const meta = document.querySelector('meta[name="theme-color"]')
+  if (meta) {
+    meta.setAttribute('content', t === 'dark' ? '#141210' : '#3a49ad')
+  }
 })
 
 if (typeof window !== 'undefined') {

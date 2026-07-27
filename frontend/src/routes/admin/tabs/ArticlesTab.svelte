@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { AdminApi } from '../../../lib/api/admin'
   import { newsApi } from '../../../lib/api/news'
+  import Markdown from '../../../components/Markdown.svelte'
 
   let {
     admin,
@@ -22,6 +23,7 @@
   let error = $state<string | null>(null)
   let deleteOpen = $state(false)
   let blockSource = $state(false)
+  let showPreview = $state(true)
 
   async function loadList() {
     loadingList = true
@@ -160,10 +162,30 @@
               <span>Summary (deck)</span>
               <textarea rows="3" bind:value={summary}></textarea>
             </label>
-            <label class="field">
-              <span>Body (markdown)</span>
-              <textarea rows="14" class="mono-body" bind:value={body}></textarea>
-            </label>
+            <div class="field">
+              <div class="body-label">
+                <span>Body (markdown)</span>
+                <button
+                  class="preview-toggle"
+                  type="button"
+                  onclick={() => (showPreview = !showPreview)}
+                >
+                  {showPreview ? 'Hide preview' : 'Show preview'}
+                </button>
+              </div>
+              <div class="body-split" class:with-preview={showPreview}>
+                <textarea rows="14" class="mono-body" bind:value={body}></textarea>
+                {#if showPreview}
+                  <div class="preview panel">
+                    {#if body.trim()}
+                      <Markdown source={body} />
+                    {:else}
+                      <p class="muted">Nothing to preview yet.</p>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            </div>
           {/if}
 
           <div class="actions">
@@ -324,6 +346,38 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 0.85rem;
     line-height: 1.55;
+    min-height: 280px;
+  }
+  .body-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+  }
+  .preview-toggle {
+    border: 0;
+    background: transparent;
+    color: var(--primary);
+    font-size: 0.82rem;
+    font-weight: 700;
+    padding: 0;
+    cursor: pointer;
+  }
+  .body-split {
+    display: grid;
+    gap: 12px;
+  }
+  @media (min-width: 1100px) {
+    .body-split.with-preview {
+      grid-template-columns: 1fr 1fr;
+      align-items: stretch;
+    }
+  }
+  .preview {
+    max-height: 420px;
+    overflow: auto;
+    padding: 14px 16px;
+    font-size: 0.92rem;
   }
   .skeleton {
     display: flex;

@@ -159,6 +159,14 @@
   .feed :global(.row:last-child) {
     border-bottom: 0;
   }
+  .feed + .btn {
+    margin-top: 8px;
+  }
+  @media (max-width: 519px) {
+    .feed + .btn {
+      width: 100%;
+    }
+  }
   .err {
     color: var(--danger);
   }

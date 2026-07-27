@@ -165,7 +165,7 @@ function resetWalletFlow() {
 }
 
 /**
- * Universal WalletConnect sign-in: QR / deep-link pair → nonce → sign → verify.
+ * WalletConnect sign-in: QR / deep-link pair → nonce → sign → verify.
  * Works with Pera, Defly, and other ARC-0025 Algorand wallets.
  */
 export async function signInWithWalletConnect(): Promise<void> {
@@ -178,6 +178,9 @@ export async function signInWithWalletConnect(): Promise<void> {
     wcConnect,
     wcSignLoginProof,
     wcDisconnect,
+    isMobileWalletClient,
+    openWalletDeepLink,
+    walletAppLaunchLink,
   } = await import('./walletconnect')
 
   try {
@@ -200,7 +203,16 @@ export async function signInWithWalletConnect(): Promise<void> {
     const signingMessage = String(challenge.signing_message ?? '')
     if (!nonce || !signingMessage) throw new Error('Invalid auth challenge')
 
-    const proof = await wcSignLoginProof(address, signingMessage)
+    // Open the wallet only AFTER the sign request is on the bridge — opening
+    // earlier races the socket wake and drops the reply on Firefox.
+    const proof = await wcSignLoginProof(address, signingMessage, {
+      onRequestSent: () => {
+        if (!isMobileWalletClient()) return
+        window.setTimeout(() => {
+          openWalletDeepLink(walletAppLaunchLink())
+        }, 200)
+      },
+    })
     if (cancelSignIn) throw new Error('Wallet connection cancelled')
 
     await completeSignIn({
@@ -210,8 +222,6 @@ export async function signInWithWalletConnect(): Promise<void> {
       signedTxnB64: proof.proofMethod === 'arc0025_txn' ? proof.signedTxnB64 : undefined,
       proofMethod: proof.proofMethod,
     })
-    // Durable login is the API session token; drop the WC bridge pairing so a
-    // later dead socket cannot confuse a re-login.
     try {
       await wcDisconnect()
     } catch {
@@ -253,7 +263,7 @@ export async function cancelWalletSignIn(): Promise<void> {
 }
 
 export function wakeWalletTransport(): void {
-  void import('./walletconnect').then((m) => m.wcWakeTransport())
+  void import('./walletconnect').then((m) => m.wcWakeTransportBurst())
 }
 
 export async function logout(): Promise<void> {

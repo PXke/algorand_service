@@ -3,6 +3,7 @@
   import { messages, t } from '../../lib/i18n'
   import { walletAddress, sessionToken, isAdmin } from '../../lib/auth/session'
   import { createAdminApi } from '../../lib/api/admin'
+  import { route, navigate } from '../../lib/router'
   import SeedsTab from './tabs/SeedsTab.svelte'
   import ArticlesTab from './tabs/ArticlesTab.svelte'
   import BriefsTab from './tabs/BriefsTab.svelte'
@@ -17,29 +18,46 @@
   import InboxTab from './tabs/InboxTab.svelte'
   import SystemTab from './tabs/SystemTab.svelte'
   import PageMeta from '../../components/PageMeta.svelte'
+  import BrandMark from '../../components/BrandMark.svelte'
 
   const tabs = [
-    { id: 'Analytics', label: 'Analytics' },
-    { id: 'Articles', label: 'Articles' },
-    { id: 'Queue', label: 'Queue' },
-    { id: 'Classifier', label: 'Classifier' },
-    { id: 'Domains', label: 'Domains' },
-    { id: 'Seeds', label: 'Seeds' },
-    { id: 'Writer Briefs', label: 'Briefs' },
-    { id: 'Training', label: 'Training' },
-    { id: 'Gatekeeper', label: 'Gatekeeper' },
-    { id: 'Tool Insights', label: 'Insights' },
-    { id: 'Sessions', label: 'Sessions' },
-    { id: 'Inbox', label: 'Inbox' },
-    { id: 'System', label: 'System' },
+    { id: 'Analytics', label: 'Analytics', slug: 'analytics', group: 'Content' },
+    { id: 'Articles', label: 'Articles', slug: 'articles', group: 'Content' },
+    { id: 'Writer Briefs', label: 'Briefs', slug: 'briefs', group: 'Content' },
+    { id: 'Inbox', label: 'Inbox', slug: 'inbox', group: 'Content' },
+    { id: 'Queue', label: 'Queue', slug: 'queue', group: 'Pipeline' },
+    { id: 'Classifier', label: 'Classifier', slug: 'classifier', group: 'Pipeline' },
+    { id: 'Training', label: 'Training', slug: 'training', group: 'Pipeline' },
+    { id: 'Gatekeeper', label: 'Gatekeeper', slug: 'gatekeeper', group: 'Pipeline' },
+    { id: 'Domains', label: 'Domains', slug: 'domains', group: 'Sources' },
+    { id: 'Seeds', label: 'Seeds', slug: 'seeds', group: 'Sources' },
+    { id: 'Tool Insights', label: 'Insights', slug: 'insights', group: 'System' },
+    { id: 'Sessions', label: 'Sessions', slug: 'sessions', group: 'System' },
+    { id: 'System', label: 'System', slug: 'system', group: 'System' },
   ] as const
 
   type TabId = (typeof tabs)[number]['id']
+  type GroupName = (typeof tabs)[number]['group']
 
-  let tab = $state<TabId>('Analytics')
+  const groups: GroupName[] = ['Content', 'Pipeline', 'Sources', 'System']
+
+  const slugToId = Object.fromEntries(tabs.map((x) => [x.slug, x.id])) as Record<string, TabId>
+  const idToSlug = Object.fromEntries(tabs.map((x) => [x.id, x.slug])) as Record<TabId, string>
+
+  function tabFromQuery(q: URLSearchParams): TabId {
+    const raw = (q.get('tab') || '').trim().toLowerCase()
+    return slugToId[raw] ?? 'Analytics'
+  }
+
+  let tab = $state<TabId>(tabFromQuery($route.query))
   let walletOpen = $state(false)
   let WalletDialog = $state<import('svelte').Component<{ onclose: () => void }> | null>(null)
   let toast = $state<string | null>(null)
+
+  $effect(() => {
+    const next = tabFromQuery($route.query)
+    if (next !== tab) tab = next
+  })
 
   $effect(() => {
     if (!walletOpen || WalletDialog) return
@@ -51,6 +69,13 @@
   const admin = $derived(
     $walletAddress && $isAdmin ? createAdminApi($walletAddress, $sessionToken) : null,
   )
+
+  function selectTab(id: TabId) {
+    tab = id
+    const slug = idToSlug[id]
+    const next = slug === 'analytics' ? '/admin' : `/admin?tab=${slug}`
+    navigate(next, true, false)
+  }
 
   function flash(msg: string) {
     toast = msg
@@ -78,19 +103,41 @@
   </header>
 
   {#if !$walletAddress}
-    <p class="admin-muted">{t($messages, 'adminAccessDenied')}</p>
-    <button class="btn btn-primary" type="button" onclick={() => (walletOpen = true)}>
-      {t($messages, 'walletConnect')}
-    </button>
+    <div class="admin-gate panel">
+      <BrandMark size={44} />
+      <div class="gate-copy">
+        <h2>{t($messages, 'adminGateTitle')}</h2>
+        <p class="admin-muted">{t($messages, 'adminGateBody')}</p>
+      </div>
+      <button class="btn btn-primary" type="button" onclick={() => (walletOpen = true)}>
+        {t($messages, 'walletConnect')}
+      </button>
+    </div>
   {:else if !$isAdmin}
-    <p class="admin-muted">{t($messages, 'adminAccessDenied')}</p>
-    <p class="admin-muted">{$walletAddress}</p>
+    <div class="admin-gate panel">
+      <BrandMark size={44} />
+      <div class="gate-copy">
+        <h2>{t($messages, 'adminAccessDenied')}</h2>
+        <p class="admin-muted mono">{$walletAddress}</p>
+      </div>
+    </div>
   {:else if admin}
-    <nav class="admin-tabs" aria-label="Admin sections">
-      {#each tabs as item}
-        <button type="button" class:active={tab === item.id} onclick={() => (tab = item.id)}>
-          {item.label}
-        </button>
+    <nav class="admin-nav" aria-label="Admin sections">
+      {#each groups as group}
+        <div class="admin-group">
+          <p class="admin-group-label">{group}</p>
+          <div class="admin-tabs">
+            {#each tabs.filter((x) => x.group === group) as item}
+              <button
+                type="button"
+                class:active={tab === item.id}
+                onclick={() => selectTab(item.id)}
+              >
+                {item.label}
+              </button>
+            {/each}
+          </div>
+        </div>
       {/each}
     </nav>
 

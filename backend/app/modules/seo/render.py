@@ -185,7 +185,7 @@ def _meta_block(
         f"<title>{html.escape(full_title)}</title>",
         f'<meta name="description" content="{_attr(description)}">',
         f'<link rel="canonical" href="{_attr(canonical)}">',
-        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">',
         f'<link rel="alternate" type="application/rss+xml" '
         f'title="{_attr(settings.site_name)}" href="{_attr(absolute("/feed.xml"))}">',
     ]
@@ -307,7 +307,7 @@ _SSR_STYLE = (
     "<style>"
     # Paints the paper background under #ssr-body's own gutters too, so there
     # is no flash of default-white margin around the centered column.
-    "html,body{background:#F2F4F2}"
+    "html,body{background:#F7F4EE}"
     + SSR_CHROME_STYLE
     # The loading notice only exists for humans watching the app boot, so it is
     # hidden from the reading flow's start: JS reveals it, and it dies with the
@@ -316,7 +316,7 @@ _SSR_STYLE = (
     # than an apologetic status line, since the content right below it is the
     # real page, not a placeholder.
     + "#ssr-loading{display:none;font:600 11px/1.4 system-ui,sans-serif;"
-    "letter-spacing:.06em;text-transform:uppercase;color:#0E7A72;margin:0 0 18px}"
+    "letter-spacing:.06em;text-transform:uppercase;color:#3A49AD;margin:0 0 18px}"
     "</style>"
 )
 _SSR_LOADING = (

@@ -5,6 +5,7 @@
   import { setAnalyticsOptOut } from '../lib/analyticsOptOut'
   import { config } from '../lib/config'
   import { navigate, pathOnly } from '../lib/router'
+  import { articleChromeCollapsed } from '../lib/articleChrome'
   import BrandMark from './BrandMark.svelte'
   import Icon from './Icon.svelte'
   import MarketsBar from './MarketsBar.svelte'
@@ -33,7 +34,11 @@
     })
   })
 
-  const nav = $derived([
+  /* The masthead tab row carries content destinations only. Top, About and
+     Contact still exist — they live in the drawer and the footer — but three
+     near-identical feed tabs plus two marketing pages made the row read as
+     noise. */
+  const sections = $derived([
     {
       href: '/news',
       label: t($messages, 'navLatest'),
@@ -47,22 +52,19 @@
       match: (p: string) => p === '/hot',
     },
     {
-      href: '/top',
-      label: t($messages, 'navTop'),
-      icon: 'trending' as const,
-      match: (p: string) => p === '/top',
-    },
-    {
       href: '/topics',
       label: t($messages, 'navTopics'),
       icon: 'tag' as const,
       match: (p: string) => p === '/topics' || p.startsWith('/topic/'),
     },
+  ])
+
+  const moreNav = $derived([
     {
-      href: '/search',
-      label: t($messages, 'navSearch'),
-      icon: 'search' as const,
-      match: (p: string) => p === '/search' || p.startsWith('/search/'),
+      href: '/top',
+      label: t($messages, 'navTop'),
+      icon: 'trending' as const,
+      match: (p: string) => p === '/top',
     },
     {
       href: '/about',
@@ -77,6 +79,8 @@
       match: (p: string) => p === '/contact',
     },
   ])
+
+  const drawerNav = $derived([...sections, ...moreNav])
 
   const products = $derived(
     [
@@ -94,13 +98,6 @@
           p.startsWith('/topic/') ||
           p === '/about' ||
           p === '/contact',
-      },
-      {
-        href: '/search',
-        label: t($messages, 'navSearch'),
-        tagline: t($messages, 'homeSearchDescription'),
-        icon: 'search' as const,
-        active: (p: string) => p === '/search' || p.startsWith('/search/'),
       },
       ...(config.suggestionsEnabled
         ? [
@@ -139,6 +136,7 @@
   const onArticle = $derived($pathOnly.startsWith('/news/articles/'))
   const onSearch = $derived($pathOnly === '/search' || $pathOnly.startsWith('/search/'))
   const isDark = $derived($resolvedTheme === 'dark')
+  const readingCollapsed = $derived(onArticle && $articleChromeCollapsed)
 
   function go(href: string) {
     drawerOpen = false
@@ -170,9 +168,25 @@
     document.addEventListener('pointerdown', onPointerDown, true)
     return () => document.removeEventListener('pointerdown', onPointerDown, true)
   })
+
+  $effect(() => {
+    if (!drawerOpen) return
+    const prevOverflow = document.body.style.overflow
+    const prevPad = document.body.style.paddingRight
+    const sb = window.innerWidth - document.documentElement.clientWidth
+    document.body.style.overflow = 'hidden'
+    if (sb > 0) document.body.style.paddingRight = `${sb}px`
+    return () => {
+      document.body.style.overflow = prevOverflow
+      document.body.style.paddingRight = prevPad
+    }
+  })
 </script>
 
-<div class="shell">
+<div class="shell" class:on-article={onArticle} class:reading-collapsed={readingCollapsed}>
+  <!-- Keyboard users otherwise tab the masthead, section nav and every
+       control before reaching the story on every single page. -->
+  <a class="skip-link" href="#main">{t($messages, 'skipToContent')}</a>
   <header class="masthead">
     <div class="bar">
       <button
@@ -206,17 +220,9 @@
 
       <div class="actions">
         {#if onArticle}
-          <button class="back-btn wide-only-btn" type="button" onclick={() => go('/news')}>
+          <button class="back-btn" type="button" onclick={() => go('/news')}>
             <Icon name="arrow_back" size={16} />
             {t($messages, 'backToFeed')}
-          </button>
-          <button
-            class="icon-btn compact-only-btn"
-            type="button"
-            title={t($messages, 'backToFeed')}
-            onclick={() => go('/news')}
-          >
-            <Icon name="arrow_back" size={20} />
           </button>
         {/if}
 
@@ -231,7 +237,11 @@
           <Icon name="search" size={22} />
         </button>
 
-        <div class="popover-wrap" bind:this={appsWrapEl}>
+        <!-- Suggestions is config-gated and Admin is wallet-gated, so for an
+             ordinary reader this menu held exactly one entry: the page they
+             were already on. Only show a switcher when there's a choice. -->
+        {#if products.length > 1}
+        <div class="popover-wrap article-secondary" bind:this={appsWrapEl}>
           <button
             class="icon-btn muted"
             type="button"
@@ -271,14 +281,19 @@
             </div>
           {/if}
         </div>
+        {/if}
 
         {#if $walletAddress}
-          <button class="btn wallet" type="button" onclick={() => logout()}>
+          <button class="btn wallet article-secondary" type="button" onclick={() => logout()}>
             <Icon name="wallet" size={18} class="wallet-icon" />
             <span class="wallet-label">{shortAddr($walletAddress)}</span>
           </button>
         {:else}
-          <button class="btn btn-primary wallet" type="button" onclick={() => (walletOpen = true)}>
+          <button
+            class="btn btn-primary wallet article-secondary"
+            type="button"
+            onclick={() => (walletOpen = true)}
+          >
             <Icon name="wallet" size={18} class="wallet-icon" />
             <span class="wallet-label">{t($messages, 'navWallet')}</span>
           </button>
@@ -299,6 +314,7 @@
             class="icon-btn locale-toggle"
             type="button"
             title={t($messages, 'navLanguage')}
+            aria-label={t($messages, 'navLanguage')}
             aria-expanded={localeOpen}
             aria-haspopup="menu"
             onclick={() => {
@@ -334,7 +350,7 @@
     </div>
 
     <nav class="section-nav" aria-label="Primary">
-      {#each nav as item}
+      {#each sections as item}
         <a
           class="tab"
           class:active={item.match($pathOnly)}
@@ -364,21 +380,23 @@
         </div>
       </div>
 
-      <p class="drawer-label">{t($messages, 'navApps')}</p>
-      {#each products as product}
-        <button
-          type="button"
-          class="drawer-link"
-          class:selected={product.active($pathOnly)}
-          onclick={() => go(product.href)}
-        >
-          <Icon name={product.icon} size={21} />
-          {product.label}
-        </button>
-      {/each}
+      {#if products.length > 1}
+        <p class="drawer-label">{t($messages, 'navApps')}</p>
+        {#each products as product}
+          <button
+            type="button"
+            class="drawer-link"
+            class:selected={product.active($pathOnly)}
+            onclick={() => go(product.href)}
+          >
+            <Icon name={product.icon} size={21} />
+            {product.label}
+          </button>
+        {/each}
+      {/if}
 
       <p class="drawer-label">{t($messages, 'navNews')}</p>
-      {#each nav as item}
+      {#each drawerNav as item}
         <button
           type="button"
           class="drawer-link"
@@ -391,6 +409,24 @@
       {/each}
 
       <p class="drawer-label">{t($messages, 'navAppearance')}</p>
+      {#if $walletAddress}
+        <button type="button" class="drawer-link" onclick={() => logout()}>
+          <Icon name="wallet" size={21} />
+          {shortAddr($walletAddress)}
+        </button>
+      {:else}
+        <button
+          type="button"
+          class="drawer-link"
+          onclick={() => {
+            drawerOpen = false
+            walletOpen = true
+          }}
+        >
+          <Icon name="wallet" size={21} />
+          {t($messages, 'walletConnect')}
+        </button>
+      {/if}
       <button
         type="button"
         class="drawer-link"
@@ -440,7 +476,7 @@
     </aside>
   {/if}
 
-  <main>
+  <main id="main" tabindex="-1">
     {@render children()}
   </main>
 
@@ -454,9 +490,32 @@
 <style>
   .shell {
     min-height: 100vh;
+    min-height: 100dvh;
     display: flex;
     flex-direction: column;
     background: transparent;
+  }
+  /* Off-screen until focused, then pinned over the masthead. */
+  .skip-link {
+    position: absolute;
+    top: 0;
+    inset-inline-start: 0;
+    z-index: 60;
+    transform: translateY(-120%);
+    padding: 12px 18px;
+    background: var(--panel);
+    color: var(--primary);
+    border: 1px solid var(--border);
+    border-radius: 0 0 10px 0;
+    font-size: 14px;
+    font-weight: 700;
+    text-decoration: none;
+  }
+  .skip-link:focus-visible {
+    transform: translateY(0);
+  }
+  main:focus {
+    outline: none;
   }
   .masthead {
     position: sticky;
@@ -467,13 +526,35 @@
     -webkit-backdrop-filter: saturate(1.2) blur(10px);
     border-top: 3px solid var(--accent);
   }
+  /* While reading mid-article: drop site chrome so only the title strip remains. */
+  .shell.reading-collapsed .masthead,
+  .shell.reading-collapsed :global(.markets) {
+    display: none;
+  }
   .bar {
-    height: 64px;
+    height: calc(64px + env(safe-area-inset-top, 0px));
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 0 8px 0 4px;
+    padding-top: env(safe-area-inset-top, 0);
+    box-sizing: border-box;
     border-bottom: 1px solid var(--border);
+  }
+  /* Articles on phone: menu + brand + search + language — apps/wallet in the drawer. */
+  @media (max-width: 859px) {
+    .shell.on-article .article-secondary {
+      display: none;
+    }
+    .shell.on-article .bar {
+      height: calc(52px + env(safe-area-inset-top, 0px));
+      gap: 4px;
+    }
+  }
+  @media (max-width: 519px) {
+    .shell:not(.on-article) .article-secondary {
+      display: none;
+    }
   }
   @media (min-width: 860px) {
     .bar {
@@ -579,22 +660,6 @@
       display: none;
     }
   }
-  .theme-toggle {
-    display: none;
-  }
-  @media (min-width: 520px) {
-    .theme-toggle {
-      display: inline-grid;
-    }
-  }
-  .locale-wrap {
-    display: none;
-  }
-  @media (min-width: 860px) {
-    .locale-wrap {
-      display: block;
-    }
-  }
   .back-btn {
     display: none;
     align-items: center;
@@ -611,18 +676,9 @@
   .back-btn:hover {
     background: var(--accent-soft);
   }
-  .wide-only-btn {
-    display: none;
-  }
-  .compact-only-btn {
-    display: inline-grid;
-  }
-  @media (min-width: 520px) {
-    .wide-only-btn {
+  @media (min-width: 860px) {
+    .back-btn {
       display: inline-flex;
-    }
-    .compact-only-btn {
-      display: none;
     }
   }
   .wallet {
@@ -774,17 +830,38 @@
     font-weight: 600;
   }
   .section-nav {
-    display: none;
-    height: 45px;
+    display: flex;
+    height: 40px;
     align-items: stretch;
-    gap: 4px;
-    padding: 0 18px;
+    gap: 0;
+    padding: 0 6px;
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+  .section-nav::-webkit-scrollbar {
+    display: none;
+  }
+  @media (max-width: 859px) {
+    .shell.on-article .section-nav {
+      display: none;
+    }
+    .section-nav .tab {
+      flex: 0 0 auto;
+      padding: 0 12px;
+      font-size: 12.5px;
+    }
   }
   @media (min-width: 860px) {
     .section-nav {
-      display: flex;
+      height: 45px;
+      gap: 4px;
+      padding: 0 18px;
+      overflow: visible;
     }
   }
   .tab {
@@ -838,12 +915,17 @@
     inset-inline-start: 0;
     width: min(320px, 92vw);
     height: 100%;
+    height: 100dvh;
     z-index: 51;
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding: 8px;
+    padding: max(8px, env(safe-area-inset-top, 0px)) 8px
+      max(8px, env(safe-area-inset-bottom, 0px));
+    padding-inline-start: max(8px, env(safe-area-inset-left, 0px));
     overflow: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
     background: var(--panel);
     border-inline-end: 1px solid var(--border);
     box-shadow: 12px 0 40px var(--card-hover-shadow);
@@ -901,7 +983,8 @@
     text-align: start;
     border: 0;
     background: transparent;
-    padding: 10px 12px;
+    padding: 12px;
+    min-height: 44px;
     border-radius: 10px;
     color: var(--on-surface);
     font-weight: 500;

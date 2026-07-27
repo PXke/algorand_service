@@ -6,9 +6,11 @@
   let {
     url,
     title,
+    compact = false,
   }: {
     url: string
     title: string
+    compact?: boolean
   } = $props()
 
   let open = $state(false)
@@ -68,12 +70,15 @@
   }
 </script>
 
-<div class="share" bind:this={rootEl}>
+<div class="share" class:compact bind:this={rootEl}>
   <button
     class="btn share-btn"
+    class:icon-only={compact}
     type="button"
     aria-expanded={open}
     aria-haspopup="menu"
+    aria-label={t($messages, 'articleShare')}
+    title={t($messages, 'articleShare')}
     onclick={() => {
       if (typeof navigator.share === 'function' && !window.matchMedia('(min-width: 860px)').matches) {
         void nativeShare()
@@ -82,8 +87,10 @@
       }
     }}
   >
-    <Icon name="share" size={16} />
-    {t($messages, 'articleShare')}
+    <Icon name="share" size={compact ? 15 : 16} />
+    {#if !compact}
+      {t($messages, 'articleShare')}
+    {/if}
   </button>
   {#if open}
     <div class="menu" role="menu">
@@ -108,10 +115,16 @@
     display: inline-flex;
   }
   .share-btn {
-    height: 34px;
+    height: 36px;
     padding: 0 12px;
     font-size: 12.5px;
     gap: 6px;
+  }
+  .share.compact .share-btn.icon-only {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border-radius: 10px;
   }
   .menu {
     position: absolute;
@@ -128,6 +141,10 @@
     flex-direction: column;
     gap: 2px;
     animation: pop 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .share.compact .menu {
+    inset-inline-start: auto;
+    inset-inline-end: 0;
   }
   .menu button {
     border: 0;

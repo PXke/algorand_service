@@ -23,7 +23,6 @@
   "homeNewsDescription": "मॉनिटर किए गए स्रोतों या श्रृंखला की घटनाओं में परिवर्तन होने पर प्रकाशित लेखों की क्यूरेटेड फ़ीड।",
   "homeSourcesDescription": "पंजीकृत डिस्कॉर्ड, रेडिट और वेब क्रॉलर जो समाचार पाइपलाइन को शक्ति प्रदान करते हैं।",
   "homeSuggestionsDescription": "वॉलेट-समर्थित प्रमाणीकरण के साथ सामुदायिक विचार सबमिट करें और अपवोट करें।",
-  "homeSearchDescription": "प्रकाशित लेखों में पूर्ण-पाठ खोज।",
   "homeOpenProduct": "खुला",
   "themeLight": "रोशनी",
   "themeDark": "अँधेरा",
@@ -41,6 +40,7 @@
   "localeDari": "دری",
   "localePashto": "پښتو",
   "navLanguage": "भाषा",
+  "skipToContent": "सामग्री पर जाएँ",
   "walletConnected": "जुड़े हुए",
   "walletDisconnect": "डिस्कनेक्ट",
   "walletSignInTitle": "वॉलेट से साइन इन करें",
@@ -64,6 +64,8 @@
   "walletRetry": "फिर से प्रयास करें",
   "walletShowQr": "QR कोड दिखाएँ",
   "walletMobileHint": "अपना Algorand वॉलेट खोलने के लिए नीचे दिया गया बटन दबाएँ, कनेक्शन स्वीकृत करें, फिर यहाँ वापस आएँ।",
+  "walletMobileFallbackHint": "If Pera opened but nothing happened: Copy URI, then open Pera and add the WalletConnect session from QR or paste.",
+  "walletOpenPeraOnly": "Open Pera app",
   "walletSignExplainer": "आपका वॉलेट एक साइन-इन संदेश साइन करने के लिए कहेगा (पुराने वॉलेट इसके बजाय 0 ALGO का लेनदेन दिखाते हैं)। साइन करना मुफ़्त है और नेटवर्क पर कुछ नहीं भेजा जाता — यह केवल साबित करता है कि पता आपका है।",
   "newsFeedTitle": "नवीनतम लेख",
   "newsSubtitleDefault": "सामग्री में परिवर्तन होने पर ऑन-चेन ट्रिगर और क्रॉल किए गए स्रोत यहां प्रकाशित होते हैं।",
@@ -302,5 +304,6 @@
   "walletPasteSignature": "Paste signature (base64)",
   "walletComplete": "Complete sign-in",
   "walletAddressLabel": "Wallet address",
-  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below."
+  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below.",
+  "walletOpenHttps": "Open Pera link"
 }

@@ -11,24 +11,22 @@
     wakeWalletTransport,
     walletFlow,
   } from '../lib/auth/session'
+  import {
+    isMobileWalletClient,
+    openWalletDeepLink,
+    openWalletDeepLinkRobust,
+    walletAppLaunchLink,
+    walletDeepLink,
+  } from '../lib/auth/walletconnect'
+  import {
+    enableWcDebugFromQuery,
+    toggleWcDebug,
+    wcDebug,
+    wcDebugEnabled,
+    wcDebugLog,
+  } from '../lib/auth/wcDebug'
 
   let { onclose }: { onclose: () => void } = $props()
-
-  function isMobileWalletClient(): boolean {
-    if (typeof navigator === 'undefined') return false
-    return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
-  }
-
-  function walletDeepLink(wcUri: string): string {
-    const isIOS =
-      typeof navigator !== 'undefined' &&
-      (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
-        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1))
-    if (isIOS) {
-      return `perawallet-wc://wc?uri=${encodeURIComponent(wcUri)}`
-    }
-    return wcUri
-  }
 
   let mode = $state<'wallet' | 'manual'>('wallet')
   let address = $state('')
@@ -41,8 +39,15 @@
   let launchFailed = $state(false)
   let copied = $state(false)
   let started = $state(false)
+  let titlePressTimer: number | null = null
+  let reviveTimer: number | null = null
+  let lastReviveAt = 0
 
+  let backdropEl: HTMLDivElement | undefined = $state()
   let hiddenAt: number | null = null
+  let leftForWallet = false
+  let prevOverflow = ''
+  let prevPaddingRight = ''
 
   $effect(() => {
     const uri = $walletFlow.uri
@@ -65,27 +70,99 @@
     }
   })
 
+  // Pairing: wake bridge when returning from Pera so the session approval
+  // can arrive. Signing: soft visibility wake (request already on the wire).
+  // Debounce: Firefox fires visibility + focus together (was double close+open).
+  function reviveBridge(reason: string) {
+    const now = Date.now()
+    if (now - lastReviveAt < 900) {
+      wcDebug(`revive debounced (${reason})`)
+      return
+    }
+    if (reviveTimer != null) window.clearTimeout(reviveTimer)
+    reviveTimer = window.setTimeout(() => {
+      reviveTimer = null
+      lastReviveAt = Date.now()
+      wcDebug(`visibility revive (${reason})`)
+      wakeWalletTransport()
+    }, 80)
+  }
+
   function onVisibility() {
     if (document.visibilityState === 'hidden') {
       hiddenAt = Date.now()
+      leftForWallet = true
+      wcDebug('visibility hidden')
       return
     }
     if (document.visibilityState !== 'visible' || hiddenAt == null) return
     const elapsed = Date.now() - hiddenAt
     hiddenAt = null
-    if (elapsed > 2000) wakeWalletTransport()
+    // Ignore brief flickers from iframe / target=_blank launches (~100–400ms).
+    // Real app switches are usually >500ms.
+    if (elapsed < 500) {
+      wcDebug(`visibility flicker ${elapsed}ms ignored`)
+      return
+    }
+    if (!leftForWallet) return
+    wcDebug(`visibility return after ${elapsed}ms`)
+    reviveBridge('visibility')
+  }
+
+  function onPageShow(e: PageTransitionEvent) {
+    if (e.persisted) reviveBridge('pageshow')
+  }
+
+  function onFocus() {
+    // Firefox sometimes skips visibilitychange on return.
+    if (leftForWallet && hiddenAt == null) {
+      reviveBridge('focus')
+    }
+  }
+
+  function onKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') void closeDialog()
   }
 
   onMount(() => {
+    enableWcDebugFromQuery()
+    // Escape any transformed ancestors so `position: fixed` tracks the viewport
+    // (long articles otherwise pin the modal mid-scroll).
+    const node = backdropEl
+    if (node && node.parentElement !== document.body) {
+      document.body.appendChild(node)
+    }
+    const sb = window.innerWidth - document.documentElement.clientWidth
+    prevOverflow = document.body.style.overflow
+    prevPaddingRight = document.body.style.paddingRight
+    document.body.style.overflow = 'hidden'
+    if (sb > 0) document.body.style.paddingRight = `${sb}px`
     document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pageshow', onPageShow)
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('keydown', onKeydown)
     if (mode === 'wallet' && !started) {
       started = true
       void beginWallet()
+    }
+    return () => {
+      document.body.style.overflow = prevOverflow
+      document.body.style.paddingRight = prevPaddingRight
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pageshow', onPageShow)
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('keydown', onKeydown)
+      node?.remove()
     }
   })
 
   onDestroy(() => {
     document.removeEventListener('visibilitychange', onVisibility)
+    window.removeEventListener('pageshow', onPageShow)
+    window.removeEventListener('focus', onFocus)
+    document.removeEventListener('keydown', onKeydown)
+    if (titlePressTimer != null) window.clearTimeout(titlePressTimer)
+    if (reviveTimer != null) window.clearTimeout(reviveTimer)
   })
 
   async function beginWallet() {
@@ -107,19 +184,19 @@
     onclose()
   }
 
-  function openWallet(uri: string, sameTab: boolean) {
+  function openWallet(uri: string) {
     launchFailed = false
-    const link = walletDeepLink(uri)
-    try {
-      if (sameTab) {
-        window.location.href = link
-        return
-      }
-      const w = window.open(link, '_blank', 'noopener,noreferrer')
-      if (!w) launchFailed = true
-    } catch {
-      launchFailed = true
-    }
+    leftForWallet = true
+    wcDebug(`user Open wallet → ${walletDeepLink(uri).slice(0, 96)}…`)
+    const ok = openWalletDeepLinkRobust(uri)
+    if (!ok) launchFailed = true
+  }
+
+  function reopenWalletApp() {
+    launchFailed = false
+    leftForWallet = true
+    const ok = openWalletDeepLink(walletAppLaunchLink())
+    if (!ok) launchFailed = true
   }
 
   async function copyUri(uri: string) {
@@ -127,8 +204,24 @@
       await navigator.clipboard.writeText(uri)
       copied = true
       setTimeout(() => (copied = false), 2000)
+      wcDebug('uri copied')
     } catch {
-      /* ignore */
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = uri
+        ta.setAttribute('readonly', '')
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        ta.remove()
+        copied = true
+        setTimeout(() => (copied = false), 2000)
+        wcDebug('uri copied (fallback)')
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -149,6 +242,20 @@
     onclose()
   }
 
+  function onTitlePointerDown() {
+    titlePressTimer = window.setTimeout(() => {
+      toggleWcDebug()
+      wcDebug('debug toggled via long-press')
+    }, 900)
+  }
+
+  function onTitlePointerUp() {
+    if (titlePressTimer != null) {
+      window.clearTimeout(titlePressTimer)
+      titlePressTimer = null
+    }
+  }
+
   const phase = $derived($walletFlow.phase)
   const uri = $derived($walletFlow.uri)
   const pairedAddress = $derived($walletFlow.walletAddress)
@@ -156,7 +263,7 @@
   const mobile = isMobileWalletClient()
 </script>
 
-<div class="backdrop" role="presentation" onclick={() => closeDialog()}>
+<div class="backdrop" role="presentation" bind:this={backdropEl} onclick={() => closeDialog()}>
   <div
     class="dialog panel"
     role="dialog"
@@ -166,7 +273,13 @@
     onclick={(e) => e.stopPropagation()}
     onkeydown={(e) => e.stopPropagation()}
   >
-    <div class="title-row">
+    <div
+      class="title-row"
+      onpointerdown={onTitlePointerDown}
+      onpointerup={onTitlePointerUp}
+      onpointerleave={onTitlePointerUp}
+      onpointercancel={onTitlePointerUp}
+    >
       <div class="title-icon" aria-hidden="true">
         {#if phase === 'error'}
           !
@@ -231,14 +344,9 @@
           <button class="btn" type="button" onclick={() => closeDialog()}
             >{t($messages, 'walletCancel')}</button
           >
-          {#if uri}
-            <button
-              class="btn btn-primary"
-              type="button"
-              onclick={() => openWallet(uri.split('?')[0] ?? uri, true)}
-              >{t($messages, 'walletOpenWallet')}</button
-            >
-          {/if}
+          <button class="btn btn-primary" type="button" onclick={() => reopenWalletApp()}
+            >{t($messages, 'walletOpenWallet')}</button
+          >
         </div>
       {:else}
         <p class="hint muted">
@@ -250,14 +358,19 @@
             class="btn btn-primary open-main"
             type="button"
             disabled={!uri}
-            onclick={() => uri && openWallet(uri, true)}>{t($messages, 'walletOpenWallet')}</button
+            onclick={() => uri && openWallet(uri)}>{t($messages, 'walletOpenWallet')}</button
           >
+
+          <div class="actions">
+            <button class="btn" type="button" disabled={!uri} onclick={() => uri && copyUri(uri)}>
+              {copied ? t($messages, 'walletUriCopied') : t($messages, 'walletCopyUri')}
+            </button>
+          </div>
+
           {#if launchFailed}
             <p class="err">{t($messages, 'walletOpenFailed')}</p>
-            <button class="btn" type="button" disabled={!uri} onclick={() => uri && copyUri(uri)}
-              >{t($messages, 'walletCopyUri')}</button
-            >
           {/if}
+
           <button class="linkish" type="button" onclick={() => (showQr = !showQr)}>
             {showQr ? 'Hide QR' : t($messages, 'walletShowQr')}
           </button>
@@ -273,25 +386,32 @@
           </div>
         {/if}
 
-        <div class="actions">
-          <button class="btn" type="button" disabled={!uri} onclick={() => uri && copyUri(uri)}>
-            {copied ? t($messages, 'walletUriCopied') : t($messages, 'walletCopyUri')}
-          </button>
-          {#if !mobile}
+        {#if !mobile}
+          <div class="actions">
+            <button class="btn" type="button" disabled={!uri} onclick={() => uri && copyUri(uri)}>
+              {copied ? t($messages, 'walletUriCopied') : t($messages, 'walletCopyUri')}
+            </button>
             <button
               class="btn btn-primary"
               type="button"
               disabled={!uri}
-              onclick={() => uri && openWallet(uri, false)}>{t($messages, 'walletOpenWallet')}</button
+              onclick={() => uri && openWallet(uri)}>{t($messages, 'walletOpenWallet')}</button
             >
-          {/if}
-        </div>
+          </div>
+        {/if}
 
         <div class="row">
           <button class="btn" type="button" onclick={() => closeDialog()}
             >{t($messages, 'walletCancel')}</button
           >
         </div>
+      {/if}
+
+      {#if $wcDebugEnabled}
+        <pre class="wc-debug mono" aria-live="polite"
+          >{#each $wcDebugLog as row}{row.t}ms {row.msg}
+{/each}</pre
+        >
       {/if}
     {:else if step === 'address'}
       <label class="field">
@@ -339,22 +459,40 @@
   .backdrop {
     position: fixed;
     inset: 0;
-    z-index: 50;
+    z-index: 200;
+    width: 100%;
+    height: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
     background: rgba(0, 0, 0, 0.45);
-    display: grid;
-    place-items: center;
-    padding: 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: max(1rem, env(safe-area-inset-top, 0px)) 1rem
+      max(1rem, env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box;
   }
   .dialog {
     width: min(420px, 100%);
+    max-height: min(90dvh, calc(100% - 0.5rem));
+    overflow-y: auto;
+    overscroll-behavior: contain;
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
+    margin: auto;
+    flex-shrink: 0;
   }
   .title-row {
     display: flex;
     align-items: center;
     gap: 0.75rem;
+    touch-action: manipulation;
+    user-select: none;
   }
   .title-icon {
     width: 36px;
@@ -444,6 +582,19 @@
   }
   .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+  .wc-debug {
+    margin: 0;
+    max-height: 140px;
+    overflow: auto;
+    font-size: 0.65rem;
+    line-height: 1.35;
+    background: var(--callout);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.45rem 0.55rem;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
   .row {
     display: flex;

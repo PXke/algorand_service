@@ -19,7 +19,7 @@ from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
 from app.core.redis_lock import single_flight
 from app.modules.newspaper.article_composer import ArticleComposeResult, compose_scrape_article
 from app.modules.newspaper.article_store import insert_article
-from app.modules.newspaper.article_tags import derive_article_tags
+from app.modules.newspaper.article_tags import derive_article_tags, order_reader_tags
 from app.modules.newspaper.compose_lock import COMPOSE_LOCK_KEY, ComposeBusyError
 from app.modules.newspaper.ingest_signal import ingest_publish_signal
 from app.modules.newspaper.publish_policy import PublishKind, PublishTier, PublishTopic
@@ -200,7 +200,7 @@ def _merge_tags(base: list[str], extra: list[str] | None) -> list[str]:
     for t in extra or ():
         if t and t not in out:
             out.append(t)
-    return out[:10]
+    return order_reader_tags(out)[:10]
 
 
 def _stash_capped_compose_to_backlog(

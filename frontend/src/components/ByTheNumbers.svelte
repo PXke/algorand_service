@@ -101,32 +101,6 @@
   let tip = $state<{ x: number; y: number; price: number; label: string } | null>(null)
   let chartEl = $state<SVGSVGElement | null>(null)
 
-  /** Draw the stroke using the real path length so it always finishes full-width. */
-  function drawStroke(node: SVGPathElement) {
-    const reduce =
-      typeof matchMedia === 'function' &&
-      matchMedia('(prefers-reduced-motion: reduce)').matches
-    const len = node.getTotalLength()
-    node.style.strokeDasharray = `${len}`
-    if (reduce) {
-      node.style.strokeDashoffset = '0'
-      return {}
-    }
-    node.style.strokeDashoffset = `${len}`
-    node.style.transition = 'none'
-    // Force layout so the starting offset sticks before we animate.
-    void node.getBoundingClientRect()
-    requestAnimationFrame(() => {
-      node.style.transition = 'stroke-dashoffset 1.05s cubic-bezier(0.22, 1, 0.36, 1)'
-      node.style.strokeDashoffset = '0'
-    })
-    return {
-      destroy() {
-        node.style.transition = ''
-      },
-    }
-  }
-
   function onMove(e: PointerEvent) {
     if (!spark || !chartEl) return
     const rect = chartEl.getBoundingClientRect()
@@ -204,7 +178,14 @@
           </defs>
           <line class="baseline" x1="0" y1={spark.h - 0.5} x2={spark.w} y2={spark.h - 0.5} />
           <path d={spark.area} class="fill" />
-          <path d={spark.line} class="line" fill="none" use:drawStroke />
+          {#key spark.line}
+            <path
+              d={spark.line}
+              class="line draw"
+              fill="none"
+              pathLength="1"
+            />
+          {/key}
           {#if tip}
             <line class="cross" x1={tip.x} y1="0" x2={tip.x} y2={spark.h} />
           {/if}
@@ -248,11 +229,15 @@
 <style>
   .numbers {
     --tone: var(--accent);
-    --tone-soft: color-mix(in srgb, var(--accent) 12%, transparent);
-    padding: 22px 0 18px;
-    border-top: 3px solid var(--tone);
-    border-bottom: 1px solid var(--border);
-    background: linear-gradient(180deg, var(--tone-soft) 0%, transparent 70%);
+    padding: 26px 0 22px;
+  }
+  /* The band is unfilled, so the module needs almost nothing from it. The
+     only real difference: markers sit on --surface here, not on a panel. */
+  :global(.band) .numbers .mark.end {
+    background: var(--surface);
+  }
+  :global(.band) .numbers .mark.tip-dot {
+    border-color: var(--surface);
   }
   .head {
     display: flex;
@@ -378,7 +363,7 @@
     width: 100%;
     height: 72px;
     cursor: crosshair;
-    touch-action: none;
+    touch-action: pan-y;
   }
   .baseline {
     stroke: var(--border);
@@ -404,6 +389,18 @@
     stroke-linejoin: round;
     stroke-linecap: round;
     vector-effect: non-scaling-stroke;
+  }
+  /* pathLength="1" — dash units are normalized to the full path, so the
+     stroke always finishes at the last point (no getTotalLength races). */
+  .line.draw {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    animation: line-draw 1.05s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  }
+  @keyframes line-draw {
+    to {
+      stroke-dashoffset: 0;
+    }
   }
   .cross {
     stroke: color-mix(in srgb, var(--tone) 45%, transparent);
@@ -494,12 +491,16 @@
     .price,
     .fill,
     .mark.end,
-    .tip {
+    .tip,
+    .line.draw {
       animation: none;
     }
     .fill,
     .mark.end {
       opacity: 1;
+    }
+    .line.draw {
+      stroke-dashoffset: 0;
     }
   }
 </style>

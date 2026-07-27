@@ -101,17 +101,19 @@
   /* Fixed height (incl. .empty) so async tiles don't shove the page (CLS). */
   .markets {
     height: 34px;
-    background: color-mix(in srgb, var(--app-bar) 92%, var(--accent-soft));
+    background: color-mix(in srgb, var(--app-bar) 96%, var(--panel));
     border-bottom: 1px solid var(--border);
     position: relative;
   }
+  /* Wider, fully-opaque-at-the-edge fades: the ticker scrolls, and a hard
+     cut mid-word ("CoinGeck|") read as a layout bug rather than an affordance. */
   .markets::before,
   .markets::after {
     content: '';
     position: absolute;
     top: 0;
     bottom: 0;
-    width: 28px;
+    width: 44px;
     z-index: 1;
     pointer-events: none;
   }
@@ -119,7 +121,7 @@
     left: 0;
     background: linear-gradient(
       90deg,
-      color-mix(in srgb, var(--app-bar) 92%, var(--accent-soft)),
+      color-mix(in srgb, var(--app-bar) 96%, var(--panel)) 35%,
       transparent
     );
   }
@@ -127,7 +129,7 @@
     right: 0;
     background: linear-gradient(
       270deg,
-      color-mix(in srgb, var(--app-bar) 92%, var(--accent-soft)),
+      color-mix(in srgb, var(--app-bar) 96%, var(--panel)) 35%,
       transparent
     );
   }
@@ -136,18 +138,28 @@
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
   }
   .scroller::-webkit-scrollbar {
     display: none;
   }
   .inner {
-    min-width: 100%;
+    min-width: max-content;
+    width: 100%;
     height: 100%;
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    padding: 0 20px;
+    justify-content: flex-start;
+    padding: 0 16px;
     box-sizing: border-box;
+  }
+  @media (min-width: 860px) {
+    .inner {
+      justify-content: center;
+      min-width: 100%;
+      padding: 0 20px;
+    }
   }
   .chip {
     display: inline-flex;

@@ -4,6 +4,7 @@
   import { articleLogoUrl, proxiedImageUrl } from '../lib/images'
   import { articleHref } from '../lib/paths'
   import { navigate } from '../lib/router'
+  import { primaryTopic, topicColor } from '../lib/tags'
 
   let {
     article,
@@ -31,18 +32,22 @@
     })
     return logo ? { src: logo, logo: true } : null
   })
+  /* One pass — primaryTopic() allocates a Set and two arrays, and the front
+     page renders ~23 of these. */
+  const topic = $derived(primaryTopic(article.tags))
   const kicker = $derived.by(() => {
     const kind = article.trigger_kind?.toLowerCase()
     if (kind === 'chain' || kind === 'onchain') return t($messages, 'sourceKindOnChain')
     if (kind === 'scheduled') return t($messages, 'sourceKindScheduled')
-    if (article.tags?.[0]) return article.tags[0]
-    return t($messages, 'kickerNews')
+    return topic ?? t($messages, 'kickerNews')
   })
-  const kickerColor = $derived.by(() => {
+  /* Provenance kinds keep their own colours; everything else takes the
+     topic tone so the feed's kickers become a navigable colour system. */
+  const tone = $derived.by(() => {
     const kind = article.trigger_kind?.toLowerCase()
     if (kind === 'chain' || kind === 'onchain') return 'var(--chain)'
     if (kind === 'scheduled') return 'var(--scheduled)'
-    return 'var(--primary)'
+    return topicColor(topic)
   })
   const when = $derived.by(() => {
     const epoch = article.published_at_epoch
@@ -64,6 +69,7 @@
   class="row"
   class:dense
   {href}
+  style="--tone:{tone}"
   onclick={(e) => {
     e.preventDefault()
     navigate(href)
@@ -74,7 +80,7 @@
   {/if}
   <div class="text">
     <div class="meta-top">
-      <p class="kicker" style="color:{kickerColor}">{kicker}</p>
+      <p class="kicker">{kicker}</p>
       {#if when}
         <span class="when subtle">{when}</span>
       {/if}
@@ -120,7 +126,7 @@
     text-decoration: none;
   }
   .row:hover .title {
-    color: var(--primary);
+    color: var(--tone, var(--primary));
   }
   .row:hover .thumb img {
     transform: scale(1.06);
@@ -135,8 +141,14 @@
     color: var(--subtle);
     text-align: center;
   }
+  @media (max-width: 519px) {
+    .rank {
+      width: 26px;
+      font-size: 18px;
+    }
+  }
   .rank.top {
-    color: var(--accent);
+    color: var(--tone, var(--accent));
   }
   .text {
     min-width: 0;
@@ -198,12 +210,13 @@
     width: 64px;
     height: 64px;
   }
+  /* contain — see LeadStory: cover crops wordmarks and washes out screenshots. */
   .thumb img {
     width: 100%;
     height: 100%;
     object-fit: contain;
     object-position: center;
-    filter: saturate(0.92);
+    filter: saturate(0.96);
     transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1), filter 0.35s ease;
   }
   /* Favicon/fallback: letterbox instead of blowing up a tiny icon. */
@@ -213,6 +226,31 @@
     padding: 18%;
     filter: none;
     box-sizing: border-box;
+  }
+  @media (max-width: 519px) {
+    .row {
+      gap: 12px;
+      padding: 12px 0;
+    }
+    .row:not(.dense) .title {
+      font-size: 16.5px;
+    }
+    .row:not(.dense) .thumb {
+      width: 64px;
+      height: 64px;
+    }
+    .row:not(.dense) .deck {
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      font-size: 0.9rem;
+    }
+    .dense .title {
+      font-size: 15.5px;
+    }
+    .dense .thumb {
+      width: 56px;
+      height: 56px;
+    }
   }
   @media (prefers-reduced-motion: reduce) {
     .title,

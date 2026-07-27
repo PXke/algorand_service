@@ -39,31 +39,29 @@
 {/if}
 
 <style>
+  /* A resume prompt, not a story: it sits above the lead, so it has to stay
+     visibly lighter than one. Ruled strip rather than a filled card. */
   .cont {
     display: flex;
     align-items: stretch;
     gap: 4px;
-    padding: 4px;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    background:
-      linear-gradient(
-        120deg,
-        color-mix(in srgb, var(--accent) 10%, var(--panel)) 0%,
-        var(--panel) 55%
-      );
+    padding: 0;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    background: transparent;
   }
   .main {
     flex: 1;
     min-width: 0;
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
     border: 0;
     background: transparent;
     text-align: start;
-    padding: 10px 12px;
-    border-radius: 10px;
+    padding: 6px 2px 10px;
+    border-radius: 8px;
     color: inherit;
   }
   .main:hover,
@@ -92,9 +90,12 @@
     text-transform: uppercase;
     color: var(--subtle);
   }
+  /* Single line: two lines of display serif read as a headline and competed
+     with the lead story directly beneath it. */
   .title {
-    font-family: var(--font-display);
-    font-size: 15px;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    font-weight: 600;
     line-height: 1.3;
     white-space: nowrap;
     overflow: hidden;
@@ -104,15 +105,23 @@
     border: 0;
     background: transparent;
     color: var(--subtle);
-    width: 36px;
+    width: 44px;
+    min-height: 44px;
     border-radius: 10px;
     display: grid;
     place-items: center;
+    flex-shrink: 0;
   }
   .x:hover,
   .x:focus-visible {
     color: var(--on-surface);
     background: color-mix(in srgb, var(--on-surface) 8%, transparent);
     outline: none;
+  }
+  @media (max-width: 519px) {
+    .main {
+      padding: 8px 2px 10px;
+      gap: 10px;
+    }
   }
 </style>

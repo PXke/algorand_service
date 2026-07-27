@@ -125,7 +125,7 @@ pillow==12.3.0
     #   algorand-platform-workers (workers/pyproject.toml)
 playwright==1.61.0
     # via algorand-platform-workers (workers/pyproject.toml)
-prompt-toolkit==3.0.52
+prompt-toolkit==3.0.53
     # via
     #   click-repl
     #   inquirerpy

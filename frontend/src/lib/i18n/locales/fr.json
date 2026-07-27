@@ -23,7 +23,6 @@
   "homeNewsDescription": "Fil d'articles publiés lorsque les sources ou la chaîne changent.",
   "homeSourcesDescription": "Registered Discord, Reddit, and web crawlers that power the news pipeline.",
   "homeSuggestionsDescription": "Proposez et votez des idées avec votre portefeuille.",
-  "homeSearchDescription": "Recherche plein texte dans les articles publiés.",
   "homeOpenProduct": "Ouvrir",
   "themeLight": "Clair",
   "themeDark": "Sombre",
@@ -41,6 +40,7 @@
   "localeDari": "دری",
   "localePashto": "پښتو",
   "navLanguage": "LANGUE",
+  "skipToContent": "Aller au contenu",
   "walletConnected": "Connecté",
   "walletDisconnect": "Déconnecter",
   "walletSignInTitle": "Sign in with wallet",
@@ -64,6 +64,8 @@
   "walletRetry": "Réessayer",
   "walletShowQr": "Afficher le code QR",
   "walletMobileHint": "Touchez le bouton ci-dessous pour ouvrir votre portefeuille Algorand, approuvez la connexion, puis revenez ici.",
+  "walletMobileFallbackHint": "If Pera opened but nothing happened: Copy URI, then open Pera and add the WalletConnect session from QR or paste.",
+  "walletOpenPeraOnly": "Open Pera app",
   "walletSignExplainer": "Votre portefeuille vous demandera de signer un message de connexion (les anciens portefeuilles affichent une transaction de 0 ALGO). La signature est gratuite et rien n'est envoyé au réseau — elle prouve seulement que l'adresse vous appartient.",
   "newsFeedTitle": "Derniers articles",
   "newsSubtitleDefault": "On-chain triggers and crawled sources publish here when content changes.",
@@ -302,5 +304,6 @@
   "walletPasteSignature": "Paste signature (base64)",
   "walletComplete": "Complete sign-in",
   "walletAddressLabel": "Wallet address",
-  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below."
+  "walletSigningMessage": "Sign this message in your wallet, then paste the signature below.",
+  "walletOpenHttps": "Open Pera link"
 }

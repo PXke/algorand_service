@@ -1,29 +1,50 @@
 :root,
 [data-theme='light'] {
-  /* Ink & tide — cool mineral paper + deep teal (not indigo / cream). */
-  --seed: #0e7a72;
-  --accent: #0e7a72;
-  --primary: #0a5f59;
-  --surface: #f2f4f2;
-  --on-surface: #121816;
-  --body: #2a3330;
-  --md-ink: #1a221f;
-  --muted: #5a6662;
-  --subtle: #6b7571;
-  --border: #d5dbd7;
-  --panel: #fafbfa;
-  --callout: #e6f1ef;
-  --accent-soft: #e6f1ef;
-  --hero-start: #0a2422;
-  --hero-end: #0e7a72;
-  --app-bar: #fafbfa;
+  /* Accent = interaction only (links, buttons, focus). Topic colour lives
+     in the --tone-* family below; never reuse the accent for meaning. */
+  --seed: #4a5bd0;
+  --accent: #4a5bd0;
+  --primary: #3a49ad;
+  /* Warm newsprint — the old cool grey-lavender read as a spreadsheet. */
+  --surface: #f7f4ee;
+  --on-surface: #171410;
+  --body: #3b352c;
+  --md-ink: #201c16;
+  --muted: #6a6355;
+  --subtle: #7d7566;
+  --border: #e0d9cb;
+  --panel: #fffdf8;
+  --callout: #efeade;
+  --accent-soft: #e9ebf8;
+  --app-bar: #fffdf8;
   --danger: #b42318;
   --gain: #0e7c50;
   --loss: #c0392b;
-  --chain: #0e7c70;
+  --chain: #4a5bd0;
   --scheduled: #5b6b4a;
-  --card-shadow: rgba(12, 28, 24, 0.06);
-  --card-hover-shadow: rgba(12, 28, 24, 0.14);
+  --card-shadow: rgba(58, 46, 28, 0.07);
+  --card-hover-shadow: rgba(58, 46, 28, 0.16);
+
+  /* Section tones — four editorial desks + a neutral for the unclassified.
+     Validated with the dataviz palette validator (light, surface #f7f4ee,
+     all-pairs): lightness band, chroma floor, normal-vision ΔE 22.6 and
+     WCAG text contrast all PASS; CVD ΔE 7.0 sits in the 6–8 band, which is
+     permitted here because the topic name is always printed in the label —
+     colour never carries identity alone.
+
+     An earlier eight-hue set failed hard (rust↔amber ΔE 2.0 deutan): you
+     cannot fit eight equal-lightness hues and keep them separable. */
+  --tone-markets: #0b5cd5;
+  --tone-protocol: #15803d;
+  --tone-assets: #c2410c;
+  --tone-people: #a21caf;
+  --tone-meta: #5f5849;
+  /* Status, not a desk: reserved for breaking/scam/outage, never a 5th
+     category. Reuses --danger so alert colour is defined once. */
+  --tone-alert: var(--danger);
+
+  --grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+
   --radius-card: 16px;
   --radius-control: 12px;
   --radius-thumb: 8px;
@@ -31,33 +52,48 @@
   --font-display: 'Source Serif 4', Georgia, 'Times New Roman', serif;
   --max-content: 880px;
   --max-reading: 660px;
+  /* Front page and other grid pages get the wide measure. */
+  --max-wide: 1240px;
+  --rail: 320px;
   color-scheme: light;
 }
 
 [data-theme='dark'] {
-  --seed: #4aafa6;
-  --accent: #4aafa6;
-  --primary: #5fbbb4;
-  --surface: #0c1211;
-  --on-surface: #e8eeec;
-  --body: #c5d0cc;
-  --md-ink: #e2eae7;
-  --muted: #8a9692;
-  --subtle: #6f7b77;
-  --border: #24302d;
-  --panel: #141c1a;
-  --callout: #1a2624;
-  --accent-soft: #1a2624;
-  --hero-start: #0a1a18;
-  --hero-end: #1a4a45;
-  --app-bar: #101816;
+  /* Warm-neutral charcoal so it reads as the same paper at night. */
+  --seed: #8fa0e8;
+  --accent: #8fa0e8;
+  --primary: #a8b4f0;
+  --surface: #100f0d;
+  --on-surface: #f0ece4;
+  --body: #c9c3b8;
+  --md-ink: #ebe6dd;
+  --muted: #928b7e;
+  --subtle: #776f63;
+  --border: #2b2823;
+  --panel: #191713;
+  --callout: #201d18;
+  --accent-soft: #1c1e2e;
+  --app-bar: #141210;
   --danger: #f97066;
   --gain: #7fc0a8;
   --loss: #f97066;
-  --chain: #7fc0b8;
+  --chain: #a8b4f0;
   --scheduled: #a3b58e;
   --card-shadow: rgba(0, 0, 0, 0.2);
   --card-hover-shadow: rgba(0, 0, 0, 0.35);
+
+  /* Re-stepped for the dark surface rather than flipped — validated
+     separately (band L 0.48–0.67, chroma, normal-vision ΔE 16.8, WCAG text
+     all PASS). Known miss: protocol↔assets is ΔE 4.7 under deuteranopia,
+     below the 6.0 floor. Green/orange is the classic red-green collision and
+     no re-stepping cleared it at this lightness. Acceptable only because the
+     topic name is always spelled out beside the colour. */
+  --tone-markets: #6a8ee5;
+  --tone-protocol: #46ad63;
+  --tone-assets: #d87540;
+  --tone-people: #c964bc;
+  --tone-meta: #9a9282;
+  --tone-alert: var(--danger);
   color-scheme: dark;
 }
 
@@ -71,20 +107,22 @@ html,
 body {
   margin: 0;
   min-height: 100%;
+  min-height: 100dvh;
   background-color: var(--surface);
-  /* Atmosphere: soft tide wash at the top + paper grain. */
+  /* Atmosphere: warm paper wash at the top + grain. Kept off the accent
+     hue — a blue wash under warm newsprint turns the page muddy. */
   background-image:
     radial-gradient(
       ellipse 110% 70% at 50% -18%,
-      color-mix(in srgb, var(--accent) 9%, transparent),
+      color-mix(in srgb, var(--tone-assets) 7%, transparent),
       transparent 58%
     ),
     linear-gradient(
       180deg,
-      color-mix(in srgb, var(--accent) 4%, var(--surface)) 0%,
+      color-mix(in srgb, var(--tone-assets) 3%, var(--surface)) 0%,
       var(--surface) 32%
     ),
-    url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+    var(--grain);
   background-blend-mode: normal, normal, multiply;
   background-attachment: fixed, fixed, fixed;
   color: var(--on-surface);
@@ -93,6 +131,25 @@ body {
   font-weight: 400;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+html {
+  scroll-padding-top: calc(64px + env(safe-area-inset-top, 0px));
+  /* `clip` not `hidden`: full-bleed bands overhang by the scrollbar width,
+     and clip contains them without creating a scroll container (which
+     would break the sticky masthead). */
+  overflow-x: clip;
+}
+
+@media (max-width: 859px) {
+  html,
+  body {
+    background-attachment: scroll, scroll, scroll;
+  }
+  html {
+    scroll-padding-top: calc(92px + env(safe-area-inset-top, 0px));
+  }
 }
 
 @supports not (background-blend-mode: multiply) {
@@ -101,12 +158,12 @@ body {
     background-image:
       radial-gradient(
         ellipse 110% 70% at 50% -18%,
-        color-mix(in srgb, var(--accent) 9%, transparent),
+        color-mix(in srgb, var(--tone-assets) 7%, transparent),
         transparent 58%
       ),
       linear-gradient(
         180deg,
-        color-mix(in srgb, var(--accent) 4%, var(--surface)) 0%,
+        color-mix(in srgb, var(--tone-assets) 3%, var(--surface)) 0%,
         var(--surface) 32%
       );
   }
@@ -118,15 +175,35 @@ html[data-theme='dark'] body {
   background-image:
     radial-gradient(
       ellipse 110% 70% at 50% -18%,
-      color-mix(in srgb, var(--accent) 14%, transparent),
+      color-mix(in srgb, var(--accent) 7%, transparent),
       transparent 58%
     ),
     linear-gradient(
       180deg,
-      color-mix(in srgb, var(--accent) 7%, var(--surface)) 0%,
+      color-mix(in srgb, var(--accent) 3%, var(--surface)) 0%,
       var(--surface) 36%
     ),
-    url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+    var(--grain);
+}
+
+/* Phones/OLEDs amplify green cast — keep dark mobile nearly neutral. */
+@media (max-width: 859px) {
+  html[data-theme='dark'],
+  html[data-theme='dark'] body {
+    background-blend-mode: normal, normal, soft-light;
+    background-image:
+      radial-gradient(
+        ellipse 100% 55% at 50% -22%,
+        color-mix(in srgb, var(--accent) 4%, transparent),
+        transparent 52%
+      ),
+      linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--accent) 1.5%, var(--surface)) 0%,
+        var(--surface) 28%
+      ),
+      var(--grain);
+  }
 }
 
 a {
@@ -175,6 +252,12 @@ h3 {
   padding: 15px 22px;
   font-weight: 600;
   transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+@media (max-width: 519px) {
+  .btn {
+    padding: 12px 16px;
+  }
 }
 
 .btn:hover {
@@ -277,14 +360,97 @@ button:focus-visible {
   }
 }
 
+@media (max-width: 859px) {
+  .page {
+    /* Safe-area lives on the footer — don't pad the page twice. */
+    padding: 18px 18px 20px;
+  }
+}
+
 @media (max-width: 519px) {
   .page {
-    padding: 16px 16px 32px;
+    padding: 14px 14px 12px;
   }
 }
 
 .page-reading {
   max-width: var(--max-reading);
+}
+
+/* Wide measure for grid pages (front, feed). Reading pages stay narrow —
+   varying the module width is what stops desktop reading as "mobile with
+   margins". */
+.page-wide {
+  max-width: var(--max-wide);
+}
+
+/* ---- Editorial grid -------------------------------------------------
+   Below 1080px this is a single column and the rail simply flows after
+   the main content, so mobile inherits the same source order. */
+.editorial {
+  display: grid;
+  gap: 28px;
+  align-items: start;
+}
+
+@media (min-width: 1080px) {
+  .editorial {
+    grid-template-columns: minmax(0, 1fr) var(--rail);
+    column-gap: 44px;
+  }
+  .editorial > .rail {
+    position: sticky;
+    top: 116px;
+    display: flex;
+    flex-direction: column;
+    gap: 26px;
+  }
+}
+
+.editorial > .main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Rail modules read as marginalia: quieter, ruled, no card chrome. */
+.rail-module {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rail-module > .rail-head {
+  margin: 0 0 8px;
+  padding-bottom: 7px;
+  border-bottom: 2px solid var(--on-surface);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--on-surface);
+}
+
+/* ---- Full-bleed band ------------------------------------------------
+   Breaks out of the centred column to the viewport edge. `100vw` ignores
+   the scrollbar, so pair with overflow-x guard on the shell. */
+.bleed {
+  width: 100vw;
+  margin-inline: calc(50% - 50vw);
+  padding-inline: max(18px, calc(50vw - var(--max-wide) / 2));
+}
+
+@media (max-width: 859px) {
+  .bleed {
+    padding-inline: 18px;
+  }
+}
+
+/* The band is unfilled — full-bleed width plus these rules are what mark
+   the change of register. It carries no colours of its own. */
+.band {
+  border-block: 1px solid var(--border);
 }
 
 /* Presence: SPA shell rises in after SSR handoff (see main.ts spa-revealed). */
@@ -328,19 +494,21 @@ button:focus-visible {
 .accent-slug {
   width: 34px;
   height: 3px;
-  background: var(--accent);
+  background: var(--tone, var(--accent));
   border-radius: 1px;
   transform-origin: left center;
   animation: slug-draw 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* Colour comes from the topic tone the ancestor sets; --tone-meta is the
+   neutral fallback for untagged/meta items. */
 .kicker {
   margin: 0;
   font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 1px;
   text-transform: uppercase;
-  color: var(--primary);
+  color: var(--tone, var(--tone-meta));
 }
 
 .section-rule {

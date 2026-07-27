@@ -35,11 +35,11 @@ CARD_HEIGHT = 630
 # Same palette as the SPA's light theme tokens (frontend/src/app.css :root) —
 # the share card is always the light "paper" look regardless of the viewer's
 # app theme, matching how a printed front page has one identity.
-_PAPER = (242, 244, 242)
-_INK = (18, 24, 22)
-_MUTED = (90, 102, 98)
-_ACCENT = (14, 122, 114)
-_ACCENT_FACET = (26, 155, 144)
+_PAPER = (247, 244, 238)
+_INK = (23, 20, 16)
+_MUTED = (106, 99, 85)
+_ACCENT = (74, 91, 208)
+_ACCENT_FACET = (109, 124, 224)
 
 _PAD_X = 76
 _PAD_TOP = 72

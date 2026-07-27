@@ -1,6 +1,29 @@
-"""Derive an article's tags from its source kind and content."""
+"""Derive and order article tags for reader display."""
 
 from __future__ import annotations
+
+# Provenance / pipeline labels — fine as chips, bad as the lead kicker.
+_META_TAGS = frozenset(
+    {
+        "web",
+        "chain",
+        "chain-only",
+        "onchain",
+        "on-chain",
+        "mail",
+        "discord",
+        "telegram",
+        "update",
+        "discovery",
+        "news",
+        "ai",
+        "generic",
+        "algorand",
+        "updated",
+        "weekly",
+        "digest",
+    }
+)
 
 _TOPIC_TAGS = {
     "scam-alert": "scam-alert",
@@ -48,6 +71,21 @@ def _dedupe(tags: list[str]) -> list[str]:
     return out
 
 
+def order_reader_tags(tags: list[str]) -> list[str]:
+    """Lead with topical tags; keep provenance/meta chips at the end."""
+    topical: list[str] = []
+    meta: list[str] = []
+    for raw in tags:
+        tag = str(raw or "").strip().lower()
+        if not tag:
+            continue
+        if tag in _META_TAGS:
+            meta.append(tag)
+        else:
+            topical.append(tag)
+    return _dedupe([*topical, *meta])
+
+
 def derive_article_tags(
     *,
     service_id: str,
@@ -57,23 +95,29 @@ def derive_article_tags(
     publish_topic: str | None = None,
     publish_tier: str | None = None,
 ) -> list[str]:
-    """Build display tags for a feed article from service metadata."""
-    tags: list[str] = []
-    kind = (source_kind or "").strip().lower()
-    if kind:
-        tags.append(kind.replace("_", "-"))
+    """Build display tags for a feed article from service metadata.
 
-    tags.extend(_service_content_tags(service_id.lower(), title.lower()))
-    tags.extend(_publish_kind_tags(publish_kind))
+    Topical labels lead; source-kind / pipeline labels trail so kickers and
+    related-topic picks don't collapse to ubiquitous values like ``web``.
+    """
+    topical: list[str] = []
+    meta: list[str] = []
+
+    topical.extend(_service_content_tags(service_id.lower(), title.lower()))
 
     topic = (publish_topic or "").strip().lower().replace("_", "-")
     if topic in _TOPIC_TAGS:
-        tags.append(_TOPIC_TAGS[topic])
+        mapped = _TOPIC_TAGS[topic]
+        (meta if mapped in _META_TAGS else topical).append(mapped)
 
     if (publish_tier or "").strip().lower() == "breaking":
-        tags.append("breaking")
+        topical.append("breaking")
 
-    if not tags:
-        tags.append("news")
+    meta.extend(_publish_kind_tags(publish_kind))
 
-    return _dedupe(tags)
+    kind = (source_kind or "").strip().lower().replace("_", "-")
+    if kind:
+        meta.append(kind)
+
+    ordered = order_reader_tags([*topical, *meta])
+    return ordered or ["news"]
