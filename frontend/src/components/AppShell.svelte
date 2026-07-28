@@ -499,23 +499,11 @@
 
 <style>
   .shell {
-    --shell-gutter: 32px;
     min-height: 100vh;
     min-height: 100dvh;
     display: flex;
     flex-direction: column;
     background: transparent;
-  }
-  /* After the base rule, or these lose the cascade at equal specificity. */
-  @media (max-width: 859px) {
-    .shell {
-      --shell-gutter: 18px;
-    }
-  }
-  @media (max-width: 519px) {
-    .shell {
-      --shell-gutter: 14px;
-    }
   }
   /* Off-screen until focused, then pinned over the masthead. */
   .skip-link {
@@ -558,8 +546,8 @@
   }
   /* Every strip in the masthead shares the content measure and gutters —
      otherwise the mark and the tabs sit hundreds of px left of the headlines
-     they sit above. --shell-gutter matches .page's padding at each breakpoint
-     and is declared on .shell above. */
+     they sit above. --shell-gutter is declared once in app.css :root, which is
+     also what .page uses, so the two cannot drift apart. */
   .bar {
     width: 100%;
     max-width: var(--max-wide);

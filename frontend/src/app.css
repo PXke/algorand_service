@@ -62,6 +62,11 @@
   /* Front page and other grid pages get the wide measure. */
   --max-wide: 1240px;
   --rail: 320px;
+  /* One page gutter for every strip that has to line up: .page, the masthead
+     bar, the tab row and the markets ticker. It was declared in AppShell's
+     scoped CSS and re-stated as literals here, so a change in one silently
+     misaligned the masthead from the column beneath it. */
+  --shell-gutter: 32px;
   color-scheme: light;
 }
 
@@ -137,18 +142,26 @@ body {
 
 html {
   scroll-padding-top: calc(64px + env(safe-area-inset-top, 0px));
-  /* No overflow-x here. `clip` on the ROOT element makes it a containing
-     block for fixed-position descendants, which silently anchored the
-     article's sticky bar to the document instead of the viewport — measured
-     top: -2600px at scrollY 2600, i.e. it never appeared while reading, so
-     there was no way back to the front page mid-article. The .bleed bands it
-     was added to contain overhang by the scrollbar width instead; that is a
-     cosmetic ~15px, and losing position:fixed is not. */
+  /* Contains the scrollbar-width overhang of .bleed (sized in vw, and vw
+     counts the scrollbar while the document does not). `clip`, not `hidden`,
+     so this never becomes a scroll container. Suspected once of breaking the
+     article's sticky bar; the real culprit was a retained spa-enter transform
+     on #app — see the note there. */
+  overflow-x: clip;
 }
 
 @media (max-width: 859px) {
   html {
     scroll-padding-top: calc(92px + env(safe-area-inset-top, 0px));
+  }
+  :root {
+    --shell-gutter: 18px;
+  }
+}
+
+@media (max-width: 519px) {
+  :root {
+    --shell-gutter: 14px;
   }
 }
 
@@ -303,7 +316,7 @@ button:focus-visible {
   width: 100%;
   max-width: var(--max-content);
   margin: 0 auto;
-  padding: 28px 32px 48px;
+  padding: 28px var(--shell-gutter) 48px;
   animation: page-enter 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -321,13 +334,13 @@ button:focus-visible {
 @media (max-width: 859px) {
   .page {
     /* Safe-area lives on the footer — don't pad the page twice. */
-    padding: 18px 18px 20px;
+    padding: 18px var(--shell-gutter) 20px;
   }
 }
 
 @media (max-width: 519px) {
   .page {
-    padding: 14px 14px 12px;
+    padding: 14px var(--shell-gutter) 12px;
   }
 }
 
@@ -405,12 +418,12 @@ button:focus-visible {
 .bleed {
   width: 100vw;
   margin-inline: calc(50% - 50vw);
-  padding-inline: max(18px, calc(50vw - var(--max-wide) / 2));
+  padding-inline: max(var(--shell-gutter), calc(50vw - var(--max-wide) / 2));
 }
 
 @media (max-width: 859px) {
   .bleed {
-    padding-inline: 18px;
+    padding-inline: var(--shell-gutter);
   }
 }
 
