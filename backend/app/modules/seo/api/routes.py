@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import inspect
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from uuid import UUID
 
@@ -133,15 +134,26 @@ _BEACON_STATIC_PATHS = {
 }
 
 
+# Lowercase alphanumerics and single dashes — the exact shape slugify emits.
+_SLUG_SHAPE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
 def _is_known_app_path(path: str) -> bool:
     """True for a path the SPA router can actually land on — keeps the unauthenticated beacon from letting a client bump counters for arbitrary made-up paths (cardinality/data-quality, not just a hard filter)."""
     if path in _BEACON_STATIC_PATHS:
         return True
     if path.startswith("/news/articles/"):
+        # A uuid OR a slug (migration 056). Article URLs became slugs on
+        # 2026-07-28 and this still demanded a uuid, so every article pageview
+        # was rejected with 400 and silently stopped being counted. Slugs are
+        # shape-checked rather than looked up: the beacon is unauthenticated
+        # and must not become a way to probe which articles exist, and the
+        # point of this guard is cardinality control, not authorisation.
+        ident = path[len("/news/articles/") :]
         try:
-            UUID(path[len("/news/articles/") :])
+            UUID(ident)
         except ValueError:
-            return False
+            return bool(ident) and len(ident) <= 80 and _SLUG_SHAPE.fullmatch(ident) is not None
         return True
     if path.startswith("/topic/"):
         # Any non-empty slug: the SPA router serves every /topic/:tag.

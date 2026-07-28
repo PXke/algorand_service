@@ -409,15 +409,18 @@ def test_beacon_path_validation_rejects_made_up_paths() -> None:
     assert _is_known_app_path("/about")
     assert _is_known_app_path("/topic/sdk")
     assert _is_known_app_path("/news/articles/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d")
+    # Article paths accept a slug as well as a uuid (migration 056).
+    assert _is_known_app_path("/news/articles/algorank-debuts-1k-project-directory")
     # Admin isn't a public pageview route; retired sections, an overlong or
-    # nested topic slug, a non-UUID "article id" and arbitrary paths must not
+    # nested topic slug, a malformed "article id" and arbitrary paths must not
     # bump analytics counters.
     assert not _is_known_app_path("/admin")
     assert not _is_known_app_path("/section/markets")
     assert not _is_known_app_path("/topic/")
     assert not _is_known_app_path("/topic/" + "x" * 49)
     assert not _is_known_app_path("/topic/a/b")
-    assert not _is_known_app_path("/news/articles/not-a-uuid")
+    assert not _is_known_app_path("/news/articles/Not A Slug")
+    assert not _is_known_app_path("/news/articles/nested/path")
     assert not _is_known_app_path("/random/garbage")
 
 
@@ -888,3 +891,14 @@ def test_sitemap_emits_slug_urls_not_ids() -> None:
     locs = " ".join(e.loc for e in entries)
     assert "/news/articles/my-story" in locs
     assert "/news/articles/id0" not in locs
+
+
+def test_beacon_accepts_slug_article_paths() -> None:
+    """Article URLs are slugs since migration 056 — a uuid-only guard silently stopped counting reads."""
+    assert _is_known_app_path("/news/articles/algorank-debuts-1k-project-directory")
+    assert _is_known_app_path("/news/articles/afeeec91-dc1a-4cba-88b3-7447ac3ee2c3")
+    # Still rejects junk, which is what the guard is for.
+    assert not _is_known_app_path("/news/articles/Not A Slug")
+    assert not _is_known_app_path("/news/articles/x/y")
+    assert not _is_known_app_path("/news/articles/")
+    assert not _is_known_app_path("/news/articles/" + "a" * 100)

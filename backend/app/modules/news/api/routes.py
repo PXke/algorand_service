@@ -92,9 +92,16 @@ def feed(request: Request) -> Response:
 
 def article_detail(request: Request) -> Response:
     """Fetch one article's full detail, recording a best-effort read (bots and opted-out readers excluded)."""
-    article_id = request.path_params.get("article_id", "")
-    if not article_id:
+    raw = request.path_params.get("article_id", "")
+    if not raw:
         return json_error_response(400, "invalid_request", "article_id required")
+
+    # Accept a slug as well as a uuid. The SPA builds hrefs from article.slug
+    # (migration 056), so after hydration EVERY article fetch arrives here as a
+    # slug — resolving only in the SSR document route left the JSON API
+    # answering 404 for every story, which the app renders as "this article was
+    # deleted".
+    article_id = news_service.resolve_slug(raw) or raw
 
     lang = query_param(request.query_params.get("lang", "")) or None
     detail = news_service.get_article(article_id, lang=lang)
