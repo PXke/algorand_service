@@ -409,13 +409,13 @@ def search(request: Request) -> Response:
 def suggestions(request: Request) -> Response:
     """SSR noindex shell for the client-side suggestions page."""
     _ = request
-    return _doc_response(render.render_noindex("Suggestions"), "public, max-age=300")
+    return _doc_response(render.render_noindex("Suggestions", active="/suggestions"), "public, max-age=300")
 
 
 def admin(request: Request) -> Response:
     """SSR noindex, no-store shell for the admin dashboard."""
     _ = request
-    return _doc_response(render.render_noindex("Admin"), "no-store")
+    return _doc_response(render.render_noindex("Admin", active="/admin"), "no-store")
 
 
 def _beacon_origin_ok(request: Request) -> bool:

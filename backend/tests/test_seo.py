@@ -265,7 +265,8 @@ def test_render_home_lists_articles() -> None:
     """Lists all feed articles with a CollectionPage head and matching body links."""
     head, body = render.render_news_feed(_feed(3))
     assert "CollectionPage" in head
-    assert 'rel="canonical" href="https://algorand.pxke.me/news"' in head
+    # Canonical is the front page — see test_render_news_canonicalises_to_the_front_page.
+    assert 'rel="canonical" href="https://algorand.pxke.me/"' in head
     assert 'id="pxke-ssr-feed"' in head
     assert '"items":' in head
     assert body.count('href="/news/articles/id') == 3
@@ -296,13 +297,23 @@ def test_render_front_differs_from_news_feed() -> None:
     assert "Full chronological feed" in front
 
 
-def test_render_news_canonical_is_distinct_from_home() -> None:
-    """Gives the news feed a canonical URL distinct from the home page's."""
+def test_render_news_canonicalises_to_the_front_page() -> None:
+    """Points /news at / as canonical, because the two are near-identical.
+
+    This asserted a DISTINCT self-canonical until 2026-07-28. In production the
+    two pages measured 95% identical text — they list the same stories — so
+    Search Console reported "Duplicate without user-selected canonical" and
+    picked one itself. Declaring the stronger URL is what we mean; /news stays
+    crawlable and linked, it is just not indexed as a second copy. The ItemList
+    JSON-LD still describes /news, since it describes THIS page's contents.
+    """
     items = _feed(2)
     front_head, _ = render.render_front(items, [])
     news_head, news_body = render.render_news_feed(items)
     assert 'rel="canonical" href="https://algorand.pxke.me/"' in front_head
-    assert 'rel="canonical" href="https://algorand.pxke.me/news"' in news_head
+    assert 'rel="canonical" href="https://algorand.pxke.me/"' in news_head
+    assert 'rel="canonical" href="https://algorand.pxke.me/news"' not in news_head
+    assert '"url":"https://algorand.pxke.me/news"' in news_head
     assert "Latest" in news_body
     assert 'aria-label="Breadcrumb"' in news_body
 

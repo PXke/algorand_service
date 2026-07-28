@@ -823,8 +823,15 @@ def render_news_feed(
     total_count: int | None = None,
 ) -> tuple[str, str]:
     """Chronological file at /news."""
-    canonical = absolute("/news")
-    breadcrumbs = [("Home", site_url() + "/"), ("Latest", canonical)]
+    # Canonicalised to the front page, not self-referential: the two carry the
+    # same stories and measured 95% identical text, which is the definition of
+    # a duplicate. Left self-canonical, Search Console reported "Duplicate
+    # without user-selected canonical" and picked one of them itself. The
+    # homepage is the stronger URL, so point at it and let /news stay a
+    # crawlable, linkable route that simply is not indexed separately.
+    canonical = site_url() + "/"
+    self_url = absolute("/news")
+    breadcrumbs = [("Home", site_url() + "/"), ("Latest", self_url)]
     heading = f"{settings.site_name} — Latest"
     intro = ""
     if total_count is not None and total_count > len(items):
@@ -841,7 +848,9 @@ def render_news_feed(
         image_alt=settings.site_name,
         image_dims=_DEFAULT_IMAGE_DIMS,
         json_ld=[
-            _feed_list_jsonld(items, canonical, heading),
+            # self_url: the ItemList describes THIS page's contents,
+            # whereas the canonical points at the front page.
+            _feed_list_jsonld(items, self_url, heading),
             _breadcrumb(breadcrumbs),
         ],
     )
@@ -1050,10 +1059,17 @@ def render_contact() -> tuple[str, str]:
 
 def render_noindex(title: str, *, active: str | None = None) -> tuple[str, str]:
     """Minimal shell for utility routes (admin/search/suggestions) — keep them out of the index but still serve the app."""
+    # Self-referential canonical, not the homepage. noindex plus a canonical
+    # pointing somewhere else are contradictory instructions — one says "drop
+    # this page", the other says "credit it to /" — and Google resolves the
+    # conflict however it likes. These pages are not duplicates of the front
+    # page either, which is what "Duplicate, Google chose different canonical
+    # than user" reports. noindex alone says exactly what we mean.
+    canonical = absolute(active) if active else site_url() + "/"
     head = _meta_block(
         title=title,
         description=settings.site_tagline,
-        canonical=site_url() + "/",
+        canonical=canonical,
         image=absolute(settings.seo_default_image),
         image_alt=settings.site_name,
         image_dims=_DEFAULT_IMAGE_DIMS,
