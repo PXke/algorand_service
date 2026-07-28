@@ -2,28 +2,13 @@
 
 from __future__ import annotations
 
-# Provenance / pipeline labels — fine as chips, bad as the lead kicker.
-_META_TAGS = frozenset(
-    {
-        "web",
-        "chain",
-        "chain-only",
-        "onchain",
-        "on-chain",
-        "mail",
-        "discord",
-        "telegram",
-        "update",
-        "discovery",
-        "news",
-        "ai",
-        "generic",
-        "algorand",
-        "updated",
-        "weekly",
-        "digest",
-    }
-)
+# The provenance list and the ordering rule both live in shared/taxonomy.json.
+# This module is the PRODUCER — it decides the tag order that gets persisted,
+# and publish_tasks truncates to the first 10 — so a local copy drifting from
+# the canon is worse here than anywhere else: it was missing `blockchain` and
+# `service`, which meant those led the stored array as if topical while both
+# display sides (SSR and SPA) correctly classified them as provenance.
+from algorand_shared.taxonomy import is_meta_tag, order_reader_tags
 
 _TOPIC_TAGS = {
     "scam-alert": "scam-alert",
@@ -61,31 +46,6 @@ def _publish_kind_tags(publish_kind: str | None) -> list[str]:
     return []
 
 
-def _dedupe(tags: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for tag in tags:
-        if tag not in seen:
-            seen.add(tag)
-            out.append(tag)
-    return out
-
-
-def order_reader_tags(tags: list[str]) -> list[str]:
-    """Lead with topical tags; keep provenance/meta chips at the end."""
-    topical: list[str] = []
-    meta: list[str] = []
-    for raw in tags:
-        tag = str(raw or "").strip().lower()
-        if not tag:
-            continue
-        if tag in _META_TAGS:
-            meta.append(tag)
-        else:
-            topical.append(tag)
-    return _dedupe([*topical, *meta])
-
-
 def derive_article_tags(
     *,
     service_id: str,
@@ -108,7 +68,7 @@ def derive_article_tags(
     topic = (publish_topic or "").strip().lower().replace("_", "-")
     if topic in _TOPIC_TAGS:
         mapped = _TOPIC_TAGS[topic]
-        (meta if mapped in _META_TAGS else topical).append(mapped)
+        (meta if is_meta_tag(mapped) else topical).append(mapped)
 
     if (publish_tier or "").strip().lower() == "breaking":
         topical.append("breaking")

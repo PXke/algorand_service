@@ -1,0 +1,59 @@
+{
+  "$schema-note": [
+    "Cross-boundary design tokens: the palette values that are restated OUTSIDE",
+    "frontend/src/app.css, in files that cannot read a CSS custom property — a",
+    "favicon SVG, the pre-CSS offline page, the SSR <style> block Python emits,",
+    "the PWA manifest, a <meta name=theme-color>.",
+    "",
+    "app.css remains the design surface and defines the full palette. Only the",
+    "handful of values that must be duplicated live here, so there is one place",
+    "to change them and one place to check them against.",
+    "",
+    "Consumers:",
+    "  Python  - shared/algorand_shared/design.py (read at runtime)",
+    "  TS      - frontend/src/lib/designTokens.ts (GENERATED, do not edit)",
+    "  CSS/SVG/HTML - hand-authored, verified by tools/design/sync_tokens.py",
+    "",
+    "After editing this file run:  python3 tools/design/sync_tokens.py --write",
+    "backend/tests/test_design_tokens.py fails the suite if anything drifts."
+  ],
+  "tokens": {
+    "accent": {
+      "light": "#4a5bd0",
+      "role": "Brand mark and interaction. The one blue the logo is drawn in."
+    },
+    "primary": {
+      "light": "#3a49ad",
+      "role": "Link ink — accent darkened to clear WCAG AA on --surface."
+    },
+    "surface": {
+      "light": "#f7f4ee",
+      "role": "Warm newsprint page background."
+    },
+    "panel": {
+      "light": "#fffdf8",
+      "role": "Raised card / app-bar fill."
+    },
+    "on-surface": {
+      "light": "#171410",
+      "role": "Headline ink."
+    },
+    "muted": {
+      "light": "#6a6355",
+      "role": "Secondary text: bylines, timestamps, breadcrumbs."
+    },
+    "subtle": {
+      "light": "#7d7566",
+      "role": "Tertiary marks: breadcrumb separators, hairline glyphs."
+    },
+    "border": {
+      "light": "#e0d9cb",
+      "role": "Hairline rules."
+    },
+    "theme-color": {
+      "light": "#3a49ad",
+      "dark": "#141210",
+      "role": "Browser/OS chrome tint. Light tints to brand; dark matches --app-bar."
+    }
+  }
+}

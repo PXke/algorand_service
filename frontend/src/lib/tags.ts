@@ -1,23 +1,9 @@
-/** Provenance / pipeline labels — fine as chips, bad as the lead kicker. */
-const META_TAGS = new Set([
-  'web',
-  'chain',
-  'chain-only',
-  'onchain',
-  'on-chain',
-  'mail',
-  'discord',
-  'telegram',
-  'update',
-  'discovery',
-  'news',
-  'ai',
-  'generic',
-  'algorand',
-  'updated',
-  'weekly',
-  'digest',
-])
+/* Provenance / pipeline labels — fine as chips, bad as the lead kicker.
+   Generated from shared/taxonomy.json, which the Python SSR reads too: this
+   list and the backend's used to differ, so an article tagged
+   ["update", "defi"] was served to crawlers under "Update" and re-labelled
+   "DeFi" the moment the SPA hydrated. */
+import { META_TAGS, DISPLAY_LABELS } from './taxonomy.generated'
 
 export function isMetaTag(tag: string): boolean {
   return META_TAGS.has(tag.trim().toLowerCase())
@@ -44,6 +30,17 @@ export function orderReaderTags(tags: string[] | null | undefined): string[] {
 export function primaryTopic(tags: string[] | null | undefined): string | null {
   const ordered = orderReaderTags(tags)
   return ordered.find((t) => !META_TAGS.has(t)) ?? ordered[0] ?? null
+}
+
+/** Reader-facing text for a tag slug. Display only — /topic/<tag> links keep
+    the raw slug, so a URL never changes shape based on this table. The SSR
+    applies the same map; without it the server said "on-chain" and the SPA
+    said "chain-only" on the same chip. */
+export function displayTagLabel(tag: string | null | undefined): string {
+  const key = String(tag ?? '')
+    .trim()
+    .toLowerCase()
+  return DISPLAY_LABELS[key] ?? String(tag ?? '')
 }
 
 /* ------------------------------------------------------------------ *
@@ -75,6 +72,10 @@ const TONE_BY_TOPIC: Record<string, Tone> = {
   payments: 'markets',
   treasury: 'markets',
   liquidity: 'markets',
+  trading: 'markets',
+  'swap-aggregator': 'markets',
+  institutional: 'markets',
+  compliance: 'markets',
   // Protocol — the chain and the tools on it
   infrastructure: 'protocol',
   api: 'protocol',
@@ -94,6 +95,14 @@ const TONE_BY_TOPIC: Record<string, Tone> = {
   security: 'protocol',
   audit: 'protocol',
   privacy: 'protocol',
+  explorer: 'protocol',
+  'cross-chain': 'protocol',
+  validator: 'protocol',
+  'open-source': 'protocol',
+  algokit: 'protocol',
+  agents: 'protocol',
+  'arc-standards': 'protocol',
+  avm: 'protocol',
   // Assets — things issued and traded
   nft: 'assets',
   marketplace: 'assets',
@@ -101,6 +110,8 @@ const TONE_BY_TOPIC: Record<string, Tone> = {
   asa: 'assets',
   collectibles: 'assets',
   gaming: 'assets',
+  memecoins: 'assets',
+  launchpad: 'assets',
   // People — who is doing it and how they decide
   identity: 'people',
   nfd: 'people',
@@ -112,6 +123,14 @@ const TONE_BY_TOPIC: Record<string, Tone> = {
   dao: 'people',
   voting: 'people',
   foundation: 'people',
+  directory: 'people',
+  education: 'people',
+  undp: 'people',
+  partnership: 'people',
+  xgov: 'people',
+  humanitarian: 'people',
+  afghanistan: 'people',
+  onboarding: 'people',
   // Alert — urgency, not a desk. These are the labels the pipeline stamps
   // deterministically (article_tags.py `_TOPIC_TAGS` / the breaking tier),
   // and every one of them used to fall through to neutral grey — the desk
@@ -135,9 +154,4 @@ export function topicTone(tag: string | null | undefined): Tone {
 /** CSS colour for a topic, for inline `style="color: …"`. */
 export function topicColor(tag: string | null | undefined): string {
   return `var(--tone-${topicTone(tag)})`
-}
-
-/** Soft background wash matching a topic's tone. */
-export function topicWash(tag: string | null | undefined): string {
-  return `var(--tone-${topicTone(tag)}-soft)`
 }

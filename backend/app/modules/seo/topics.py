@@ -12,6 +12,19 @@ import time
 from collections import Counter
 from collections.abc import Callable
 
+# display_tag_label and primary_tag are re-exported for callers that import
+# them from this module; the redundant alias is the explicit re-export idiom
+# and keeps them from reading as unused imports.
+from algorand_shared.taxonomy import (
+    display_tag_label as display_tag_label,
+)
+from algorand_shared.taxonomy import (
+    meta_tags,
+)
+from algorand_shared.taxonomy import (
+    primary_tag as primary_tag,
+)
+
 from app.modules.news.models.schemas import ArticleFeedItem
 
 # Slugs of the retired human sections → the closest real writer tag, so the
@@ -28,31 +41,17 @@ MIN_COUNT = 2
 UBIQUITY_CEILING = 0.5  # tags on >=50% of the corpus are boilerplate
 DEFAULT_CAP = 100
 
-# Pipeline-stamped labels with no topical signal (mirrors the Flutter
-# `kBoilerplateTags`); kickers/breadcrumbs skip past them.
-BOILERPLATE_TAGS = frozenset({"web", "news", "discovery", "algorand", "generic", "service"})
-
-
-# Internal-jargon tags with a friendlier reader-facing label — mirrors the
-# Flutter displayTagLabel (modules/newspaper/sections.dart). Applied only to
-# DISPLAY text (breadcrumb, kicker, articleSection); URL slugs (/topic/<tag>)
-# always use the raw tag, in both this backend and the app, so a link never
-# changes shape based on this table.
-_TAG_DISPLAY_LABELS: dict[str, str] = {"chain-only": "on-chain"}
-
-
-def display_tag_label(tag: str) -> str:
-    """Map an internal tag slug to its reader-facing display label, if any."""
-    return _TAG_DISPLAY_LABELS.get(tag.strip().lower(), tag)
-
-
-def primary_tag(tags: list[str] | None) -> str | None:
-    """First non-boilerplate tag (raw slug — see display_tag_label for the reader-facing text), falling back to the plain first tag."""
-    cleaned = [t.strip().lower() for t in (tags or []) if t.strip()]
-    for tag in cleaned:
-        if tag not in BOILERPLATE_TAGS:
-            return tag
-    return cleaned[0] if cleaned else None
+# Pipeline-stamped labels with no topical signal; kickers/breadcrumbs skip past
+# them. `primary_tag` and `display_tag_label` now come from shared/taxonomy.json
+# — the SPA generates its copy from the same file. They used to be two
+# hand-maintained lists (6 entries here, 18 in the frontend), so an article
+# tagged ["update", "defi"] was served to crawlers as "Update" and shown to
+# readers as "DeFi" once the SPA hydrated: same URL, two sections.
+#
+# Note this list governs the KICKER only. Which tags get a landing page is a
+# separate policy below (MIN_COUNT + UBIQUITY_CEILING), deliberately so — a tag
+# can be too generic to headline a story yet still worth an index page.
+BOILERPLATE_TAGS = meta_tags()
 
 
 def tag_counts(items: list[ArticleFeedItem]) -> Counter[str]:

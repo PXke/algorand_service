@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
-from app.modules.seo import feeds, render, shell, sitemap
+from app.modules.seo import feeds, render, shell, sitemap, topics
 from app.modules.seo.api.routes import _is_known_app_path
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
 from app.modules.seo.topics import SECTION_REDIRECTS, reliable_tags
@@ -794,13 +794,27 @@ def test_icon_word_boundary_matching() -> None:
     assert not _is_icon_like("https://x.io/features/hero-image.jpg")
 
 
-def test_chain_only_tag_gets_friendly_display_label() -> None:
-    """primary_tag() returns the raw slug (used for /topic/<tag> URLs); the breadcrumb, og:section and articleSection show display_tag_label's friendlier text instead — mirrors the Flutter displayTagLabel mapping."""
+def test_section_skips_provenance_tags_for_the_real_subject() -> None:
+    """The section is what the story is ABOUT, never how we found it.
+
+    "chain-only" and "discovery" are pipeline provenance — they say the story
+    surfaced from an on-chain-only trigger, not that it concerns the chain.
+    This backend used to treat "chain-only" as topical (its boilerplate list
+    held 6 labels to the SPA's 18), so crawlers were told the section was
+    "on-chain" while a reader saw "Payments" a frame after hydration. Both
+    sides now read shared/taxonomy.json, so the subject wins on both.
+    """
     head, _ = render.render_article(_article(tags=["chain-only", "discovery", "payments"]))
-    assert '"name":"on-chain"' in head
-    assert 'property="article:section" content="on-chain"' in head
-    assert '"articleSection":"on-chain"' in head
-    assert "/topic/chain-only" in head  # URL slug stays raw
+    assert 'property="article:section" content="payments"' in head
+    assert '"articleSection":"payments"' in head
+    assert "/topic/payments" in head
+
+
+def test_display_label_rewrites_jargon_slugs_without_touching_urls() -> None:
+    """Display text only: /topic/<tag> always links the raw slug, both sides."""
+    assert topics.display_tag_label("chain-only") == "on-chain"
+    assert topics.display_tag_label("CHAIN-ONLY") == "on-chain"
+    assert topics.display_tag_label("payments") == "payments"
 
 
 def test_section_redirect_map_matches_the_spa() -> None:

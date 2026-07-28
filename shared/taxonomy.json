@@ -1,0 +1,42 @@
+{
+  "$schema-note": [
+    "Reader-facing tag policy, shared by the Python SSR and the Svelte SPA.",
+    "",
+    "Both sides pick a story's kicker/breadcrumb from its tags, and they used to",
+    "hold separate lists: the backend skipped 6 labels, the frontend 18. On an",
+    "article tagged [\"update\", \"defi\"] the crawler was served \"Update\" and the",
+    "reader saw \"DeFi\" a frame later — same URL, two different sections.",
+    "",
+    "Consumers:",
+    "  Python - shared/algorand_shared/taxonomy.py (read at runtime)",
+    "  TS     - frontend/src/lib/taxonomy.generated.ts (GENERATED, do not edit)",
+    "",
+    "After editing this file run:  python3 tools/design/sync_tokens.py --write"
+  ],
+  "meta_tags": [
+    "ai",
+    "algorand",
+    "blockchain",
+    "chain",
+    "chain-only",
+    "digest",
+    "discord",
+    "discovery",
+    "generic",
+    "mail",
+    "news",
+    "on-chain",
+    "onchain",
+    "service",
+    "telegram",
+    "update",
+    "updated",
+    "web",
+    "weekly"
+  ],
+  "meta_tags_note": "Provenance and pipeline labels. Fine as chips at the end of an article; never the kicker, because they say how we found the story rather than what it is about.",
+  "display_labels": {
+    "chain-only": "on-chain"
+  },
+  "display_labels_note": "Internal slug -> reader-facing text. DISPLAY ONLY: /topic/<tag> URLs always use the raw slug on both sides, so a link never changes shape based on this table."
+}

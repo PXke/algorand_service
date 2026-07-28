@@ -25,6 +25,7 @@ from functools import cache
 from io import BytesIO
 from pathlib import Path
 
+from algorand_shared import design
 from PIL import Image, ImageDraw, ImageFont
 
 _ASSETS = Path(__file__).parent / "assets" / "fonts"
@@ -32,13 +33,17 @@ _ASSETS = Path(__file__).parent / "assets" / "fonts"
 CARD_WIDTH = 1200
 CARD_HEIGHT = 630
 
-# Same palette as the SPA's light theme tokens (frontend/src/app.css :root) —
-# the share card is always the light "paper" look regardless of the viewer's
-# app theme, matching how a printed front page has one identity.
-_PAPER = (247, 244, 238)
-_INK = (23, 20, 16)
-_MUTED = (106, 99, 85)
-_ACCENT = (74, 91, 208)
+# Read from shared/design_tokens.json, not hand-copied: this file kept its own
+# RGB transcription of the palette and was the one surface the 2026-07-27 token
+# migration missed, so a colour change would have silently left share cards on
+# the old brand. The card is always the light "paper" look regardless of the
+# viewer's theme, the way a printed front page has one identity.
+_PAPER = design.rgb("surface")
+_INK = design.rgb("on-surface")
+_MUTED = design.rgb("muted")
+_ACCENT = design.rgb("accent")
+# Card-local highlight, deliberately not a token: it exists only to face the
+# accent block on this one graphic, so it has no counterpart in the UI.
 _ACCENT_FACET = (109, 124, 224)
 
 _PAD_X = 76
