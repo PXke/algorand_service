@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.core.cache import cached_json
 from app.core.config import settings
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.news.services.trigger_kind import classify_article_trigger
@@ -17,10 +18,24 @@ class NewsService:
         self._store = store or get_article_store()
 
     def count_feed(self, *, feed_bucket: str | None = None) -> int:
-        """Approximate feed size (in-memory exact; Cassandra capped query)."""
+        """Approximate feed size (in-memory exact; Cassandra capped query).
+
+        Cached because the only callers are display counters — the "Feed
+        articles" tile and /news/stats — while the query itself is expensive
+        out of proportion to a `len()`: it walks up to 18 month partitions and
+        materialises 500 StoredArticle rows, each carrying the 8-language
+        `translations` map. Until 2026-07-27 the Cassandra store spelled the
+        keyword `_feed_bucket`, so this raised TypeError and the tile silently
+        rendered "—"; fixing that name put ~1 MB of Cassandra traffic on an
+        endpoint every open tab polls once a minute. A minutes-stale count is
+        indistinguishable to a reader.
+        """
         bucket = feed_bucket or settings.news_feed_bucket
-        articles = self._store.list_feed(feed_bucket=bucket, limit=500)
-        return len(articles)
+        return cached_json(
+            f"news:feed-count:{bucket}",
+            300,
+            lambda: len(self._store.list_feed(feed_bucket=bucket, limit=500)),
+        )
 
     def list_feed(
         self,

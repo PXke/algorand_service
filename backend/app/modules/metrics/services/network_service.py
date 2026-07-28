@@ -19,6 +19,57 @@ _NODELY_CACHE_KEY = "metrics:nodely-validators"
 _NODELY_CACHE_TTL = 3600
 
 
+_ROUND_TIME_CACHE_KEY = "metrics:round-time"
+_ROUND_TIME_CACHE_TTL = 120
+# Averaged over a span rather than one gap: consensus jitter makes a single
+# interval swing by hundreds of ms, and the tile should read as a network
+# characteristic, not a stopwatch.
+_ROUND_TIME_SPAN = 20
+
+
+def _block_timestamp(round_number: int, *, timeout: float) -> int | None:
+    """Unix seconds the given round was committed, or None if algod won't say."""
+    url = f"{settings.algod_url.rstrip('/')}/v2/blocks/{round_number}"
+    headers: dict[str, str] = {}
+    token = settings.algod_token.strip()
+    if token:
+        headers["X-Algo-API-Token"] = token
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(url, headers=headers, params={"format": "json"})
+            response.raise_for_status()
+            block = response.json().get("block")
+            ts = block.get("ts") if isinstance(block, dict) else None
+            return int(ts) if isinstance(ts, int | float) else None
+    except Exception as exc:
+        logger.warning("Algod block %s fetch failed: %s", round_number, exc)
+        return None
+
+
+def fetch_round_time_seconds(last_round: int, *, timeout: float = 8.0) -> float | None:
+    """Mean seconds per round over the last `_ROUND_TIME_SPAN` rounds.
+
+    Not `time-since-last-round` from /v2/status: that is a stopwatch on the
+    CURRENT block, so polling it returns whatever instant the request landed on
+    (observed 2.2s, 1.8s, 1.8s within seconds of each other) — the age of one
+    block, not how long a round takes. Two block headers and a subtraction give
+    the real figure, which for Algorand sits near 2.8s.
+    """
+    if last_round <= _ROUND_TIME_SPAN:
+        return None
+
+    def compute() -> float | None:
+        newest = _block_timestamp(last_round, timeout=timeout)
+        oldest = _block_timestamp(last_round - _ROUND_TIME_SPAN, timeout=timeout)
+        if newest is None or oldest is None or newest <= oldest:
+            return None
+        return (newest - oldest) / _ROUND_TIME_SPAN
+
+    # Keyed on the span, not the round: the value barely moves, and this keeps
+    # every browser polling the dashboard from issuing two algod calls a minute.
+    return cached_json(_ROUND_TIME_CACHE_KEY, _ROUND_TIME_CACHE_TTL, compute)
+
+
 def fetch_algod_status(*, timeout: float = 8.0) -> dict[str, Any]:
     """Best-effort Algod /v2/status for chain activity tiles."""
     url = settings.algod_url.rstrip("/") + "/v2/status"

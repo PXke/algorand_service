@@ -21,7 +21,7 @@ def _epoch(dt: datetime | None) -> int:
 class CassandraArticleStore:
     """Cassandra-backed article storage."""
 
-    def insert(self, article: StoredArticle, *, _feed_bucket: str = "main") -> None:
+    def insert(self, article: StoredArticle, *, feed_bucket: str = "main") -> None:
         # UNREACHABLE IN PRODUCTION as of 2026-07-13: NewsService (the only
         # consumer of ArticleStore) never calls this — real article writes
         # happen entirely in the `workers` package via insert_article /
@@ -36,6 +36,7 @@ class CassandraArticleStore:
         # such duplicate (Bitrue article, 2026-07-13) whose origin predates
         # this comment and could not be traced to a live call site.
         """Insert a new article and its feed row. Unreachable in production; kept to satisfy ArticleStore."""
+        _ = feed_bucket  # single-bucket schema; accepted for protocol parity
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import NewsStmts
 
@@ -75,9 +76,14 @@ class CassandraArticleStore:
             ),
         )
 
-    def list_feed(self, *, _feed_bucket: str = "main", limit: int = 50) -> list[StoredArticle]:
-        """List recent feed rows, newest first (wraps list_feed_page, discarding the cursor)."""
-        items, _ = self.list_feed_page(limit=limit)
+    def list_feed(self, *, feed_bucket: str = "main", limit: int = 50) -> list[StoredArticle]:
+        """List recent feed rows, newest first (wraps list_feed_page, discarding the cursor).
+
+        The keyword must stay spelled `feed_bucket` to match ArticleStore;
+        test_news_store_protocol guards it.
+        """
+        _ = feed_bucket  # single-bucket schema; accepted for protocol parity
+        items, _cursor = self.list_feed_page(limit=limit)
         return items
 
     def list_feed_page(

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from app.core.config import settings
 from app.modules.metrics.models.dashboard_schemas import MetricsDashboardResponse, MetricTile
-from app.modules.metrics.services.network_service import fetch_algod_status, fetch_nodely_node_stats
+from app.modules.metrics.services.network_service import (
+    fetch_algod_status,
+    fetch_nodely_node_stats,
+    fetch_round_time_seconds,
+)
 from app.modules.metrics.services.price_service import PriceMetricsService
 from app.modules.metrics.stores.cassandra import load_latest_price_sample
 from app.modules.news.services.news_service import NewsService
@@ -125,37 +129,8 @@ class MetricsDashboardService:
                 )
             )
 
-        catchup = status.get("catchup-time", status.get("CatchupTime"))
-        time_since = status.get("time-since-last-round", status.get("TimeSinceLastRound"))
-        if isinstance(time_since, int) and time_since >= 0:
-            tiles.append(
-                MetricTile(
-                    id="round_latency",
-                    label="Round time",
-                    value=f"{time_since / 1_000_000_000:.1f}s",
-                    hint="Since last block",
-                    available=True,
-                )
-            )
-        elif catchup is not None:
-            tiles.append(
-                MetricTile(
-                    id="round_latency",
-                    label="Round time",
-                    value=str(catchup),
-                    available=True,
-                )
-            )
-        else:
-            tiles.append(
-                MetricTile(
-                    id="round_latency",
-                    label="Round time",
-                    value="—",
-                    available=False,
-                )
-            )
-
+        # Validators before round time: node count is the headline
+        # decentralisation number, and the markets bar shows this list in order.
         node_stats = fetch_nodely_node_stats()
         node_count = node_stats.get("node_count")
         if isinstance(node_count, int) and node_count > 0:
@@ -175,6 +150,44 @@ class MetricsDashboardService:
                     label="Validators",
                     value="—",
                     hint="Nodely unavailable",
+                    available=False,
+                )
+            )
+
+        # Real seconds-per-round, not /v2/status's stopwatch on the current
+        # block (see fetch_round_time_seconds). Falls back to the old reading
+        # when algod won't serve block headers, so the tile degrades rather
+        # than vanishing.
+        round_seconds = (
+            fetch_round_time_seconds(last_round) if isinstance(last_round, int) else None
+        )
+        time_since = status.get("time-since-last-round", status.get("TimeSinceLastRound"))
+        if round_seconds is not None:
+            tiles.append(
+                MetricTile(
+                    id="round_latency",
+                    label="Round time",
+                    value=f"{round_seconds:.1f}s",
+                    hint="Avg last 20 rounds",
+                    available=True,
+                )
+            )
+        elif isinstance(time_since, int) and time_since >= 0:
+            tiles.append(
+                MetricTile(
+                    id="round_latency",
+                    label="Round time",
+                    value=f"{time_since / 1_000_000_000:.1f}s",
+                    hint="Since last block",
+                    available=True,
+                )
+            )
+        else:
+            tiles.append(
+                MetricTile(
+                    id="round_latency",
+                    label="Round time",
+                    value="—",
                     available=False,
                 )
             )
