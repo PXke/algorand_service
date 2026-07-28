@@ -8,7 +8,6 @@ or one that truncates mid-word.
 from __future__ import annotations
 
 import pytest
-
 from algorand_shared.slugs import MAX_SLUG_CHARS, slugify, unique_slug
 
 
@@ -52,7 +51,7 @@ def test_slugify_is_stable() -> None:
 
 def test_unique_slug_first_claimant_keeps_the_bare_slug() -> None:
     """The first article with a title owns the unsuffixed URL."""
-    assert unique_slug("Weekly digest", fallback="id1", is_taken=lambda s: False) == "weekly-digest"
+    assert unique_slug("Weekly digest", fallback="id1", is_taken=lambda _s: False) == "weekly-digest"
 
 
 def test_unique_slug_suffixes_later_duplicates() -> None:
@@ -67,7 +66,7 @@ def test_unique_slug_suffixes_later_duplicates() -> None:
 
 def test_unique_slug_falls_back_to_the_article_id() -> None:
     """An unslugifiable title still produces a resolvable URL."""
-    got = unique_slug("🎉", fallback="afeeec91-dc1a-4cba-88b3-7447ac3ee2c3", is_taken=lambda s: False)
+    got = unique_slug("🎉", fallback="afeeec91-dc1a-4cba-88b3-7447ac3ee2c3", is_taken=lambda _s: False)
     assert got == "afeeec91-dc1a-4cba-88b3-7447ac3ee2c3"
 
 
@@ -83,4 +82,4 @@ def test_unique_slug_suffix_does_not_blow_the_length_budget() -> None:
 def test_unique_slug_raises_rather_than_looping_forever() -> None:
     """A pathological collision surfaces as an error, not a hang."""
     with pytest.raises(ValueError, match="could not find a free slug"):
-        unique_slug("Same", fallback="id", is_taken=lambda s: True)
+        unique_slug("Same", fallback="id", is_taken=lambda _s: True)
