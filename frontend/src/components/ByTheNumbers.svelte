@@ -178,14 +178,7 @@
           </defs>
           <line class="baseline" x1="0" y1={spark.h - 0.5} x2={spark.w} y2={spark.h - 0.5} />
           <path d={spark.area} class="fill" />
-          {#key spark.line}
-            <path
-              d={spark.line}
-              class="line draw"
-              fill="none"
-              pathLength="1"
-            />
-          {/key}
+          <path d={spark.line} class="line" fill="none" />
           {#if tip}
             <line class="cross" x1={tip.x} y1="0" x2={tip.x} y2={spark.h} />
           {/if}
@@ -292,11 +285,11 @@
     min-width: 0;
   }
   .price {
-    font-family: var(--font-display);
-    font-size: clamp(34px, 5vw, 44px);
-    font-weight: 700;
+    font-family: var(--font-mono);
+    font-size: clamp(32px, 4.6vw, 41px);
+    font-weight: 600;
     line-height: 1;
-    letter-spacing: -1px;
+    letter-spacing: -1.5px;
     font-variant-numeric: tabular-nums;
     animation: price-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
@@ -345,9 +338,9 @@
   }
   .fig-value {
     margin: 2px 0 0;
-    font-family: var(--font-display);
-    font-size: 22px;
-    font-weight: 700;
+    font-family: var(--font-mono);
+    font-size: 20px;
+    font-weight: 600;
     line-height: 1;
     font-variant-numeric: tabular-nums;
   }
@@ -390,18 +383,12 @@
     stroke-linecap: round;
     vector-effect: non-scaling-stroke;
   }
-  /* pathLength="1" — dash units are normalized to the full path, so the
-     stroke always finishes at the last point (no getTotalLength races). */
-  .line.draw {
-    stroke-dasharray: 1;
-    stroke-dashoffset: 1;
-    animation: line-draw 1.05s cubic-bezier(0.22, 1, 0.36, 1) forwards;
-  }
-  @keyframes line-draw {
-    to {
-      stroke-dashoffset: 0;
-    }
-  }
+  /* No draw-on animation here. It normalised the dash with pathLength="1",
+     but `vector-effect: non-scaling-stroke` makes Chrome measure dashes in
+     screen space, and preserveAspectRatio="none" stretches this chart ~4x
+     horizontally — so the dash ran out around 54% and the price line simply
+     stopped mid-chart while the area fill carried on. Data should not arrive
+     in pieces. */
   .cross {
     stroke: color-mix(in srgb, var(--tone) 45%, transparent);
     stroke-width: 1;
@@ -491,16 +478,12 @@
     .price,
     .fill,
     .mark.end,
-    .tip,
-    .line.draw {
+    .tip {
       animation: none;
     }
     .fill,
     .mark.end {
       opacity: 1;
-    }
-    .line.draw {
-      stroke-dashoffset: 0;
     }
   }
 </style>

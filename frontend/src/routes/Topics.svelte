@@ -153,7 +153,12 @@
      serif "#" at thirty different sizes looked ragged. Tone stays in the
      rule and the wash so the type itself can be plain ink. */
   .topic strong {
-    font-family: var(--font-sans);
+    font-family: var(--font-mono);
+    /* Mono runs wider than the sans this replaced, and long single-word tags
+       (#infrastructure, #decentralization) have no break opportunity — they
+       ran straight out of the card. */
+    min-width: 0;
+    overflow-wrap: anywhere;
     /* --size is the coverage weighting. */
     font-size: var(--size, 1.05rem);
     font-weight: 600;
@@ -162,7 +167,8 @@
     color: var(--on-surface);
   }
   .topic:hover strong {
-    color: var(--tone);
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
   .topic .subtle {
     font-size: 0.82rem;

@@ -1,7 +1,9 @@
 /* Shared admin console styles — imported by AdminHub. */
 
 .admin-page {
-  max-width: var(--max-content);
+  /* The console is dense tables and queues, not prose — it was squeezed into
+     the 880px reading measure. Give it the wide grid measure instead. */
+  max-width: var(--max-wide);
   margin: 0 auto;
   padding: 20px 16px 48px;
   display: flex;

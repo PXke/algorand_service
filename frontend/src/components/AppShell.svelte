@@ -133,6 +133,7 @@
     }),
   )
 
+
   const onArticle = $derived($pathOnly.startsWith('/news/articles/'))
   const onSearch = $derived($pathOnly === '/search' || $pathOnly.startsWith('/search/'))
   const isDark = $derived($resolvedTheme === 'dark')
@@ -183,10 +184,15 @@
   })
 </script>
 
-<div class="shell" class:on-article={onArticle} class:reading-collapsed={readingCollapsed}>
+<div
+  class="shell"
+  class:on-article={onArticle}
+  class:reading-collapsed={readingCollapsed}
+>
   <!-- Keyboard users otherwise tab the masthead, section nav and every
        control before reaching the story on every single page. -->
   <a class="skip-link" href="#main">{t($messages, 'skipToContent')}</a>
+
   <header class="masthead">
     <div class="bar">
       <button
@@ -210,13 +216,34 @@
           go('/')
         }}
       >
-        <BrandMark />
+        <BrandMark size={34} />
         <span class="titles">
           <span class="name wide">{t($messages, 'appTitle')}</span>
           <span class="name compact">PXke</span>
           <span class="dateline">{dateline}</span>
         </span>
       </a>
+
+      <!-- In the bar, not a strip of its own: on the front page the bar held a
+           28px mark at the far left and four icons at the far right with ~1000px
+           of empty paper between them, then the tabs sat alone on a second thin
+           strip below. One row does both jobs. -->
+      <nav class="section-nav" aria-label="Primary">
+        {#each sections as item}
+          <a
+            class="tab"
+            class:active={item.match($pathOnly)}
+            href={item.href}
+            onclick={(e) => {
+              e.preventDefault()
+              go(item.href)
+            }}
+          >
+            {item.label}
+            <span class="underline"></span>
+          </a>
+        {/each}
+      </nav>
 
       <div class="actions">
         {#if onArticle}
@@ -348,23 +375,6 @@
         </div>
       </div>
     </div>
-
-    <nav class="section-nav" aria-label="Primary">
-      {#each sections as item}
-        <a
-          class="tab"
-          class:active={item.match($pathOnly)}
-          href={item.href}
-          onclick={(e) => {
-            e.preventDefault()
-            go(item.href)
-          }}
-        >
-          {item.label}
-          <span class="underline"></span>
-        </a>
-      {/each}
-    </nav>
   </header>
 
   <MarketsBar />
@@ -489,11 +499,23 @@
 
 <style>
   .shell {
+    --shell-gutter: 32px;
     min-height: 100vh;
     min-height: 100dvh;
     display: flex;
     flex-direction: column;
     background: transparent;
+  }
+  /* After the base rule, or these lose the cascade at equal specificity. */
+  @media (max-width: 859px) {
+    .shell {
+      --shell-gutter: 18px;
+    }
+  }
+  @media (max-width: 519px) {
+    .shell {
+      --shell-gutter: 14px;
+    }
   }
   /* Off-screen until focused, then pinned over the masthead. */
   .skip-link {
@@ -521,25 +543,34 @@
     position: sticky;
     top: 0;
     z-index: 40;
-    background: color-mix(in srgb, var(--app-bar) 86%, transparent);
-    backdrop-filter: saturate(1.2) blur(10px);
-    -webkit-backdrop-filter: saturate(1.2) blur(10px);
+    /* Opaque, not frosted glass: at 86% the headlines underneath showed
+       through the bar and read as a rendering fault. A masthead is printed
+       on the paper, not floated over it — and this drops a backdrop-filter
+       that was compositing the whole page on every scroll frame. */
+    background: var(--app-bar);
     border-top: 3px solid var(--accent);
+    border-bottom: 1px solid var(--border);
   }
   /* While reading mid-article: drop site chrome so only the title strip remains. */
   .shell.reading-collapsed .masthead,
   .shell.reading-collapsed :global(.markets) {
     display: none;
   }
+  /* Every strip in the masthead shares the content measure and gutters —
+     otherwise the mark and the tabs sit hundreds of px left of the headlines
+     they sit above. --shell-gutter matches .page's padding at each breakpoint
+     and is declared on .shell above. */
   .bar {
+    width: 100%;
+    max-width: var(--max-wide);
+    margin-inline: auto;
+    padding-inline: var(--shell-gutter);
+    padding-top: env(safe-area-inset-top, 0);
+    box-sizing: border-box;
     height: calc(64px + env(safe-area-inset-top, 0px));
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 0 8px 0 4px;
-    padding-top: env(safe-area-inset-top, 0);
-    box-sizing: border-box;
-    border-bottom: 1px solid var(--border);
   }
   /* Articles on phone: menu + brand + search + language — apps/wallet in the drawer. */
   @media (max-width: 859px) {
@@ -558,7 +589,6 @@
   }
   @media (min-width: 860px) {
     .bar {
-      padding: 0 12px 0 24px;
       border-bottom: 0;
     }
   }
@@ -582,16 +612,22 @@
     flex-direction: column;
     min-width: 0;
   }
+  /* This IS the nameplate now. The separate full-width one above the bar was
+     cut: between it, the bar and the ticker the page spent 231px of chrome
+     before the first headline, and it duplicated the mark and the name the bar
+     already carried. Set at the narrow end of Archivo's width axis so it reads
+     as a masthead rather than a UI label. */
   .name {
     font-family: var(--font-display);
+    font-stretch: 82%;
     font-weight: 800;
-    letter-spacing: -0.4px;
-    font-size: 20px;
+    letter-spacing: -0.5px;
+    font-size: 21px;
     line-height: 1.1;
   }
   @media (min-width: 520px) {
     .name {
-      font-size: 25px;
+      font-size: 27px;
     }
   }
   .name.wide {
@@ -831,12 +867,8 @@
   }
   .section-nav {
     display: flex;
-    height: 40px;
     align-items: stretch;
     gap: 0;
-    padding: 0 6px;
-    border-top: 1px solid var(--border);
-    border-bottom: 1px solid var(--border);
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: none;
@@ -847,6 +879,28 @@
     display: none;
   }
   @media (max-width: 859px) {
+    /* Too tight to share the bar with the menu, the mark and the icons, so it
+       wraps back onto its own line — the phone bar was never the empty one. */
+    .bar {
+      flex-wrap: wrap;
+      height: auto;
+    }
+    .bar > .menu-btn,
+    .bar > .nameplate,
+    .bar > .actions {
+      min-height: calc(64px + env(safe-area-inset-top, 0px));
+    }
+    .shell.on-article .bar > .menu-btn,
+    .shell.on-article .bar > .nameplate,
+    .shell.on-article .bar > .actions {
+      min-height: calc(52px + env(safe-area-inset-top, 0px));
+    }
+    .section-nav {
+      flex-basis: 100%;
+      order: 10;
+      height: 40px;
+      border-top: 1px solid var(--border);
+    }
     .shell.on-article .section-nav {
       display: none;
     }
@@ -858,9 +912,11 @@
   }
   @media (min-width: 860px) {
     .section-nav {
-      height: 45px;
+      /* Fills the paper the bar used to leave blank. .actions already carries
+         margin-inline-start:auto, which is what pins the icons to the right. */
+      align-self: stretch;
+      margin-inline-start: 26px;
       gap: 4px;
-      padding: 0 18px;
       overflow: visible;
     }
   }

@@ -1,4 +1,5 @@
 import { writable, derived, get } from 'svelte/store'
+import { designToken } from './designTokens'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
@@ -42,7 +43,7 @@ resolvedTheme.subscribe((t) => {
   document.documentElement.dataset.theme = t
   const meta = document.querySelector('meta[name="theme-color"]')
   if (meta) {
-    meta.setAttribute('content', t === 'dark' ? '#141210' : '#3a49ad')
+    meta.setAttribute('content', designToken('theme-color', t))
   }
 })
 

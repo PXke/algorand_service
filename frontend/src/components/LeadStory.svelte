@@ -1,25 +1,19 @@
 <script lang="ts">
   import type { ArticleItem } from '../lib/api/news'
-  import { articleLogoUrl, proxiedImageUrl } from '../lib/images'
+  import { articleImageUrl } from '../lib/images'
   import { articleHref } from '../lib/paths'
   import { navigate } from '../lib/router'
-  import { primaryTopic, topicColor } from '../lib/tags'
+  import { displayTagLabel, primaryTopic, topicColor } from '../lib/tags'
 
   let { article }: { article: ArticleItem } = $props()
 
   const href = $derived(articleHref(article.article_id))
-  /** Server already dimension-vets image_url — trust it; favicon only if absent. */
-  const media = $derived.by(() => {
-    const u = article.image_url?.trim()
-    if (u) return { src: proxiedImageUrl(u), logo: false }
-    const logo = articleLogoUrl({
-      sourceUrl: article.source_url,
-      serviceId: article.service_id,
-    })
-    return logo ? { src: logo, logo: true } : null
-  })
+  const media = $derived(articleImageUrl(article))
+
+  let failedSrc = $state<string | null>(null)
+  const showMedia = $derived(media != null && media !== failedSrc)
   const topic = $derived(primaryTopic(article.tags))
-  const kicker = $derived(topic ?? 'Lead')
+  const kicker = $derived(topic ? displayTagLabel(topic) : 'Lead')
   const tone = $derived(topicColor(topic))
 </script>
 
@@ -40,17 +34,17 @@
       <p class="deck muted">{article.summary}</p>
     {/if}
   </div>
-  {#if media}
-    <div class="media" class:logo={media.logo}>
+  {#if showMedia}
+    <div class="media">
       <img
-        src={media.src}
+        src={media}
         alt=""
-        width={media.logo ? 160 : 680}
-        height={media.logo ? 160 : 425}
+        width="680"
+        height="425"
         loading="eager"
         fetchpriority="high"
         decoding="async"
-        onerror={(e) => ((e.currentTarget as HTMLImageElement).style.display = 'none')}
+        onerror={() => (failedSrc = media)}
       />
     </div>
   {/if}
@@ -97,6 +91,7 @@
     transition: color 0.28s ease;
   }
   .deck {
+    font-family: var(--font-serif);
     margin: 0;
     font-size: 17px;
     line-height: 1.55;
@@ -121,8 +116,6 @@
     }
   }
   .media {
-    display: grid;
-    place-items: center;
     aspect-ratio: 16 / 10;
     max-height: 260px;
     border-radius: 12px;
@@ -150,13 +143,6 @@
     object-position: center;
     filter: saturate(0.96);
     transition: transform 0.55s cubic-bezier(0.22, 1, 0.36, 1), filter 0.45s ease;
-  }
-  .media.logo img {
-    object-fit: contain;
-    object-position: center;
-    padding: 16%;
-    filter: none;
-    box-sizing: border-box;
   }
   @media (prefers-reduced-motion: reduce) {
     .title,

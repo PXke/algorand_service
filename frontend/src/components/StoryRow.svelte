@@ -1,10 +1,10 @@
 <script lang="ts">
   import type { ArticleItem } from '../lib/api/news'
   import { messages, t, tPlural, activeLocale, localeTag } from '../lib/i18n'
-  import { articleLogoUrl, proxiedImageUrl } from '../lib/images'
+  import { articleImageUrl } from '../lib/images'
   import { articleHref } from '../lib/paths'
   import { navigate } from '../lib/router'
-  import { primaryTopic, topicColor } from '../lib/tags'
+  import { displayTagLabel, primaryTopic, topicColor } from '../lib/tags'
 
   let {
     article,
@@ -21,17 +21,15 @@
   const href = $derived(articleHref(article.article_id))
   const views = $derived(typeof article.views === 'number' ? article.views : 0)
   const displayReads = $derived(
-    showReads ?? ((rank != null || views > 0) && views > 0),
+    showReads ?? views > 0,
   )
-  const media = $derived.by(() => {
-    const u = article.image_url?.trim()
-    if (u) return { src: proxiedImageUrl(u), logo: false }
-    const logo = articleLogoUrl({
-      sourceUrl: article.source_url,
-      serviceId: article.service_id,
-    })
-    return logo ? { src: logo, logo: true } : null
-  })
+  const media = $derived(articleImageUrl(article))
+
+  /* Track the src that failed rather than hiding the <img>: hiding it left the
+     wrapper behind as an empty grey box. Keying on the URL means a new article
+     re-arms it without an effect or a reset. */
+  let failedSrc = $state<string | null>(null)
+  const showMedia = $derived(media != null && media !== failedSrc)
   /* One pass — primaryTopic() allocates a Set and two arrays, and the front
      page renders ~23 of these. */
   const topic = $derived(primaryTopic(article.tags))
@@ -39,7 +37,7 @@
     const kind = article.trigger_kind?.toLowerCase()
     if (kind === 'chain' || kind === 'onchain') return t($messages, 'sourceKindOnChain')
     if (kind === 'scheduled') return t($messages, 'sourceKindScheduled')
-    return topic ?? t($messages, 'kickerNews')
+    return topic ? displayTagLabel(topic) : t($messages, 'kickerNews')
   })
   /* Provenance kinds keep their own colours; everything else takes the
      topic tone so the feed's kickers become a navigable colour system. */
@@ -93,16 +91,16 @@
       <p class="reads muted">{tPlural($messages, 'readsCount', views)}</p>
     {/if}
   </div>
-  {#if media}
-    <div class="thumb" class:logo={media.logo}>
+  {#if showMedia}
+    <div class="thumb">
       <img
-        src={media.src}
+        src={media}
         alt=""
         width={dense ? 64 : 88}
         height={dense ? 64 : 88}
         loading="lazy"
         decoding="async"
-        onerror={(e) => ((e.currentTarget as HTMLImageElement).style.display = 'none')}
+        onerror={() => (failedSrc = media)}
       />
     </div>
   {/if}
@@ -125,8 +123,12 @@
   .row:hover {
     text-decoration: none;
   }
+  /* Underline on hover, not a colour change: recolouring a headline mid-read
+     is jarring, and the tone already labels the desk in the kicker. */
   .row:hover .title {
-    color: var(--tone, var(--primary));
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-thickness: 1.5px;
   }
   .row:hover .thumb img {
     transform: scale(1.06);
@@ -134,9 +136,9 @@
   }
   .rank {
     width: 34px;
-    font-family: var(--font-display);
-    font-size: 24px;
-    font-weight: 700;
+    font-family: var(--font-mono);
+    font-size: 20px;
+    font-weight: 600;
     line-height: 1;
     color: var(--subtle);
     text-align: center;
@@ -183,6 +185,7 @@
     font-size: 17px;
   }
   .deck {
+    font-family: var(--font-serif);
     margin: 6px 0 0;
     font-size: 0.95rem;
     line-height: 1.5;
@@ -203,8 +206,6 @@
     overflow: hidden;
     background: var(--callout);
     flex-shrink: 0;
-    display: grid;
-    place-items: center;
   }
   .dense .thumb {
     width: 64px;
@@ -218,14 +219,6 @@
     object-position: center;
     filter: saturate(0.96);
     transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1), filter 0.35s ease;
-  }
-  /* Favicon/fallback: letterbox instead of blowing up a tiny icon. */
-  .thumb.logo img {
-    object-fit: contain;
-    object-position: center;
-    padding: 18%;
-    filter: none;
-    box-sizing: border-box;
   }
   @media (max-width: 519px) {
     .row {

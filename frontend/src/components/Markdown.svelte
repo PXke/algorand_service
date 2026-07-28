@@ -38,6 +38,13 @@
       return out.replace('<p>', '<p class="lede">')
     }
 
+    /* Wrap tables so a wide one scrolls instead of being squeezed. Pipeline
+       tables run to 8 columns; forced into the reading measure that left ~45px
+       a column on a phone, which is not a table anyone can read. The wrapper
+       scrolls, and the cell min-width below is what decides when. */
+    const baseTable = renderer.table.bind(renderer)
+    renderer.table = (token) => `<div class="table-scroll">${baseTable(token)}</div>`
+
     const baseLink = renderer.link.bind(renderer)
     renderer.link = ({ href, title, tokens }) => {
       const out = baseLink({ href, title, tokens })
@@ -65,18 +72,21 @@
 {/if}
 
 <style>
+  /* Reading voice. Prose is the one place on the site set in a serif — the
+     paper is machine-written, and this is where that machine is trying to be
+     read rather than to report a measurement. */
   .md {
     color: var(--md-ink);
-    font-family: var(--font-sans);
+    font-family: var(--font-serif);
     font-weight: 400;
-    font-size: 17.5px;
-    line-height: 1.72;
+    font-size: 18.5px;
+    line-height: 1.68;
     overflow-wrap: anywhere;
   }
   @media (min-width: 520px) {
     .md {
-      font-size: 19px;
-      line-height: 1.8;
+      font-size: 20px;
+      line-height: 1.72;
     }
   }
 
@@ -141,7 +151,7 @@
     }
   }
   .md :global(h4) {
-    font-family: var(--font-sans);
+    font-family: var(--font-mono);
     font-size: 13px;
     font-weight: 700;
     letter-spacing: 0.4px;
@@ -185,9 +195,10 @@
     border-radius: 0;
     background: transparent;
     font-family: var(--font-display);
+    font-stretch: 94%;
     font-style: normal;
-    font-size: 1.22em;
-    line-height: 1.45;
+    font-size: 1.16em;
+    line-height: 1.34;
     letter-spacing: -0.2px;
     color: var(--on-surface);
   }
@@ -260,7 +271,7 @@
   }
 
   .md :global(code) {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 0.86em;
     padding: 0.12em 0.38em;
     border-radius: 5px;
@@ -292,14 +303,25 @@
 
   /* Data tables: smaller, tabular figures, and allowed to use the full
      column width rather than wrapping every cell to two lines. */
+  /* The wrapper is the scroll container; the table keeps its own layout. */
+  .md :global(.table-scroll) {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    margin: 0 0 24px;
+  }
   .md :global(table) {
+    /* max-content + min-width:100%: the table sizes to its content so columns
+       are never squeezed, but still fills the measure when it is narrow, so
+       short tables stay flush with the prose. Cell min-width alone could not do
+       this — an auto-layout table honours the cells' minimums only up to its
+       own width:100%, so an 8-column table still collapsed to 45px columns. */
     width: max-content;
     min-width: 100%;
     border-collapse: collapse;
-    margin: 0 0 24px;
-    font-family: var(--font-sans);
-    font-size: 0.86em;
-    line-height: 1.45;
+    font-family: var(--font-mono);
+    font-size: 0.84em;
+    line-height: 1.55;
     font-variant-numeric: tabular-nums;
     overflow-x: auto;
     display: block;
@@ -315,16 +337,26 @@
     font-weight: 800;
     letter-spacing: 0.7px;
     text-transform: uppercase;
-    padding: 8px 14px 8px 0;
+    padding: 8px 18px 8px 0;
     color: var(--muted);
     white-space: nowrap;
   }
+  /* Cells wrap. `nowrap` kept every table on one line and made them read as
+     a cramped strip; prose tables here are mostly short phrases, not figures. */
   .md :global(td) {
-    padding: 9px 14px 9px 0;
+    padding: 11px 18px 11px 0;
     border-top: 1px solid var(--border);
     color: var(--md-ink);
     vertical-align: top;
-    white-space: nowrap;
+  }
+  .md :global(td:last-child),
+  .md :global(th:last-child) {
+    padding-inline-end: 0;
+  }
+  /* A readability floor per column, on top of the content sizing above. */
+  .md :global(th),
+  .md :global(td) {
+    min-width: 7.5ch;
   }
   /* Zebra fought the hairlines; rules alone separate rows more cleanly. */
   .md :global(tr:nth-child(even) td) {

@@ -43,13 +43,20 @@
      category. Reuses --danger so alert colour is defined once. */
   --tone-alert: var(--danger);
 
-  --grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
 
   --radius-card: 16px;
   --radius-control: 12px;
   --radius-thumb: 8px;
-  --font-sans: 'Source Sans 3', system-ui, sans-serif;
-  --font-display: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  /* Three voices — the face tells the reader who is speaking.
+     Headlines shout in the grotesque, the pipeline stamps everything it
+     measures in mono, and prose is the one place a reading voice takes over.
+     --font-sans is UI chrome only (buttons, inputs, nav) and stays on the
+     system stack: free, neutral, and legible at 12px in every script we
+     publish in, which a Latin-subset webfont is not. */
+  --font-display: 'Archivo', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-serif: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --max-content: 880px;
   --max-reading: 660px;
   /* Front page and other grid pages get the wide measure. */
@@ -109,22 +116,16 @@ body {
   min-height: 100%;
   min-height: 100dvh;
   background-color: var(--surface);
-  /* Atmosphere: warm paper wash at the top + grain. Kept off the accent
-     hue — a blue wash under warm newsprint turns the page muddy. */
-  background-image:
-    radial-gradient(
-      ellipse 110% 70% at 50% -18%,
-      color-mix(in srgb, var(--tone-assets) 7%, transparent),
-      transparent 58%
-    ),
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--tone-assets) 3%, var(--surface)) 0%,
-      var(--surface) 32%
-    ),
-    var(--grain);
-  background-blend-mode: normal, normal, multiply;
-  background-attachment: fixed, fixed, fixed;
+  /* One warm wash at the masthead, nothing else. The paper-grain noise layer
+     that used to sit under this was simulating print on a screen — the type
+     system carries the paper now, and dropping it also drops three fixed
+     background layers, a blend mode and their @supports fallback. */
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--tone-assets) 4%, var(--surface)) 0%,
+    var(--surface) 30%
+  );
+  background-repeat: no-repeat;
   color: var(--on-surface);
   font-family: var(--font-sans);
   font-size: 16px;
@@ -136,74 +137,28 @@ body {
 
 html {
   scroll-padding-top: calc(64px + env(safe-area-inset-top, 0px));
-  /* `clip` not `hidden`: full-bleed bands overhang by the scrollbar width,
-     and clip contains them without creating a scroll container (which
-     would break the sticky masthead). */
-  overflow-x: clip;
+  /* No overflow-x here. `clip` on the ROOT element makes it a containing
+     block for fixed-position descendants, which silently anchored the
+     article's sticky bar to the document instead of the viewport — measured
+     top: -2600px at scrollY 2600, i.e. it never appeared while reading, so
+     there was no way back to the front page mid-article. The .bleed bands it
+     was added to contain overhang by the scrollbar width instead; that is a
+     cosmetic ~15px, and losing position:fixed is not. */
 }
 
 @media (max-width: 859px) {
-  html,
-  body {
-    background-attachment: scroll, scroll, scroll;
-  }
   html {
     scroll-padding-top: calc(92px + env(safe-area-inset-top, 0px));
   }
 }
 
-@supports not (background-blend-mode: multiply) {
-  html,
-  body {
-    background-image:
-      radial-gradient(
-        ellipse 110% 70% at 50% -18%,
-        color-mix(in srgb, var(--tone-assets) 7%, transparent),
-        transparent 58%
-      ),
-      linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--tone-assets) 3%, var(--surface)) 0%,
-        var(--surface) 32%
-      );
-  }
-}
-
 html[data-theme='dark'],
 html[data-theme='dark'] body {
-  background-blend-mode: normal, normal, soft-light;
-  background-image:
-    radial-gradient(
-      ellipse 110% 70% at 50% -18%,
-      color-mix(in srgb, var(--accent) 7%, transparent),
-      transparent 58%
-    ),
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--accent) 3%, var(--surface)) 0%,
-      var(--surface) 36%
-    ),
-    var(--grain);
-}
-
-/* Phones/OLEDs amplify green cast — keep dark mobile nearly neutral. */
-@media (max-width: 859px) {
-  html[data-theme='dark'],
-  html[data-theme='dark'] body {
-    background-blend-mode: normal, normal, soft-light;
-    background-image:
-      radial-gradient(
-        ellipse 100% 55% at 50% -22%,
-        color-mix(in srgb, var(--accent) 4%, transparent),
-        transparent 52%
-      ),
-      linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--accent) 1.5%, var(--surface)) 0%,
-        var(--surface) 28%
-      ),
-      var(--grain);
-  }
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent) 4%, var(--surface)) 0%,
+    var(--surface) 32%
+  );
 }
 
 a {
@@ -237,7 +192,10 @@ h3 {
   font-family: var(--font-display);
   font-weight: 700;
   color: var(--on-surface);
-  letter-spacing: -0.4px;
+  /* Archivo carries a width axis; narrowing headlines slightly is what gives
+     the front page its dense, set-by-hand column rhythm. */
+  font-stretch: 94%;
+  letter-spacing: -0.2px;
 }
 
 .btn {
@@ -412,6 +370,9 @@ button:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  /* This column spaces its own children; a hairline adding margin on top of
+     the gap cost 73px of page for one pixel of ink. */
+  --hairline-gap: 0px;
 }
 
 /* Rail modules read as marginalia: quieter, ruled, no card chrome. */
@@ -425,9 +386,10 @@ button:focus-visible {
   margin: 0 0 8px;
   padding-bottom: 7px;
   border-bottom: 2px solid var(--on-surface);
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 1.4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
   text-transform: uppercase;
   color: var(--on-surface);
 }
@@ -435,6 +397,11 @@ button:focus-visible {
 /* ---- Full-bleed band ------------------------------------------------
    Breaks out of the centred column to the viewport edge. `100vw` ignores
    the scrollbar, so pair with overflow-x guard on the shell. */
+/* 100vw counts the classic scrollbar; the document does not. On any browser
+   that reserves scrollbar space (i.e. most desktops — overlay-scrollbar
+   headless Chrome hides this) the band came out ~15px wider than every other
+   element and pushed a horizontal scrollbar. .shell clips the overhang, so the
+   band lands flush with the viewport instead of past it. */
 .bleed {
   width: 100vw;
   margin-inline: calc(50% - 50vw);
@@ -488,7 +455,14 @@ button:focus-visible {
 }
 
 #app.spa-revealed {
-  animation: spa-enter 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  /* `backwards`, never `both`: `both` retains the final keyframe, leaving an
+     identity transform on #app forever — and ANY transform makes an element
+     the containing block for its fixed-position descendants. That silently
+     turned the article's sticky bar (headline, share, home mark) into an
+     absolutely-positioned element anchored to the document, so it sat at
+     top:-2600px while reading and never appeared. `backwards` still applies
+     the from-state before the animation starts, so the entrance is unchanged. */
+  animation: spa-enter 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
 .accent-slug {
@@ -500,13 +474,16 @@ button:focus-visible {
   animation: slug-draw 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-/* Colour comes from the topic tone the ancestor sets; --tone-meta is the
-   neutral fallback for untagged/meta items. */
+/* Machine voice. The desk, the timestamp, the section — everything the
+   pipeline stamps rather than writes — is set in mono, so a reader can tell
+   at a glance what was measured from what was written. Colour comes from the
+   topic tone the ancestor sets; --tone-meta is the neutral for untagged items. */
 .kicker {
   margin: 0;
+  font-family: var(--font-mono);
   font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 1px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
   text-transform: uppercase;
   color: var(--tone, var(--tone-meta));
 }
@@ -520,9 +497,10 @@ button:focus-visible {
 
 .section-rule .label {
   margin: 0;
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 1.4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
   text-transform: uppercase;
   color: var(--on-surface);
   white-space: nowrap;
@@ -537,10 +515,16 @@ button:focus-visible {
   animation: rule-draw 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.08s both;
 }
 
+/* Keeps its own spacing by default, because two of its three call sites
+   (About, the feed skeleton) sit in flex columns with `gap: 0` and supply
+   none. Containers that DO space their children opt out via --hairline-gap:
+   flex items don't collapse margins, so inside Home's `gap: 20px` column the
+   default stacked on top of the gap and one pixel of ink cost 73px of page
+   (20 gap + 16 margin + 1 rule + 16 margin + 20 gap). */
 .hairline {
   border: 0;
   border-top: 1px solid var(--border);
-  margin: 16px 0;
+  margin-block: var(--hairline-gap, 16px);
 }
 
 .story-grid {

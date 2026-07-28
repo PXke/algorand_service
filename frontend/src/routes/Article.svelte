@@ -5,17 +5,20 @@
   import { explorerTxUrl as txUrl, isAlgorandTxid } from '../lib/config'
   import { readingMinutes } from '../lib/reading'
   import {
+    clearContinue,
+    readContinue,
     rememberContinue,
     saveArticleScroll,
     takeArticleScroll,
   } from '../lib/continueReading'
   import { withLang, articleHref } from '../lib/paths'
   import { articleChromeCollapsed } from '../lib/articleChrome'
-  import { orderReaderTags, primaryTopic, topicColor } from '../lib/tags'
+  import { displayTagLabel, orderReaderTags, primaryTopic, topicColor } from '../lib/tags'
   import Markdown from '../components/Markdown.svelte'
   import StoryRow from '../components/StoryRow.svelte'
   import SectionRule from '../components/SectionRule.svelte'
   import ShareBar from '../components/ShareBar.svelte'
+  import BrandMark from '../components/BrandMark.svelte'
   import PageMeta from '../components/PageMeta.svelte'
   import FeedSkeleton from '../components/FeedSkeleton.svelte'
   import { ApiException } from '../lib/api/client'
@@ -115,6 +118,14 @@
       const top = el.getBoundingClientRect().top + window.scrollY
       const span = Math.max(1, el.offsetHeight - window.innerHeight * 0.55)
       progress = Math.min(1, Math.max(0, (window.scrollY - top + 48) / span))
+      /* Finished it — so stop offering to resume it. "Continue reading" kept
+         pointing at articles the reader had already read to the end, because
+         nothing ever cleared the entry except opening a different story. */
+      if (progress >= 0.99) {
+        const saved = readContinue()
+        if (saved?.articleId === id) clearContinue()
+        saveArticleScroll(id, 0)
+      }
     }
     onScroll()
     window.addEventListener('scroll', onScroll, { passive: true })
@@ -153,7 +164,7 @@
 
   const displayTags = $derived(orderReaderTags(article?.tags))
   const topic = $derived(article ? primaryTopic(article.tags) : null)
-  const kicker = $derived(topic || t($messages, 'pageTitleArticle'))
+  const kicker = $derived(topic ? displayTagLabel(topic) : t($messages, 'pageTitleArticle'))
   const tone = $derived(topicColor(topic))
   const byline = $derived.by(() => {
     if (!article || !article.published_at_epoch) return ''
@@ -226,6 +237,21 @@
 
   <div class="sticky-bar" class:on={stickyOn} aria-hidden={!stickyOn}>
     <div class="sticky-inner">
+      <!-- A running head, the way a printed interior page carries the paper's
+           name: while reading, the masthead is hidden, and without this there
+           was no link back to the front page anywhere on screen. -->
+      <a
+        class="sticky-home"
+        href="/"
+        aria-label={t($messages, 'appTitle')}
+        tabindex={stickyOn ? 0 : -1}
+        onclick={(e) => {
+          e.preventDefault()
+          navigate('/')
+        }}
+      >
+        <BrandMark size={24} />
+      </a>
       <strong class="sticky-title">{headline}</strong>
       <ShareBar url={canonicalPath} title={headline} compact />
     </div>
@@ -283,7 +309,7 @@
                 onclick={(e) => {
                   e.preventDefault()
                   navigate(`/topic/${encodeURIComponent(tag)}`)
-                }}>#{tag}</a
+                }}>#{displayTagLabel(tag)}</a
               >
             {/each}
           </div>
@@ -387,9 +413,9 @@
     transform: translateY(-110%);
     opacity: 0;
     pointer-events: none;
-    background: color-mix(in srgb, var(--app-bar) 94%, transparent);
-    backdrop-filter: saturate(1.15) blur(8px);
-    -webkit-backdrop-filter: saturate(1.15) blur(8px);
+    /* Opaque, like the masthead — prose scrolling under a translucent strip
+       reads as a smear, and the blur cost a full-page composite per frame. */
+    background: var(--app-bar);
     border-top: 3px solid var(--accent);
     border-bottom: 1px solid var(--border);
     transition:
@@ -414,6 +440,13 @@
     height: 44px;
     max-width: var(--max-reading);
     margin: 0 auto;
+  }
+  .sticky-home {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    line-height: 0;
+    border-radius: 2px;
   }
   .sticky-title {
     flex: 1;
@@ -623,7 +656,7 @@
      a lead image and/or a heading, which no CSS selector can pin down. */
   .reading :global(.md > p.lede::first-letter) {
     float: inline-start;
-    font-family: var(--font-display);
+    font-family: var(--font-serif);
     font-size: 3.4em;
     font-weight: 700;
     line-height: 0.85;

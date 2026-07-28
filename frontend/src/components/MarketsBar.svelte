@@ -150,16 +150,15 @@
     height: 100%;
     display: inline-flex;
     align-items: center;
-    justify-content: flex-start;
-    padding: 0 16px;
+    /* Every tile stays — the row is centred rather than trimmed. `safe` is the
+       load-bearing word: plain `center` overflows equally into BOTH ends once
+       the tiles outgrow the viewport, and since the scroller starts at
+       scrollLeft 0 the left-hand tiles would be permanently unreachable. `safe`
+       falls back to flex-start exactly in that case, so narrow screens keep all
+       seven and scroll to them. */
+    justify-content: safe center;
+    padding-inline: var(--shell-gutter);
     box-sizing: border-box;
-  }
-  @media (min-width: 860px) {
-    .inner {
-      justify-content: center;
-      min-width: 100%;
-      padding: 0 20px;
-    }
   }
   .chip {
     display: inline-flex;

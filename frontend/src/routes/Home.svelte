@@ -209,6 +209,9 @@
   .feed-section {
     width: 100%;
     max-width: 860px;
+    /* .page is a column flex container: without this the narrower feed
+       column hugs the left edge of the 1240px page instead of centring. */
+    margin-inline: auto;
     display: flex;
     flex-direction: column;
     gap: 12px;

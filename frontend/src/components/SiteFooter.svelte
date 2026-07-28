@@ -75,13 +75,9 @@
   .site-footer {
     margin-top: auto;
     border-top: 1px solid var(--border);
-    background:
-      linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--accent) 5%, transparent) 0%,
-        var(--panel) 48px
-      ),
-      var(--panel);
+    /* Warm paper a shade below the page. The old near-white --panel carried a
+       5% accent wash, which read cold and blue against warm newsprint. */
+    background: var(--callout);
   }
   .inner {
     max-width: var(--max-content);

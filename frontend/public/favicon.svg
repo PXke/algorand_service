@@ -1,11 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="8" fill="#4a5bd0"/>
+  <!-- A printed stamp, not an app icon: hard corners, ink ground, and the
+       accent kept to a single rule along the foot — the same device the
+       nameplate uses. The old mark was a blue squircle with decorative
+       bar-chart bars, which read as a product tile rather than a masthead. -->
+  <rect id="ground" width="32" height="32" fill="#171410"/>
   <path
-    fill="#fff"
+    fill="#fffdf8"
     fill-rule="evenodd"
-    d="M8 5.8h7.85c4.7 0 7.75 2.65 7.75 6.55s-3.05 6.5-7.75 6.5H12.35V26.2H8V5.8Zm4.35 3.65v5.75h3.35c2.2 0 3.5-1.1 3.5-2.9s-1.3-2.85-3.5-2.85h-3.35Z"
+    d="M8 4.6h7.85c4.7 0 7.75 2.65 7.75 6.55s-3.05 6.5-7.75 6.5H12.35V25H8V4.6Zm4.35 3.65v5.75h3.35c2.2 0 3.5-1.1 3.5-2.9s-1.3-2.85-3.5-2.85h-3.35Z"
   />
-  <rect x="19.4" y="20.15" width="2.4" height="2.15" rx="1.05" fill="#fff"/>
-  <rect x="19.4" y="23.05" width="4" height="2.15" rx="1.05" fill="#fff"/>
-  <rect x="19.4" y="25.95" width="5.6" height="2.15" rx="1.05" fill="#fff"/>
+  <rect id="rule" y="28" width="32" height="4" fill="#4a5bd0"/>
 </svg>
