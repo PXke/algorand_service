@@ -102,6 +102,8 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/test_arc0060_verify.py" = ["E501"]
+# One-off operational scripts: stdout IS the interface, so print is correct.
+"scripts/*.py" = ["T201"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
