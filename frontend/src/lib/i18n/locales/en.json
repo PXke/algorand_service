@@ -317,6 +317,7 @@
   "storiesCount": "{count, plural, =1{1 story} other{{count} stories}}",
   "byTheNumbersRange": "Past 7 days",
   "byTheNumbersMarketCap": "Market cap",
+  "byTheNumbersBlock": "Block",
   "byTheNumbersVolume": "24h volume",
   "hotTabHot": "Hot right now",
   "hotTabAllTime": "All-time",
