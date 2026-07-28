@@ -50,9 +50,11 @@ def robots_txt() -> str:
     lines = [
         "User-agent: *",
         "Allow: /",
+        # /search and /suggestions are deliberately NOT disallowed: they send
+        # `noindex, follow`, and a crawler blocked by robots.txt never reads the
+        # noindex, so the URLs could still surface bare. /admin stays blocked —
+        # it is gated anyway and there is nothing there to crawl.
         "Disallow: /admin",
-        "Disallow: /search",
-        "Disallow: /suggestions",
         "",
         f"Sitemap: {site_url()}/sitemap.xml",
     ]

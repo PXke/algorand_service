@@ -41,6 +41,22 @@ def display_tag_label(tag: str) -> str:
     return _display_labels().get(key, tag)
 
 
+def display_tag_title(tag: str) -> str:
+    """Reader-facing label for headings and <title>, sentence-cased.
+
+    display_tag_label leaves unmapped slugs alone because they also appear
+    inline in body copy. A page title should not read "defi — Algorand news",
+    so anything without an explicit label gets its first letter capitalised and
+    its dashes opened up. Explicit labels win untouched — they are the ones
+    capitalisation would get wrong (DeFi, NFTs, dApps).
+    """
+    key = tag.strip().lower()
+    mapped = _display_labels().get(key)
+    if mapped is not None:
+        return mapped
+    return key.replace("-", " ").capitalize() if key else tag
+
+
 def primary_tag(tags: list[str] | None) -> str | None:
     """First topical tag (raw slug), falling back to the plain first tag.
 

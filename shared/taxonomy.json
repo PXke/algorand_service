@@ -36,7 +36,30 @@
   ],
   "meta_tags_note": "Provenance and pipeline labels. Fine as chips at the end of an article; never the kicker, because they say how we found the story rather than what it is about.",
   "display_labels": {
-    "chain-only": "on-chain"
+    "chain-only": "on-chain",
+    "defi": "DeFi",
+    "nft": "NFTs",
+    "nfts": "NFTs",
+    "dao": "DAOs",
+    "daos": "DAOs",
+    "sdk": "SDKs",
+    "sdks": "SDKs",
+    "api": "APIs",
+    "apis": "APIs",
+    "dapps": "dApps",
+    "dapp": "dApps",
+    "ai": "AI",
+    "rwa": "RWAs",
+    "defi-yield": "DeFi yield",
+    "nft-marketplace": "NFT marketplaces",
+    "post-quantum-cryptography": "Post-quantum cryptography",
+    "algorand": "Algorand",
+    "algokit": "AlgoKit",
+    "avm": "AVM",
+    "asa": "ASAs",
+    "tvl": "TVL",
+    "kyc": "KYC",
+    "x402": "x402"
   },
   "display_labels_note": "Internal slug -> reader-facing text. DISPLAY ONLY: /topic/<tag> URLs always use the raw slug on both sides, so a link never changes shape based on this table."
 }

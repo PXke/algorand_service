@@ -18,6 +18,7 @@ from urllib.parse import quote
 
 import msgspec
 from algorand_shared.design import token
+from algorand_shared.taxonomy import display_tag_title
 
 from app.core.article_translation_langs import (
     ARTICLE_TRANSLATION_LANG_NAMES,
@@ -917,9 +918,13 @@ def render_topic(
 ) -> tuple[str, str]:
     """Topic landing page: the feed filtered to one writer tag."""
     canonical = absolute(f"/topic/{tag}")
-    title = f"{tag} — Algorand news"
-    description = f"Algorand stories tagged “{tag}” from {settings.site_name}."
-    trail = [("Home", site_url() + "/"), ("Topics", absolute("/topics")), (tag, canonical)]
+    # The reader-facing label, not the raw slug: titles read "DeFi — Algorand
+    # news" rather than "defi — …". The slug still builds the URL, which is why
+    # only the display strings go through display_tag_label.
+    label = display_tag_title(tag)
+    title = f"{label} — Algorand news"
+    description = f"Algorand stories tagged “{label}” from {settings.site_name}."
+    trail = [("Home", site_url() + "/"), ("Topics", absolute("/topics")), (label, canonical)]
     feed_path = topic_feed_path(tag)
     head = _meta_block(
         title=title,
@@ -932,7 +937,7 @@ def render_topic(
     )
     head += (
         f'\n<link rel="alternate" type="application/rss+xml" '
-        f'title="{_attr(f"{tag} — {settings.site_name}")}" '
+        f'title="{_attr(f"{label} — {settings.site_name}")}" '
         f'href="{_attr(absolute(feed_path))}">'
     )
     head = f"{head}\n{_ssr_feed_script(items)}"

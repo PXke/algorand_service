@@ -165,7 +165,9 @@ def test_render_article_jsonld_is_valid_newsarticle() -> None:
     assert data["datePublished"].startswith("20")
     assert data["articleBody"]
     assert data["wordCount"] > 0
-    assert data["articleSection"] == "sdk"
+    # Display label, not the raw slug: article:section is read by humans.
+    # /topic/<tag> URLs still use the slug — see the topic-link asserts.
+    assert data["articleSection"] == "SDKs"
     assert data["speakable"]["cssSelector"]
     assert data["publisher"]["name"] == "PXke Algorand"
 
@@ -173,7 +175,7 @@ def test_render_article_jsonld_is_valid_newsarticle() -> None:
 def test_render_article_og_section_from_primary_tag() -> None:
     """Sets article:section from the article's primary tag."""
     head, _ = render.render_article(_article(tags=["sdk", "release"]))
-    assert 'property="article:section" content="sdk"' in head
+    assert 'property="article:section" content="SDKs"' in head
 
 
 def test_render_article_falls_back_to_generated_share_card() -> None:
@@ -204,7 +206,7 @@ def test_article_has_breadcrumb_and_image_meta() -> None:
     """Renders a BreadcrumbList and generated share-card image metas when no hero image is set."""
     head, _ = render.render_article(_article(image_url=None, tags=["sdk"]))
     assert '"@type":"BreadcrumbList"' in head
-    assert '"name":"sdk"' in head  # primary-tag crumb -> /topic/sdk
+    assert '"name":"SDKs"' in head  # primary-tag crumb -> /topic/sdk
     # generated share card -> known (og-standard) dimensions + alt on og/twitter
     assert 'property="og:image:width" content="1200"' in head
     assert 'property="og:image:height" content="630"' in head

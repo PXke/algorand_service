@@ -27,5 +27,28 @@ export const META_TAGS: ReadonlySet<string> = new Set([
 
 // Internal slug -> reader-facing text. DISPLAY ONLY: /topic/<tag> URLs always use the raw slug on both sides, so a link never changes shape based on this table.
 export const DISPLAY_LABELS: Readonly<Record<string, string>> = {
+  'ai': 'AI',
+  'algokit': 'AlgoKit',
+  'algorand': 'Algorand',
+  'api': 'APIs',
+  'apis': 'APIs',
+  'asa': 'ASAs',
+  'avm': 'AVM',
   'chain-only': 'on-chain',
+  'dao': 'DAOs',
+  'daos': 'DAOs',
+  'dapp': 'dApps',
+  'dapps': 'dApps',
+  'defi': 'DeFi',
+  'defi-yield': 'DeFi yield',
+  'kyc': 'KYC',
+  'nft': 'NFTs',
+  'nft-marketplace': 'NFT marketplaces',
+  'nfts': 'NFTs',
+  'post-quantum-cryptography': 'Post-quantum cryptography',
+  'rwa': 'RWAs',
+  'sdk': 'SDKs',
+  'sdks': 'SDKs',
+  'tvl': 'TVL',
+  'x402': 'x402',
 }
