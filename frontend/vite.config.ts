@@ -17,7 +17,18 @@ export default defineConfig({
         background_color: '#F7F4EE',
         display: 'standalone',
         start_url: '/',
+        // Regenerated from public/favicon.svg on 2026-07-27 — the previous PNGs
+        // predated the mark rework and still shipped the old blue squircle.
+        // The maskable one is its own file: Android crops to a circle, and the
+        // square-cornered stamp lost its accent foot rule under that mask, so it
+        // is rendered on a padded 40-unit ground to clear the safe zone.
         icons: [
+          {
+            src: '/icons/icon-128.png',
+            sizes: '128x128',
+            type: 'image/png',
+            purpose: 'any',
+          },
           {
             src: '/icons/icon-192.png',
             sizes: '192x192',
@@ -31,7 +42,7 @@ export default defineConfig({
             purpose: 'any',
           },
           {
-            src: '/icons/icon-512.png',
+            src: '/icons/icon-maskable-512.png',
             sizes: '512x512',
             type: 'image/png',
             purpose: 'maskable',
@@ -43,7 +54,23 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png,webp}'],
         globIgnores: ['**/wallet-connect-*.js', '**/AdminHub-*'],
         navigateFallback: '/index.html',
-        navigateFallbackDenylist: [/^\/api\//, /^\/assets\//, /^\/fonts\//],
+        // Anything the SERVER renders must opt out, or a navigation to it gets
+        // the SPA shell handed back by the service worker — which is why
+        // feed.xml looked broken in a browser while curl saw perfect XML.
+        // Matched by route SHAPE, not file suffix: three of these documents
+        // have no extension at all (/feed/topic/:tag, /og/article/:id,
+        // /sitemap-articles-:part), so a `\.xml$` test silently missed them.
+        // Mirrors register_seo_routes() in backend/app/modules/seo/api/routes.py.
+        navigateFallbackDenylist: [
+          /^\/api\//,
+          /^\/assets\//,
+          /^\/fonts\//,
+          /^\/feed(?:\.xml|\/)/,
+          /^\/sitemap/,
+          /^\/og\//,
+          // robots.txt, llms.txt and the IndexNow key file, all root-level.
+          /^\/[^/]+\.txt$/,
+        ],
         runtimeCaching: [
           {
             urlPattern: ({ request }) => request.mode === 'navigate',
