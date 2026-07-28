@@ -7,7 +7,7 @@
 
   let { article }: { article: ArticleItem } = $props()
 
-  const href = $derived(articleHref(article.article_id))
+  const href = $derived(articleHref(article.article_id, null, article.slug))
   const media = $derived(articleImageUrl(article))
 
   let failedSrc = $state<string | null>(null)

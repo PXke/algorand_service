@@ -197,8 +197,11 @@ def _article_entries(
     for item in items:
         if item.article_id in tombstones:
             continue
+        # Pass the slug: without it the sitemap advertises uuid URLs while
+        # rel=canonical advertises slugs, which is the mixed state that reads
+        # as duplicate content.
         alternates = article_hreflang_links(
-            item.article_id, translations_by_id.get(item.article_id)
+            item.article_id, translations_by_id.get(item.article_id), item.slug
         )
         # Revised articles advertise the revision date so crawlers recrawl.
         lastmod = _iso_date(
@@ -258,7 +261,7 @@ def news_sitemap_xml(items: list[ArticleFeedItem]) -> str:
             keywords = f"<news:keywords>{escape(', '.join(item.tags))}</news:keywords>"
         entries.append(
             "<url>"
-            f"<loc>{escape(absolute(article_path(item.article_id)))}</loc>"
+            f"<loc>{escape(absolute(article_path(item.article_id, item.slug)))}</loc>"
             "<news:news>"
             "<news:publication>"
             f"<news:name>{escape(settings.site_name)}</news:name>"

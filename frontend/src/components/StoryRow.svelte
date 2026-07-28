@@ -18,7 +18,7 @@
     showReads?: boolean
   } = $props()
 
-  const href = $derived(articleHref(article.article_id))
+  const href = $derived(articleHref(article.article_id, null, article.slug))
   const views = $derived(typeof article.views === 'number' ? article.views : 0)
   const displayReads = $derived(
     showReads ?? views > 0,

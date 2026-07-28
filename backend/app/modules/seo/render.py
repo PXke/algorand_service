@@ -267,14 +267,19 @@ def _is_icon_like(image_url: str) -> bool:
     return "/og/" in path or "opengraph" in path
 
 
-def article_path(article_id: str) -> str:
-    """Return the site-relative path for an article's canonical page."""
-    return f"/news/articles/{article_id}"
+def article_path(article_id: str, slug: str | None = None) -> str:
+    """Site-relative path for an article's canonical page.
+
+    Prefers the permanent slug (migration 056); falls back to the article id so
+    rows written before the backfill, and any article whose slug is somehow
+    missing, still resolve. The route accepts both forms and 301s id -> slug.
+    """
+    return f"/news/articles/{slug or article_id}"
 
 
-def article_url(article_id: str, lang: str | None = None) -> str:
+def article_url(article_id: str, lang: str | None = None, slug: str | None = None) -> str:
     """Absolute article URL; non-English locales use ?lang= (matches the API)."""
-    base = absolute(article_path(article_id))
+    base = absolute(article_path(article_id, slug))
     code = (lang or "").strip()
     if code and code != "en":
         return f"{base}?lang={code}"
@@ -282,10 +287,10 @@ def article_url(article_id: str, lang: str | None = None) -> str:
 
 
 def article_hreflang_links(
-    article_id: str, translation_langs: list[str] | None
+    article_id: str, translation_langs: list[str] | None, slug: str | None = None
 ) -> list[tuple[str, str]]:
     """(hreflang BCP-47 tag, absolute URL) pairs including x-default."""
-    base = article_url(article_id)
+    base = article_url(article_id, slug=slug)
     links: list[tuple[str, str]] = [
         ("x-default", base),
         (SEO_HREFLANG_LOCALES["en"], base),
@@ -297,7 +302,7 @@ def article_hreflang_links(
         hreflang = SEO_HREFLANG_LOCALES.get(code)
         if not hreflang:
             continue
-        links.append((hreflang, article_url(article_id, code)))
+        links.append((hreflang, article_url(article_id, code, slug)))
         seen.add(code)
     return links
 
@@ -414,6 +419,7 @@ def _translation_links_html(
     article_id: str,
     current_lang: str | None,
     translation_langs: list[str] | None,
+    slug: str | None = None,
 ) -> str:
     langs = ["en", *(c for c in (translation_langs or []) if c != "en")]
     if len(langs) <= 1:
@@ -422,7 +428,9 @@ def _translation_links_html(
     parts = []
     for code in langs:
         path = (
-            article_path(article_id) if code == "en" else f"{article_path(article_id)}?lang={code}"
+            article_path(article_id, slug)
+            if code == "en"
+            else f"{article_path(article_id, slug)}?lang={code}"
         )
         label = _LANG_LABELS.get(code, code)
         hreflang = SEO_HREFLANG_LOCALES.get(code, code)
@@ -449,7 +457,7 @@ def _related_stories_html(items: list[ArticleFeedItem]) -> str:
     if not items:
         return ""
     links = "".join(
-        f'<li><a href="{_attr(article_path(item.article_id))}">{html.escape(item.title)}</a></li>'
+        f'<li><a href="{_attr(article_path(item.article_id, item.slug))}">{html.escape(item.title)}</a></li>'
         for item in items
     )
     return (
@@ -504,7 +512,7 @@ def render_article(
     lang_code = (lang or "").strip() or None
     if lang_code == "en":
         lang_code = None
-    canonical = article_url(article.article_id, lang_code)
+    canonical = article_url(article.article_id, lang_code, article.slug)
     image, is_default = _image_for(article.image_url)
     # A brand-icon fallback (favicon/logo) is tile art, not a share image or
     # banner — skip it for the body hero below same as a missing image.
@@ -563,7 +571,7 @@ def render_article(
     if lang_code:
         news_article["inLanguage"] = html_lang_for(lang_code)
 
-    hreflang_links = article_hreflang_links(article.article_id, translation_langs)
+    hreflang_links = article_hreflang_links(article.article_id, translation_langs, article.slug)
     current_og = og_locale_for(lang_code)
     og_alternates = sorted(
         {
@@ -609,7 +617,9 @@ def render_article(
         else ""
     )
     tags_html = _tag_links_html(article.tags)
-    langs_html = _translation_links_html(article.article_id, lang_code, translation_langs)
+    langs_html = _translation_links_html(
+        article.article_id, lang_code, translation_langs, article.slug
+    )
     related_html = _related_stories_html(related or [])
     body = ssr_container(
         f'<p class="ssr-back"><a href="/news">← Latest stories</a></p>'
@@ -636,7 +646,7 @@ def _feed_list_jsonld(items: list[ArticleFeedItem], canonical: str, name: str) -
                 {
                     "@type": "ListItem",
                     "position": i + 1,
-                    "url": absolute(article_path(item.article_id)),
+                    "url": absolute(article_path(item.article_id, item.slug)),
                     "name": item.title,
                 }
                 for i, item in enumerate(items)
@@ -670,7 +680,7 @@ def _topics_index_jsonld(tags: list[tuple[str, int]], canonical: str, title: str
 def _story_li(item: ArticleFeedItem, *, rank: int | None = None) -> str:
     prefix = f"{rank}. " if rank is not None else ""
     return (
-        f'<li>{prefix}<a href="{_attr(article_path(item.article_id))}">'
+        f'<li>{prefix}<a href="{_attr(article_path(item.article_id, item.slug))}">'
         f"{html.escape(item.title)}</a> — {html.escape(truncate(item.summary, 140))}</li>"
     )
 
@@ -693,7 +703,7 @@ def _lead_html(item: ArticleFeedItem) -> str:
             f'<img src="{src}" alt="{_attr(item.title)}" '
             f'width="680" height="425" fetchpriority="high" decoding="async">'
         )
-    path = _attr(article_path(item.article_id))
+    path = _attr(article_path(item.article_id, item.slug))
     return (
         f'<article class="ssr-lead">'
         f'<h1><a href="{path}">{html.escape(item.title)}</a></h1>'

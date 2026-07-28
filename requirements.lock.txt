@@ -221,7 +221,7 @@ wcwidth==0.8.2
     # via prompt-toolkit
 webob==1.8.10
     # via bugsnag
-wrapt==2.2.2
+wrapt==2.3.0
     # via deprecated
 x402-avm==2.0.2
     # via algorand-platform-backend (backend/pyproject.toml)

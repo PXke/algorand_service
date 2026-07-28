@@ -185,6 +185,10 @@ class NewsService:
         }
         return items, translations
 
+    def resolve_slug(self, slug: str) -> str | None:
+        """Article id for a URL slug, or None. Single-partition read on the reverse index."""
+        return self._store.id_for_slug(slug)
+
     def get_article(self, article_id: str, lang: str | None = None) -> ArticleDetail | None:
         """Fetch one article's full detail, translated if lang is given and available."""
         article = self._store.get(article_id)
@@ -232,6 +236,7 @@ class NewsService:
             ),
             views=get_views(article.article_id),
             image_url=article.image_url,
+            slug=getattr(article, "slug", None),
             updated_at_epoch=getattr(article, "updated_at_epoch", None),
         )
 
@@ -270,6 +275,7 @@ class NewsService:
             ),
             image_url=getattr(article, "image_url", None),
             source_url=getattr(article, "source_url", None),
+            slug=getattr(article, "slug", None),
             first_published_at_epoch=getattr(article, "first_published_at_epoch", None),
             updated_at_epoch=getattr(article, "updated_at_epoch", None),
         )

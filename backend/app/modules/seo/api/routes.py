@@ -237,12 +237,27 @@ def news_index(request: Request) -> Response:
 
 def article(request: Request) -> Response:
     """SSR article detail, or a 410/404 noindex page for a removed/missing article."""
-    article_id = request.path_params.get("article_id", "")
+    raw = request.path_params.get("article_id", "")
     qp = _query_params(request)
     lang = query_param(qp.get("lang")) or None
     if lang == "en":
         lang = None
+
+    # The path segment is a slug for every article since migration 056, but old
+    # uuid URLs are indexed and must keep working. Try the slug index first; a
+    # uuid that resolves gets a permanent redirect to its slug, so search
+    # engines consolidate on one URL instead of seeing two for one story.
+    article_id = news.resolve_slug(raw) or raw
     detail = news.get_article(article_id, lang=lang) if article_id else None
+    if detail is not None and detail.slug and raw != detail.slug:
+        target = render.article_path(article_id, detail.slug)
+        if lang:
+            target = f"{target}?lang={lang}"
+        return Response(
+            status_code=301,
+            headers={"Location": target, "Cache-Control": "public, max-age=86400"},
+            description="",
+        )
     if detail is None:
         _record_notfound(request, f"/news/articles/{article_id}")
         # 410 Gone for tombstoned (deliberately deleted) articles: their

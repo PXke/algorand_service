@@ -855,3 +855,36 @@ def test_section_redirect_map_matches_the_spa() -> None:
     spa_map = dict(re.findall(r"(\w+)\s*:\s*'([^']+)'", block.group(1)))
 
     assert spa_map == SECTION_REDIRECTS
+
+
+def test_article_path_prefers_the_slug_and_falls_back_to_the_id() -> None:
+    """Slug URLs since migration 056; rows without one still resolve by id."""
+    assert render.article_path("abc123", "my-story") == "/news/articles/my-story"
+    assert render.article_path("abc123", None) == "/news/articles/abc123"
+
+
+def test_article_urls_agree_across_canonical_feed_and_sitemap() -> None:
+    """Canonical, RSS and sitemap must emit ONE url form — a mismatch reads as duplicate content."""
+    from app.modules.seo.feeds import _article_path as feed_path
+
+    article = _article(slug="my-story")
+    head, _ = render.render_article(article)
+    assert 'rel="canonical" href="https://algorand.pxke.me/news/articles/my-story"' in head
+    assert feed_path(article.article_id, article.slug) == "/news/articles/my-story"
+
+
+def test_slug_url_keeps_the_lang_query() -> None:
+    """A translated article canonicalises to the slug plus ?lang=, not the id."""
+    head, _ = render.render_article(_article(slug="my-story"), lang="fa", translation_langs=["fa"])
+    assert 'rel="canonical" href="https://algorand.pxke.me/news/articles/my-story?lang=fa"' in head
+    assert "/news/articles/abc123" not in head
+
+
+def test_sitemap_emits_slug_urls_not_ids() -> None:
+    """Sitemap <loc> must match rel=canonical — a uuid here vs a slug there is duplicate content."""
+    items = _feed(1)
+    items[0].slug = "my-story"
+    entries = sitemap._article_entries(items, {})
+    locs = " ".join(e.loc for e in entries)
+    assert "/news/articles/my-story" in locs
+    assert "/news/articles/id0" not in locs

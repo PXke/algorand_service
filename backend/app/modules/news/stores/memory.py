@@ -42,6 +42,14 @@ class InMemoryArticleStore:
         next_cursor = page[-1].published_at_epoch * 1000 if len(page) >= limit and page else None
         return page, next_cursor
 
+    def id_for_slug(self, slug: str) -> str | None:
+        """Article id owning this permanent URL slug, or None."""
+        clean = (slug or "").strip().lower()
+        return next(
+            (a.article_id for a in self._by_id.values() if (a.slug or "").lower() == clean),
+            None,
+        )
+
     def get(self, article_id: str) -> StoredArticle | None:
         """Fetch one article by id, or None if it does not exist."""
         return self._by_id.get(article_id)

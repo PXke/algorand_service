@@ -122,6 +122,7 @@ class CassandraArticleStore:
                         tags=list(row.tags or []),
                         image_url=getattr(row, "image_url", None),
                         source_url=getattr(row, "source_url", None),
+                        slug=getattr(row, "slug", None),
                         translations=dict(row.translations) if row.translations else None,
                         updated_at_epoch=(_epoch(getattr(row, "updated_at", None)) or None),
                         first_published_at_epoch=(
@@ -131,6 +132,17 @@ class CassandraArticleStore:
                 )
         next_cursor = to_ms(last_dt) if (len(items) >= limit and last_dt) else None
         return items, next_cursor
+
+    def id_for_slug(self, slug: str) -> str | None:
+        """Article id owning this permanent URL slug, or None."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import NewsStmts
+
+        clean = (slug or "").strip().lower()
+        if not clean:
+            return None
+        row = get_cassandra_session().execute(NewsStmts.ID_BY_SLUG, (clean,)).one()
+        return str(row.article_id) if row and row.article_id else None
 
     def get(self, article_id: str) -> StoredArticle | None:
         """Fetch one article's full data by id, or None if it does not exist."""
@@ -159,6 +171,7 @@ class CassandraArticleStore:
             source_url=row.source_url,
             tags=list(row.tags or []),
             image_url=getattr(row, "image_url", None),
+            slug=getattr(row, "slug", None),
             translations=dict(row.translations) if row.translations else None,
             updated_at_epoch=_epoch(getattr(row, "updated_at", None)) or None,
         )

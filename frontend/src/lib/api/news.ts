@@ -8,6 +8,8 @@ export type ArticleItem = {
   published_at_epoch?: number
   service_id?: string
   image_url?: string
+  /** Permanent URL slug; absent on rows written before migration 056. */
+  slug?: string | null
   source_url?: string
   tags?: string[]
   trigger_kind?: string

@@ -25,8 +25,12 @@ export function withLang(path: string, lang: string | null | undefined = get(act
   return `${base}${q ? `?${q}` : ''}${hash}`
 }
 
-export function articleHref(articleId: string, lang?: string | null): string {
-  return articleCanonicalPath(articleId, lang ?? get(activeLocale))
+export function articleHref(
+  articleId: string,
+  lang?: string | null,
+  slug?: string | null,
+): string {
+  return articleCanonicalPath(articleId, lang ?? get(activeLocale), slug)
 }
 
 /** Read `?lang=` from the current URL (or a path string). */

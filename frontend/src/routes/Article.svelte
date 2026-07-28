@@ -200,7 +200,7 @@
   )
 
   function goArticle(item: ArticleItem) {
-    navigate(articleHref(item.article_id))
+    navigate(articleHref(item.article_id, null, item.slug))
   }
 </script>
 
@@ -341,7 +341,7 @@
         {#if older}
           <a
             class="nav-card older"
-            href={articleHref(older.article_id)}
+            href={articleHref(older.article_id, null, older.slug)}
             onclick={(e) => {
               e.preventDefault()
               goArticle(older!)
@@ -354,7 +354,7 @@
         {#if newer}
           <a
             class="nav-card newer"
-            href={articleHref(newer.article_id)}
+            href={articleHref(newer.article_id, null, newer.slug)}
             onclick={(e) => {
               e.preventDefault()
               goArticle(newer!)

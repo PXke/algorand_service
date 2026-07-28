@@ -21,6 +21,7 @@ class StoredArticle:
     source_url: str | None = None
     tags: list[str] | None = None
     image_url: str | None = None
+    slug: str | None = None
     translations: dict[str, str] | None = None
     # Last content revision (edit/recompose); None = never revised.
     updated_at_epoch: int | None = None
@@ -39,6 +40,10 @@ class ArticleStore(Protocol):
 
     def list_feed(self, *, feed_bucket: str = "main", limit: int = 50) -> list[StoredArticle]:
         """List recent feed rows, newest first."""
+        ...
+
+    def id_for_slug(self, slug: str) -> str | None:
+        """Article id owning this permanent URL slug, or None."""
         ...
 
     def get(self, article_id: str) -> StoredArticle | None:

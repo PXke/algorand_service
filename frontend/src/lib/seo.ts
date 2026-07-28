@@ -40,8 +40,15 @@ export function articleOgImageUrl(articleId: string): string {
   return absoluteUrl(`/og/article/${articleId}.png`)
 }
 
-export function articleCanonicalPath(articleId: string, lang?: string | null): string {
-  const base = `/news/articles/${articleId}`
+/** Prefers the permanent slug; falls back to the id so pre-migration-056 rows
+ *  (and anything whose slug failed to load) still resolve. The server 301s
+ *  id -> slug, so an id href is correct but costs a redirect. */
+export function articleCanonicalPath(
+  articleId: string,
+  lang?: string | null,
+  slug?: string | null,
+): string {
+  const base = `/news/articles/${slug || articleId}`
   const code = (lang || '').trim()
   if (code && code !== 'en') return `${base}?lang=${encodeURIComponent(code)}`
   return base

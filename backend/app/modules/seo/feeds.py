@@ -20,8 +20,16 @@ def _absolute(path: str) -> str:
     return f"{_site_url()}/{path.lstrip('/')}"
 
 
-def _article_path(article_id: str) -> str:
-    return f"/news/articles/{article_id}"
+def _article_path(article_id: str, slug: str | None = None) -> str:
+    """Site-relative article path, delegating to render.article_path.
+
+    Shared rather than duplicated so the feed can never disagree with the
+    canonical URL: an RSS guid pointing somewhere other than rel=canonical is
+    a duplicate-content signal.
+    """
+    from app.modules.seo.render import article_path
+
+    return article_path(article_id, slug)
 
 
 def _rfc822(epoch: int) -> str:
@@ -44,7 +52,7 @@ def rss_xml(
     newest = max((i.published_at_epoch for i in items), default=0)
     entries = []
     for item in items:
-        url = _absolute(_article_path(item.article_id))
+        url = _absolute(_article_path(item.article_id, item.slug))
         content = (bodies or {}).get(item.article_id, "")
         entries.append(
             "<item>"

@@ -492,15 +492,20 @@ class NewsStmts:
     )
     FEED_PAGE = _Stmt(
         "SELECT article_id, service_id, title, summary, published_at, first_published_at, "
-        "updated_at, tags, "
+        "updated_at, tags, slug, "
         "image_url, source_url, translations FROM algorand_platform.articles_feed "
         "WHERE bucket = ? AND published_at < ? LIMIT ?"
     )
     GET_FULL = _Stmt(
         "SELECT article_id, service_id, title, summary, body, "
         "trigger_txid, trigger_round, source_url, published_at, updated_at, tags, "
-        "image_url, translations "
+        "image_url, translations, slug "
         "FROM algorand_platform.articles_by_id WHERE article_id = ?"
+    )
+    # Slug -> article id. A single-partition read on the reverse index, never a
+    # scan of articles_by_id.
+    ID_BY_SLUG = _Stmt(
+        "SELECT article_id FROM algorand_platform.articles_by_slug WHERE slug = ?"
     )
 
 

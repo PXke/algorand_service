@@ -36,6 +36,9 @@ class ArticleFeedItem(msgspec.Struct, kw_only=True):
     trigger_txid: str | None = None
     trigger_round: int | None = None
     tags: list[str] = field(default_factory=list)
+    # Permanent URL slug. None on rows written before migration 056, which fall
+    # back to the article id so their URLs keep resolving.
+    slug: str | None = None
     trigger_kind: str = "editorial"
     image_url: str | None = None
     source_url: str | None = None
@@ -61,6 +64,7 @@ class ArticleDetail(msgspec.Struct, kw_only=True):
     trigger_round: int | None = None
     source_url: str | None = None
     tags: list[str] = field(default_factory=list)
+    slug: str | None = None
     trigger_kind: str = "editorial"
     views: int = 0
     image_url: str | None = None
