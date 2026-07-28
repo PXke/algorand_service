@@ -43,9 +43,20 @@ COPY algorand_platform.articles_by_id FROM '<dir>/articles_by_id.csv' WITH HEADE
 
 ## 2. Current state
 
-- `articles_by_id` holds **224** rows; `articles_feed` holds **90**. Slug all
-  224 — the extra 134 are older articles whose URLs are indexed and must keep
-  resolving.
+- `articles_by_id` holds **224** rows; `articles_feed` holds **90** (87 with
+  titles). The extra ~135 are NOT older published articles — they are drafts,
+  superseded recomposes and rejected candidates that never reached a reader.
+  Measured 2026-07-28 from the backup.
+- **Backfill published articles FIRST.** Of 222 stored titles, 65 involve
+  duplicates — but among *published* ones, exactly one pair does. The
+  duplication lives almost entirely in the unpublished pool, where the pipeline
+  recomposed the same story repeatedly. If the backfill walks all 224 in
+  published_at order it will hand the bare slug to a draft and push the live
+  article to `-2`, which is exactly backwards. Slug the feed first; give
+  unpublished rows a slug lazily, at publish time.
+- Two PUBLISHED articles share the title "Compx Launches Canix402: A
+  Pay-Per-Query API for Algorand DeFi Yield Data". Worth checking whether that
+  is a genuine double-publish before it is immortalised as `...-2`.
 - `deleted_articles` (8 rows) drives 410 Gone tombstones. That path must
   survive; see invariants.
 - URLs today are `/news/articles/<uuid>`, built by `article_path()`.
@@ -92,9 +103,11 @@ Each step should be independently verifiable. Do not batch them.
 2. **`slugify()` + collision assignment**, with unit tests covering: unicode
    titles, titles that collapse to empty (fall back to the uuid), duplicates
    producing `-2`/`-3`, and the length clamp landing on a word boundary.
-3. **Backfill all 224 rows.** Deterministic order (by `published_at`) so a
-   re-run assigns the same suffixes. Write both the column and the lookup
-   table. Verify: 224 slugs, 0 empty, 0 duplicates.
+3. **Backfill.** Published articles first (articles_feed), in `published_at`
+   order so a re-run is deterministic; unpublished rows get theirs at publish
+   time. Write both the column and the lookup table. Verify: every published
+   article has a slug, 0 empty, 0 duplicates, and no published article carries
+   a numeric suffix it did not earn against another *published* article.
 4. **Wire generation into publish** so new articles get a slug at creation.
 5. **Resolver**: route accepts a slug, falls back to a uuid.
 6. **301 uuid → slug**, permanent. This is the step that protects the existing
