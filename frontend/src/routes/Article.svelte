@@ -19,6 +19,7 @@
   import SectionRule from '../components/SectionRule.svelte'
   import ShareBar from '../components/ShareBar.svelte'
   import BrandMark from '../components/BrandMark.svelte'
+  import Icon from '../components/Icon.svelte'
   import PageMeta from '../components/PageMeta.svelte'
   import FeedSkeleton from '../components/FeedSkeleton.svelte'
   import { ApiException } from '../lib/api/client'
@@ -240,6 +241,22 @@
       <!-- A running head, the way a printed interior page carries the paper's
            name: while reading, the masthead is hidden, and without this there
            was no link back to the front page anywhere on screen. -->
+      <!-- Back to the feed, in the collapsed bar too. The page's own "Back to
+           feed" link sits at the top of the article, so once the chrome
+           collapsed mid-read the only way back was to scroll all the way up. -->
+      <a
+        class="sticky-back"
+        href="/news"
+        aria-label={t($messages, 'backToFeed')}
+        title={t($messages, 'backToFeed')}
+        tabindex={stickyOn ? 0 : -1}
+        onclick={(e) => {
+          e.preventDefault()
+          navigate('/news')
+        }}
+      >
+        <Icon name="arrow_back" size={18} />
+      </a>
       <a
         class="sticky-home"
         href="/"
@@ -440,6 +457,20 @@
     height: 44px;
     max-width: var(--max-reading);
     margin: 0 auto;
+  }
+  .sticky-back {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    color: var(--muted);
+  }
+  .sticky-back:hover {
+    background: var(--callout);
+    color: var(--on-surface);
   }
   .sticky-home {
     display: inline-flex;

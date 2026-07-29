@@ -19,23 +19,19 @@
         IBM Plex Mono       - anything the pipeline stamps: block height,
                               timestamps, kickers, counts. The machine's voice.
         Source Serif 4      - article prose only. The reading voice.
-      The serif is no longer prose-only: story decks use it, so the front page
-      renders ~23 of them and pays for the face either way. Preloaded rather
-      than discovered after CSS parse, and set to `optional` like every other
-      face so a late arrival is skipped instead of reflowing the whole feed.
+      The serif is no longer prose-only: story decks use it. It is deliberately
+      NOT preloaded, though. At 119KB it was 54% of the preload budget, and
+      `optional` gives a face ~100ms before falling back for good — on
+      throttled mobile it cannot arrive in that window, so preloading it spent
+      over half the critical-path font bytes on a face the first paint would
+      not use, delaying FCP/LCP. It still loads normally and is used from cache
+      on the next view and on article pages, where the prose actually wants it.
       Mono is preloaded at 600, the weight the front page actually sets
       (kickers, rules, figures); 400 appears only in article code blocks.
       The italic stays unpreloaded — it is fetched only if an <em> renders.
     -->
     <link rel="preload" href="/fonts/Archivo-400-800.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/PlexMono-600.woff2" as="font" type="font/woff2" crossorigin />
-    <link
-      rel="preload"
-      href="/fonts/SourceSerif4-400-700.woff2"
-      as="font"
-      type="font/woff2"
-      crossorigin
-    />
     <style>
       @font-face {
         font-family: 'Archivo';

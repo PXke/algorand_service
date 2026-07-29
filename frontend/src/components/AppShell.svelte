@@ -22,9 +22,14 @@
   let appsWrapEl = $state<HTMLElement | null>(null)
   let localeWrapEl = $state<HTMLElement | null>(null)
 
-  // Admin wallet → pxke_no_track cookie so our visits aren't counted.
+  /* Admin wallet → pxke_no_track cookie so our visits aren't counted.
+     Only ever SETS it. $isAdmin is false while the wallet session is still
+     being restored, so calling setAnalyticsOptOut($isAdmin) unconditionally
+     deleted the cookie on every single page load and only re-set it once the
+     wallet resolved — leaving a window (and a hard refresh) where our own
+     visits were counted. Clearing is now explicit, on logout. */
   $effect(() => {
-    setAnalyticsOptOut(!!$isAdmin)
+    if ($isAdmin) setAnalyticsOptOut(true)
   })
 
   $effect(() => {
@@ -52,6 +57,12 @@
       match: (p: string) => p === '/hot',
     },
     {
+      href: '/top',
+      label: t($messages, 'navTop'),
+      icon: 'trending' as const,
+      match: (p: string) => p === '/top',
+    },
+    {
       href: '/topics',
       label: t($messages, 'navTopics'),
       icon: 'tag' as const,
@@ -60,12 +71,6 @@
   ])
 
   const moreNav = $derived([
-    {
-      href: '/top',
-      label: t($messages, 'navTop'),
-      icon: 'trending' as const,
-      match: (p: string) => p === '/top',
-    },
     {
       href: '/about',
       label: t($messages, 'navAbout'),

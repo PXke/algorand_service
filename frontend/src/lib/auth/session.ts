@@ -277,6 +277,15 @@ export async function logout(): Promise<void> {
   }
   writeToken(null)
   session.set(null)
+  // Clearing the analytics opt-out belongs HERE, not in a reactive effect on
+  // isAdmin: that flag is false while a session is being restored, so clearing
+  // from there wiped the cookie on every page load.
+  try {
+    const { setAnalyticsOptOut } = await import('../analyticsOptOut')
+    setAnalyticsOptOut(false)
+  } catch {
+    /* ignore */
+  }
   try {
     const { wcDisconnect } = await import('./walletconnect')
     await wcDisconnect()

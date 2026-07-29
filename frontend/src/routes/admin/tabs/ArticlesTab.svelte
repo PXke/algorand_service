@@ -272,7 +272,7 @@
   }
   @media (min-width: 900px) {
     .panes {
-      grid-template-columns: 280px 1fr;
+      grid-template-columns: 260px minmax(0, 1fr);
     }
   }
   .list {
@@ -316,7 +316,10 @@
     background: var(--accent-soft);
   }
   .editor {
-    min-height: 360px;
+    /* Sized to the viewport rather than a fixed 360px: this is a writing
+       surface on a wide console, and a laptop screen has far more room than
+       the old fixed heights used. */
+    min-height: 420px;
     padding: 16px;
   }
   .editor-head {
@@ -346,7 +349,8 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 0.85rem;
     line-height: 1.55;
-    min-height: 280px;
+    min-height: min(64vh, 760px);
+    resize: vertical;
   }
   .body-label {
     display: flex;
@@ -374,7 +378,9 @@
     }
   }
   .preview {
-    max-height: 420px;
+    /* Matches the editor so the two panes read as one surface side by side. */
+    max-height: min(64vh, 760px);
+    min-height: min(64vh, 760px);
     overflow: auto;
     padding: 14px 16px;
     font-size: 0.92rem;
