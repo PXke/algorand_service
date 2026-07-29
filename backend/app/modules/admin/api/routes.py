@@ -9,6 +9,7 @@ from robyn import Request, Response, Robyn
 
 from app.core import serialization
 from app.core.http_errors import json_error_response
+from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet, verified_admin_wallet
 from app.modules.admin.schemas import (
     ArticlePatchRequest,
@@ -958,11 +959,12 @@ async def admin_list_compose_sessions(request: Request) -> Response:
     if denied is not None:
         return denied
 
-    qp = request.query_params
     # Keyset cursor: the created_at of the oldest row the client already has.
-    before = (qp.get("before") or "").strip() if hasattr(qp, "get") else ""
+    # Robyn's QueryParams.get REQUIRES the default argument — omitting it is a
+    # TypeError at request time, not import time, so it 500s only in prod.
+    before = query_param(request.query_params.get("before", ""))
     try:
-        limit = max(1, min(int(qp.get("limit") or "20"), 100))
+        limit = max(1, min(int(query_param(request.query_params.get("limit", "")) or 20), 100))
     except (TypeError, ValueError):
         limit = 20
 
