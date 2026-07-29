@@ -143,6 +143,47 @@ ARTICLE_TRANSLATION_GLOSSARY: dict[str, dict[str, str]] = {
 }
 
 
+# Which numeral glyphs each language should use, and stick to.
+#
+# Measured on the live corpus 2026-07-29: `ar` and `hi` came back in Western
+# digits with ZERO native glyphs across every stored translation, so their
+# entries just make the existing behaviour explicit. `fa` and `ps` are the
+# problem — both MIX systems (`fa` ~64% Extended Arabic-Indic / ~36% Western,
+# `ps` roughly the reverse), which means one publication renders a figure in
+# Persian digits in one paragraph and Western digits in the next. That is
+# reader-visible sloppiness with nothing to do with translation accuracy, and
+# nothing in the prompt ever said which to use.
+#
+# `fa` -> Extended Arabic-Indic follows standard Persian press convention.
+# `ps` is set to match it (same script, same region) but is PROVISIONAL:
+# unlike Persian there is no established Pashto crypto press to check against,
+# so a native reviewer should confirm it. Consistency is enforced either way —
+# picking the wrong system consistently is still better than mixing.
+ARTICLE_TRANSLATION_DIGITS: dict[str, str] = {
+    "fa": "Extended Arabic-Indic (۰۱۲۳۴۵۶۷۸۹)",
+    "ps": "Extended Arabic-Indic (۰۱۲۳۴۵۶۷۸۹)",
+    "ar": "Western Arabic (0123456789)",
+    "hi": "Western Arabic (0123456789)",
+    "ru": "Western Arabic (0123456789)",
+    "zh": "Western Arabic (0123456789)",
+    "es": "Western Arabic (0123456789)",
+    "fr": "Western Arabic (0123456789)",
+}
+
+
+def digits_block(lang: str) -> str:
+    """Prompt fragment pinning this language's numeral system, or "" when unset."""
+    system = ARTICLE_TRANSLATION_DIGITS.get(lang)
+    if not system:
+        return ""
+    return (
+        f"\n\nNUMERALS — write every number in {system}, the same way throughout "
+        "the article. Never mix numeral systems within one article. Digits, "
+        "separators and the value itself must match the source exactly; only the "
+        "glyphs may change."
+    )
+
+
 def glossary_block(lang: str) -> str:
     """Prompt fragment pinning this language's crypto terminology, or "" when none is defined."""
     terms = ARTICLE_TRANSLATION_GLOSSARY.get(lang)

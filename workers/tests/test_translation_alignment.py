@@ -150,3 +150,41 @@ def test_prompt_states_the_block_count(monkeypatch: pytest.MonkeyPatch) -> None:
     assert f"EXACTLY {n}" in system or f"Return EXACTLY {n}" in system
     assert "[1]" in user
     assert f"[{n}]" in user
+
+
+def test_prompt_pins_the_numeral_system(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pins one numeral system per language: fa/ps mixed Extended and Western digits in the live corpus (fa ~64/36), which reads as sloppiness independent of accuracy."""
+    n = len(split_markdown_blocks(_BODY))
+    seen = _client(
+        monkeypatch,
+        {"title": "T", "summary": "S", "blocks": [f"b{i}" for i in range(n)]},
+    )
+    mc.translate_article_mistral(
+        english_title="T", english_summary="S", english_body=_BODY, target_language="fa"
+    )
+    system = seen[0][0]["content"]
+    assert "۰۱۲۳۴۵۶۷۸۹" in system
+    assert "Never mix numeral systems" in system
+
+
+def test_glossary_and_numerals_are_language_specific(monkeypatch: pytest.MonkeyPatch) -> None:
+    """French keeps the English 'staking' and Western digits; Persian takes the native term and Extended digits."""
+    n = len(split_markdown_blocks(_BODY))
+    payload = {"title": "T", "summary": "S", "blocks": [f"b{i}" for i in range(n)]}
+
+    seen_fr = _client(monkeypatch, payload)
+    mc.translate_article_mistral(
+        english_title="T", english_summary="S", english_body=_BODY, target_language="fr"
+    )
+    fr = seen_fr[0][0]["content"]
+
+    seen_fa = _client(monkeypatch, payload)
+    mc.translate_article_mistral(
+        english_title="T", english_summary="S", english_body=_BODY, target_language="fa"
+    )
+    fa = seen_fa[0][0]["content"]
+
+    assert "jalonnement" in fr  # pinned as the thing NOT to say
+    assert "0123456789" in fr
+    assert "استیکینگ" in fa
+    assert "۰۱۲۳۴۵۶۷۸۹" in fa

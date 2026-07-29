@@ -2599,6 +2599,7 @@ def translate_article_mistral(
     """
     from app.core.article_translation_langs import (
         ARTICLE_TRANSLATION_LANG_NAMES,
+        digits_block,
         glossary_block,
     )
     from app.core.config import MISTRAL_MODEL_TRANSLATE
@@ -2647,6 +2648,7 @@ def translate_article_mistral(
         "Do not translate names like 'Algorand', 'ALGO', or specific DeFi protocol and product "
         "names unless there is a universally accepted localized brand name. Keep the tone "
         "professional and objective. Keep markdown formatting intact."
+        f"{digits_block(target_language)}"
         f"{glossary_block(target_language)}\n\n"
         "Write the translation as a single JSON object adhering exactly to this schema:\n"
         '{"title": "string", "summary": "string", "blocks": ["string", ...]}\n\n'
