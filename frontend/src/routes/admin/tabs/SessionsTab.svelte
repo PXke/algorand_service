@@ -8,7 +8,6 @@
   const ACTIVE_STATUSES = new Set(['researching', 'writing'])
   const ACTIVE_POLL_MS = 8000
   const IDLE_POLL_MS = 30000
-  const MAX_SESSIONS = 20
 
   let { admin }: { admin: AdminApi } = $props()
 
@@ -35,7 +34,10 @@
 
   const pollInterval = $derived(hasActiveSession ? ACTIVE_POLL_MS : IDLE_POLL_MS)
 
-  const visibleSessions = $derived(sessions.slice(0, MAX_SESSIONS))
+  /* No client-side cap: the server decides how many rows come back (pageLimit),
+     and a slice here silently discarded every extra page — "load more" fetched
+     40 and then rendered the same 20. */
+  const visibleSessions = $derived(sessions)
 
   function sessionId(s: SessionSummary): string {
     return String(s.session_id ?? '')
@@ -220,7 +222,7 @@
   <div class="admin-toolbar">
     <p class="admin-muted intro">
       Recent article composes — expand one for its full transcript (prompts, tool calls, output).
-      Newest first, last ~{MAX_SESSIONS}.
+      Newest first, showing {sessions.length}.
     </p>
     <button class="btn" type="button" disabled={loading} onclick={() => load()}>Refresh</button>
   </div>
