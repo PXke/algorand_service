@@ -51,8 +51,13 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.getJson('/api/v1/admin/tool-suggestions', h()),
     listComposeFeedback: () =>
       api.getJson('/api/v1/admin/compose-feedback', h()),
-    listComposeSessions: () =>
-      api.getJson('/api/v1/admin/compose-sessions', h()),
+    listComposeSessions: (opts?: { before?: string | null; limit?: number }) => {
+      const q = new URLSearchParams()
+      if (opts?.before) q.set('before', opts.before)
+      if (opts?.limit) q.set('limit', String(opts.limit))
+      const qs = q.toString()
+      return api.getJson(`/api/v1/admin/compose-sessions${qs ? `?${qs}` : ''}`, h())
+    },
     getComposeSessionDetail: (sessionId: string, createdAt: string) =>
       api.getJson(
         `/api/v1/admin/compose-sessions/${sessionId}?created_at=${encodeURIComponent(createdAt)}`,

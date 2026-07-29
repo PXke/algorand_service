@@ -958,12 +958,31 @@ async def admin_list_compose_sessions(request: Request) -> Response:
     if denied is not None:
         return denied
 
+    qp = request.query_params
+    # Keyset cursor: the created_at of the oldest row the client already has.
+    before = (qp.get("before") or "").strip() if hasattr(qp, "get") else ""
+    try:
+        limit = max(1, min(int(qp.get("limit") or "20"), 100))
+    except (TypeError, ValueError):
+        limit = 20
+
     def _compute() -> dict:
+        from datetime import datetime
+
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
-        rows = session.execute(ToolInsightStmts.LIST_COMPOSE_SESSIONS_SUMMARY, ("all",))
+        if before:
+            cursor = datetime.fromisoformat(before)
+            rows = session.execute(
+                ToolInsightStmts.LIST_COMPOSE_SESSIONS_SUMMARY_BEFORE,
+                ("all", cursor, limit),
+            )
+        else:
+            rows = session.execute(
+                ToolInsightStmts.LIST_COMPOSE_SESSIONS_SUMMARY, ("all", limit)
+            )
         items = [
             {
                 "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -990,7 +1009,10 @@ async def admin_list_compose_sessions(request: Request) -> Response:
     # Short TTL: this is polled every ~8s from possibly several open admin
     # tabs, so a few seconds of staleness collapses concurrent polls into
     # one Cassandra read instead of one per request.
-    return await asyncio.to_thread(cached_json, "admin:compose-sessions", 5, _compute)
+    # Cursor and limit are part of the key — otherwise page 2 would be served
+    # the cached page 1.
+    key = f"admin:compose-sessions:{before or 'head'}:{limit}"
+    return await asyncio.to_thread(cached_json, key, 5, _compute)
 
 
 async def admin_get_compose_session(request: Request) -> Response:

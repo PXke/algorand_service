@@ -13,6 +13,14 @@
   let { admin }: { admin: AdminApi } = $props()
 
   let sessions = $state<SessionSummary[]>([])
+  /* A growing window rather than appended pages: this tab polls every few
+     seconds and replaces the list wholesale, so accumulated pages would be
+     wiped by the next refresh. Re-requesting the same total keeps "load more"
+     and the poll from fighting each other. */
+  const PAGE = 20
+  let pageLimit = $state(PAGE)
+  let hasMore = $state(false)
+  let loadingMore = $state(false)
   let loading = $state(true)
   let error = $state<string | null>(null)
 
@@ -138,9 +146,10 @@
     if (showSpinner) loading = true
     error = null
     try {
-      const res = await admin.listComposeSessions()
+      const res = await admin.listComposeSessions({ limit: pageLimit })
       const items = Array.isArray(res.items) ? (res.items as SessionSummary[]) : []
       sessions = items
+      hasMore = items.length >= pageLimit
       refreshExpandedActiveDetails(items)
     } catch (e) {
       if (showSpinner) error = e instanceof Error ? e.message : String(e)
@@ -151,9 +160,10 @@
 
   async function quietReload() {
     try {
-      const res = await admin.listComposeSessions()
+      const res = await admin.listComposeSessions({ limit: pageLimit })
       const items = Array.isArray(res.items) ? (res.items as SessionSummary[]) : []
       sessions = items
+      hasMore = items.length >= pageLimit
       refreshExpandedActiveDetails(items)
     } catch {
       // Silent — next poll retries; manual refresh surfaces errors.
@@ -297,10 +307,48 @@
         {/if}
       </section>
     {/each}
+
+    {#if hasMore}
+      <button
+        class="load-more"
+        type="button"
+        disabled={loadingMore}
+        onclick={async () => {
+          loadingMore = true
+          pageLimit += PAGE
+          try {
+            await load(false)
+          } finally {
+            loadingMore = false
+          }
+        }}
+      >
+        {loadingMore ? 'Loading…' : `Load ${PAGE} more`}
+      </button>
+    {/if}
   {/if}
 </div>
 
 <style>
+  .load-more {
+    display: block;
+    width: 100%;
+    margin-top: 12px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    background: var(--panel);
+    color: var(--on-surface);
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .load-more:hover:not(:disabled) {
+    background: var(--accent-soft);
+  }
+  .load-more:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
   .tab {
     gap: 14px;
   }

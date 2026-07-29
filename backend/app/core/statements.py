@@ -348,7 +348,14 @@ class ToolInsightStmts:
     LIST_COMPOSE_SESSIONS_SUMMARY = _Stmt(
         "SELECT created_at, session_id, service_id, source_url, model, status, "
         "rounds, tool_calls, duration_ms, prompt_tokens, completion_tokens, total_tokens "
-        "FROM algorand_platform.compose_sessions WHERE bucket = ? LIMIT 20"
+        "FROM algorand_platform.compose_sessions WHERE bucket = ? LIMIT ?"
+    )
+    # Keyset page: everything older than the cursor. created_at is a clustering
+    # column, so this stays a single-partition range read rather than a scan.
+    LIST_COMPOSE_SESSIONS_SUMMARY_BEFORE = _Stmt(
+        "SELECT created_at, session_id, service_id, source_url, model, status, "
+        "rounds, tool_calls, duration_ms, prompt_tokens, completion_tokens, total_tokens "
+        "FROM algorand_platform.compose_sessions WHERE bucket = ? AND created_at < ? LIMIT ?"
     )
     GET_COMPOSE_SESSION_DETAIL = _Stmt(
         "SELECT messages, final_output FROM algorand_platform.compose_sessions "
