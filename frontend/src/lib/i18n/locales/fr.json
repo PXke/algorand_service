@@ -186,7 +186,7 @@
   "hotTitle": "Les plus lus",
   "hotLead": "Les articles que les lecteurs ouvrent le plus en ce moment.",
   "topicsTitle": "Sujets",
-  "topicsLead": "Chaque étiquette utilisée récemment par la rédaction — la taille reflète la couverture, la couleur les lectures.",
+  "topicsLead": "Chaque sujet couvert récemment, classé par volume de couverture.",
   "topicSubtitle": "Articles étiquetés « {tag} »",
   "readsCount": "{count, plural, =1{1 lecture} other{{count} lectures}}",
   "sectionMarkets": "Marchés",

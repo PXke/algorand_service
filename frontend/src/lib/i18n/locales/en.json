@@ -186,7 +186,7 @@
   "hotTitle": "Most read",
   "hotLead": "The stories readers are opening most right now.",
   "topicsTitle": "Topics",
-  "topicsLead": "Every tag the newsroom used recently — sized by coverage, warmed by reads.",
+  "topicsLead": "Every tag the newsroom used recently, ranked by how much we covered it.",
   "topicSubtitle": "Stories tagged “{tag}”",
   "readsCount": "{count, plural, =1{1 read} other{{count} reads}}",
   "sectionMarkets": "Markets",

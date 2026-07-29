@@ -186,7 +186,7 @@
   "hotTitle": "阅读最多",
   "hotLead": "读者当前打开最多的报道。",
   "topicsTitle": "话题",
-  "topicsLead": "编辑部近期使用的所有标签——大小代表报道量，颜色代表阅读热度。",
+  "topicsLead": "编辑部近期报道的所有话题，按报道量排序。",
   "topicSubtitle": "带有“{tag}”标签的报道",
   "readsCount": "{count, plural, other{{count} 次阅读}}",
   "sectionMarkets": "市场",

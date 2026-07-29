@@ -7,32 +7,27 @@
   import PageMeta from '../components/PageMeta.svelte'
   import { ApiException } from '../lib/api/client'
   import { SITE_TAGLINE } from '../lib/seo'
-  import { isMetaTag, topicColor } from '../lib/tags'
+  import { displayTagLabel, isMetaTag, topicColor } from '../lib/tags'
 
   let tags: Array<{ tag: string; count: number; views?: number }> = $state([])
   let loading = $state(true)
   let error = $state<string | null>(null)
 
-  /* The page has always promised "sized by coverage, warmed by reads" and
-     always rendered identical cards. Actually derive both now. */
-  const scaled = $derived.by(() => {
-    const maxCount = Math.max(...tags.map((x) => x.count ?? 0), 1)
-    const maxViews = Math.max(...tags.map((x) => x.views ?? 0), 1)
-    return tags.map((x) => {
-      // sqrt keeps the long tail legible instead of collapsing it to nothing
-      const size = Math.sqrt((x.count ?? 0) / maxCount)
-      const heat = Math.sqrt((x.views ?? 0) / maxViews)
-      return {
-        ...x,
-        tone: topicColor(x.tag),
-        // 1rem → 1.6rem
-        fontSize: `${(1 + size * 0.6).toFixed(2)}rem`,
-        // wide topics claim two columns
-        wide: size > 0.62,
-        // 0 → 9% tone wash; the CSS applies this as a percentage directly
-        heat: (heat * 9).toFixed(1),
-      }
-    })
+  let query = $state('')
+
+  /* One ranked column, not a four-column card grid. The grid encoded coverage
+     as type size and reads as a background wash, which meant the eye had to
+     decode two visual channels to answer "which topic is biggest" — and with
+     ~30 cards across four columns there was no reading order at all. A list
+     sorted by coverage answers it directly, and the numbers stay legible
+     because they are printed rather than encoded. */
+  const ranked = $derived.by(() => {
+    const q = query.trim().toLowerCase()
+    return tags
+      .filter((x) => !q || x.tag.toLowerCase().includes(q) || displayTagLabel(x.tag).toLowerCase().includes(q))
+      .slice()
+      .sort((a, b) => (b.count ?? 0) - (a.count ?? 0) || (b.views ?? 0) - (a.views ?? 0))
+      .map((x, i) => ({ ...x, rank: i + 1, tone: topicColor(x.tag), label: displayTagLabel(x.tag) }))
   })
 
   onMount(() => {
@@ -68,29 +63,44 @@
   {:else if error}
     <p class="err">{error}</p>
   {:else}
-    <div class="topics">
-      {#each scaled as item}
-        <a
-          class="topic"
-          class:wide={item.wide}
-          style="--tone:{item.tone}; --heat:{item.heat}; --size:{item.fontSize}"
-          href={`/topic/${encodeURIComponent(item.tag)}`}
-          onclick={(e) => {
-            e.preventDefault()
-            navigate(`/topic/${encodeURIComponent(item.tag)}`)
-          }}
-        >
-          <strong>#{item.tag}</strong>
-          <span class="subtle"
-            >{tPlural($messages, 'storiesCount', item.count)} · {tPlural(
-              $messages,
-              'readsCount',
-              item.views ?? 0,
-            )}</span
-          >
-        </a>
-      {/each}
-    </div>
+    <label class="find">
+      <span class="sr-only">{t($messages, 'navSearch')}</span>
+      <input
+        type="search"
+        bind:value={query}
+        placeholder={t($messages, 'navSearch')}
+        autocomplete="off"
+        spellcheck="false"
+      />
+    </label>
+
+    {#if !ranked.length}
+      <p class="muted">{t($messages, 'searchEmptyTitle')}</p>
+    {:else}
+      <ol class="rank-list">
+        {#each ranked as item (item.tag)}
+          <li>
+            <a
+              class="topic"
+              style="--tone:{item.tone}"
+              href={`/topic/${encodeURIComponent(item.tag)}`}
+              onclick={(e) => {
+                e.preventDefault()
+                navigate(`/topic/${encodeURIComponent(item.tag)}`)
+              }}
+            >
+              <span class="pos">{item.rank}</span>
+              <strong class="name">{item.label}</strong>
+              <span class="counts subtle">
+                {tPlural($messages, 'storiesCount', item.count)}
+                <span class="dot" aria-hidden="true">·</span>
+                {tPlural($messages, 'readsCount', item.views ?? 0)}
+              </span>
+            </a>
+          </li>
+        {/each}
+      </ol>
+    {/if}
   {/if}
 </div>
 
@@ -103,83 +113,93 @@
     margin: 8px 0 0;
     max-width: 42rem;
   }
-  .topics {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-    gap: 12px;
+  .find {
+    display: block;
+    max-width: 320px;
   }
-  @media (min-width: 500px) {
-    .topics {
-      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-    }
-  }
-  .topic {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 8px;
-    min-height: 84px;
-    padding: 14px;
-    /* --heat is the read-warmth the page copy promises, already in percent.
-       Kept to a whisper — a grid of thirty saturated cards read as a circus. */
-    background: color-mix(in srgb, var(--tone) calc(var(--heat, 0) * 1%), var(--panel));
+  .find input {
+    width: 100%;
+    padding: 9px 12px;
     border: 1px solid var(--border);
-    border-inline-start: 3px solid color-mix(in srgb, var(--tone) 55%, var(--border));
-    border-radius: 12px;
+    border-radius: var(--radius-control);
+    background: var(--panel);
+    color: var(--on-surface);
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+  .find input:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 1px;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .rank-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  /* Ruled rows, like the Most Read module — the rule is the structure, so the
+     row itself needs no card chrome. */
+  .topic {
+    display: grid;
+    grid-template-columns: 2.4rem 1fr auto;
+    align-items: baseline;
+    gap: 12px;
+    padding: 11px 4px;
+    border-bottom: 1px solid var(--border);
     color: inherit;
     text-decoration: none;
-    transition:
-      border-color 0.2s ease,
-      transform 0.25s cubic-bezier(0.22, 1, 0.36, 1),
-      box-shadow 0.25s ease;
-  }
-  .topic.wide {
-    grid-column: span 2;
-  }
-  @media (max-width: 499px) {
-    .topic.wide {
-      grid-column: span 1;
-    }
   }
   .topic:hover {
     text-decoration: none;
-    border-color: color-mix(in srgb, var(--tone) 45%, var(--border));
-    border-inline-start-color: var(--tone);
-    transform: translateY(-2px);
-    box-shadow: 0 10px 24px var(--card-shadow);
+    background: var(--callout);
   }
-  /* Sans, not display serif: these are lowercase #hashtag labels, and a
-     serif "#" at thirty different sizes looked ragged. Tone stays in the
-     rule and the wash so the type itself can be plain ink. */
-  .topic strong {
-    font-family: var(--font-mono);
-    /* Mono runs wider than the sans this replaced, and long single-word tags
-       (#infrastructure, #decentralization) have no break opportunity — they
-       ran straight out of the card. */
-    min-width: 0;
-    overflow-wrap: anywhere;
-    /* --size is the coverage weighting. */
-    font-size: var(--size, 1.05rem);
-    font-weight: 600;
-    line-height: 1.15;
-    letter-spacing: -0.2px;
-    color: var(--on-surface);
-  }
-  .topic:hover strong {
+  .topic:hover .name {
     text-decoration: underline;
     text-underline-offset: 2px;
   }
-  .topic .subtle {
-    font-size: 0.82rem;
-    line-height: 1.35;
+  .pos {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--subtle);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
-  @media (prefers-reduced-motion: reduce) {
+  /* The tone stays a marker beside the name rather than a wash behind it:
+     thirty tinted rows read as noise, one coloured tick reads as a label. */
+  .name {
+    font-family: var(--font-display);
+    font-size: 1.02rem;
+    font-weight: 700;
+    letter-spacing: -0.2px;
+    color: var(--on-surface);
+    border-inline-start: 3px solid var(--tone);
+    padding-inline-start: 10px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .counts {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .dot {
+    color: var(--border);
+  }
+  @media (max-width: 519px) {
     .topic {
-      transition: none;
+      grid-template-columns: 2rem 1fr;
+      row-gap: 4px;
     }
-    .topic:hover {
-      transform: none;
+    .counts {
+      grid-column: 2;
     }
   }
   .err {
