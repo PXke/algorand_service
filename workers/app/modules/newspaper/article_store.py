@@ -46,6 +46,7 @@ class ArticleDetail:
     prompt_version: str = ""
     translations: dict[str, str] | None = None
     tags: tuple[str, ...] = ()
+    slug: str | None = None
 
 
 def get_article(article_id: str) -> ArticleDetail | None:
@@ -76,6 +77,7 @@ def get_article(article_id: str) -> ArticleDetail | None:
         prompt_version=getattr(row, "prompt_version", "") or "",
         translations=dict(row.translations) if row.translations else None,
         tags=tuple(row.tags or []),
+        slug=getattr(row, "slug", None),
     )
 
 

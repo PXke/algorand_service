@@ -25,7 +25,7 @@ def distribute_article(article_id: str) -> dict[str, object]:
     share = ArticleShare(
         title=article.title,
         summary=article.summary,
-        url=article_url(article_id),
+        url=article_url(article_id, slug=getattr(article, "slug", None)),
         image_url=f"{config.PUBLIC_SITE_URL}/og/article/{article_id}.png",
         tags=tuple(article.tags),
     )

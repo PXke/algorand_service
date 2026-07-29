@@ -67,9 +67,17 @@ class IndexNowClient:
         """Public site base URL with no trailing slash."""
         return (self._site_url() or "").rstrip("/")
 
-    def article_url(self, article_id: str, lang: str | None = None) -> str:
-        """Absolute article URL; non-English locales use ?lang= (matches SSR/sitemap)."""
-        base = f"{self.site()}/news/articles/{article_id}"
+    def article_url(
+        self, article_id: str, lang: str | None = None, slug: str | None = None
+    ) -> str:
+        """Absolute article URL; non-English locales use ?lang= (matches SSR/sitemap).
+
+        Prefers the permanent slug (migration 056). Callers that pass only an id
+        still produce a working URL — the site 301s id -> slug — but they cost a
+        redirect and, for IndexNow and social cards, publish the pre-migration
+        form of a URL that is meant to be permanent.
+        """
+        base = f"{self.site()}/news/articles/{slug or article_id}"
         code = (lang or "").strip()
         if code and code != "en":
             return f"{base}?lang={code}"
