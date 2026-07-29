@@ -258,6 +258,10 @@ def insert_stored_article(
                 source_url or None,
             ),
         )
+        # Claim the permanent URL slug at go-live. Held drafts deliberately do
+        # NOT claim one: they may never publish, and a draft holding the clean
+        # slug would push the real article to -2.
+        _claim_slug_for_feed(article_id, title, published_at)
         return str(article_id), True
     return str(article_id), False
 
@@ -428,6 +432,67 @@ def replace_article_content(
         ),
     )
     return now
+
+
+def _claim_slug_for_feed(article_id: UUID, title: str, published_at: datetime) -> None:
+    """Assign a slug and mirror it onto the feed row.
+
+    Never raises: a missing slug degrades to a uuid URL, which still resolves,
+    so slug assignment must not be able to fail a publish.
+    """
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts
+
+    try:
+        slug = ensure_article_slug(article_id, title)
+        if slug:
+            get_cassandra_session().execute(
+                ArticleStmts.SET_FEED_SLUG,
+                (slug, feed_month(published_at), published_at, article_id),
+            )
+    except Exception as exc:
+        logger.warning("slug claim failed for %s: %s", article_id, exc)
+
+
+def ensure_article_slug(article_id: str | UUID, title: str) -> str | None:
+    """Claim a permanent URL slug for an article, or return the one it already has.
+
+    Called at publish. Without this, articles created after migration 056 have
+    no slug and fall back to a uuid URL — which does not break anything visibly,
+    so the migration would have quietly stopped applying to new stories.
+
+    Idempotent and safe under concurrency: the claim is a lightweight
+    transaction (IF NOT EXISTS), so two workers racing on the same title cannot
+    both take one slug — the loser tries the next suffix.
+    """
+    from algorand_shared.slugs import slugify, unique_slug
+
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArticleStmts
+
+    aid = article_id if isinstance(article_id, UUID) else UUID(str(article_id))
+    session = get_cassandra_session()
+
+    existing = session.execute(ArticleStmts.GET_ARTICLE_SLUG, (aid,)).one()
+    if existing and existing.slug:
+        return existing.slug
+
+    base = slugify(title) or str(aid)
+    for _attempt in range(50):
+        candidate = unique_slug(
+            title,
+            fallback=str(aid),
+            is_taken=lambda s: session.execute(ArticleStmts.SLUG_TAKEN, (s,)).one() is not None,
+        )
+        applied = session.execute(
+            ArticleStmts.CLAIM_SLUG, (candidate, aid, datetime.now(tz=UTC))
+        ).one()
+        # LWT returns [applied] — False means another worker took it first.
+        if applied is None or getattr(applied, "applied", True):
+            session.execute(ArticleStmts.SET_ARTICLE_SLUG, (candidate, aid))
+            return candidate
+    logger.warning("could not claim a slug for %s (base=%s)", aid, base)
+    return None
 
 
 def update_article_image(article_id: str, image_url: str) -> bool:

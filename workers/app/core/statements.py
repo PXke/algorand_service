@@ -94,6 +94,24 @@ class ArticleStmts:
         "image_url = ?, published_at = ?, first_published_at = ?, updated_at = ? "
         "WHERE article_id = ?"
     )
+    # Slug claim (migration 056). Kept as separate writes rather than widening
+    # the INSERTs above: those take positional params at several call sites,
+    # and a slug is assigned once per article rather than on every write.
+    SLUG_TAKEN = _Stmt("SELECT article_id FROM algorand_platform.articles_by_slug WHERE slug = ?")
+    CLAIM_SLUG = _Stmt(
+        "INSERT INTO algorand_platform.articles_by_slug (slug, article_id, claimed_at) "
+        "VALUES (?, ?, ?) IF NOT EXISTS"
+    )
+    SET_ARTICLE_SLUG = _Stmt(
+        "UPDATE algorand_platform.articles_by_id SET slug = ? WHERE article_id = ?"
+    )
+    SET_FEED_SLUG = _Stmt(
+        "UPDATE algorand_platform.articles_feed SET slug = ? "
+        "WHERE bucket = ? AND published_at = ? AND article_id = ?"
+    )
+    GET_ARTICLE_SLUG = _Stmt(
+        "SELECT slug FROM algorand_platform.articles_by_id WHERE article_id = ?"
+    )
     CLEAR_TRANSLATIONS = _Stmt(
         "DELETE translations FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )

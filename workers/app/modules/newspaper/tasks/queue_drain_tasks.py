@@ -742,6 +742,12 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
                     ),
                 )
                 session.execute(ArticleStmts.UPDATE_PUBLISHED_AT, (released_at, art.article_id))
+                # Permanent URL slug, claimed at release rather than at compose:
+                # a held draft that never ships must not hold the clean slug.
+                # Self-contained and non-raising, so it cannot fail the publish.
+                from app.modules.newspaper.article_store import _claim_slug_for_feed
+
+                _claim_slug_for_feed(art.article_id, art.title, released_at)
             except Exception:
                 # The article never became visible — hand the slot back so
                 # the day's budget isn't burned by a failed write.
