@@ -59,7 +59,7 @@ export function articleCanonicalPath(
 export function ogLocaleFor(lang: string): string {
   const map: Record<string, string> = {
     en: 'en_US',
-    fa: 'fa_AF',
+    fa: 'fa_IR',
     ps: 'ps_AF',
     ar: 'ar_AR',
     ru: 'ru_RU',

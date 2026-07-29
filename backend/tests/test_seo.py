@@ -140,16 +140,16 @@ def test_render_article_hreflang_for_translations() -> None:
         translation_langs=["fa", "ar"],
     )
     assert 'rel="alternate" hreflang="x-default"' in head
-    assert 'hreflang="fa-AF"' in head
+    assert 'hreflang="fa"' in head
     assert 'hreflang="ar"' in head
     assert "/fa/news/articles/" in head
-    assert 'property="og:locale" content="fa_AF"' in head
+    assert 'property="og:locale" content="fa_IR"' in head
     assert 'rel="canonical" href="https://algorand.pxke.me/fa/news/articles/abc123"' in head
     # Visible translation picker in the body (not just <head> hreflang).
     assert 'aria-label="Translations"' in body
-    assert 'hreflang="fa-AF"' in body
+    assert 'hreflang="fa"' in body
     assert 'aria-current="true"' in body
-    assert "Dari" in body
+    assert "Persian" in body
     assert 'hreflang="ar"' in body
     assert "/ar/news/articles/" in body
 
@@ -485,7 +485,7 @@ def test_sitemap_article_hreflang_and_translations() -> None:
     translations = {"id0": ["fa", "ar"]}
     xml = sitemap.sitemap_xml(items, translations)
     assert 'xmlns:xhtml="http://www.w3.org/1999/xhtml"' in xml
-    assert 'hreflang="fa-AF"' in xml
+    assert 'hreflang="fa"' in xml
     assert 'hreflang="ar"' in xml
     assert "/fa/news/articles/" in xml
     assert "/ar/news/articles/" in xml
@@ -509,7 +509,7 @@ def test_sitemap_splits_into_index_when_large(monkeypatch: pytest.MonkeyPatch) -
     assert "/fa/news/articles/" not in pages
     articles = build.parts["sitemap-articles-1.xml"]
     assert "/fa/news/articles/" in articles
-    assert 'hreflang="fa-AF"' in articles
+    assert 'hreflang="fa"' in articles
 
 
 def test_sitemap_single_file_when_under_limit() -> None:
@@ -594,9 +594,9 @@ def test_shell_injection_dedups_and_keeps_bootstrap(
     shell._cache["html"] = None  # bust the module cache
 
     head, body = render.render_article(_article(), lang="fa", translation_langs=["fa"])
-    doc = shell.render_document(head, body, html_lang="fa-AF")
+    doc = shell.render_document(head, body, html_lang="zh-Hans")
     assert doc is not None
-    assert '<html lang="fa-AF">' in doc
+    assert '<html lang="zh-Hans">' in doc
     assert doc.count("<title>") == 1
     assert "Old Title" not in doc
     assert doc.count('property="og:title"') == 1

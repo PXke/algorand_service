@@ -39,7 +39,7 @@ ENDONYMS = {
     "localeChinese": "中文",
     "localeHindi": "हिन्दी",
     "localeRussian": "Русский",
-    "localeDari": "دری",
+    "localePersian": "فارسی",
     "localePashto": "پښتو",
 }
 

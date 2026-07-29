@@ -268,7 +268,7 @@
         <div>
           <h3>Content localization</h3>
           <p class="subtle">
-            Queue missing article translations (دری, پښتو, العربية, Русский, …) for stories already on
+            Queue missing article translations (فارسی, پښتو, العربية, Русский, …) for stories already on
             the feed.
           </p>
         </div>

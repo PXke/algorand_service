@@ -148,6 +148,6 @@ export const localeOptions: Array<{ value: LocaleCode | 'system'; labelKey: stri
   { value: 'zh', labelKey: 'localeChinese' },
   { value: 'hi', labelKey: 'localeHindi' },
   { value: 'ru', labelKey: 'localeRussian' },
-  { value: 'fa', labelKey: 'localeDari' },
+  { value: 'fa', labelKey: 'localePersian' },
   { value: 'ps', labelKey: 'localePashto' },
 ]

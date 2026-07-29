@@ -2528,6 +2528,46 @@ Articles published this week ({len(context.articles)}):
     return _parse_article_fields(payload)
 
 
+class TranslationAlignmentError(Exception):
+    """A translation came back with a different block count than its source."""
+
+
+def split_markdown_blocks(text: str) -> list[str]:
+    """Split markdown into blank-line-separated blocks, never cutting inside a fenced code block.
+
+    Blocks, not sentences, are the translation unit (see
+    translate_article_mistral). A markdown table has no blank lines inside it,
+    so it survives as one block for free — which matters, because 59% of the
+    live corpus contains one. Fenced code needs the explicit guard: a fence
+    with a blank line in it would otherwise be split down the middle and both
+    halves would render as broken markdown.
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+    in_fence = False
+    for line in (text or "").replace("\r\n", "\n").split("\n"):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        if not in_fence and not line.strip():
+            if current:
+                blocks.append("\n".join(current).strip())
+                current = []
+            continue
+        current.append(line)
+    if current:
+        blocks.append("\n".join(current).strip())
+    return [b for b in blocks if b]
+
+
+def _aligned_blocks(payload: dict, expected: int) -> list[str] | None:
+    """Pull an aligned block list out of a translation payload, or None when it does not line up."""
+    raw = payload.get("blocks")
+    if not isinstance(raw, list) or len(raw) != expected:
+        return None
+    out = [_coerce_markdown(b).strip() for b in raw]
+    return out if all(out) else None
+
+
 def translate_article_mistral(
     *,
     english_title: str,
@@ -2536,23 +2576,83 @@ def translate_article_mistral(
     target_language: str,
     client: MistralClient | None = None,
 ) -> dict[str, str]:
-    """Translate an English article to the target language via Mistral. Runs on the Small tier (MISTRAL_MODEL_TRANSLATE) — localization needs no research or editorial judgment, and this fires once per target language per published article."""
-    from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANG_NAMES
+    """Translate an English article to the target language via Mistral, block-aligned to the source.
+
+    Runs on the Small tier (MISTRAL_MODEL_TRANSLATE) — localization needs no
+    research or editorial judgment, and this fires once per target language per
+    published article.
+
+    The body is translated as a BLOCK-ALIGNED list rather than one opaque
+    string. The model still sees the whole article (coherence, pronouns,
+    terminology all need document context) and still gets full freedom to
+    restructure prose INSIDE a block — that freedom is what fixes the
+    word-by-word reading. But block boundaries are hard: it must return exactly
+    one entry per source block, so drift is caught at parse time instead of
+    never.
+
+    That check is not hypothetical. Auditing the 660 stored translations on
+    2026-07-29 found 18.5% with a paragraph count different from their source,
+    including a Persian article that collapsed 42 paragraphs into 9 — roughly
+    three quarters of the piece gone, live and indexed, undetected. Translation
+    is the only content lane with no gate; alignment is the cheapest one that
+    works on languages nobody here reads.
+    """
+    from app.core.article_translation_langs import (
+        ARTICLE_TRANSLATION_LANG_NAMES,
+        glossary_block,
+    )
     from app.core.config import MISTRAL_MODEL_TRANSLATE
 
     mistral = client or get_mistral_client(model=MISTRAL_MODEL_TRANSLATE)
 
     lang_name = ARTICLE_TRANSLATION_LANG_NAMES.get(target_language, target_language)
+    blocks = split_markdown_blocks(english_body)
+    n = len(blocks)
+    if not n:
+        return {"title": english_title, "summary": english_summary, "body": english_body}
 
+    # The anti-calque rule below is the whole point of this prompt. The previous
+    # version asked only for a tone ("professional, objective, and clear") and
+    # said nothing about SENTENCE STRUCTURE, so the model transposed English
+    # syntax word by word: grammatical, accurate, and unmistakably machine
+    # output. Owner review of the live French and Spanish (2026-07-29) put it
+    # as "not incorrect, but very word-by-word, giving weird phrases, hard to
+    # read sentences" — the classic literal-MT artefact, and the thing readers
+    # notice first. Telling the model to RE-EXPRESS rather than transpose costs
+    # nothing and targets exactly that.
     system = (
-        f"You are a professional journalist localizing an Algorand news article into {lang_name}. "
-        "Do not translate names like 'Algorand', 'ALGO', or specific DeFi protocol names unless "
-        "there is a universally accepted localized brand name. Keep the tone professional, objective, "
-        "and clear. Keep markdown formatting intact.\n\n"
+        f"You are a professional journalist writing an Algorand news article in {lang_name}. "
+        "You are not transcribing an English article — you are writing the same story for a "
+        f"{lang_name}-speaking reader.\n\n"
+        "TRANSLATE THE MEANING, NOT THE WORDS:\n"
+        f"- Write natural, idiomatic {lang_name}. A native journalist must not be able to tell "
+        "it began as English.\n"
+        "- Do NOT mirror English clause order or sentence boundaries. Restructure freely: split "
+        "long sentences, merge short ones, move clauses wherever the target language wants them.\n"
+        "- Never calque an English idiom or fixed expression — use the equivalent a native "
+        "speaker would actually reach for, even when it shares no words with the original.\n"
+        "- Preserve every fact, figure, date, name and link exactly. Freedom applies to phrasing, "
+        "never to content.\n\n"
+        f"BLOCK ALIGNMENT — this is a hard requirement, not a preference. The body arrives as {n} "
+        "numbered blocks. Return EXACTLY "
+        f"{n} translated blocks, in the same order, one per source block.\n"
+        "- Restructure sentences freely INSIDE a block. Never merge two blocks, never split one "
+        "block into two, never drop a block, never reorder them.\n"
+        "- A block that is a heading stays a heading; a list stays a list with the same number of "
+        "items; a table stays a table with the same rows and columns. Translate the cell text, "
+        "keep the pipes.\n"
+        "- If a block genuinely needs no translation (a bare URL, a code block), return it "
+        "unchanged rather than dropping it.\n"
+        "- Omit the [n] markers from your output — they mark the input only.\n\n"
+        "Do not translate names like 'Algorand', 'ALGO', or specific DeFi protocol and product "
+        "names unless there is a universally accepted localized brand name. Keep the tone "
+        "professional and objective. Keep markdown formatting intact."
+        f"{glossary_block(target_language)}\n\n"
         "Write the translation as a single JSON object adhering exactly to this schema:\n"
-        '{"title": "string", "summary": "string", "body": "string"}\n\n'
+        '{"title": "string", "summary": "string", "blocks": ["string", ...]}\n\n'
         f"{_JSON_ONLY}"
     )
+    numbered = "\n\n".join(f"[{i + 1}] {b}" for i, b in enumerate(blocks))
     user = f"""Translate this article into {lang_name}.
 
 Title:
@@ -2561,18 +2661,50 @@ Title:
 Summary:
 {english_summary}
 
-Body:
-{english_body}"""
+Body — {n} blocks, return exactly {n}:
+{numbered}"""
 
-    payload = mistral.chat_json_object(
-        [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-    )
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    payload = mistral.chat_json_object(messages)
+    translated = _aligned_blocks(payload, n)
+    if translated is None:
+        # One corrective round. The model usually merges short adjacent blocks;
+        # naming the count it returned is what gets it to recount rather than
+        # re-emit the same shape.
+        got = payload.get("blocks")
+        got_n = len(got) if isinstance(got, list) else 0
+        logger.warning(
+            "translation block misalignment for %s: expected %d, got %d — retrying",
+            target_language,
+            n,
+            got_n,
+        )
+        messages.append({"role": "assistant", "content": json.dumps(payload)[:2000]})
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"That returned {got_n} blocks; the source has {n}. Redo it with EXACTLY "
+                    f"{n} blocks, one per numbered source block, same order. Do not merge, "
+                    "split, drop or reorder blocks."
+                ),
+            }
+        )
+        payload = mistral.chat_json_object(messages)
+        translated = _aligned_blocks(payload, n)
+    if translated is None:
+        # Storing a misaligned translation is how a 42-block article became 9
+        # and stayed live. Raise instead: the language simply stays missing, and
+        # enqueue_missing_article_translations picks it up again next time.
+        raise TranslationAlignmentError(
+            f"{target_language}: could not align translation to {n} source blocks"
+        )
 
     return {
         "title": str(payload.get("title") or "").strip() or english_title,
         "summary": str(payload.get("summary") or "").strip() or english_summary,
-        "body": _coerce_markdown(payload.get("body")).strip() or english_body,
+        "body": "\n\n".join(translated).strip() or english_body,
     }

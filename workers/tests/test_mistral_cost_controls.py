@@ -18,7 +18,8 @@ def test_translations_use_small_tier(monkeypatch: pytest.MonkeyPatch) -> None:
             chat_json_object=lambda *_a, **_kw: {
                 "title": "t",
                 "summary": "s",
-                "body": "b",
+                # One source block ("Body") -> one translated block.
+                "blocks": ["b"],
             }
         )
 
