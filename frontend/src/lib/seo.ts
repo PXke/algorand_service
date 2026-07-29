@@ -50,7 +50,8 @@ export function articleCanonicalPath(
 ): string {
   const base = `/news/articles/${slug || articleId}`
   const code = (lang || '').trim()
-  if (code && code !== 'en') return `${base}?lang=${encodeURIComponent(code)}`
+  // Locale path segment, mirroring render.article_path on the server.
+  if (code && code !== 'en') return `/${encodeURIComponent(code)}${base}`
   return base
 }
 

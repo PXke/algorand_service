@@ -1,27 +1,27 @@
-/** Boot + keep `?lang=` in sync with the active content language. */
+/** Boot + keep the locale path segment in sync with the active content language. */
 
 import { get } from 'svelte/store'
 import { activeLocale, localePreference } from './i18n'
 import { langFromLocation } from './paths'
-import { syncLangQuery } from './router'
+import { syncLangPath } from './router'
 
-/** Prefer URL `?lang=` over stored preference on first paint. */
+/** Prefer the URL's locale segment over the stored preference on first paint. */
 export function applyLangFromUrl(): void {
   const fromUrl = langFromLocation()
   if (fromUrl) localePreference.set(fromUrl)
 }
 
-/** Mirror active locale into the address bar; honor back/forward `?lang=`. */
+/** Mirror active locale into the address bar; honor back/forward locale segments. */
 export function startLocaleUrlSync(): void {
   let skipFirst = true
   activeLocale.subscribe((lang) => {
     if (skipFirst) {
       skipFirst = false
       // Still align the bar once after boot (e.g. preference is es, URL bare).
-      syncLangQuery(lang)
+      syncLangPath(lang)
       return
     }
-    syncLangQuery(lang)
+    syncLangPath(lang)
   })
 
   window.addEventListener('popstate', () => {

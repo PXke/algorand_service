@@ -142,16 +142,16 @@ def test_render_article_hreflang_for_translations() -> None:
     assert 'rel="alternate" hreflang="x-default"' in head
     assert 'hreflang="fa-AF"' in head
     assert 'hreflang="ar"' in head
-    assert "?lang=fa" in head
+    assert "/fa/news/articles/" in head
     assert 'property="og:locale" content="fa_AF"' in head
-    assert 'rel="canonical" href="https://algorand.pxke.me/news/articles/abc123?lang=fa"' in head
+    assert 'rel="canonical" href="https://algorand.pxke.me/fa/news/articles/abc123"' in head
     # Visible translation picker in the body (not just <head> hreflang).
     assert 'aria-label="Translations"' in body
     assert 'hreflang="fa-AF"' in body
     assert 'aria-current="true"' in body
     assert "Dari" in body
     assert 'hreflang="ar"' in body
-    assert "?lang=ar" in body
+    assert "/ar/news/articles/" in body
 
 
 def test_render_article_jsonld_is_valid_newsarticle() -> None:
@@ -487,8 +487,8 @@ def test_sitemap_article_hreflang_and_translations() -> None:
     assert 'xmlns:xhtml="http://www.w3.org/1999/xhtml"' in xml
     assert 'hreflang="fa-AF"' in xml
     assert 'hreflang="ar"' in xml
-    assert "?lang=fa" in xml
-    assert "?lang=ar" in xml
+    assert "/fa/news/articles/" in xml
+    assert "/ar/news/articles/" in xml
     assert 'hreflang="x-default"' in xml
 
 
@@ -506,9 +506,9 @@ def test_sitemap_splits_into_index_when_large(monkeypatch: pytest.MonkeyPatch) -
     assert "sitemap-articles-1.xml" in build.parts
     pages = build.parts["sitemap-pages.xml"]
     assert "/topics" in pages
-    assert "?lang=fa" not in pages
+    assert "/fa/news/articles/" not in pages
     articles = build.parts["sitemap-articles-1.xml"]
-    assert "?lang=fa" in articles
+    assert "/fa/news/articles/" in articles
     assert 'hreflang="fa-AF"' in articles
 
 
@@ -735,21 +735,51 @@ def test_long_title_drops_brand_suffix_but_stays_whole() -> None:
     assert f"<title>{t}</title>" in head
 
 
-def test_overlong_title_clamped_at_word_boundary() -> None:
-    """Clamps an overlong title at a word boundary while leaving the full title in og:title."""
+def test_overlong_title_is_served_whole_not_truncated() -> None:
+    """Serves an overlong headline whole — the engine shortens it better than a blind cut can."""
     t = (
         "Algorand Foundation Restructures Leadership to Accelerate "
         "AI-Driven On-Chain Activity Across the Entire Ecosystem"
     )
     head, _ = render.render_article(_article(title=t))
+    assert f"<title>{t}</title>" in head
+    assert "…</title>" not in head
+    # Full headline still rides in og:title untouched.
+    assert f'property="og:title" content="{t}"' in head
+
+
+def test_translated_title_over_65_chars_keeps_its_tail() -> None:
+    """Keeps the tail of a translated headline: translations run 15-25% longer than the English source, so a flat 65-char cut truncated ~95% of fr/es/ru titles (2026-07-29)."""
+    t = (
+        "La Fondation Algorand restructure sa direction pour accélérer "
+        "une activité on-chain pilotée par intelligence artificielle"
+    )
+    assert len(t) > 65
+    head, _ = render.render_article(_article(title=t))
+    assert f"<title>{t}</title>" in head
+    assert "…</title>" not in head
+
+
+def test_title_width_budget_counts_cjk_as_double_width() -> None:
+    """Drops the brand suffix on a CJK headline that a character count would wave through: 40 Han glyphs occupy ~80 Latin advance widths, over the ~65-unit SERP budget."""
+    t = "阿尔戈兰德基金会重组领导层以加速整个生态系统中由人工智能驱动的链上活动增长"
+    assert len(t) < 65  # a character count says this fits...
+    assert render._display_width(t) > 65  # ...but its rendered width does not
+    head, _ = render.render_article(_article(title=t))
+    assert f"<title>{t}</title>" in head
+    assert f"{t} — " not in head
+
+
+def test_pathological_title_still_guarded() -> None:
+    """Clamps only a runaway title, so a model glitch can never ship a multi-KB <title>."""
+    t = "Algorand " * 60
+    head, _ = render.render_article(_article(title=t))
     import re
 
     m = re.search(r"<title>(.*?)</title>", head)
     assert m is not None
-    assert len(m.group(1)) <= 66  # 65 + ellipsis
+    assert render._display_width(m.group(1)) <= 201
     assert m.group(1).endswith("…")
-    # Full headline still rides in og:title untouched.
-    assert f'property="og:title" content="{t}"' in head
 
 
 def test_spa_ready_script_removes_ssr_from_dom() -> None:
@@ -876,10 +906,11 @@ def test_article_urls_agree_across_canonical_feed_and_sitemap() -> None:
     assert feed_path(article.article_id, article.slug) == "/news/articles/my-story"
 
 
-def test_slug_url_keeps_the_lang_query() -> None:
-    """A translated article canonicalises to the slug plus ?lang=, not the id."""
+def test_slug_url_uses_the_locale_path_prefix() -> None:
+    """A translated article canonicalises to the locale-prefixed slug path, not the id and not ?lang=."""
     head, _ = render.render_article(_article(slug="my-story"), lang="fa", translation_langs=["fa"])
-    assert 'rel="canonical" href="https://algorand.pxke.me/news/articles/my-story?lang=fa"' in head
+    assert 'rel="canonical" href="https://algorand.pxke.me/fa/news/articles/my-story"' in head
+    assert "?lang=" not in head
     assert "/news/articles/abc123" not in head
 
 

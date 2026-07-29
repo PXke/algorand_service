@@ -1,6 +1,7 @@
 <script lang="ts">
   import AppShell from './components/AppShell.svelte'
   import { route, matchPath, navigate } from './lib/router'
+  import { splitLocalePath } from './lib/paths'
   import { config } from './lib/config'
   import Home from './routes/Home.svelte'
   import NotFound from './routes/NotFound.svelte'
@@ -60,7 +61,11 @@
     const path = $route.path
     if (path === '/') return { name: 'home' }
     if (path === '/news') return { name: 'news' }
-    const article = matchPath('/news/articles/:articleId', path)
+    // Locale-prefixed article URLs (/fr/news/articles/x) resolve to the same
+    // view — the locale itself is applied via localePreference on boot, so the
+    // segment only needs stripping here, not routing on.
+    const { rest } = splitLocalePath(path)
+    const article = matchPath('/news/articles/:articleId', rest)
     if (article) return { name: 'article', id: article.articleId }
     if (path === '/hot') return { name: 'hot', rank: 'hot' }
     if (path === '/top') return { name: 'hot', rank: 'top' }

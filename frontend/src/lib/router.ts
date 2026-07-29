@@ -25,8 +25,8 @@ export function navigate(to: string, replace = false, scroll = true): void {
   void trackPageview()
 }
 
-/** Keep `?lang=` aligned with the active content language (no scroll jump). */
-export function syncLangQuery(lang: string): void {
+/** Keep the locale path segment aligned with the active content language (no scroll jump). */
+export function syncLangPath(lang: string): void {
   const cur = `${window.location.pathname}${window.location.search}`
   const next = withLang(cur, lang)
   if (next === cur) return

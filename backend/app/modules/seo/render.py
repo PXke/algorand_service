@@ -13,6 +13,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import unicodedata
 from datetime import UTC, datetime
 from urllib.parse import quote
 
@@ -103,21 +104,57 @@ def _publisher() -> dict:
     return org
 
 
-# Bing/most audit tools warn above ~65 display chars; Google truncates by
-# pixel width around the same point.
-_TITLE_MAX_CHARS = 65
+# SERP title budget, in display-width units (~65 Latin characters, the point
+# where Google's ~600px desktop title link starts to clip and audit tools warn).
+_TITLE_WIDTH_BUDGET = 65
+# Pathological-length guard only — a model glitch must not ship a 2KB <title>.
+# Normal overlong headlines pass through whole; see _clamped_title.
+_TITLE_HARD_WIDTH_CAP = 200
+
+
+def _display_width(text: str) -> int:
+    """Approximate SERP display width in Latin-character units.
+
+    Search engines clip the title by PIXEL width, not character count, and a
+    CJK glyph occupies roughly two Latin advance widths — so 37 Chinese
+    characters already fill the space of ~74 Latin ones. Counting characters
+    judges Chinese titles as less than half their real width (measured
+    2026-07-29: mean 37.3 chars for zh, so a flat 65-char rule waved through
+    98.8% of them) while over-penalising every other script.
+    """
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
 
 
 def _clamped_title(title: str) -> str:
-    """The <title> tag text: brand-suffixed when the result still fits the ~65-char SERP budget (before SERPs truncate and audit tools warn), otherwise the bare headline (brand already rides in og:site_name), word-boundary clamped if even that alone overflows. Only the <title> tag is clamped this way — og:/twitter:/JSON-LD keep the full headline."""
+    """The <title> tag text: brand-suffixed while the result still fits the SERP width budget, otherwise the bare headline (the brand already rides in og:site_name).
+
+    The headline itself is NEVER truncated. Google and Yandex shorten an
+    overlong title themselves -- at a word boundary, or by rewriting from the
+    H1 -- and they do it better than a blind cut, because they can see which
+    query matched. Pre-truncating is strictly worse on both counts: the tail
+    never reaches the engine at all, and our own ellipsis ships as visible SERP
+    text that reads as a broken headline.
+
+    That cost was not theoretical. Measured against the old flat 65-character
+    cut (2026-07-29, live corpus): 95.2% of French titles, 94.0% of Russian and
+    Spanish, 85.5% of Farsi and Pashto -- and 65.1% of the English ones -- were
+    served to crawlers pre-truncated with a trailing "…". Translations run
+    15-25% longer than their English source, so a headline that just fits in
+    English overflows in every Romance and Slavic target. Those locale pages
+    are the best-ranking pages on the site (impression-weighted position 15.8
+    vs 21.0 for English), so the cut was landing hardest on exactly the pages
+    that were working.
+    """
+    title = title.strip()
     suffixed = title if title.endswith(settings.site_name) else f"{title} — {settings.site_name}"
-    if len(suffixed) <= _TITLE_MAX_CHARS:
+    if _display_width(suffixed) <= _TITLE_WIDTH_BUDGET:
         return suffixed
-    if len(title) <= _TITLE_MAX_CHARS:
+    if _display_width(title) <= _TITLE_HARD_WIDTH_CAP:
         return title
-    cut = title[: _TITLE_MAX_CHARS - 1]
+    # Beyond the guard: clamp on a word boundary rather than emit a runaway tag.
+    cut = title[: _TITLE_HARD_WIDTH_CAP - 1]
     space = cut.rfind(" ")
-    if space > _TITLE_MAX_CHARS // 2:
+    if space > _TITLE_HARD_WIDTH_CAP // 2:
         cut = cut[:space]
     return cut.rstrip(" ,;:—-") + "…"
 
@@ -267,23 +304,32 @@ def _is_icon_like(image_url: str) -> bool:
     return "/og/" in path or "opengraph" in path
 
 
-def article_path(article_id: str, slug: str | None = None) -> str:
-    """Site-relative path for an article's canonical page.
+def article_path(article_id: str, slug: str | None = None, lang: str | None = None) -> str:
+    """Site-relative path for an article's canonical page, locale-prefixed for translations.
 
     Prefers the permanent slug (migration 056); falls back to the article id so
     rows written before the backfill, and any article whose slug is somehow
     missing, still resolve. The route accepts both forms and 301s id -> slug.
+
+    Non-English locales live under a path segment (``/fr/news/articles/slug``),
+    not the ``?lang=fr`` query parameter this used to emit. Google's
+    multi-regional guidance is the only URL structure it actively advises
+    against; Yandex -- which matters here, since Russian is the top-performing
+    locale and Yandex is most of Russian search -- handles path segments far
+    more predictably; and query strings get stripped by link sharers and
+    shorteners, which the Telegram distribution plan depends on. The old form
+    still resolves: the bare route 301s ``?lang=xx`` here (see seo.api.routes).
     """
-    return f"/news/articles/{slug or article_id}"
+    base = f"/news/articles/{slug or article_id}"
+    code = (lang or "").strip()
+    if code and code != "en":
+        return f"/{code}{base}"
+    return base
 
 
 def article_url(article_id: str, lang: str | None = None, slug: str | None = None) -> str:
-    """Absolute article URL; non-English locales use ?lang= (matches the API)."""
-    base = absolute(article_path(article_id, slug))
-    code = (lang or "").strip()
-    if code and code != "en":
-        return f"{base}?lang={code}"
-    return base
+    """Absolute article URL; non-English locales are locale-prefixed paths."""
+    return absolute(article_path(article_id, slug, lang))
 
 
 def article_hreflang_links(
@@ -427,11 +473,7 @@ def _translation_links_html(
     current = (current_lang or "en").strip() or "en"
     parts = []
     for code in langs:
-        path = (
-            article_path(article_id, slug)
-            if code == "en"
-            else f"{article_path(article_id, slug)}?lang={code}"
-        )
+        path = article_path(article_id, slug, code)
         label = _LANG_LABELS.get(code, code)
         hreflang = SEO_HREFLANG_LOCALES.get(code, code)
         if code == current:

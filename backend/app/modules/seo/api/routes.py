@@ -18,7 +18,7 @@ from uuid import UUID
 from robyn import Request, Response, Robyn
 
 from app.core import serialization
-from app.core.article_translation_langs import html_lang_for
+from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS, html_lang_for
 from app.core.config import settings
 from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
@@ -247,13 +247,49 @@ def news_index(request: Request) -> Response:
     )
 
 
+def _permanent_redirect(target: str) -> Response:
+    return Response(
+        status_code=301,
+        headers={"Location": target, "Cache-Control": "public, max-age=86400"},
+        description="",
+    )
+
+
+def article_localized(request: Request) -> Response:
+    """SSR article under a locale path segment (``/fr/news/articles/slug``).
+
+    An unknown leading segment is not a locale at all, so it must 404 rather
+    than silently serve the English article under a junk prefix -- that would
+    mint an unbounded set of duplicate URLs for crawlers to find.
+    """
+    lang = (request.path_params.get("lang", "") or "").strip().lower()
+    if lang not in ARTICLE_TRANSLATION_LANGS:
+        _record_notfound(request, f"/{lang}")
+        return _doc_response(
+            render.render_noindex("Page not found"), "public, max-age=60", status=404
+        )
+    return _article_document(request, lang)
+
+
 def article(request: Request) -> Response:
-    """SSR article detail, or a 410/404 noindex page for a removed/missing article."""
-    raw = request.path_params.get("article_id", "")
+    """SSR article at the bare (English) path; a legacy ``?lang=`` 301s to the locale path."""
     qp = _query_params(request)
     lang = query_param(qp.get("lang")) or None
-    if lang == "en":
-        lang = None
+    if lang and lang != "en" and lang in ARTICLE_TRANSLATION_LANGS:
+        # Legacy URL form (indexed until 2026-07-29). Resolve the slug here so
+        # this is a SINGLE hop to the final URL — chaining id->slug->locale
+        # redirects bleeds crawl budget and dilutes the signal.
+        raw = request.path_params.get("article_id", "")
+        article_id = news.resolve_slug(raw) or raw
+        detail = news.get_article(article_id, lang=lang) if article_id else None
+        slug = detail.slug if detail is not None else None
+        return _permanent_redirect(render.article_path(article_id, slug or raw, lang))
+    return _article_document(request, None)
+
+
+def _article_document(request: Request, lang: str | None) -> Response:
+    """Render one article document for a resolved locale (None = English)."""
+    raw = request.path_params.get("article_id", "")
 
     # The path segment is a slug for every article since migration 056, but old
     # uuid URLs are indexed and must keep working. Try the slug index first; a
@@ -262,14 +298,7 @@ def article(request: Request) -> Response:
     article_id = news.resolve_slug(raw) or raw
     detail = news.get_article(article_id, lang=lang) if article_id else None
     if detail is not None and detail.slug and raw != detail.slug:
-        target = render.article_path(article_id, detail.slug)
-        if lang:
-            target = f"{target}?lang={lang}"
-        return Response(
-            status_code=301,
-            headers={"Location": target, "Cache-Control": "public, max-age=86400"},
-            description="",
-        )
+        return _permanent_redirect(render.article_path(article_id, detail.slug, lang))
     if detail is None:
         _record_notfound(request, f"/news/articles/{article_id}")
         # 410 Gone for tombstoned (deliberately deleted) articles: their
@@ -286,6 +315,10 @@ def article(request: Request) -> Response:
             render.render_noindex("Article not found"), "public, max-age=60", status=404
         )
     translation_langs = news.translation_langs_for(article_id)
+    # Tracked under the CANONICAL (unprefixed) path regardless of locale: these
+    # counters drive per-article view counts and Most Read, and keying them by
+    # locale path would split one story's readership across nine URLs and rank
+    # every article below its true total.
     path = f"/news/articles/{article_id}"
     _record(request, path)
     # Footer topic links + related stories reuse the cached topics-index feed.
@@ -622,6 +655,7 @@ def register_seo_routes(app: Robyn) -> None:
     app.get("/")(home)
     app.get("/news")(news_index)
     app.get("/news/articles/:article_id")(article)
+    app.get("/:lang/news/articles/:article_id")(article_localized)
     app.get("/og/article/:article_id")(og_article_card)
     app.get("/section/:slug")(section)
     app.get("/hot")(hot)
@@ -648,6 +682,7 @@ def register_seo_routes(app: Robyn) -> None:
         ("/", home),
         ("/news", news_index),
         ("/news/articles/:article_id", article),
+        ("/:lang/news/articles/:article_id", article_localized),
         ("/og/article/:article_id", og_article_card),
         ("/section/:slug", section),
         ("/hot", hot),
