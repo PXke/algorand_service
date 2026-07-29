@@ -20,7 +20,9 @@
   let loading = $state(true)
   let error = $state<string | null>(null)
   let newDomain = $state('')
-  let addFullSite = $state(true)
+  /* 'full' | 'single' — the crawl scope for a newly approved domain. Was a
+     single `addFullSite` boolean defaulting to true. */
+  let addScope = $state<'full' | 'single'>('full')
   let adding = $state(false)
   let busy = $state<Set<string>>(new Set())
 
@@ -141,7 +143,7 @@
     if (!domain) return
     adding = true
     try {
-      await admin.setDomainRelevant({ domain, is_relevant: true, full_site: addFullSite })
+      await admin.setDomainRelevant({ domain, is_relevant: true, full_site: addScope === 'full' })
       newDomain = ''
       onmessage?.(`Approved ${domain}`)
       await load()
@@ -196,10 +198,21 @@
           {adding ? 'Adding…' : 'Add domain'}
         </button>
       </div>
-      <label class="check-row">
-        <input type="checkbox" bind:checked={addFullSite} />
-        <span>Approve &amp; explore full site</span>
-      </label>
+      <!-- Two explicit choices rather than one inverted checkbox. As a single
+           "explore full site" box, the single-page option existed only as the
+           absence of a tick — the scope of the crawl was never presented as a
+           decision, so it read as missing. -->
+      <fieldset class="scope-row">
+        <legend class="admin-muted">Crawl scope</legend>
+        <label class="scope-opt">
+          <input type="radio" name="crawl-scope" value="full" bind:group={addScope} />
+          <span>Whole site — follow links from this domain</span>
+        </label>
+        <label class="scope-opt">
+          <input type="radio" name="crawl-scope" value="single" bind:group={addScope} />
+          <span>This page only — do not follow links</span>
+        </label>
+      </fieldset>
     </form>
   </section>
 
@@ -402,7 +415,19 @@
     min-width: 180px;
   }
 
-  .check-row {
+  .scope-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .scope-row legend {
+    padding: 0 0 4px;
+    font-size: 0.8rem;
+  }
+  .scope-opt {
     display: flex;
     align-items: center;
     gap: 8px;
