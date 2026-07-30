@@ -271,6 +271,40 @@ def test_section_bucket_routes() -> None:
     assert a.section_bucket("/some/unknown/path") == "Other"
 
 
+def test_canonical_path_strips_a_real_locale_prefix() -> None:
+    """Strips a leading /xx/ locale segment so a translated article's traffic still matches _ARTICLE_PREFIX.
+
+    Root-caused 2026-07-30: the 2026-07-29 locale-path migration
+    (/fr/news/articles/slug) left every _ARTICLE_PREFIX check in this module
+    unaware of the new prefix, so a translated article's views resolved to
+    the raw path, "Other", or vanished entirely instead of the article's
+    title -- reported as "direct access referer articles are marked
+    'Articles' instead of the name of the article".
+    """
+    assert a._canonical_path("/fr/news/articles/some-slug") == "/news/articles/some-slug"
+    assert a._canonical_path("/ps/news/articles/x") == "/news/articles/x"
+    assert a._canonical_path("/news/articles/some-slug") == "/news/articles/some-slug"
+
+
+def test_canonical_path_leaves_an_unknown_prefix_alone() -> None:
+    """A leading segment that is NOT one of the 8 translation languages must not be stripped — that would misclassify an unrelated path (e.g. a future two-letter route) as an article."""
+    assert a._canonical_path("/xx/news/articles/x") == "/xx/news/articles/x"
+    assert a.section_bucket("/xx/news/articles/x") == "Other"
+
+
+def test_section_bucket_resolves_locale_prefixed_article() -> None:
+    """A translated article's path buckets as "Article", same as the canonical form."""
+    assert a.section_bucket("/fr/news/articles/some-slug") == "Article"
+
+
+def test_resolve_labels_finds_the_title_for_a_locale_prefixed_path() -> None:
+    """Looks up article_cards (keyed by canonical path) via the canonicalized form, while keying the returned label dict by the original (possibly locale-prefixed) path the caller asked about."""
+    row = SimpleNamespace(title="CompX Launches Canix402")
+    cards = {"/news/articles/compx": row}
+    labels = a._resolve_labels(["/fr/news/articles/compx"], cards)
+    assert labels["/fr/news/articles/compx"] == "CompX Launches Canix402"
+
+
 def test_normalize_referrer_url_strips_noise() -> None:
     """Strips tracking params/fragment/www, drops self-referrals, and length-caps the result."""
     # Tracking/campaign params and the fragment are dropped, host loses 'www.',

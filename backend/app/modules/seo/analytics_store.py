@@ -21,6 +21,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
 from app.core.config import settings
 
 if TYPE_CHECKING:
@@ -171,6 +172,29 @@ _STATIC_PATH_LABELS = {
 
 _ARTICLE_PREFIX = "/news/articles/"
 _SECTION_PREFIX = "/section/"
+_LOCALE_PATH_PREFIX = re.compile(r"^/(" + "|".join(ARTICLE_TRANSLATION_LANGS) + r")(/.*)$")
+
+
+def _canonical_path(path: str) -> str:
+    """Strip a leading `/xx/` locale segment, e.g. `/fr/news/articles/x` -> `/news/articles/x`.
+
+    A translated article's URL carries this prefix since the 2026-07-29
+    locale-path migration (`render.article_path`). Every function below that
+    gates on `_ARTICLE_PREFIX` needs to see past it, or a translated
+    article's traffic silently stops resolving to its title anywhere in
+    analytics -- shows as the raw path, "Other", or vanishes outright
+    depending on the view. Root-caused 2026-07-30 from an admin report the
+    day after the migration shipped: "direct access referer articles are
+    marked 'Articles' instead of the name of the article."
+
+    Canonicalizing (rather than teaching every site a locale-aware prefix
+    check) also means all nine URL variants of one article collapse onto a
+    single `article_cards` entry -- one card fetch per article, not up to
+    nine, and "top articles" views correctly merge a story's readership
+    across languages instead of ranking each locale as a separate story.
+    """
+    m = _LOCALE_PATH_PREFIX.match(path)
+    return m.group(2) if m else path
 
 
 def _static_label(path: str) -> str:
@@ -183,23 +207,24 @@ def _static_label(path: str) -> str:
 
 
 def section_bucket(path: str) -> str:
-    """Coarse content bucket for a path, for the section-level rollup. Article paths are bucketed generically here; the read layer upgrades them to the article's primary tag ('Section · DeFi') when it can resolve one."""
+    """Coarse content bucket for a path, for the section-level rollup. Article paths (canonical or locale-prefixed) are bucketed generically here; the read layer upgrades them to the article's primary tag ('Section · DeFi') when it can resolve one."""
     if path in _STATIC_PATH_LABELS:
         return _STATIC_PATH_LABELS[path]
     if path.startswith(_SECTION_PREFIX):
         return "Section · " + path[len(_SECTION_PREFIX) :]
-    if path.startswith(_ARTICLE_PREFIX):
+    if _canonical_path(path).startswith(_ARTICLE_PREFIX):
         return "Article"
     return "Other"
 
 
 def _resolve_labels(paths: list[str], article_cards: dict[str, object]) -> dict[str, str]:
-    """Map each path to a human-readable label, from the already-fetched article metadata batch (see `_fetch_article_cards`) rather than a fresh DB lookup."""
+    """Map each path to a human-readable label, from the already-fetched article metadata batch (see `_fetch_article_cards`, keyed by canonical path) rather than a fresh DB lookup."""
     labels = {p: _static_label(p) for p in paths}
     for p in paths:
-        if not p.startswith(_ARTICLE_PREFIX):
+        canonical = _canonical_path(p)
+        if not canonical.startswith(_ARTICLE_PREFIX):
             continue
-        row = article_cards.get(p)
+        row = article_cards.get(canonical)
         labels[p] = (row.title if row and row.title else None) or "Article"
     return labels
 
@@ -1424,7 +1449,7 @@ def _article_referrers_from_rows(
     agg: dict[str, dict[str, int]] = {}
     for rows in rp_by_day.values():
         for r in rows:
-            path = r.path or ""
+            path = _canonical_path(r.path or "")
             if not path.startswith(_ARTICLE_PREFIX) or r.referrer == "(direct)":
                 continue
             bucket = agg.setdefault(path, {})
@@ -1460,7 +1485,7 @@ def _referrer_articles_from_rows(
     agg: dict[str, dict[str, int]] = {}
     for rows in rp_by_day.values():
         for r in rows:
-            path = r.path or ""
+            path = _canonical_path(r.path or "")
             if not path.startswith(_ARTICLE_PREFIX) or r.referrer == "(direct)":
                 continue
             bucket = agg.setdefault(r.referrer, {})
@@ -1513,7 +1538,7 @@ def _sections_from_rows(
         for r in rows:
             if r.kind != "human":
                 continue
-            path = r.path or ""
+            path = _canonical_path(r.path or "")
             if path.startswith(_ARTICLE_PREFIX):
                 row = article_cards.get(path)
                 bucket = "Section · " + str(row.tags[0]) if row and row.tags else "Article"
@@ -1593,10 +1618,12 @@ def _editorial_scorecard_from_rows(
         for r in rows:
             if r.kind != "human":
                 continue
-            path = r.path or ""
+            path = _canonical_path(r.path or "")
             if not path.startswith(_ARTICLE_PREFIX):
                 continue
-            per_article.setdefault(path, {})[day] = int(r.views)
+            per_article.setdefault(path, {})[day] = per_article.get(path, {}).get(
+                day, 0
+            ) + int(r.views)
     ranked = sorted(per_article.items(), key=lambda kv: sum(kv[1].values()), reverse=True)[:limit]
     today = datetime.now(UTC).date()
     rows_out: list[dict] = []
@@ -1633,10 +1660,11 @@ def _distinct_article_ids(by_day: dict[str, dict[str, list]]) -> dict:
     ids: dict[str, UUID] = {}
 
     def _consider(path: str) -> None:
-        if not path or path in ids or not path.startswith(_ARTICLE_PREFIX):
+        canonical = _canonical_path(path or "")
+        if not canonical or canonical in ids or not canonical.startswith(_ARTICLE_PREFIX):
             return
         with contextlib.suppress(ValueError):
-            ids[path] = UUID(path[len(_ARTICLE_PREFIX) :])
+            ids[canonical] = UUID(canonical[len(_ARTICLE_PREFIX) :])
 
     for table in ("path_kind", "referrer_path", "notfound"):
         for rows in by_day.get(table, {}).values():

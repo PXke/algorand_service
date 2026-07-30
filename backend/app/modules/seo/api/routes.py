@@ -50,18 +50,20 @@ def _doc_response(
     status: int = 200,
     *,
     tracked_path: str | None = None,
+    dedup_path: str | None = None,
     html_lang: str = "en",
 ) -> Response:
+    """``tracked_path`` is what gets counted server-side (must be the CANONICAL path for an article — see _article_document). ``dedup_path`` is what the client-side beacon dedup marker gets, and must match ``window.location.pathname`` exactly, or the SPA boot's mismatch check fails open and fires a second, redundant beacon for the same load. These differ for a locale-prefixed article: canonical for counting, `/fr/...` for what the browser is actually at. Defaults to ``tracked_path`` for every other route, where the two are the same string."""
     head, body = parts
     if tracked_path:
-        body = shell.ssr_track_snippet(tracked_path) + body
+        body = shell.ssr_track_snippet(dedup_path or tracked_path) + body
     document = shell.render_document(head, body, html_lang=html_lang)
     if document is None:
         # Shell template not found (missing/So far unbuilt frontend). Still return
         # valid crawlable HTML so meta/OG/JSON-LD survive; the SPA can't boot from
         # here because Vite's entry script is content-hashed, so humans get the
         # SSR body until a real build lands.
-        track = shell.ssr_track_snippet(tracked_path) if tracked_path else ""
+        track = shell.ssr_track_snippet(dedup_path or tracked_path) if tracked_path else ""
         document = (
             f'<!DOCTYPE html><html lang="{html.escape(html_lang, quote=True)}"><head><base href="/">'
             f"{head}</head><body>{track}{body}"
@@ -321,6 +323,14 @@ def _article_document(request: Request, lang: str | None) -> Response:
     # every article below its true total.
     path = f"/news/articles/{article_id}"
     _record(request, path)
+    # The browser's ACTUAL path, locale prefix included -- must match
+    # window.location.pathname on boot exactly, or the SPA's dedup check
+    # against the canonical `path` above always fails for a translated
+    # article, firing a second (redundant, and unresolvable to a title --
+    # see _ARTICLE_PREFIX) beacon under the raw locale path on every direct
+    # visit. Root-caused 2026-07-30 from an admin-analytics report the day
+    # after locale path URLs shipped.
+    browser_path = render.article_path(article_id, detail.slug, lang)
     # Footer topic links + related stories reuse the cached topics-index feed.
     feed, topics = cached_feed_snapshot(news.list_feed)
     related = render.pick_related_articles(detail, feed, limit=5)
@@ -333,6 +343,7 @@ def _article_document(request: Request, lang: str | None) -> Response:
             related=related,
         ),
         "public, max-age=300, stale-while-revalidate=600",
+        dedup_path=browser_path,
         tracked_path=path,
         html_lang=html_lang_for(lang),
     )

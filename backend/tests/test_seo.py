@@ -10,7 +10,7 @@ import pytest
 
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.seo import feeds, render, shell, sitemap, topics
-from app.modules.seo.api.routes import _is_known_app_path
+from app.modules.seo.api.routes import _doc_response, _is_known_app_path
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
 from app.modules.seo.topics import SECTION_REDIRECTS, reliable_tags
 
@@ -429,6 +429,40 @@ def test_ssr_track_snippet_marks_recorded_path() -> None:
     snippet = shell.ssr_track_snippet("/news/articles/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d")
     assert 'sessionStorage.setItem("pxke_ssr_pv"' in snippet
     assert "/news/articles/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d" in snippet
+
+
+def test_doc_response_dedup_marker_matches_the_browser_path_not_the_counted_one() -> None:
+    """The SSR dedup marker must embed dedup_path (what window.location.pathname will actually be), not tracked_path (the canonical path used for counting) -- these differ for a translated article.
+
+    Root-caused 2026-07-30: a direct visit to a locale-prefixed article
+    (/fr/news/articles/slug) wrote the CANONICAL path into the dedup marker.
+    On boot the SPA compares that marker to window.location.pathname
+    (/fr/news/articles/slug) -- they never matched, so the dedup skip never
+    fired, and every direct load of a translated article recorded a second,
+    redundant pageview under the raw locale path (which analytics could not
+    resolve to a title at all -- see test_analytics.py's canonical-path
+    tests). tracked_path alone (no dedup_path) must still work for every
+    other route, where the two are the same string.
+    """
+    resp = _doc_response(
+        ("<title>t</title>", "<body-html>"),
+        "public, max-age=300",
+        tracked_path="/news/articles/abc123",
+        dedup_path="/fr/news/articles/some-slug",
+    )
+    doc = resp.description
+    assert 'pxke_ssr_pv","/fr/news/articles/some-slug"' in doc
+    assert '"/news/articles/abc123"' not in doc
+
+
+def test_doc_response_dedup_marker_falls_back_to_tracked_path() -> None:
+    """Without an explicit dedup_path (every non-article route), the marker still uses tracked_path -- unchanged behavior."""
+    resp = _doc_response(
+        ("<title>t</title>", "<body-html>"),
+        "public, max-age=300",
+        tracked_path="/topics",
+    )
+    assert 'pxke_ssr_pv","/topics"' in resp.description
 
 
 def test_reliable_tags_policy_and_section_redirect_map() -> None:
