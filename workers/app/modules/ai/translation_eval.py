@@ -663,6 +663,115 @@ _M2M100 = Candidate(
     unload_fn=unload_all,
 )
 
+# --- MADLAD-400-3B-MT (google/madlad400-3b-mt, apache-2.0, confirmed via HF
+# API 2026-07-31). Found by a live HF search for models tagged
+# pipeline_tag=translation, sorted by downloads -- overlooked in the
+# original candidate research despite being a well-established, 248K-
+# download Google T5 model. Covers all 8 of our languages, confirmed via
+# its own tag list. Target language is selected with a `<2id>` prefix
+# token on the input text (T5/MADLAD's own convention, no source-language
+# specification needed -- unlike the OPUS-MT-ine loader's `>>id<<`, this
+# one has no `<<` closing marker).
+
+_MADLAD_MODEL_ID = "google/madlad400-3b-mt"
+
+
+def _madlad_translate(
+    text: str,
+    src_lang: str,  # noqa: ARG001 -- MADLAD has no source-language input, target-only prefix
+    tgt_lang: str,
+    *,
+    sample: bool = False,
+) -> str:
+    import torch
+    from transformers import T5ForConditionalGeneration, T5Tokenizer
+
+    tokenizer, model = _load(_MADLAD_MODEL_ID, T5ForConditionalGeneration, T5Tokenizer)
+    inputs = tokenizer(f"<2{tgt_lang}> {text}", return_tensors="pt")
+    torch.set_num_threads(_MAX_THREADS)
+    gen_kwargs: dict[str, object] = (
+        {"do_sample": True, "temperature": _SAMPLE_TEMPERATURE} if sample else {}
+    )
+    with torch.inference_mode():
+        out = model.generate(**inputs, max_new_tokens=512, **gen_kwargs)
+    return tokenizer.decode(out[0], skip_special_tokens=True).strip()
+
+
+_MADLAD = Candidate(
+    name="madlad400-3b-mt",
+    license="Apache-2.0",
+    translate_fn=_madlad_translate,
+    unload_fn=unload_all,
+)
+
+# --- Tencent Hy-MT2-1.8B (apache-2.0, verified 2026-07-31 by reading the
+# actual LICENSE.txt line by line, not just the metadata tag -- the
+# PREVIOUS Hunyuan-MT generation was ruled out earlier this session for a
+# real EU/UK/South-Korea territorial exclusion clause in its Community
+# License, so this one was not taken on trust). A newer generation
+# (released 2026-05-21, part of an active WMT26 partnership -- a real,
+# maintained release, not a derivative) that appears to have genuinely
+# moved to a clean Apache 2.0 license. Covers 7 of our 8 languages --
+# confirmed via its own tag list, but Pashto is NOT among them, unlike
+# MADLAD-400. Instruction-tuned chat model (not a raw seq2seq translator
+# like the others here): uses tokenizer.apply_chat_template with an
+# English-language-name prompt, per Tencent's own documented usage.
+
+_HYMT2_MODEL_ID = "tencent/Hy-MT2-1.8B"
+_HYMT2_LANG_NAME = {
+    "en": "English",
+    "fr": "French",
+    "es": "Spanish",
+    "ar": "Arabic",
+    "ru": "Russian",
+    "zh": "Chinese",
+    "hi": "Hindi",
+    "fa": "Persian",
+}
+
+
+def _hymt2_translate(
+    text: str,
+    src_lang: str,  # noqa: ARG001 -- Hy-MT2's documented prompt only names the target language
+    tgt_lang: str,
+    *,
+    sample: bool = False,
+) -> str:
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    # trust_remote_code=True: Hy-MT2 ships custom modeling code, same
+    # rationale as Jais -- scoped to this one candidate, publisher (Tencent,
+    # via an active WMT26 partnership) is the trust basis.
+    tokenizer, model = _load(
+        _HYMT2_MODEL_ID, AutoModelForCausalLM, AutoTokenizer, trust_remote_code=True
+    )
+    tgt_name = _HYMT2_LANG_NAME.get(tgt_lang, tgt_lang)
+    prompt = (
+        f"Translate the following text into {tgt_name}. Note that you should only output "
+        f"the translated result without any additional explanation:\n\n{text}"
+    )
+    messages = [{"role": "user", "content": prompt}]
+    input_ids = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, return_tensors="pt"
+    )
+    torch.set_num_threads(_MAX_THREADS)
+    gen_kwargs: dict[str, object] = (
+        {"do_sample": True, "temperature": _SAMPLE_TEMPERATURE} if sample else {"do_sample": False}
+    )
+    with torch.inference_mode():
+        out = model.generate(input_ids, max_new_tokens=max(256, int(len(text) * 1.6)), **gen_kwargs)
+    generated = out[0][input_ids.shape[-1] :]
+    return tokenizer.decode(generated, skip_special_tokens=True).strip()
+
+
+_HYMT2 = Candidate(
+    name="hy-mt2-1.8b",
+    license="Apache-2.0",
+    translate_fn=_hymt2_translate,
+    unload_fn=unload_all,
+)
+
 # Jais (inceptionai/jais-family-*-chat) was tried as a 4th Arabic bonus
 # candidate and dropped 2026-07-31: every checkpoint shares the same custom
 # `modeling_jais.py`, which imports `find_pruneable_heads_and_indices` from
@@ -745,12 +854,12 @@ _SEAMLESS_BASELINE = Candidate(
 # Adding a candidate later means adding one Candidate to one list here --
 # nothing about the runner or the checks above needs to change.
 CANDIDATES: dict[str, list[Candidate]] = {
-    "fr": [_MILMMT_BASELINE, _opus_mt_candidate("fr"), _M2M100],
-    "es": [_MILMMT_BASELINE, _opus_mt_candidate("es"), _M2M100],
-    "ar": [_MILMMT_BASELINE, _opus_mt_candidate("ar"), _M2M100],
-    "ru": [_MILMMT_BASELINE, _opus_mt_candidate("ru"), _M2M100],
-    "zh": [_MILMMT_BASELINE, _opus_mt_candidate("zh"), _M2M100],
-    "hi": [_MILMMT_BASELINE, _opus_mt_candidate("hi"), _M2M100],
-    "fa": [_MILMMT_BASELINE, _M2M100, _opus_mt_ine_candidate("fa")],
-    "ps": [_SEAMLESS_BASELINE, _M2M100, _opus_mt_ine_candidate("ps")],
+    "fr": [_MILMMT_BASELINE, _opus_mt_candidate("fr"), _M2M100, _MADLAD, _HYMT2],
+    "es": [_MILMMT_BASELINE, _opus_mt_candidate("es"), _M2M100, _MADLAD, _HYMT2],
+    "ar": [_MILMMT_BASELINE, _opus_mt_candidate("ar"), _M2M100, _MADLAD, _HYMT2],
+    "ru": [_MILMMT_BASELINE, _opus_mt_candidate("ru"), _M2M100, _MADLAD, _HYMT2],
+    "zh": [_MILMMT_BASELINE, _opus_mt_candidate("zh"), _M2M100, _MADLAD, _HYMT2],
+    "hi": [_MILMMT_BASELINE, _opus_mt_candidate("hi"), _M2M100, _MADLAD, _HYMT2],
+    "fa": [_MILMMT_BASELINE, _M2M100, _opus_mt_ine_candidate("fa"), _MADLAD, _HYMT2],
+    "ps": [_SEAMLESS_BASELINE, _M2M100, _opus_mt_ine_candidate("ps"), _MADLAD],
 }
