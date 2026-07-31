@@ -37,6 +37,17 @@ across every language they appear in, not once per language) and unload
 before the next candidate -- mirrors local_translate.translate_article_batch's
 own load-once-per-group discipline.
 
+Nothing is buffered until the end: every file is opened and its header
+written before the first case runs, and each case's result is appended and
+flushed to disk the moment it finishes -- MiLMMT alone can take minutes per
+case, so waiting for a whole (candidate, language) pair, let alone the
+whole run, before anything is readable would defeat the point of watching
+results land. `_progress.md` in the output dir is a single running index,
+one line per finished case, written as you go -- `tail -f` it to watch the
+whole run without guessing which per-file to open, then dive into the
+per-(candidate, language) file once something in the index looks worth a
+closer read.
+
 This is a fixed set of frozen excerpts and automatable structural/back-
 translation checks read with your own eyes -- not a scored gate. See
 translation_eval.py's module docstring for the full layered framework and
@@ -239,6 +250,46 @@ def _build_worklist(
     return worklist
 
 
+def _flags(result: dict) -> list[str]:
+    """Short machine-greppable tags for a case's result -- empty list means nothing stood out."""
+    if "error" in result:
+        return ["error"]
+    flags = []
+    if not result["structural"].block_count_matches:
+        flags.append("structural_mismatch")
+    if result["structural"].row_diffs:
+        flags.append("row_diff")
+    if result["digits"].ungrounded:
+        flags.append("digits_ungrounded")
+    if result["backtrans"].drifted_block_indices:
+        flags.append("backtrans_drift")
+    return flags
+
+
+def _append_progress(
+    progress_path: Path,
+    candidate: Candidate,
+    language: str,
+    fixture: TranslationFixture,
+    run_idx: int,
+    runs: int,
+    result: dict,
+) -> None:
+    """One line per finished case, appended and flushed immediately -- this file is the thing to `tail -f`, not any individual report."""
+    stamp = datetime.now(tz=UTC).strftime("%H:%M:%SZ")
+    label = f"run {run_idx + 1}/{runs}" if runs > 1 else "run"
+    flags = _flags(result)
+    flag_text = f" [{','.join(flags)}]" if flags else " [clean]"
+    safe_name = candidate.name.replace("/", "_").replace(" ", "_")
+    line = (
+        f"- {stamp} {candidate.name} -> {language} / {fixture.name} / {label}{flag_text} "
+        f"-> {safe_name}__{language}.md\n"
+    )
+    with progress_path.open("a") as f:
+        f.write(line)
+        f.flush()
+
+
 def _write_reports_for_candidate(
     candidate: Candidate,
     cases: list[tuple[str, TranslationFixture]],
@@ -247,35 +298,40 @@ def _write_reports_for_candidate(
     runs: int,
     sample: bool,
     out_dir: Path,
+    progress_path: Path,
 ) -> None:
+    """Writes and flushes each case's result to its (candidate, language) file the moment it finishes, and appends a summary line to progress_path -- nothing here waits for the whole candidate, or even the whole language, to be done before becoming readable."""
     by_language: dict[str, list[TranslationFixture]] = {}
     for language, fixture in cases:
         by_language.setdefault(language, []).append(fixture)
 
     for language, fixtures_for_lang in by_language.items():
-        report_lines = [
-            f"# {candidate.name} -> {language}",
-            "",
-            f"- license: {candidate.license}",
-            f"- mode: {mode} (runs={runs})",
-            "",
-        ]
-        for fixture in fixtures_for_lang:
-            report_lines.append(f"## {fixture.name}")
-            report_lines.append(f"- watch for: {fixture.watch_for}")
-            report_lines.append("")
-            for run_idx in range(runs):
-                logger.info(
-                    "  %s / %s / %s / run %d ...",
-                    candidate.name,
-                    language,
-                    fixture.name,
-                    run_idx + 1,
-                )
-                result = _run_case(candidate, language, fixture, sample=sample)
-                report_lines.append(_format_case(result, run_idx, runs))
         safe_name = candidate.name.replace("/", "_").replace(" ", "_")
-        (out_dir / f"{safe_name}__{language}.md").write_text("\n".join(report_lines))
+        report_path = out_dir / f"{safe_name}__{language}.md"
+        with report_path.open("w") as report:
+            report.write(f"# {candidate.name} -> {language}\n\n")
+            report.write(f"- license: {candidate.license}\n")
+            report.write(f"- mode: {mode} (runs={runs})\n\n")
+            report.flush()
+
+            for fixture in fixtures_for_lang:
+                report.write(f"## {fixture.name}\n")
+                report.write(f"- watch for: {fixture.watch_for}\n\n")
+                report.flush()
+                for run_idx in range(runs):
+                    logger.info(
+                        "  %s / %s / %s / run %d ...",
+                        candidate.name,
+                        language,
+                        fixture.name,
+                        run_idx + 1,
+                    )
+                    result = _run_case(candidate, language, fixture, sample=sample)
+                    report.write(_format_case(result, run_idx, runs) + "\n")
+                    report.flush()
+                    _append_progress(
+                        progress_path, candidate, language, fixture, run_idx, runs, result
+                    )
 
 
 def main() -> None:
@@ -307,19 +363,37 @@ def main() -> None:
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    total_cases = sum(len(cases) for cases in worklist.values()) * runs
+    progress_path = out_dir / "_progress.md"
+    progress_path.write_text(
+        f"# eval_translate_candidates run: {stamp}\n\n"
+        f"mode={args.mode} runs={runs} fixtures={len(selected_fixtures)} "
+        f"candidates={len(worklist)} total_cases={total_cases}\n\n"
+        "One line per finished case, appended as the run progresses -- "
+        f"`tail -f {progress_path}` to watch live.\n\n"
+    )
+
     logger.info(
-        "mode=%s runs=%d fixtures=%d candidates=%d -> %s",
+        "mode=%s runs=%d fixtures=%d candidates=%d total_cases=%d -> %s (tail -f %s)",
         args.mode,
         runs,
         len(selected_fixtures),
         len(worklist),
+        total_cases,
         out_dir,
+        progress_path,
     )
 
     for candidate, cases in worklist.items():
         logger.info("loading %s (license: %s) ...", candidate.name, candidate.license)
         _write_reports_for_candidate(
-            candidate, cases, mode=args.mode, runs=runs, sample=sample, out_dir=out_dir
+            candidate,
+            cases,
+            mode=args.mode,
+            runs=runs,
+            sample=sample,
+            out_dir=out_dir,
+            progress_path=progress_path,
         )
         logger.info("unloading %s ...", candidate.name)
         candidate.unload_fn()
