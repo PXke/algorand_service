@@ -456,16 +456,16 @@ def _m2m100_translate(text: str, src_lang: str, tgt_lang: str, *, sample: bool =
 # License confirmed via HF API 2026-07-31, per pair: en-ar/ar-en apache-2.0,
 # en-ru apache-2.0 / ru-en cc-by-4.0, en-zh apache-2.0 / zh-en cc-by-4.0,
 # en-hi/hi-en apache-2.0, en-es/es-en apache-2.0, en-fr/fr-en apache-2.0.
-# en-fa and en-ps are a step worse than "no license tag": every request to
-# either repo (model page AND API, verified 2026-07-31) returns a
-# consistent 401 "Invalid username or password" -- confirmed against a
-# working en-es control on the same API in the same session, so this isn't
-# rate-limiting or a transient blip. Cause unconfirmed (could be genuine
-# Hub-side gating, could be a network/proxy restriction specific to this
-# environment) -- whoever picks this up needs an authenticated browser
-# session pointed at huggingface.co/Helsinki-NLP/opus-mt-en-fa directly to
-# find out, not another curl/API attempt from here. Deliberately NOT wired
-# into CANDIDATES below until that's resolved.
+#
+# en-fa and en-ps do NOT exist as dedicated pairs -- resolved 2026-07-31.
+# The 401 initially looked like an access restriction (even served an AWS
+# WAF bot-challenge page on the plain webpage fetch), but that was a red
+# herring: the real `huggingface_hub` client returns a clean
+# RepositoryNotFoundError, and neither repo appears anywhere in a full
+# listing of all 1563 Helsinki-NLP repos. Helsinki-NLP consolidated small
+# pairs like these into grouped multi-target models instead -- see
+# _opus_mt_ine_translate below, which covers both languages via a different
+# repo pair entirely.
 
 
 def _opus_mt_translate(text: str, src_lang: str, tgt_lang: str, *, sample: bool = False) -> str:
@@ -490,6 +490,53 @@ def _opus_mt_candidate(lang: str) -> Candidate:
         name=f"opus-mt-en-{lang}",
         license="Apache-2.0 or CC-BY-4.0 (both commercial-safe; see per-pair comment above)",
         translate_fn=_opus_mt_translate,
+        unload_fn=unload_all,
+    )
+
+
+# --- OPUS-MT grouped Indo-European models (Helsinki-NLP/opus-mt-en-ine /
+# opus-mt-ine-en), covering fa and ps where no dedicated pair exists ---
+# Both Apache-2.0, confirmed 2026-07-31. Target language on the en->X
+# direction is selected with a `>>id<<` prefix token on the input text
+# (OPUS-MT's standard convention for grouped multi-target models) rather
+# than a separate repo per language; the X->en direction needs no prefix
+# (many-to-one). Smoke-tested 2026-07-31 with real, non-empty, correct-
+# script output for both `pes` (Farsi) and `pus` (Pashto) -- whether the
+# TRANSLATION QUALITY is any good is exactly what this harness exists to
+# find out, not something to assume from a two-sentence manual check.
+
+_OPUS_MT_INE_LANG = {"fa": "pes", "ps": "pus"}
+
+
+def _opus_mt_ine_translate(text: str, src_lang: str, tgt_lang: str, *, sample: bool = False) -> str:
+    import torch
+    from transformers import MarianMTModel, MarianTokenizer
+
+    if tgt_lang == "en":
+        assert src_lang in _OPUS_MT_INE_LANG, f"opus-mt-ine-en has no coverage for {src_lang!r}"
+        model_id = "Helsinki-NLP/opus-mt-ine-en"
+        prefixed = text  # many-to-one -- no source-language prefix needed
+    else:
+        assert src_lang == "en", f"opus-mt-en-ine only translates FROM English, got {src_lang!r}"
+        model_id = "Helsinki-NLP/opus-mt-en-ine"
+        prefixed = f">>{_OPUS_MT_INE_LANG[tgt_lang]}<< {text}"
+
+    tokenizer, model = _load(model_id, MarianMTModel, MarianTokenizer)
+    inputs = tokenizer(prefixed, return_tensors="pt", truncation=True)
+    torch.set_num_threads(_MAX_THREADS)
+    gen_kwargs: dict[str, object] = (
+        {"do_sample": True, "temperature": _SAMPLE_TEMPERATURE} if sample else {}
+    )
+    with torch.inference_mode():
+        tokens = model.generate(**inputs, max_new_tokens=512, **gen_kwargs)
+    return tokenizer.batch_decode(tokens, skip_special_tokens=True)[0].strip()
+
+
+def _opus_mt_ine_candidate(lang: str) -> Candidate:
+    return Candidate(
+        name=f"opus-mt-ine-{lang}",
+        license="Apache-2.0",
+        translate_fn=_opus_mt_ine_translate,
         unload_fn=unload_all,
     )
 
@@ -607,10 +654,11 @@ _SEAMLESS_BASELINE = Candidate(
 )
 
 
-# Starter set: 3 candidates for every language with a verified-license
-# OPUS-MT pair, 2 for fa/ps pending that pair's license, +1 bonus for ar.
-# Adding a candidate later means adding one Candidate to one list here --
-# nothing about the runner or the checks above needs to change.
+# Starter set: 3 candidates for every language (fa/ps via the grouped
+# opus-mt-en-ine/ine-en models rather than a dedicated pair, see above),
+# +1 bonus for ar. Adding a candidate later means adding one Candidate to
+# one list here -- nothing about the runner or the checks above needs to
+# change.
 CANDIDATES: dict[str, list[Candidate]] = {
     "fr": [_MILMMT_BASELINE, _opus_mt_candidate("fr"), _M2M100],
     "es": [_MILMMT_BASELINE, _opus_mt_candidate("es"), _M2M100],
@@ -618,6 +666,6 @@ CANDIDATES: dict[str, list[Candidate]] = {
     "ru": [_MILMMT_BASELINE, _opus_mt_candidate("ru"), _M2M100],
     "zh": [_MILMMT_BASELINE, _opus_mt_candidate("zh"), _M2M100],
     "hi": [_MILMMT_BASELINE, _opus_mt_candidate("hi"), _M2M100],
-    "fa": [_MILMMT_BASELINE, _M2M100],
-    "ps": [_SEAMLESS_BASELINE, _M2M100],
+    "fa": [_MILMMT_BASELINE, _M2M100, _opus_mt_ine_candidate("fa")],
+    "ps": [_SEAMLESS_BASELINE, _M2M100, _opus_mt_ine_candidate("ps")],
 }
