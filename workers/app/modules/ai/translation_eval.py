@@ -349,8 +349,8 @@ class Candidate:
     both current production engines decode deterministically by default
     (MiLMMT do_sample=False, SeamlessM4T fixed beam search), so a naive
     "run N times" test would trivially report 100% consistency and prove
-    nothing. Causal-LM-style candidates (MiLMMT, Jais, M2M-100, OPUS-MT)
-    honor it by switching to temperature sampling; SeamlessM4T's beam search
+    nothing. Every candidate except SeamlessM4T honors it by switching to
+    temperature sampling; SeamlessM4T's beam search
     has no simple sampling equivalent and ignores the flag -- see
     _seamless_translate.
     """
@@ -400,22 +400,27 @@ def _load(
     model_id: str,
     model_cls: Any,  # noqa: ANN401 -- one of several unrelated transformers model classes, no single static type
     tokenizer_cls: Any,  # noqa: ANN401 -- matching tokenizer class for model_cls
+    *,
+    trust_remote_code: bool = False,
 ) -> tuple[Any, Any]:
+    """``trust_remote_code`` executes arbitrary Python shipped in the model repo (needed for architectures transformers doesn't have a built-in class for, e.g. Jais's custom attention/positional-encoding code) -- defaults False for every loader here, and is opted into per-candidate below with a comment explaining why that specific repo needs it, never as a blanket default."""
     with _load_lock:
         if model_id not in _loaded:
             import logging
 
             logging.getLogger(__name__).info("loading %s (eval harness, first use)", model_id)
             _loaded[model_id] = {
-                "tokenizer": tokenizer_cls.from_pretrained(model_id),
-                "model": model_cls.from_pretrained(model_id),
+                "tokenizer": tokenizer_cls.from_pretrained(
+                    model_id, trust_remote_code=trust_remote_code
+                ),
+                "model": model_cls.from_pretrained(model_id, trust_remote_code=trust_remote_code),
             }
         entry = _loaded[model_id]
         return entry["tokenizer"], entry["model"]
 
 
 def unload_all() -> None:
-    """Evict every third-party candidate model currently cached here. Called after each candidate finishes in the runner -- same never-both-resident discipline local_translate.py enforces for its own two engines, applied to however many model ids this candidate populated (one for M2M-100/Jais, up to two for an OPUS-MT pair used for both forward and back-translation)."""
+    """Evict every third-party candidate model currently cached here. Called after each candidate finishes in the runner -- same never-both-resident discipline local_translate.py enforces for its own two engines, applied to however many model ids this candidate populated (one for M2M-100, up to two for an OPUS-MT pair used for both forward and back-translation)."""
     with _load_lock:
         _loaded.clear()
     gc.collect()
@@ -548,45 +553,16 @@ _M2M100 = Candidate(
     unload_fn=unload_all,
 )
 
-# --- Jais (inceptionai/jais-family-6p7b-chat, apache-2.0, confirmed via HF ---
-# API 2026-07-31). General Arabic/English chat model, NOT fine-tuned for
-# translation -- no published translation benchmark, no model-card
-# translation template. The prompt below is our own best-effort instruction,
-# not a validated recipe; whether this even produces usable output is
-# exactly what this candidate's eval run is for.
-
-_JAIS_MODEL_ID = "inceptionai/jais-family-6p7b-chat"
-_JAIS_LANG_NAME = {"en": "English", "ar": "Arabic"}
-
-
-def _jais_translate(text: str, src_lang: str, tgt_lang: str, *, sample: bool = False) -> str:
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    tokenizer, model = _load(_JAIS_MODEL_ID, AutoModelForCausalLM, AutoTokenizer)
-    src_name = _JAIS_LANG_NAME.get(src_lang, src_lang)
-    tgt_name = _JAIS_LANG_NAME.get(tgt_lang, tgt_lang)
-    prompt = (
-        f"Translate the following text from {src_name} to {tgt_name}. "
-        f"Return only the translation, nothing else.\n\n{text}"
-    )
-    inputs = tokenizer(prompt, return_tensors="pt")
-    torch.set_num_threads(_MAX_THREADS)
-    gen_kwargs: dict[str, object] = (
-        {"do_sample": True, "temperature": _SAMPLE_TEMPERATURE} if sample else {"do_sample": False}
-    )
-    with torch.inference_mode():
-        out = model.generate(**inputs, max_new_tokens=max(256, int(len(text) * 1.6)), **gen_kwargs)
-    generated = out[0][inputs["input_ids"].shape[1] :]
-    return tokenizer.decode(generated, skip_special_tokens=True).strip()
-
-
-_JAIS = Candidate(
-    name="jais-family-6.7b-chat",
-    license="Apache-2.0",
-    translate_fn=_jais_translate,
-    unload_fn=unload_all,
-)
+# Jais (inceptionai/jais-family-*-chat) was tried as a 4th Arabic bonus
+# candidate and dropped 2026-07-31: every checkpoint shares the same custom
+# `modeling_jais.py`, which imports `find_pruneable_heads_and_indices` from
+# `transformers.pytorch_utils` -- removed in the installed transformers
+# 5.14.1 (only `prune_linear_layer` remains). Fails to load at any size,
+# not a disk-space or gating issue (590M is neither gated nor large, and
+# still hits the same ImportError). Arabic still has 3 real candidates
+# (MiLMMT, OPUS-MT, M2M-100) without it -- revisit only if this repo's
+# custom code is updated for newer transformers, or if pinning an older
+# transformers version is ever worth it for one bonus candidate.
 
 # --- production baselines, reusing local_translate.py's own cache/loaders ---
 # These wrap the SAME model singletons production uses (lt._load_milmmt() /
@@ -655,14 +631,13 @@ _SEAMLESS_BASELINE = Candidate(
 
 
 # Starter set: 3 candidates for every language (fa/ps via the grouped
-# opus-mt-en-ine/ine-en models rather than a dedicated pair, see above),
-# +1 bonus for ar. Adding a candidate later means adding one Candidate to
-# one list here -- nothing about the runner or the checks above needs to
-# change.
+# opus-mt-en-ine/ine-en models rather than a dedicated pair, see above).
+# Adding a candidate later means adding one Candidate to one list here --
+# nothing about the runner or the checks above needs to change.
 CANDIDATES: dict[str, list[Candidate]] = {
     "fr": [_MILMMT_BASELINE, _opus_mt_candidate("fr"), _M2M100],
     "es": [_MILMMT_BASELINE, _opus_mt_candidate("es"), _M2M100],
-    "ar": [_MILMMT_BASELINE, _opus_mt_candidate("ar"), _M2M100, _JAIS],
+    "ar": [_MILMMT_BASELINE, _opus_mt_candidate("ar"), _M2M100],
     "ru": [_MILMMT_BASELINE, _opus_mt_candidate("ru"), _M2M100],
     "zh": [_MILMMT_BASELINE, _opus_mt_candidate("zh"), _M2M100],
     "hi": [_MILMMT_BASELINE, _opus_mt_candidate("hi"), _M2M100],
