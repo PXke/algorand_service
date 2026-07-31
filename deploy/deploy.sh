@@ -68,7 +68,7 @@ export FRONTEND_ALGOD_API_URL="${FRONTEND_ALGOD_API_URL:-$_ALGOD_URL_DEFAULT}"
 export FRONTEND_WALLET_CHAIN_ID="${FRONTEND_WALLET_CHAIN_ID:-$_CHAIN_ID_DEFAULT}"
 export FRONTEND_EXPLORER_BASE_URL="${FRONTEND_EXPLORER_BASE_URL:-$_EXPLORER_DEFAULT}"
 
-UNITS=(algorand-platform-backend algorand-platform-celery algorand-platform-celery-beat)
+UNITS=(algorand-platform-backend algorand-platform-celery algorand-platform-celery-beat algorand-platform-celery-translate)
 
 SSH_SVC="${SERVICE_USER}@${TARGET_HOST}"
 SSH_ROOT="${ROOT_USER}@${TARGET_HOST}"
@@ -422,7 +422,7 @@ EOF
 
   RESTART_UNITS=()
   [[ "${DEPLOY_RESTART_BACKEND:-1}" == "1" ]] && RESTART_UNITS+=(algorand-platform-backend)
-  [[ "${DEPLOY_RESTART_WORKERS:-1}" == "1" ]] && RESTART_UNITS+=(algorand-platform-celery algorand-platform-celery-beat)
+  [[ "${DEPLOY_RESTART_WORKERS:-1}" == "1" ]] && RESTART_UNITS+=(algorand-platform-celery algorand-platform-celery-beat algorand-platform-celery-translate)
 
   if [[ "${DEPLOY_CHANGED_DEPLOY_CONFIG:-0}" == "1" ]]; then
     echo ">>> [root] Installing systemd units + nginx site"
@@ -453,6 +453,24 @@ from app.modules.newspaper.compose_lock import get_compose_lock_status
 status = get_compose_lock_status()
 if status:
     print('>>> WARNING: compose lock held', status, '-- this restart will silently kill it mid-compose')
+"
+EOF
+    fi
+    if [[ " ${RESTART_UNITS[*]} " == *" algorand-platform-celery-translate "* ]]; then
+      # Same SIGQUIT risk as above, but worse here: a translation batch can
+      # legitimately run for hours (translate_article_batch_task's own
+      # time_limit is 6h), not minutes. Losing it isn't destructive — each
+      # language is persisted the moment it finishes, so a restart at worst
+      # re-does whatever was still in flight — but it IS wasted CPU time,
+      # worth a heads-up rather than a silent surprise.
+      ssh "$SSH_SVC" bash -s 2>/dev/null <<EOF || true
+set -a; source '${SHARED}/workers.env'; set +a
+cd '${CURRENT}/workers'
+'${VENV}/bin/python' -c "
+from app.modules.ai.local_translate_lock import get_local_translate_lock_status
+ttl = get_local_translate_lock_status()
+if ttl is not None:
+    print('>>> WARNING: local translation batch in progress (lock ttl', ttl, 's) -- this restart will kill it mid-batch; already-finished languages are safe, in-flight ones are not')
 "
 EOF
     fi

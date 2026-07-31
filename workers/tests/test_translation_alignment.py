@@ -188,3 +188,28 @@ def test_glossary_and_numerals_are_language_specific(monkeypatch: pytest.MonkeyP
     assert "0123456789" in fr
     assert "استیکینگ" in fa
     assert "۰۱۲۳۴۵۶۷۸۹" in fa
+
+
+def test_prompt_bans_colon_label_titles_and_preserves_named_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The translated title must obey the same house rule as the English writer, and named events/works must survive rather than being rendered as a description.
+
+    Root-caused 2026-07-29 on a live translation: "Algorand Dev Retreat's Sound
+    of AVM turns transactions into live synth music" became "Le Son de l'AVM
+    d'Algorand : transformer les transactions..." — the colon-label shape the
+    English writer prompt explicitly bans (mistral_compose.py:1402), and "Dev
+    Retreat" (the event) was dropped entirely.
+    """
+    n = len(split_markdown_blocks(_BODY))
+    seen = _client(
+        monkeypatch,
+        {"title": "T", "summary": "S", "blocks": [f"b{i}" for i in range(n)]},
+    )
+    mc.translate_article_mistral(
+        english_title="T", english_summary="S", english_body=_BODY, target_language="fr"
+    )
+    system = seen[0][0]["content"]
+    assert "colon-label" in system
+    assert "named events" in system
+    assert "do not drop the event or organization" in system

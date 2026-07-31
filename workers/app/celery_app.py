@@ -46,6 +46,16 @@ celery_app.conf.task_routes = {
     "app.tasks.search.*": {"queue": "pipeline"},
     "app.tasks.metrics.*": {"queue": "pipeline"},
     "app.tasks.gatekeeper.*": {"queue": "pipeline"},
+    # Exact-name entry, checked by Celery's router BEFORE the
+    # "app.tasks.newspaper.*" glob above regardless of dict order (an exact
+    # match always wins over a pattern match) -- pulled off the shared
+    # pipeline queue onto its own, consumed only by the dedicated
+    # algorand-platform-celery-translate worker (-Q translate,
+    # --concurrency=1). It needs isolation the rest of "newspaper.*" doesn't:
+    # a multi-hour batch that loads a multi-GB local model must never share
+    # a worker slot with anything else, and must never be picked up by the
+    # general pool under load.
+    "app.tasks.newspaper.translate_article_batch": {"queue": "translate"},
 }
 celery_app.conf.imports = (
     "app.modules.newspaper.tasks.mail_poll_tasks",

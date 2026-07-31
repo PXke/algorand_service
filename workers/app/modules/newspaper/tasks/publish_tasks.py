@@ -277,7 +277,16 @@ def _stash_capped_compose_to_backlog(
 
 
 def enqueue_missing_article_translations(article_id: str) -> int:
-    """Enqueue translate_article only for langs not yet stored. Returns count queued."""
+    """Enqueue ONE translate_article_batch task covering every lang not yet stored. Returns count queued (languages, not tasks -- callers key off this number, not "how many Celery tasks fired").
+
+    One task, not one per language: local translation loads a multi-GB model
+    per engine, so batching by article lets the batch task load each engine
+    at most once and reuse it for every language routed there, instead of a
+    fresh worker process potentially loading BOTH engines across an
+    unpredictable spread of independently-scheduled tasks (see
+    local_translate.translate_article_batch for the actual grouping/load/
+    unload logic).
+    """
     try:
         from app.celery_app import celery_app
         from app.modules.newspaper.article_store import get_article
@@ -287,10 +296,11 @@ def enqueue_missing_article_translations(article_id: str) -> int:
             return 0
         existing = set((article.translations or {}).keys())
         missing = [lang for lang in ARTICLE_TRANSLATION_LANGS if lang not in existing]
-        for lang in missing:
-            celery_app.send_task(
-                "app.tasks.newspaper.translate_article", args=[str(article_id), lang]
-            )
+        if not missing:
+            return 0
+        celery_app.send_task(
+            "app.tasks.newspaper.translate_article_batch", args=[str(article_id), missing]
+        )
         return len(missing)
     except Exception:
         logger.warning("Failed to enqueue translation tasks for %s", article_id, exc_info=True)
@@ -2034,6 +2044,72 @@ def translate_article_task(
         return {"status": "ok", "article_id": article_id, "lang": lang}
     except Exception as e:
         logger.error(f"Failed to translate article {article_id} to {lang}: {e}")
+        return {"status": "error", "reason": str(e)}
+
+
+# Kept registered (not deleted) as a shim: a stale enqueue from before this
+# deploy could still reference "app.tasks.newspaper.translate_article" by
+# name, and dropping the task definition would make that a hard failure
+# instead of a normal (if now-legacy) single-language translation.
+@celery_app.task(
+    name="app.tasks.newspaper.translate_article_batch",
+    # Generous, not yet precisely tuned -- see local_translate_lock.py's TTL
+    # comment for the 51-minute/41-block measurement this is sized against.
+    # Both engines share this one task's queue (see celery_app.py's
+    # task_routes "translate" entry and the dedicated
+    # algorand-platform-celery-translate systemd unit), so overriding here
+    # rather than the app-wide task_soft_time_limit/task_time_limit leaves
+    # every OTHER task's limits untouched.
+    soft_time_limit=21000,  # 5h50m
+    time_limit=21600,  # 6h hard kill
+)
+def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
+    """Background task to translate an article into every language in `langs`, batched by engine.
+
+    Same freshness/idempotency guards as the retired per-language task:
+    re-reads the CURRENT article from the store (a recompose between enqueue
+    and run must not persist a stale translation) and re-checks each lang
+    against what's already stored (time passes in a queue -- a manual
+    backfill run could have filled one in the meantime). See
+    app.modules.ai.local_translate.translate_article_batch for the actual
+    engine grouping / load-once / explicit-unload logic.
+    """
+    import json
+
+    from app.modules.ai.local_translate import translate_article_batch
+    from app.modules.newspaper.article_store import get_article, update_article_translations
+
+    try:
+        article = get_article(article_id)
+        if article is None or not (article.body or "").strip():
+            return {"status": "error", "reason": "article_not_found_or_empty"}
+        existing = set((article.translations or {}).keys())
+        pending = [lang for lang in langs if lang not in existing]
+        if not pending:
+            return {"status": "skipped", "reason": "already_translated", "langs": langs}
+
+        def _persist(lang: str, result: dict[str, str]) -> None:
+            update_article_translations(article_id, {lang: json.dumps(result, ensure_ascii=False)})
+            try:
+                from app.modules.newspaper.indexnow import ping_translation
+
+                ping_translation(article_id, lang)
+            except Exception:
+                logger.warning(
+                    "IndexNow ping failed for translation %s/%s", article_id, lang, exc_info=True
+                )
+
+        outcome = translate_article_batch(
+            english_title=article.title or "",
+            english_summary=article.summary or "",
+            english_body=article.body or "",
+            target_languages=pending,
+            on_language_done=_persist,
+        )
+        status = "ok" if not outcome["failed"] else "partial"
+        return {"status": status, "article_id": article_id, **outcome}
+    except Exception as e:
+        logger.error(f"Failed to batch-translate article {article_id}: {e}")
         return {"status": "error", "reason": str(e)}
 
 

@@ -1,0 +1,36 @@
+[Unit]
+Description=Algorand Platform Celery Worker (local translation, one engine at a time)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+WorkingDirectory=@TARGET_PATH@/releases/current/workers
+EnvironmentFile=-@TARGET_PATH@/releases/current/workers/.env
+# Dedicated, isolated from the shared worker's -Q list on purpose: local
+# translation loads a multi-GB CPU-only model per engine (SeamlessM4T for
+# ps, MiLMMT for everything else — see app/modules/ai/local_translate.py),
+# and must never share a process with anything else that could leave a
+# second model resident alongside it. --concurrency=1 so there is only ever
+# ONE translation batch running, full stop — translate_article_batch's own
+# Redis lock (local_translate_lock.py) is kept too, as defense-in-depth
+# against a rolling-deploy overlap window, not as the primary guarantee.
+ExecStart=@TARGET_PATH@/venv/bin/celery -A app.celery_app worker --loglevel=INFO -Q translate --concurrency=1 --hostname=translate@%%h
+Restart=on-failure
+RestartSec=5
+# Same cold-shutdown rationale as algorand-platform-celery.service: a batch
+# can legitimately run for hours (translate_article_batch_task's own
+# time_limit is 6h), so a warm SIGTERM drain is impractical here more than
+# anywhere else in this deploy. Safe because each language's translation is
+# persisted to Cassandra the moment it finishes (see on_language_done in
+# translate_article_batch_task) — a killed batch loses at most the one
+# language in flight, and re-enqueueing skips everything already stored.
+KillSignal=SIGQUIT
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
