@@ -162,6 +162,79 @@ across its 7 languages:
   initial smoke test — mistranslated "wallet" as "computer" (الكمبيوتر
   instead of المحفظة) in Arabic, independent of the table/list issue.
 
+## Finding 4: cell-level splitting fixes the collapse, but unevenly
+
+Following Finding 1's implication, `translate_block_with` was extended
+(2026-07-31, commit `f01b81a`) to detect a pure list or table block and
+translate each item/cell's text in isolation, reassembling the markdown
+structure deterministically ourselves — the same principle already used for
+headings, just applied to two more structural units. Re-running
+`table_block`/`list_block` across every candidate and language
+(`20260731T134459Z_deterministic`, 48 cases) confirmed it works, but not
+uniformly:
+
+- **The catastrophe is gone everywhere.** No more repetition-loop
+  degeneration, no more outright data loss, across every candidate tested.
+  Non-MiLMMT clean rate on these two fixtures went from 0/34 to 16/34.
+- **But cell isolation trades one failure mode for another, and which one
+  shows up is per-model, per-language, not predictable in advance.** M2M-100
+  improved substantially (9/16 clean) with some remaining vocabulary gaps —
+  "DeFi" translated to French as "Défaut" ("Lack/Default", not even a
+  plausible near-miss, evidence the term simply isn't in its vocabulary) and
+  "ALGO" as "Quelque chose" ("Something"). OPUS-MT-zh kept producing
+  structurally-clean tables with wrong units on isolated numbers ("900K" →
+  "900克朗", 900 *kroner*; "780K" → "780公里", 780 *kilometres*) — a
+  systematic pattern, the model guessing a unit with no sentence context to
+  anchor "K". OPUS-MT-hi was worse in a different way: not systematic at
+  all, just occasionally and wildly wrong — one isolated cell ("650K")
+  back-translated as "Watch Tower Bible and Tract Society of Pennsylvania",
+  a completely unrelated hallucination. SeamlessM4T's `list_block` went
+  fully clean, but `table_block` still garbled isolated numbers in its own
+  way ("9" → "Nine nights", "650K" → "650 kilos of wheat", "900K" produced a
+  raw, unfilled `XNUMX` template placeholder).
+- **Conclusion**: cell isolation is a real, necessary fix for the
+  structural catastrophe, but it is not sufficient on its own to make any
+  of the smaller candidates production-ready for numeric/tabular content —
+  each remaining defect is a distinct, model-specific problem that would
+  need its own investigation, not one shared fix.
+
+Eval-harness only; not ported into `local_translate.py`'s production
+`_translate_block` (see the comment in `translation_eval.py` for why).
+
+## Conclusions: which model for which language
+
+No language tested here has a case for switching away from what's already
+in production. MiLMMT and SeamlessM4T remain the pick for every language;
+this survey's practical value was confirming that, not finding a
+replacement — every alternative candidate, even after the Finding 4 fix,
+still has real, unresolved problems no language recovers from cleanly.
+
+- **Arabic, Hindi, Spanish, Russian**: MiLMMT clean or near-clean
+  throughout, no real defect found. No open concern from this survey.
+- **French**: MiLMMT's only debatable case all day (Proposals → Projets)
+  resolved clean on the cell-split retest. No open concern.
+- **Chinese**: MiLMMT clean (the one flag was a back-translation-hop
+  artifact, see Finding 3). Worth remembering if a cheaper candidate is
+  ever reconsidered: OPUS-MT-zh's wrong-unit hallucination on numbers is a
+  real, still-open defect class for that candidate specifically.
+- **Farsi**: this is the language the original production incident
+  happened on. Today's fixture test didn't reproduce it, but deterministic
+  decoding means a clean result on ONE fixture proves the harness didn't
+  catch it THIS time, not that the underlying risk is gone — a real
+  article's specific phrasing could still trigger it. Treat as "watch this
+  going forward," not "resolved."
+- **Pashto**: the one language with no good answer yet. SeamlessM4T has a
+  genuine, currently-unfixed production defect (whole-table destruction —
+  Finding 4's fix exists only in the eval harness). Even with that fix
+  applied, it still garbles isolated numbers in table cells ("9" → "Nine
+  nights", "650K" → "650 kilos of wheat"). No alternative tested (M2M-100,
+  the grouped OPUS-MT model) is any better — both stayed 0/2 clean on
+  `table_block` post-fix too. Combined with its non-commercial license
+  (an already-accepted stopgap, not a resolved question) and the fact that
+  nobody on the team reads Pashto well enough to sanity-check any of this
+  by eye, this is the language most worth real, continued investment —
+  not the one to leave alone because "it's just Pashto."
+
 ## Numbers
 
 Cases per candidate, `[clean]` vs. anything flagged (structural mismatch,
@@ -191,13 +264,23 @@ meaning.
 
 ## Next steps
 
-1. **Prototype cell-by-cell table translation** for the smaller candidates
-   — the highest-leverage fix, since it's the one thing standing between
-   M2M-100/OPUS-MT and being viable at all for ~59% of the corpus.
-2. Re-run this survey (or at least `table_block`/`list_block`) after that
-   fix lands, to see whether it actually rescues the smaller candidates or
-   just shifts the failure mode.
-3. `docs/modules/article-translations.md` still describes the old
+1. ~~Prototype cell-by-cell table translation~~ — done (Finding 4,
+   `f01b81a`), and re-run against every candidate/language. It fixed the
+   structural catastrophe but not the deeper per-model quality gaps.
+2. Investigate whether any *other* candidate models were missed — the field
+   moves fast and the ones tried so far were found ad hoc (MiLMMT itself
+   was found by searching HuggingFace for recent translation models, not
+   from a systematic sweep). Now that a cheap benchmark exists, a broader
+   HF search targeted at "general LLM continual-pretrained for
+   translation" (MiLMMT's own recipe, and the likely reason it's the only
+   candidate that handles markdown structurally) is worth doing before
+   calling the candidate list closed.
+3. Farsi and Pashto both need more than one clean deterministic fixture
+   pass before either is trusted: sampling-variance mode (temperature
+   decoding, repeated runs) to check whether a clean result is stable, and
+   ideally testing against more/different real Farsi content, not just the
+   one synthetic excerpt used here.
+4. `docs/modules/article-translations.md` still describes the old
    Mistral-based translation pipeline (`translate_article`,
    `MISTRAL_MODEL_TRANSLATE`) — stale since `local_translate.py` replaced
    it earlier this session (`6303958`). Needs an update, separate from this
@@ -207,7 +290,10 @@ meaning.
 
 Full per-(candidate, language) Markdown reports (translated + back-translated
 text for every case) are in
-`workers/scripts/eval_translate_output/20260731T085110Z_deterministic/`.
-That directory is gitignored (matches the existing convention for
-`eval_compose_output/`) — it's local-only and not guaranteed to survive;
-re-run `python -m scripts.eval_translate_candidates` to regenerate it.
+`workers/scripts/eval_translate_output/20260731T085110Z_deterministic/`
+(the original 120-case run) and
+`workers/scripts/eval_translate_output/20260731T134459Z_deterministic/`
+(the Finding 4 list/table retest, 48 cases). That directory is gitignored
+(matches the existing convention for `eval_compose_output/`) — local-only,
+not guaranteed to survive; re-run `python -m scripts.eval_translate_candidates`
+to regenerate it.
