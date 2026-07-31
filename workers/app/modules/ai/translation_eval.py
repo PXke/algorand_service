@@ -57,6 +57,29 @@ from app.modules.gatekeeper.fact_align import EntailmentResult, numeric_entailme
 # ---------------------------------------------------------------------------
 
 
+_THOUSANDS_GROUP_SEP = re.compile(r"(?<=\d)[.,\s](?=\d{3}(?:[.,\s]\d{3})*(?:\D|$))")
+_DECIMAL_COMMA = re.compile(r"(?<=\d),(?=\d)")
+
+
+def _normalize_numeral_punctuation(text: str) -> str:
+    """Collapse European-style number punctuation (comma/period/space thousands grouping, comma decimals) to the English convention extract_numbers() already parses, without touching the digit VALUES.
+
+    Found live 2026-07-31 running the eval harness on real MiLMMT French/
+    Spanish output: "1.4M" came back as "1,4 M" (comma decimal) and
+    "900,000" as "900 000" (French, space-grouped) or "900.000" (Spanish,
+    period-grouped) -- all correct in their own language, all unparseable
+    by fact_align's US/UK-formatted _NUM_RE, which shattered each into 2-3
+    garbage "ungrounded" fragments. A thousands separator is only ever
+    followed by an exact 3-digit group (then either another such group or
+    the end of the number); a decimal separator never is -- that
+    distinction, not knowing which language it is, is what lets this stay
+    locale-agnostic across all 8 target languages rather than hardcoding a
+    per-language rule.
+    """
+    text = _THOUSANDS_GROUP_SEP.sub("", text)
+    return _DECIMAL_COMMA.sub(".", text)
+
+
 def digit_consistency(
     source_text: str, translated_text: str, *, tol: float = 0.02
 ) -> EntailmentResult:
@@ -68,17 +91,23 @@ def digit_consistency(
     already parse Extended Arabic-Indic (۰-۹), Arabic-Indic (٠-٩), and
     Devanagari (०-९) digits natively (verified 2026-07-31 -- `float("۱۲۳")
     == 123.0`), so extract_numbers() reads a translated "۱۲۳" the same as a
-    source "123".
+    source "123". Both texts pass through ``_normalize_numeral_punctuation``
+    first (see its docstring) so European thousands/decimal punctuation
+    doesn't shatter into false "ungrounded" fragments.
 
     Known gap: unit-class markers ($, %, "million"/"billion",
     "bytes"/"bits") are English/Latin-script pattern matches only -- a
-    translated percent sign or magnitude WORD won't be recognized as a
-    suffix and falls back to the "plain" class, which is compatible with
-    "currency"/"bytes" but NOT "percent"/"bits"/"multiplier". This can
-    produce a false-positive drift report for those three classes; read the
-    ``ungrounded`` list before concluding a real defect.
+    translated percent SIGN (e.g. Arabic ٪) or magnitude WORD won't be
+    recognized as a suffix and falls back to the "plain" class, which is
+    compatible with "currency"/"bytes" but NOT "percent"/"bits"/"multiplier".
+    This can produce a false-positive drift report for those three classes;
+    read the ``ungrounded`` list before concluding a real defect.
     """
-    return numeric_entailment_score(source_text, translated_text, tol=tol)
+    return numeric_entailment_score(
+        _normalize_numeral_punctuation(source_text),
+        _normalize_numeral_punctuation(translated_text),
+        tol=tol,
+    )
 
 
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")

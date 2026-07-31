@@ -57,6 +57,28 @@ def test_digit_consistency_documents_the_percent_glyph_gap() -> None:
     assert "۴.۲" in result.ungrounded
 
 
+def test_digit_consistency_handles_french_comma_decimal_with_spaced_magnitude() -> None:
+    """Regression for a real false positive hit running the eval harness 2026-07-31: MiLMMT rendered "1.4M" as French "1,4 M" (comma decimal, space before the magnitude letter) -- must not shatter into two ungrounded fragments."""
+    result = te.digit_consistency(
+        "DeFi tooling got 1.4M ALGO.", "Les outils DeFi ont reçu 1,4 M d'ALGO."
+    )
+    assert result.ungrounded == ()
+
+
+def test_digit_consistency_handles_space_and_period_thousands_grouping() -> None:
+    """Regression for real false positives hit running the eval harness 2026-07-31: French renders 900,000 as "900 000" (space-grouped), Spanish as "900.000" (period-grouped) -- neither is an ungrounded value, just a different grouping character than the English source's comma."""
+    fr = te.digit_consistency("900,000 ALGO allocated.", "900 000 ALGO alloué.")
+    es = te.digit_consistency("900,000 ALGO allocated.", "900.000 ALGO asignado.")
+    assert fr.ungrounded == ()
+    assert es.ungrounded == ()
+
+
+def test_digit_consistency_still_treats_a_short_decimal_as_a_decimal() -> None:
+    """The thousands-vs-decimal heuristic hinges on an exact 3-digit group after the separator -- a genuine 1-2 digit decimal (12.5, or its comma-decimal equivalent) must not be swept up as if it were a thousands separator."""
+    result = te.digit_consistency("Grew 12.5% this quarter.", "Creció un 12,5% este trimestre.")
+    assert result.ungrounded == ()
+
+
 # --- list_table_row_count / structural_alignment ----------------------------
 
 
