@@ -399,11 +399,88 @@ _BARE_URL = re.compile(r"^https?://\S+$")
 # nonsense. Revisit if early runs show it's too tame or too wild.
 _SAMPLE_TEMPERATURE = 0.7
 
+# --- list/table structural splitting -----------------------------------
+# Motivated by the 2026-07-31 survey run: every dedicated seq2seq candidate
+# (M2M-100, OPUS-MT, SeamlessM4T -- everything except MiLMMT) destroyed
+# markdown tables outright (repetition-loop degeneration, actual data loss)
+# and collapsed lists into one run-on line, because none of them were
+# trained on anything that looks like markdown table/list syntax -- it's
+# far out of distribution for a model trained on sentence-level parallel
+# corpora. The fix mirrors how headings are already handled just above:
+# strip the markdown syntax, translate ONLY the isolated text content (the
+# short-phrase input these models were actually trained on), reassemble
+# the structure ourselves outside the model call. This makes a
+# structural_mismatch/row_diff impossible by construction for these two
+# cases, since the harness controls the reassembly, not the model.
+#
+# Scoped to BLOCK-level structural units (list items, table cells) only --
+# never inline spans (bold/italic/links inside a sentence). Splitting
+# there would fragment a natural sentence mid-thought for no evidence-based
+# benefit; nothing in the survey showed inline-span corruption.
+#
+# Eval-harness only, by design (2026-07-31) -- NOT ported into
+# local_translate.py's production _translate_block. MiLMMT (production's
+# other engine) never needed this fix; SeamlessM4T (production's live
+# Pashto engine) showed the identical defect in this survey and is a real,
+# separate follow-up, not something silently fixed here.
+
+_LIST_ITEM_SPLIT = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+)(.*)$")
+_TABLE_ROW_SPLIT = re.compile(r"^\s*\|(.*)\|\s*$")
+_SEPARATOR_CELL = re.compile(r"^\s*:?-+:?\s*$")
+
+
+def _is_list_block(text: str) -> bool:
+    lines = [line for line in text.split("\n") if line.strip()]
+    return bool(lines) and all(_LIST_ITEM_SPLIT.match(line) for line in lines)
+
+
+def _is_table_block(text: str) -> bool:
+    lines = [line for line in text.split("\n") if line.strip()]
+    return bool(lines) and all(_TABLE_ROW_SPLIT.match(line) for line in lines)
+
+
+def _translate_list_block(
+    candidate: Candidate, text: str, src_lang: str, tgt_lang: str, *, sample: bool
+) -> str:
+    """Translate each list item's text in isolation, reassembling with its original bullet/number prefix -- same principle as heading handling, applied per item instead of once per block."""
+    out_lines = []
+    for line in text.split("\n"):
+        match = _LIST_ITEM_SPLIT.match(line)
+        if not match or not match.group(2).strip():
+            out_lines.append(line)
+            continue
+        prefix, content = match.group(1), match.group(2)
+        out_lines.append(
+            prefix + candidate.translate_fn(content, src_lang, tgt_lang, sample=sample)
+        )
+    return "\n".join(out_lines)
+
+
+def _translate_table_block(
+    candidate: Candidate, text: str, src_lang: str, tgt_lang: str, *, sample: bool
+) -> str:
+    """Translate each table cell's text in isolation, reassembling the row ourselves -- the separator row (all-dashes cells) passes through unchanged, never sent to the model."""
+    out_lines = []
+    for line in text.split("\n"):
+        match = _TABLE_ROW_SPLIT.match(line)
+        if not match:
+            out_lines.append(line)
+            continue
+        cells = [c.strip() for c in match.group(1).split("|")]
+        if all(_SEPARATOR_CELL.match(c) for c in cells):
+            out_lines.append(line)
+            continue
+        translated_cells = [
+            candidate.translate_fn(c, src_lang, tgt_lang, sample=sample) if c else c for c in cells
+        ]
+        out_lines.append("| " + " | ".join(translated_cells) + " |")
+    return "\n".join(out_lines)
+
 
 def translate_block_with(
     candidate: Candidate, text: str, src_lang: str, tgt_lang: str, *, sample: bool = False
 ) -> str:
-    """Apply one candidate's translate_fn to one markdown block, mirroring local_translate._translate_block's structural pass-throughs (code fences, bare URLs, heading prefix stripped/reapplied outside the model call)."""
+    """Apply one candidate's translate_fn to one markdown block, mirroring local_translate._translate_block's structural pass-throughs (code fences, bare URLs, heading prefix stripped/reapplied outside the model call) plus this module's own list/table cell-level splitting (see the comment above)."""
     stripped = text.strip()
     if not stripped:
         return text
@@ -413,6 +490,10 @@ def translate_block_with(
     if heading:
         prefix, content = heading.group(1), heading.group(2)
         return prefix + candidate.translate_fn(content, src_lang, tgt_lang, sample=sample)
+    if _is_table_block(text):
+        return _translate_table_block(candidate, text, src_lang, tgt_lang, sample=sample)
+    if _is_list_block(text):
+        return _translate_list_block(candidate, text, src_lang, tgt_lang, sample=sample)
     return candidate.translate_fn(text, src_lang, tgt_lang, sample=sample)
 
 

@@ -221,6 +221,56 @@ def test_translate_block_with_forwards_sample_flag() -> None:
     assert calls == [("plain text", "en", "fr", True)]
 
 
+# --- translate_block_with: list/table cell-level splitting ------------------
+
+
+def test_translate_block_with_splits_list_items_and_preserves_prefixes() -> None:
+    """Each item's text is translated in isolation and reassembled with its original bullet prefix -- this is the actual fix for the survey's list-collapse finding."""
+    candidate, calls = _stub_candidate()
+    block = "- one\n- two\n- three"
+    result = te.translate_block_with(candidate, block, "en", "fr")
+    assert result == "- ONE\n- TWO\n- THREE"
+    assert calls == [
+        ("one", "en", "fr", False),
+        ("two", "en", "fr", False),
+        ("three", "en", "fr", False),
+    ]
+
+
+def test_translate_block_with_preserves_numbered_list_prefixes() -> None:
+    """Numbered list markers (1., 2)) are preserved the same way bullet markers are."""
+    candidate, calls = _stub_candidate()
+    block = "1. first\n2. second"
+    result = te.translate_block_with(candidate, block, "en", "fr")
+    assert result == "1. FIRST\n2. SECOND"
+    assert calls == [("first", "en", "fr", False), ("second", "en", "fr", False)]
+
+
+def test_translate_block_with_splits_table_cells_and_skips_the_separator_row() -> None:
+    """Each cell is translated in isolation and reassembled into the row -- the all-dashes separator row is never sent to the model at all, just passed through verbatim. This is the actual fix for the survey's table-destruction finding."""
+    candidate, calls = _stub_candidate()
+    block = "| Category | Count |\n| --- | --- |\n| tools | 18 |\n| training | 12 |"
+    result = te.translate_block_with(candidate, block, "en", "fr")
+    assert result == ("| CATEGORY | COUNT |\n| --- | --- |\n| TOOLS | 18 |\n| TRAINING | 12 |")
+    assert calls == [
+        ("Category", "en", "fr", False),
+        ("Count", "en", "fr", False),
+        ("tools", "en", "fr", False),
+        ("18", "en", "fr", False),
+        ("training", "en", "fr", False),
+        ("12", "en", "fr", False),
+    ]
+
+
+def test_translate_block_with_leaves_a_plain_paragraph_untouched_by_splitting() -> None:
+    """A regular paragraph (not a pure list or table block) still goes through as one whole-block call -- splitting must not misfire on ordinary prose."""
+    candidate, calls = _stub_candidate()
+    te.translate_block_with(
+        candidate, "Just a normal sentence with a dash - not a list.", "en", "fr"
+    )
+    assert calls == [("Just a normal sentence with a dash - not a list.", "en", "fr", False)]
+
+
 # --- CANDIDATES registry sanity ---------------------------------------------
 
 
