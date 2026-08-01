@@ -29,13 +29,26 @@ dev = [
   "ruff>=0.8.0",
   "vulture>=2.14",
 ]
-# Local MTTH gatekeeper (ModernBERT). Heavy + CPU-tuned; installed only on the
-# dedicated evaluation worker, never pulled into the base runtime. IPEX is
-# optional at runtime — training/inference fall back to plain torch without it.
+# Local MTTH gatekeeper (ModernBERT) + local_translate.py's CPU translation
+# engines (MiLMMT, SeamlessM4T). Heavy + CPU-tuned. Deploy uses one shared
+# venv for every service (see deploy.sh), so this extra is compiled into the
+# base requirements.lock.txt rather than kept out of it — every service gets
+# torch/transformers on disk, but only the dedicated gatekeeper-eval and
+# celery-translate workers ever actually import them at runtime.
+#
+# intel-extension-for-pytorch (IPEX) was dropped 2026-08-01: no wheel exists
+# for this project's pinned Python 3.14 at all, and the one version range
+# that would otherwise resolve (2.2.0-2.5.0) is yanked upstream for a
+# security issue -- `uv pip compile` cannot solve this extra with IPEX in it,
+# full stop, on any Python 3.14 install. This extra had never actually been
+# locked/deployed before (requirements.lock.txt had no ml packages in it at
+# all until this same date), so this was a latent, pre-existing gap, not a
+# regression. Training/inference already fall back to plain torch without
+# IPEX per the gatekeeper's own code -- nothing here needed it.
 ml = [
   "torch>=2.2.0",
   "transformers>=4.48.0",
-  "intel-extension-for-pytorch>=2.2.0",
+  "sentencepiece>=0.2.0",
 ]
 
 [tool.pytest.ini_options]

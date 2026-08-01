@@ -330,7 +330,13 @@ if [[ "\$(cat '${SHARED}/.requirements.sha256' 2>/dev/null)" == "\$REQ_HASH" ]];
   echo "deps unchanged — skipping pip install"
 else
   '${VENV}/bin/pip' install --quiet --upgrade pip setuptools wheel
-  '${VENV}/bin/pip' install --quiet -r '${CURRENT}/requirements.lock.txt'
+  # --extra-index-url: the lock file pins torch to its CPU-only build
+  # (==X.Y.Z+cpu, no bundled CUDA) -- plain PyPI doesn't have that exact
+  # local version, only download.pytorch.org/whl/cpu does. See the matching
+  # comment in deploy/scripts/lock_requirements.sh for why this must stay
+  # in sync with how the lock file itself is generated.
+  '${VENV}/bin/pip' install --quiet --extra-index-url https://download.pytorch.org/whl/cpu \
+    -r '${CURRENT}/requirements.lock.txt'
   echo "\$REQ_HASH" > '${SHARED}/.requirements.sha256'
   # Playwright browser is versioned to the playwright package — only refresh
   # when the lock file (and thus pip install) changes.
