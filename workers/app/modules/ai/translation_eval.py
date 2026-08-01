@@ -663,46 +663,18 @@ _M2M100 = Candidate(
     unload_fn=unload_all,
 )
 
-# --- MADLAD-400-3B-MT (google/madlad400-3b-mt, apache-2.0, confirmed via HF
-# API 2026-07-31). Found by a live HF search for models tagged
-# pipeline_tag=translation, sorted by downloads -- overlooked in the
-# original candidate research despite being a well-established, 248K-
-# download Google T5 model. Covers all 8 of our languages, confirmed via
-# its own tag list. Target language is selected with a `<2id>` prefix
-# token on the input text (T5/MADLAD's own convention, no source-language
-# specification needed -- unlike the OPUS-MT-ine loader's `>>id<<`, this
-# one has no `<<` closing marker).
-
-_MADLAD_MODEL_ID = "google/madlad400-3b-mt"
-
-
-def _madlad_translate(
-    text: str,
-    src_lang: str,  # noqa: ARG001 -- MADLAD has no source-language input, target-only prefix
-    tgt_lang: str,
-    *,
-    sample: bool = False,
-) -> str:
-    import torch
-    from transformers import T5ForConditionalGeneration, T5Tokenizer
-
-    tokenizer, model = _load(_MADLAD_MODEL_ID, T5ForConditionalGeneration, T5Tokenizer)
-    inputs = tokenizer(f"<2{tgt_lang}> {text}", return_tensors="pt")
-    torch.set_num_threads(_MAX_THREADS)
-    gen_kwargs: dict[str, object] = (
-        {"do_sample": True, "temperature": _SAMPLE_TEMPERATURE} if sample else {}
-    )
-    with torch.inference_mode():
-        out = model.generate(**inputs, max_new_tokens=512, **gen_kwargs)
-    return tokenizer.decode(out[0], skip_special_tokens=True).strip()
-
-
-_MADLAD = Candidate(
-    name="madlad400-3b-mt",
-    license="Apache-2.0",
-    translate_fn=_madlad_translate,
-    unload_fn=unload_all,
-)
+# MADLAD-400-3B-MT (google/madlad400-3b-mt) was tried and dropped 2026-08-01:
+# despite Apache-2.0 licensing and covering all 8 survey languages, the
+# checkpoint itself produces degenerate garbage output -- confirmed with the
+# EXACT documented example from Google/jbochi's own README ("<2pt> I love
+# pizza!" -> should be "Eu adoro pizza!"), which instead returned the string
+# "1000000000000000000". A load-time warning ("tied weights mapping...
+# present in the checkpoints with different values, so we will NOT tie
+# them") strongly suggests the output embedding layer is desynced from the
+# trained weights in this specific converted checkpoint -- not a bug in our
+# loader or prompt, the model card's own usage example fails identically.
+# Not retried at a different revision/quantization; may be worth revisiting
+# if the repo is ever re-converted.
 
 # --- Tencent Hy-MT2-1.8B (apache-2.0, verified 2026-07-31 by reading the
 # actual LICENSE.txt line by line, not just the metadata tag -- the
@@ -854,12 +826,12 @@ _SEAMLESS_BASELINE = Candidate(
 # Adding a candidate later means adding one Candidate to one list here --
 # nothing about the runner or the checks above needs to change.
 CANDIDATES: dict[str, list[Candidate]] = {
-    "fr": [_MILMMT_BASELINE, _opus_mt_candidate("fr"), _M2M100, _MADLAD, _HYMT2],
-    "es": [_MILMMT_BASELINE, _opus_mt_candidate("es"), _M2M100, _MADLAD, _HYMT2],
-    "ar": [_MILMMT_BASELINE, _opus_mt_candidate("ar"), _M2M100, _MADLAD, _HYMT2],
-    "ru": [_MILMMT_BASELINE, _opus_mt_candidate("ru"), _M2M100, _MADLAD, _HYMT2],
-    "zh": [_MILMMT_BASELINE, _opus_mt_candidate("zh"), _M2M100, _MADLAD, _HYMT2],
-    "hi": [_MILMMT_BASELINE, _opus_mt_candidate("hi"), _M2M100, _MADLAD, _HYMT2],
-    "fa": [_MILMMT_BASELINE, _M2M100, _opus_mt_ine_candidate("fa"), _MADLAD, _HYMT2],
-    "ps": [_SEAMLESS_BASELINE, _M2M100, _opus_mt_ine_candidate("ps"), _MADLAD],
+    "fr": [_MILMMT_BASELINE, _opus_mt_candidate("fr"), _M2M100, _HYMT2],
+    "es": [_MILMMT_BASELINE, _opus_mt_candidate("es"), _M2M100, _HYMT2],
+    "ar": [_MILMMT_BASELINE, _opus_mt_candidate("ar"), _M2M100, _HYMT2],
+    "ru": [_MILMMT_BASELINE, _opus_mt_candidate("ru"), _M2M100, _HYMT2],
+    "zh": [_MILMMT_BASELINE, _opus_mt_candidate("zh"), _M2M100, _HYMT2],
+    "hi": [_MILMMT_BASELINE, _opus_mt_candidate("hi"), _M2M100, _HYMT2],
+    "fa": [_MILMMT_BASELINE, _M2M100, _opus_mt_ine_candidate("fa"), _HYMT2],
+    "ps": [_SEAMLESS_BASELINE, _M2M100, _opus_mt_ine_candidate("ps")],
 }
