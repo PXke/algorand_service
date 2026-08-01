@@ -217,3 +217,58 @@ def test_translate_article_local_unchanged_single_call_contract(
         english_title="T", english_summary="S", english_body="B", target_language="fr"
     )
     assert out == {"title": "t", "summary": "s", "body": "b"}
+
+
+# --- list/table cell-splitting: seq2seq (SeamlessM4T) only ------------------
+
+
+def _stub_seamless_text(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Fake _translate_text_seamless: uppercases and records every call's input text, so a test can assert exactly what got sent to the model."""
+    calls: list[str] = []
+
+    def _fake(text: str, _target_language: str) -> str:
+        calls.append(text)
+        return text.upper()
+
+    monkeypatch.setattr(lt, "_translate_text_seamless", _fake)
+    return calls
+
+
+def test_translate_block_splits_list_items_for_seq2seq(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pure list block routed to seq2seq is translated item-by-item and reassembled with its original bullet prefix -- the actual production fix for the survey's list-collapse finding."""
+    calls = _stub_seamless_text(monkeypatch)
+    block = "- one\n- two\n- three"
+    result = lt._translate_block(block, "ps", "seq2seq")
+    assert result == "- ONE\n- TWO\n- THREE"
+    assert calls == ["one", "two", "three"]
+
+
+def test_translate_block_splits_table_cells_for_seq2seq(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pure table block routed to seq2seq is translated cell-by-cell and reassembled -- the separator row (all-dashes) is never sent to the model at all."""
+    calls = _stub_seamless_text(monkeypatch)
+    block = "| Category | Count |\n| --- | --- |\n| tools | 18 |"
+    result = lt._translate_block(block, "ps", "seq2seq")
+    assert result == "| CATEGORY | COUNT |\n| --- | --- |\n| TOOLS | 18 |"
+    assert calls == ["Category", "Count", "tools", "18"]
+
+
+def test_translate_block_does_not_split_for_milmmt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same list/table content routed to milmmt goes through as one whole-block call -- MiLMMT is the proven candidate for this, deliberately untouched."""
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        lt, "_translate_text_milmmt", lambda text, lang: calls.append((text, lang)) or text.upper()
+    )
+    block = "- one\n- two"
+    result = lt._translate_block(block, "fr", "milmmt")
+    assert result == block.upper()
+    assert calls == [(block, "fr")]
+
+
+def test_translate_block_plain_paragraph_untouched_by_splitting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A regular paragraph (not a pure list or table) still goes through seq2seq as one whole-block call, even with a dash in it."""
+    calls = _stub_seamless_text(monkeypatch)
+    text = "Just a sentence with a dash - not a list."
+    lt._translate_block(text, "ps", "seq2seq")
+    assert calls == [text]

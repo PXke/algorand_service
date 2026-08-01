@@ -21,13 +21,20 @@ digit-system pinning, colon-label title ban, named-entity preservation -- has
 no home here; it only worked because Mistral is a chat model that follows
 instructions. That machinery is gone, not ported.
 
-Markdown structure inside a block is UNPROVEN for both engines (2026-07-29):
+Markdown structure inside a block, resolved 2026-08-01 by the
+promising-ranking survey (see docs/architecture/translation-model-survey.md):
 headings get their ``#`` prefix stripped and reapplied outside the model call
-(cheap, clearly correct), and code fences / bare URLs pass through untouched,
-but list items and table rows are fed to the model as one block, syntax
-included, with no evidence yet on whether either model preserves them. Check
-real output against real markdown before trusting this on tables (59% of the
-corpus has one).
+(cheap, clearly correct) for both engines, and code fences / bare URLs pass
+through untouched. For lists and tables the two engines differ for real,
+not just "unproven": MiLMMT handles both correctly fed as one whole block
+(the only candidate across the entire survey that did) and is left on that
+path. SeamlessM4T does not -- confirmed to destroy a table outright (real
+data replaced with repetition-loop degeneration, not just reformatting) and
+collapse a list into one run-on line when fed either as a whole block --
+so its path splits list items / table cells into isolated per-item/per-cell
+model calls and reassembles the markdown structure deterministically
+instead (see _translate_block, _is_list_block/_is_table_block). 59% of the
+corpus has a table.
 
 Both models run CPU-only (no GPU on dev or prod). Loaded lazily, cached
 in-process, and reused within a call -- but NEVER both resident at once in
@@ -97,6 +104,21 @@ _MAX_THREADS = max(1, (os.cpu_count() or 2) // 2)
 _HEADING = re.compile(r"^(#{1,6}\s+)(.*)$", re.DOTALL)
 _CODE_FENCE = re.compile(r"^```")
 _BARE_URL = re.compile(r"^https?://\S+$")
+
+# List/table cell-level splitting -- SeamlessM4T (seq2seq) ONLY, see
+# _translate_block. Ported 2026-08-01 from the eval harness
+# (translation_eval.py) after the promising-ranking survey found SeamlessM4T
+# destroys markdown tables outright when fed one as a whole block (real data
+# replaced with repetition-loop degeneration, not just reformatting) and
+# collapses lists into one run-on line -- resolving the "UNPROVEN" risk this
+# module's docstring used to flag, now proven and fixed for this engine.
+# MiLMMT was the ONE candidate across the entire survey that handled both
+# correctly as whole blocks; deliberately NOT touched here to avoid risking
+# an already-proven path for a problem it doesn't have. See
+# docs/architecture/translation-model-survey.md for the full evidence.
+_LIST_ITEM_SPLIT = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+)(.*)$")
+_TABLE_ROW_SPLIT = re.compile(r"^\s*\|(.*)\|\s*$")
+_SEPARATOR_CELL = re.compile(r"^\s*:?-+:?\s*$")
 
 _load_lock = threading.Lock()
 _seamless: dict[str, Any] = {}
@@ -208,8 +230,53 @@ def _translate_text_milmmt(text: str, target_language: str) -> str:
     return tokenizer.decode(generated, skip_special_tokens=True).strip()
 
 
+def _is_list_block(text: str) -> bool:
+    lines = [line for line in text.split("\n") if line.strip()]
+    return bool(lines) and all(_LIST_ITEM_SPLIT.match(line) for line in lines)
+
+
+def _is_table_block(text: str) -> bool:
+    lines = [line for line in text.split("\n") if line.strip()]
+    return bool(lines) and all(_TABLE_ROW_SPLIT.match(line) for line in lines)
+
+
+def _translate_list_block_seamless(text: str, target_language: str) -> str:
+    """Translate each list item's text in isolation, reassembling with its original bullet/number prefix -- same principle as heading handling, applied per item."""
+    out_lines = []
+    for line in text.split("\n"):
+        match = _LIST_ITEM_SPLIT.match(line)
+        if not match or not match.group(2).strip():
+            out_lines.append(line)
+            continue
+        prefix, content = match.group(1), match.group(2)
+        out_lines.append(prefix + _translate_text_seamless(content, target_language))
+    return "\n".join(out_lines)
+
+
+def _translate_table_block_seamless(text: str, target_language: str) -> str:
+    """Translate each table cell's text in isolation, reassembling the row -- the separator row (all-dashes cells) passes through unchanged, never sent to the model."""
+    out_lines = []
+    for line in text.split("\n"):
+        match = _TABLE_ROW_SPLIT.match(line)
+        if not match:
+            out_lines.append(line)
+            continue
+        cells = [c.strip() for c in match.group(1).split("|")]
+        if all(_SEPARATOR_CELL.match(c) for c in cells):
+            out_lines.append(line)
+            continue
+        translated_cells = [_translate_text_seamless(c, target_language) if c else c for c in cells]
+        out_lines.append("| " + " | ".join(translated_cells) + " |")
+    return "\n".join(out_lines)
+
+
 def _translate_block(text: str, target_language: str, engine: str) -> str:
-    """Translate one block, handling the markdown-structure exceptions cheap enough to be safe (see module docstring for what is NOT yet handled)."""
+    """Translate one block, handling the markdown-structure exceptions cheap enough to be safe (see module docstring for what is NOT yet handled).
+
+    List/table cell-level splitting is seq2seq (SeamlessM4T) ONLY -- MiLMMT
+    handles both correctly as a whole block (proven across the full
+    promising-ranking survey) and is deliberately left on its original path.
+    """
     stripped = text.strip()
     if not stripped:
         return text
@@ -220,6 +287,11 @@ def _translate_block(text: str, target_language: str, engine: str) -> str:
     if heading:
         prefix, content = heading.group(1), heading.group(2)
         return prefix + translate_fn(content, target_language)
+    if engine == "seq2seq":
+        if _is_table_block(text):
+            return _translate_table_block_seamless(text, target_language)
+        if _is_list_block(text):
+            return _translate_list_block_seamless(text, target_language)
     return translate_fn(text, target_language)
 
 
