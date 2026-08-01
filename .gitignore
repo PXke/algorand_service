@@ -21,3 +21,6 @@ build/
 
 # Compose prompt eval harness output (local, not for commit)
 workers/scripts/eval_compose_output/
+
+# Translation candidate eval harness output (local, not for commit)
+workers/scripts/eval_translate_output/
