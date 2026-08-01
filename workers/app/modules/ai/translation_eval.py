@@ -724,7 +724,13 @@ def _hymt2_translate(
         f"the translated result without any additional explanation:\n\n{text}"
     )
     messages = [{"role": "user", "content": prompt}]
-    input_ids = tokenizer.apply_chat_template(
+    # Tencent's own README example does `model.generate(**inputs, ...)`, which
+    # only type-checks if apply_chat_template returns a dict/BatchEncoding --
+    # confirmed empirically (transformers 5.14.1 here): with return_tensors="pt"
+    # alone it returns exactly that, not a raw tensor, so this unpacks with
+    # **inputs and reads inputs["input_ids"].shape for the output slice below,
+    # matching their example rather than my own earlier (wrong) assumption.
+    inputs = tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, return_tensors="pt"
     )
     torch.set_num_threads(_MAX_THREADS)
@@ -732,8 +738,8 @@ def _hymt2_translate(
         {"do_sample": True, "temperature": _SAMPLE_TEMPERATURE} if sample else {"do_sample": False}
     )
     with torch.inference_mode():
-        out = model.generate(input_ids, max_new_tokens=max(256, int(len(text) * 1.6)), **gen_kwargs)
-    generated = out[0][input_ids.shape[-1] :]
+        out = model.generate(**inputs, max_new_tokens=max(256, int(len(text) * 1.6)), **gen_kwargs)
+    generated = out[0][inputs["input_ids"].shape[-1] :]
     return tokenizer.decode(generated, skip_special_tokens=True).strip()
 
 
