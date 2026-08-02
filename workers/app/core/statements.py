@@ -512,8 +512,8 @@ class ArticleMatchStmts:
     """Prepared statements for article match-key lookups (edit-vs-create routing)."""
 
     FIND_BY_KEY = _Stmt(
-        "SELECT article_id, edit_window_closes_at FROM algorand_platform.article_match_keys "
-        "WHERE key_type = ? AND key_value = ?"
+        "SELECT article_id, linked_at, edit_window_closes_at "
+        "FROM algorand_platform.article_match_keys WHERE key_type = ? AND key_value = ?"
     )
     INSERT_KEY = _Stmt(
         "INSERT INTO algorand_platform.article_match_keys ("

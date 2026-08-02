@@ -137,6 +137,25 @@ def service_has_article(service_id: str) -> bool:
         return True
 
 
+def find_latest_service_article(service_id: str) -> str | None:
+    """The most recently published/edited article for this service, by match-key linked_at, or None. Unlike find_article_for_followup, this ignores the edit window entirely — it answers "what did we last say about this service", not "is it still editable". Fails open (None) on store errors: the safe default is no comparison baseline, not a false duplicate block."""
+    sid = (service_id or "").strip().lower()
+    if not sid:
+        return None
+    try:
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ArticleMatchStmts
+
+        rows = get_cassandra_session().execute(ArticleMatchStmts.FIND_BY_KEY, ("service_id", sid))
+        best_id, best_linked_at = None, None
+        for row in rows:
+            if best_linked_at is None or (row.linked_at and row.linked_at > best_linked_at):
+                best_id, best_linked_at = str(row.article_id), row.linked_at
+        return best_id
+    except Exception:
+        return None
+
+
 def find_article_for_followup(
     keys: list[tuple[str, str]],
     *,

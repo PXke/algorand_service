@@ -542,6 +542,19 @@ NOVELTY_CONTENT_WINDOW_HOURS = env_int("NOVELTY_CONTENT_WINDOW_HOURS", 24 * 70)
 # penalized hard for a week and freely allowed again after ~10 weeks.
 NOVELTY_DECAY_FULL_DAYS = env_int("NOVELTY_DECAY_FULL_DAYS", 7)
 NOVELTY_DECAY_ZERO_DAYS = env_int("NOVELTY_DECAY_ZERO_DAYS", 70)
+# Post-compose, same-service duplicate check: catches a page that was
+# genuinely reworded (so the title/content novelty checks above, which
+# compare the SOURCE page against recent articles, see enough lexical
+# difference to pass) but reports the same underlying facts as the service's
+# own last article (Steak Pool, 2026-08-02: "1.9M STEAK via validator
+# commission" vs "1.9M tokens via validator economics" 21 days apart --
+# same 1.9M/11.16%/1.69%/#13 figures, 69.8% of the new draft's numbers
+# already grounded in the prior article). Independent of Typesense (a direct
+# match-key lookup + Cassandra fetch), so it isn't exposed to index-lag gaps.
+# total<MIN_CLAIMS is never blocked -- too few numbers to be meaningful
+# evidence either way.
+ARTICLE_DUPLICATE_NUMERIC_OVERLAP = env_float("ARTICLE_DUPLICATE_NUMERIC_OVERLAP", 0.6)
+ARTICLE_DUPLICATE_MIN_CLAIMS = env_int("ARTICLE_DUPLICATE_MIN_CLAIMS", 3)
 # Selection ranking: relevance, novelty, and source timeliness. Relevance is the
 # spine — it MULTIPLIES, so an off-topic page scores ~0 no matter how "novel" or
 # "fresh" it looks. Timeliness uses page metadata and title/lead dates so a

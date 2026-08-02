@@ -231,6 +231,49 @@ def test_same_service_novelty_bar_blocks_the_alpha_arcade_pair(
     assert outcome["similarity"] == 0.46
 
 
+def test_post_compose_duplicate_veto_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A draft reporting the same facts as the service's own last article vetoes with a same_facts_as_own_recent_article outcome. Regression pin for the Steak Pool incident (2026-08-02): the page was genuinely reworded (so _novelty_duplicate_veto's page-title comparison passed) but the underlying figures were unchanged."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.composed_duplicates_latest_service_article",
+        lambda **_kw: (True, "prior-article-id", 0.7),
+    )
+    composed = SimpleNamespace(title="New title", summary="New summary", body="New body")
+    outcome = pt._post_compose_duplicate_veto(
+        composed, "algostakepool-com", PublishKind.CONTENT_UPDATE
+    )
+    assert outcome == {
+        "status": "duplicate",
+        "reason": "same_facts_as_own_recent_article",
+        "service_id": "algostakepool-com",
+        "closest_article_id": "prior-article-id",
+        "numeric_overlap": 0.7,
+    }
+
+
+def test_post_compose_duplicate_veto_passes_when_not_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passes (returns None) when the numeric-overlap check finds no duplicate."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.composed_duplicates_latest_service_article",
+        lambda **_kw: (False, "", 0.1),
+    )
+    composed = SimpleNamespace(title="New title", summary="New summary", body="New body")
+    assert pt._post_compose_duplicate_veto(composed, "svc", PublishKind.CONTENT_UPDATE) is None
+
+
+def test_post_compose_duplicate_veto_scoped_to_content_update_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never even runs the comparison for discovery/breaking coverage -- there's no meaningful "own prior article" to repeat."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.composed_duplicates_latest_service_article",
+        lambda **_kw: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    composed = SimpleNamespace(title="T", summary="S", body="B")
+    assert pt._post_compose_duplicate_veto(composed, "svc", PublishKind.SERVICE_DISCOVERY) is None
+
+
 def test_same_similarity_from_a_DIFFERENT_service_still_passes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

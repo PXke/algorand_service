@@ -1,9 +1,14 @@
 """Building match keys and resolving edit-vs-create publish mode."""
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from app.modules.newspaper.article_matching import build_match_keys, resolve_publish_mode
+from app.modules.newspaper.article_matching import (
+    build_match_keys,
+    find_latest_service_article,
+    resolve_publish_mode,
+)
 
 D13 = (Path(__file__).parent / "fixtures" / "algoblow_d13_alert.txt").read_text(encoding="utf-8")
 
@@ -109,3 +114,36 @@ def test_resolve_publish_mode_create_when_no_match() -> None:
         )
     assert info["publish_mode"] == "create"
     assert info["linked_article_id"] is None
+
+
+class _Row:
+    def __init__(self, article_id: str, linked_at: datetime) -> None:
+        self.article_id = article_id
+        self.linked_at = linked_at
+
+
+def test_find_latest_service_article_picks_the_newest_linked_at() -> None:
+    """Among several match-key rows for a service, returns the one with the latest linked_at, not the first/last by scan order."""
+    now = datetime.now(tz=UTC)
+    rows = [
+        _Row("older-article", now - timedelta(days=21)),
+        _Row("newest-article", now - timedelta(hours=2)),
+        _Row("middle-article", now - timedelta(days=5)),
+    ]
+    with patch("app.core.cassandra.get_cassandra_session") as mock_session:
+        mock_session.return_value.execute.return_value = rows
+        result = find_latest_service_article("algostakepool-com")
+    assert result == "newest-article"
+
+
+def test_find_latest_service_article_none_when_service_never_published() -> None:
+    """Returns None (not an exception) when the service has no match-key rows at all."""
+    with patch("app.core.cassandra.get_cassandra_session") as mock_session:
+        mock_session.return_value.execute.return_value = []
+        assert find_latest_service_article("brand-new-service") is None
+
+
+def test_find_latest_service_article_fails_open_on_store_error() -> None:
+    """A Cassandra error returns None rather than raising -- the safe default is no comparison baseline."""
+    with patch("app.core.cassandra.get_cassandra_session", side_effect=RuntimeError("boom")):
+        assert find_latest_service_article("algostakepool-com") is None

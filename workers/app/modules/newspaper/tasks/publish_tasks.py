@@ -552,6 +552,28 @@ def _novelty_duplicate_veto(ctx: _ComposeVetoCtx) -> dict | None:
     return None
 
 
+def _post_compose_duplicate_veto(
+    composed: ArticleComposeResult, service_id: str, publish_kind: PublishKind
+) -> dict | None:
+    """Same-facts guard: catches a genuinely reworded source page that still reports the same facts as this service's own last article -- the shape _novelty_duplicate_veto's page_title/page_text comparison misses (Steak Pool, 2026-08-02). Runs post-compose (needs the draft's own numbers), CONTENT_UPDATE only -- discovery/breaking coverage has no meaningful "own prior article" to repeat."""
+    if publish_kind != PublishKind.CONTENT_UPDATE:
+        return None
+    from app.modules.newspaper.article_grader import composed_duplicates_latest_service_article
+
+    is_dup, prior_id, overlap = composed_duplicates_latest_service_article(
+        title=composed.title, summary=composed.summary, body=composed.body, service_id=service_id
+    )
+    if not is_dup:
+        return None
+    return {
+        "status": "duplicate",
+        "reason": "same_facts_as_own_recent_article",
+        "service_id": service_id,
+        "closest_article_id": prior_id,
+        "numeric_overlap": round(overlap, 2),
+    }
+
+
 def _pending_review_veto(ctx: _ComposeVetoCtx) -> dict | None:
     """A pending review already covers this exact URL — skip BEFORE paying for a Mistral compose, not after. This used to be a post-compose check only (still kept below as a safety net for the race window during a multi- minute compose), which meant a highly dynamic page — bank.testnet. algorand.network's wallet-connect/session chrome makes it register as "changed" on nearly every poll — could burn a full ~4min compose 5x in one day only to have every result but the first silently discarded with no article stored and no review ever updated (2026-07-10)."""
     from app.modules.crawler.classifier_review_store import has_pending_review_for_url
@@ -1417,6 +1439,10 @@ def publish_from_queued_row(
     )
     if compose_error is not None:
         return compose_error
+
+    duplicate_outcome = _post_compose_duplicate_veto(composed, row.service_id, publish_kind)
+    if duplicate_outcome is not None:
+        return duplicate_outcome
 
     tier = _maybe_upgrade_to_breaking(tier, composed, row)
 

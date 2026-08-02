@@ -226,6 +226,49 @@ def recent_same_service_similarity(title: str, service_id: str) -> tuple[float, 
     return _closest_similarity(_tokens(title), recent)
 
 
+def composed_duplicates_latest_service_article(
+    *, title: str, summary: str, body: str, service_id: str
+) -> tuple[bool, str, float]:
+    """Whether a composed draft reports the same facts as this service's own last article.
+
+    recent_title_similarity/recent_content_similarity above both compare the
+    SOURCE PAGE (title/text at scrape time) against recent articles -- fine
+    for catching a near-identical re-crawl, but a genuine site reword slips
+    past both while reporting the identical underlying facts (Steak Pool,
+    2026-08-02: differently-worded page, same 1.9M STEAK / 11.16% / 1.69% /
+    validator #13 figures as the article published 21 days earlier). This
+    check instead compares the DRAFT's own numeric claims against the
+    service's most recently linked article, via a direct Cassandra
+    match-key lookup -- no Typesense dependency, so it isn't exposed to
+    index-lag gaps the content-similarity check above is.
+
+    Returns (is_duplicate, prior_article_id, numeric_overlap_score). Fails
+    open (not a duplicate) when there's no prior article, too few numeric
+    claims to be meaningful evidence, or on any store error.
+    """
+    from app.core import config
+    from app.modules.gatekeeper.fact_align import numeric_entailment_score
+    from app.modules.newspaper.article_matching import find_latest_service_article
+
+    try:
+        prior_id = find_latest_service_article(service_id)
+        if not prior_id:
+            return False, "", 0.0
+        from app.modules.newspaper.article_store import get_article
+
+        prior = get_article(prior_id)
+        if prior is None:
+            return False, "", 0.0
+        prior_text = f"{prior.title}\n{prior.summary}\n{prior.body}"
+        new_text = f"{title}\n{summary}\n{body}"
+        result = numeric_entailment_score(prior_text, new_text, tol=0.05)
+        if result.total < config.ARTICLE_DUPLICATE_MIN_CLAIMS:
+            return False, prior_id, result.score
+        return result.score >= config.ARTICLE_DUPLICATE_NUMERIC_OVERLAP, prior_id, result.score
+    except Exception:
+        return False, "", 0.0
+
+
 def recent_content_similarity(title: str, text: str = "") -> tuple[float, str]:
     """(closest_similarity, that_article_title) of a candidate vs recently published articles, retrieved by CONTENT (title+summary+body) from the Typesense articles index rather than by headline tokens. This catches the same-topic / different-headline dupes that recent_title_similarity misses (e.g. "Pera adds staking" vs "Explore Pera's new feature").
 
