@@ -1148,3 +1148,235 @@ def test_mark_article_document_served_skips_without_article_id_or_ip(
     monkeypatch.setattr(a, "_uv_redis", _boom)
     a.mark_article_document_served("", "8.8.8.8", "Mozilla/5.0")
     a.mark_article_document_served("article-1", None, "Mozilla/5.0")
+
+
+class _FakeStageRedis:
+    """Minimal in-memory stand-in for the direct-pageview staging tests: set/get/delete plus one sorted set."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+        self.zset: dict[str, float] = {}
+
+    def set(self, k: str, v: object, ex: int | None = None) -> None:  # noqa: ARG002
+        self.store[k] = v
+
+    def get(self, k: str) -> str | None:
+        return self.store.get(k)
+
+    def delete(self, k: str) -> None:
+        self.store.pop(k, None)
+
+    def zadd(self, name: str, mapping: dict) -> None:  # noqa: ARG002 -- single zset per test
+        self.zset.update(mapping)
+
+    def zrangebyscore(
+        self,
+        name: str,  # noqa: ARG002
+        min: float,  # noqa: A002
+        max: float,  # noqa: A002
+        start: int | None = None,
+        num: int | None = None,
+    ) -> list:
+        members = sorted(
+            (m for m, score in self.zset.items() if min <= score <= max),
+            key=lambda m: self.zset[m],
+        )
+        if start is not None and num is not None:
+            members = members[start : start + num]
+        return members
+
+    def zrem(self, name: str, member: str) -> None:  # noqa: ARG002
+        self.zset.pop(member, None)
+
+
+def test_article_document_recently_served_confirms_pending_direct_pageview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The view-count 'second hand' also confirms any pageview held pending by _stage_direct_pageview for the same (article, ip, ua) -- one real signal, reused for both gates."""
+    fake = _FakeStageRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    a._stage_direct_pageview(
+        article_id="art-1",
+        client_ip="1.2.3.4",
+        user_agent="Mozilla/5.0",
+        day="2026-08-02",
+        path="/news/articles/art-1",
+        referer=None,
+        campaign=None,
+        accept_language="en-US",
+    )
+    a.mark_article_document_served("art-1", "1.2.3.4", "Mozilla/5.0")
+    assert a.article_document_recently_served("art-1", "1.2.3.4", "Mozilla/5.0") is True
+
+    token = a._doc_seen_token("art-1", "1.2.3.4", "Mozilla/5.0")
+    assert fake.store.get(f"{a._DIRECT_CONFIRM_PREFIX}{token}") == "1"
+
+
+def test_article_document_recently_served_does_not_confirm_an_unseen_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client that never requested the SSR document (the scraper case) never gets a confirm flag written."""
+    fake = _FakeStageRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    assert a.article_document_recently_served("art-1", "1.2.3.4", "curl/8.0") is False
+
+    token = a._doc_seen_token("art-1", "1.2.3.4", "curl/8.0")
+    assert f"{a._DIRECT_CONFIRM_PREFIX}{token}" not in fake.store
+
+
+def test_write_pageview_counters_stages_direct_article_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct-referrer article-page hit is held pending confirmation instead of writing Cassandra counters immediately."""
+    fake = _FakeStageRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+
+    def _boom() -> Never:
+        raise AssertionError("must not touch Cassandra while a hit is staged")
+
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", _boom)
+
+    a._write_pageview_counters(
+        day="2026-08-02",
+        path="/news/articles/art-1",
+        referer=None,
+        user_agent="Mozilla/5.0",
+        client_ip="1.2.3.4",
+        campaign=None,
+        accept_language="en-US",
+    )
+    assert any(k.startswith(a._DIRECT_STAGE_PREFIX) for k in fake.store)
+
+
+def test_write_pageview_counters_does_not_stage_non_article_direct_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Home/topic '(direct)' hits still commit immediately -- staging is scoped to article pages only."""
+    fake = _FakeStageRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    monkeypatch.setattr(a, "record_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(a, "record_unique", lambda *_args, **_kwargs: None)
+    sess = _FakeSession()
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: sess)
+
+    a._write_pageview_counters(
+        day="2026-08-02",
+        path="/",
+        referer=None,
+        user_agent="Mozilla/5.0",
+        client_ip="1.2.3.4",
+        campaign=None,
+        accept_language="en-US",
+    )
+    assert any(c[1] == AnalyticsStmts.PAGEVIEW_BUMP for c in sess.calls)
+    assert not any(k.startswith(a._DIRECT_STAGE_PREFIX) for k in fake.store)
+
+
+def test_write_pageview_counters_does_not_stage_referred_article_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An article hit with a real referrer commits immediately -- staging only applies to '(direct)'."""
+    fake = _FakeStageRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    monkeypatch.setattr(a, "record_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(a, "record_unique", lambda *_args, **_kwargs: None)
+    sess = _FakeSession()
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: sess)
+
+    a._write_pageview_counters(
+        day="2026-08-02",
+        path="/news/articles/art-1",
+        referer="https://google.com/search",
+        user_agent="Mozilla/5.0",
+        client_ip="1.2.3.4",
+        campaign=None,
+        accept_language="en-US",
+    )
+    assert any(c[1] == AnalyticsStmts.PAGEVIEW_BUMP for c in sess.calls)
+    assert not any(k.startswith(a._DIRECT_STAGE_PREFIX) for k in fake.store)
+
+
+def test_reconcile_commits_confirmed_staged_pageview(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A staged direct pageview whose confirm flag was set gets committed once its window elapses."""
+    fake = _FakeStageRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    clock = [1000.0]
+    monkeypatch.setattr(a.time, "time", lambda: clock[0])
+
+    assert a._stage_direct_pageview(
+        article_id="art-1",
+        client_ip="1.2.3.4",
+        user_agent="Mozilla/5.0",
+        day="2026-08-02",
+        path="/news/articles/art-1",
+        referer=None,
+        campaign=None,
+        accept_language="en-US",
+    )
+    a._confirm_direct_pageview("art-1", "1.2.3.4", "Mozilla/5.0")
+
+    clock[0] += a._DIRECT_STAGE_WINDOW_SECONDS + 1  # window elapsed
+
+    committed: list = []
+    monkeypatch.setattr(a, "_write_pageview_counters", lambda **kw: committed.append(kw))
+    a._reconcile_due_direct_pageviews()
+
+    assert len(committed) == 1
+    assert committed[0]["path"] == "/news/articles/art-1"
+    assert committed[0]["_skip_direct_staging"] is True
+    assert committed[0]["client_ip"] is None  # never persisted past the staging key
+
+
+def test_reconcile_drops_unconfirmed_staged_pageview(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A staged direct pageview nobody ever confirmed is dropped, never committed -- the scraper case."""
+    fake = _FakeStageRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    clock = [2000.0]
+    monkeypatch.setattr(a.time, "time", lambda: clock[0])
+
+    a._stage_direct_pageview(
+        article_id="art-1",
+        client_ip="9.9.9.9",
+        user_agent="Mozilla/4.0 (Windows; MSIE 6.0; Windows NT 6.0)",
+        day="2026-08-02",
+        path="/news/articles/art-1",
+        referer=None,
+        campaign=None,
+        accept_language=None,
+    )
+    clock[0] += a._DIRECT_STAGE_WINDOW_SECONDS + 1
+
+    committed: list = []
+    monkeypatch.setattr(a, "_write_pageview_counters", lambda **kw: committed.append(kw))
+    a._reconcile_due_direct_pageviews()
+
+    assert committed == []
+    assert fake.zset == {}  # cleaned up either way
+
+
+def test_reconcile_leaves_entries_still_inside_the_confirmation_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A staged pageview younger than the confirmation window is left alone -- it may still be confirmed."""
+    fake = _FakeStageRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    clock = [3000.0]
+    monkeypatch.setattr(a.time, "time", lambda: clock[0])
+
+    a._stage_direct_pageview(
+        article_id="art-1",
+        client_ip="1.2.3.4",
+        user_agent="Mozilla/5.0",
+        day="2026-08-02",
+        path="/news/articles/art-1",
+        referer=None,
+        campaign=None,
+        accept_language="en-US",
+    )
+
+    committed: list = []
+    monkeypatch.setattr(a, "_write_pageview_counters", lambda **kw: committed.append(kw))
+    a._reconcile_due_direct_pageviews()  # no time has passed
+
+    assert committed == []
+    assert len(fake.zset) == 1  # still pending, not dropped

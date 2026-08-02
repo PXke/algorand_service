@@ -14,8 +14,10 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import ipaddress
+import json
 import logging
 import re
+import time
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -632,10 +634,149 @@ def article_document_recently_served(
     try:
         r = _uv_redis()
         key = f"{_DOC_SEEN_PREFIX}{_doc_seen_token(article_id, ip, user_agent)}"
-        return bool(r.get(key))
+        seen = bool(r.get(key))
+        if seen:
+            # Also confirms this (article, ip, ua)'s pageview, if one is
+            # currently held pending in _stage_direct_pageview -- same real
+            # signal, reused for the raw pageview counter's own confirm-or-drop
+            # rather than just the view-count gate.
+            _confirm_direct_pageview(article_id, ip, user_agent)
+        return seen
     except Exception as exc:
         log.debug("doc-seen check skipped: %s", exc)
         return True
+
+
+# --- Confirm-or-drop staging for the raw pageview/'(direct)' counter -------
+#
+# article_document_recently_served (above) only gates the Most-Read view
+# count, which is credited from the JSON API route -- AFTER the SSR document
+# hit that record_pageview counts has already happened. There is no "second
+# hand" to check yet at the moment a direct-referrer article pageview is
+# recorded: the SSR request IS the first touch. So instead of gating, this
+# holds that hit's counters in Redis and commits them only once the same
+# (article, ip, ua) is confirmed by article_document_recently_served's own
+# check succeeding later (a real browser's JS re-fetching the article) --
+# see _confirm_direct_pageview above. A hit nobody ever confirms (the
+# 2026-08-02 scraper: SSR document requests with no follow-up JS fetch, ever)
+# is simply dropped when its window elapses, never counted.
+#
+# Reuses _DOC_SEEN_TTL_SECONDS as the confirmation window and _doc_seen_token
+# as the correlation key -- same signal, same salted ip+ua+article hash,
+# just also used here rather than only for the view-count gate.
+_DIRECT_STAGE_PREFIX = "algorand:pvstage:"
+_DIRECT_STAGE_ZSET = "algorand:pvstage:pending"
+_DIRECT_CONFIRM_PREFIX = "algorand:pvconfirm:"
+_DIRECT_STAGE_WINDOW_SECONDS = _DOC_SEEN_TTL_SECONDS
+_DIRECT_STAGE_TTL_SECONDS = _DIRECT_STAGE_WINDOW_SECONDS + 120
+_DIRECT_CONFIRM_TTL_SECONDS = _DIRECT_STAGE_TTL_SECONDS
+_DIRECT_RECONCILE_BATCH = 20
+_ARTICLE_PATH_PREFIX = "/news/articles/"
+
+
+def _confirm_direct_pageview(article_id: str, client_ip: str, user_agent: str | None) -> None:
+    """Mark a staged direct pageview as backed by a real browser. Best-effort."""
+    try:
+        r = _uv_redis()
+        key = f"{_DIRECT_CONFIRM_PREFIX}{_doc_seen_token(article_id, client_ip, user_agent)}"
+        r.set(key, "1", ex=_DIRECT_CONFIRM_TTL_SECONDS)
+    except Exception as exc:
+        log.debug("direct pageview confirm skipped: %s", exc)
+
+
+def _stage_direct_pageview(
+    *,
+    article_id: str,
+    client_ip: str,
+    user_agent: str | None,
+    day: str,
+    path: str,
+    referer: str | None,
+    campaign: str | None,
+    accept_language: str | None,
+) -> bool:
+    """Hold one direct-referrer article pageview's counters in Redis pending confirm-or-drop instead of committing them to Cassandra immediately.
+
+    Returns True if staged — the caller must skip its own immediate write.
+    Returns False (fail OPEN: caller writes immediately) on any Redis error,
+    so a coordination hiccup never silently drops real traffic.
+
+    The client_ip itself is never written to Cassandra by this path (only
+    hashed into the Redis correlation key, same as _doc_seen_token elsewhere)
+    and is dropped from the payload — meaning record_unique/record_session/
+    country_for_ip are skipped for whichever of these hits later get
+    committed by _reconcile_due_direct_pageviews. Same bounded limitation
+    _purge_direct_sample_ua already documents for its own retroactive
+    correction: those signals are approximate/unrecoverable by construction,
+    not something this path is meant to fix.
+    """
+    try:
+        r = _uv_redis()
+        token = _doc_seen_token(article_id, client_ip, user_agent)
+        payload = json.dumps(
+            {
+                "day": day,
+                "path": path,
+                "referer": referer,
+                "user_agent": user_agent,
+                "campaign": campaign,
+                "accept_language": accept_language,
+            }
+        )
+        r.set(f"{_DIRECT_STAGE_PREFIX}{token}", payload, ex=_DIRECT_STAGE_TTL_SECONDS)
+        r.zadd(_DIRECT_STAGE_ZSET, {token: time.time()})
+        return True
+    except Exception as exc:
+        log.debug("direct pageview staging skipped: %s", exc)
+        return False
+
+
+def _reconcile_due_direct_pageviews() -> None:
+    """Commit or drop staged direct-article pageviews whose confirmation window has fully elapsed.
+
+    Piggybacked on regular pageview traffic (called at the end of every
+    record_pageview) instead of a dedicated beat task — cheap and bounded
+    (_DIRECT_RECONCILE_BATCH per call), in the same spirit as
+    _repeated_ua_for_today's inline retroactive purge above. Best-effort
+    throughout: a Redis or Cassandra hiccup here must never surface to the
+    real pageview this call is riding along with.
+    """
+    try:
+        r = _uv_redis()
+        cutoff = time.time() - _DIRECT_STAGE_WINDOW_SECONDS
+        due = r.zrangebyscore(_DIRECT_STAGE_ZSET, 0, cutoff, start=0, num=_DIRECT_RECONCILE_BATCH)
+    except Exception as exc:
+        log.debug("direct pageview reconcile scan skipped: %s", exc)
+        return
+    if not due:
+        return
+    for raw_token in due:
+        token = raw_token.decode() if isinstance(raw_token, bytes) else raw_token
+        try:
+            r.zrem(_DIRECT_STAGE_ZSET, token)
+            data_key = f"{_DIRECT_STAGE_PREFIX}{token}"
+            raw = r.get(data_key)
+            r.delete(data_key)
+            confirmed = bool(r.get(f"{_DIRECT_CONFIRM_PREFIX}{token}"))
+        except Exception as exc:
+            log.debug("direct pageview reconcile row skipped: %s", exc)
+            continue
+        if not raw or not confirmed:
+            continue  # never confirmed (or already expired) -> drop, never counted
+        try:
+            payload = json.loads(raw)
+            _write_pageview_counters(
+                day=payload["day"],
+                path=payload["path"],
+                referer=payload.get("referer"),
+                user_agent=payload.get("user_agent"),
+                client_ip=None,
+                campaign=payload.get("campaign"),
+                accept_language=payload.get("accept_language"),
+                _skip_direct_staging=True,
+            )
+        except Exception as exc:
+            log.debug("direct pageview reconcile commit skipped: %s", exc)
 
 
 def record_unique(kind: str, client_ip: str | None, user_agent: str | None, day: str) -> None:
@@ -1230,10 +1371,36 @@ def _write_pageview_counters(
     client_ip: str | None,
     campaign: str | None,
     accept_language: str | None,
+    _skip_direct_staging: bool = False,
 ) -> None:
-    """Bump every Cassandra/Redis pageview counter for one confirmed-human hit."""
+    """Bump every Cassandra/Redis pageview counter for one confirmed-human hit.
+
+    A direct-referrer article-page hit is held pending confirm-or-drop
+    instead (see _stage_direct_pageview) unless _skip_direct_staging is set —
+    which only _reconcile_due_direct_pageviews passes, when re-invoking this
+    for a hit that already cleared that check.
+    """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import AnalyticsStmts
+
+    referrer = referrer_host(referer)
+    if (
+        not _skip_direct_staging
+        and referrer == "(direct)"
+        and client_ip
+        and path.startswith(_ARTICLE_PATH_PREFIX)
+        and _stage_direct_pageview(
+            article_id=path[len(_ARTICLE_PATH_PREFIX) :],
+            client_ip=client_ip.split(",")[0].strip(),
+            user_agent=user_agent,
+            day=day,
+            path=path,
+            referer=referer,
+            campaign=campaign,
+            accept_language=accept_language,
+        )
+    ):
+        return  # held pending confirm-or-drop -- see _reconcile_due_direct_pageviews
 
     session = get_cassandra_session()
     # Privacy-safe unique visitor count (Redis HLL), independent of Cassandra.
@@ -1255,7 +1422,6 @@ def _write_pageview_counters(
     lang = primary_language(accept_language)
     if lang:
         session.execute_async(AnalyticsStmts.LANGUAGE_BUMP, (day, lang[:8]))
-    referrer = referrer_host(referer)
     session.execute_async(AnalyticsStmts.REFERRER_BUMP, (day, referrer))
     # Source -> landing-page attribution (which referrer drove which page).
     session.execute_async(AnalyticsStmts.REFERRER_PATH_BUMP, (day, referrer, path[:200]))
@@ -1327,6 +1493,14 @@ def record_pageview(
         )
     except Exception as exc:  # missing tables / cassandra down — analytics is non-critical
         log.debug("pageview record skipped: %s", exc)
+    try:
+        # Opportunistic: settle any OTHER staged direct-article pageviews
+        # whose confirmation window has elapsed, piggybacked on this hit
+        # rather than a dedicated beat task. Unrelated to this hit's own
+        # outcome above.
+        _reconcile_due_direct_pageviews()
+    except Exception as exc:
+        log.debug("direct pageview reconcile skipped: %s", exc)
 
 
 def record_search(query: str, result_count: int, *, user_agent: str | None = None) -> None:
