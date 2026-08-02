@@ -286,6 +286,13 @@ def test_title_rule_avoids_leading_headline_with_unflattering_number() -> None:
     assert "lead with what actually happened" in mc._ARTICLE_FORMAT_RULES
 
 
+def test_title_rule_matches_headline_scope_to_evidence_scope() -> None:
+    """A held classifier review (2026-08-02, algorand.co/algokit): the underlying diff genuinely showed four specific pages removed and one added -- a real, sourced, narrow change -- but the writer's headline, 'Algorand Replaces Legacy Pages with AlgoKit Developer Hub', read as a site-wide pivot ("the Foundation turned its site into a dev portal"), which the rest of the site (still covering DeFi, RWA, quantum resilience, etc.) contradicts. Not a fabrication -- the facts were grounded -- but an unsourced scope claim layered on top of sourced facts. The rule must be phrased generally (ANY service/topic), not as an Algorand-specific fix -- the dated incident is one illustration, not the rule itself."""
+    assert "SCOPE must match the evidence's scope" in mc._ARTICLE_FORMAT_RULES
+    assert "for ANY service or topic" in mc._ARTICLE_FORMAT_RULES
+    assert "X replaces its website" in mc._ARTICLE_FORMAT_RULES
+
+
 def test_writing_guidelines_are_honest_but_empathetic() -> None:
     """Same CompX incident as the title-exception test above: the body itself repeated the tiny-TVL framing in nearly every section, piling on a small early-stage team rather than just stating the challenge once. This is a body-tone rule (separate from the headline-specific fix), so it lives in _writing_guidelines — shared system prompt, no duplication needed."""
     guidelines = mc._writing_guidelines("2026-07-14")
