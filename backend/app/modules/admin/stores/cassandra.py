@@ -1611,6 +1611,7 @@ class AdminCassandraStore:
             "hold_reason": hold_reason,
             "article_title": (a.title or "") if a else "",
             "article_summary": (a.summary or "") if a else "",
+            "article_body": (a.body or "") if a else "",
             "service_id": (a.service_id or "") if a else "",
         }
 

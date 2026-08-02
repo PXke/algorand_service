@@ -59,7 +59,7 @@ class ArticleStmts:
         "image_url, source_url FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
     GET_SUMMARY_CARD = _Stmt(
-        "SELECT article_id, title, summary, service_id FROM algorand_platform.articles_by_id "
+        "SELECT article_id, title, summary, service_id, body FROM algorand_platform.articles_by_id "
         "WHERE article_id = ?"
     )
     UPDATE_CONTENT = _Stmt(

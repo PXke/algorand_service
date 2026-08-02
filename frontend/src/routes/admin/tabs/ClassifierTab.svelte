@@ -403,10 +403,14 @@
               {/each}
             </div>
           {/if}
+          {#if String(current.article_body ?? '').trim()}
+            <pre class="text-preview article-body">{String(current.article_body)}</pre>
+          {/if}
         </section>
       {/if}
 
       {#if String(current.page_text_preview ?? '').trim()}
+        <p class="preview-label source-label">Crawled source page (context, not the article)</p>
         <pre class="text-preview">{String(current.page_text_preview)}</pre>
       {/if}
 
@@ -630,6 +634,14 @@
     color: var(--primary);
     text-transform: uppercase;
     letter-spacing: 0.3px;
+  }
+
+  .source-label {
+    color: var(--muted);
+  }
+
+  .article-body {
+    max-height: 400px;
   }
 
   .article-preview h4 {
