@@ -78,6 +78,16 @@ def test_locale_has_exactly_the_english_keys(lang: str) -> None:
     assert not stale, f"{lang}.json has {len(stale)} keys absent from en.json: {stale[:8]}"
 
 
+# ASCII-only: every {placeholder} in en.json is a camelCase identifier
+# (count, serviceId, minAlgo, ...), never non-ASCII. \w in Python's re is
+# Unicode-aware by default, so a plain \{(\w+)\} false-positives on a CJK
+# ICU-plural bucket like =0{暂无投票} -- valid ICU selector syntax, not a
+# placeholder that lost its identifier -- because unspaced Chinese prose
+# matches \w+ just as well as an identifier would (found 2026-08-02,
+# zh.json's suggestionsUpvoteCount, translating the remaining UI strings).
+_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z][A-Za-z0-9]*)\}")
+
+
 @pytest.mark.parametrize("lang", _locale_names())
 def test_placeholders_survive_translation(lang: str) -> None:
     """{tag}/{host} interpolation breaks silently if a translator drops or renames one."""
@@ -88,6 +98,6 @@ def test_placeholders_survive_translation(lang: str) -> None:
         target = data[key]
         if not isinstance(target, str):
             continue
-        want = set(re.findall(r"\{(\w+)\}", source))
-        got = set(re.findall(r"\{(\w+)\}", target))
+        want = set(_PLACEHOLDER_RE.findall(source))
+        got = set(_PLACEHOLDER_RE.findall(target))
         assert want == got, f"{lang}.json[{key}]: placeholders {want} became {got}"
