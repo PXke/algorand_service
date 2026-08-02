@@ -1,5 +1,5 @@
 /**
- * Node shims required by @walletconnect/client (and related crypto deps)
+ * Node shims required by @perawallet/connect (and related crypto deps)
  * when running in the browser.
  */
 import { Buffer } from 'buffer'

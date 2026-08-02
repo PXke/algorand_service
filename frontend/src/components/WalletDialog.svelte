@@ -11,13 +11,7 @@
     wakeWalletTransport,
     walletFlow,
   } from '../lib/auth/session'
-  import {
-    isMobileWalletClient,
-    openWalletDeepLink,
-    openWalletDeepLinkRobust,
-    walletAppLaunchLink,
-    walletDeepLink,
-  } from '../lib/auth/walletconnect'
+  import { openWalletDeepLink, walletAppLaunchLink } from '../lib/auth/walletconnect'
   import {
     enableWcDebugFromQuery,
     toggleWcDebug,
@@ -34,10 +28,7 @@
   let signingMessage = $state('')
   let signature = $state('')
   let step = $state<'address' | 'sign'>('address')
-  let qrDataUrl = $state<string | null>(null)
-  let showQr = $state(!isMobileWalletClient())
   let launchFailed = $state(false)
-  let copied = $state(false)
   let started = $state(false)
   let titlePressTimer: number | null = null
   let reviveTimer: number | null = null
@@ -48,27 +39,6 @@
   let leftForWallet = false
   let prevOverflow = ''
   let prevPaddingRight = ''
-
-  $effect(() => {
-    const uri = $walletFlow.uri
-    if (!uri) {
-      qrDataUrl = null
-      return
-    }
-    let cancelled = false
-    void import('qrcode').then((QRCode) =>
-      QRCode.toDataURL(uri, {
-        width: 280,
-        margin: 2,
-        color: { dark: '#111827', light: '#ffffff' },
-      }).then((url) => {
-        if (!cancelled) qrDataUrl = url
-      }),
-    )
-    return () => {
-      cancelled = true
-    }
-  })
 
   // Pairing: wake bridge when returning from Pera so the session approval
   // can arrive. Signing: soft visibility wake (request already on the wire).
@@ -184,45 +154,11 @@
     onclose()
   }
 
-  function openWallet(uri: string) {
-    launchFailed = false
-    leftForWallet = true
-    wcDebug(`user Open wallet → ${walletDeepLink(uri).slice(0, 96)}…`)
-    const ok = openWalletDeepLinkRobust(uri)
-    if (!ok) launchFailed = true
-  }
-
   function reopenWalletApp() {
     launchFailed = false
     leftForWallet = true
     const ok = openWalletDeepLink(walletAppLaunchLink())
     if (!ok) launchFailed = true
-  }
-
-  async function copyUri(uri: string) {
-    try {
-      await navigator.clipboard.writeText(uri)
-      copied = true
-      setTimeout(() => (copied = false), 2000)
-      wcDebug('uri copied')
-    } catch {
-      try {
-        const ta = document.createElement('textarea')
-        ta.value = uri
-        ta.setAttribute('readonly', '')
-        ta.style.position = 'fixed'
-        ta.style.opacity = '0'
-        document.body.appendChild(ta)
-        ta.select()
-        document.execCommand('copy')
-        ta.remove()
-        copied = true
-        setTimeout(() => (copied = false), 2000)
-        wcDebug('uri copied (fallback)')
-      } catch {
-        /* ignore */
-      }
-    }
   }
 
   async function getChallenge() {
@@ -257,10 +193,8 @@
   }
 
   const phase = $derived($walletFlow.phase)
-  const uri = $derived($walletFlow.uri)
   const pairedAddress = $derived($walletFlow.walletAddress)
   const flowError = $derived($walletFlow.error ?? $authError)
-  const mobile = isMobileWalletClient()
 </script>
 
 <div class="backdrop" role="presentation" bind:this={backdropEl} onclick={() => closeDialog()}>
@@ -349,55 +283,10 @@
           >
         </div>
       {:else}
-        <p class="hint muted">
-          {mobile ? t($messages, 'walletMobileHint') : t($messages, 'walletDialogBody')}
-        </p>
+        <p class="hint muted">{t($messages, 'walletPairingHint')}</p>
 
-        {#if mobile}
-          <button
-            class="btn btn-primary open-main"
-            type="button"
-            disabled={!uri}
-            onclick={() => uri && openWallet(uri)}>{t($messages, 'walletOpenWallet')}</button
-          >
-
-          <div class="actions">
-            <button class="btn" type="button" disabled={!uri} onclick={() => uri && copyUri(uri)}>
-              {copied ? t($messages, 'walletUriCopied') : t($messages, 'walletCopyUri')}
-            </button>
-          </div>
-
-          {#if launchFailed}
-            <p class="err">{t($messages, 'walletOpenFailed')}</p>
-          {/if}
-
-          <button class="linkish" type="button" onclick={() => (showQr = !showQr)}>
-            {showQr ? 'Hide QR' : t($messages, 'walletShowQr')}
-          </button>
-        {/if}
-
-        {#if showQr}
-          <div class="qr-wrap">
-            {#if qrDataUrl}
-              <img class="qr" src={qrDataUrl} alt="WalletConnect QR code" width="280" height="280" />
-            {:else}
-              <div class="qr skeleton" aria-hidden="true"></div>
-            {/if}
-          </div>
-        {/if}
-
-        {#if !mobile}
-          <div class="actions">
-            <button class="btn" type="button" disabled={!uri} onclick={() => uri && copyUri(uri)}>
-              {copied ? t($messages, 'walletUriCopied') : t($messages, 'walletCopyUri')}
-            </button>
-            <button
-              class="btn btn-primary"
-              type="button"
-              disabled={!uri}
-              onclick={() => uri && openWallet(uri)}>{t($messages, 'walletOpenWallet')}</button
-            >
-          </div>
+        {#if launchFailed}
+          <p class="err">{t($messages, 'walletOpenFailed')}</p>
         {/if}
 
         <div class="row">
@@ -456,6 +345,12 @@
 </div>
 
 <style>
+  /* Pera's own connect modal (opened by peraConnect() during 'pairing') must
+     render ABOVE our backdrop or it's unusable — default z-index is 10,
+     ours is 200. See @perawallet/connect's README "Customizing Style". */
+  :global(.pera-wallet-modal) {
+    z-index: 201;
+  }
   .backdrop {
     position: fixed;
     inset: 0;
@@ -530,47 +425,6 @@
   .hint {
     margin: 0;
     font-size: 0.92rem;
-  }
-  .qr-wrap {
-    display: grid;
-    place-items: center;
-    padding: 0.5rem 0;
-  }
-  .qr {
-    width: min(280px, 100%);
-    height: auto;
-    border-radius: 12px;
-    border: 1px solid var(--border);
-    background: #fff;
-  }
-  .qr.skeleton {
-    width: min(280px, 100%);
-    aspect-ratio: 1;
-    background: var(--callout);
-    animation: pulse 1.2s ease-in-out infinite;
-  }
-  @keyframes pulse {
-    50% {
-      opacity: 0.55;
-    }
-  }
-  .actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-  }
-  .open-main {
-    width: 100%;
-  }
-  .linkish {
-    border: 0;
-    background: transparent;
-    color: var(--primary);
-    font-weight: 600;
-    font-size: 0.9rem;
-    padding: 0;
-    text-align: left;
-    cursor: pointer;
   }
   .addr {
     margin: 0;

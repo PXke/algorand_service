@@ -15,7 +15,6 @@ export type WalletFlowPhase = 'idle' | 'pairing' | 'signing' | 'error'
 
 export type WalletFlowState = {
   phase: WalletFlowPhase
-  uri: string | null
   walletAddress: string | null
   error: string | null
 }
@@ -43,7 +42,6 @@ export const authBusy = writable(false)
 export const authError = writable<string | null>(null)
 export const walletFlow = writable<WalletFlowState>({
   phase: 'idle',
-  uri: null,
   walletAddress: null,
   error: null,
 })
@@ -161,39 +159,33 @@ export async function startChallenge(walletAddress: string) {
 }
 
 function resetWalletFlow() {
-  walletFlow.set({ phase: 'idle', uri: null, walletAddress: null, error: null })
+  walletFlow.set({ phase: 'idle', walletAddress: null, error: null })
 }
 
 /**
- * WalletConnect sign-in: QR / deep-link pair → nonce → sign → verify.
- * Works with Pera, Defly, and other ARC-0025 Algorand wallets.
+ * Pera sign-in: connect (Pera's own modal handles QR/deep-link/Firefox
+ * quirks) → nonce → sign → verify. Pera-only — see pera.ts for why the
+ * generic WalletConnect v1 client this used to wrap was dropped
+ * (2026-08-02: it had drifted out of sync with Pera's own, actively
+ * maintained client, and QR pairing silently stopped completing).
  */
 export async function signInWithWalletConnect(): Promise<void> {
   cancelSignIn = false
   authBusy.set(true)
   authError.set(null)
-  walletFlow.set({ phase: 'pairing', uri: null, walletAddress: null, error: null })
+  walletFlow.set({ phase: 'pairing', walletAddress: null, error: null })
 
-  const {
-    wcConnect,
-    wcSignLoginProof,
-    wcDisconnect,
-    isMobileWalletClient,
-    openWalletDeepLink,
-    walletAppLaunchLink,
-  } = await import('./walletconnect')
+  const { peraConnect, peraSignLoginProof, peraDisconnect } = await import('./pera')
+  const { isMobileWalletClient, openWalletDeepLink, walletAppLaunchLink } = await import(
+    './walletconnect'
+  )
 
   try {
-    const address = await wcConnect({
-      onDisplayUri: (uri) => {
-        walletFlow.update((s) => ({ ...s, phase: 'pairing', uri }))
-      },
-    })
+    const address = await peraConnect()
     if (cancelSignIn) throw new Error('Wallet connection cancelled')
 
     walletFlow.set({
       phase: 'signing',
-      uri: get(walletFlow).uri,
       walletAddress: address,
       error: null,
     })
@@ -205,14 +197,13 @@ export async function signInWithWalletConnect(): Promise<void> {
 
     // Open the wallet only AFTER the sign request is on the bridge — opening
     // earlier races the socket wake and drops the reply on Firefox.
-    const proof = await wcSignLoginProof(address, signingMessage, {
-      onRequestSent: () => {
-        if (!isMobileWalletClient()) return
-        window.setTimeout(() => {
-          openWalletDeepLink(walletAppLaunchLink())
-        }, 200)
-      },
-    })
+    const proofPromise = peraSignLoginProof(address, signingMessage)
+    if (isMobileWalletClient()) {
+      window.setTimeout(() => {
+        openWalletDeepLink(walletAppLaunchLink())
+      }, 200)
+    }
+    const proof = await proofPromise
     if (cancelSignIn) throw new Error('Wallet connection cancelled')
 
     await completeSignIn({
@@ -223,14 +214,14 @@ export async function signInWithWalletConnect(): Promise<void> {
       proofMethod: proof.proofMethod,
     })
     try {
-      await wcDisconnect()
+      await peraDisconnect()
     } catch {
       /* ignore */
     }
     resetWalletFlow()
   } catch (e) {
     try {
-      await wcDisconnect()
+      await peraDisconnect()
     } catch {
       /* ignore */
     }
@@ -243,7 +234,6 @@ export async function signInWithWalletConnect(): Promise<void> {
     authError.set(message)
     walletFlow.set({
       phase: 'error',
-      uri: get(walletFlow).uri,
       walletAddress: get(walletFlow).walletAddress,
       error: message,
     })
@@ -258,12 +248,12 @@ export async function cancelWalletSignIn(): Promise<void> {
   authBusy.set(false)
   authError.set(null)
   resetWalletFlow()
-  const { wcCancelPending } = await import('./walletconnect')
-  await wcCancelPending()
+  const { peraDisconnect } = await import('./pera')
+  await peraDisconnect()
 }
 
 export function wakeWalletTransport(): void {
-  void import('./walletconnect').then((m) => m.wcWakeTransportBurst())
+  void import('./pera').then((m) => m.peraWakeTransportBurst())
 }
 
 export async function logout(): Promise<void> {
@@ -287,8 +277,8 @@ export async function logout(): Promise<void> {
     /* ignore */
   }
   try {
-    const { wcDisconnect } = await import('./walletconnect')
-    await wcDisconnect()
+    const { peraDisconnect } = await import('./pera')
+    await peraDisconnect()
   } catch {
     /* ignore */
   }
