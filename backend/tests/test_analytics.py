@@ -1081,3 +1081,70 @@ def test_missing_accept_language_flags_scripted_client_only_on_navigation(
     written.clear()
     a.record_pageview(path="/topic/sdk", navigation=True, **hit)
     assert written == []  # navigation: dropped
+
+
+class _FakeDocSeenRedis:
+    """Minimal in-memory stand-in supporting the .set/.get pair mark/check use."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+
+    def set(self, k: str, v: object, ex: int | None = None) -> None:  # noqa: ARG002 -- name must match the real callee's keyword arg
+        self.store[k] = v
+
+    def get(self, k: str) -> str | None:
+        return self.store.get(k)
+
+
+def test_article_document_recently_served_true_after_mark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A JSON-API view check for the same (article, ip, ua) that just requested the SSR document passes -- the real-reader case."""
+    fake = _FakeDocSeenRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    a.mark_article_document_served("article-1", "8.8.8.8", "Mozilla/5.0")
+    assert a.article_document_recently_served("article-1", "8.8.8.8", "Mozilla/5.0") is True
+
+
+def test_article_document_recently_served_false_for_json_api_only_scraper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client that never requested the SSR document (going straight for the JSON API) fails the check -- the scraper case this exists to catch (2026-08-02)."""
+    fake = _FakeDocSeenRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    assert a.article_document_recently_served("article-1", "1.2.3.4", "curl/8.0") is False
+
+
+def test_article_document_recently_served_scoped_to_the_right_article(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A doc-hit for one article doesn't vouch for a JSON-API view of a DIFFERENT article from the same client -- the exact multi-article-same-fingerprint shape the scraper showed."""
+    fake = _FakeDocSeenRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    a.mark_article_document_served("article-1", "1.2.3.4", "Mozilla/5.0")
+    assert a.article_document_recently_served("article-2", "1.2.3.4", "Mozilla/5.0") is False
+
+
+def test_article_document_recently_served_fails_open_on_redis_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Redis hiccup must never silently zero out real readers' views -- fails open (True)."""
+
+    def _boom() -> Never:
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(a, "_uv_redis", _boom)
+    assert a.article_document_recently_served("article-1", "8.8.8.8", "Mozilla/5.0") is True
+
+
+def test_mark_article_document_served_skips_without_article_id_or_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never touches Redis when there's no article id or client IP to key on."""
+
+    def _boom() -> Never:
+        raise AssertionError("must not touch Redis")
+
+    monkeypatch.setattr(a, "_uv_redis", _boom)
+    a.mark_article_document_served("", "8.8.8.8", "Mozilla/5.0")
+    a.mark_article_document_served("article-1", None, "Mozilla/5.0")

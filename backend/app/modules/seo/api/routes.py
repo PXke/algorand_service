@@ -323,6 +323,15 @@ def _article_document(request: Request, lang: str | None) -> Response:
     # every article below its true total.
     path = f"/news/articles/{article_id}"
     _record(request, path)
+    # First hand of record_view's two-hand check (news/api/routes.py): a real
+    # reader's browser always requests this document before their own
+    # client-side JSON fetch fires (Article.svelte re-fetches unconditionally
+    # on mount). A scraper going straight for the JSON API skips this.
+    analytics_store.mark_article_document_served(
+        article_id,
+        _header(request, "x-forwarded-for") or _header(request, "x-real-ip"),
+        _header(request, "user-agent"),
+    )
     # The browser's ACTUAL path, locale prefix included -- must match
     # window.location.pathname on boot exactly, or the SPA's dedup check
     # against the canonical `path` above always fails for a translated

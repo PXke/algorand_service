@@ -120,14 +120,26 @@ def article_detail(request: Request) -> Response:
     # fetches this JSON, which used to inflate "reads" — reuse the same UA
     # denylist the pageview analytics already trusts.
     from app.modules.news.stores.view_counts import record_view
-    from app.modules.seo.analytics_store import is_bot, is_malformed_ua, is_repeated_ua
+    from app.modules.seo.analytics_store import (
+        article_document_recently_served,
+        is_bot,
+        is_malformed_ua,
+        is_repeated_ua,
+    )
 
     user_agent = request.headers.get("user-agent") or request.headers.get("User-Agent") or ""
+    client_ip = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
     if (
         not is_bot(user_agent)
         and not is_malformed_ua(user_agent)
         and not is_repeated_ua(user_agent)
         and not tracking_opted_out_from_headers(request.headers)
+        # Second hand: this same (article, ip, ua) must have requested the
+        # SSR document recently. Catches a scraper hitting this JSON
+        # endpoint directly, which the UA-identity checks above can't (found
+        # 2026-08-02: a UA/IP-rotating scraper walking ~88-90% of the
+        # archive, none of it repeating enough to trip is_repeated_ua).
+        and article_document_recently_served(article_id, client_ip, user_agent)
     ):
         record_view(article_id)
     return serialization.to_builtins(detail)

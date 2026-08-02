@@ -578,6 +578,66 @@ def _uv_key(kind: str, day: str) -> str:
     return f"{_UV_PREFIX}{kind}:{day}"
 
 
+_DOC_SEEN_PREFIX = "algorand:docseen:"
+# Generous window between a real reader's SSR document request and their own
+# client-side JSON fetch (Article.svelte always re-fetches on mount, even
+# with SSR-seeded data) -- long enough for a slow connection, short enough
+# that a scraper can't harvest one legitimate doc-hit and replay it broadly.
+_DOC_SEEN_TTL_SECONDS = 60
+
+
+def _doc_seen_token(article_id: str, ip: str, ua: str | None) -> str:
+    raw = f"{settings.analytics_hll_salt}|{article_id}|{ip}|{ua or ''}".encode()
+    return hashlib.sha256(raw).hexdigest()[:32]
+
+
+def mark_article_document_served(
+    article_id: str, client_ip: str | None, user_agent: str | None
+) -> None:
+    """Record that this (article, ip, ua) just requested the article's SSR HTML document -- the "first hand" the view-count two-hand check (article_document_recently_served) looks for before crediting a view from the JSON API. Called from the SSR article route, alongside the existing pageview record. Best-effort: a Redis hiccup must never block page serving."""
+    if not article_id or not client_ip:
+        return
+    ip = client_ip.split(",")[0].strip()
+    if not ip:
+        return
+    try:
+        r = _uv_redis()
+        key = f"{_DOC_SEEN_PREFIX}{_doc_seen_token(article_id, ip, user_agent)}"
+        r.set(key, "1", ex=_DOC_SEEN_TTL_SECONDS)
+    except Exception as exc:
+        log.debug("doc-seen mark skipped: %s", exc)
+
+
+def article_document_recently_served(
+    article_id: str, client_ip: str | None, user_agent: str | None
+) -> bool:
+    """The "second hand" of the view-count check: did this exact (article, ip, ua) request the SSR HTML document in the last _DOC_SEEN_TTL_SECONDS?
+
+    A scraper hitting the JSON API (/api/v1/news/articles/<id>) directly for
+    clean structured data -- the natural approach, and cheaper than parsing
+    HTML -- never trips this: nginx serves the JS bundle straight from disk
+    (backend never sees it), so the SSR document request is the one signal
+    that's both backend-visible and something a real browser navigation
+    always does first. Found 2026-08-02: a UA/IP-rotating scraper walked
+    ~88-90% of the article archive, evading the existing is_bot/is_repeated_ua
+    guard on record_view by construction (no single UA repeats enough to trip
+    it). Fails open (True) on any lookup error or missing article_id/ip --
+    a monitoring hiccup must never silently zero out real readers' views.
+    """
+    if not article_id or not client_ip:
+        return True
+    ip = client_ip.split(",")[0].strip()
+    if not ip:
+        return True
+    try:
+        r = _uv_redis()
+        key = f"{_DOC_SEEN_PREFIX}{_doc_seen_token(article_id, ip, user_agent)}"
+        return bool(r.get(key))
+    except Exception as exc:
+        log.debug("doc-seen check skipped: %s", exc)
+        return True
+
+
 def record_unique(kind: str, client_ip: str | None, user_agent: str | None, day: str) -> None:
     """Best-effort: add this visitor to the day's HyperLogLog for `kind`."""
     if not client_ip:
