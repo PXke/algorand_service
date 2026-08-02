@@ -172,6 +172,15 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.newspaper.reap_stale_compose_sessions",
         "schedule": float(os.getenv("COMPOSE_SESSION_REAP_SECONDS", "3600")),
     }
+    # Self-heals index_article.delay() misses: that task fires once at publish
+    # time with no retry, so a transient Typesense hiccup silently drops an
+    # article from search forever (found 2026-08-02: a live, feed-listed
+    # article missing from every result). Idempotent upsert, safe to re-run.
+    schedule["reindex-articles"] = {
+        "task": "app.tasks.search.reindex_articles",
+        "schedule": float(os.getenv("ARTICLE_REINDEX_SECONDS", "86400")),
+        "kwargs": {"limit": int(os.getenv("ARTICLE_REINDEX_LIMIT", "1000"))},
+    }
     if is_crawler_enabled(CrawlerType.MAIL):
         schedule["mail-poll-inbox"] = {
             "task": "app.tasks.newspaper.poll_mail_inbox",
