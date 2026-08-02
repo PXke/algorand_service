@@ -49,6 +49,12 @@ ml = [
   "torch>=2.2.0",
   "transformers>=4.48.0",
   "sentencepiece>=0.2.0",
+  # SeamlessM4T's tokenizer is stored as a tiktoken vocab file; transformers'
+  # slow-to-fast conversion path requires this package to read it (found
+  # 2026-08-02: first real prod translate run hit ValueError, not caught by
+  # dev testing since the eval harness's model cache had a compatible
+  # tokenizer already resolved through a different code path).
+  "tiktoken>=0.7.0",
 ]
 
 [tool.pytest.ini_options]
