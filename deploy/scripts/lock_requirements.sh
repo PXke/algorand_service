@@ -30,14 +30,25 @@ command -v uv >/dev/null 2>&1 || { echo "error: uv not found (https://docs.astra
 # safe in general as a default for untrusted/private indexes.
 PYTORCH_CPU_INDEX="https://download.pytorch.org/whl/cpu"
 
+# sync_deps.sh's deploy-time auto-refresh wants --upgrade (a pyproject.toml
+# change should pick up latest compatible versions); a manual run defaults to
+# preserving existing pins. Set via env rather than a second script so there
+# is exactly ONE place that knows the correct flag set -- a second,
+# independently-maintained `uv pip compile` invocation is what silently
+# stripped torch/transformers/tiktoken back out during a deploy 2026-08-02
+# (sync_deps.sh had never been updated when --extra ml/--extra-index-url/
+# --index-strategy were added here).
+extra_args=()
+[[ "${LOCK_UPGRADE:-0}" == "1" ]] && extra_args+=("--upgrade")
+
 uv pip compile backend/pyproject.toml workers/pyproject.toml --extra ml \
   --extra-index-url "$PYTORCH_CPU_INDEX" --index-strategy unsafe-best-match \
-  --python-version 3.14 --no-header \
+  --python-version 3.14 --no-header "${extra_args[@]}" \
   -o requirements.lock.txt
 
 uv pip compile backend/pyproject.toml workers/pyproject.toml --extra ml --extra dev \
   --extra-index-url "$PYTORCH_CPU_INDEX" --index-strategy unsafe-best-match \
-  --python-version 3.14 --no-header \
+  --python-version 3.14 --no-header "${extra_args[@]}" \
   -o requirements-dev.lock.txt
 
 echo "wrote requirements.lock.txt and requirements-dev.lock.txt"

@@ -43,12 +43,15 @@ _sync_python() {
   local before="" after=""
   [[ -f "$lock" ]] && before=$(sha256sum "$lock" | awk '{print $1}')
   log "Python lock refresh (pyproject.toml changed)"
-  uv pip compile "$REPO_ROOT/backend/pyproject.toml" "$REPO_ROOT/workers/pyproject.toml" \
-    --python-version 3.14 --no-header --upgrade \
-    -o "$lock" >&2
+  # Delegate to lock_requirements.sh rather than a second, independently-
+  # maintained `uv pip compile` invocation -- that's exactly what silently
+  # stripped torch/transformers/tiktoken back out of the deployed lock file
+  # 2026-08-02 (this script's own compile call had never been updated when
+  # --extra ml/--extra-index-url/--index-strategy were added there).
+  LOCK_UPGRADE=1 "$SCRIPT_DIR/lock_requirements.sh" >&2
   [[ -f "$lock" ]] && after=$(sha256sum "$lock" | awk '{print $1}')
   if [[ "$before" != "$after" ]]; then
-    log "Python lock updated — commit requirements.lock.txt"
+    log "Python lock updated — commit requirements.lock.txt and requirements-dev.lock.txt"
   fi
 }
 
