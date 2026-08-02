@@ -33,8 +33,10 @@
   let loading = $state(seeded.length === 0)
 
   const lead = $derived(items[0])
-  const secondary = $derived(items.slice(1, 5))
-  const more = $derived(items.slice(5, 18))
+  /* 6, not 4: on desktop the Most Read rail runs taller than 4 dense rows
+     (2 cols x 2), leaving a void beside the secondary grid. 2x3 matches it. */
+  const secondary = $derived(items.slice(1, 7))
+  const more = $derived(items.slice(7, 18))
   /* The rail carries most-read; the main column shouldn't repeat it. */
   const RAIL_HOT_COUNT = 5
   const railHot = $derived(hot.slice(0, RAIL_HOT_COUNT))
