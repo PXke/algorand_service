@@ -600,7 +600,7 @@ class AdminCassandraStore:
             predicted_category=predicted,
             quality=quality,
             article_id=article_id,
-            approved=approved,
+            _approved=approved,
             source_relevant=source_relevant,
         )
         self._apply_classifier_feedback_effects(
