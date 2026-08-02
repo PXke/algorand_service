@@ -539,16 +539,31 @@ def _novelty_duplicate_veto(ctx: _ComposeVetoCtx) -> dict | None:
     # Same-service re-coverage gets a stricter bar: the Alpha Arcade pair
     # ("Goes Live with Daily ... Price Prediction Markets" vs "expands to
     # daily ... price markets") scored 0.455 — under the global gate, yet
-    # plainly the same story ten days later (2026-07-16).
-    svc_sim, svc_closest = recent_same_service_similarity(page_title, ctx.row.service_id)
-    if svc_sim >= worker_config.NOVELTY_SAME_SERVICE_MAX_SIMILARITY:
-        return {
-            "status": "duplicate",
-            "reason": "too_similar_to_own_recent_coverage",
-            "service_id": ctx.row.service_id,
-            "closest_title": svc_closest,
-            "similarity": round(svc_sim, 2),
-        }
+    # plainly the same story ten days later (2026-07-16). BUT this compares
+    # page_title (the scraped PAGE's <title> tag) against past ARTICLE
+    # headlines -- fine for Alpha Arcade, where the source page's own title
+    # is descriptive prose that tracks its content. A service-watch
+    # aggregate's page_title is the site's static <title> tag (found
+    # 2026-08-02, NFDomains: "NFD | nf.domains", identical on every poll
+    # regardless of what changed) -- comparing it against generated headlines
+    # can never match, so this check silently contributes nothing for every
+    # aggregate-sourced compose. Skipped there rather than left to falsely
+    # reassure: composed_duplicates_latest_service_article (post-compose,
+    # the draft's own real title/body) is the enforcement point for this
+    # shape now.
+    is_aggregate_page = str(ctx.row.payload.get("page_text", "")).lstrip().startswith(
+        "# SERVICE WATCH:"
+    )
+    if not is_aggregate_page:
+        svc_sim, svc_closest = recent_same_service_similarity(page_title, ctx.row.service_id)
+        if svc_sim >= worker_config.NOVELTY_SAME_SERVICE_MAX_SIMILARITY:
+            return {
+                "status": "duplicate",
+                "reason": "too_similar_to_own_recent_coverage",
+                "service_id": ctx.row.service_id,
+                "closest_title": svc_closest,
+                "similarity": round(svc_sim, 2),
+            }
     return None
 
 

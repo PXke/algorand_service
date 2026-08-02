@@ -231,6 +231,38 @@ def test_same_service_novelty_bar_blocks_the_alpha_arcade_pair(
     assert outcome["similarity"] == 0.46
 
 
+def test_same_service_novelty_bar_skipped_for_service_watch_aggregates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NFDomains regression pin (2026-08-02): a service-watch aggregate's page_title is the site's static <title> tag, identical on every poll -- comparing it against past headlines can never match, so the same-service check is skipped entirely for aggregate-sourced rows rather than falsely reassuring. The SITEWIDE title check still runs regardless."""
+    monkeypatch.setattr("app.core.config.NOVELTY_GATE_ENABLED", True, raising=False)
+    monkeypatch.setattr("app.core.config.NOVELTY_MAX_SIMILARITY", 0.6, raising=False)
+    monkeypatch.setattr("app.core.config.NOVELTY_SAME_SERVICE_MAX_SIMILARITY", 0.4, raising=False)
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.recent_title_similarity",
+        lambda _t: (0.0, ""),
+    )
+
+    def _boom(_t: str, _sid: str) -> tuple[float, str]:
+        raise AssertionError("same-service title check must not run for a SERVICE WATCH aggregate")
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.recent_same_service_similarity", _boom
+    )
+    ctx = _ctx(
+        row=SimpleNamespace(
+            queue_id="q1",
+            service_id="nf-domains",
+            scrape_url="https://nf.domains",
+            payload={
+                "page_title": "NFD | nf.domains",
+                "page_text": "# SERVICE WATCH: nf.domains\n\n## PAGE: https://nf.domains\n...",
+            },
+        )
+    )
+    assert pt._novelty_duplicate_veto(ctx) is None
+
+
 def test_post_compose_duplicate_veto_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
     """A draft reporting the same facts as the service's own last article vetoes with a same_facts_as_own_recent_article outcome. Regression pin for the Steak Pool incident (2026-08-02): the page was genuinely reworded (so _novelty_duplicate_veto's page-title comparison passed) but the underlying figures were unchanged."""
     monkeypatch.setattr(
