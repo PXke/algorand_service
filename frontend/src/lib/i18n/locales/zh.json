@@ -51,6 +51,7 @@
   "walletConnectFailed": "连接失败。请重试或先取消配对对话框。",
   "walletDialogTitle": "连接你的钱包",
   "walletDialogBody": "使用与 WalletConnect 兼容的 Algorand 钱包（Pera、Defly 等）扫描二维码，或在手机上复制/打开链接。",
+  "walletPairingHint": "A Pera Wallet window will open — scan the QR code or approve on your phone, then return here.",
   "walletAwaitingApproval": "钱包已连接。切换回您的钱包应用程序以批准登录请求，然后返回此处。",
   "walletAwaitingApprovalTitle": "快到了",
   "walletCopyUri": "复制 URI",

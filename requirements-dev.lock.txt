@@ -172,6 +172,8 @@ propcache==0.5.2
     # via
     #   aiohttp
     #   yarl
+protobuf==7.35.1
+    # via algorand-platform-workers (workers/pyproject.toml)
 py-algorand-sdk==2.11.1
     # via algorand-platform-backend (backend/pyproject.toml)
 pycparser==3.0

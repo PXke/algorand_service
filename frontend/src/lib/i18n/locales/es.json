@@ -51,6 +51,7 @@
   "walletConnectFailed": "Error de conexión. Inténtalo de nuevo o cancela el emparejamiento primero.",
   "walletDialogTitle": "Conectar tu cartera",
   "walletDialogBody": "Escanea el código QR con una cartera compatible (Pera, Defly, etc.) o copia/abre el enlace en el móvil.",
+  "walletPairingHint": "A Pera Wallet window will open — scan the QR code or approve on your phone, then return here.",
   "walletAwaitingApproval": "Monedero conectado. Vuelve a tu aplicación de monedero para aprobar la solicitud de inicio de sesión y regresa aquí.",
   "walletAwaitingApprovalTitle": "Casi listo",
   "walletCopyUri": "Copiar URI",

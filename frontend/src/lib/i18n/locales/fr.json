@@ -51,6 +51,7 @@
   "walletConnectFailed": "Connection failed. Try again or cancel the pairing dialog first.",
   "walletDialogTitle": "Connect your wallet",
   "walletDialogBody": "Scan the QR code with a WalletConnect-compatible Algorand wallet (Pera, Defly, etc.) or copy/open the link on mobile.",
+  "walletPairingHint": "A Pera Wallet window will open — scan the QR code or approve on your phone, then return here.",
   "walletAwaitingApproval": "Portefeuille connecté. Retournez dans votre application portefeuille pour approuver la demande de connexion, puis revenez ici.",
   "walletAwaitingApprovalTitle": "Presque fini",
   "walletCopyUri": "Copy URI",

@@ -51,6 +51,7 @@
   "walletConnectFailed": "اتصال ناموفق بود. دوباره تلاش کنید یا ابتدا دیالوگ جفت‌سازی را لغو کنید.",
   "walletDialogTitle": "کیف پول خود را وصل کنید",
   "walletDialogBody": "کد QR را با یک کیف پول Algorand سازگار با WalletConnect (Pera، Defly و غیره) اسکن کنید یا لینک را در موبایل کپی/باز کنید.",
+  "walletPairingHint": "A Pera Wallet window will open — scan the QR code or approve on your phone, then return here.",
   "walletAwaitingApproval": "کیف پول وصل شد. برای تأیید درخواست ورود به اپلیکیشن کیف پول برگردید، سپس اینجا بازگردید.",
   "walletAwaitingApprovalTitle": "تقریباً تمام شد",
   "walletCopyUri": "کپی URI",

@@ -51,6 +51,7 @@
   "walletConnectFailed": "وصلول ناکام شول. بیا هڅه وکړئ یا لومړی د جوړولو ډیالوګ لغوه کړئ.",
   "walletDialogTitle": "خپله بټۍ وصل کړئ",
   "walletDialogBody": "QR کوډ د WalletConnect سره سمون لرونکي Algorand بټۍ (Pera، Defly او نور) سره سکین کړئ یا لینک په موبایل کې کاپي/خلاص کړئ.",
+  "walletPairingHint": "A Pera Wallet window will open — scan the QR code or approve on your phone, then return here.",
   "walletAwaitingApproval": "بټۍ وصل شوه. د ننوتلو غوښتنه تاییدولو لپاره بټۍ اپلیکیشن ته بیرته لاړ شئ، بیا دلته راشئ.",
   "walletAwaitingApprovalTitle": "نږدې شو",
   "walletCopyUri": "URI کاپي کول",

@@ -51,6 +51,7 @@
   "walletConnectFailed": "Не удалось подключиться. Попробуйте снова или сначала отмените диалог сопряжения.",
   "walletDialogTitle": "Подключите кошелёк",
   "walletDialogBody": "Отсканируйте QR-код кошельком Algorand с WalletConnect (Pera, Defly и др.) или скопируйте/откройте ссылку на телефоне.",
+  "walletPairingHint": "A Pera Wallet window will open — scan the QR code or approve on your phone, then return here.",
   "walletAwaitingApproval": "Кошелёк подключён. Вернитесь в приложение кошелька, чтобы подтвердить запрос на вход, затем вернитесь сюда.",
   "walletAwaitingApprovalTitle": "Почти готово",
   "walletCopyUri": "Копировать URI",
