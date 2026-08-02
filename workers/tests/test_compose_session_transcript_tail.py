@@ -85,3 +85,57 @@ def test_oversized_transcript_drops_from_front_not_json_string(
     stored_messages = json.loads(raw)  # must not raise — valid JSON, not a mid-string cut
     names = [m.get("name") for m in stored_messages if m.get("name")]
     assert "review_draft" in names  # the tail survives; front entries were dropped instead
+
+
+def test_initial_source_material_turn_gets_a_generous_cap(
+    fake_cassandra_session: MagicMock,
+) -> None:
+    """Messina.one regression pin (2026-08-02): the FIRST user turn carries the actual scraped source material -- the primary evidence for whether a specific claim was grounded or invented. At the old 1500-char generic cap it cut off after ~30 lines of a multi-page SERVICE WATCH aggregate, making a claim sourced from page 3 of the scrape look unsourced when it wasn't. Both known opening templates start with "Write the article now"."""
+    source_material = "y" * 18_000
+    messages = [
+        {"role": "system", "content": "system prompt"},
+        {
+            "role": "user",
+            "content": f"Write the article now from the material below.\n\n```\n{source_material}\n```",
+        },
+    ]
+    debug = {"messages": messages}
+
+    record_compose_session(
+        debug=debug,
+        trace=[],
+        service_id="svc",
+        source_url="https://example.com/",
+        model="mistral-large-latest",
+        final_output="{}",
+        status="ok",
+    )
+
+    call = fake_cassandra_session.execute.call_args
+    stored_messages = json.loads(call.args[1][10])
+    user_turn = next(m for m in stored_messages if m["role"] == "user")
+    assert source_material in user_turn["content"]  # not truncated away
+
+
+def test_other_user_turns_keep_the_short_cap(fake_cassandra_session: MagicMock) -> None:
+    """A user turn that ISN'T the initial source-material prompt (e.g. a mid-loop nudge) still gets the tight 1500-char cap -- the generous cap is scoped to the one message shape that actually needs it."""
+    messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "Some other user turn: " + ("z" * 3000)},
+    ]
+    debug = {"messages": messages}
+
+    record_compose_session(
+        debug=debug,
+        trace=[],
+        service_id="svc",
+        source_url="https://example.com/",
+        model="mistral-large-latest",
+        final_output="{}",
+        status="ok",
+    )
+
+    call = fake_cassandra_session.execute.call_args
+    stored_messages = json.loads(call.args[1][10])
+    user_turn = next(m for m in stored_messages if m["role"] == "user")
+    assert len(user_turn["content"]) == 1500

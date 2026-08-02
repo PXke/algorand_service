@@ -167,10 +167,27 @@ def record_compose_session(
                 # truncating it mid-sentence, right around where the Liveness
                 # Signals section lives — hiding exactly the evidence needed to
                 # diagnose a fabrication (2026-07-10, KryptoNurd).
+                #
+                # Same failure, different message (found 2026-08-02, Messina.one):
+                # the FIRST user turn ("Write the article now...") carries the
+                # actual scraped source material -- the primary evidence for
+                # whether a specific claim (a named protocol, an audit firm) was
+                # genuinely grounded or invented. At 1500 chars it cut off after
+                # ~30 lines of a multi-page SERVICE WATCH aggregate, making a
+                # claim sourced from page 3 of the scrape look unsourced when it
+                # wasn't -- nearly produced a false fabrication call on a piece
+                # that was actually fine. mistral_compose.py's two known opening
+                # templates both start with "Write the article now" (the
+                # evolution and standard paths alike), so matching that prefix
+                # covers both without needing to know which one fired.
                 cap = (
                     6000
                     if text.startswith("[stage 2 handoff]")
-                    else (1500 if role in ("user", "system") else 4000)
+                    else (
+                        20_000
+                        if role == "user" and text.startswith("Write the article now")
+                        else (1500 if role in ("user", "system") else 4000)
+                    )
                 )
                 entry["content"] = text[:cap]
             tcs = m.get("tool_calls")
