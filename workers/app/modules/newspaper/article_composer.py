@@ -75,6 +75,7 @@ def compose_scrape_article(
     keywords: str = "",
     brief_id: str = "",
     first_coverage: bool = False,
+    prior_coverage_block: str = "",
 ) -> ArticleComposeResult:
     """Compose by publish kind (discovery vs update) via Mistral."""
     del mistral_only  # see docstring above
@@ -142,6 +143,7 @@ def compose_scrape_article(
         source_links=source_links,
         publish_topic=topic.value,
         first_coverage=first_coverage,
+        prior_coverage_block=prior_coverage_block,
     )
     return ArticleComposeResult(
         title=fields.title,

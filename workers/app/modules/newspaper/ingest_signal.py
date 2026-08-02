@@ -52,6 +52,82 @@ _VOLATILE_PATTERNS = (
     re.compile(r"\d[\d,]*(?:\.\d+)?"),
 )
 
+# A live activity feed (marketplace sales, leaderboard, recent trades) churns
+# its per-row IDENTITY (names, addresses, tickers) every poll even when the
+# volatile numeric/date fields above are stripped -- found 2026-08-02
+# (NFDomains): a "recent sales" table flattened to text as a 4-line-per-row
+# cycle (name+price / seller / buyer / date) meant the page's stable hash
+# differed on every single one of 12 consecutive weekly polls, so "unchanged"
+# never fired and every poll looked like real news even though the volatile
+# numeric/date fields WERE being stripped -- the row's changing NAME is what
+# survived. Rather than hand-list every site's own feed vocabulary
+# (unmaintainable, never generalizes to the next service with this shape),
+# detect it structurally: normalize each line to its "shape" (the same
+# volatile-token strip as the hash, plus any dotted/ticker-ish identifier
+# collapsed to a placeholder), then find any run of a repeating N-line CYCLE
+# (rows are rarely 1 line each once seller/buyer/date are split onto their
+# own lines, as scrapers commonly flatten a table) that repeats
+# _ROW_BLOCK_MIN_CYCLES+ times, and blank the whole run out. A hand-written
+# passage essentially never repeats its own line-shape cycle that many times;
+# a flattened table of near-identical rows always does.
+_ROW_BLOCK_MIN_CYCLES = 3
+_ROW_BLOCK_MAX_PERIOD = 6
+_ROW_SHAPE_NAME = re.compile(r"\b[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)+\b")
+# A scraped table's seller/buyer cell is often flattened onto its own line as
+# ONE bare token -- a .algo name (caught above) or a truncated address like
+# "X5KD3V…EXVU" (an ellipsis, not a dot). Collapse a whole line that's just a
+# single non-whitespace identifier-shaped run, so both forms shape the same.
+_ROW_SHAPE_BARE_TOKEN = re.compile(r"^[a-z0-9][a-z0-9_.…-]{1,79}$")
+
+
+def _line_shape(line: str) -> str | None:
+    """Structural signature of one line -- volatile tokens stripped, identifier-shaped tokens collapsed -- or None for a genuinely blank input line."""
+    stripped = line.strip().lower()
+    if not stripped:
+        return None
+    for pat in _VOLATILE_PATTERNS:
+        stripped = pat.sub("", stripped)
+    stripped = _ROW_SHAPE_NAME.sub("@", stripped)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    if _ROW_SHAPE_BARE_TOKEN.match(stripped):
+        stripped = "@"
+    return stripped
+
+
+def _strip_repeating_row_blocks(text: str) -> str:
+    """Blank out any run where an N-line shape cycle (N up to _ROW_BLOCK_MAX_PERIOD) repeats _ROW_BLOCK_MIN_CYCLES+ times -- a flattened live activity table, whose row identities are noise for change-detection even though the surrounding page is stable."""
+    lines = text.split("\n")
+    shapes = [_line_shape(line) for line in lines]
+    n = len(shapes)
+    out = list(lines)
+    i = 0
+    while i < n:
+        if shapes[i] is None:
+            i += 1
+            continue
+        best_end = i
+        for period in range(1, _ROW_BLOCK_MAX_PERIOD + 1):
+            if i + period * _ROW_BLOCK_MIN_CYCLES > n:
+                continue
+            block = shapes[i : i + period]
+            if any(s is None for s in block):
+                continue
+            cycles = 1
+            pos = i + period
+            while pos + period <= n and shapes[pos : pos + period] == block:
+                cycles += 1
+                pos += period
+            if cycles >= _ROW_BLOCK_MIN_CYCLES:
+                end = i + period * cycles
+                best_end = max(best_end, end)
+        if best_end > i:
+            for k in range(i, best_end):
+                out[k] = ""
+            i = best_end
+        else:
+            i += 1
+    return "\n".join(out)
+
 
 def _dedupe_key_for(
     intent: PublishIntent, *, mode_info: dict, service_id: str, content_hash: str
@@ -82,8 +158,8 @@ def _dedupe_key_for(
 
 
 def _stable_content_hash(text: str) -> str:
-    """Hash of the page with volatile numeric/time tokens removed, so pages that only update live data (prices, counters, timestamps) hash the same across polls and are correctly treated as ``unchanged``."""
-    normalized = text
+    """Hash of the page with volatile numeric/time tokens AND any repeating live-activity-list rows removed, so pages that only update live data (prices, counters, timestamps, a marketplace/leaderboard feed's row identities) hash the same across polls and are correctly treated as ``unchanged``."""
+    normalized = _strip_repeating_row_blocks(text)
     for pat in _VOLATILE_PATTERNS:
         normalized = pat.sub("", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
@@ -191,7 +267,14 @@ def ingest_publish_signal(
 
     diff = None
     if not is_first:
-        diff = build_text_diff(previous=previous_body, current=page_text)
+        # Strip the same repeating live-activity-list rows the stable hash
+        # ignores -- otherwise a page whose only REAL change is prose
+        # elsewhere still hands the writer a diff dominated by marketplace/
+        # leaderboard row noise (new names, same shape) as "what changed".
+        diff = build_text_diff(
+            previous=_strip_repeating_row_blocks(previous_body),
+            current=_strip_repeating_row_blocks(page_text),
+        )
 
     upsert_service_profile(
         service_id=service_id,

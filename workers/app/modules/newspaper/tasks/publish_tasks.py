@@ -714,6 +714,12 @@ def _compose_or_error(
     from app.modules.ai.mistral_client import MistralCreditError, MistralError
     from app.modules.ai.story_spike import StorySpikedError
 
+    prior_coverage_block = ""
+    if not first_coverage:
+        from app.modules.newspaper.article_grader import prior_service_article_summary
+
+        prior_coverage_block = prior_service_article_summary(row.service_id)
+
     try:
         composed = compose_scrape_article(
             service_name=row.display_name,
@@ -733,6 +739,7 @@ def _compose_or_error(
             keywords=str(payload.get("keywords", "")),
             brief_id=str(payload.get("brief_id", "")),
             first_coverage=first_coverage,
+            prior_coverage_block=prior_coverage_block,
         )
         return composed, None
     except ComposeBusyError:

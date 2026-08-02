@@ -229,7 +229,7 @@ def recent_same_service_similarity(title: str, service_id: str) -> tuple[float, 
 def composed_duplicates_latest_service_article(
     *, title: str, summary: str, body: str, service_id: str
 ) -> tuple[bool, str, float]:
-    """Whether a composed draft reports the same facts as this service's own last article.
+    """Whether a composed draft reports the same facts (or is substantially the same piece) as this service's own last article.
 
     recent_title_similarity/recent_content_similarity above both compare the
     SOURCE PAGE (title/text at scrape time) against recent articles -- fine
@@ -237,14 +237,25 @@ def composed_duplicates_latest_service_article(
     past both while reporting the identical underlying facts (Steak Pool,
     2026-08-02: differently-worded page, same 1.9M STEAK / 11.16% / 1.69% /
     validator #13 figures as the article published 21 days earlier). This
-    check instead compares the DRAFT's own numeric claims against the
-    service's most recently linked article, via a direct Cassandra
-    match-key lookup -- no Typesense dependency, so it isn't exposed to
-    index-lag gaps the content-similarity check above is.
+    check instead compares the DRAFT's own text against the service's most
+    recently linked article, via a direct Cassandra match-key lookup -- no
+    Typesense dependency, so it isn't exposed to index-lag gaps the
+    content-similarity check above is. Two independent triggers, either one
+    is sufficient:
 
-    Returns (is_duplicate, prior_article_id, numeric_overlap_score). Fails
-    open (not a duplicate) when there's no prior article, too few numeric
-    claims to be meaningful evidence, or on any store error.
+      - Numeric overlap: the draft restates the same specific figures (Steak
+        Pool's shape).
+      - Body similarity (2026-08-02, NFDomains): the draft shares almost no
+        numbers with its own prior coverage -- a growing mint-count, a fresh
+        headline stat each time -- while reusing the same explainer pitch,
+        structure, and vocabulary nearly verbatim. Title-only and
+        numeric-only checks both missed this one (title Jaccard 0.06; too
+        few shared numeric claims to trip the other trigger).
+
+    Returns (is_duplicate, prior_article_id, score) -- score is whichever
+    signal is higher, numeric or body. Fails open (not a duplicate) when
+    there's no prior article, neither signal has enough evidence to be
+    meaningful, or on any store error.
     """
     from app.core import config
     from app.modules.gatekeeper.fact_align import numeric_entailment_score
@@ -261,12 +272,60 @@ def composed_duplicates_latest_service_article(
             return False, "", 0.0
         prior_text = f"{prior.title}\n{prior.summary}\n{prior.body}"
         new_text = f"{title}\n{summary}\n{body}"
+
         result = numeric_entailment_score(prior_text, new_text, tol=0.05)
-        if result.total < config.ARTICLE_DUPLICATE_MIN_CLAIMS:
-            return False, prior_id, result.score
-        return result.score >= config.ARTICLE_DUPLICATE_NUMERIC_OVERLAP, prior_id, result.score
+        numeric_is_dup = (
+            result.total >= config.ARTICLE_DUPLICATE_MIN_CLAIMS
+            and result.score >= config.ARTICLE_DUPLICATE_NUMERIC_OVERLAP
+        )
+
+        prior_tokens, new_tokens = _tokens(prior_text), _tokens(new_text)
+        body_sim = _jaccard(prior_tokens, new_tokens)
+        body_is_dup = (
+            len(prior_tokens) >= config.ARTICLE_DUPLICATE_BODY_MIN_TOKENS
+            and len(new_tokens) >= config.ARTICLE_DUPLICATE_BODY_MIN_TOKENS
+            and body_sim >= config.ARTICLE_DUPLICATE_BODY_SIMILARITY
+        )
+
+        return (numeric_is_dup or body_is_dup), prior_id, max(result.score, body_sim)
     except Exception:
         return False, "", 0.0
+
+
+def prior_service_article_summary(service_id: str) -> str:
+    """A short prompt-ready block naming this service's own most recent article, or "" when there is none.
+
+    2026-08-02 (NFDomains): the writer has an abort_article(duplicate_coverage)
+    tool but no way to know "we already covered exactly this" unless told --
+    each compose starts with no memory of prior sessions, and the source
+    material handed to it is just the current scrape, never our own past
+    coverage. This gives the writer the one fact it needs to use that tool
+    correctly, or to write a genuine update instead of re-introducing the
+    service from scratch. Fails open ("") on any store error -- a missing
+    prior-coverage note must never block a compose that would otherwise
+    proceed fine.
+    """
+    from app.modules.newspaper.article_matching import find_latest_service_article
+
+    try:
+        prior_id = find_latest_service_article(service_id)
+        if not prior_id:
+            return ""
+        from app.modules.newspaper.article_store import get_article
+
+        prior = get_article(prior_id)
+        if prior is None:
+            return ""
+        return (
+            f'Our own most recent article about this service: "{prior.title}" -- '
+            f"{prior.summary}\n"
+            "If your research today shows nothing genuinely new since that piece, "
+            "either find a real fresh angle or call abort_article(duplicate_coverage) "
+            "rather than re-writing the same introduction with a different headline "
+            "number."
+        )
+    except Exception:
+        return ""
 
 
 def recent_content_similarity(title: str, text: str = "") -> tuple[float, str]:

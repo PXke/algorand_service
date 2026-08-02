@@ -1658,6 +1658,7 @@ def compose_scrape_article_mistral(
     source_links: list[dict[str, str]] | None = None,
     publish_topic: str = "",
     first_coverage: bool = False,
+    prior_coverage_block: str = "",
     client: MistralClient | None = None,
 ) -> MistralArticleFields:
     """Generate newspaper article fields from scrape context via Mistral.
@@ -1666,6 +1667,13 @@ def compose_scrape_article_mistral(
     one-shot discovery row expired unpublished), so a diff-driven update would
     reference a service readers have never met — write an introduction/profile
     instead, with the recent change as a secondary note.
+
+    ``prior_coverage_block`` (2026-08-02, NFDomains): names this service's own
+    most recent article, when one exists, so the writer has the one fact it
+    needs to either write a genuine update or call
+    abort_article(duplicate_coverage) instead of silently re-writing the same
+    introduction with a fresh headline number. Empty when there's no prior
+    article (first_coverage) or the lookup failed -- never blocks a compose.
     """
     mistral = client or get_mistral_client()
     today = _today_utc()
@@ -1676,6 +1684,7 @@ def compose_scrape_article_mistral(
         diff_block = f"\n\nText diff (unified):\n```\n{_clip(diff, 4000)}\n```"
     elif not is_first_snapshot:
         diff_block = "\n\n(Content hash changed but no textual diff was produced.)"
+    prior_block = f"\n\n{prior_coverage_block}" if prior_coverage_block else ""
 
     system = _writer_system_prompt(today)
     # Source-type router: a static landing page (root domain) becomes an evergreen
@@ -1715,7 +1724,7 @@ WHAT CHANGED since we last looked (this is the story — unified diff):
 {_clip(diff, 6000)}
 ```
 {links_block}
-
+{prior_block}
 Full service aggregate (BACKGROUND ONLY — explain the change, don't re-report this):
 ```
 {_clip(page_text, source_limit)}
@@ -1730,7 +1739,7 @@ Source domain: {source_domain}
 Page title from source: {page_title}
 First snapshot: {is_first_snapshot}
 On-chain context (background only): round {round_num}, tx {txid}
-
+{prior_block}
 Source material (may be days or years old — judge figures against today's date):
 ```
 {_clip(page_text, source_limit)}

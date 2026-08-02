@@ -175,6 +175,62 @@ def test_known_service_keeps_evolution_framing(monkeypatch: pytest.MonkeyPatch) 
     assert "WHAT CHANGED since we last looked" in captured["user"]
 
 
+def test_prior_coverage_block_reaches_the_evolution_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NFDomains regression pin (2026-08-02): when the caller supplies a prior-coverage note (this service's own last article), it must actually reach the writer's prompt -- the whole point is giving the writer what abort_article(duplicate_coverage) needs to be usable."""
+    captured = {}
+
+    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+        captured.update(kwargs)
+        return mc.MistralArticleFields(title="t", summary="s", body="b")
+
+    monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
+    mc.compose_scrape_article_mistral(
+        service_name="NFDomains",
+        source_url="https://nf.domains/",
+        page_title="NFD | nf.domains",
+        page_text="Algorand naming service page " * 30,
+        txid="tx",
+        round_num=1,
+        diff="+++ a\n+ x\n+ y\n+ z\n",
+        is_first_snapshot=False,
+        first_coverage=False,
+        prior_coverage_block=(
+            'Our own most recent article about this service: "NFDomains: Human-'
+            'Readable Identities for Algorand\'s Decentralized Web" -- NFDomains '
+            "replaces cryptic wallet addresses with verifiable .algo names."
+        ),
+        client=SimpleNamespace(),
+    )
+    assert "Our own most recent article about this service" in captured["user"]
+    assert "NFDomains: Human-Readable Identities" in captured["user"]
+
+
+def test_no_prior_coverage_block_omits_the_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No prior article (first coverage, or lookup failure) -- the note is simply absent, never a placeholder or error text."""
+    captured = {}
+
+    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+        captured.update(kwargs)
+        return mc.MistralArticleFields(title="t", summary="s", body="b")
+
+    monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
+    mc.compose_scrape_article_mistral(
+        service_name="Tinyman",
+        source_url="https://tinyman.org/",
+        page_title="tinyman",
+        page_text="Algorand AMM " * 30,
+        txid="tx",
+        round_num=1,
+        diff="+++ a\n+ x\n+ y\n+ z\n",
+        is_first_snapshot=False,
+        first_coverage=False,
+        client=SimpleNamespace(),
+    )
+    assert "Our own most recent article about this service" not in captured["user"]
+
+
 def test_model_tier_split_large_writes_small_does_mechanics() -> None:
     """Owner policy (2026-07-12): Large writes reader-facing prose (writer, digest); Small does the mechanical work (tool-loop research, translate)."""
     from app.core.config import (

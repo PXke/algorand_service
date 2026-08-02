@@ -7,6 +7,7 @@ from app.modules.newspaper.article_grader import (
     _length_score,
     _structure_score,
     composed_duplicates_latest_service_article,
+    prior_service_article_summary,
 )
 
 
@@ -105,6 +106,70 @@ def test_composed_duplicates_latest_service_article_different_story_same_service
     assert score < 0.6
 
 
+def test_composed_duplicates_latest_service_article_same_pitch_different_numbers() -> None:
+    """NFDomains regression pin (2026-08-02): a draft sharing almost no NUMBERS with its own prior coverage (a growing headline stat each time) but reusing the same explainer pitch/structure/vocabulary is flagged via body similarity, even though the numeric-overlap trigger alone would miss it."""
+    prior = _Prior(
+        title="NFDomains: Human-Readable Identities for Algorand's Decentralized Web",
+        summary="NFDomains replaces cryptic wallet addresses with verifiable .algo names, "
+        "enabling forward and reverse resolution on Algorand's Pure Proof-of-Stake chain.",
+        body=(
+            "Blockchain transactions rely on cryptographic addresses that are secure but "
+            "unintuitive for users, prone to transcription errors and phishing risks. "
+            "NFDomains provides a permissionless registry for .algo top-level domains, "
+            "allowing users to mint unique, non-fungible identities as Algorand Standard "
+            "Assets. Each NFD is a verifiable digital identity that maps a human-readable "
+            "name to one or more blockchain addresses, metadata records, and social "
+            "profiles. The system is built on Algorand's layer-1 infrastructure, "
+            "leveraging Pure Proof-of-Stake consensus for fast finality and low fees. "
+            "NFDomains enables two critical functions: forward and reverse resolution, "
+            "converting a name into its associated address and back again."
+        ),
+    )
+    with (
+        patch(
+            "app.modules.newspaper.article_matching.find_latest_service_article",
+            return_value="prior-id",
+        ),
+        patch("app.modules.newspaper.article_store.get_article", return_value=prior),
+    ):
+        is_dup, prior_id, score = composed_duplicates_latest_service_article(
+            title="Algorand's 69,000 Human-Readable Identities: How NFDomains Replaces "
+            "Cryptic Addresses with .algo Names",
+            summary="NFDomains' decentralized registry turns Algorand's 58-character "
+            "addresses into portable .algo identities with vaults, verification, and a "
+            "live marketplace-69,000+ names minted.",
+            body=(
+                "Algorand's 58-character addresses are secure but unusable for humans. "
+                "Users memorize handles, not hex strings; every manual copy-paste risks a "
+                "typo. NFDomains is Algorand's name service: a permissionless registry "
+                "that turns opaque addresses into memorable .algo names. Each name is a "
+                "non-fungible Algorand Standard Asset whose ownership is recorded "
+                "on-chain, making .algo names portable digital identities. The platform's "
+                "three core features -- minting, resolution, and vaults -- eliminate the "
+                "friction of cryptic addresses. Forward resolution converts a name into "
+                "an address plus linked metadata. Reverse resolution converts an address "
+                "back into its registered name."
+            ),
+            service_id="nf-domains",
+        )
+    assert is_dup is True
+    assert prior_id == "prior-id"
+    assert score >= 0.22
+    # And confirm the numeric-overlap trigger alone would NOT have caught this --
+    # the two drafts share essentially no specific figures.
+    from app.modules.gatekeeper.fact_align import numeric_entailment_score
+
+    numeric = numeric_entailment_score(
+        f"{prior.title}\n{prior.summary}\n{prior.body}",
+        "Algorand's 69,000 Human-Readable Identities: How NFDomains Replaces Cryptic "
+        "Addresses with .algo Names\nNFDomains' decentralized registry turns Algorand's "
+        "58-character addresses into portable .algo identities with vaults, "
+        "verification, and a live marketplace-69,000+ names minted.",
+        tol=0.05,
+    )
+    assert numeric.total < 3 or numeric.score < 0.6
+
+
 def test_composed_duplicates_latest_service_article_too_few_claims_not_flagged() -> None:
     """A draft with too few numeric claims to be meaningful evidence is never flagged, even at 100% overlap."""
     prior = _Prior(title="Steak Pool update", summary="Burns 5% of supply.", body="")
@@ -122,3 +187,41 @@ def test_composed_duplicates_latest_service_article_too_few_claims_not_flagged()
             service_id="algostakepool-com",
         )
     assert is_dup is False
+
+
+def test_prior_service_article_summary_names_the_prior_article() -> None:
+    """Gives the writer the one fact abort_article(duplicate_coverage) needs: our own last article's title and summary."""
+    prior = _Prior(
+        title="NFDomains: Human-Readable Identities for Algorand's Decentralized Web",
+        summary="NFDomains replaces cryptic wallet addresses with verifiable .algo names.",
+        body="...",
+    )
+    with (
+        patch(
+            "app.modules.newspaper.article_matching.find_latest_service_article",
+            return_value="prior-id",
+        ),
+        patch("app.modules.newspaper.article_store.get_article", return_value=prior),
+    ):
+        block = prior_service_article_summary("nf-domains")
+    assert "NFDomains: Human-Readable Identities" in block
+    assert "verifiable .algo names" in block
+    assert "abort_article" in block  # points the writer at the actual tool name
+
+
+def test_prior_service_article_summary_empty_when_no_prior_article() -> None:
+    """No prior article -- an empty string, never a placeholder or error text."""
+    with patch(
+        "app.modules.newspaper.article_matching.find_latest_service_article",
+        return_value=None,
+    ):
+        assert prior_service_article_summary("brand-new-service") == ""
+
+
+def test_prior_service_article_summary_fails_open_on_store_error() -> None:
+    """A Cassandra hiccup must never surface here -- empty string, same as no prior article."""
+    with patch(
+        "app.modules.newspaper.article_matching.find_latest_service_article",
+        side_effect=RuntimeError("cassandra down"),
+    ):
+        assert prior_service_article_summary("nf-domains") == ""

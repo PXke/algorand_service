@@ -152,7 +152,15 @@ SCRAPE_COOLDOWN_SECONDS = env_int("SCRAPE_COOLDOWN_SECONDS", 3600)
 # polling faster only burns requests). Fractional values work for testing;
 # <= 0 falls back to SCRAPE_COOLDOWN_SECONDS. Failed polls retry on the
 # shorter SCRAPE_COOLDOWN_SECONDS instead of losing a whole window.
-SERVICE_RESCRAPE_DAYS = env_float("SERVICE_RESCRAPE_DAYS", 7.0)
+#
+# Raised from 7 to 30 (2026-08-02, NFDomains incident): weekly was frequent
+# enough that a service with no real news still got a full re-explainer
+# article every few weeks, reworded around whatever headline stat had ticked
+# since the last poll. A real product update deserves reporting whenever it
+# happens; a page that's simply still online doesn't need re-introducing
+# every week. See also ARTICLE_DUPLICATE_BODY_SIMILARITY, which catches the
+# same failure mode after the fact if this cadence alone isn't enough.
+SERVICE_RESCRAPE_DAYS = env_float("SERVICE_RESCRAPE_DAYS", 30.0)
 # Service-watch context: the snapshot/diff/compose unit for a web service is an
 # AGGREGATE of its recently harvested pages across all of the service's domains
 # (never just the homepage). ~48k chars ≈ 12k tokens for the composer. Sections
@@ -555,6 +563,23 @@ NOVELTY_DECAY_ZERO_DAYS = env_int("NOVELTY_DECAY_ZERO_DAYS", 70)
 # evidence either way.
 ARTICLE_DUPLICATE_NUMERIC_OVERLAP = env_float("ARTICLE_DUPLICATE_NUMERIC_OVERLAP", 0.6)
 ARTICLE_DUPLICATE_MIN_CLAIMS = env_int("ARTICLE_DUPLICATE_MIN_CLAIMS", 3)
+# Second, independent trigger for the same guard: the NFDomains incident
+# (2026-08-02) showed a service can get a full re-explainer article every
+# ~3-5 weeks that shares almost no NUMBERS with its own prior coverage (a
+# growing mint-count, a fresh headline stat each time) while reusing the same
+# pitch/structure/vocabulary almost verbatim -- title-only and numeric-only
+# checks both missed it (title Jaccard 0.06; too few shared numeric claims).
+# Calibrated against that real pair: whole-body token Jaccard of the actual
+# duplicate scored 0.229-0.232 vs 0.152 for an unrelated control article --
+# a real but modest margin (shared Algorand/crypto vocabulary dilutes the
+# signal even for unrelated stories), so treat this as a starting point to
+# revisit once more real (service, article) pairs exist to calibrate against.
+ARTICLE_DUPLICATE_BODY_SIMILARITY = env_float("ARTICLE_DUPLICATE_BODY_SIMILARITY", 0.22)
+# Below this many unique tokens per side, Jaccard on short text is noisy
+# (small vocabularies swing to extremes) -- same "not enough evidence either
+# way" floor as ARTICLE_DUPLICATE_MIN_CLAIMS, just for the body-similarity
+# side of the check instead of the numeric side.
+ARTICLE_DUPLICATE_BODY_MIN_TOKENS = env_int("ARTICLE_DUPLICATE_BODY_MIN_TOKENS", 40)
 # Selection ranking: relevance, novelty, and source timeliness. Relevance is the
 # spine — it MULTIPLIES, so an off-topic page scores ~0 no matter how "novel" or
 # "fresh" it looks. Timeliness uses page metadata and title/lead dates so a
