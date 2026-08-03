@@ -192,7 +192,7 @@
   .links a {
     display: flex;
     align-items: center;
-    min-height: 40px;
+    min-height: 44px;
     padding: 8px 4px;
     color: var(--on-surface);
     text-decoration: none;

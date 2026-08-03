@@ -668,8 +668,8 @@
     background: transparent;
     color: var(--on-surface);
     border-radius: 50%;
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     display: inline-grid;
     place-items: center;
     flex-shrink: 0;
@@ -917,6 +917,7 @@
     position: relative;
     display: inline-flex;
     align-items: center;
+    min-height: 44px;
     padding: 0 13px;
     color: var(--muted);
     font-size: 13px;

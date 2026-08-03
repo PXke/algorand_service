@@ -309,6 +309,25 @@
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-x: contain;
     margin: 0 0 24px;
+    /* Scroll-shadow cue: a wide table (pipeline output runs to 8 columns) has
+       no visible sign it scrolls, so a phone reader sees the last column(s)
+       simply cut off — e.g. a location name truncated mid-word — with no hint
+       there's more to swipe to. Two edge-fixed radial gradients (background-
+       attachment: scroll) sit under two content-fixed opaque fades
+       (background-attachment: local); the opaque fades cover the shadow
+       exactly at each scrollable edge and slide away WITH the content once
+       scrolled past, so a shadow only shows on the side that still has more
+       to reveal. CSS-only — no JS scroll listener needed.
+       https://lea.verou.me/blog/2012/04/background-attachment-local/ */
+    background:
+      linear-gradient(to right, var(--surface) 30%, transparent),
+      linear-gradient(to left, var(--surface) 30%, transparent) 100% 0,
+      radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.18), transparent),
+      radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.18), transparent) 100% 0;
+    background-repeat: no-repeat;
+    background-color: var(--surface);
+    background-size: 24px 100%, 24px 100%, 10px 100%, 10px 100%;
+    background-attachment: local, local, scroll, scroll;
   }
   .md :global(table) {
     /* max-content + min-width:100%: the table sizes to its content so columns
