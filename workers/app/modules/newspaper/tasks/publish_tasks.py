@@ -169,11 +169,20 @@ def _validated_hero(image: str, source_url: str) -> str:
     return image
 
 
-def _validated_hero_checked(image: str, source_url: str) -> str:
-    """_validated_hero, then fetch+decode to reject images too small or blank to be worth showing (see _is_real_image). Does real network I/O — use this at compose call sites, not _validated_hero directly, so pure unit tests of the URL-based gate stay fast and deterministic."""
+# A real declared share image can be a modest photo and still look fine as a
+# hero; a bare brand icon (favicon / apple-touch-icon, no og:image anywhere)
+# needs to be genuinely substantial before it's fit to stand in for one full-
+# width — a barely-over-120px icon still reads as blurry/pixelated at hero
+# size, even though it's "real" by the og:image bar.
+_LOGO_MIN_DIMENSION = 256
+
+
+def _validated_hero_checked(image: str, source_url: str, kind: str = "og") -> str:
+    """_validated_hero, then fetch+decode to reject images too small or blank to be worth showing (see _is_real_image). Does real network I/O — use this at compose call sites, not _validated_hero directly, so pure unit tests of the URL-based gate stay fast and deterministic. ``kind="logo"`` applies the stricter _LOGO_MIN_DIMENSION floor instead of _is_real_image's default."""
     image = _validated_hero(image, source_url)
-    if image and not _is_real_image(image):
-        logger.warning("dropping degenerate/decoy og:image %s for %s", image, source_url)
+    min_dimension = _LOGO_MIN_DIMENSION if kind == "logo" else 120
+    if image and not _is_real_image(image, min_dimension=min_dimension):
+        logger.warning("dropping degenerate/decoy %s image %s for %s", kind, image, source_url)
         return ""
     return image
 

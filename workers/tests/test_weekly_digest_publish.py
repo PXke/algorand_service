@@ -94,8 +94,16 @@ def test_run_publishes_new_digest(monkeypatch: pytest.MonkeyPatch) -> None:
         "delay",
         lambda **kw: indexed.append(kw["article_id"]),
     )
+    translated: list[str] = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.tasks.publish_tasks.enqueue_article_translations",
+        lambda article_id: translated.append(article_id),
+    )
+
+    captured_insert_kwargs: dict = {}
 
     def fake_insert(**kwargs: object) -> tuple[str, bool]:
+        captured_insert_kwargs.update(kwargs)
         return str(kwargs["article_id"]), True
 
     monkeypatch.setattr(weekly_digest_publish, "insert_article_if_absent", fake_insert)
@@ -103,6 +111,53 @@ def test_run_publishes_new_digest(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["status"] == "published"
     assert result["feed_articles"] == "0"
     assert indexed
+    # Unlike the normal publish path, the digest never called this at all
+    # (found 2026-08-03) -- weekly digests silently never got translated.
+    assert translated == [result["article_id"]]
+    # No source page to pull a hero image from -- falls back to the site's
+    # own icon instead of publishing with no image at all.
+    assert captured_insert_kwargs["image_url"] == f"{config.PUBLIC_SITE_URL}/icons/icon-512.png"
+
+
+def test_run_skipped_already_published_does_not_retranslate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A week that already has its digest article must not re-enqueue translations on every subsequent beat tick."""
+    import app.core.config as config
+
+    monkeypatch.setattr(config, "PRICE_ANALYSIS_ENABLED", True)
+    ctx = WeeklyDigestContext(
+        week_key="2026-W23",
+        week_label="2026-06-02",
+        price=WeeklyPriceSnapshot(
+            asset_id="algorand",
+            asset_name="Algorand",
+            currency="USD",
+            price_usd=1.0,
+            week_open_usd=1.0,
+            week_high_usd=1.0,
+            week_low_usd=1.0,
+            week_change_pct=0.0,
+            as_of=datetime(2026, 6, 2, tzinfo=UTC),
+        ),
+        articles=(),
+    )
+
+    monkeypatch.setattr(weekly_digest_publish, "build_weekly_digest", lambda **_kw: ctx)
+    monkeypatch.setattr(weekly_digest_publish, "compose_weekly_digest", _fake_compose)
+    translated: list[str] = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.tasks.publish_tasks.enqueue_article_translations",
+        lambda article_id: translated.append(article_id),
+    )
+
+    def fake_insert(**kwargs: object) -> tuple[str, bool]:
+        return str(kwargs["article_id"]), False
+
+    monkeypatch.setattr(weekly_digest_publish, "insert_article_if_absent", fake_insert)
+    result = weekly_digest_publish.run_weekly_digest_publish()
+    assert result["status"] == "skipped"
+    assert not translated
 
 
 def test_run_skips_cleanly_when_mistral_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:

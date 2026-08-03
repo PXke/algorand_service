@@ -15,12 +15,14 @@ from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
 
-# validate(image_url, declaring_page_url) -> validated image URL or "".
+# validate(image_url, declaring_page_url, kind) -> validated image URL or "".
 # Anchored to the page that DECLARED the image, not the article's source_url:
 # an og:image legitimately lives on the declaring page's own domain/CDN (a
 # GitHub link cited in Sources advertises opengraph.githubassets.com — foreign
 # to the article's subject site but correct for the declaring page).
-_Validator = Callable[[str, str], str]
+# kind is "og" or "logo" — a bare brand icon needs a stricter size floor than
+# a real declared share image before it's fit to use as a full-width hero.
+_Validator = Callable[[str, str, str], str]
 
 # Links that never carry a representative share image for the story subject:
 # social/chat profiles. Content hosts (medium, youtube, news sites) stay in —
@@ -101,8 +103,8 @@ def resolve_source_images(
             log.info("source image fetch failed for %s: %s", url, exc)
             continue
         if validate is not None:
-            page_og = validate(page_og, url) if page_og else ""
-            page_logo = validate(page_logo, url) if page_logo else ""
+            page_og = validate(page_og, url, "og") if page_og else ""
+            page_logo = validate(page_logo, url, "logo") if page_logo else ""
         og = og or page_og
         logo = logo or page_logo
         if og:  # a real share image is the best result — stop early
@@ -155,8 +157,8 @@ def resolve_article_images(
             log.info("source image fetch failed for %s: %s", url, exc)
             continue
         if validate is not None:
-            page_og = validate(page_og, url) if page_og else ""
-            page_logo = validate(page_logo, url) if page_logo else ""
+            page_og = validate(page_og, url, "og") if page_og else ""
+            page_logo = validate(page_logo, url, "logo") if page_logo else ""
         og = og or page_og
         logo = logo or page_logo
         if og:

@@ -107,7 +107,7 @@ def test_dead_declared_og_falls_through_to_sources_block(monkeypatch: pytest.Mon
     }
     monkeypatch.setattr(si, "_images_from_url", lambda url: pages.get(url, ("", "")))
 
-    def validate(image: str, _page_url: str) -> str:
+    def validate(image: str, _page_url: str, _kind: str) -> str:
         # The declared og 404s in the real incident — validator rejects it.
         if image == "https://www.aramid.finance/og-image.jpg":
             return ""
@@ -132,7 +132,7 @@ def test_resolver_validation_is_anchored_to_the_declaring_page(
     monkeypatch.setattr(si, "_images_from_url", lambda url: pages.get(url, ("", "")))
     seen: list[tuple[str, str]] = []
 
-    def validate(image: str, page_url: str) -> str:
+    def validate(image: str, page_url: str, _kind: str) -> str:
         seen.append((image, page_url))
         return image
 
@@ -368,6 +368,42 @@ def test_validated_hero_checked_keeps_good_apple_touch_icon(
             "https://algovanity.com/apple-touch-icon.png", "https://algovanity.com"
         )
         == "https://algovanity.com/apple-touch-icon.png"
+    )
+
+
+def test_validated_hero_checked_logo_kind_drops_borderline_icon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare brand icon (kind="logo", no declared og:image anywhere) needs a stricter floor than a real share image -- 192x192 clears the "og" bar (120) but not the "logo" one (256), since a favicon-shaped image that small still looks blurry blown up to full hero width."""
+    monkeypatch.setattr(
+        "app.core.net_guard.guarded_get",
+        lambda *_a, **_kw: _fake_response(content=_png_bytes(size=(192, 192))),
+    )
+    assert (
+        _validated_hero_checked(
+            "https://museum.datahistory.org/assets/favicon.ico",
+            "https://museum.datahistory.org",
+            "logo",
+        )
+        == ""
+    )
+
+
+def test_validated_hero_checked_logo_kind_keeps_genuinely_large_icon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely large declared icon (>=256px) passes the stricter logo-kind floor."""
+    monkeypatch.setattr(
+        "app.core.net_guard.guarded_get",
+        lambda *_a, **_kw: _fake_response(content=_png_bytes(size=(512, 512))),
+    )
+    assert (
+        _validated_hero_checked(
+            "https://museum.datahistory.org/assets/icon-512.png",
+            "https://museum.datahistory.org",
+            "logo",
+        )
+        == "https://museum.datahistory.org/assets/icon-512.png"
     )
 
 

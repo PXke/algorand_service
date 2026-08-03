@@ -72,6 +72,10 @@ def run_weekly_digest_publish(
             publish_kind="weekly_digest",
         ),
         prompt_version=getattr(composed, "prompt_version", ""),
+        # The digest has no source page to pull a hero image from — fall
+        # back to the site's own high-res icon rather than shipping with
+        # none at all (a bare digest card/OG preview looked broken).
+        image_url=f"{config.PUBLIC_SITE_URL}/icons/icon-512.png",
     )
 
     if not created:
@@ -90,6 +94,9 @@ def run_weekly_digest_publish(
         service_id=service_id,
         published_at_epoch=int(time.time()),
     )
+    from app.modules.newspaper.tasks.publish_tasks import enqueue_article_translations
+
+    enqueue_article_translations(article_id)
     return {
         "status": "published",
         "article_id": article_id,

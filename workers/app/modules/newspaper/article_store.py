@@ -556,6 +556,7 @@ def insert_article_if_absent(
     source_url: str,
     tags: list[str] | None = None,
     prompt_version: str = "",
+    image_url: str = "",
 ) -> tuple[str, bool]:
     """Insert digest article; return (id, created). Skips when id already exists."""
     if article_exists(article_id):
@@ -571,6 +572,7 @@ def insert_article_if_absent(
         article_id=article_id,
         tags=tags,
         prompt_version=prompt_version,
+        image_url=image_url,
     )
     return str(article_id), True
 
