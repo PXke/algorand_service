@@ -1087,11 +1087,23 @@ def _attempt_revision(
     revise_user: str,
     *,
     temperature: float,
-    too_long: bool,
-    orig_words: int,
     note_failure: Callable[[str], None],
 ) -> dict | None:
-    """Call the reviser and apply the word-count safety net (a structure-only fix must not gut the article — losing more than ~25% of the words when we weren't trimming an over-long piece has lost real content). Returns the revised fields, or None — having already called note_failure — if the call failed or the revision looks unsafe."""
+    """Call the reviser. Returns the revised fields, or None — having already called note_failure — if the call failed or came back empty.
+
+    Used to also reject any revision that dropped more than ~25% of the word
+    count (unless the draft was flagged too-long) on the theory that a
+    structure-only fix must not gut the article. Removed 2026-08-03: that
+    guard was sized for Mistral Medium, which wrote too-short drafts by
+    default and needed protecting from further shrinkage. Mistral Large
+    (the writer tier since) reliably writes enough — the guard's only
+    observed effect by then was rejecting a LEGITIMATE fix (a revision that
+    correctly merged a grader-flagged repeated section, e.g. HAY tokenomics
+    restated in both prose and a table, cut real duplication and tripped the
+    same ratio check as a lazy gut job would have) and silently reverting to
+    the still-repetitive draft — defeating the revision pass it was
+    supposed to be protecting.
+    """
     try:
         revised = mistral.chat_json_object(
             [
@@ -1105,13 +1117,6 @@ def _attempt_revision(
         return None
     if not str(revised.get("body", "") or "").strip():
         note_failure("revision returned an empty body")
-        return None
-    new_words = len(str(revised.get("body", "")).split())
-    if not too_long and orig_words and new_words < 0.75 * orig_words:
-        note_failure(
-            f"revision dropped too much content ({orig_words} -> {new_words} words); "
-            "kept prior draft"
-        )
         return None
     return revised
 
@@ -1257,8 +1262,6 @@ def _review_and_revise(
             gen_system,
             revise_user,
             temperature=MISTRAL_TEMP_WRITE,
-            too_long=too_long,
-            orig_words=draft_words,
             note_failure=_note_revision_failure,
         )
         if revised is None:
