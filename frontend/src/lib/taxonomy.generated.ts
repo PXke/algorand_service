@@ -18,6 +18,7 @@ export const META_TAGS: ReadonlySet<string> = new Set([
   'on-chain',
   'onchain',
   'service',
+  'special-edition',
   'telegram',
   'update',
   'updated',
@@ -49,6 +50,7 @@ export const DISPLAY_LABELS: Readonly<Record<string, string>> = {
   'rwa': 'RWAs',
   'sdk': 'SDKs',
   'sdks': 'SDKs',
+  'special-edition': 'Special Edition',
   'tvl': 'TVL',
   'x402': 'x402',
 }

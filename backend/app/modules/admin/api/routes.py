@@ -178,6 +178,7 @@ async def admin_create_brief(request: Request) -> Response:
         status=payload.status,
         wallet_address=wallet,
         refresh_every_days=payload.refresh_every_days,
+        is_special_edition=payload.is_special_edition,
     )
     try:
         from celery import Celery

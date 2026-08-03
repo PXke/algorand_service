@@ -755,6 +755,7 @@ def _compose_or_error(
             brief_id=str(payload.get("brief_id", "")),
             first_coverage=first_coverage,
             prior_coverage_block=prior_coverage_block,
+            is_special_edition=bool(payload.get("is_special_edition", False)),
         )
         return composed, None
     except ComposeBusyError:
@@ -2256,6 +2257,7 @@ def _recompose_published_compose(
                 is_first_snapshot=True,
                 publish_kind=PublishKind.SERVICE_DISCOVERY,
                 publish_topic=PublishTopic.EDITORIAL_ASSIGNMENT,
+                is_special_edition=getattr(brief_for_recompose, "is_special_edition", False),
             )
         else:
             composed = compose_scrape_article(

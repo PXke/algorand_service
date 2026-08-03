@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,6 +23,55 @@ def _brief(**overrides: object) -> ea.EditorialBrief:
     }
     defaults.update(overrides)
     return ea.EditorialBrief(**defaults)
+
+
+def test_get_brief_parses_is_special_edition_true(fake_cassandra_session: MagicMock) -> None:
+    """get_brief surfaces is_special_edition=True from the row."""
+    row = MagicMock()
+    row.brief_id = "00000000-0000-0000-0000-000000000001"
+    row.title = "State of Algorand DeFi"
+    row.body_markdown = "Angle: quarterly deep dive."
+    row.keywords = "defi, algorand"
+    row.status = "active"
+    row.refresh_every_days = 30
+    row.last_run_at = None
+    row.linked_article_id = None
+    row.is_special_edition = True
+    fake_cassandra_session.execute.return_value.one.return_value = row
+
+    brief = ea.get_brief("00000000-0000-0000-0000-000000000001")
+
+    assert brief is not None
+    assert brief.is_special_edition is True
+
+
+def test_get_brief_defaults_is_special_edition_false(fake_cassandra_session: MagicMock) -> None:
+    """A null is_special_edition column (pre-migration rows) reads as False, not None."""
+    row = MagicMock()
+    row.brief_id = "00000000-0000-0000-0000-000000000001"
+    row.title = "Algorand wallets compared"
+    row.body_markdown = "Cover download links."
+    row.keywords = "wallet"
+    row.status = "active"
+    row.refresh_every_days = 0
+    row.last_run_at = None
+    row.linked_article_id = None
+    row.is_special_edition = None
+    fake_cassandra_session.execute.return_value.one.return_value = row
+
+    brief = ea.get_brief("00000000-0000-0000-0000-000000000001")
+
+    assert brief is not None
+    assert brief.is_special_edition is False
+
+
+def test_build_assignment_payload_carries_is_special_edition() -> None:
+    """The compose payload threads is_special_edition through for the writer prompt."""
+    payload = ea._build_assignment_payload(_brief(is_special_edition=True))
+    assert payload["is_special_edition"] is True
+
+    payload = ea._build_assignment_payload(_brief(is_special_edition=False))
+    assert payload["is_special_edition"] is False
 
 
 def test_assign_editorial_brief_forces_relevance_and_enqueues(

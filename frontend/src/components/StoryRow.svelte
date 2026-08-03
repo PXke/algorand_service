@@ -33,6 +33,9 @@
   /* One pass — primaryTopic() allocates a Set and two arrays, and the front
      page renders ~23 of these. */
   const topic = $derived(primaryTopic(article.tags))
+  const isSpecialEdition = $derived(
+    (article.tags ?? []).some((tag) => String(tag).toLowerCase() === 'special-edition'),
+  )
   const kicker = $derived.by(() => {
     const kind = article.trigger_kind?.toLowerCase()
     if (kind === 'chain' || kind === 'onchain') return t($messages, 'sourceKindOnChain')
@@ -79,6 +82,9 @@
   <div class="text">
     <div class="meta-top">
       <p class="kicker">{kicker}</p>
+      {#if isSpecialEdition}
+        <span class="special-edition-badge">{t($messages, 'specialEditionBadge')}</span>
+      {/if}
       {#if when}
         <span class="when subtle">{when}</span>
       {/if}
@@ -171,6 +177,18 @@
   .when {
     flex-shrink: 0;
     font-size: 10.5px;
+  }
+  .special-edition-badge {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+    padding: 1.5px 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--primary) 14%, var(--panel));
+    color: var(--primary);
   }
   .title {
     margin: 0;

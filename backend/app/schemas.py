@@ -363,6 +363,9 @@ class EditorialBriefCreate(msgspec.Struct, kw_only=True):
     # 0 = one-off assignment; >0 = re-trigger an in-place edit of the resulting
     # article every N days (see app.tasks.newspaper.scan_editorial_brief_schedule).
     refresh_every_days: Annotated[int, Meta(ge=0, le=3650)] = 0
+    # In-depth, longer treatment (see mistral_compose._SPECIAL_EDITION_DEPTH_INSTRUCTIONS)
+    # instead of the standard "scale length to substance" pass every other brief gets.
+    is_special_edition: bool = False
 
 
 class OfficialChannelCreate(msgspec.Struct, kw_only=True):

@@ -747,12 +747,12 @@ class EditorialBriefStmts:
 
     LIST = _Stmt(
         "SELECT brief_id, title, body_markdown, keywords, status, "
-        "refresh_every_days, last_run_at, linked_article_id "
+        "refresh_every_days, last_run_at, linked_article_id, is_special_edition "
         "FROM algorand_platform.editorial_briefs LIMIT ?"
     )
     GET = _Stmt(
         "SELECT brief_id, title, body_markdown, keywords, status, "
-        "refresh_every_days, last_run_at, linked_article_id "
+        "refresh_every_days, last_run_at, linked_article_id, is_special_edition "
         "FROM algorand_platform.editorial_briefs WHERE brief_id = ?"
     )
     UPDATE_LAST_RUN = _Stmt(

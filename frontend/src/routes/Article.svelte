@@ -166,6 +166,9 @@
   const displayTags = $derived(orderReaderTags(article?.tags))
   const topic = $derived(article ? primaryTopic(article.tags) : null)
   const kicker = $derived(topic ? displayTagLabel(topic) : t($messages, 'pageTitleArticle'))
+  const isSpecialEdition = $derived(
+    (article?.tags ?? []).some((tag) => String(tag).toLowerCase() === 'special-edition'),
+  )
   const tone = $derived(topicColor(topic))
   const byline = $derived.by(() => {
     if (!article || !article.published_at_epoch) return ''
@@ -306,7 +309,12 @@
   {:else if article}
     <article class="reading" bind:this={readingEl} style="--tone:{tone}">
       <span class="accent-slug"></span>
-      <p class="kicker">{kicker}</p>
+      <div class="kicker-row">
+        <p class="kicker">{kicker}</p>
+        {#if isSpecialEdition}
+          <span class="special-edition-badge">{t($messages, 'specialEditionBadge')}</span>
+        {/if}
+      </div>
       <h1 bind:this={titleEl}>{article.title}</h1>
       <p class="lede-meta muted">
         <span>{byline}</span>
@@ -510,6 +518,23 @@
   }
   .kicker {
     margin: 0;
+  }
+  .kicker-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .special-edition-badge {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--primary) 14%, var(--panel));
+    color: var(--primary);
   }
   h1 {
     margin: 0;

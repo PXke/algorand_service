@@ -126,6 +126,7 @@ def test_recompose_editorial_composes_from_brief_not_prior_body(
         title="Algorand Wallets Guide",
         body_markdown="Compare the active Algorand wallets.",
         keywords="wallet,algorand",
+        is_special_edition=False,
     )
     monkeypatch.setattr("app.modules.newspaper.editorial_assignment.get_brief", lambda _bid: brief)
 

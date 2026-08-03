@@ -294,6 +294,7 @@ class AdminCassandraStore:
         status: str,
         wallet_address: str,
         refresh_every_days: int = 0,
+        is_special_edition: bool = False,
     ) -> dict:
         """Insert a new editorial brief."""
         from app.core.cassandra import get_cassandra_session
@@ -314,6 +315,7 @@ class AdminCassandraStore:
                 now,
                 now,
                 refresh_every_days,
+                is_special_edition,
             ),
         )
         return {
@@ -351,6 +353,7 @@ class AdminCassandraStore:
                     "linked_article_id": (
                         str(row.linked_article_id) if row.linked_article_id else ""
                     ),
+                    "is_special_edition": bool(row.is_special_edition),
                 }
             )
         return items
@@ -383,6 +386,7 @@ class AdminCassandraStore:
             "refresh_every_days": int(row.refresh_every_days or 0),
             "last_run_at_epoch": int(last_run.timestamp()) if last_run else 0,
             "linked_article_id": str(row.linked_article_id) if row.linked_article_id else "",
+            "is_special_edition": bool(row.is_special_edition),
         }
 
     def list_official_channels(self, *, kind: str | None = None, limit: int = 200) -> list[dict]:

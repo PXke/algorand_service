@@ -2309,15 +2309,30 @@ def _compose_via_writer_tools_locked(
     return _parse_article_fields(payload)
 
 
+_SPECIAL_EDITION_DEPTH_INSTRUCTIONS = """
+
+SPECIAL EDITION: this is a deliberate in-depth feature, not a routine news
+item — an editor chose this topic for a longer, more substantial treatment.
+Target roughly 1,800-2,500 words (still scaled to genuine verified
+substance — never pad with repetition or filler to hit a count). Cover the
+topic from multiple distinct angles across separate sections: background/
+context, current state (with specifics), comparison or broader implications,
+and open questions or what to watch next. Use your full tool budget for
+real multi-source research across this session rather than a quick
+single-pass writeup — the depth should come from genuinely more verified
+material, not from restating the same few facts at greater length."""
+
+
 def compose_assignment_article_mistral(
     *,
     brief_title: str,
     brief_body: str,
     keywords: str,
     brief_id: str,
+    is_special_edition: bool = False,
     client: MistralClient | None = None,
 ) -> MistralArticleFields:
-    """Generate a from-scratch article for an editor-assigned topic (no scraped source page). Unlike ``compose_scrape_article_mistral``, the brief text is NOT verified fact — the model must substantiate the topic itself via tools before writing, using the same research -> write -> grade/revise loop."""
+    """Generate a from-scratch article for an editor-assigned topic (no scraped source page). Unlike ``compose_scrape_article_mistral``, the brief text is NOT verified fact — the model must substantiate the topic itself via tools before writing, using the same research -> write -> grade/revise loop. ``is_special_edition`` requests a longer, multi-angle in-depth treatment instead of the standard length-scaled-to-substance pass."""
     mistral = client or get_mistral_client()
     today = _today_utc()
 
@@ -2338,7 +2353,7 @@ relying on anything here):
 
 This is a from-scratch research assignment. Use your tools extensively (official
 sites, GitHub, on-chain data, market data, etc. as relevant) to gather current,
-verifiable facts before writing."""
+verifiable facts before writing.{_SPECIAL_EDITION_DEPTH_INSTRUCTIONS if is_special_edition else ""}"""
 
     return _call_compose_via_writer_tools(
         system=system,

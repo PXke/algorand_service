@@ -76,6 +76,7 @@ def compose_scrape_article(
     brief_id: str = "",
     first_coverage: bool = False,
     prior_coverage_block: str = "",
+    is_special_edition: bool = False,
 ) -> ArticleComposeResult:
     """Compose by publish kind (discovery vs update) via Mistral."""
     del mistral_only  # see docstring above
@@ -98,14 +99,18 @@ def compose_scrape_article(
             brief_body=page_text,
             keywords=keywords,
             brief_id=brief_id or source_url,
+            is_special_edition=is_special_edition,
         )
+        extra_tags = tuple(getattr(fields, "tags", ()))
+        if is_special_edition and "special-edition" not in extra_tags:
+            extra_tags = (*extra_tags, "special-edition")
         return ArticleComposeResult(
             title=fields.title,
             summary=fields.summary,
             body=fields.body,
             composer="mistral_assignment",
             publish_kind=publish_kind.value,
-            extra_tags=getattr(fields, "tags", ()),
+            extra_tags=extra_tags,
             prompt_version=getattr(fields, "prompt_version", ""),
             heuristic_grade=getattr(fields, "heuristic_grade", None),
             defunct_domains=getattr(fields, "defunct_domains", ()),

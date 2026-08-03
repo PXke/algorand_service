@@ -19,6 +19,7 @@ class EditorialBrief:
     refresh_every_days: int
     last_run_at: datetime | None
     linked_article_id: str
+    is_special_edition: bool = False
 
 
 def get_brief(brief_id: str) -> EditorialBrief | None:
@@ -44,6 +45,7 @@ def get_brief(brief_id: str) -> EditorialBrief | None:
         refresh_every_days=int(row.refresh_every_days or 0),
         last_run_at=row.last_run_at,
         linked_article_id=str(row.linked_article_id) if row.linked_article_id else "",
+        is_special_edition=bool(row.is_special_edition),
     )
 
 
@@ -71,6 +73,7 @@ def list_active_briefs(*, limit: int = 200) -> list[EditorialBrief]:
                 refresh_every_days=int(row.refresh_every_days or 0),
                 last_run_at=row.last_run_at,
                 linked_article_id=str(row.linked_article_id) if row.linked_article_id else "",
+                is_special_edition=bool(row.is_special_edition),
             )
         )
     return out
@@ -107,6 +110,7 @@ def _build_assignment_payload(brief: EditorialBrief) -> dict[str, Any]:
         "page_title": brief.title,
         "page_text": brief.body_markdown,
         "keywords": brief.keywords,
+        "is_special_edition": brief.is_special_edition,
         "is_first_snapshot": True,
         "diff": None,
         "txid": "",

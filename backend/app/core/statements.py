@@ -179,18 +179,18 @@ class EditorialBriefStmts:
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.editorial_briefs ("
         "brief_id, title, body_markdown, keywords, status, "
-        "wallet_address, created_at, updated_at, refresh_every_days"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "wallet_address, created_at, updated_at, refresh_every_days, is_special_edition"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     LIST = _Stmt(
         "SELECT brief_id, title, keywords, status, wallet_address, created_at, updated_at, "
-        "refresh_every_days, last_run_at, linked_article_id "
+        "refresh_every_days, last_run_at, linked_article_id, is_special_edition "
         "FROM algorand_platform.editorial_briefs LIMIT ?"
     )
     GET = _Stmt(
         "SELECT brief_id, title, body_markdown, keywords, status, "
         "wallet_address, created_at, updated_at, "
-        "refresh_every_days, last_run_at, linked_article_id "
+        "refresh_every_days, last_run_at, linked_article_id, is_special_edition "
         "FROM algorand_platform.editorial_briefs WHERE brief_id = ?"
     )
 

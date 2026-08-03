@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ArticleItem } from '../lib/api/news'
+  import { messages, t } from '../lib/i18n'
   import { articleImageUrl } from '../lib/images'
   import { articleHref } from '../lib/paths'
   import { navigate } from '../lib/router'
@@ -15,6 +16,9 @@
   const topic = $derived(primaryTopic(article.tags))
   const kicker = $derived(topic ? displayTagLabel(topic) : 'Lead')
   const tone = $derived(topicColor(topic))
+  const isSpecialEdition = $derived(
+    (article.tags ?? []).some((tag) => String(tag).toLowerCase() === 'special-edition'),
+  )
 </script>
 
 <a
@@ -28,7 +32,12 @@
 >
   <div class="copy">
     <span class="accent-slug"></span>
-    <p class="kicker">{kicker}</p>
+    <div class="kicker-row">
+      <p class="kicker">{kicker}</p>
+      {#if isSpecialEdition}
+        <span class="special-edition-badge">{t($messages, 'specialEditionBadge')}</span>
+      {/if}
+    </div>
     <h1 class="title">{article.title ?? 'Untitled'}</h1>
     {#if article.summary}
       <p class="deck muted">{article.summary}</p>
@@ -74,6 +83,23 @@
   .lead:hover .media img {
     transform: scale(1.035);
     filter: saturate(1);
+  }
+  .kicker-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .special-edition-badge {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--primary) 14%, var(--panel));
+    color: var(--primary);
   }
   .copy {
     display: flex;

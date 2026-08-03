@@ -525,3 +525,11 @@ file = "backend/schema/migrations/app/057_glossary.cql"
 tier = "prod"
 status = "active"
 description = "glossary_terms: admin-curated term/definition pairs for the public /glossary pages and deterministic article auto-linking"
+
+[[migrations]]
+stream = "app"
+version = "058"
+file = "backend/schema/migrations/app/058_special_edition_brief.cql"
+tier = "prod"
+status = "active"
+description = "editorial_briefs.is_special_edition: flags a brief for deeper/longer compose treatment and a reader-facing badge"

@@ -14,6 +14,7 @@
   let body = $state('')
   let keywords = $state('')
   let refreshDays = $state(0)
+  let specialEdition = $state(false)
   let loading = $state(true)
   let submitting = $state(false)
   let assigningId = $state<string | null>(null)
@@ -47,11 +48,13 @@
           .join(', '),
         status: 'active',
         refresh_every_days: refreshDays,
+        is_special_edition: specialEdition,
       })
       title = ''
       body = ''
       keywords = ''
       refreshDays = 0
+      specialEdition = false
       onmessage?.('Brief assigned to the writer agent')
       await load()
     } catch (e) {
@@ -126,6 +129,10 @@
       <input type="number" min="0" bind:value={refreshDays} />
       <span class="hint">0 = one-off, no recurring refresh</span>
     </label>
+    <label class="field-checkbox">
+      <input type="checkbox" bind:checked={specialEdition} />
+      <span>Special Edition (in-depth, longer)</span>
+    </label>
     <div class="form-actions">
       <button class="btn btn-primary" type="submit" disabled={submitting}>
         {submitting ? 'Assigning…' : 'Assign to writer'}
@@ -152,6 +159,7 @@
         <div class="brief-main">
           <strong>{String(b.title ?? '')}</strong>
           <div class="brief-meta">
+            {#if b.is_special_edition}<span class="special-badge">Special Edition</span>{/if}
             {#if kw}<span>{kw}</span>{/if}
             <span>{cadence}</span>
             {#if linked}
@@ -217,6 +225,22 @@
   }
   .field.narrow input {
     max-width: 120px;
+  }
+  .field-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.88rem;
+  }
+  .special-badge {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--primary) 14%, var(--panel));
+    color: var(--primary);
   }
   .form-actions {
     display: flex;

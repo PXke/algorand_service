@@ -28,6 +28,7 @@
     "on-chain",
     "onchain",
     "service",
+    "special-edition",
     "telegram",
     "update",
     "updated",
@@ -59,7 +60,8 @@
     "asa": "ASAs",
     "tvl": "TVL",
     "kyc": "KYC",
-    "x402": "x402"
+    "x402": "x402",
+    "special-edition": "Special Edition"
   },
   "display_labels_note": "Internal slug -> reader-facing text. DISPLAY ONLY: /topic/<tag> URLs always use the raw slug on both sides, so a link never changes shape based on this table."
 }
