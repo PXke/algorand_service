@@ -934,6 +934,79 @@ def _tool_get_defi_tvl(protocol: str = "") -> dict[str, Any]:
         return {"protocol": p or "algorand-chain", "error": str(exc)[:200]}
 
 
+def _tool_package_download_stats(registry: str = "", package: str = "") -> dict[str, Any]:
+    """Download counts for an npm or PyPI package (e.g. an AlgoKit utility) — free, unauthenticated third-party adoption numbers. registry is 'npm' or 'pypi'; package is the exact published name (npm scoped names like '@algorandfoundation/algokit-utils' are fine as-is)."""
+    import urllib.parse
+
+    reg = (registry or "").strip().lower()
+    pkg = (package or "").strip()
+    if not pkg:
+        return {"error": "package is required"}
+    if reg not in {"npm", "pypi"}:
+        return {"error": "registry must be 'npm' or 'pypi'"}
+    encoded = urllib.parse.quote(pkg, safe="")
+    try:
+        if reg == "npm":
+            week = _guarded_get(f"https://api.npmjs.org/downloads/point/last-week/{encoded}")
+            month = _guarded_get(f"https://api.npmjs.org/downloads/point/last-month/{encoded}")
+            if week.status_code == 404 or month.status_code == 404:
+                return {"registry": reg, "package": pkg, "error": "package not found on npm"}
+            week.raise_for_status()
+            month.raise_for_status()
+            return {
+                "registry": reg,
+                "package": pkg,
+                "downloads_last_week": week.json().get("downloads"),
+                "downloads_last_month": month.json().get("downloads"),
+                "source": "npmjs.org",
+            }
+        resp = _guarded_get(f"https://pypistats.org/api/packages/{encoded}/recent")
+        if resp.status_code == 404:
+            return {"registry": reg, "package": pkg, "error": "package not found on PyPI"}
+        resp.raise_for_status()
+        data = (resp.json() or {}).get("data") or {}
+        return {
+            "registry": reg,
+            "package": pkg,
+            "downloads_last_day": data.get("last_day"),
+            "downloads_last_week": data.get("last_week"),
+            "downloads_last_month": data.get("last_month"),
+            "source": "pypistats.org",
+        }
+    except Exception as exc:
+        return {"registry": reg, "package": pkg, "error": str(exc)[:200]}
+
+
+_PACKAGE_DOWNLOADS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "package_download_stats",
+        "description": (
+            "Download counts for a published npm or PyPI package — concrete, "
+            "third-party adoption numbers for an SDK/CLI/utility (e.g. AlgoKit's "
+            "TypeScript or Python packages) rather than a claim from the project's "
+            "own marketing. Use the package's exact published name (npm scoped "
+            "names like '@algorandfoundation/algokit-utils' work as-is)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "registry": {
+                    "type": "string",
+                    "enum": ["npm", "pypi"],
+                    "description": "which registry the package is published on",
+                },
+                "package": {
+                    "type": "string",
+                    "description": "exact published package name",
+                },
+            },
+            "required": ["registry", "package"],
+        },
+    },
+}
+
+
 _NODELY_DS_QUERY = "https://g.nodely.io/api/ds/query"
 _NODELY_CH_UID = "fc25640e-50ee-4e04-aad6-2a5336c09eaf"
 # In-process hourly cache: this is Nodely's free dashboard infra and the daily
@@ -1660,8 +1733,8 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     register only when usable. github_activity, github_repository_search,
     github_repository_contents, search_token_listings, fetch_url, get_defi_tvl,
     discourse_forum, get_node_stats, medium_api_article_list,
-    reddit_api_post_history and xgov_proposal_status hit free public APIs and
-    are always available (GITHUB_TOKEN optional).
+    package_download_stats, reddit_api_post_history and xgov_proposal_status
+    hit free public APIs and are always available (GITHUB_TOKEN optional).
     """
     import os
 
@@ -1677,6 +1750,7 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         _DISCOURSE_SCHEMA,
         _NODE_STATS_SCHEMA,
         _MEDIUM_SCHEMA,
+        _PACKAGE_DOWNLOADS_SCHEMA,
         # reddit_api_post_history deliberately has NO schema (2026-07-16):
         # reddit blocks this server's IP — offering the tool just burned one
         # 403 per session. Its stub handler (still registered below) answers
@@ -1693,6 +1767,7 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         "discourse_forum": _tool_discourse_forum,
         "get_node_stats": _tool_get_node_stats,
         "medium_api_article_list": _tool_medium_articles,
+        "package_download_stats": _tool_package_download_stats,
         "reddit_api_post_history": _tool_reddit_history,
         "xgov_proposal_status": _tool_xgov_proposal,
     }
