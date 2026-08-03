@@ -90,6 +90,22 @@ def test_strip_repeating_row_blocks_leaves_prose_and_short_tables_untouched() ->
 
 
 def test_strip_repeating_row_blocks_requires_minimum_cycles() -> None:
-    """Only two repeats of a shape is not enough evidence of a live feed -- left alone."""
-    two_rows = "aigirlfriend.algo A 144.34\nnfdomains.algo\ngf.algo\nJul 24, 2026 12:13 AM\n" * 2
-    assert _strip_repeating_row_blocks(two_rows) == two_rows
+    """A single occurrence of a multi-line row shape is not enough evidence of a repeating live feed -- left alone.
+
+    Two+ full repeats of this exact 4-line shape total 8+ short-shaped
+    lines, which the independent short-run pass has enough evidence to
+    catch on its own regardless of exact period -- see
+    test_strip_repeating_row_blocks_handles_variable_period_screener for
+    that pass's own coverage.
+    """
+    one_row = "aigirlfriend.algo A 144.34\nnfdomains.algo\ngf.algo\nJul 24, 2026 12:13 AM\n"
+    assert _strip_repeating_row_blocks(one_row) == one_row
+
+
+def test_strip_repeating_row_blocks_handles_variable_period_screener() -> None:
+    """hay.app regression pin (2026-08-02): a dense TICKER/PERCENT screener where SOME rows also carry a rank number has no constant period, so the fixed-cycle pass alone misses the tail (found stopping short after the first 3 clean 2-line rows). The independent short-run pass catches the whole thing regardless of exact period."""
+    screener = (
+        "ORA\n+6%\nALPHA\n+5%\nGONNA\n+2%\nTINY\n-1%\n10\nHOG\n-1%\n11\nFOLKS\n-1%\n12\nHAY\n+3%\n"
+    )
+    other_values = screener.replace("+6%", "+9%").replace("ORA", "ZETA").replace("10\n", "20\n")
+    assert _stable_content_hash(screener) == _stable_content_hash(other_values)

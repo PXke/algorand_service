@@ -78,6 +78,19 @@ _ROW_SHAPE_NAME = re.compile(r"\b[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)+\b
 # "X5KD3V…EXVU" (an ellipsis, not a dot). Collapse a whole line that's just a
 # single non-whitespace identifier-shaped run, so both forms shape the same.
 _ROW_SHAPE_BARE_TOKEN = re.compile(r"^[a-z0-9][a-z0-9_.…-]{1,79}$")
+# Second detection pass (see _strip_repeating_row_blocks): a dense screener
+# (hay.app: TICKER / PERCENT, with some rows also carrying a rank number) has
+# no CONSTANT period, so the cycle pass above misses its tail. Independently
+# catch a long run of individually short-shaped lines instead. 4 chars covers
+# "" (a bare number/percent, fully consumed by _VOLATILE_PATTERNS) and "@" /
+# "@ a" (an identifier with at most one short leftover token, e.g. a
+# currency-ish prefix letter). A hand-written sentence's shape is essentially
+# never that short.
+_ROW_SHORT_SHAPE_MAX_LEN = 4
+# Higher bar than the cycle pass's MIN_CYCLES*period floor -- this heuristic
+# is blunter (no shape-matching, just "short"), so require more consecutive
+# evidence before blanking a run.
+_SHORT_RUN_MIN_LINES = 8
 
 
 def _line_shape(line: str) -> str | None:
@@ -94,12 +107,9 @@ def _line_shape(line: str) -> str | None:
     return stripped
 
 
-def _strip_repeating_row_blocks(text: str) -> str:
-    """Blank out any run where an N-line shape cycle (N up to _ROW_BLOCK_MAX_PERIOD) repeats _ROW_BLOCK_MIN_CYCLES+ times -- a flattened live activity table, whose row identities are noise for change-detection even though the surrounding page is stable."""
-    lines = text.split("\n")
-    shapes = [_line_shape(line) for line in lines]
+def _blank_repeating_cycles(shapes: list[str | None], out: list[str]) -> None:
+    """Pass 1: blank any run where an N-line shape cycle (N up to _ROW_BLOCK_MAX_PERIOD) repeats _ROW_BLOCK_MIN_CYCLES+ times -- a multi-field row flattened across several lines (NFDomains: name+price / seller / buyer / date, every cycle the same length). Mutates ``out`` in place."""
     n = len(shapes)
-    out = list(lines)
     i = 0
     while i < n:
         if shapes[i] is None:
@@ -126,6 +136,37 @@ def _strip_repeating_row_blocks(text: str) -> str:
             i = best_end
         else:
             i += 1
+
+
+def _blank_short_shape_runs(shapes: list[str | None], out: list[str]) -> None:
+    """Pass 2: blank any run of _SHORT_RUN_MIN_LINES+ individually short-shaped lines, regardless of exact period -- a dense single-value screener (hay.app: TICKER / PERCENT, but some rows also carry a rank number, so the period isn't constant and pass 1 alone misses the tail). "Short-shaped" means the line reduced to nothing (a bare number/percent, fully consumed by _VOLATILE_PATTERNS) or to the bare "@" identifier placeholder -- a hand-written sentence essentially never does that many times in a row. Mutates ``out`` in place."""
+    n = len(shapes)
+    i = 0
+    while i < n:
+        shape = shapes[i]
+        if shape is None or len(shape) > _ROW_SHORT_SHAPE_MAX_LEN:
+            i += 1
+            continue
+        j = i
+        while (
+            j + 1 < n
+            and shapes[j + 1] is not None
+            and len(shapes[j + 1]) <= _ROW_SHORT_SHAPE_MAX_LEN
+        ):
+            j += 1
+        if (j - i + 1) >= _SHORT_RUN_MIN_LINES:
+            for k in range(i, j + 1):
+                out[k] = ""
+        i = j + 1
+
+
+def _strip_repeating_row_blocks(text: str) -> str:
+    """Blank out live-activity-table noise before hashing/diffing, via two independent passes over line SHAPE (never vocabulary) -- see _blank_repeating_cycles and _blank_short_shape_runs."""
+    lines = text.split("\n")
+    shapes = [_line_shape(line) for line in lines]
+    out = list(lines)
+    _blank_repeating_cycles(shapes, out)
+    _blank_short_shape_runs(shapes, out)
     return "\n".join(out)
 
 
