@@ -211,7 +211,7 @@ requests==2.34.2
     # via
     #   geoip2
     #   tiktoken
-resvg-py==0.3.3
+resvg-py==0.3.4
     # via algorand-platform-backend (backend/pyproject.toml)
 rich==15.0.0
     # via typer

@@ -771,6 +771,16 @@ def all_tools(
         handlers["confirm_alert_topic"] = confirm_alert_topic_handler
     except Exception:
         logger.warning("failed to load confirm_alert_topic tool", exc_info=True)
+    try:
+        from app.modules.ai.glossary_suggest_tool import (
+            SUGGEST_GLOSSARY_TERM_SCHEMA,
+            _make_suggest_glossary_term_handler,
+        )
+
+        schemas.append(SUGGEST_GLOSSARY_TERM_SCHEMA)
+        handlers["suggest_glossary_term"] = _make_suggest_glossary_term_handler(context)
+    except Exception:
+        logger.warning("failed to load suggest_glossary_term tool", exc_info=True)
     # Registered last, once every toolset is merged, so the already-have-it
     # check sees the FULL tool registry for this compose.
     handlers["report_compose_issue"] = _make_report_compose_issue_handler(context)
