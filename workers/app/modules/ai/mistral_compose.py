@@ -1795,6 +1795,7 @@ def _compose_via_writer_tools(
     mistral: MistralClient,
     topic: str = "",
     research_user: str | None = None,
+    is_special_edition: bool = False,
 ) -> MistralArticleFields:
     """Shared research -> write -> grade/revise loop behind every writer-tools compose path. Only depends on the system/user prompt pair and a label (``source_url``) used for tool scoping and session/investigation bookkeeping — it doesn't assume the source material was a real scraped page, so callers can feed it a from-scratch topic assignment just as well as a scrape diff.
 
@@ -1802,6 +1803,10 @@ def _compose_via_writer_tools(
     clip) for the stage-1 research rounds, which re-send the whole prompt on
     every tool round; stage-2 generation always uses the full ``user``.
     Defaults to ``user``.
+
+    ``is_special_edition``: quadruples the stage-1 research round budget
+    (MISTRAL_MAX_TOOL_ROUNDS) for a genuinely deeper investigation, on top
+    of the prompt's own depth instructions.
     """
     from app.modules.newspaper.compose_lock import compose_lock
 
@@ -1813,6 +1818,7 @@ def _compose_via_writer_tools(
             mistral=mistral,
             topic=topic,
             research_user=research_user,
+            is_special_edition=is_special_edition,
         )
 
 
@@ -1925,6 +1931,7 @@ def _run_two_stage_compose(
     trace: list,
     debug: dict,
     checkpoint: Callable[[str], None],
+    max_rounds: int | None = None,
 ) -> dict:
     """Two-stage compose: cold research (tools, low temp) on the Small research tier, a floor + gap-fill pass if it under-researched, a structured digest handoff, then a warm no-tools generation on the writer tier, and finally deterministic grade/revise."""
     from app.core.config import MISTRAL_MODEL_RESEARCH, MISTRAL_TEMP_RESEARCH, MISTRAL_TEMP_WRITE
@@ -1953,6 +1960,7 @@ def _run_two_stage_compose(
         debug=debug,
         temperature=MISTRAL_TEMP_RESEARCH,
         require_tool=None,
+        max_rounds=max_rounds,
         # Research runs for its tool side-effects (the trace); the
         # return value is discarded — never pay for a final
         # article completion on round exhaustion.
@@ -2138,6 +2146,7 @@ def _compose_via_writer_tools_locked(
     mistral: MistralClient,
     topic: str = "",
     research_user: str | None = None,
+    is_special_edition: bool = False,
 ) -> MistralArticleFields:
     from app.core.config import WRITER_TOOLS_ENABLED
 
@@ -2148,11 +2157,16 @@ def _compose_via_writer_tools_locked(
     if WRITER_TOOLS_ENABLED:
         try:
             from app.core.config import (
+                MISTRAL_MAX_TOOL_ROUNDS,
                 MISTRAL_MODEL_RESEARCH,
                 MISTRAL_MODEL_WRITER,
                 WRITER_TWO_STAGE,
             )
             from app.modules.ai.writer_tools import all_tools
+
+            research_max_rounds = (
+                MISTRAL_MAX_TOOL_ROUNDS * 4 if is_special_edition else None
+            )
 
             research_mistral = get_mistral_research_client()
             tool_context = {
@@ -2220,6 +2234,7 @@ def _compose_via_writer_tools_locked(
                     trace=trace,
                     debug=debug,
                     checkpoint=_checkpoint,
+                    max_rounds=research_max_rounds,
                 )
             else:
                 # Legacy single agentic loop: tools + final article in one pass.
@@ -2233,6 +2248,7 @@ def _compose_via_writer_tools_locked(
                     trace=trace,
                     debug=debug,
                     require_tool="review_draft",
+                    max_rounds=research_max_rounds,
                 )
                 payload = json.loads(raw)
 
@@ -2312,15 +2328,20 @@ def _compose_via_writer_tools_locked(
 _SPECIAL_EDITION_DEPTH_INSTRUCTIONS = """
 
 SPECIAL EDITION: this is a deliberate in-depth feature, not a routine news
-item — an editor chose this topic for a longer, more substantial treatment.
-Target roughly 1,800-2,500 words (still scaled to genuine verified
-substance — never pad with repetition or filler to hit a count). Cover the
-topic from multiple distinct angles across separate sections: background/
-context, current state (with specifics), comparison or broader implications,
-and open questions or what to watch next. Use your full tool budget for
-real multi-source research across this session rather than a quick
-single-pass writeup — the depth should come from genuinely more verified
-material, not from restating the same few facts at greater length."""
+item — an editor chose this topic for real investigative treatment. Act like
+an investigative journalist: dig past the surface-level facts, chase down
+primary sources, cross-check claims against on-chain/on-record evidence, and
+follow up on anything that looks thin, contradictory, or worth questioning.
+Use your full tool budget for genuine multi-source research across this
+session rather than a quick single-pass writeup.
+
+There is no target length — let it run as long as the material genuinely
+supports, never pad with repetition or filler to hit a count, and never cut
+a real finding short to stay brief. The piece should read as a narrative,
+not a list of facts: build it around a clear throughline that connects
+background/context, the current state (with specifics), comparison or
+broader implications, and open questions or what to watch next, so a reader
+comes away with a story, not just a summary."""
 
 
 def compose_assignment_article_mistral(
@@ -2361,6 +2382,7 @@ verifiable facts before writing.{_SPECIAL_EDITION_DEPTH_INSTRUCTIONS if is_speci
         source_url=f"editorial://brief/{brief_id}",
         mistral=mistral,
         topic="editorial_assignment",
+        is_special_edition=is_special_edition,
     )
 
 

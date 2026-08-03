@@ -29,7 +29,9 @@ def test_special_edition_appends_depth_instructions(monkeypatch: pytest.MonkeyPa
         client=SimpleNamespace(),
     )
     assert "SPECIAL EDITION" in captured["user"]
-    assert "1,800-2,500 words" in captured["user"]
+    assert "investigative journalist" in captured["user"]
+    assert "no target length" in captured["user"]
+    assert "1,800" not in captured["user"]
 
 
 def test_standard_brief_has_no_depth_instructions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,6 +51,48 @@ def test_standard_brief_has_no_depth_instructions(monkeypatch: pytest.MonkeyPatc
         client=SimpleNamespace(),
     )
     assert "SPECIAL EDITION" not in captured["user"]
+
+
+def test_two_stage_compose_forwards_max_rounds_to_stage1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_run_two_stage_compose passes its max_rounds straight through to stage-1's chat_with_tools call."""
+    monkeypatch.setattr("app.core.config.RESEARCH_FLOOR_ENABLED", False)
+    monkeypatch.setattr("app.core.config.DIGEST_GAP_FILL_ENABLED", False)
+    monkeypatch.setattr(mc, "_synthesize_research_digest", lambda **_kw: "digest")
+    monkeypatch.setattr(
+        mc, "_review_and_revise", lambda *_a, **_kw: {"title": "t", "summary": "s", "body": "b"}
+    )
+
+    captured = {}
+
+    class _FakeResearchClient:
+        def chat_with_tools(self, *_args: object, **kwargs: object) -> str:
+            captured.update(kwargs)
+            return ""
+
+        def usage_totals(self) -> dict[str, int]:
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    class _FakeWriteClient:
+        def chat_json_object(self, *_args: object, **_kw: object) -> dict:
+            return {"title": "t", "summary": "s", "body": "b"}
+
+        def usage_totals(self) -> dict[str, int]:
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    mc._run_two_stage_compose(
+        research_mistral=_FakeResearchClient(),
+        mistral=_FakeWriteClient(),
+        system="sys",
+        user="usr",
+        research_user=None,
+        tool_schemas=[],
+        tool_handlers={},
+        trace=[],
+        debug={},
+        checkpoint=lambda _stage: None,
+        max_rounds=96,
+    )
+    assert captured["max_rounds"] == 96
 
 
 def test_compose_scrape_article_tags_special_edition(monkeypatch: pytest.MonkeyPatch) -> None:
