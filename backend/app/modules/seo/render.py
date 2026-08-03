@@ -97,7 +97,7 @@ def _publisher() -> dict:
     org = {
         "@type": "Organization",
         "name": settings.site_name,
-        "logo": {"@type": "ImageObject", "url": absolute("/icons/Icon-512.png")},
+        "logo": {"@type": "ImageObject", "url": absolute("/icons/icon-512.png")},
     }
     same = _same_as()
     if same:
@@ -265,7 +265,7 @@ def _meta_block(
     return "\n".join(parts)
 
 
-_DEFAULT_IMAGE_DIMS = (512, 512)  # icons/Icon-512.png
+_DEFAULT_IMAGE_DIMS = (512, 512)  # icons/icon-512.png
 _OG_CARD_DIMS = (1200, 630)  # seo/share_card.py — the standard OG share size
 
 

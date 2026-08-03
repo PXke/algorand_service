@@ -59,7 +59,7 @@ class Settings(msgspec.Struct, kw_only=True):
     # auto-detect: <release>/frontend_web (prod) then frontend/dist (dev).
     frontend_dist_dir: str = ""
     # OG/Twitter card image used when an article has no hero image (path or URL).
-    seo_default_image: str = "/icons/Icon-512.png"
+    seo_default_image: str = "/icons/icon-512.png"
     # Comma-separated official profile URLs (X, Discord, GitHub, …) for the
     # Organization JSON-LD `sameAs`. Empty = omitted. e.g. "https://x.com/...".
     seo_same_as: str = ""
