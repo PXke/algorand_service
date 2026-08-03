@@ -340,6 +340,20 @@ async def admin_publish_queue_breakdown(request: Request) -> Response | dict:
     return detail
 
 
+async def admin_bump_queue_priority(request: Request) -> Response | dict:
+    """Pin a pending queue row to the front so the next drain composes it next — never touches the daily cap or pacing interval that gate when the drain runs at all."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    import asyncio
+
+    queue_id = request.path_params.get("queue_id", "")
+    result = await asyncio.to_thread(store.bump_queue_priority, queue_id)
+    if result is None:
+        return json_error_response(404, "not_found", "unknown queue_id or not pending")
+    return result
+
+
 async def admin_training_stats(request: Request) -> Response:
     """Labelled-data volume + balance + grader readiness for the Training tab."""
     denied = require_admin_wallet(request)
@@ -1530,6 +1544,7 @@ def register_admin_routes(app: Robyn) -> None:
     app.get("/api/v1/admin/publish-queue")(admin_list_publish_queue)
     app.get("/api/v1/admin/pending-feed-backlog")(admin_pending_feed_backlog)
     app.get("/api/v1/admin/publish-queue/:queue_id/breakdown")(admin_publish_queue_breakdown)
+    app.post("/api/v1/admin/publish-queue/:queue_id/compose-next")(admin_bump_queue_priority)
     app.get("/api/v1/admin/training-stats")(admin_training_stats)
     app.post("/api/v1/admin/retrain")(admin_retrain)
     app.post("/api/v1/admin/classifier-feedback")(admin_classifier_feedback)

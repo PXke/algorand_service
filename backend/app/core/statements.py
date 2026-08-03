@@ -456,6 +456,29 @@ class PublishQueueStmts:
         "FROM algorand_platform.publish_queue LIMIT ?"
     )
     GET_PAYLOAD = _Stmt("SELECT payload FROM algorand_platform.publish_queue WHERE queue_id = ?")
+    # "Compose next": publish_queue_pending is clustered by (priority DESC,
+    # created_at ASC), so a single-row read of the top of that clustering
+    # gives the current max pending priority for free — no aggregation query
+    # needed. Bumping a row above it means it wins the drain's next priority
+    # scan without touching the pacing clock/daily cap that gate WHEN the
+    # drain runs at all.
+    MAX_PENDING_PRIORITY = _Stmt(
+        "SELECT priority FROM algorand_platform.publish_queue_pending WHERE status = ? LIMIT 1"
+    )
+    UPDATE_PRIORITY = _Stmt(
+        "UPDATE algorand_platform.publish_queue SET priority = ?, updated_at = ? WHERE queue_id = ?"
+    )
+    # publish_queue_pending's clustering key includes priority, so bumping it
+    # is a DELETE-at-old-position + INSERT-at-new-position, not an UPDATE.
+    DELETE_PENDING = _Stmt(
+        "DELETE FROM algorand_platform.publish_queue_pending "
+        "WHERE status = ? AND priority = ? AND created_at = ? AND queue_id = ?"
+    )
+    INSERT_PENDING = _Stmt(
+        "INSERT INTO algorand_platform.publish_queue_pending "
+        "(status, priority, created_at, queue_id, service_id, topic, publish_kind) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
 
 
 # --------------------------------------------------------------------------- #

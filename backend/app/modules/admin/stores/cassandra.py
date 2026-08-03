@@ -1727,3 +1727,41 @@ class AdminCassandraStore:
             "page_title": str(payload.get("page_title", "")),
             "diff_preview": str(payload.get("diff") or "")[:2000],
         }
+
+    def bump_queue_priority(self, queue_id: str) -> dict | None:
+        """Pin a pending queue row to the front: gives it a priority higher than every other pending row, so the drain's next legitimate run (still fully gated by the daily cap and pacing interval — this never touches either) composes it next instead of whatever would otherwise win on priority. None when the row is missing or not pending."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import PublishQueueStmts
+
+        try:
+            qid = UUID(queue_id)
+        except ValueError:
+            return None
+        session = get_cassandra_session()
+        row = session.execute(PublishQueueStmts.GET_ROW, (qid,)).one()
+        if row is None or (row.status or "") != "pending":
+            return None
+
+        max_row = session.execute(PublishQueueStmts.MAX_PENDING_PRIORITY, ("pending",)).one()
+        current_max = int(max_row.priority) if max_row is not None else 0
+        new_priority = max(current_max, int(row.priority or 0)) + 1
+        now = datetime.now(tz=UTC)
+
+        session.execute(PublishQueueStmts.UPDATE_PRIORITY, (new_priority, now, qid))
+        session.execute(
+            PublishQueueStmts.DELETE_PENDING,
+            ("pending", row.priority, row.created_at, qid),
+        )
+        session.execute(
+            PublishQueueStmts.INSERT_PENDING,
+            (
+                "pending",
+                new_priority,
+                row.created_at,
+                qid,
+                row.service_id,
+                row.topic,
+                row.publish_kind,
+            ),
+        )
+        return {"queue_id": queue_id, "priority": new_priority}

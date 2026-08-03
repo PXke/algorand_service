@@ -13,6 +13,8 @@
   let expanded = $state<Set<string>>(new Set())
   let breakdowns = $state<Record<string, Record<string, unknown>>>({})
   let breakdownLoading = $state<Set<string>>(new Set())
+  let bumpingId = $state<string | null>(null)
+  let bumpError = $state<string | null>(null)
 
   const filtered = $derived(
     filter === 'all' ? queue : queue.filter((x) => String(x.status ?? '') === filter),
@@ -89,6 +91,19 @@
     }
   }
 
+  async function composeNext(queueId: string) {
+    bumpingId = queueId
+    bumpError = null
+    try {
+      await admin.composeQueueItemNext(queueId)
+      await load()
+    } catch (e) {
+      bumpError = e instanceof Error ? e.message : String(e)
+    } finally {
+      bumpingId = null
+    }
+  }
+
   function signalsText(signals: unknown): string {
     if (!signals || typeof signals !== 'object' || Array.isArray(signals)) return ''
     return Object.entries(signals as Record<string, unknown>)
@@ -147,6 +162,10 @@
     {/each}
   </div>
 
+  {#if bumpError}
+    <p class="admin-err">{bumpError}</p>
+  {/if}
+
   {#if loading}
     <p class="admin-muted">Loading…</p>
   {:else if error}
@@ -163,31 +182,45 @@
       {@const isOpen = expanded.has(queueId)}
       {@const detail = breakdowns[queueId]}
       {@const isLoadingDetail = breakdownLoading.has(queueId)}
-      <button
-        type="button"
-        class="admin-panel queue-row"
-        class:open={isOpen}
-        onclick={() => toggleExpand(queueId)}
-      >
-        <div class="row-head">
-          <span class="status-dot" style="background: {statusColor(status)}"></span>
-          <span class="status-label">{status}</span>
-          <strong class="display-name">
-            {String(item.display_name ?? item.service_id ?? queueId)}
-          </strong>
-          <span class="priority admin-muted">prio {Number(item.priority ?? 0)}</span>
-        </div>
+      <div class="admin-panel queue-row" class:open={isOpen}>
+        <button
+          type="button"
+          class="row-toggle"
+          onclick={() => toggleExpand(queueId)}
+        >
+          <div class="row-head">
+            <span class="status-dot" style="background: {statusColor(status)}"></span>
+            <span class="status-label">{status}</span>
+            <strong class="display-name">
+              {String(item.display_name ?? item.service_id ?? queueId)}
+            </strong>
+            <span class="priority admin-muted">prio {Number(item.priority ?? 0)}</span>
+          </div>
 
-        {#if item.last_reason}
-          <p class="last-reason">last decision: {String(item.last_reason)}</p>
-        {/if}
+          {#if item.last_reason}
+            <p class="last-reason">last decision: {String(item.last_reason)}</p>
+          {/if}
 
-        {#if rowMeta(item)}
-          <p class="admin-muted small meta">{rowMeta(item)}</p>
-        {/if}
+          {#if rowMeta(item)}
+            <p class="admin-muted small meta">{rowMeta(item)}</p>
+          {/if}
 
-        {#if item.updated_at}
-          <p class="admin-muted small">{formatTs(item.updated_at)}</p>
+          {#if item.updated_at}
+            <p class="admin-muted small">{formatTs(item.updated_at)}</p>
+          {/if}
+        </button>
+
+        {#if status === 'pending'}
+          <div class="row-actions">
+            <button
+              class="btn compact"
+              type="button"
+              disabled={bumpingId === queueId}
+              onclick={() => composeNext(queueId)}
+            >
+              {bumpingId === queueId ? 'Pinning…' : 'Compose next'}
+            </button>
+          </div>
         {/if}
 
         {#if isOpen}
@@ -219,7 +252,7 @@
             {/if}
           </div>
         {/if}
-      </button>
+      </div>
     {/each}
   {/if}
 </div>
@@ -304,15 +337,29 @@
   }
 
   .queue-row {
-    display: block;
-    width: 100%;
-    text-align: start;
-    cursor: pointer;
     transition: border-color 0.15s ease;
   }
 
   .queue-row.open {
     border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
+  }
+
+  .row-toggle {
+    display: block;
+    width: 100%;
+    text-align: start;
+    cursor: pointer;
+    background: none;
+    border: 0;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+  }
+
+  .row-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
   }
 
   .row-head {
