@@ -9,6 +9,14 @@ Run on the prod host, in the workers env (same Cassandra creds deploy.sh uses):
 given comma-separated keywords, instead of dumping the whole transcript —
 handy for "did any fetch actually see X" questions.
 
+Every message prints in FULL, never truncated. A prior 2000/5000-char
+display cap here caused three separate near-miss false-fabrication calls
+this session (Messina.one, museum.datahistory.org, lora.algokit.io) — each
+time a claim looked ungrounded only because the tool result or final_output
+that actually sourced it had scrolled past the cap, not because the writer
+invented it. Forensic questions ("is X actually grounded?") need the whole
+story, not a preview of it.
+
 Strictly read-only (SELECT only), never writes.
 """
 
@@ -84,10 +92,10 @@ def main() -> None:
             if isinstance(content, list):
                 content = json.dumps(content)
             logger.info("--- [%s%s] ---", role, f" {name}" if name else "")
-            logger.info("%s", (content or "")[:2000])
+            logger.info("%s", content or "")
         if not keywords:
             logger.info("--- final_output ---")
-            logger.info("%s", (row.final_output or "")[:5000])
+            logger.info("%s", row.final_output or "")
         if found >= args.max_matches:
             break
 
