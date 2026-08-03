@@ -402,6 +402,9 @@ _CAPABILITY_ALIASES = {
     "npm": "package_download_stats",
     "pypi": "package_download_stats",
     "telegram": "telegram_channel_lookup",
+    "algod": "lookup_application",
+    "http": "fetch_url",
+    "store": "app_store_metrics",
 }
 
 

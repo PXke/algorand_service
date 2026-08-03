@@ -934,6 +934,129 @@ def _tool_get_defi_tvl(protocol: str = "") -> dict[str, Any]:
         return {"protocol": p or "algorand-chain", "error": str(exc)[:200]}
 
 
+def _tool_search_nfd_directory(name: str = "", address: str = "") -> dict[str, Any]:
+    """Resolve an Algorand NFD (.algo name) via the NFDomains public API. Pass `name` (e.g. 'gazer.algo') to look up its owner address; pass `address` to reverse-lookup the .algo name(s) that address owns. Exactly one of name/address should be set."""
+    name = (name or "").strip()
+    address = (address or "").strip()
+    if not name and not address:
+        return {"error": "name or address is required"}
+    try:
+        if name:
+            slug = name if name.endswith(".algo") else f"{name}.algo"
+            resp = _guarded_get(f"https://api.nf.domains/nfd/{slug}", params={"view": "tiny"})
+            if resp.status_code == 404:
+                return {"name": slug, "found": False}
+            resp.raise_for_status()
+            data = resp.json()
+            return {
+                "name": data.get("name", slug),
+                "found": True,
+                "owner": data.get("owner"),
+                "deposit_account": data.get("depositAccount"),
+                "url": (data.get("properties") or {}).get("userDefined", {}).get("url"),
+            }
+        resp = _guarded_get(
+            "https://api.nf.domains/nfd/lookup", params={"address": address, "view": "tiny"}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        entry = data.get(address) if isinstance(data, dict) else None
+        if not entry:
+            return {"address": address, "found": False}
+        return {
+            "address": address,
+            "found": True,
+            "name": entry.get("name"),
+            "state": entry.get("state"),
+            "expired": entry.get("expired"),
+        }
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
+_NFD_DIRECTORY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_nfd_directory",
+        "description": (
+            "Resolve an Algorand NFD (.algo human-readable name) to its owner "
+            "address, or reverse-resolve an address to the .algo name(s) it "
+            "owns — via NFDomains' own public API. Use to verify a claimed "
+            ".algo identity actually resolves on-chain, or to find the name "
+            "behind an address you already have."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "an NFD name, e.g. 'gazer.algo' (the .algo suffix is optional)",
+                },
+                "address": {
+                    "type": "string",
+                    "description": "an Algorand address to reverse-lookup",
+                },
+            },
+        },
+    },
+}
+
+
+def _tool_app_store_metrics(term: str = "") -> dict[str, Any]:
+    """Apple App Store listing(s) matching a search term, via Apple's free public iTunes Search API: app name, bundle id, rating count and average rating as a real third-party adoption/quality signal. No equivalent free public API exists for Google Play (its Console API only covers apps you own) — this is iOS-only."""
+    q = (term or "").strip()
+    if not q:
+        return {"error": "term is required"}
+    try:
+        resp = _guarded_get(
+            "https://itunes.apple.com/search",
+            params={"term": q, "entity": "software", "limit": 5},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return {"term": q, "error": str(exc)[:200]}
+    results = [
+        {
+            "app_name": r.get("trackName"),
+            "bundle_id": r.get("bundleId"),
+            "seller": r.get("sellerName"),
+            "rating_count": r.get("userRatingCount"),
+            "average_rating": r.get("averageUserRating"),
+            "current_version_rating_count": r.get("userRatingCountForCurrentVersion"),
+        }
+        for r in (data.get("results") or [])
+        if isinstance(r, dict)
+    ]
+    return {"term": q, "platform": "ios", "count": len(results), "results": results}
+
+
+_APP_STORE_METRICS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "app_store_metrics",
+        "description": (
+            "iOS App Store rating count and average rating for apps matching "
+            "a search term — a real, third-party adoption/quality proxy "
+            "(e.g. for a mobile wallet), via Apple's free public iTunes "
+            "Search API. iOS only: there is no equivalent free public API "
+            "for Google Play download counts (its Console API only covers "
+            "apps you own), so don't claim Android numbers from this."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "term": {
+                    "type": "string",
+                    "description": "app name / search term, e.g. 'Pera Wallet Algorand'",
+                },
+            },
+            "required": ["term"],
+        },
+    },
+}
+
+
 def _tool_package_download_stats(registry: str = "", package: str = "") -> dict[str, Any]:
     """Download counts for an npm or PyPI package (e.g. an AlgoKit utility) — free, unauthenticated third-party adoption numbers. registry is 'npm' or 'pypi'; package is the exact published name (npm scoped names like '@algorandfoundation/algokit-utils' are fine as-is)."""
     import urllib.parse
@@ -1806,9 +1929,9 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     Telegram distribution), so they register only when usable. github_activity,
     github_repository_search, github_repository_contents, search_token_listings,
     fetch_url, get_defi_tvl, discourse_forum, get_node_stats,
-    medium_api_article_list, package_download_stats, reddit_api_post_history
-    and xgov_proposal_status hit free public APIs and are always available
-    (GITHUB_TOKEN optional).
+    medium_api_article_list, package_download_stats, search_nfd_directory,
+    app_store_metrics, reddit_api_post_history and xgov_proposal_status hit
+    free public APIs and are always available (GITHUB_TOKEN optional).
     """
     import os
 
@@ -1825,6 +1948,8 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         _NODE_STATS_SCHEMA,
         _MEDIUM_SCHEMA,
         _PACKAGE_DOWNLOADS_SCHEMA,
+        _NFD_DIRECTORY_SCHEMA,
+        _APP_STORE_METRICS_SCHEMA,
         # reddit_api_post_history deliberately has NO schema (2026-07-16):
         # reddit blocks this server's IP — offering the tool just burned one
         # 403 per session. Its stub handler (still registered below) answers
@@ -1842,6 +1967,8 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         "get_node_stats": _tool_get_node_stats,
         "medium_api_article_list": _tool_medium_articles,
         "package_download_stats": _tool_package_download_stats,
+        "search_nfd_directory": _tool_search_nfd_directory,
+        "app_store_metrics": _tool_app_store_metrics,
         "reddit_api_post_history": _tool_reddit_history,
         "xgov_proposal_status": _tool_xgov_proposal,
     }
