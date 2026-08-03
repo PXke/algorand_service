@@ -1230,6 +1230,78 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10, query: str = "") -> d
     return out
 
 
+def _tool_telegram_channel_lookup(handle: str = "") -> dict[str, Any]:
+    """Check whether a specific @handle is a real public Telegram channel/group, via the platform's own posting bot (Bot API's getChat resolves any public handle without needing the bot to be a member). NOT a search — you must already have a candidate handle (try search_web first, or the project's own name). Returns existence, title/type/description, visible member count, and the most recent post date seen on the channel's public web preview (a real activity signal — a channel that exists but hasn't posted in years is itself a notable fact, not evidence of an active community)."""
+    import re
+
+    from app.core.config import TELEGRAM_BOT_TOKEN
+
+    h = (handle or "").strip().lstrip("@")
+    if not h:
+        return {"error": "handle is required"}
+    if not TELEGRAM_BOT_TOKEN:
+        return {"handle": h, "error": "telegram lookup not configured"}
+    base = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    try:
+        resp = _guarded_get(f"{base}/getChat", params={"chat_id": f"@{h}"})
+        data = resp.json()
+    except Exception as exc:
+        return {"handle": h, "error": str(exc)[:200]}
+    if not data.get("ok"):
+        return {"handle": h, "exists": False}
+    result = data.get("result") or {}
+    out: dict[str, Any] = {
+        "handle": h,
+        "exists": True,
+        "title": result.get("title"),
+        "type": result.get("type"),
+        "description": (result.get("description") or "")[:300] or None,
+    }
+    try:
+        count_data = _guarded_get(f"{base}/getChatMemberCount", params={"chat_id": f"@{h}"}).json()
+        if count_data.get("ok"):
+            out["member_count"] = count_data.get("result")
+    except Exception:
+        pass
+    try:
+        preview = _guarded_get(f"https://t.me/s/{h}", headers={"User-Agent": "Mozilla/5.0"})
+        if preview.status_code == 200:
+            times = sorted(set(re.findall(r'<time datetime="([^"]+)"', preview.text)))
+            if times:
+                out["most_recent_post_at"] = times[-1]
+    except Exception:
+        pass
+    return out
+
+
+_TELEGRAM_LOOKUP_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "telegram_channel_lookup",
+        "description": (
+            "Check whether a specific Telegram @handle is a real, public "
+            "channel/group and how active it actually is — existence, "
+            "title/description, visible member count, and the most recent "
+            "post date from its public web preview. This is a LOOKUP, not a "
+            "search: you need a candidate handle first (try search_web, or "
+            "the project's own name/branding). A channel existing does not "
+            "mean it's active — check most_recent_post_at before calling a "
+            "community 'active'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "description": "the channel's @handle, with or without the leading @",
+                },
+            },
+            "required": ["handle"],
+        },
+    },
+}
+
+
 def _normalize_repo_slug(repo: str) -> str:
     """'owner/name', a github.com URL, or '...git' -> 'owner/name' ('' if invalid)."""
     slug = (repo or "").strip().rstrip("/")
@@ -1729,12 +1801,14 @@ _XGOV_SCHEMA = {
 def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Enabled external research tools as (schemas, handlers).
 
-    search_web needs SEARXNG_URL and search_bluesky needs an app-password, so they
-    register only when usable. github_activity, github_repository_search,
-    github_repository_contents, search_token_listings, fetch_url, get_defi_tvl,
-    discourse_forum, get_node_stats, medium_api_article_list,
-    package_download_stats, reddit_api_post_history and xgov_proposal_status
-    hit free public APIs and are always available (GITHUB_TOKEN optional).
+    search_web needs SEARXNG_URL, search_bluesky needs an app-password, and
+    telegram_channel_lookup needs TELEGRAM_BOT_TOKEN (already configured for
+    Telegram distribution), so they register only when usable. github_activity,
+    github_repository_search, github_repository_contents, search_token_listings,
+    fetch_url, get_defi_tvl, discourse_forum, get_node_stats,
+    medium_api_article_list, package_download_stats, reddit_api_post_history
+    and xgov_proposal_status hit free public APIs and are always available
+    (GITHUB_TOKEN optional).
     """
     import os
 
@@ -1781,4 +1855,9 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if BLUESKY_SEARCH_ENABLED and bsky_ready:
         schemas.append(_BLUESKY_SCHEMA)
         handlers["search_bluesky"] = _tool_search_bluesky
+    from app.core.config import TELEGRAM_BOT_TOKEN
+
+    if TELEGRAM_BOT_TOKEN:
+        schemas.append(_TELEGRAM_LOOKUP_SCHEMA)
+        handlers["telegram_channel_lookup"] = _tool_telegram_channel_lookup
     return schemas, handlers

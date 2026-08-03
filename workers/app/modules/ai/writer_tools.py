@@ -401,6 +401,7 @@ _CAPABILITY_ALIASES = {
     "plot": "chart_data",
     "npm": "package_download_stats",
     "pypi": "package_download_stats",
+    "telegram": "telegram_channel_lookup",
 }
 
 
