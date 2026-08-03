@@ -11,6 +11,15 @@
   let error = $state<string | null>(null)
   let section = $state<'gaps' | 'feedback'>('gaps')
 
+  function newestFirst(entries: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+    return [...entries].sort((a, b) => timestamp(b) - timestamp(a))
+  }
+
+  function timestamp(item: Record<string, unknown>): number {
+    const t = Date.parse(String(item.created_at ?? ''))
+    return Number.isNaN(t) ? 0 : t
+  }
+
   function groupSuggestions(items: Array<Record<string, unknown>>): Group[] {
     const byCap = new Map<string, Group>()
     for (const item of items) {
@@ -24,7 +33,8 @@
       }
       group.entries.push(item)
     }
-    return [...byCap.values()].sort((a, b) => b.entries.length - a.entries.length)
+    const groups = [...byCap.values()].map((g) => ({ ...g, entries: newestFirst(g.entries) }))
+    return groups.sort((a, b) => timestamp(b.entries[0]) - timestamp(a.entries[0]))
   }
 
   function groupFeedback(items: Array<Record<string, unknown>>): Group[] {
