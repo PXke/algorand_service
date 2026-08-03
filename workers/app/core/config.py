@@ -517,6 +517,14 @@ AUTHORITY_GATE_ENABLED = env_bool("AUTHORITY_GATE_ENABLED", True)
 # didn't fetch), which a human keeps and a machine rewrite would wrongly strip.
 UNSOURCED_SPECIFICS_GATE_ENABLED = env_bool("UNSOURCED_SPECIFICS_GATE_ENABLED", True)
 UNSOURCED_SPECIFICS_GATE_ENFORCE = env_bool("UNSOURCED_SPECIFICS_GATE_ENFORCE", True)
+# suggest_glossary_term is only callable during Stage 1 (research), before the
+# article's own prose exists, so it was never actually usable for its stated
+# purpose -- confirmed 2026-08-03: 0 of 62 real sessions ever called it, and
+# glossary_terms had 0 rows total. This runs a small classification call over
+# the FINISHED body instead and queues draft rows the same way the tool did
+# (admin still reviews before publish) -- pure side effect, never mutates the
+# article, so it's safe on by default.
+GLOSSARY_SUGGEST_GATE_ENABLED = env_bool("GLOSSARY_SUGGEST_GATE_ENABLED", True)
 # Stop composing review-bound candidates once pending_feed_queue already holds
 # this many approved articles awaiting paced release (2026-07-16: auto-approve
 # → backlog bypassed the 1-slot review throttle, so hourly drains composed 6

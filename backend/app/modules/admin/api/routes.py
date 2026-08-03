@@ -607,7 +607,11 @@ def admin_upsert_glossary_term(request: Request) -> Response:
         payload = serialization.decode(request.body, GlossaryUpsertRequest)
     except Exception as exc:
         return json_error_response(400, "invalid_request", str(exc))
-    from app.modules.glossary.store import upsert_term
+    from app.modules.glossary.store import (
+        STATUS_PUBLISHED,
+        enqueue_glossary_term_translations,
+        upsert_term,
+    )
 
     wallet = verified_admin_wallet(request)
     term = upsert_term(
@@ -618,6 +622,8 @@ def admin_upsert_glossary_term(request: Request) -> Response:
         status=payload.status,
         created_by=wallet or "",
     )
+    if payload.status == STATUS_PUBLISHED:
+        enqueue_glossary_term_translations(payload.slug)
     return asdict(term)
 
 

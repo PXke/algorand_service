@@ -166,3 +166,26 @@ def test_update_term_translations_noop_on_empty_input() -> None:
 
     with patch("app.core.cassandra.get_cassandra_session", _boom):
         assert store.update_term_translations("liquid-staking", {}) is False
+
+
+def test_enqueue_glossary_term_translations_fires_one_task_per_language() -> None:
+    """One send_task per ARTICLE_TRANSLATION_LANGS entry, same task-name dispatch as articles."""
+    from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
+
+    calls: list[tuple] = []
+    fake_celery = SimpleNamespace(send_task=lambda *a, **kw: calls.append((a, kw)))
+    with patch("celery.Celery", return_value=fake_celery):
+        store.enqueue_glossary_term_translations("liquid-staking")
+    assert len(calls) == len(ARTICLE_TRANSLATION_LANGS)
+    for args, kwargs in calls:
+        assert args[0] == "app.tasks.newspaper.translate_glossary_term"
+        assert kwargs["args"][0] == "liquid-staking"
+        assert kwargs["queue"] == "pipeline"
+    langs_dispatched = {kwargs["args"][1] for _args, kwargs in calls}
+    assert langs_dispatched == set(ARTICLE_TRANSLATION_LANGS)
+
+
+def test_enqueue_glossary_term_translations_fails_open_on_broker_error() -> None:
+    """A broker/Celery construction failure must never raise out to the caller."""
+    with patch("celery.Celery", side_effect=RuntimeError("no broker")):
+        store.enqueue_glossary_term_translations("liquid-staking")  # must not raise

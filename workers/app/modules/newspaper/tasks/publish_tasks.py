@@ -2105,6 +2105,43 @@ def translate_article_task(
         return {"status": "error", "reason": str(e)}
 
 
+@celery_app.task(name="app.tasks.newspaper.translate_glossary_term")
+def translate_glossary_term_task(slug: str, lang: str) -> dict[str, str]:
+    """Background task to translate a published glossary term's term+definition.
+
+    Mirrors translate_article_task's shape: reads the CURRENT row (a term can
+    be edited between enqueue and run), skips a language already stored, and
+    fails open -- a glossary translation is never on the article's critical
+    path.
+    """
+    import json
+
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import GlossaryStmts
+    from app.modules.newspaper.glossary_translate import translate_glossary_term_mistral
+
+    try:
+        session = get_cassandra_session()
+        row = session.execute(GlossaryStmts.GET_FOR_TRANSLATE, (slug,)).one()
+        if row is None or not (row.term or "").strip():
+            return {"status": "error", "reason": "term_not_found"}
+        existing = dict(row.translations or {})
+        if lang in existing:
+            return {"status": "skipped", "reason": "already_translated", "lang": lang}
+
+        translated = translate_glossary_term_mistral(
+            term=row.term or "",
+            definition=row.definition or "",
+            target_language=lang,
+        )
+        translations = {lang: json.dumps(translated, ensure_ascii=False)}
+        session.execute(GlossaryStmts.UPDATE_TRANSLATIONS, (translations, slug))
+        return {"status": "ok", "slug": slug, "lang": lang}
+    except Exception as e:
+        logger.error(f"Failed to translate glossary term {slug} to {lang}: {e}")
+        return {"status": "error", "reason": str(e)}
+
+
 # Kept registered (not deleted) as a shim: a stale enqueue from before this
 # deploy could still reference "app.tasks.newspaper.translate_article" by
 # name, and dropping the task definition would make that a hard failure

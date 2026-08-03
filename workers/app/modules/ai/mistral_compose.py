@@ -2007,7 +2007,13 @@ def _run_two_stage_compose(
 
 
 def _apply_post_compose_gates(
-    payload: dict, trace: list, *, user: str, research_user: str | None
+    payload: dict,
+    trace: list,
+    *,
+    user: str,
+    research_user: str | None,
+    service_id: str = "",
+    glossary_client: MistralClient | None = None,
 ) -> dict:
     """Sequential deterministic post-compose gates plus writer-declared judgment flags read from the trace. Order matters: the defunct-entity veto must precede the link-gate delinker below, so it still sees the writer's original links."""
     # Stage-2 assembly: append every successfully fetched research URL the
@@ -2080,6 +2086,16 @@ def _apply_post_compose_gates(
     confirmed_alert = confirmed_alert_from_trace(trace)
     if confirmed_alert is not None:
         payload["_confirmed_alert"] = confirmed_alert
+    # Glossary suggestion: a small classification pass over the finished
+    # body, queuing draft terms for admin review (see glossary_suggest_gate
+    # docstring — replaces the tool-call path, which was only reachable
+    # before the article's prose existed). Skipped when the caller has no
+    # client to lend it (legacy path with tools disabled, no research
+    # client ever constructed).
+    if glossary_client is not None:
+        from app.modules.newspaper.glossary_suggest_gate import suggest_glossary_terms
+
+        payload = suggest_glossary_terms(payload, client=glossary_client, service_id=service_id)
     return payload
 
 
@@ -2253,7 +2269,12 @@ def _compose_via_writer_tools_locked(
                 payload = json.loads(raw)
 
             payload = _apply_post_compose_gates(
-                payload, trace, user=user, research_user=research_user
+                payload,
+                trace,
+                user=user,
+                research_user=research_user,
+                service_id=source_url,
+                glossary_client=research_mistral,
             )
             raw = json.dumps(payload)
             _duration_ms = int((_time.monotonic() - _t0) * 1000)

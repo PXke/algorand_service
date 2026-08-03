@@ -1,9 +1,14 @@
 """Admin-curated glossary: term/definition pairs linked to from article bodies (deterministic auto-link, never model-authored) and served as their own public pages.
 
-Translations mirror articles_by_id's own shape (lang -> JSON blob), filled by
-the same local translation engine/backfill task articles already use — see
-workers/app/modules/newspaper/tasks/publish_tasks.py's translate_article_batch_task
-for the article-side twin this reuses the pattern from.
+Translations mirror articles_by_id's own shape (lang -> JSON blob). Unlike
+articles (translated via the heavy local engines, worth the multi-GB model
+load for a full body), a glossary entry is a name plus 1-3 sentences — fired
+via a single Mistral call per language instead
+(workers/app/modules/newspaper/tasks/publish_tasks.py's
+translate_glossary_term_task, mirroring the article-side legacy
+translate_article_task). Found 2026-08-03: this plumbing (translations
+column, ?lang= read resolution) existed but nothing ever populated it —
+glossary terms were never translated at all.
 """
 
 from __future__ import annotations
@@ -142,3 +147,32 @@ def update_term_translations(slug: str, translations: dict[str, str]) -> bool:
         return False
     result = get_cassandra_session().execute(GlossaryStmts.UPDATE_TRANSLATIONS, (translations, slug))
     return bool(result.was_applied)
+
+
+def enqueue_glossary_term_translations(slug: str) -> None:
+    """Publish-time only — a held draft is not translated (same rule as articles: enqueue_article_translations).
+
+    Fires one workers-side Celery task per target language, same task-name
+    dispatch over the shared broker as _enqueue_article_translations
+    (backend and workers are separate services/venvs, so this can't import
+    the task directly).
+    """
+    try:
+        from celery import Celery
+
+        from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
+        from app.core.config import settings
+
+        app = Celery(broker=settings.celery_broker_url)
+        for lang in ARTICLE_TRANSLATION_LANGS:
+            app.send_task(
+                "app.tasks.newspaper.translate_glossary_term",
+                args=[slug, lang],
+                queue="pipeline",
+            )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "failed to enqueue glossary translation tasks for %s", slug, exc_info=True
+        )
