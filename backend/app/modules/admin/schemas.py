@@ -6,6 +6,7 @@ from app.schemas import (  # noqa: F401
     DomainSetRequest,
     EditorialBriefCreate,
     GatekeeperAnchorCreate,
+    GlossaryUpsertRequest,
     OfficialChannelCreate,
     ScraperRunRequest,
     ServiceMergeRequest,

@@ -917,3 +917,31 @@ class KycStmts:
         "payout_status, payout_txid, payout_error"
         ") VALUES (?, now(), ?, ?, ?, ?, ?, ?)"
     )
+
+
+# --------------------------------------------------------------------------- #
+# glossary_terms
+# --------------------------------------------------------------------------- #
+class GlossaryStmts:
+    """Prepared statements for the admin-curated glossary."""
+
+    # No WHERE clause -- a full-partition scan, same convention as
+    # ServiceRegistryStmts.LIST_ALL for a small, fully-enumerable admin table.
+    LIST_ALL = _Stmt(
+        "SELECT slug, term, definition, aliases, status, created_at, updated_at, "
+        "created_by, translations FROM algorand_platform.glossary_terms"
+    )
+    GET = _Stmt(
+        "SELECT slug, term, definition, aliases, status, created_at, updated_at, "
+        "created_by, translations FROM algorand_platform.glossary_terms WHERE slug = ?"
+    )
+    UPSERT = _Stmt(
+        "INSERT INTO algorand_platform.glossary_terms ("
+        "slug, term, definition, aliases, status, created_at, updated_at, created_by"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    DELETE = _Stmt("DELETE FROM algorand_platform.glossary_terms WHERE slug = ?")
+    UPDATE_TRANSLATIONS = _Stmt(
+        "UPDATE algorand_platform.glossary_terms SET translations = translations + ? "
+        "WHERE slug = ? IF EXISTS"
+    )

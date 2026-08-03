@@ -28,6 +28,7 @@ from app.core.article_translation_langs import (
     og_locale_for,
 )
 from app.core.config import settings
+from app.modules.glossary.store import GlossaryTerm
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.seo.chrome import SSR_CHROME_STYLE, ssr_page
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
@@ -1041,6 +1042,93 @@ def render_topics(tags: list[tuple[str, int]]) -> tuple[str, str]:
         active="/topics",
         breadcrumbs=trail,
         topic_links=tags,
+    )
+    return head, body
+
+
+def render_glossary_index(terms: list[GlossaryTerm]) -> tuple[str, str]:
+    """Glossary index: crawlable links to every published term, schema.org DefinedTermSet."""
+    canonical = absolute("/glossary")
+    title = f"Glossary — {settings.site_name}"
+    description = f"Plain-language definitions for {settings.site_name} readers."
+    trail = [("Home", site_url() + "/"), ("Glossary", canonical)]
+    json_ld = {
+        "@context": "https://schema.org",
+        "@type": "DefinedTermSet",
+        "@id": canonical,
+        "name": title,
+        "url": canonical,
+        "hasDefinedTerm": [
+            {
+                "@type": "DefinedTerm",
+                "name": t.term,
+                "url": absolute(f"/glossary/{t.slug}"),
+            }
+            for t in terms
+        ],
+    }
+    head = _meta_block(
+        title="Glossary",
+        description=description,
+        canonical=canonical,
+        image=absolute(settings.seo_default_image),
+        image_alt=settings.site_name,
+        image_dims=_DEFAULT_IMAGE_DIMS,
+        json_ld=[json_ld, _breadcrumb(trail)],
+    )
+    links = "".join(
+        f'<li><a href="{_attr(absolute(f"/glossary/{t.slug}"))}">{html.escape(t.term)}</a>'
+        f" — {html.escape(t.definition[:140])}</li>"
+        for t in terms
+    )
+    body = ssr_container(
+        f"<h1>{html.escape(title)}</h1><ul>{links}</ul>",
+        active="/glossary",
+        breadcrumbs=trail,
+    )
+    return head, body
+
+
+def render_glossary_term(term: GlossaryTerm) -> tuple[str, str]:
+    """One glossary term's SSR page, schema.org DefinedTerm."""
+    canonical = absolute(f"/glossary/{term.slug}")
+    title = f"{term.term} — {settings.site_name} Glossary"
+    description = term.definition[:280]
+    trail = [
+        ("Home", site_url() + "/"),
+        ("Glossary", absolute("/glossary")),
+        (term.term, canonical),
+    ]
+    json_ld = {
+        "@context": "https://schema.org",
+        "@type": "DefinedTerm",
+        "@id": canonical,
+        "name": term.term,
+        "description": term.definition,
+        "url": canonical,
+        "inDefinedTermSet": absolute("/glossary"),
+    }
+    head = _meta_block(
+        title=title,
+        description=description,
+        canonical=canonical,
+        image=absolute(settings.seo_default_image),
+        image_alt=settings.site_name,
+        image_dims=_DEFAULT_IMAGE_DIMS,
+        json_ld=[json_ld, _breadcrumb(trail)],
+    )
+    aliases_html = ""
+    if term.aliases:
+        aliases_html = (
+            '<p class="ssr-muted">Also known as: '
+            + html.escape(", ".join(term.aliases))
+            + "</p>"
+        )
+    body = ssr_container(
+        f"<h1>{html.escape(term.term)}</h1>"
+        f"<p>{html.escape(term.definition)}</p>{aliases_html}",
+        active="/glossary",
+        breadcrumbs=trail,
     )
     return head, body
 

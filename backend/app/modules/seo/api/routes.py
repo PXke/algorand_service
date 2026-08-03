@@ -466,6 +466,33 @@ def topic(request: Request) -> Response:
     return _doc_response((head, body), "public, max-age=120", tracked_path=path)
 
 
+def glossary_index(request: Request) -> Response:
+    """SSR glossary index: every published term."""
+    from app.modules.glossary.store import list_terms
+
+    path = "/glossary"
+    _record(request, path)
+    terms = list_terms(published_only=True)
+    return _doc_response(render.render_glossary_index(terms), "public, max-age=300", tracked_path=path)
+
+
+def glossary_term(request: Request) -> Response:
+    """SSR one glossary term, 404 if unpublished/missing."""
+    from app.modules.glossary.store import STATUS_PUBLISHED, get_term
+
+    slug = request.path_params.get("slug", "").strip().lower()
+    lang = query_param(_query_params(request).get("lang", "")) or None
+    term = get_term(slug, lang=lang)
+    if term is None or term.status != STATUS_PUBLISHED:
+        _record_notfound(request, f"/glossary/{slug}")
+        return _doc_response(
+            render.render_noindex("Term not found"), "public, max-age=60", status=404
+        )
+    path = f"/glossary/{slug}"
+    _record(request, path)
+    return _doc_response(render.render_glossary_term(term), "public, max-age=300", tracked_path=path)
+
+
 def about(request: Request) -> Response:
     """SSR static about page."""
     path = "/about"
@@ -682,6 +709,8 @@ def register_seo_routes(app: Robyn) -> None:
     app.get("/top")(top)
     app.get("/topics")(topics)
     app.get("/topic/:tag")(topic)
+    app.get("/glossary")(glossary_index)
+    app.get("/glossary/:slug")(glossary_term)
     app.get("/about")(about)
     app.get("/contact")(contact)
     app.get("/search")(search)
@@ -708,6 +737,8 @@ def register_seo_routes(app: Robyn) -> None:
         ("/hot", hot),
         ("/topics", topics),
         ("/topic/:tag", topic),
+        ("/glossary", glossary_index),
+        ("/glossary/:slug", glossary_term),
         ("/about", about),
         ("/contact", contact),
         ("/search", search),

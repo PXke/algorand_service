@@ -23,6 +23,8 @@
     | { name: 'hot'; rank: 'hot' | 'top' }
     | { name: 'topics' }
     | { name: 'topic'; tag: string }
+    | { name: 'glossary' }
+    | { name: 'glossaryTerm'; slug: string }
     | { name: 'search' }
     | { name: 'about' }
     | { name: 'contact' }
@@ -36,6 +38,8 @@
     | 'hot'
     | 'topics'
     | 'topic'
+    | 'glossary'
+    | 'glossaryTerm'
     | 'search'
     | 'about'
     | 'contact'
@@ -48,6 +52,8 @@
     hot: () => import('./routes/Hot.svelte'),
     topics: () => import('./routes/Topics.svelte'),
     topic: () => import('./routes/Topic.svelte'),
+    glossary: () => import('./routes/Glossary.svelte'),
+    glossaryTerm: () => import('./routes/GlossaryTerm.svelte'),
     search: () => import('./routes/Search.svelte'),
     about: () => import('./routes/About.svelte'),
     contact: () => import('./routes/Contact.svelte'),
@@ -72,6 +78,9 @@
     if (path === '/topics') return { name: 'topics' }
     const topic = matchPath('/topic/:tag', path)
     if (topic) return { name: 'topic', tag: topic.tag }
+    if (path === '/glossary') return { name: 'glossary' }
+    const glossaryTerm = matchPath('/glossary/:slug', path)
+    if (glossaryTerm) return { name: 'glossaryTerm', slug: glossaryTerm.slug }
     const section = matchPath('/section/:slug', path)
     if (section) {
       const tag = SECTION_REDIRECTS[section.slug.toLowerCase()]
@@ -161,6 +170,11 @@
       {#key view.tag}
         {@const C = lazy.topic!}
         <C tag={view.tag} />
+      {/key}
+    {:else if view.name === 'glossaryTerm'}
+      {#key view.slug}
+        {@const C = lazy.glossaryTerm!}
+        <C slug={view.slug} />
       {/key}
     {:else}
       {@const C = lazy[view.name]!}

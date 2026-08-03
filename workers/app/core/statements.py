@@ -783,3 +783,23 @@ class OfficialChannelStmts:
     """Prepared statements for the official-channels trust list."""
 
     BY_KIND = _Stmt("SELECT channel_id FROM algorand_platform.official_channels WHERE kind = ?")
+
+
+# --------------------------------------------------------------------------- #
+# glossary_terms (read-only from this side -- entries are admin-curated via
+# the backend; workers only reads published terms for auto-linking, and
+# writes suggested drafts via INSERT_SUGGESTED)
+# --------------------------------------------------------------------------- #
+class GlossaryStmts:
+    """Prepared statements the workers side needs for the glossary."""
+
+    LIST_ALL = _Stmt(
+        "SELECT slug, term, definition, aliases, status "
+        "FROM algorand_platform.glossary_terms"
+    )
+    GET = _Stmt("SELECT slug FROM algorand_platform.glossary_terms WHERE slug = ?")
+    INSERT_SUGGESTED = _Stmt(
+        "INSERT INTO algorand_platform.glossary_terms ("
+        "slug, term, definition, aliases, status, created_at, updated_at, created_by"
+        ") VALUES (?, ?, ?, ?, 'draft', ?, ?, ?) IF NOT EXISTS"
+    )

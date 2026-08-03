@@ -460,6 +460,16 @@ class ScraperRunRequest(msgspec.Struct, kw_only=True):
     action: Annotated[str, Meta(min_length=1, max_length=64)]
 
 
+class GlossaryUpsertRequest(msgspec.Struct, kw_only=True):
+    """Request body for creating/updating a glossary entry."""
+
+    slug: Annotated[str, Meta(min_length=1, max_length=96, pattern=r"^[a-z0-9][a-z0-9-]*$")]
+    term: Annotated[str, Meta(min_length=1, max_length=200)]
+    definition: Annotated[str, Meta(min_length=1, max_length=4000)]
+    aliases: Annotated[list[str], Meta(max_length=16)] = field(default_factory=list)
+    status: Literal["draft", "published"] = "draft"
+
+
 class DomainSetRequest(msgspec.Struct, kw_only=True):
     """Request body for setting a domain's frontier status."""
 

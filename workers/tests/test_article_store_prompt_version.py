@@ -5,7 +5,19 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+from app.core.statements import ArticleStmts
 from app.modules.newspaper.article_store import get_article, insert_stored_article
+
+
+def _article_insert_params(fake_cassandra_session: MagicMock) -> tuple:
+    """The bind params of the ArticleStmts.INSERT call specifically -- insert_stored_article also makes an (unrelated, best-effort) glossary lookup, so position alone isn't a reliable way to find the article insert among execute() calls."""
+    for args, _kwargs in fake_cassandra_session.execute.call_args_list:
+        if len(args) != 2:
+            continue  # e.g. the glossary lookup's no-params LIST_ALL call
+        stmt, params = args
+        if stmt is ArticleStmts.INSERT:
+            return params
+    raise AssertionError("ArticleStmts.INSERT was never called")
 
 
 def test_insert_stored_article_passes_prompt_version_last_positional(
@@ -24,8 +36,7 @@ def test_insert_stored_article_passes_prompt_version_last_positional(
         prompt_version="2026-07-02",
     )
 
-    args, _ = fake_cassandra_session.execute.call_args_list[0]
-    _stmt, params = args
+    params = _article_insert_params(fake_cassandra_session)
     assert params[-1] == "2026-07-02"
 
 
@@ -44,8 +55,7 @@ def test_insert_stored_article_defaults_prompt_version_to_none(
         publish_to_feed=False,
     )
 
-    args, _ = fake_cassandra_session.execute.call_args_list[0]
-    _stmt, params = args
+    params = _article_insert_params(fake_cassandra_session)
     assert params[-1] is None
 
 

@@ -42,6 +42,7 @@
           <div class="links">
             <a href="/about" onclick={(e) => go('/about', e)}>{t($messages, 'navAbout')}</a>
             <a href="/contact" onclick={(e) => go('/contact', e)}>{t($messages, 'navContact')}</a>
+            <a href="/glossary" onclick={(e) => go('/glossary', e)}>{t($messages, 'navGlossary')}</a>
           </div>
         </div>
 

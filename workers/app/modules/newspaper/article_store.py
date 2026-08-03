@@ -221,7 +221,9 @@ def insert_stored_article(
     """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
+    from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
 
+    body = auto_link_glossary_terms(body)
     article_id = article_id or uuid.uuid4()
     published_at = datetime.now(tz=UTC)
     tag_list = list(tags or [])
@@ -317,6 +319,7 @@ def update_article(
     Also stamps updated_at so the revision surfaces as dateModified.
     """
     from app.core.cassandra import get_cassandra_session
+    from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
 
     existing = get_article(article_id)
     if existing is None:
@@ -327,6 +330,7 @@ def update_article(
     except ValueError:
         return False
 
+    body = auto_link_glossary_terms(body)
     from app.core.statements import ArticleStmts, FeedStmts
 
     session = get_cassandra_session()
@@ -392,11 +396,13 @@ def replace_article_content(
     """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
+    from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
 
     try:
         aid = UUID(article_id)
     except ValueError:
         return None
+    body = auto_link_glossary_terms(body)
     session = get_cassandra_session()
     row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
     if row is None or row.published_at is None:

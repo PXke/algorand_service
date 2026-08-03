@@ -11,6 +11,7 @@ from app.core.observability import init_bugsnag
 from app.modules.admin.api.routes import register_admin_routes
 from app.modules.auth.api.routes import register_auth_routes
 from app.modules.contact.api.routes import register_contact_routes
+from app.modules.glossary.api.routes import register_glossary_routes
 from app.modules.ingest.api.routes import register_ingest_routes
 from app.modules.kyc.api.routes import register_kyc_routes
 from app.modules.media.api.routes import register_media_routes
@@ -54,6 +55,7 @@ register_admin_routes(app)
 register_registry_routes(app)
 register_search_routes(app)
 register_contact_routes(app)
+register_glossary_routes(app)
 if settings.suggestions_enabled:
     register_suggestions_routes(app)
 if settings.x402_enabled:

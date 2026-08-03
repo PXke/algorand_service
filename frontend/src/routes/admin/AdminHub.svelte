@@ -5,6 +5,7 @@
   import { createAdminApi } from '../../lib/api/admin'
   import { route, navigate } from '../../lib/router'
   import SeedsTab from './tabs/SeedsTab.svelte'
+  import GlossaryTab from './tabs/GlossaryTab.svelte'
   import ArticlesTab from './tabs/ArticlesTab.svelte'
   import BriefsTab from './tabs/BriefsTab.svelte'
   import ClassifierTab from './tabs/ClassifierTab.svelte'
@@ -25,6 +26,7 @@
     { id: 'Articles', label: 'Articles', slug: 'articles', group: 'Content' },
     { id: 'Writer Briefs', label: 'Briefs', slug: 'briefs', group: 'Content' },
     { id: 'Inbox', label: 'Inbox', slug: 'inbox', group: 'Content' },
+    { id: 'Glossary', label: 'Glossary', slug: 'glossary', group: 'Content' },
     { id: 'Queue', label: 'Queue', slug: 'queue', group: 'Pipeline' },
     { id: 'Classifier', label: 'Classifier', slug: 'classifier', group: 'Pipeline' },
     { id: 'Training', label: 'Training', slug: 'training', group: 'Pipeline' },
@@ -150,6 +152,8 @@
         <ArticlesTab {admin} onmessage={flash} />
       {:else if tab === 'Writer Briefs'}
         <BriefsTab {admin} onmessage={flash} />
+      {:else if tab === 'Glossary'}
+        <GlossaryTab {admin} onmessage={flash} />
       {:else if tab === 'Classifier'}
         <ClassifierTab {admin} onmessage={flash} />
       {:else if tab === 'Queue'}

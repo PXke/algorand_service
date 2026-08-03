@@ -17,6 +17,7 @@ from app.modules.admin.schemas import (
     DomainSetRequest,
     EditorialBriefCreate,
     GatekeeperAnchorCreate,
+    GlossaryUpsertRequest,
     OfficialChannelCreate,
     ScraperRunRequest,
     ServiceMergeRequest,
@@ -569,6 +570,56 @@ def admin_delete_source(request: Request) -> Response:
 
     get_service_registry_repository().delete(service_id)
     return {"deleted": True, "service_id": service_id}
+
+
+def admin_list_glossary(request: Request) -> Response:
+    """List every glossary entry (draft and published) for the admin table."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    from app.modules.glossary.store import list_terms
+
+    terms = list_terms()
+    return {"items": [asdict(t) for t in terms]}
+
+
+def admin_upsert_glossary_term(request: Request) -> Response:
+    """Create or fully replace a glossary entry's own-language fields."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    try:
+        payload = serialization.decode(request.body, GlossaryUpsertRequest)
+    except Exception as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+    from app.modules.glossary.store import upsert_term
+
+    wallet = verified_admin_wallet(request)
+    term = upsert_term(
+        slug=payload.slug,
+        term=payload.term,
+        definition=payload.definition,
+        aliases=payload.aliases,
+        status=payload.status,
+        created_by=wallet or "",
+    )
+    return asdict(term)
+
+
+def admin_delete_glossary_term(request: Request) -> Response:
+    """Delete a glossary entry."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    slug = request.path_params.get("slug", "")
+    if not slug:
+        return json_error_response(400, "invalid_request", "slug required")
+    from app.modules.glossary.store import delete_term
+
+    deleted = delete_term(slug)
+    if not deleted:
+        return json_error_response(404, "not_found", "Glossary entry not found")
+    return {"deleted": True, "slug": slug}
 
 
 def admin_list_scrapers(request: Request) -> Response:
@@ -1506,3 +1557,6 @@ def register_admin_routes(app: Robyn) -> None:
     app.post("/api/v1/admin/classifier-reviews/recompose")(admin_recompose_review)
     app.post("/api/v1/admin/translations/backfill")(admin_backfill_translations)
     app.get("/api/v1/admin/investigations")(admin_investigation_findings)
+    app.get("/api/v1/admin/glossary")(admin_list_glossary)
+    app.post("/api/v1/admin/glossary")(admin_upsert_glossary_term)
+    app.delete("/api/v1/admin/glossary/:slug")(admin_delete_glossary_term)

@@ -176,6 +176,17 @@ def _static_entries(items: list[ArticleFeedItem]) -> list[_UrlEntry]:
                 changefreq="daily",
             )
         )
+    glossary_entries = []
+    try:
+        from app.modules.glossary.store import list_terms
+
+        glossary_entries = [
+            _UrlEntry(loc=absolute(f"/glossary/{t.slug}"), changefreq="monthly")
+            for t in list_terms(published_only=True)
+        ]
+    except Exception:
+        logger.debug("glossary sitemap entries skipped", exc_info=True)
+
     return [
         _UrlEntry(loc=site_url() + "/", lastmod=lastmod, changefreq="hourly"),
         _UrlEntry(loc=absolute("/news"), lastmod=lastmod, changefreq="hourly"),
@@ -184,6 +195,8 @@ def _static_entries(items: list[ArticleFeedItem]) -> list[_UrlEntry]:
         _UrlEntry(loc=absolute("/contact"), changefreq="monthly"),
         _UrlEntry(loc=absolute("/topics"), lastmod=lastmod, changefreq="daily"),
         *topic_entries,
+        _UrlEntry(loc=absolute("/glossary"), changefreq="weekly"),
+        *glossary_entries,
     ]
 
 
