@@ -721,10 +721,21 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
             if not reserved:
                 logger.info("backlog release blocked: %s", reserve_reason)
                 break
-            # This is the article's FIRST (and only) entry into articles_feed —
+            # Normally this is the article's FIRST entry into articles_feed —
             # art.published_at was stamped at compose time, not release time,
             # so it must be re-stamped now on both the feed row and the
-            # source-of-truth articles_by_id row.
+            # source-of-truth articles_by_id row. Defensively clean up a feed
+            # row at the PRE-release published_at first: a backlog item that
+            # somehow already has one (observed 2026-08-03 — a forced/manual
+            # drain released an article that was, unexpectedly, already fed)
+            # would otherwise end up with two live feed rows for one article,
+            # since the clustering key is (bucket, published_at, article_id)
+            # and this INSERT below lands at a different published_at.
+            if art.published_at is not None:
+                session.execute(
+                    FeedStmts.DELETE,
+                    (_feed_month(art.published_at), art.published_at, art.article_id),
+                )
             released_at = datetime.now(tz=UTC)
             try:
                 session.execute(

@@ -35,6 +35,7 @@ class _FakeSession:
         self._pending_rows = pending_rows
         self._article_row = article_row
         self.feed_inserts: list[tuple] = []
+        self.feed_deletes: list[tuple] = []
         self.published_at_updates: list[tuple] = []
 
     def prepare(self, cql: str) -> str:
@@ -48,6 +49,8 @@ class _FakeSession:
             return _Result(self._article_row)
         if q.startswith("INSERT INTO algorand_platform.articles_feed"):
             self.feed_inserts.append(tuple(params))
+        elif q.startswith("DELETE FROM algorand_platform.articles_feed"):
+            self.feed_deletes.append(tuple(params))
         elif q.startswith("UPDATE algorand_platform.articles_by_id SET published_at"):
             self.published_at_updates.append(tuple(params))
         return _Result(None)
@@ -119,3 +122,61 @@ def test_drain_approved_feed_queue_stamps_release_time_and_keeps_image(
 
     assert len(fake.published_at_updates) == 1
     assert fake.published_at_updates[0] == (feed_published_at, article_id)
+
+
+def test_release_deletes_any_pre_existing_feed_row_before_inserting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A defensive cleanup: if this article somehow already had a feed row at its pre-release (compose-time) published_at, releasing it must delete that row first -- otherwise the article ends up with two live feed rows (observed 2026-08-03: a forced/manual drain released an article that, unexpectedly, was already fed)."""
+    from app.core.feed_bucket import feed_month
+
+    article_id = uuid4()
+    compose_time = datetime.now(tz=UTC) - timedelta(hours=5)
+    article_row = SimpleNamespace(
+        article_id=article_id,
+        service_id="svc",
+        title="Title",
+        summary="Summary",
+        published_at=compose_time,
+        tags=["a", "b"],
+        image_url="",
+        source_url="https://example.com/",
+    )
+    fake = _FakeSession(pending_rows=[_PendingRow(article_id)], article_row=article_row)
+
+    import app.core.cassandra as c
+
+    monkeypatch.setattr(c, "get_cassandra_session", lambda: fake)
+    c.prepare_cached.cache_clear()
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.publish_policy.remaining_standard_publish_slots",
+        lambda: 3,
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.publish_schedule.is_standard_publish_due",
+        lambda: (True, "no_prior_standard_publish"),
+    )
+    monkeypatch.setattr(queue_drain_tasks, "record_standard_publish", lambda: None)
+    monkeypatch.setattr(
+        "app.modules.newspaper.publish_daily_guard.reserve_publish_slot",
+        lambda **_kw: (True, "ok"),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.tasks.publish_tasks.enqueue_article_translations",
+        lambda *_a, **_kw: None,
+    )
+    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        "app.modules.newspaper.tasks.distribution_tasks.distribute_article",
+        SimpleNamespace(delay=lambda *_a, **_kw: None),
+    )
+
+    result = queue_drain_tasks.drain_approved_feed_queue()
+
+    assert result["status"] == "ok"
+    assert len(fake.feed_deletes) == 1
+    assert fake.feed_deletes[0] == (feed_month(compose_time), compose_time, article_id)
+    # The delete must run before the insert, not after -- otherwise it would
+    # wipe out the freshly-released row instead of the stale one.
+    assert fake.feed_deletes[0][1] != fake.feed_inserts[0][1]
