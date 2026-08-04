@@ -40,7 +40,7 @@
   $effect(() => {
     const lang = $activeLocale
     const _tag = tag
-    let cancelled = false
+    const ac = new AbortController()
     void (async () => {
       loading = true
       error = null
@@ -50,19 +50,20 @@
           cursor: null,
           tag: _tag,
           lang,
+          signal: ac.signal,
         })
-        if (cancelled) return
+        if (ac.signal.aborted) return
         items = page.items
         cursor = page.next_cursor
       } catch (e) {
-        if (cancelled) return
+        if (ac.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return
         error = e instanceof ApiException ? e.userMessage : t($messages, 'errorGeneric')
       } finally {
-        if (!cancelled) loading = false
+        if (!ac.signal.aborted) loading = false
       }
     })()
     return () => {
-      cancelled = true
+      ac.abort()
     }
   })
 

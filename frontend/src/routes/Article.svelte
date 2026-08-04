@@ -49,67 +49,66 @@
   $effect(() => {
     const id = articleId
     const lang = $activeLocale
-    let cancelled = false
+    const ac = new AbortController()
     loading = true
     error = null
     removed = false
     newer = null
     older = null
+    related = []
     void (async () => {
       try {
-        const next = await newsApi.fetchArticle(id, lang)
-        if (cancelled) return
+        const next = await newsApi.fetchArticle(id, lang, ac.signal)
+        if (ac.signal.aborted) return
         article = next
+        loading = false
         rememberContinue({
           articleId: id,
           title: next.title?.trim() || t($messages, 'pageTitleArticle'),
           path: withLang(articleCanonicalPath(id, lang), lang),
         })
-        const topic = primaryTopic(next.tags)
-        if (topic) {
-          const feed = await newsApi.fetchFeedPage({
-            limit: 24,
-            tag: topic,
-            lang,
-          })
-          if (cancelled) return
-          const items = feed.items
-          const idx = items.findIndex((a) => a.article_id === id)
-          newer = idx > 0 ? items[idx - 1] : null
-          older = idx >= 0 && idx < items.length - 1 ? items[idx + 1] : null
-          related = items
-            .filter((a) => a.article_id !== id)
-            .slice(0, 4)
-        } else {
-          related = []
-        }
         const y = takeArticleScroll(id)
         if (y != null) {
           requestAnimationFrame(() => window.scrollTo(0, y))
         }
+        const topic = primaryTopic(next.tags)
+        if (!topic) return
+        const feed = await newsApi.fetchFeedPage({
+          limit: 24,
+          tag: topic,
+          lang,
+          signal: ac.signal,
+        })
+        if (ac.signal.aborted) return
+        const items = feed.items
+        const idx = items.findIndex((a) => a.article_id === id)
+        newer = idx > 0 ? items[idx - 1] : null
+        older = idx >= 0 && idx < items.length - 1 ? items[idx + 1] : null
+        related = items.filter((a) => a.article_id !== id).slice(0, 4)
       } catch (e) {
-        if (cancelled) return
+        if (ac.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return
         article = null
         related = []
+        loading = false
         if (e instanceof ApiException && (e.statusCode === 404 || e.statusCode === 410)) {
           removed = true
           error = null
         } else {
           error = e instanceof ApiException ? e.userMessage : t($messages, 'errorGeneric')
         }
-      } finally {
-        if (!cancelled) loading = false
       }
     })()
     return () => {
-      cancelled = true
+      ac.abort()
       saveArticleScroll(id, window.scrollY)
     }
   })
 
   $effect(() => {
     const id = articleId
-    const onScroll = () => {
+    let raf = 0
+    const update = () => {
+      raf = 0
       saveArticleScroll(id, window.scrollY)
       const el = readingEl
       if (!el) {
@@ -128,10 +127,15 @@
         saveArticleScroll(id, 0)
       }
     }
-    onScroll()
+    const onScroll = () => {
+      if (raf) return
+      raf = requestAnimationFrame(update)
+    }
+    update()
     window.addEventListener('scroll', onScroll, { passive: true })
     window.addEventListener('resize', onScroll, { passive: true })
     return () => {
+      if (raf) cancelAnimationFrame(raf)
       window.removeEventListener('scroll', onScroll)
       window.removeEventListener('resize', onScroll)
     }

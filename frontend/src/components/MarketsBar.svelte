@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte'
   import { newsApi } from '../lib/api/news'
   import { pathOnly } from '../lib/router'
   import Icon from './Icon.svelte'
@@ -40,26 +39,28 @@
   )
 
   let tiles: Tile[] = $state([])
-  let timer: ReturnType<typeof setInterval> | undefined
 
   const visible = $derived(tiles.filter((t) => t.available))
 
-  async function load() {
-    try {
-      const res = await newsApi.fetchMetricsDashboard()
-      tiles = res.tiles
-    } catch {
-      /* keep previous tiles */
+  // Fetch + poll only while the bar is on screen — article/about/etc. shouldn't
+  // keep hitting /metrics/dashboard every minute in the background.
+  $effect(() => {
+    if (!showOn) return
+    const ac = new AbortController()
+    const load = async () => {
+      try {
+        const res = await newsApi.fetchMetricsDashboard(ac.signal)
+        if (!ac.signal.aborted) tiles = res.tiles
+      } catch {
+        /* keep previous tiles / ignore abort */
+      }
     }
-  }
-
-  onMount(() => {
     void load()
-    timer = setInterval(() => void load(), 60_000)
-  })
-
-  onDestroy(() => {
-    if (timer) clearInterval(timer)
+    const timer = setInterval(() => void load(), 60_000)
+    return () => {
+      ac.abort()
+      clearInterval(timer)
+    }
   })
 
   function hintTone(hint: string | null | undefined): 'up' | 'down' | '' {

@@ -17,23 +17,23 @@
   $effect(() => {
     const lang = $activeLocale
     const r = rank
-    let cancelled = false
+    const ac = new AbortController()
     loading = true
     error = null
     void (async () => {
       try {
-        const next = await newsApi.fetchHot(30, r, lang)
-        if (cancelled) return
+        const next = await newsApi.fetchHot(30, r, lang, ac.signal)
+        if (ac.signal.aborted) return
         items = next
       } catch (e) {
-        if (cancelled) return
+        if (ac.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return
         error = e instanceof ApiException ? e.userMessage : t($messages, 'errorGeneric')
       } finally {
-        if (!cancelled) loading = false
+        if (!ac.signal.aborted) loading = false
       }
     })()
     return () => {
-      cancelled = true
+      ac.abort()
     }
   })
 

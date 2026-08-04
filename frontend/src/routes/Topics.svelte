@@ -31,16 +31,20 @@
   })
 
   onMount(() => {
+    const ac = new AbortController()
     void (async () => {
       try {
-        const res = await newsApi.fetchTags()
+        const res = await newsApi.fetchTags(ac.signal)
+        if (ac.signal.aborted) return
         tags = res.tags.filter((x) => (x.count ?? 0) >= 2 && !isMetaTag(x.tag))
       } catch (e) {
+        if (ac.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return
         error = e instanceof ApiException ? e.userMessage : t($messages, 'errorGeneric')
       } finally {
-        loading = false
+        if (!ac.signal.aborted) loading = false
       }
     })()
+    return () => ac.abort()
   })
 </script>
 

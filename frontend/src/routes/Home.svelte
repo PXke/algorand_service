@@ -61,25 +61,29 @@
   // so a tracked read makes the response retrigger the effect, which cancels
   // the in-flight run before `hot` commits and immediately refetches. That
   // loop ran at ~120 req/s per visitor and left the rail permanently empty.
+  //
+  // Soft refresh: when SSR (or a prior visit) already seeded the page, keep
+  // showing it and swap in the network response without a skeleton flash.
   $effect(() => {
     const lang = $activeLocale
-    let cancelled = false
+    const ac = new AbortController()
     loading = untrack(() => items.length) === 0
     error = null
     void (async () => {
       try {
         // Independent requests, and the rail is above the fold now — running
         // them in parallel takes a full round trip off first paint.
-        const hotPromise = newsApi.fetchHot(RAIL_HOT_COUNT, 'hot', lang).catch(() => [])
-        const feed = await newsApi.fetchFeedPage({ limit: 30, lang })
-        if (cancelled) return
+        // limit matches what we render (lead + 6 secondary + 11 more = 18).
+        const hotPromise = newsApi.fetchHot(RAIL_HOT_COUNT, 'hot', lang, ac.signal).catch(() => [])
+        const feed = await newsApi.fetchFeedPage({ limit: 18, lang, signal: ac.signal })
+        if (ac.signal.aborted) return
         items = feed.items
         loading = false
         const hotItems = await hotPromise
-        if (cancelled) return
+        if (ac.signal.aborted) return
         hot = hotItems
       } catch (e) {
-        if (cancelled) return
+        if (ac.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return
         if (!untrack(() => items.length)) {
           error = e instanceof ApiException ? e.userMessage : t($messages, 'errorGeneric')
         }
@@ -87,7 +91,7 @@
       }
     })()
     return () => {
-      cancelled = true
+      ac.abort()
     }
   })
 
@@ -95,13 +99,13 @@
   // effect form read `marketsLoaded` and then wrote it, so it invalidated
   // itself and only the guard stopped a re-run.
   onMount(() => {
-    let cancelled = false
+    const ac = new AbortController()
     void (async () => {
       const [priceRes, histRes] = await Promise.all([
-        newsApi.fetchPrice().catch(() => null),
-        newsApi.fetchPriceHistory().catch(() => null),
+        newsApi.fetchPrice(ac.signal).catch(() => null),
+        newsApi.fetchPriceHistory(ac.signal).catch(() => null),
       ])
-      if (cancelled) return
+      if (ac.signal.aborted) return
       if (priceRes?.available) price = priceRes
       const pts = Array.isArray(histRes?.points) ? histRes.points : []
       history = pts
@@ -112,7 +116,7 @@
         .filter((p: { epoch: number; price: number }) => p.epoch > 0 && p.price > 0)
     })()
     return () => {
-      cancelled = true
+      ac.abort()
     }
   })
 </script>

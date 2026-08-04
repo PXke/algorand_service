@@ -59,6 +59,7 @@ async function decode(res: Response): Promise<Record<string, unknown>> {
 
 function wrapNetwork(err: unknown): never {
   if (err instanceof ApiException) throw err
+  if (err instanceof DOMException && err.name === 'AbortError') throw err
   const base = config.apiBaseUrl || '(same origin)'
   throw new ApiException(
     0,
@@ -69,19 +70,25 @@ function wrapNetwork(err: unknown): never {
 
 export type JsonHeaders = Record<string, string>
 
+export type RequestOpts = {
+  headers?: JsonHeaders
+  signal?: AbortSignal
+}
+
 type JsonMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE'
 
 async function requestJson(
   method: JsonMethod,
   path: string,
-  headers?: JsonHeaders,
+  opts?: RequestOpts,
   body?: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   try {
     const hasBody = body !== undefined
     const res = await fetch(uri(path), {
       method,
-      headers: hasBody ? { 'Content-Type': 'application/json', ...headers } : headers,
+      headers: hasBody ? { 'Content-Type': 'application/json', ...opts?.headers } : opts?.headers,
+      signal: opts?.signal,
       ...(hasBody ? { body: JSON.stringify(body ?? {}) } : {}),
     })
     return await decode(res)
@@ -91,27 +98,40 @@ async function requestJson(
 }
 
 export const api = {
-  async getJson(path: string, headers?: JsonHeaders): Promise<Record<string, unknown>> {
-    return requestJson('GET', path, headers)
+  async getJson(path: string, opts?: RequestOpts | JsonHeaders): Promise<Record<string, unknown>> {
+    // Back-compat: older callers pass headers as the 2nd arg.
+    if (opts && ('signal' in opts || 'headers' in opts)) {
+      return requestJson('GET', path, opts as RequestOpts)
+    }
+    return requestJson('GET', path, opts ? { headers: opts as JsonHeaders } : undefined)
   },
 
   async postJson(
     path: string,
     body?: Record<string, unknown>,
-    headers?: JsonHeaders,
+    opts?: RequestOpts | JsonHeaders,
   ): Promise<Record<string, unknown>> {
-    return requestJson('POST', path, headers, body)
+    if (opts && ('signal' in opts || 'headers' in opts)) {
+      return requestJson('POST', path, opts as RequestOpts, body)
+    }
+    return requestJson('POST', path, opts ? { headers: opts as JsonHeaders } : undefined, body)
   },
 
   async patchJson(
     path: string,
     body?: Record<string, unknown>,
-    headers?: JsonHeaders,
+    opts?: RequestOpts | JsonHeaders,
   ): Promise<Record<string, unknown>> {
-    return requestJson('PATCH', path, headers, body)
+    if (opts && ('signal' in opts || 'headers' in opts)) {
+      return requestJson('PATCH', path, opts as RequestOpts, body)
+    }
+    return requestJson('PATCH', path, opts ? { headers: opts as JsonHeaders } : undefined, body)
   },
 
-  async deleteJson(path: string, headers?: JsonHeaders): Promise<Record<string, unknown>> {
-    return requestJson('DELETE', path, headers)
+  async deleteJson(path: string, opts?: RequestOpts | JsonHeaders): Promise<Record<string, unknown>> {
+    if (opts && ('signal' in opts || 'headers' in opts)) {
+      return requestJson('DELETE', path, opts as RequestOpts)
+    }
+    return requestJson('DELETE', path, opts ? { headers: opts as JsonHeaders } : undefined)
   },
 }

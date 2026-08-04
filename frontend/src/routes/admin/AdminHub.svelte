@@ -1,23 +1,10 @@
 <script lang="ts">
   import './admin.css'
+  import type { Component } from 'svelte'
   import { messages, t } from '../../lib/i18n'
   import { walletAddress, sessionToken, isAdmin } from '../../lib/auth/session'
   import { createAdminApi } from '../../lib/api/admin'
   import { route, navigate } from '../../lib/router'
-  import SeedsTab from './tabs/SeedsTab.svelte'
-  import GlossaryTab from './tabs/GlossaryTab.svelte'
-  import ArticlesTab from './tabs/ArticlesTab.svelte'
-  import BriefsTab from './tabs/BriefsTab.svelte'
-  import ClassifierTab from './tabs/ClassifierTab.svelte'
-  import QueueTab from './tabs/QueueTab.svelte'
-  import TrainingTab from './tabs/TrainingTab.svelte'
-  import GatekeeperTab from './tabs/GatekeeperTab.svelte'
-  import DomainsTab from './tabs/DomainsTab.svelte'
-  import ToolInsightsTab from './tabs/ToolInsightsTab.svelte'
-  import SessionsTab from './tabs/SessionsTab.svelte'
-  import AnalyticsTab from './tabs/AnalyticsTab.svelte'
-  import InboxTab from './tabs/InboxTab.svelte'
-  import SystemTab from './tabs/SystemTab.svelte'
   import PageMeta from '../../components/PageMeta.svelte'
   import BrandMark from '../../components/BrandMark.svelte'
 
@@ -46,6 +33,36 @@
   const slugToId = Object.fromEntries(tabs.map((x) => [x.slug, x.id])) as Record<string, TabId>
   const idToSlug = Object.fromEntries(tabs.map((x) => [x.id, x.slug])) as Record<TabId, string>
 
+  /** Tabs that take an onmessage flash callback. */
+  const withFlash = new Set<TabId>([
+    'Seeds',
+    'Articles',
+    'Writer Briefs',
+    'Glossary',
+    'Classifier',
+    'Training',
+    'Domains',
+    'Inbox',
+    'System',
+  ])
+
+  const tabLoaders: Record<TabId, () => Promise<{ default: Component<any> }>> = {
+    Analytics: () => import('./tabs/AnalyticsTab.svelte'),
+    Articles: () => import('./tabs/ArticlesTab.svelte'),
+    'Writer Briefs': () => import('./tabs/BriefsTab.svelte'),
+    Inbox: () => import('./tabs/InboxTab.svelte'),
+    Glossary: () => import('./tabs/GlossaryTab.svelte'),
+    Queue: () => import('./tabs/QueueTab.svelte'),
+    Classifier: () => import('./tabs/ClassifierTab.svelte'),
+    Training: () => import('./tabs/TrainingTab.svelte'),
+    Gatekeeper: () => import('./tabs/GatekeeperTab.svelte'),
+    Domains: () => import('./tabs/DomainsTab.svelte'),
+    Seeds: () => import('./tabs/SeedsTab.svelte'),
+    'Tool Insights': () => import('./tabs/ToolInsightsTab.svelte'),
+    Sessions: () => import('./tabs/SessionsTab.svelte'),
+    System: () => import('./tabs/SystemTab.svelte'),
+  }
+
   function tabFromQuery(q: URLSearchParams): TabId {
     const raw = (q.get('tab') || '').trim().toLowerCase()
     return slugToId[raw] ?? 'Analytics'
@@ -55,6 +72,8 @@
   let walletOpen = $state(false)
   let WalletDialog = $state<import('svelte').Component<{ onclose: () => void }> | null>(null)
   let toast = $state<string | null>(null)
+  let ActiveTab = $state<Component<any> | null>(null)
+  let tabLoading = $state(false)
 
   $effect(() => {
     const next = tabFromQuery($route.query)
@@ -66,6 +85,25 @@
     void import('../../components/WalletDialog.svelte').then((m) => {
       WalletDialog = m.default
     })
+  })
+
+  $effect(() => {
+    const id = tab
+    let cancelled = false
+    tabLoading = true
+    ActiveTab = null
+    void tabLoaders[id]()
+      .then((m) => {
+        if (cancelled) return
+        ActiveTab = m.default
+        tabLoading = false
+      })
+      .catch(() => {
+        if (!cancelled) tabLoading = false
+      })
+    return () => {
+      cancelled = true
+    }
   })
 
   const admin = $derived(
@@ -145,37 +183,17 @@
 
     {#if toast}<p class="admin-toast">{toast}</p>{/if}
 
-    {#key tab}
-      {#if tab === 'Seeds'}
-        <SeedsTab {admin} onmessage={flash} />
-      {:else if tab === 'Articles'}
-        <ArticlesTab {admin} onmessage={flash} />
-      {:else if tab === 'Writer Briefs'}
-        <BriefsTab {admin} onmessage={flash} />
-      {:else if tab === 'Glossary'}
-        <GlossaryTab {admin} onmessage={flash} />
-      {:else if tab === 'Classifier'}
-        <ClassifierTab {admin} onmessage={flash} />
-      {:else if tab === 'Queue'}
-        <QueueTab {admin} />
-      {:else if tab === 'Training'}
-        <TrainingTab {admin} onmessage={flash} />
-      {:else if tab === 'Gatekeeper'}
-        <GatekeeperTab {admin} onmessage={flash} />
-      {:else if tab === 'Domains'}
-        <DomainsTab {admin} onmessage={flash} />
-      {:else if tab === 'Tool Insights'}
-        <ToolInsightsTab {admin} />
-      {:else if tab === 'Sessions'}
-        <SessionsTab {admin} />
-      {:else if tab === 'Analytics'}
-        <AnalyticsTab {admin} />
-      {:else if tab === 'Inbox'}
-        <InboxTab {admin} onmessage={flash} />
-      {:else if tab === 'System'}
-        <SystemTab {admin} onmessage={flash} />
-      {/if}
-    {/key}
+    {#if tabLoading && !ActiveTab}
+      <p class="admin-muted">Loading…</p>
+    {:else if ActiveTab}
+      {#key tab}
+        {#if withFlash.has(tab)}
+          <ActiveTab {admin} onmessage={flash} />
+        {:else}
+          <ActiveTab {admin} />
+        {/if}
+      {/key}
+    {/if}
   {/if}
 </div>
 
