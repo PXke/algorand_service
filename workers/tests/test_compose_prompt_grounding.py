@@ -355,3 +355,31 @@ def test_writing_guidelines_reject_diff_noise_as_news() -> None:
     guidelines = mc._writing_guidelines("2026-07-09")
     assert "Diff noise is not news" in guidelines
     assert "canonical" in guidelines
+
+
+def test_feedback_channels_says_check_tool_list_before_suggesting() -> None:
+    """A real special-edition session (2026-08-04) called suggest_tool 5 times on tools it already had (report_compose_issue x2, fetch_archive_text, get_asset_holder_share, discourse_forum), wasting rounds the auto-correction response alone didn't prevent."""
+    assert "check the tool list you were actually given" in mc._FEEDBACK_CHANNELS
+    assert "check the tool list you were actually given" in mc._RESEARCH_PHASE_GUIDANCE
+
+
+def test_sourcing_rules_treat_a_contentless_fetch_as_unread() -> None:
+    """Same session: the CGAP section was built on a page fetched twice that returned only a cookie-consent banner and nav menu, no article text -- a 200 response with no substance is the same as an error for citation purposes."""
+    assert "no substantive content" in mc._SOURCING_AND_FRAMING_RULES
+    assert "did not read that page either" in mc._SOURCING_AND_FRAMING_RULES
+
+
+def test_special_edition_instructions_require_on_chain_verification() -> None:
+    """Same session: the headline $35M/625,000-people figures were never cross-checked on-chain, despite get_asset_holder_share being available (the model even tried, and failed, to suggest it as a new tool)."""
+    assert "ON-CHAIN VERIFICATION" in mc._SPECIAL_EDITION_DEPTH_INSTRUCTIONS
+    assert "get_asset_holder_share" in mc._SPECIAL_EDITION_DEPTH_INSTRUCTIONS
+
+
+def test_special_edition_instructions_require_recency_within_a_source() -> None:
+    """Same session: the article described a Council meeting as 'held in Berlin in 2025' as if current, when the very same fetched press release's news hook was a more recent Washington D.C. summit."""
+    assert "RECENCY WITHIN A SOURCE" in mc._SPECIAL_EDITION_DEPTH_INSTRUCTIONS
+
+
+def test_special_edition_instructions_forbid_dropping_a_found_contrast() -> None:
+    """Same session: research surfaced that HesabPay 'plans to move into Haiti and Sudan' -- the exact deployed-vs-announced contrast the brief asked for -- and it was dropped from the published country list."""
+    assert "DO NOT DROP A FOUND CONTRAST" in mc._SPECIAL_EDITION_DEPTH_INSTRUCTIONS

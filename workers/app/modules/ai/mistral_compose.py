@@ -339,9 +339,13 @@ _SOURCING_AND_FRAMING_RULES = (
     "company unless a tool returned concrete evidence; when a SPECIFIC claim is "
     "unverified, hedge or drop THAT claim — not the rest of the story. The Source "
     "list is the same rule applied to citations: a URL you fetched and that errored "
-    "or timed out was NEVER READ — do not list it as a source. Only cite pages you "
-    "successfully read, or attribute the fact to where it actually came from (a "
-    "search result snippet, an on-chain lookup, an archived copy).\n"
+    "or timed out was NEVER READ — do not list it as a source. A 200 response with "
+    "no substantive content (a cookie-consent notice, a bare nav menu, a paywall "
+    "stub) is the SAME as an error — you did not read that page either, so do not "
+    "characterize what it 'says' or 'reports'; a search-result snippet naming the "
+    "same source is a weaker but real citation, use that instead and say so. Only "
+    "cite pages you successfully read, or attribute the fact to where it actually "
+    "came from (a search result snippet, an on-chain lookup, an archived copy).\n"
     "MEMORY IS NOT A SOURCE: a specific fact you recognize — a real product name, "
     "a transaction, a price, a date — is not verified just because it feels "
     "familiar from training. If it did not appear in an actual tool result THIS "
@@ -408,7 +412,11 @@ _FEEDBACK_CHANNELS = (
     "such gap — even when you finished the article without it. This is NOT only for "
     "hard walls: a fact you worked around with a weaker source, or could verify less "
     "than you wanted, counts too. suggest_tool returns no data and never blocks the "
-    "article — naming these gaps is part of the job, not an exception.\n"
+    "article — naming these gaps is part of the job, not an exception. Before "
+    "calling it, check the tool list you were actually given this session — "
+    "suggest_tool is for a capability that does not exist yet, not a capability "
+    "you forgot you have; calling it on a tool already in your list wastes a round "
+    "and gets auto-corrected anyway.\n"
     "PIPELINE FEEDBACK: when instructions, source material, an existing tool, or "
     "the research→write handoff genuinely blocked or degraded your work, call "
     "report_compose_issue with a specific category and summary (use suggest_tool "
@@ -2396,7 +2404,34 @@ a real finding short to stay brief. The piece should read as a narrative,
 not a list of facts: build it around a clear throughline that connects
 background/context, the current state (with specifics), comparison or
 broader implications, and open questions or what to watch next, so a reader
-comes away with a story, not just a summary."""
+comes away with a story, not just a summary.
+
+ON-CHAIN VERIFICATION: when the story turns on a specific on-chain figure —
+an asset's supply/holder share, a transaction/transfer count, funds moved
+through a contract — verify it with an on-chain tool (lookup_asset,
+lookup_account, get_asset_holder_share, lookup_application) rather than
+relying on a press release or partner's own quoted number for it. A
+headline dollar/volume figure repeated from a PR without an independent
+on-chain check is exactly the kind of surface-level fact this piece exists
+to dig past.
+
+RECENCY WITHIN A SOURCE: a single fetched page can describe several
+chronologically distinct events — do not treat an earlier one as the
+current state when the same page also describes a later one. Identify
+which described event is most recent (by its own dateline, or by explicit
+sequencing language like "today," "ahead of," "building on") and lead with
+that: describing last year's meeting as the current state of a coalition
+when the same source is reporting on this month's follow-up summit is
+citing the source you actually read as if you had not read all of it.
+
+DO NOT DROP A FOUND CONTRAST: if research surfaces a genuine contrast worth
+including — a deployed, operating program versus one that is only
+announced or planned; a claim that is independently verified versus one
+that rests on a single self-interested source — that contrast is exactly
+the kind of finding an investigative piece exists to surface. Keep it in,
+even when it complicates a clean narrative or undercuts the more flattering
+half of the story; dropping the less convenient finding is the failure
+mode this depth pass exists to prevent, not an edit for concision."""
 
 
 def compose_assignment_article_mistral(
