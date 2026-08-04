@@ -966,6 +966,21 @@ def _authority_gate_issues(body: str) -> list[str]:
         return []
 
 
+def _stale_deadline_gate_issues(body: str) -> list[str]:
+    """Stale-deadline feedback: a real, accurately-sourced date framed as still open when it has already passed (Meld Gold 2026-08-04) is fed back so the writer rewrites the tense — a mechanical fix, not a factual dispute, so this stays a revision issue rather than a human hold like the defunct-entity gate."""
+    from app.core.config import STALE_DEADLINE_GATE_ENABLED
+
+    if not STALE_DEADLINE_GATE_ENABLED:
+        return []
+    try:
+        from app.modules.newspaper.stale_deadline_gate import stale_deadline_issues
+
+        return stale_deadline_issues(body)
+    except Exception:
+        logger.warning("stale-deadline check failed during revision", exc_info=True)
+        return []
+
+
 def _unsourced_specifics_gate_issues(
     body: str, trace: list[dict], user: str, research_user: str | None
 ) -> list[str]:
@@ -1035,6 +1050,9 @@ def _collect_fixable_issues(
     unsourced_fixable = _unsourced_specifics_gate_issues(body, trace, user, research_user)
     if unsourced_fixable:
         review["unsourced_specifics"] = unsourced_fixable
+    stale_deadline_fixable = _stale_deadline_gate_issues(body)
+    if stale_deadline_fixable:
+        review["stale_deadlines"] = stale_deadline_fixable
 
     return (
         schema_fixable
@@ -1043,6 +1061,7 @@ def _collect_fixable_issues(
         + chain_fixable
         + authority_fixable
         + unsourced_fixable
+        + stale_deadline_fixable
     )
 
 

@@ -517,6 +517,11 @@ AUTHORITY_GATE_ENABLED = env_bool("AUTHORITY_GATE_ENABLED", True)
 # didn't fetch), which a human keeps and a machine rewrite would wrongly strip.
 UNSOURCED_SPECIFICS_GATE_ENABLED = env_bool("UNSOURCED_SPECIFICS_GATE_ENABLED", True)
 UNSOURCED_SPECIFICS_GATE_ENFORCE = env_bool("UNSOURCED_SPECIFICS_GATE_ENFORCE", True)
+# Root-caused 2026-08-04 (Meld Gold): a real, accurately-sourced deadline
+# ("Holders have until June 29, 2026") published over 5 weeks AFTER that date
+# passed, presented as still open. See stale_deadline_gate.py — a revision
+# issue, not a hold, since the fix is a tense rewrite the writer can do itself.
+STALE_DEADLINE_GATE_ENABLED = env_bool("STALE_DEADLINE_GATE_ENABLED", True)
 # suggest_glossary_term is only callable during Stage 1 (research), before the
 # article's own prose exists, so it was never actually usable for its stated
 # purpose -- confirmed 2026-08-03: 0 of 62 real sessions ever called it, and
