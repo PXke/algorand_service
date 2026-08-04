@@ -105,8 +105,15 @@ def _domain_capped(row: QueuedPublishRow) -> bool:
     return bool(dom and domain_compose_cap_reached(dom))
 
 
+def _is_editorial_assignment(row: QueuedPublishRow) -> bool:
+    """True for an editorial-brief row -- a deliberate, one-off editorial/admin decision (assign_editorial_brief/refresh_editorial_brief already fire the drain immediately on enqueue, by design), not automatic discovery. The diversity cooldowns exist to space out routine coverage of the SAME source recurring on its own; they were never meant to silently defer an explicit human "compose this now" request. Same reasoning the breaking tier already applies (see _BREAKING_VETOES: "breaking is the one tier where a genuine alert must never wait behind a cooldown from routine coverage of the same source" -- an editorial assignment is the standard tier's equivalent case."""
+    return (row.payload or {}).get("source_kind") == "editorial_assignment"
+
+
 def _domain_in_cooldown(row: QueuedPublishRow) -> bool:
     """True when this web source published/composed within the diversity cooldown (COMPOSE_DOMAIN_COOLDOWN_HOURS). Unlike the daily cap, cooldown is short-lived, so such rows are left pending (not deferred) to retry once it clears."""
+    if _is_editorial_assignment(row):
+        return False
     from app.modules.crawler.domain_tracker import domain_in_cooldown
     from app.modules.newspaper.tasks.publish_tasks import _compose_domain_for_row
 
@@ -115,7 +122,16 @@ def _domain_in_cooldown(row: QueuedPublishRow) -> bool:
 
 
 def _service_in_cooldown(row: QueuedPublishRow) -> bool:
-    """True when this SERVICE (across all its domains) published/composed within its diversity cooldown. Complements _domain_in_cooldown for a project whose domains don't share a registrable domain, so the per-domain check alone can't see the repeat (e.g. a project's own site + a separate Medium blog)."""
+    """True when this SERVICE (across all its domains) published/composed within its diversity cooldown. Complements _domain_in_cooldown for a project whose domains don't share a registrable domain, so the per-domain check alone can't see the repeat (e.g. a project's own site + a separate Medium blog).
+
+    Root-caused 2026-08-04: an admin's explicit brief refresh (a deliberate
+    "recompose this now" action) was silently vetoed here and skipped to the
+    next-priority row instead, hours after the brief's own prior compose --
+    the cooldown is meant for routine automatic coverage recurring on its
+    own, not an explicit editorial trigger. See _is_editorial_assignment.
+    """
+    if _is_editorial_assignment(row):
+        return False
     from app.modules.crawler.domain_tracker import service_in_cooldown
 
     return bool(row.service_id and service_in_cooldown(row.service_id))

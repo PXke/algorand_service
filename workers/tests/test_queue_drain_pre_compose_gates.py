@@ -128,6 +128,46 @@ def test_first_match_wins_and_later_gates_do_not_run(monkeypatch: pytest.MonkeyP
     assert fired.mark_status == "deferred"
 
 
+def test_editorial_assignment_exempt_from_domain_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An editorial-assignment row skips the domain cooldown check entirely -- a deliberate admin trigger must not be silently deferred behind routine-coverage spacing."""
+
+    def _must_not_run(_domain: str) -> Never:
+        raise AssertionError("real domain_in_cooldown must not be called for an editorial row")
+
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.domain_in_cooldown", _must_not_run
+    )
+    assert qdt._domain_in_cooldown(_assignment_row("ok")) is False
+
+
+def test_editorial_assignment_exempt_from_service_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An editorial-assignment row skips the service cooldown check entirely -- root-caused 2026-08-04: an admin's explicit brief refresh was silently vetoed hours after the brief's own prior compose."""
+
+    def _must_not_run(_service_id: str) -> Never:
+        raise AssertionError("real service_in_cooldown must not be called for an editorial row")
+
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.service_in_cooldown", _must_not_run
+    )
+    assert qdt._service_in_cooldown(_assignment_row("ok")) is False
+
+
+def test_non_editorial_row_still_subject_to_cooldowns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A normal web/service row (no source_kind editorial_assignment) is unaffected -- still runs the real cooldown checks."""
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.domain_in_cooldown", lambda _d: True
+    )
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.service_in_cooldown", lambda _s: True
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.tasks.publish_tasks._compose_domain_for_row",
+        lambda _r: "example.com",
+    )
+    assert qdt._domain_in_cooldown(_row()) is True
+    assert qdt._service_in_cooldown(_row()) is True
+
+
 def test_late_gate_fires_after_earlier_ones_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     """A later gate fires and is reported once all earlier gates in the list pass."""
     monkeypatch.setattr(
