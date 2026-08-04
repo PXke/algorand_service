@@ -106,7 +106,15 @@ class MetricsDashboardService:
             )
         )
 
-        status = fetch_algod_status()
+        # Algod status + Nodely validators are independent; overlap the cold path.
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            status_fut = pool.submit(fetch_algod_status)
+            nodes_fut = pool.submit(fetch_nodely_node_stats)
+            status = status_fut.result()
+            node_stats = nodes_fut.result()
+
         last_round = status.get("last-round", status.get("LastRound"))
         if isinstance(last_round, int):
             tiles.append(
@@ -131,7 +139,6 @@ class MetricsDashboardService:
 
         # Validators before round time: node count is the headline
         # decentralisation number, and the markets bar shows this list in order.
-        node_stats = fetch_nodely_node_stats()
         node_count = node_stats.get("node_count")
         if isinstance(node_count, int) and node_count > 0:
             tiles.append(

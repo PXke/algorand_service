@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 
 from x402.extensions.bazaar import declare_discovery_extension
@@ -85,7 +84,7 @@ def kyc_enroll(request: Request) -> Response:
     }
 
 
-async def kyc_verify(request: Request) -> Response:
+def kyc_verify(request: Request) -> Response:
     """The paid product: any third party (an exchange, a faucet, ...) pays to check a wallet's KYC status. Charged whether or not the wallet is enrolled (same as any paid lookup/search API) — the payout to the enrolled wallet only fires on a hit, since there's no subject to reward on a miss. See LookupService for the core rule (payout always goes to the LOOKED-UP wallet, never the payer)."""
     wallet = query_param(request.query_params.get("wallet", ""))
     if not wallet:
@@ -114,11 +113,7 @@ async def kyc_verify(request: Request) -> Response:
     if result.error:
         return result.error
 
-    # The payout leg makes blocking algod calls (suggested params, submit,
-    # confirm-wait) — run it off the event loop so one slow payout doesn't
-    # stall every other in-flight request.
-    payload = await asyncio.to_thread(
-        lookup_service.lookup,
+    payload = lookup_service.lookup(
         wallet_address=wallet,
         payer_address=result.payer or "",
         payment_txid=result.payment_txid or "",
@@ -131,7 +126,7 @@ async def kyc_verify(request: Request) -> Response:
     )
 
 
-async def kyc_payout_retry(request: Request) -> Response:
+def kyc_payout_retry(request: Request) -> Response:
     """Admin-gated manual retry for a lookup whose payout failed (float too low, opt-in missing, algod hiccup, confirm timeout) — see kyc_lookup_events for which ones need it. Deliberately manual rather than an automatic backoff sweep: ship simple first, automate later if failures turn out to be common in practice."""
     from app.modules.admin.auth import require_admin_wallet
 
@@ -144,8 +139,7 @@ async def kyc_payout_retry(request: Request) -> Response:
     except serialization.DecodeError as exc:
         return json_error_response(400, "invalid_request", str(exc))
 
-    result = await asyncio.to_thread(
-        send_payout,
+    result = send_payout(
         receiver=payload.wallet_address,
         amount_atomic=payload.amount_atomic,
     )

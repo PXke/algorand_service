@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from typing import Any
 
 import httpx
@@ -27,20 +28,35 @@ _ROUND_TIME_CACHE_TTL = 120
 _ROUND_TIME_SPAN = 20
 
 
-def _block_timestamp(round_number: int, *, timeout: float) -> int | None:
-    """Unix seconds the given round was committed, or None if algod won't say."""
-    url = f"{settings.algod_url.rstrip('/')}/v2/blocks/{round_number}"
+_ALGOD_STATUS_CACHE_KEY = "metrics:algod-status"
+_ALGOD_STATUS_CACHE_TTL = 10
+
+
+def _algod_headers() -> dict[str, str]:
     headers: dict[str, str] = {}
     token = settings.algod_token.strip()
     if token:
         headers["X-Algo-API-Token"] = token
+    return headers
+
+
+@lru_cache(maxsize=1)
+def _http_client() -> httpx.Client:
+    """Shared client so dashboard polls reuse connections."""
+    return httpx.Client(timeout=8.0)
+
+
+def _block_timestamp(round_number: int, *, timeout: float) -> int | None:
+    """Unix seconds the given round was committed, or None if algod won't say."""
+    url = f"{settings.algod_url.rstrip('/')}/v2/blocks/{round_number}"
     try:
-        with httpx.Client(timeout=timeout) as client:
-            response = client.get(url, headers=headers, params={"format": "json"})
-            response.raise_for_status()
-            block = response.json().get("block")
-            ts = block.get("ts") if isinstance(block, dict) else None
-            return int(ts) if isinstance(ts, int | float) else None
+        response = _http_client().get(
+            url, headers=_algod_headers(), params={"format": "json"}, timeout=timeout
+        )
+        response.raise_for_status()
+        block = response.json().get("block")
+        ts = block.get("ts") if isinstance(block, dict) else None
+        return int(ts) if isinstance(ts, int | float) else None
     except Exception as exc:
         logger.warning("Algod block %s fetch failed: %s", round_number, exc)
         return None
@@ -70,22 +86,24 @@ def fetch_round_time_seconds(last_round: int, *, timeout: float = 8.0) -> float 
     return cached_json(_ROUND_TIME_CACHE_KEY, _ROUND_TIME_CACHE_TTL, compute)
 
 
-def fetch_algod_status(*, timeout: float = 8.0) -> dict[str, Any]:
-    """Best-effort Algod /v2/status for chain activity tiles."""
+def _fetch_algod_status_uncached(*, timeout: float = 8.0) -> dict[str, Any]:
     url = settings.algod_url.rstrip("/") + "/v2/status"
-    headers: dict[str, str] = {}
-    token = settings.algod_token.strip()
-    if token:
-        headers["X-Algo-API-Token"] = token
+    response = _http_client().get(url, headers=_algod_headers(), timeout=timeout)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        return {}
+    return payload
 
+
+def fetch_algod_status(*, timeout: float = 8.0) -> dict[str, Any]:
+    """Best-effort Algod /v2/status for chain activity tiles (short Redis TTL)."""
     try:
-        with httpx.Client(timeout=timeout) as client:
-            response = client.get(url, headers=headers)
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, dict):
-                return {}
-            return payload
+        return cached_json(
+            _ALGOD_STATUS_CACHE_KEY,
+            _ALGOD_STATUS_CACHE_TTL,
+            lambda: _fetch_algod_status_uncached(timeout=timeout),
+        )
     except Exception as exc:
         logger.warning("Algod status fetch failed: %s", exc)
         return {}
@@ -111,10 +129,9 @@ def _fetch_nodely_node_stats_uncached(*, timeout: float = 8.0) -> dict[str, Any]
             }
         ],
     }
-    with httpx.Client(timeout=timeout) as client:
-        response = client.post(_NODELY_DS_QUERY, json=body)
-        response.raise_for_status()
-        data = response.json()
+    response = _http_client().post(_NODELY_DS_QUERY, json=body, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
 
     frame = data["results"]["A"]["frames"][0]
     fields = [f["name"] for f in frame["schema"]["fields"]]

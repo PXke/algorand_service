@@ -43,7 +43,7 @@ def _invalidate_domains_cache() -> None:
     invalidate(*_DOMAIN_CACHE_KEYS)
 
 
-async def admin_analytics(request: Request) -> Response | dict:
+def admin_analytics(request: Request) -> Response | dict:
     """Site-wide pageview/referrer analytics for the given day window, cached briefly."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -56,19 +56,18 @@ async def admin_analytics(request: Request) -> Response | dict:
 
         return read_analytics(days=days)
 
-    import asyncio
 
     from app.core.cache import cached_json
 
     # This aggregate does a full sequential pass over `days` day-partitions
     # plus several site-wide aggregates (~1s) — the original motivation for
-    # running Robyn multi-process, but the handler itself was never offloaded.
+    # running multi-process, but the handler itself was never offloaded.
     # 30s TTL: an admin reloading the tab a few times in a row shouldn't
     # re-run the whole thing every time.
-    return await asyncio.to_thread(cached_json, f"admin:analytics:{days}", 30, _compute)
+    return cached_json(f"admin:analytics:{days}", 30, _compute)
 
 
-async def admin_patch_article(request: Request) -> Response:
+def admin_patch_article(request: Request) -> Response:
     """Patch an article's title/summary/body as an admin edit."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -79,22 +78,14 @@ async def admin_patch_article(request: Request) -> Response:
     except Exception as exc:
         return json_error_response(400, "invalid_request", str(exc))
     wallet = verified_admin_wallet(request)
-    import asyncio
 
-    updated = await asyncio.to_thread(
-        store.update_article,
-        article_id,
-        title=payload.title,
-        summary=payload.summary,
-        body=payload.body,
-        editor=f"admin:{wallet}",
-    )
+    updated = store.update_article(article_id, title=payload.title, summary=payload.summary, body=payload.body, editor=f"admin:{wallet}", )
     if updated is None:
         return json_error_response(404, "not_found", "Article not found")
     return asdict(updated)
 
 
-async def admin_delete_article(request: Request) -> Response:
+def admin_delete_article(request: Request) -> Response:
     """Delete an article, optionally blocking its source domain too."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -105,14 +96,13 @@ async def admin_delete_article(request: Request) -> Response:
         "true",
     )
     wallet = verified_admin_wallet(request)
-    import asyncio
 
     source_url = ""
     if block_source:
-        current = await asyncio.to_thread(store.get_article, article_id)
+        current = store.get_article(article_id)
         source_url = (current.source_url or "") if current is not None else ""
 
-    deleted = await asyncio.to_thread(store.delete_article, article_id)
+    deleted = store.delete_article(article_id)
     if not deleted:
         return json_error_response(404, "not_found", "Article not found")
 
@@ -122,28 +112,22 @@ async def admin_delete_article(request: Request) -> Response:
 
         domain = domain_from_url(source_url)
         if domain:
-            await asyncio.to_thread(
-                store.reject_domain_source,
-                domain=domain,
-                wallet=wallet,
-                source_url_hint=source_url,
-            )
+            store.reject_domain_source(domain=domain, wallet=wallet, source_url_hint=source_url, )
             blocked = True
     return {"deleted": True, "article_id": article_id, "source_blocked": blocked}
 
 
-async def admin_list_briefs(request: Request) -> dict:
+def admin_list_briefs(request: Request) -> dict:
     """List editorial briefs."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
-    items = await asyncio.to_thread(store.list_briefs)
+    items = store.list_briefs()
     return {"items": items}
 
 
-async def admin_create_brief(request: Request) -> Response:
+def admin_create_brief(request: Request) -> Response:
     """Create an editorial brief and eagerly kick off its assignment."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -153,18 +137,8 @@ async def admin_create_brief(request: Request) -> Response:
     except Exception as exc:
         return json_error_response(400, "invalid_request", str(exc))
     wallet = verified_admin_wallet(request)
-    import asyncio
 
-    item = await asyncio.to_thread(
-        store.create_brief,
-        title=payload.title,
-        body_markdown=payload.body_markdown,
-        keywords=payload.keywords,
-        status=payload.status,
-        wallet_address=wallet,
-        refresh_every_days=payload.refresh_every_days,
-        is_special_edition=payload.is_special_edition,
-    )
+    item = store.create_brief(title=payload.title, body_markdown=payload.body_markdown, keywords=payload.keywords, status=payload.status, wallet_address=wallet, refresh_every_days=payload.refresh_every_days, is_special_edition=payload.is_special_edition, )
     try:
         from celery import Celery
 
@@ -181,15 +155,14 @@ async def admin_create_brief(request: Request) -> Response:
     return item
 
 
-async def admin_assign_brief_now(request: Request) -> Response:
+def admin_assign_brief_now(request: Request) -> Response:
     """Queue a brief for (re)assignment now instead of waiting for its refresh schedule."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
     brief_id = request.path_params.get("brief_id", "")
-    import asyncio
 
-    item = await asyncio.to_thread(store.get_brief, brief_id)
+    item = store.get_brief(brief_id)
     if item is None:
         return json_error_response(404, "not_found", "Brief not found")
     # Already has an article -> refresh it in place; otherwise this is the
@@ -212,100 +185,90 @@ async def admin_assign_brief_now(request: Request) -> Response:
         return json_error_response(500, "assign_failed", str(exc))
 
 
-async def admin_list_classifier_reviews(request: Request) -> Response:
+def admin_list_classifier_reviews(request: Request) -> Response:
     """List pending classifier review candidates."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
-    # Offload the (blocking) Cassandra work to a thread so it doesn't stall
-    # Robyn's event loop — lets other dashboard tabs load concurrently.
-    items = await asyncio.to_thread(store.list_classifier_reviews)
+    items = store.list_classifier_reviews()
     return {"items": items}
 
 
-async def admin_list_publish_queue(request: Request) -> Response | dict:
+def admin_list_publish_queue(request: Request) -> Response | dict:
     """Queue rows with status + last drain/compose decision (last_reason) — the persisted answer to "why was this row skipped/held/resolved" that previously vanished with the Celery task return."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
     limit_param = request.query_params.get("limit", "")
     limit = max(1, min(int(limit_param) if limit_param.isdigit() else 200, 1000))
-    items = await asyncio.to_thread(store.list_publish_queue, limit=limit)
+    items = store.list_publish_queue(limit=limit)
     return {"items": items}
 
 
-async def admin_pending_feed_backlog(request: Request) -> Response | dict:
+def admin_pending_feed_backlog(request: Request) -> Response | dict:
     """Approved articles waiting in pending_feed_queue for paced release (capped by PENDING_FEED_MAX_DEPTH) — distinct from the in-flight composing work publish-queue shows."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
-    items = await asyncio.to_thread(store.list_pending_feed_backlog)
+    items = store.list_pending_feed_backlog()
     return {"items": items}
 
 
-async def admin_publish_queue_breakdown(request: Request) -> Response | dict:
+def admin_publish_queue_breakdown(request: Request) -> Response | dict:
     """One row's enqueue-time priority_breakdown + content signals."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
     queue_id = request.path_params.get("queue_id", "")
-    detail = await asyncio.to_thread(store.publish_queue_breakdown, queue_id)
+    detail = store.publish_queue_breakdown(queue_id)
     if detail is None:
         return json_error_response(404, "not_found", "unknown queue_id")
     return detail
 
 
-async def admin_bump_queue_priority(request: Request) -> Response | dict:
+def admin_bump_queue_priority(request: Request) -> Response | dict:
     """Pin a pending queue row to the front so the next drain composes it next — never touches the daily cap or pacing interval that gate when the drain runs at all."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
     queue_id = request.path_params.get("queue_id", "")
-    result = await asyncio.to_thread(store.bump_queue_priority, queue_id)
+    result = store.bump_queue_priority(queue_id)
     if result is None:
         return json_error_response(404, "not_found", "unknown queue_id or not pending")
     return result
 
 
-async def admin_dead_end_queue_row_domain(request: Request) -> Response | dict:
+def admin_dead_end_queue_row_domain(request: Request) -> Response | dict:
     """Permanently reject the source domain behind one publish_queue row, straight from the Queue tab — the one-click alternative to hunting the same domain down in the paginated Domains tab."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
     queue_id = request.path_params.get("queue_id", "")
     wallet = verified_admin_wallet(request)
-    result = await asyncio.to_thread(store.dead_end_queue_row_domain, queue_id, wallet=wallet)
+    result = store.dead_end_queue_row_domain(queue_id, wallet=wallet)
     if result is None:
         return json_error_response(404, "not_found", "unknown queue_id or no resolvable domain")
     _invalidate_domains_cache()
     return result
 
 
-async def admin_training_stats(request: Request) -> Response:
+def admin_training_stats(request: Request) -> Response:
     """Labelled-data volume + balance + grader readiness for the Training tab."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
     from app.core.cache import cached_json
 
     # Short TTL: scans up to 5000 rows + a concurrent detail batch; doesn't
     # need to be real-time. Invalidated on each feedback write below.
-    # to_thread keeps the cache-miss recompute off the event loop.
-    return await asyncio.to_thread(cached_json, "admin:training_stats", 30, store.training_stats)
+    return cached_json("admin:training_stats", 30, store.training_stats)
 
 
 def admin_retrain(request: Request) -> Response:
@@ -328,7 +291,7 @@ def admin_retrain(request: Request) -> Response:
         return json_error_response(500, "retrain_failed", str(exc))
 
 
-async def admin_classifier_feedback(request: Request) -> Response:
+def admin_classifier_feedback(request: Request) -> Response:
     """Record a human correction to a classifier verdict and invalidate the training-stats cache."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -338,29 +301,8 @@ async def admin_classifier_feedback(request: Request) -> Response:
     except Exception as exc:
         return json_error_response(400, "invalid_request", str(exc))
     wallet = verified_admin_wallet(request)
-    import asyncio
 
-    result = await asyncio.to_thread(
-        store.record_classifier_feedback,
-        url=payload.url,
-        text_sample=payload.text_sample,
-        category=payload.category,
-        predicted_category=payload.predicted_category,
-        quality=payload.quality,
-        predicted_publish=payload.predicted_publish,
-        approved=payload.approved,
-        admin_wallet=wallet,
-        review_id=payload.review_id,
-        article_id=payload.article_id,
-        source_relevant=payload.source_relevant,
-        categories=payload.categories,
-        training_only=payload.training_only,
-        corrected_scores=payload.corrected_scores,
-        anchor=payload.anchor,
-        factuality_fail=payload.factuality_fail,
-        tone_fail=payload.tone_fail,
-        error_types=payload.error_types,
-    )
+    result = store.record_classifier_feedback(url=payload.url, text_sample=payload.text_sample, category=payload.category, predicted_category=payload.predicted_category, quality=payload.quality, predicted_publish=payload.predicted_publish, approved=payload.approved, admin_wallet=wallet, review_id=payload.review_id, article_id=payload.article_id, source_relevant=payload.source_relevant, categories=payload.categories, training_only=payload.training_only, corrected_scores=payload.corrected_scores, anchor=payload.anchor, factuality_fail=payload.factuality_fail, tone_fail=payload.tone_fail, error_types=payload.error_types, )
     # Labeling changes the Training-tab aggregate — drop its cache so the
     # next load reflects this decision immediately (don't wait for the TTL).
     from app.core.cache import invalidate
@@ -369,17 +311,16 @@ async def admin_classifier_feedback(request: Request) -> Response:
     return result
 
 
-async def admin_list_gatekeeper_anchors(request: Request) -> Response:
+def admin_list_gatekeeper_anchors(request: Request) -> Response:
     """Validation anchor set: count + list (for the X/40 progress view)."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
-    return await asyncio.to_thread(store.list_gatekeeper_anchors)
+    return store.list_gatekeeper_anchors()
 
 
-async def admin_add_gatekeeper_anchor(request: Request) -> Response:
+def admin_add_gatekeeper_anchor(request: Request) -> Response:
     """Tag an already-published article into the anchor set (curate diverse anchors without waiting for the review queue)."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -389,20 +330,10 @@ async def admin_add_gatekeeper_anchor(request: Request) -> Response:
     except Exception as exc:
         return json_error_response(400, "invalid_request", str(exc))
     wallet = verified_admin_wallet(request)
-    import asyncio
 
     try:
-        anchor_id = await asyncio.to_thread(
-            store.record_gatekeeper_anchor,
-            article_id=payload.article_id,
-            url="",
-            source_text="",
-            article_text="",  # store snapshots it from the article
-            factuality_fail=payload.factuality_fail,
-            tone_fail=payload.tone_fail,
-            error_types=payload.error_types,
-            admin_wallet=wallet,
-        )
+        anchor_id = store.record_gatekeeper_anchor(article_id=payload.article_id, url="", source_text="", article_text="", # store snapshots it from the article
+            factuality_fail=payload.factuality_fail, tone_fail=payload.tone_fail, error_types=payload.error_types, admin_wallet=wallet, )
         return {"status": "ok", "anchor_id": anchor_id}
     except Exception as exc:
         return json_error_response(500, "anchor_failed", str(exc))
@@ -426,14 +357,13 @@ def admin_run_gatekeeper_validation(request: Request) -> Response:
         return json_error_response(500, "validate_failed", str(exc))
 
 
-async def admin_gatekeeper_validation_report(request: Request) -> Response:
+def admin_gatekeeper_validation_report(request: Request) -> Response:
     """Latest annotator-validation report (trusted types + precision/recall)."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
-    report = await asyncio.to_thread(store.get_gatekeeper_validation_report)
+    report = store.get_gatekeeper_validation_report()
     return report if report is not None else {"report": None}
 
 
@@ -476,7 +406,7 @@ def admin_upsert_source(request: Request) -> Response:
     return {"saved": True, "service_id": payload.service_id}
 
 
-async def admin_merge_services(request: Request) -> Response:
+def admin_merge_services(request: Request) -> Response:
     """Fold services into one (multi-domain entities like algorand.co + algorand.com): sources move to the target, domains re-point, merged services are disabled. The target's next weekly poll aggregates across all of its domains."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -485,15 +415,10 @@ async def admin_merge_services(request: Request) -> Response:
         payload = serialization.decode(request.body, ServiceMergeRequest)
     except Exception as exc:
         return json_error_response(400, "invalid_request", str(exc))
-    import asyncio
 
     from app.modules.registry.sources import merge_services
 
-    return await asyncio.to_thread(
-        merge_services,
-        target_service_id=payload.target_service_id,
-        source_service_ids=payload.source_service_ids,
-    )
+    return merge_services(target_service_id=payload.target_service_id, source_service_ids=payload.source_service_ids, )
 
 
 def admin_delete_source(request: Request) -> Response:
@@ -598,24 +523,23 @@ def admin_run_scraper(request: Request) -> Response:
     return {"queued": True, "action": payload.action, "task_id": task_id}
 
 
-async def admin_celery_overview(request: Request) -> Response:
+def admin_celery_overview(request: Request) -> Response:
     """Broker/worker overview for the admin dashboard, cached briefly."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
     from app.core.cache import cached_json
     from app.modules.admin.scrapers import celery_overview
 
     try:
         # Broker inspect is slow-ish; 10s cache smooths dashboard polling.
-        return await asyncio.to_thread(cached_json, "admin:celery", 10, celery_overview)
+        return cached_json("admin:celery", 10, celery_overview)
     except Exception as exc:
         return json_error_response(502, "broker_unavailable", str(exc))
 
 
-async def admin_reset_articles(request: Request) -> Response:
+def admin_reset_articles(request: Request) -> Response:
     """Beta convenience: wipe all article/publish state so the pipeline starts fresh. Keeps sources, classifier feedback and pending reviews."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -649,17 +573,16 @@ async def admin_reset_articles(request: Request) -> Response:
         for table in tables:
             session.execute(f"TRUNCATE {table}")
 
-    import asyncio
 
     try:
-        await asyncio.to_thread(_truncate_all)
+        _truncate_all()
     except Exception as exc:
         return json_error_response(500, "reset_failed", str(exc))
     typesense = clear_search_index()
     return {"reset": True, "tables": list(tables), "typesense": typesense}
 
 
-async def admin_clear_classifier_reviews(request: Request) -> Response:
+def admin_clear_classifier_reviews(request: Request) -> Response:
     """Discard all pending review items without recording any feedback (stored classifier_feedback labels are untouched)."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -671,9 +594,8 @@ async def admin_clear_classifier_reviews(request: Request) -> Response:
         session.execute("TRUNCATE classifier_review_pending")
         session.execute("TRUNCATE classifier_review_queue")
 
-    import asyncio
 
-    await asyncio.to_thread(_truncate)
+    _truncate()
     return {"cleared": True}
 
 
@@ -855,7 +777,7 @@ def _admin_domains_page(status: str, page: int, page_size: int) -> dict:
     }
 
 
-async def admin_list_domains(request: Request) -> Response:
+def admin_list_domains(request: Request) -> Response:
     """Paginated, sorted crawl-frontier domain list with per-domain page counts and today's auto-approve tally."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -871,14 +793,11 @@ async def admin_list_domains(request: Request) -> Response:
         page_size = 25
     page_size = max(1, min(page_size, 100))
 
-    # to_thread keeps the recompute (and its blocking Cassandra calls) off
-    # the event loop.
-    import asyncio
 
-    return await asyncio.to_thread(_admin_domains_page, status, page, page_size)
+    return _admin_domains_page(status, page, page_size)
 
 
-async def admin_list_tool_suggestions(request: Request) -> Response:
+def admin_list_tool_suggestions(request: Request) -> Response:
     """Capabilities the writer model wished it had (via the suggest_tool tool), newest first — input for which tools to build next. Resolved suggestions (tools that have since shipped) are hidden by default so the list only shows genuine gaps instead of growing forever; pass ?include_resolved=true to see the full history."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -888,13 +807,12 @@ async def admin_list_tool_suggestions(request: Request) -> Response:
         "true",
     )
 
-    import asyncio
 
-    items = await asyncio.to_thread(store.list_tool_suggestions, include_resolved=include_resolved)
+    items = store.list_tool_suggestions(include_resolved=include_resolved)
     return {"items": items}
 
 
-async def admin_list_compose_feedback(request: Request) -> Response:
+def admin_list_compose_feedback(request: Request) -> Response:
     """Writer-reported prompt/data/tool/pipeline issues (report_compose_issue)."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -922,12 +840,11 @@ async def admin_list_compose_feedback(request: Request) -> Response:
         ]
         return {"items": items}
 
-    import asyncio
 
-    return await asyncio.to_thread(_compute)
+    return _compute()
 
 
-async def admin_list_compose_sessions(request: Request) -> Response:
+def admin_list_compose_sessions(request: Request) -> Response:
     """Recent article-compose sessions, newest first — status/timing only.
 
     Polled every few seconds by the admin UI for live progress, so this is
@@ -983,7 +900,6 @@ async def admin_list_compose_sessions(request: Request) -> Response:
         ]
         return {"items": items}
 
-    import asyncio
 
     from app.core.cache import cached_json
 
@@ -993,10 +909,10 @@ async def admin_list_compose_sessions(request: Request) -> Response:
     # Cursor and limit are part of the key — otherwise page 2 would be served
     # the cached page 1.
     key = f"admin:compose-sessions:{before or 'head'}:{limit}"
-    return await asyncio.to_thread(cached_json, key, 5, _compute)
+    return cached_json(key, 5, _compute)
 
 
-async def admin_get_compose_session(request: Request) -> Response:
+def admin_get_compose_session(request: Request) -> Response:
     """Full transcript (messages + final_output) for one compose session — fetched on demand when the admin expands a session, not on every poll."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -1031,9 +947,8 @@ async def admin_get_compose_session(request: Request) -> Response:
             msgs = []
         return {"messages": msgs, "final_output": row.final_output or ""}
 
-    import asyncio
 
-    return await asyncio.to_thread(_compute)
+    return _compute()
 
 
 def _seed_domain_crawl(
@@ -1191,7 +1106,7 @@ def _admin_set_domain_compute(payload: DomainSetRequest, wallet: str) -> dict:
     }
 
 
-async def admin_set_domain(request: Request) -> Response:
+def admin_set_domain(request: Request) -> Response:
     """Approve or reject a crawl-frontier domain, seeding its crawl and optionally registering it as a monitored service."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -1214,28 +1129,26 @@ async def admin_set_domain(request: Request) -> Response:
     if payload.is_relevant:
         payload.domain = store._normalize_domain_input(payload.domain)
 
-    import asyncio
 
-    result = await asyncio.to_thread(_admin_set_domain_compute, payload, wallet)
+    result = _admin_set_domain_compute(payload, wallet)
     _invalidate_domains_cache()
     return result
 
 
-async def admin_clear_domains(request: Request) -> Response:
+def admin_clear_domains(request: Request) -> Response:
     """Forget the whole crawl frontier: every explored/pending/dead-end domain record. The blocklist (config) is unaffected."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
     from app.core.cassandra import get_cassandra_session
 
-    await asyncio.to_thread(get_cassandra_session().execute, "TRUNCATE domain_tracking")
+    get_cassandra_session().execute("TRUNCATE domain_tracking")
     _invalidate_domains_cache()
     return {"cleared": True}
 
 
-async def admin_compose_next(request: Request) -> Response:
+def admin_compose_next(request: Request) -> Response:
     """Force the pipeline to compose the highest-interest pending candidate now (instead of waiting for the next verdict/drain). The new proposal appears in the review queue once the worker finishes (a few seconds).
 
     The worker task this triggers (run_mistral_diff_check) silently no-ops
@@ -1248,16 +1161,13 @@ async def admin_compose_next(request: Request) -> Response:
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import asyncio
 
     from app.core.cassandra import get_cassandra_session
     from app.core.config import settings
     from app.core.statements import ClassifierReviewStmts, PendingFeedStmts
 
     session = get_cassandra_session()
-    pending_review = await asyncio.to_thread(
-        session.execute, ClassifierReviewStmts.LIST_PENDING, ("pending", 1)
-    )
+    pending_review = session.execute(ClassifierReviewStmts.LIST_PENDING, ("pending", 1))
     if pending_review.one() is not None:
         return {
             "triggered": False,
@@ -1266,11 +1176,7 @@ async def admin_compose_next(request: Request) -> Response:
             "resolve it before pulling a new one.",
         }
     if settings.pause_intake_on_feed_backlog:
-        pending_feed = await asyncio.to_thread(
-            session.execute,
-            PendingFeedStmts.PEEK_ID,
-            (settings.news_feed_bucket,),
-        )
+        pending_feed = session.execute(PendingFeedStmts.PEEK_ID, (settings.news_feed_bucket,), )
         if pending_feed.one() is not None:
             return {
                 "triggered": False,
@@ -1304,7 +1210,7 @@ async def admin_compose_next(request: Request) -> Response:
         return {"diff": diff_result, "drain": drain_result}
 
     try:
-        outcome = await asyncio.to_thread(_fire_and_wait)
+        outcome = _fire_and_wait()
     except Exception as exc:
         return json_error_response(502, "broker_unavailable", str(exc))
 
@@ -1397,7 +1303,7 @@ def admin_backfill_translations(request: Request) -> Response:
     return {"triggered": True, "limit": limit}
 
 
-async def admin_investigation_findings(request: Request) -> Response:
+def admin_investigation_findings(request: Request) -> Response:
     """Evidence trail: tool calls the investigative agent made for a source URL (?url=...)."""
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -1435,9 +1341,8 @@ async def admin_investigation_findings(request: Request) -> Response:
             )
         return {"items": items}
 
-    import asyncio
 
-    return await asyncio.to_thread(_compute)
+    return _compute()
 
 
 def register_admin_routes(app: Router) -> None:

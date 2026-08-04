@@ -15,7 +15,6 @@ import httpx
 from app.core.http import Request, Response, Router
 if TYPE_CHECKING:
     import redis
-    import redis.asyncio
 
 # Same-origin image proxy. Flutter web (CanvasKit) renders Image.network by
 # FETCHING the image via XHR, which needs CORS headers most external hosts
@@ -57,22 +56,13 @@ def _cache_key(url: str) -> str:
     return f"imgproxy3:{hashlib.sha256(url.encode()).hexdigest()}"
 
 
+@lru_cache(maxsize=1)
 def _redis() -> redis.Redis:
     import redis
 
     from app.core.config import settings
 
     return redis.from_url(settings.redis_url, decode_responses=False)
-
-
-@lru_cache(maxsize=1)
-def _async_redis() -> redis.asyncio.Redis:
-    """Awaitable Redis for the cache-HIT path (see _cache_get_await)."""
-    import redis.asyncio
-
-    from app.core.config import settings
-
-    return redis.asyncio.from_url(settings.redis_url, decode_responses=False)
 
 
 def _unpack_cached(raw: bytes | None) -> tuple[str, bytes] | None:
@@ -85,25 +75,16 @@ def _unpack_cached(raw: bytes | None) -> tuple[str, bytes] | None:
     return raw[:sep].decode("latin-1"), raw[sep + 1 :]
 
 
-async def _cache_get_await(url: str) -> tuple[str, bytes] | None:
-    r"""Return (content_type, data) from Redis, or None. Packed as ctype\\0data.
-
-    Awaits rather than blocks: this is the HIT path, which serves most requests,
-    and since the SSR hero images are proxied through here it sits on the LCP
-    path for every page view. A blocking GET here would stall the whole event
-    loop -- the expensive MISS path was already kept off it via to_thread, so
-    only the cheap common case was still on it.
-    """
+def _cache_get(url: str) -> tuple[str, bytes] | None:
+    r"""Return (content_type, data) from Redis, or None. Packed as ctype\\0data."""
     try:
-        raw = await _async_redis().get(_cache_key(url))
+        raw = _redis().get(_cache_key(url))
     except Exception:
         return None
     return _unpack_cached(raw)
 
 
 def _cache_set(url: str, ctype: str, data: bytes) -> None:
-    # Stays blocking on purpose: only called from _fetch_and_optimize, which
-    # already runs in a worker thread via to_thread, so it is off the loop.
     with contextlib.suppress(Exception):
         _redis().set(_cache_key(url), ctype.encode("latin-1") + b"\0" + data, ex=_CACHE_TTL)
 
@@ -201,7 +182,7 @@ def _optimize(ctype: str, data: bytes) -> tuple[str, bytes]:
 
 
 def _fetch_and_optimize(url: str) -> tuple[int, str, bytes]:
-    """(status, content_type, body) — the blocking miss path, run off-loop."""
+    """(status, content_type, body) — fetch upstream, optimize, and cache."""
     resp = _fetch_image(url)
     if resp is None:
         return 502, "", b""
@@ -217,11 +198,8 @@ def register_media_routes(app: Router) -> None:
     """Register the cached, size-limited image-proxy endpoint."""
 
     @app.get("/api/v1/img")
-    async def proxy_image(request: Request) -> Response:
-        import asyncio
-
-        # robyn does NOT URL-decode query params, so the percent-encoded url
-        # arrives literally — decode it before parsing.
+    def proxy_image(request: Request) -> Response:
+        # Query params may arrive percent-encoded — decode before parsing.
         url = unquote((request.query_params.get("url", "") or "").strip())
         if not url:
             return Response(status_code=400, headers={}, description="missing url")
@@ -229,7 +207,7 @@ def register_media_routes(app: Router) -> None:
         if parsed.scheme not in _ALLOWED_SCHEMES or not parsed.netloc:
             return Response(status_code=400, headers={}, description="bad url")
 
-        cached = await _cache_get_await(url)
+        cached = _cache_get(url)
         if cached is not None:
             ctype, data = cached
             return Response(
@@ -242,8 +220,7 @@ def register_media_routes(app: Router) -> None:
                 description=data,
             )
 
-        # Fetch + Pillow re-encode are blocking — keep them off the event loop.
-        status, ctype, data = await asyncio.to_thread(_fetch_and_optimize, url)
+        status, ctype, data = _fetch_and_optimize(url)
         if status == 502:
             return Response(
                 status_code=200,

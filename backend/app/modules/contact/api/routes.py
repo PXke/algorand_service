@@ -8,7 +8,6 @@ outbound e-mail anywhere in the stack — messages are read from the admin UI.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import suppress
 from functools import lru_cache
@@ -74,7 +73,7 @@ def register_contact_routes(app: Router) -> None:
     """Wire the public contact-submit and admin contact-inbox routes onto app."""
 
     @app.post("/api/v1/contact")
-    async def contact_submit(request: Request) -> Response | dict:
+    def contact_submit(request: Request) -> Response | dict:
         try:
             payload = serialization.decode(request.body, ContactMessageRequest)
         except serialization.DecodeError as exc:
@@ -84,13 +83,12 @@ def register_contact_routes(app: Router) -> None:
         if payload.website.strip():
             return {"ok": True}
 
-        if await asyncio.to_thread(_rate_limited, _client_ip(request)):
+        if _rate_limited(_client_ip(request)):
             return json_error_response(
                 429, "rate_limited", "Too many messages — please try again later"
             )
 
-        await asyncio.to_thread(
-            insert_message,
+        insert_message(
             name=payload.name.strip(),
             email=payload.email.strip(),
             message=payload.message.strip(),
@@ -98,9 +96,9 @@ def register_contact_routes(app: Router) -> None:
         return {"ok": True}
 
     @app.get("/api/v1/admin/contact-messages")
-    async def admin_contact_messages(request: Request) -> Response | dict:
+    def admin_contact_messages(request: Request) -> Response | dict:
         denied = require_admin_wallet(request)
         if denied is not None:
             return denied
-        items = await asyncio.to_thread(list_recent)
+        items = list_recent()
         return {"items": serialization.to_builtins(items)}

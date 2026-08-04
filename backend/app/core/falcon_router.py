@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 import re
@@ -73,7 +72,7 @@ class _FalconResource:
         )
         out = handler(request)
         if inspect.isawaitable(out):
-            out = asyncio.run(out)
+            raise TypeError("async handlers are not supported under Falcon")
         _apply_result(resp, out)
 
     on_get = _handle

@@ -9,10 +9,9 @@ Static assets keep being served from disk by nginx.
 from __future__ import annotations
 
 import html
-import inspect
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from uuid import UUID
 
 from app.core import serialization
@@ -200,21 +199,13 @@ def _response_for_head(response: Response) -> Response:
 def _mirror_head(
     app: Router,
     path: str,
-    get_handler: Callable[[Request], Response | Awaitable[Response]],
+    get_handler: Callable[[Request], Response],
 ) -> None:
     """Register HEAD on `path` with the same status/headers as GET, no body."""
 
     @app.head(path)
-    async def _head(request: Request) -> Response:
-        # The GET handlers are plain `def` (Robyn runs those in a worker thread,
-        # which is what keeps their blocking queries off the event loop). Accept
-        # either shape so this keeps working whichever way a handler is declared
-        # -- awaiting a plain Response would raise, and nothing in the test suite
-        # calls handlers directly, so that break would only show up in prod.
-        result = get_handler(request)
-        if inspect.isawaitable(result):
-            result = await result
-        return _response_for_head(result)
+    def _head(request: Request) -> Response:
+        return _response_for_head(get_handler(request))
 
 
 news = NewsService()
@@ -357,9 +348,8 @@ def _article_document(request: Request, lang: str | None) -> Response:
     )
 
 
-async def og_article_card(request: Request) -> Response:
+def og_article_card(request: Request) -> Response:
     """Generated share-card PNG (accent slug, kicker, serif headline — see seo/share_card.py) for an article's title/primary tag. Always generates regardless of whether the article has a real photo; the DECISION to use this vs. a real og:image lives in render.py, which is the only caller that should ever link here."""
-    import asyncio
     import hashlib
 
     from app.core.cache import cached_bytes
@@ -389,7 +379,7 @@ async def og_article_card(request: Request) -> Response:
 
         return render_share_card(title=detail.title, kicker=kicker)
 
-    data = await asyncio.to_thread(cached_bytes, cache_key, 2_592_000, compute)
+    data = cached_bytes(cache_key, 2_592_000, compute)
     return Response(
         status_code=200,
         headers={"Content-Type": "image/png", "Cache-Control": "public, max-age=86400"},
