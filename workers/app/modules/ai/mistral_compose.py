@@ -1830,8 +1830,21 @@ def _run_research_floor(
     research_handlers: dict,
     trace: list,
     debug: dict,
+    *,
+    is_special_edition: bool = False,
 ) -> None:
-    """Research FLOOR: if the cold-research pass stopped too early (the exact failure where it reads an existing profile and quits), send it back to dig deeper — bounded to RESEARCH_FLOOR_MAX_PASSES extra passes."""
+    """Research FLOOR: if the cold-research pass stopped too early (the exact failure where it reads an existing profile and quits), send it back to dig deeper — bounded to RESEARCH_FLOOR_MAX_PASSES extra passes.
+
+    ``is_special_edition`` quadruples the distinct-source target, same 4x
+    convention as research_max_rounds. Root-caused 2026-08-04: a special
+    edition's Stage-1 research loop has no floor of its own (require_tool is
+    None for research, so the instant the model stops calling tools the loop
+    ends -- the 4x ROUND ceiling is irrelevant if the model never approaches
+    it). The one existing safety net used the ordinary 6-source bar, which a
+    routine multi-topic sweep clears in round 1 without ever approaching the
+    depth a special edition is meant to have -- a real session touched 12+
+    domains and stopped at round 4 of a possible 96, floor never engaged.
+    """
     from app.core.config import (
         MISTRAL_TEMP_RESEARCH,
         RESEARCH_FLOOR_ENABLED,
@@ -1841,11 +1854,12 @@ def _run_research_floor(
 
     if not RESEARCH_FLOOR_ENABLED:
         return
+    min_calls = RESEARCH_MIN_TOOL_CALLS * 4 if is_special_edition else RESEARCH_MIN_TOOL_CALLS
     for _ in range(max(0, RESEARCH_FLOOR_MAX_PASSES)):
         have = _distinct_research_calls(trace)
-        if have >= RESEARCH_MIN_TOOL_CALLS:
+        if have >= min_calls:
             break
-        nudge = _research_floor_nudge(have, RESEARCH_MIN_TOOL_CALLS, _format_research_digest(trace))
+        nudge = _research_floor_nudge(have, min_calls, _format_research_digest(trace))
         research_mistral.chat_with_tools(
             [
                 {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
@@ -1932,6 +1946,7 @@ def _run_two_stage_compose(
     debug: dict,
     checkpoint: Callable[[str], None],
     max_rounds: int | None = None,
+    is_special_edition: bool = False,
 ) -> dict:
     """Two-stage compose: cold research (tools, low temp) on the Small research tier, a floor + gap-fill pass if it under-researched, a structured digest handoff, then a warm no-tools generation on the writer tier, and finally deterministic grade/revise."""
     from app.core.config import MISTRAL_MODEL_RESEARCH, MISTRAL_TEMP_RESEARCH, MISTRAL_TEMP_WRITE
@@ -1967,7 +1982,14 @@ def _run_two_stage_compose(
         finalize_on_exhaustion=False,
     )
     _run_research_floor(
-        research_mistral, system, stage1_user, research_schemas, research_handlers, trace, debug
+        research_mistral,
+        system,
+        stage1_user,
+        research_schemas,
+        research_handlers,
+        trace,
+        debug,
+        is_special_edition=is_special_edition,
     )
     # Stage 1b — synthesize a structured Research Digest handoff so Stage 2
     # grounds on high-signal facts, not raw tool JSON.
@@ -2251,6 +2273,7 @@ def _compose_via_writer_tools_locked(
                     debug=debug,
                     checkpoint=_checkpoint,
                     max_rounds=research_max_rounds,
+                    is_special_edition=is_special_edition,
                 )
             else:
                 # Legacy single agentic loop: tools + final article in one pass.
