@@ -799,9 +799,9 @@ def get_mistral_client(*, model: str | None = None) -> MistralClient:
     return MistralClient(model=model or MISTRAL_MODEL_WRITER)
 
 
-def get_mistral_research_client() -> MistralClient:
-    """Build a Mistral client pinned to the research-tier model."""
-    return MistralClient(model=MISTRAL_MODEL_RESEARCH)
+def get_mistral_research_client(*, timeout: float | None = None) -> MistralClient:
+    """Build a Mistral client pinned to the research-tier model, optionally with a non-default per-request timeout (special editions use a longer one -- see MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER)."""
+    return MistralClient(model=MISTRAL_MODEL_RESEARCH, timeout=timeout)
 
 
 def get_mistral_digest_client() -> MistralClient:

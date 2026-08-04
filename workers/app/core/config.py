@@ -265,6 +265,20 @@ MISTRAL_TOOL_RESULT_MAX_CHARS = env_int("MISTRAL_TOOL_RESULT_MAX_CHARS", 24000)
 # so token-estimate error never tips a request over the edge.
 MISTRAL_CONTEXT_SAFETY_TOKENS = env_int("MISTRAL_CONTEXT_SAFETY_TOKENS", 4000)
 MISTRAL_TIMEOUT_SECONDS = env_int("MISTRAL_TIMEOUT_SECONDS", 120)
+# Special editions' research client resends the full accumulated tool-call
+# trace every chat_with_tools round; root-caused 2026-08-04 (Humanitarian
+# Network recompose) at round 16 / 49 tool calls, a single round's request
+# exceeded the plain 120s timeout on 5 straight attempts and the whole
+# 21-minute compose was lost. Same *4-style scaling convention as the other
+# special-edition knobs (RESEARCH_MIN_TOOL_CALLS, RESEARCH_FLOOR_MAX_PASSES,
+# MISTRAL_MAX_TOOL_ROUNDS) but deliberately smaller (2x, not 4x): the
+# compose_lock is a GLOBAL mutex, so a special edition stuck retrying a truly
+# dead API would block every other compose on the platform for the full
+# worst-case retry window -- 2x balances "tolerate a slow big-context round"
+# against "don't let one stuck special edition wedge the whole pipeline."
+MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER = env_int(
+    "MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER", 2
+)
 # REQUIRED for article generation — there is no template fallback (owner
 # decision 2026-07-14: a lesser, robotic article is worse than no article).
 # Nothing gets composed until this is True with a valid MISTRAL_API_KEY.

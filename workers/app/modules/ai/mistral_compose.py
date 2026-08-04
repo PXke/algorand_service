@@ -2555,6 +2555,8 @@ def _compose_via_writer_tools_locked(
                 MISTRAL_MAX_TOOL_ROUNDS,
                 MISTRAL_MODEL_RESEARCH,
                 MISTRAL_MODEL_WRITER,
+                MISTRAL_TIMEOUT_SECONDS,
+                MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER,
                 WRITER_TWO_STAGE,
             )
             from app.modules.ai.writer_tools import all_tools
@@ -2562,8 +2564,17 @@ def _compose_via_writer_tools_locked(
             research_max_rounds = (
                 MISTRAL_MAX_TOOL_ROUNDS * 4 if is_special_edition else None
             )
+            # A special edition's research chat_with_tools loop resends the
+            # whole accumulated trace every round; by round 16+ that prompt
+            # is large enough that the plain per-attempt timeout isn't
+            # always enough (root-caused 2026-08-04 -- see config.py).
+            research_timeout = (
+                MISTRAL_TIMEOUT_SECONDS * MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER
+                if is_special_edition
+                else None
+            )
 
-            research_mistral = get_mistral_research_client()
+            research_mistral = get_mistral_research_client(timeout=research_timeout)
             tool_context = {
                 "service_id": source_url,
                 "source_url": source_url,

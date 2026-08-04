@@ -252,6 +252,67 @@ def test_model_tier_split_large_writes_small_does_mechanics() -> None:
     assert get_mistral_digest_client()._model == MISTRAL_MODEL_DIGEST
 
 
+def test_special_edition_scales_the_research_client_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-caused 2026-08-04 (Humanitarian Network recompose): a special edition's research chat_with_tools loop resends the whole accumulated trace every round, and by round 16 / 49 tool calls a single round exceeded the plain MISTRAL_TIMEOUT_SECONDS on 5 straight attempts, losing a 21-minute compose. is_special_edition=True must build the research client with MISTRAL_TIMEOUT_SECONDS * MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER; a standard compose keeps the client's own default (timeout=None passed through)."""
+    monkeypatch.setattr("app.core.config.MISTRAL_TIMEOUT_SECONDS", 120, raising=False)
+    monkeypatch.setattr(
+        "app.core.config.MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER", 2, raising=False
+    )
+    monkeypatch.setattr("app.core.config.RESEARCH_FLOOR_ENABLED", False, raising=False)
+    monkeypatch.setattr("app.core.config.WRITER_REVIEW_ENABLED", False, raising=False)
+    captured_timeouts: list[float | None] = []
+
+    def _fake_get_research_client(*, timeout: float | None = None) -> "_FakeClient":
+        captured_timeouts.append(timeout)
+        return _FakeClient("research", "mistral-small-latest")
+
+    class _FakeClient:
+        def __init__(self, tier: str, model: str) -> None:
+            self._tier = tier
+            self._model = model
+
+        def chat_with_tools(self, *_a: object, **_kw: object) -> str:
+            return ""
+
+        def chat_json_object(self, *_a: object, **_kw: object) -> dict:
+            return {"title": "t", "summary": "s", "body": "b"}
+
+        def usage_totals(self) -> dict[str, int]:
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    writer = _FakeClient("writer", "mistral-medium-latest")
+
+    monkeypatch.setattr(mc, "get_mistral_research_client", _fake_get_research_client)
+    monkeypatch.setattr(mc, "_format_research_digest", lambda _t: "")
+    monkeypatch.setattr(
+        "app.modules.ai.writer_tools.all_tools",
+        lambda **_kw: ([], {}),
+    )
+    monkeypatch.setattr(
+        "app.modules.ai.tool_insights_store.new_session_ref",
+        lambda: ("sid", 0.0),
+    )
+    monkeypatch.setattr(
+        "app.modules.ai.tool_insights_store.record_compose_session",
+        lambda **_kw: None,
+    )
+
+    mc._compose_via_writer_tools(
+        system="sys", user="user prompt", source_url="https://example.com/", mistral=writer
+    )
+    mc._compose_via_writer_tools(
+        system="sys",
+        user="user prompt",
+        source_url="https://example.com/2",
+        mistral=writer,
+        is_special_edition=True,
+    )
+
+    assert captured_timeouts == [None, 240.0]
+
+
 def test_two_stage_compose_routes_research_to_small_tier(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stage-1 tool loop + digest synthesis use the research client; generation stays on the writer (Large) client."""
     calls: list[tuple[str, str]] = []
@@ -276,7 +337,7 @@ def test_two_stage_compose_routes_research_to_small_tier(monkeypatch: pytest.Mon
     writer = _FakeClient("writer", "mistral-medium-latest")
     research = _FakeClient("research", "mistral-small-latest")
 
-    monkeypatch.setattr(mc, "get_mistral_research_client", lambda: research)
+    monkeypatch.setattr(mc, "get_mistral_research_client", lambda **_kw: research)
     monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: research)
     monkeypatch.setattr("app.core.config.WRITER_TOOLS_ENABLED", True, raising=False)
     monkeypatch.setattr("app.core.config.WRITER_TWO_STAGE", True, raising=False)
@@ -342,7 +403,7 @@ def test_digest_gap_triggers_one_bounded_research_pass(monkeypatch: pytest.Monke
     writer = _FakeClient("writer", "mistral-medium-latest")
     research = _FakeClient("research", "mistral-small-latest")
 
-    monkeypatch.setattr(mc, "get_mistral_research_client", lambda: research)
+    monkeypatch.setattr(mc, "get_mistral_research_client", lambda **_kw: research)
     monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: research)
     monkeypatch.setattr("app.core.config.WRITER_TOOLS_ENABLED", True, raising=False)
     monkeypatch.setattr("app.core.config.WRITER_TWO_STAGE", True, raising=False)
@@ -405,7 +466,7 @@ def test_digest_with_no_gaps_skips_extra_research_pass(monkeypatch: pytest.Monke
     writer = _FakeClient("writer")
     research = _FakeClient("research")
 
-    monkeypatch.setattr(mc, "get_mistral_research_client", lambda: research)
+    monkeypatch.setattr(mc, "get_mistral_research_client", lambda **_kw: research)
     monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: research)
     monkeypatch.setattr("app.core.config.WRITER_TOOLS_ENABLED", True, raising=False)
     monkeypatch.setattr("app.core.config.WRITER_TWO_STAGE", True, raising=False)
