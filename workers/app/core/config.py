@@ -522,6 +522,17 @@ UNSOURCED_SPECIFICS_GATE_ENFORCE = env_bool("UNSOURCED_SPECIFICS_GATE_ENFORCE", 
 # passed, presented as still open. See stale_deadline_gate.py — a revision
 # issue, not a hold, since the fix is a tense rewrite the writer can do itself.
 STALE_DEADLINE_GATE_ENABLED = env_bool("STALE_DEADLINE_GATE_ENABLED", True)
+# Root-caused 2026-08-04 (vestige.fi): build_text_diff's 200-line cap silently
+# dropped 1,573 of 1,773 real diff lines (89%) before the writer ever saw
+# them -- two new asset-manager pages, mostly repetitive label/value
+# boilerplate, but the writer's explicit "this is the story" assignment was
+# built from under 11% of the real change. Raised 4x; the honest
+# "(N more lines omitted)" marker (2026-07-13/14 fix) stays either way.
+# DIFF_PROMPT_MAX_CHARS must stay generous enough that the prompt-side clip
+# doesn't silently re-truncate a diff this much bigger and swallow that same
+# marker -- the original stale-hunk-header bug in a new shape.
+DIFF_MAX_LINES = env_int("DIFF_MAX_LINES", 800)
+DIFF_PROMPT_MAX_CHARS = env_int("DIFF_PROMPT_MAX_CHARS", 16_000)
 # suggest_glossary_term is only callable during Stage 1 (research), before the
 # article's own prose exists, so it was never actually usable for its stated
 # purpose -- confirmed 2026-08-03: 0 of 62 real sessions ever called it, and

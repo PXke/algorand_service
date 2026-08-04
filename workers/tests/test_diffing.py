@@ -31,3 +31,15 @@ def test_build_text_diff_no_marker_when_not_truncated() -> None:
     """Omits the truncation marker when the diff fits within max_lines."""
     diff = build_text_diff("old line", "new line", max_lines=200)
     assert "omitted" not in diff
+
+
+def test_default_max_lines_matches_config() -> None:
+    """The default cap comes from DIFF_MAX_LINES, not a hardcoded literal -- root-caused 2026-08-04 (vestige.fi): a 200-line default silently dropped 89% of a real 1,773-line diff before the writer ever saw it."""
+    from app.core.config import DIFF_MAX_LINES
+
+    previous = "line\n" * 5
+    current = "\n".join(f"new line {i}" for i in range(DIFF_MAX_LINES + 50))
+    diff = build_text_diff(previous, current)
+    lines = diff.splitlines()
+    assert len(lines) == DIFF_MAX_LINES + 1  # capped content + the marker
+    assert lines[-1].startswith("... (")

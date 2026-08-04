@@ -1735,9 +1735,11 @@ def compose_scrape_article_mistral(
     today = _today_utc()
     source_domain = (urlparse(source_url).netloc or "").lower()
     links_block = _source_links_block(source_links)
+    from app.core.config import DIFF_PROMPT_MAX_CHARS
+
     diff_block = ""
     if diff:
-        diff_block = f"\n\nText diff (unified):\n```\n{_clip(diff, 4000)}\n```"
+        diff_block = f"\n\nText diff (unified):\n```\n{_clip(diff, DIFF_PROMPT_MAX_CHARS)}\n```"
     elif not is_first_snapshot:
         diff_block = "\n\n(Content hash changed but no textual diff was produced.)"
     prior_block = f"\n\n{prior_coverage_block}" if prior_coverage_block else ""
@@ -1777,7 +1779,7 @@ On-chain context (background only): round {round_num}, tx {txid}
 
 WHAT CHANGED since we last looked (this is the story — unified diff):
 ```
-{_clip(diff, 6000)}
+{_clip(diff, DIFF_PROMPT_MAX_CHARS)}
 ```
 {links_block}
 {prior_block}
