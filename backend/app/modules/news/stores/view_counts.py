@@ -33,10 +33,15 @@ def record_view(article_id: str) -> None:
     if aid is None:
         return
     try:
-        from app.core.cassandra import get_cassandra_session
+        from app.core.cassandra import fire_and_forget
         from app.core.statements import ViewCountStmts
 
-        get_cassandra_session().execute(ViewCountStmts.BUMP, (aid,))
+        # Best-effort counter: don't block the response on the round-trip.
+        fire_and_forget(
+            ViewCountStmts.BUMP,
+            (aid,),
+            on_error=f"failed to bump view count for article {article_id}",
+        )
     except Exception:
         logger.warning("failed to bump view count for article %s", article_id, exc_info=True)
 

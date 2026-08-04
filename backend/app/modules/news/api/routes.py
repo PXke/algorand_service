@@ -103,17 +103,7 @@ def article_detail(request: Request) -> Response:
     article_id = news_service.resolve_slug(raw) or raw
 
     lang = query_param(request.query_params.get("lang", "")) or None
-    detail = news_service.get_article(article_id, lang=lang)
-    if detail is None:
-        # 410 for a deliberately deleted article, 404 for one that never
-        # existed — same split the HTML document route makes. The SPA needs
-        # it to tell "removed" (render a tombstone page, and let crawlers see
-        # the URL is permanently gone) from a plain bad id.
-        from app.modules.news.stores.tombstones import is_article_tombstoned
 
-        if is_article_tombstoned(article_id):
-            return json_error_response(410, "gone", "Article removed")
-        return json_error_response(404, "not_found", "Article not found")
     # Count the read (best-effort). detail.views is the count before this
     # hit. Crawlers don't count: Googlebot's renderer boots the app and
     # fetches this JSON, which used to inflate "reads" — reuse the same UA
@@ -126,20 +116,37 @@ def article_detail(request: Request) -> Response:
         is_repeated_ua,
     )
 
-    user_agent = request.headers.get("user-agent") or request.headers.get("User-Agent") or ""
-    client_ip = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
-    if (
-        not is_bot(user_agent)
-        and not is_malformed_ua(user_agent)
-        and not is_repeated_ua(user_agent)
-        and not tracking_opted_out_from_headers(request.headers)
-        # Second hand: this same (article, ip, ua) must have requested the
-        # SSR document recently. Catches a scraper hitting this JSON
-        # endpoint directly, which the UA-identity checks above can't (found
-        # 2026-08-02: a UA/IP-rotating scraper walking ~88-90% of the
-        # archive, none of it repeating enough to trip is_repeated_ua).
-        and article_document_recently_served(article_id, client_ip, user_agent)
-    ):
+    should_count = False
+
+    def _prep_view_gate() -> None:
+        nonlocal should_count
+        user_agent = request.headers.get("user-agent") or request.headers.get("User-Agent") or ""
+        client_ip = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
+        should_count = (
+            not is_bot(user_agent)
+            and not is_malformed_ua(user_agent)
+            and not is_repeated_ua(user_agent)
+            and not tracking_opted_out_from_headers(request.headers)
+            # Second hand: this same (article, ip, ua) must have requested the
+            # SSR document recently. Catches a scraper hitting this JSON
+            # endpoint directly, which the UA-identity checks above can't (found
+            # 2026-08-02: a UA/IP-rotating scraper walking ~88-90% of the
+            # archive, none of it repeating enough to trip is_repeated_ua).
+            and article_document_recently_served(article_id, client_ip, user_agent)
+        )
+
+    detail = news_service.get_article(article_id, lang=lang, overlap=_prep_view_gate)
+    if detail is None:
+        # 410 for a deliberately deleted article, 404 for one that never
+        # existed — same split the HTML document route makes. The SPA needs
+        # it to tell "removed" (render a tombstone page, and let crawlers see
+        # the URL is permanently gone) from a plain bad id.
+        from app.modules.news.stores.tombstones import is_article_tombstoned
+
+        if is_article_tombstoned(article_id):
+            return json_error_response(410, "gone", "Article removed")
+        return json_error_response(404, "not_found", "Article not found")
+    if should_count:
         record_view(article_id)
     return serialization.to_builtins(detail)
 

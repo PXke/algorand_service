@@ -53,3 +53,11 @@ class InMemoryArticleStore:
     def get(self, article_id: str) -> StoredArticle | None:
         """Fetch one article by id, or None if it does not exist."""
         return self._by_id.get(article_id)
+
+    def get_many(self, article_ids: list[str]) -> dict[str, StoredArticle]:
+        """Fetch many articles by id; missing ids are omitted."""
+        return {
+            aid: article
+            for aid in article_ids
+            if (article := self._by_id.get(aid)) is not None
+        }

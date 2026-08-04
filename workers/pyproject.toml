@@ -42,6 +42,11 @@ dev = [
 # IPEX per the gatekeeper's own code.
 ml = [
   "torch>=2.2.0",
+  # Latest transformers still pins tokenizers<=0.23.0. On free-threaded
+  # CPython (python3.15t) install tokenizers via
+  # deploy/scripts/build_tokenizers_ft.sh (no-abi3 cpXXt wheel stamped
+  # 0.23.0) before or after this extra — plain pip tokenizers wheels fail
+  # to import (invalid PyModuleDef).
   "transformers>=4.48.0",
   "sentencepiece>=0.2.0",
   # SeamlessM4T's tokenizer.model is a genuine SentencePiece binary file.

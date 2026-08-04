@@ -49,3 +49,7 @@ class ArticleStore(Protocol):
     def get(self, article_id: str) -> StoredArticle | None:
         """Fetch one article by id, or None if it does not exist."""
         ...
+
+    def get_many(self, article_ids: list[str]) -> dict[str, StoredArticle]:
+        """Fetch many articles by id; missing ids are omitted."""
+        ...

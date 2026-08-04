@@ -21,6 +21,10 @@ class UpvoteStore(Protocol):
         """Return the current upvote count for a suggestion."""
         ...
 
+    def count_many(self, suggestion_ids: list[str]) -> dict[str, int]:
+        """Return upvote counts for many suggestions (prefer a fan-out)."""
+        ...
+
 
 _factory: StoreFactory[UpvoteStore] = StoreFactory(
     backend_name=lambda: settings.upvote_store,

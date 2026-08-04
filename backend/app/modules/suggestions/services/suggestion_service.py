@@ -85,9 +85,13 @@ class SuggestionService:
 
     def list_open_suggestions(self) -> list[SuggestionResponse]:
         """List open suggestions with their current upvote counts."""
-        return [self._to_response(item) for item in self._store.list_open()]
+        items = self._store.list_open()
+        counts = self._upvotes.count_many([item.suggestion_id for item in items])
+        return [self._to_response(item, upvote_count=counts.get(item.suggestion_id, 0)) for item in items]
 
-    def _to_response(self, item: StoredSuggestion) -> SuggestionResponse:
+    def _to_response(
+        self, item: StoredSuggestion, *, upvote_count: int | None = None
+    ) -> SuggestionResponse:
         return SuggestionResponse(
             suggestion_id=item.suggestion_id,
             wallet_address=item.wallet_address,
@@ -96,5 +100,9 @@ class SuggestionService:
             submission_txid=item.submission_txid,
             status=item.status,
             created_at_epoch=item.created_at_epoch,
-            upvote_count=self._upvotes.count(item.suggestion_id),
+            upvote_count=(
+                upvote_count
+                if upvote_count is not None
+                else self._upvotes.count(item.suggestion_id)
+            ),
         )

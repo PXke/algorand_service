@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from app.core.cache import cached_json
 from app.core.config import settings
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
@@ -189,12 +191,94 @@ class NewsService:
         """Article id for a URL slug, or None. Single-partition read on the reverse index."""
         return self._store.id_for_slug(slug)
 
-    def get_article(self, article_id: str, lang: str | None = None) -> ArticleDetail | None:
-        """Fetch one article's full detail, translated if lang is given and available."""
-        article = self._store.get(article_id)
+    def get_article(
+        self,
+        article_id: str,
+        lang: str | None = None,
+        *,
+        overlap: Callable[[], object] | None = None,
+    ) -> ArticleDetail | None:
+        """Fetch one article's full detail, translated if lang is given and available.
+
+        ``overlap`` runs while the Cassandra article fetch is in flight (no-op for
+        the in-memory store). View counts are fetched in parallel with the article
+        body when Cassandra is in use.
+        """
+        from uuid import UUID
+
+        view_future = None
+        try:
+            if settings.news_store.strip().lower() == "cassandra":
+                from app.core.cassandra import execute_async
+                from app.core.statements import ViewCountStmts
+
+                view_future = execute_async(ViewCountStmts.GET, (UUID(article_id),))
+        except Exception:
+            view_future = None
+
+        def _overlap() -> None:
+            if overlap is not None:
+                overlap()
+
+        get = self._store.get
+        try:
+            article = get(article_id, overlap=_overlap)  # type: ignore[call-arg]
+        except TypeError:
+            _overlap()
+            article = get(article_id)
         if article is None:
+            if view_future is not None:
+                try:
+                    view_future.result()
+                except Exception:
+                    pass
             return None
 
+        views = 0
+        if view_future is not None:
+            try:
+                row = view_future.result().one()
+                if row is not None and row.views is not None:
+                    views = int(row.views)
+            except Exception:
+                views = 0
+        else:
+            from app.modules.news.stores.view_counts import get_views
+
+            views = get_views(article.article_id)
+
+        return self._to_detail(article, lang=lang, views=views)
+
+    def get_articles(
+        self, article_ids: list[str], lang: str | None = None
+    ) -> dict[str, ArticleDetail]:
+        """Fetch many article details concurrently (RSS / bulk enrichment)."""
+        getter = getattr(self._store, "get_many", None)
+        if getter is None:
+            stored = {
+                aid: article
+                for aid in article_ids
+                if (article := self._store.get(aid)) is not None
+            }
+        else:
+            stored = getter(article_ids)
+
+        views: dict[str, int] = {}
+        try:
+            from app.modules.news.stores.view_counts import get_views_bulk
+
+            views = get_views_bulk(list(stored.keys()))
+        except Exception:
+            views = {}
+
+        return {
+            aid: self._to_detail(article, lang=lang, views=views.get(aid, 0))
+            for aid, article in stored.items()
+        }
+
+    def _to_detail(
+        self, article: StoredArticle, *, lang: str | None = None, views: int = 0
+    ) -> ArticleDetail:
         title = article.title
         summary = article.summary
         body = article.body
@@ -214,8 +298,6 @@ class NewsService:
                 pass
 
         tags = list(article.tags or [])
-        from app.modules.news.stores.view_counts import get_views
-
         return ArticleDetail(
             article_id=article.article_id,
             service_id=article.service_id,
@@ -234,7 +316,7 @@ class NewsService:
                 source_url=article.source_url,
                 tags=tags,
             ),
-            views=get_views(article.article_id),
+            views=views,
             image_url=article.image_url,
             slug=getattr(article, "slug", None),
             updated_at_epoch=getattr(article, "updated_at_epoch", None),

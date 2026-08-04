@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from app.core.feed_bucket import cursor_from_ms, feed_month, months_back, to_ms
@@ -16,6 +18,46 @@ def _epoch(dt: datetime | None) -> int:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return int(dt.timestamp())
+
+
+def _feed_row_to_stored(row: Any) -> StoredArticle:
+    pub = row.published_at
+    return StoredArticle(
+        article_id=str(row.article_id),
+        service_id=row.service_id,
+        title=row.title,
+        summary=row.summary,
+        body="",
+        published_at_epoch=_epoch(pub),
+        tags=list(row.tags or []),
+        image_url=getattr(row, "image_url", None),
+        source_url=getattr(row, "source_url", None),
+        slug=getattr(row, "slug", None),
+        translations=dict(row.translations) if row.translations else None,
+        updated_at_epoch=(_epoch(getattr(row, "updated_at", None)) or None),
+        first_published_at_epoch=(_epoch(getattr(row, "first_published_at", None)) or None),
+    )
+
+
+def _full_row_to_stored(row: Any) -> StoredArticle:
+    published_at = row.published_at
+    epoch = _epoch(published_at)
+    return StoredArticle(
+        article_id=str(row.article_id),
+        service_id=row.service_id,
+        title=row.title,
+        summary=row.summary,
+        body=row.body,
+        published_at_epoch=epoch,
+        trigger_txid=row.trigger_txid,
+        trigger_round=int(row.trigger_round) if row.trigger_round is not None else None,
+        source_url=row.source_url,
+        tags=list(row.tags or []),
+        image_url=getattr(row, "image_url", None),
+        slug=getattr(row, "slug", None),
+        translations=dict(row.translations) if row.translations else None,
+        updated_at_epoch=_epoch(getattr(row, "updated_at", None)) or None,
+    )
 
 
 class CassandraArticleStore:
@@ -93,43 +135,39 @@ class CassandraArticleStore:
         cursor_epoch_ms: int | None = None,
         max_months: int = 18,
     ) -> tuple[list[StoredArticle], int | None]:
-        """Keyset-paginated feed across month partitions. Returns (items, next_cursor_ms); next_cursor is None when no more pages."""
-        from app.core.cassandra import get_cassandra_session
+        """Keyset-paginated feed across month partitions. Returns (items, next_cursor_ms); next_cursor is None when no more pages.
+
+        Prefetches the next month partition while mapping the current page so
+        Cassandra round-trips overlap with CPU work.
+        """
+        from app.core.cassandra import execute_async
         from app.core.statements import NewsStmts
 
-        session = get_cassandra_session()
         cursor_dt = cursor_from_ms(cursor_epoch_ms)
+        months = list(months_back(cursor_dt, max_months))
         items: list[StoredArticle] = []
         last_dt = None
-        for bucket in months_back(cursor_dt, max_months):
-            if len(items) >= limit:
-                break
-            rows = session.execute(
-                NewsStmts.FEED_PAGE,
-                (bucket, cursor_dt, limit - len(items)),
-            )
-            for row in rows:
-                pub = row.published_at
-                last_dt = pub
-                items.append(
-                    StoredArticle(
-                        article_id=str(row.article_id),
-                        service_id=row.service_id,
-                        title=row.title,
-                        summary=row.summary,
-                        body="",
-                        published_at_epoch=_epoch(pub),
-                        tags=list(row.tags or []),
-                        image_url=getattr(row, "image_url", None),
-                        source_url=getattr(row, "source_url", None),
-                        slug=getattr(row, "slug", None),
-                        translations=dict(row.translations) if row.translations else None,
-                        updated_at_epoch=(_epoch(getattr(row, "updated_at", None)) or None),
-                        first_published_at_epoch=(
-                            _epoch(getattr(row, "first_published_at", None)) or None
-                        ),
-                    )
+        if not months:
+            return items, None
+
+        fut = execute_async(NewsStmts.FEED_PAGE, (months[0], cursor_dt, limit))
+        for index in range(len(months)):
+            rows = list(fut.result())
+            remaining_after = limit - len(items) - len(rows)
+            if remaining_after > 0 and index + 1 < len(months):
+                fut = execute_async(
+                    NewsStmts.FEED_PAGE, (months[index + 1], cursor_dt, remaining_after)
                 )
+            else:
+                fut = None
+            for row in rows:
+                if len(items) >= limit:
+                    break
+                last_dt = row.published_at
+                items.append(_feed_row_to_stored(row))
+            if len(items) >= limit or fut is None:
+                break
+
         next_cursor = to_ms(last_dt) if (len(items) >= limit and last_dt) else None
         return items, next_cursor
 
@@ -144,34 +182,53 @@ class CassandraArticleStore:
         row = get_cassandra_session().execute(NewsStmts.ID_BY_SLUG, (clean,)).one()
         return str(row.article_id) if row and row.article_id else None
 
-    def get(self, article_id: str) -> StoredArticle | None:
-        """Fetch one article's full data by id, or None if it does not exist."""
-        from app.core.cassandra import get_cassandra_session
+    def get(
+        self,
+        article_id: str,
+        *,
+        overlap: Callable[[], Any] | None = None,
+    ) -> StoredArticle | None:
+        """Fetch one article's full data by id, or None if it does not exist.
+
+        ``overlap`` runs after the query is dispatched and before waiting, so
+        callers can do unrelated work (Redis, header checks) in parallel.
+        """
+        from app.core.cassandra import execute_then
         from app.core.statements import NewsStmts
 
-        session = get_cassandra_session()
         try:
             aid = UUID(article_id)
         except ValueError:
             return None
-        row = session.execute(NewsStmts.GET_FULL, (aid,)).one()
+        row = execute_then(NewsStmts.GET_FULL, (aid,), overlap=overlap).one()
         if row is None:
             return None
-        published_at = row.published_at
-        epoch = _epoch(published_at)
-        return StoredArticle(
-            article_id=str(row.article_id),
-            service_id=row.service_id,
-            title=row.title,
-            summary=row.summary,
-            body=row.body,
-            published_at_epoch=epoch,
-            trigger_txid=row.trigger_txid,
-            trigger_round=int(row.trigger_round) if row.trigger_round is not None else None,
-            source_url=row.source_url,
-            tags=list(row.tags or []),
-            image_url=getattr(row, "image_url", None),
-            slug=getattr(row, "slug", None),
-            translations=dict(row.translations) if row.translations else None,
-            updated_at_epoch=_epoch(getattr(row, "updated_at", None)) or None,
-        )
+        return _full_row_to_stored(row)
+
+    def get_many(self, article_ids: list[str]) -> dict[str, StoredArticle]:
+        """Fetch many articles by id concurrently; missing ids are omitted."""
+        from app.core.cassandra import execute_parallel_with_args
+        from app.core.statements import NewsStmts
+
+        pairs: list[tuple[str, UUID]] = []
+        for raw in article_ids:
+            try:
+                pairs.append((raw, UUID(raw)))
+            except ValueError:
+                continue
+        if not pairs:
+            return {}
+        out: dict[str, StoredArticle] = {}
+        for (raw, _), (ok, result) in zip(
+            pairs,
+            execute_parallel_with_args(
+                NewsStmts.GET_FULL, [(aid,) for _, aid in pairs], raise_on_error=False
+            ),
+            strict=True,
+        ):
+            if not ok:
+                continue
+            row = result.one() if hasattr(result, "one") else None
+            if row is not None:
+                out[raw] = _full_row_to_stored(row)
+        return out

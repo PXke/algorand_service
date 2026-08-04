@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Callable, Sequence
 from functools import lru_cache
 from typing import Any
 
 from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import EXEC_PROFILE_DEFAULT, Cluster, ExecutionProfile
+from cassandra.cluster import ResponseFuture
 from cassandra.cluster import Session as CassandraSession
 from cassandra.concurrent import execute_concurrent, execute_concurrent_with_args
 from cassandra.io.libevreactor import LibevConnection
@@ -20,6 +22,8 @@ from cassandra.policies import (
 from cassandra.query import PreparedStatement
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -67,6 +71,54 @@ def get_cassandra_session() -> CassandraSession:
 def prepare_cached(cql: str) -> PreparedStatement:
     """Prepare a statement once and reuse it (the driver caches the server-side plan and enables token-aware routing for it). Use `?` placeholders, not `%s`. Safe to call on hot paths — preparation happens only on the first call per unique CQL string. This is the mechanism behind the statement registry in `app.core.statements`; prefer the named registry entries at call sites."""
     return get_cassandra_session().prepare(cql)
+
+
+def execute_async(
+    statement: PreparedStatement | str,
+    parameters: Sequence | None = None,
+) -> ResponseFuture:
+    """Start a query without waiting; call ``.result()`` when the rows are needed.
+
+    Prefer this over sync ``session.execute`` when useful work can run before the
+    response is required (header parsing, Redis, mapping other rows, etc.).
+    """
+    return get_cassandra_session().execute_async(statement, parameters)
+
+
+def fire_and_forget(
+    statement: PreparedStatement | str,
+    parameters: Sequence | None = None,
+    *,
+    on_error: str = "cassandra fire-and-forget failed",
+) -> None:
+    """Enqueue a write and return immediately (analytics / best-effort counters).
+
+    Errors are logged via the driver's errback; the request path is not blocked
+    and does not see the failure.
+    """
+    future = execute_async(statement, parameters)
+
+    def _log_err(exc: BaseException) -> None:
+        logger.warning("%s: %s", on_error, exc)
+
+    future.add_errback(_log_err)
+
+
+def execute_then(
+    statement: PreparedStatement | str,
+    parameters: Sequence | None = None,
+    *,
+    overlap: Callable[[], Any] | None = None,
+) -> Any:
+    """Start ``statement``, run ``overlap()`` while in flight, then wait for rows.
+
+    ``overlap`` should not depend on the query result. Returns the same ResultSet
+    shape as ``session.execute``.
+    """
+    future = execute_async(statement, parameters)
+    if overlap is not None:
+        overlap()
+    return future.result()
 
 
 def execute_parallel(

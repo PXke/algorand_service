@@ -575,15 +575,16 @@ def rss_feed(request: Request) -> Response:
     items = news.list_feed(limit=50)
     # Full article HTML for the newest items only: readers and AI crawlers
     # get whole pieces, without 50 point-reads on every feed render (the
-    # response is cached 15 min anyway).
+    # response is cached 15 min anyway). Fan-out the body fetches.
     bodies: dict[str, str] = {}
-    for item in items[:_FEED_FULL_CONTENT_LIMIT]:
-        try:
-            detail = news.get_article(item.article_id)
-            if detail is not None and detail.body:
-                bodies[item.article_id] = md_to_html(detail.body)
-        except Exception:  # a missing body never breaks the feed
-            continue
+    ids = [item.article_id for item in items[:_FEED_FULL_CONTENT_LIMIT]]
+    try:
+        details = news.get_articles(ids)
+        for article_id, detail in details.items():
+            if detail.body:
+                bodies[article_id] = md_to_html(detail.body)
+    except Exception:
+        pass
     return _text_response(
         feeds.rss_xml(items, bodies=bodies),
         "application/rss+xml; charset=utf-8",

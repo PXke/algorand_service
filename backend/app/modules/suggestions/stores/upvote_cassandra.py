@@ -30,10 +30,27 @@ class CassandraUpvoteStore:
 
     def count(self, suggestion_id: str) -> int:
         """Return the current upvote count for a suggestion."""
-        from app.core.cassandra import get_cassandra_session
+        return self.count_many([suggestion_id]).get(suggestion_id, 0)
+
+    def count_many(self, suggestion_ids: list[str]) -> dict[str, int]:
+        """Fan-out COUNT queries for many suggestions; results keyed by id."""
+        from app.core.cassandra import execute_parallel_with_args
         from app.core.statements import UpvoteStmts
 
-        session = get_cassandra_session()
-        rows = session.execute(UpvoteStmts.COUNT, (suggestion_id,))
-        row = rows.one()
-        return int(row.count) if row is not None else 0
+        ids = [sid for sid in suggestion_ids if sid]
+        if not ids:
+            return {}
+        out: dict[str, int] = {sid: 0 for sid in ids}
+        for sid, (ok, result) in zip(
+            ids,
+            execute_parallel_with_args(
+                UpvoteStmts.COUNT, [(sid,) for sid in ids], raise_on_error=False
+            ),
+            strict=True,
+        ):
+            if not ok:
+                continue
+            row = result.one() if hasattr(result, "one") else None
+            if row is not None and getattr(row, "count", None) is not None:
+                out[sid] = int(row.count)
+        return out

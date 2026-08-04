@@ -25,3 +25,7 @@ class InMemoryUpvoteStore:
     def count(self, suggestion_id: str) -> int:
         """Return the current upvote count for a suggestion."""
         return self._counts.get(suggestion_id, 0)
+
+    def count_many(self, suggestion_ids: list[str]) -> dict[str, int]:
+        """Return upvote counts for many suggestions."""
+        return {sid: self.count(sid) for sid in suggestion_ids}
