@@ -2146,6 +2146,15 @@ def _apply_post_compose_gates(
     from app.modules.newspaper.unsourced_specifics_gate import flag_unsourced_specifics
 
     payload = flag_unsourced_specifics(payload, trace, extra_texts=[user, research_user or ""])
+    # Stale-deadline backstop (read-only for now): any lapsed-deadline-framed-
+    # as-open sentence the revision loop didn't catch (or that never went
+    # through a revision loop at all, e.g. the article-edit path) is recorded
+    # for visibility (Meld Gold 2026-08-04). See stale_deadline_gate.py.
+    from app.modules.newspaper.stale_deadline_gate import stale_deadline_issues
+
+    stale_deadlines = stale_deadline_issues(str(payload.get("body", "")))
+    if stale_deadlines:
+        payload["_stale_deadlines"] = stale_deadlines
     # Writer-declared breaking news (replaces the deterministic keyword
     # classifier, disabled 2026-07-17): scanned from the trace like the
     # gates above, since mark_breaking_news never mutates the draft —
@@ -2569,13 +2578,54 @@ New reporting to integrate:
 {diff_block}
 {_clip(enrichment_block, 5000) if enrichment_block else ""}"""
 
-    from app.core.config import WRITER_TOOLS_ENABLED
+    from app.core.config import MISTRAL_MODEL_WRITER, WRITER_TOOLS_ENABLED
 
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
     if WRITER_TOOLS_ENABLED:
+        # Root-caused 2026-08-04: this path never recorded to compose_sessions
+        # at all (no trace/debug ever threaded into chat_with_tools) and never
+        # ran the deterministic post-compose gates the create path gets --
+        # invisible to the admin Sessions view/interrogation tooling and
+        # ungated, on every in-place article edit ever, including editorial
+        # briefs (like special editions) refreshing on cadence after their
+        # first compose. Mirrors _compose_via_writer_tools_locked's legacy
+        # single-loop branch: same instrumentation, same gates, one call.
+        import time as _time
+
+        from app.modules.ai.tool_insights_store import new_session_ref
+
+        trace: list = []
+        debug: dict = {}
+        _t0 = _time.monotonic()
+        _sid, _screated = new_session_ref()
+
+        def _usage_so_far() -> dict[str, int]:
+            return mistral.usage_totals()
+
+        def _checkpoint(stage_status: str) -> None:
+            from app.modules.ai.tool_insights_store import record_compose_session
+
+            with contextlib.suppress(Exception):
+                usage = _usage_so_far()
+                record_compose_session(
+                    debug=debug,
+                    trace=trace,
+                    service_id=source_url,
+                    source_url=source_url,
+                    model=MISTRAL_MODEL_WRITER,
+                    status=stage_status,
+                    duration_ms=int((_time.monotonic() - _t0) * 1000),
+                    session_id=_sid,
+                    created_at=_screated,
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                    total_tokens=usage["total_tokens"],
+                )
+
+        _checkpoint("researching")
         try:
             from app.modules.ai.writer_tools import all_tools
             from app.modules.newspaper.compose_lock import compose_lock
@@ -2591,19 +2641,49 @@ New reporting to integrate:
                     [{"role": "system", "content": tool_system}, {"role": "user", "content": user}],
                     tools=tool_schemas,
                     handlers=tool_handlers,
+                    trace=trace,
+                    debug=debug,
                     require_tool="review_draft",
                 )
             import json as _json
 
             payload = _json.loads(raw)
+            payload = _apply_post_compose_gates(
+                payload,
+                trace,
+                user=user,
+                research_user=None,
+                service_id=source_url,
+                glossary_client=None,
+            )
+            raw = _json.dumps(payload)
+            _record_compose_telemetry(
+                source_url,
+                trace,
+                raw,
+                report_errors_model=MISTRAL_MODEL_WRITER,
+                duration_ms=int((_time.monotonic() - _t0) * 1000),
+                session_id=_sid,
+                created_at=_screated,
+                debug=debug,
+                usage_so_far=_usage_so_far,
+            )
             return _parse_article_fields(payload)
+        except MistralCreditError:
+            with contextlib.suppress(Exception):
+                _checkpoint("credit_insufficient")
+            raise
         except MistralError:
             # A real API error (rate limit, etc.) — already retried with backoff
             # inside the client. Don't burn another call on a single-shot retry
             # that will just fail the same way; let the caller fall to template.
+            with contextlib.suppress(Exception):
+                _checkpoint("error")
             raise
         except Exception:
             # Tool/parse failure (the API worked): fall back to single-shot.
+            with contextlib.suppress(Exception):
+                _checkpoint("fallback")
             logger.debug("tool-call compose failed; falling back to single-shot", exc_info=True)
 
     payload = mistral.chat_json_object(messages)
