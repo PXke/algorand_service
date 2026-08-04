@@ -216,6 +216,36 @@ def test_build_stage2_user_omits_tool_trace() -> None:
     assert "fact" in user
 
 
+def test_stage2_special_edition_overrides_the_brief_when_thin_framing() -> None:
+    """Root-caused 2026-08-04: a special-edition recompose came out SHORTER than two prior ordinary-tier versions of the same article -- _NARRATIVE_GUIDANCE's universal 'if material is brief, write a dense, brief article' framing was winning out at the writing stage even after a deep research pass. A special-edition Stage-2 prompt must explicitly override it."""
+    user = mc._build_stage2_user(
+        user="base", digest="## Verified Facts\n- fact", is_special_edition=True
+    )
+    assert "SPECIAL EDITION OVERRIDE" in user
+    assert "ignore the 'write a dense, brief article" in user
+    # The base framing is still present -- it's overridden, not deleted, so
+    # the override's own contrast ("ignore ... above") stays meaningful.
+    assert "If the verified material is brief, write a dense, brief article." in user
+
+
+def test_stage2_non_special_edition_keeps_the_plain_narrative_guidance() -> None:
+    """The ordinary (non-special-edition) path is unaffected -- no override text leaks in."""
+    user = mc._build_stage2_user(user="base", digest="## Verified Facts\n- fact")
+    assert "SPECIAL EDITION OVERRIDE" not in user
+
+
+def test_stage2_special_edition_override_survives_the_no_digest_branch() -> None:
+    """The override also applies on the empty-digest fallback branch, not just the digest-present one."""
+    user = mc._build_stage2_user(user="base", digest="", is_special_edition=True)
+    assert "SPECIAL EDITION OVERRIDE" in user
+
+
+def test_special_edition_instructions_tell_the_model_to_search_wide() -> None:
+    """Root-caused 2026-08-04: an 11-search research pass surfaced only 8 distinct domains -- several calls passed a limit below the tool's own default. Special editions must be told to raise the per-search limit and diversify query topics rather than re-drilling the same one or two stories."""
+    assert "SEARCH WIDE" in mc._SPECIAL_EDITION_DEPTH_INSTRUCTIONS
+    assert "limit up to 12" in mc._SPECIAL_EDITION_DEPTH_INSTRUCTIONS
+
+
 def test_research_digest_synthesis_asks_for_unresolved_gaps() -> None:
     """The digest-synthesis prompt requires an Unresolved Gaps section, with a literal "None" when empty."""
     assert "Unresolved Gaps" in mc._RESEARCH_DIGEST_SYNTHESIS

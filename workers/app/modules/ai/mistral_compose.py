@@ -641,18 +641,38 @@ _STAGE2_GENERATION_GUIDANCE = (
 )
 
 
-def _build_stage2_user(*, user: str, digest: str) -> str:
+_SPECIAL_EDITION_STAGE2_OVERRIDE = (
+    "\n\nSPECIAL EDITION OVERRIDE: ignore the 'write a dense, brief article if "
+    "material is brief' instruction above -- this compose already ran a "
+    "quadrupled research pass specifically so the Digest would be rich. Do "
+    "not default to compactness: develop every distinct finding in the "
+    "Digest with full narrative treatment (context, mechanics, tradeoffs), "
+    "the same depth the special-edition research instructions already asked "
+    "for. Only write briefly if the Digest itself is genuinely thin DESPITE "
+    "the deep research pass -- that means the topic doesn't support more, "
+    "not that compactness is the goal. Root-caused 2026-08-04: a special "
+    "edition recompose came out SHORTER than two prior ordinary-tier "
+    "versions of the same article -- the universal 'brief when thin' "
+    "framing below was winning out over the depth this edition was "
+    "supposed to have, once the model reached the writing stage."
+)
+
+
+def _build_stage2_user(*, user: str, digest: str, is_special_edition: bool = False) -> str:
     """Stage-2 user prompt: digest-only ground truth (no raw tool trace)."""
+    narrative_guidance = _NARRATIVE_GUIDANCE + (
+        _SPECIAL_EDITION_STAGE2_OVERRIDE if is_special_edition else ""
+    )
     if digest.strip():
         return (
             user + "\n\n## Research Digest (PRIMARY AND ONLY ground truth for external facts):\n"
             f"{digest}\n\n"
             "Write the article strictly from this digest plus any source material above. "
             "You cannot call tools or fetch additional pages.\n"
-            + _NARRATIVE_GUIDANCE
+            + narrative_guidance
             + " Write it now."
         )
-    return user + _NARRATIVE_GUIDANCE + " Write it now."
+    return user + narrative_guidance + " Write it now."
 
 
 _RESEARCH_DIGEST_SYNTHESIS = (
@@ -2070,7 +2090,7 @@ def _run_two_stage_compose(
         digest,
     )
     checkpoint("writing")  # research (+ gap-fill) done, now generating
-    gen_user = _build_stage2_user(user=user, digest=digest)
+    gen_user = _build_stage2_user(user=user, digest=digest, is_special_edition=is_special_edition)
     gen_system = system + _STAGE2_GENERATION_GUIDANCE
     payload = mistral.chat_json_object(
         [
@@ -2487,7 +2507,17 @@ that rests on a single self-interested source — that contrast is exactly
 the kind of finding an investigative piece exists to surface. Keep it in,
 even when it complicates a clean narrative or undercuts the more flattering
 half of the story; dropping the less convenient finding is the failure
-mode this depth pass exists to prevent, not an edit for concision."""
+mode this depth pass exists to prevent, not an edit for concision.
+
+SEARCH WIDE, NOT DEEP-ON-THE-SAME-THING: search_web accepts limit up to 12
+(default 6) — pass a high limit (10-12) on your searches instead of the
+default, and spend your searches on DIFFERENT angles and topics (each named
+initiative, partner, criticism, or follow-up event gets its own query)
+rather than re-querying narrower variations of the same one or two stories
+you already found. Root-caused 2026-08-04: a special-edition research pass
+made 11 search_web calls but surfaced only 8 distinct domains total —
+several calls used limit 3-4 (below even the default), and most queries
+kept circling back to the same two sources instead of branching out."""
 
 
 def compose_assignment_article_mistral(
