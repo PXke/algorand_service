@@ -715,6 +715,35 @@ def _resolve_classifier_signals(
     return signals, clf_category, clf_decision, clf_confidence
 
 
+def _suppress_if_dead_project(source_url: str, spike: object) -> None:
+    """When the writer's abort_article call is category=dead_project, suppress the domain for a bounded cooldown instead of leaving it to re-fetch and re-abort at full research cost every cycle.
+
+    Root-caused 2026-08-04 (Kryptonurd): abort_article(dead_project) was a
+    correct, well-grounded call, but nothing downstream of it changed
+    domain_tracking -- the domain stayed approved, so the next scheduled
+    crawl re-composed and re-aborted, forever. Fail-open: a suppression
+    failure must never turn a clean abort resolution into an error.
+    """
+    category = getattr(spike, "category", "")
+    if category != "dead_project":
+        return
+    try:
+        from app.core.config import DEAD_PROJECT_COOLDOWN_DAYS
+        from app.modules.crawler.domain_tracker import (
+            domain_from_url,
+            suppress_dead_project_domain,
+        )
+
+        domain = domain_from_url(source_url or "")
+        if not domain:
+            return
+        suppress_dead_project_domain(
+            domain, days=DEAD_PROJECT_COOLDOWN_DAYS, reason=getattr(spike, "reason", "")
+        )
+    except Exception:
+        logger.warning("dead-project domain suppression failed for %s", source_url, exc_info=True)
+
+
 def _is_first_coverage(row: QueuedPublishRow, publish_kind: PublishKind) -> bool:
     """A CONTENT_UPDATE for a service with no published article would report "what changed" on a service readers have never met (its one-shot discovery row may have expired unpublished) — compose an introduction instead. Checked at compose time, not enqueue, so it adds zero enqueue dynamics (the old prior==0 discovery re-fire caused a queue flood)."""
     if publish_kind != PublishKind.CONTENT_UPDATE:
@@ -780,6 +809,7 @@ def _compose_or_error(
             spike.category,
             spike.reason,
         )
+        _suppress_if_dead_project(row.scrape_url, spike)
         return None, {
             "status": "aborted_by_writer",
             "service_id": row.service_id,
@@ -1837,6 +1867,7 @@ def _recompose_via_writer(
             spike.category,
             spike.reason,
         )
+        _suppress_if_dead_project(url, spike)
         return None, {
             "status": "aborted_by_writer",
             "reason": f"{spike.category}: {spike.reason}",

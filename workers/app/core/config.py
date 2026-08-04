@@ -745,6 +745,11 @@ FRONTIER_PREVIEW_MAX_PER_PAGE = env_int("FRONTIER_PREVIEW_MAX_PER_PAGE", 8)
 # Auto-flagged (non-admin) irrelevant domains are re-checked after this many days,
 # in case they became relevant. Admin rejects are permanent regardless.
 FRONTIER_RECRAWL_DAYS_IRRELEVANT = env_int("FRONTIER_RECRAWL_DAYS_IRRELEVANT", 7)
+# A writer's abort_article(dead_project) call is a real signal but not a
+# certain human judgment (unlike an admin's explicit reject, which is
+# permanent) -- suppress the domain for this many days, then let the
+# frontier check it again in case the project came back. ~3 months.
+DEAD_PROJECT_COOLDOWN_DAYS = env_int("DEAD_PROJECT_COOLDOWN_DAYS", 90)
 
 # Curated ecosystem directories (comma-separated URLs). Each listed domain is
 # approved + monitored and gets a relevance anchor in score_page — the fix for

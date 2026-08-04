@@ -444,6 +444,11 @@ def should_recrawl_domain(domain: str) -> bool:
     - Relevant → allow.
     - Admin-rejected (is_relevant=False set via the admin reject) → NEVER recrawl;
       an explicit human reject is permanent.
+    - Writer-confirmed dead project (abort_article(dead_project), a real
+      signal but not a certain human judgment) → suppressed until
+      ``dead_project_until``, then eligible again — distinct from the
+      permanent admin reject above and from the shorter generic-irrelevant
+      window below (see suppress_dead_project_domain).
     - Auto-flagged irrelevant → re-check only after the configured window
       (FRONTIER_RECRAWL_DAYS_IRRELEVANT), in case it has since become relevant.
     """
@@ -458,6 +463,16 @@ def should_recrawl_domain(domain: str) -> bool:
     meta = status.get("metadata") or {}
     if meta.get("frontier_set_by_admin") == "true" or meta.get("frontier_status") == "dead_end":
         return False
+    until_raw = meta.get("dead_project_until") or ""
+    if until_raw:
+        try:
+            until = datetime.fromisoformat(until_raw)
+        except ValueError:
+            until = None
+        if until is not None:
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=UTC)
+            return datetime.now(tz=UTC) >= until
     last = status.get("last_crawled_at")
     if last is None:
         # Irrelevant and never actually crawled (e.g. rejected while pending) —
@@ -468,6 +483,32 @@ def should_recrawl_domain(domain: str) -> bool:
         last = last.replace(tzinfo=UTC)
     cutoff = datetime.now(tz=UTC) - timedelta(days=FRONTIER_RECRAWL_DAYS_IRRELEVANT)
     return last < cutoff
+
+
+def suppress_dead_project_domain(domain: str, *, days: int, reason: str = "") -> None:
+    """Temporarily suppress a domain the writer confirmed dead (abort_article(dead_project)).
+
+    Root-caused 2026-08-04 (Kryptonurd): abort_article is a judgment the
+    writer can make, but domain_tracking was never updated on it — the
+    domain stayed frontier_status='approved', so the next scheduled crawl
+    re-fetched the same dormant page and the writer aborted again, forever,
+    at the same research cost each time. This is deliberately a COOLDOWN,
+    not the permanent reject an admin's own action gets (reject_domain_source):
+    a project genuinely can come back from dormancy, and no human has
+    confirmed this one hasn't — see should_recrawl_domain's dead_project_until
+    check for the re-eligibility side of this.
+    """
+    if not domain:
+        return
+    status = get_domain_status(domain)
+    relevance_score = float((status or {}).get("relevance_score") or 0.0)
+    until = (datetime.now(tz=UTC) + timedelta(days=days)).isoformat()
+    update_domain_status(
+        domain,
+        relevance_score=relevance_score,
+        is_relevant=False,
+        metadata={"dead_project_until": until, "dead_project_reason": (reason or "")[:200]},
+    )
 
 
 def update_domain_status(
