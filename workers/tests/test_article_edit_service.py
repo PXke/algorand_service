@@ -91,8 +91,20 @@ def test_edit_reregisters_match_keys_anchored_to_publish_time(
     from types import SimpleNamespace
 
     monkeypatch.setattr(
-        "app.modules.ai.mistral_compose.compose_article_edit_mistral",
-        lambda **_kw: SimpleNamespace(title="T", summary="S", body="B"),
+        "app.modules.newspaper.article_composer.compose_scrape_article",
+        lambda **_kw: SimpleNamespace(
+            title="T",
+            summary="S",
+            body="B",
+            composer="mistral",
+            extra_tags=(),
+            defunct_domains=(),
+            unsourced_hold_reason="",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.prior_service_article_summary",
+        lambda _service_id: "",
     )
     monkeypatch.setattr(svc, "sanitize_body", lambda b: b)
     monkeypatch.setattr(svc, "save_article_version", lambda **_kw: 2)
@@ -167,3 +179,153 @@ def test_open_window_edit_row_still_edits(monkeypatch: pytest.MonkeyPatch) -> No
         lambda _row: {"status": "edited", "article_id": "a1"},
     )
     assert pt.publish_from_queued_row(row) == {"status": "edited", "article_id": "a1"}
+
+
+def _existing_article() -> ArticleDetail:
+    return ArticleDetail(
+        article_id="a1",
+        service_id="svc",
+        title="Existing title",
+        summary="Existing summary",
+        body="Existing body -- this must never reach the recompose prompt",
+        published_at_epoch=1_700_000_000,
+        trigger_txid="",
+        trigger_round=0,
+        source_url="https://example.com/",
+    )
+
+
+def test_edit_recomposes_fully_without_leaking_the_old_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-caused 2026-08-04 (Humanitarian Network special edition): the old edit path fed the existing article's body back into the prompt and told the model to preserve it, which is why refreshes read as padded restatements. A full recompose must call the SAME router a fresh article uses (compose_scrape_article), with NO existing title/summary/body anywhere in the call -- first_coverage=False + a prior_coverage_block instead."""
+    from types import SimpleNamespace
+
+    import app.modules.newspaper.article_edit_service as svc
+
+    monkeypatch.setattr(svc, "get_article", lambda _article_id: _existing_article())
+    monkeypatch.setattr(svc, "mistral_configured", lambda: True)
+    monkeypatch.setattr(svc, "sanitize_body", lambda b: b)
+    monkeypatch.setattr(svc, "save_article_version", lambda **_kw: 2)
+    monkeypatch.setattr(svc, "derive_article_tags", lambda **_kw: ["algorand"])
+    monkeypatch.setattr(svc, "update_article", lambda **_kw: True)
+    monkeypatch.setattr(svc.index_article, "delay", lambda **_kw: None)
+    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_matching.build_match_keys",
+        lambda **_kw: [("service_id", "svc")],
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_matching.register_article_match_keys",
+        lambda **_kw: 1,
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.prior_service_article_summary",
+        lambda _service_id: "PRIOR: we already covered svc's launch.",
+    )
+
+    captured: dict = {}
+
+    def _fake_compose(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            title="Fresh title",
+            summary="Fresh summary",
+            body="Fresh body",
+            composer="mistral",
+            extra_tags=("special-edition",),
+            defunct_domains=(),
+            unsourced_hold_reason="",
+        )
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_composer.compose_scrape_article", _fake_compose
+    )
+
+    result = svc.run_article_edit(_row())
+
+    assert result["status"] == "edited"
+    # The old body/title/summary must never appear anywhere in the compose call.
+    serialized = str(captured)
+    assert "Existing title" not in serialized
+    assert "Existing summary" not in serialized
+    assert "this must never reach the recompose prompt" not in serialized
+    assert captured["first_coverage"] is False
+    assert captured["prior_coverage_block"] == "PRIOR: we already covered svc's launch."
+    assert captured["page_text"] == "new text"
+    assert captured["page_title"] == "New"
+
+
+def test_edit_merges_extra_tags_from_the_recompose(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tag the recompose adds (e.g. "special-edition") survives into the final tag list even though derive_article_tags doesn't independently know about it."""
+    from types import SimpleNamespace
+
+    import app.modules.newspaper.article_edit_service as svc
+
+    monkeypatch.setattr(svc, "get_article", lambda _article_id: _existing_article())
+    monkeypatch.setattr(svc, "mistral_configured", lambda: True)
+    monkeypatch.setattr(svc, "sanitize_body", lambda b: b)
+    monkeypatch.setattr(svc, "save_article_version", lambda **_kw: 2)
+    monkeypatch.setattr(svc, "derive_article_tags", lambda **_kw: ["algorand"])
+    monkeypatch.setattr(svc.index_article, "delay", lambda **_kw: None)
+    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_matching.build_match_keys",
+        lambda **_kw: [("service_id", "svc")],
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_matching.register_article_match_keys",
+        lambda **_kw: 1,
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.prior_service_article_summary",
+        lambda _service_id: "",
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_composer.compose_scrape_article",
+        lambda **_kw: SimpleNamespace(
+            title="T",
+            summary="S",
+            body="B",
+            composer="mistral",
+            extra_tags=("special-edition",),
+            defunct_domains=(),
+            unsourced_hold_reason="",
+        ),
+    )
+
+    captured_tags: list = []
+
+    def _fake_update(**kwargs: object) -> bool:
+        captured_tags.extend(kwargs["tags"])
+        return True
+
+    monkeypatch.setattr(svc, "update_article", _fake_update)
+
+    svc.run_article_edit(_row())
+
+    assert captured_tags == ["algorand", "special-edition"]
+
+
+def test_edit_handles_writer_abort_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full recompose can now genuinely call abort_article (real research, unlike the old preserve-and-append prompt which never earned that judgment) -- must resolve as a clean skip, not an uncaught crash."""
+    import app.modules.newspaper.article_edit_service as svc
+    from app.modules.ai.story_spike import StorySpikedError
+
+    monkeypatch.setattr(svc, "get_article", lambda _article_id: _existing_article())
+    monkeypatch.setattr(svc, "mistral_configured", lambda: True)
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.prior_service_article_summary",
+        lambda _service_id: "",
+    )
+
+    def _boom(**_kw: object) -> None:
+        raise StorySpikedError(category="dead_project", reason="site is defunct")
+
+    monkeypatch.setattr("app.modules.newspaper.article_composer.compose_scrape_article", _boom)
+
+    result = svc.run_article_edit(_row())
+
+    assert result["status"] == "aborted_by_writer"
+    assert result["linked_article_id"] == "a1"
+    assert "dead_project" in result["reason"]
