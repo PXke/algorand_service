@@ -383,3 +383,9 @@ def test_special_edition_instructions_require_recency_within_a_source() -> None:
 def test_special_edition_instructions_forbid_dropping_a_found_contrast() -> None:
     """Same session: research surfaced that HesabPay 'plans to move into Haiti and Sudan' -- the exact deployed-vs-announced contrast the brief asked for -- and it was dropped from the published country list."""
     assert "DO NOT DROP A FOUND CONTRAST" in mc._SPECIAL_EDITION_DEPTH_INSTRUCTIONS
+
+
+def test_research_phase_has_named_document_fallback() -> None:
+    """Same session: the model knew the CGAP report's exact title from a search snippet, but gave up after only the generic /research/publication listing page 404'd (and its stale 2023 archive snapshot came back empty) -- it never searched the exact title, which would likely have surfaced the report's own permalink."""
+    assert "NAMED-DOCUMENT FALLBACK" in mc._RESEARCH_PHASE_GUIDANCE
+    assert "exact title in quotes" in mc._RESEARCH_PHASE_GUIDANCE
