@@ -146,7 +146,27 @@ def test_special_edition_still_nudges_past_the_normal_bar(monkeypatch: pytest.Mo
 
     _run_research_floor(client, "sys", "user", [], {}, trace, {}, is_special_edition=True)
 
-    client.chat_with_tools.assert_called_once()
+    client.chat_with_tools.assert_called()
+
+
+def test_special_edition_max_passes_are_also_quadrupled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Root-caused 2026-08-04 (Humanitarian Network recompose): min_calls was quadrupled for a special edition, but the number of nudge PASSES to close that gap was not -- a session that plateaued at 8 of a 24-source target got waved through after just 2 unscaled passes, writing a 1,050-word piece with no more depth than an ordinary article. A MagicMock client never grows the trace, so every pass still falls short and the loop runs its full budget -- this pins that budget at max_passes_config * 4, not the raw config value."""
+    client = _floor_client(6, 2, monkeypatch)
+    trace = _domain_trace(6)
+
+    _run_research_floor(client, "sys", "user", [], {}, trace, {}, is_special_edition=True)
+
+    assert client.chat_with_tools.call_count == 8  # 2 (config) * 4 (special-edition multiplier)
+
+
+def test_non_special_edition_max_passes_are_not_scaled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ordinary (non-special-edition) path is unaffected by the special-edition multiplier."""
+    client = _floor_client(6, 2, monkeypatch)
+    trace = _domain_trace(3)  # below the plain 6-source bar, never met
+
+    _run_research_floor(client, "sys", "user", [], {}, trace, {})
+
+    assert client.chat_with_tools.call_count == 2
 
 
 def test_special_edition_stops_once_it_reaches_the_higher_bar(

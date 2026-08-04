@@ -1910,7 +1910,17 @@ def _run_research_floor(
     if not RESEARCH_FLOOR_ENABLED:
         return
     min_calls = RESEARCH_MIN_TOOL_CALLS * 4 if is_special_edition else RESEARCH_MIN_TOOL_CALLS
-    for _ in range(max(0, RESEARCH_FLOOR_MAX_PASSES)):
+    # Root-caused 2026-08-04 (Humanitarian Network recompose): min_calls
+    # above was quadrupled for a special edition, but this loop's own
+    # budget for CLOSING that gap was not -- a session that plateaued at 8
+    # distinct sources (genuinely ran out of easy new domains after two
+    # nudges) got waved through 16 short of the 24-source target, writing a
+    # 1,050-word piece that read no deeper than an ordinary article. The
+    # floor exists specifically so quadrupling the target has teeth.
+    max_passes = (
+        RESEARCH_FLOOR_MAX_PASSES * 4 if is_special_edition else RESEARCH_FLOOR_MAX_PASSES
+    )
+    for _ in range(max(0, max_passes)):
         have = _distinct_research_calls(trace)
         if have >= min_calls:
             break
