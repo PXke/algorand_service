@@ -30,7 +30,7 @@ Two SSH users are involved:
 | `backend/` | Ship backend + restart API |
 | `workers/` | Ship workers + restart Celery |
 | `schema/` or `conduit/schema/` | Run CQL migrations |
-| `*/pyproject.toml` | Refresh `requirements.lock.txt` + restart Python services |
+| `*/pyproject.toml` | Re-resolve pip deps from pyprojects + restart Python services |
 | `frontend/package.json` | `npm install` + rebuild |
 | `deploy/nginx/` or `deploy/systemd/` | Reinstall nginx/systemd units |
 
@@ -49,7 +49,7 @@ DEPLOY_FORCE_FULL=1 DEPLOY_CONFIRM=1 ./deploy/deploy.sh deploy
 
 ## What `provision` does (idempotent)
 
-1. apt: python3, venv, build tools, rsync, curl.
+1. apt: python3 (+ python3.15 when available), venv, build tools, rsync, curl.
 2. Verifies nginx / redis / cassandra are already running on the host.
 3. Creates `TARGET_PATH` owned by `SERVICE_USER`.
 4. Obtains one Let's Encrypt cert for `SITE_DOMAIN` + `API_DOMAIN`
@@ -65,7 +65,12 @@ DEPLOY_FORCE_FULL=1 DEPLOY_CONFIRM=1 ./deploy/deploy.sh deploy
 3. `package.sh`: assemble `deploy/build/stage/` (Vite SPA skipped when unchanged).
 4. rsync the stage tree to the host (incremental via `--link-dest`).
 5. Backs up `releases/current` → `releases/previous`, activates the new tree.
-6. Shared venv at `TARGET_PATH/venv` with the union of backend+workers deps.
+6. Shared venv at `TARGET_PATH/venv`. Python is auto-selected on first create:
+   `python3.15t` → `python3.15` → `python3.13t` → `python3.13` → `python3`
+   (override with `PYTHON_BIN` in `deploy.conf`). Deps install live from
+   `backend/` + `workers[ml]` pyprojects (`pip install --upgrade`, no lock file).
+   The API runs under Gunicorn gthread via `deploy/scripts/run_backend.sh`
+   (see `GUNICORN_WORKERS` / `GUNICORN_THREADS` in `shared/backend.env`).
 7. Bootstraps `TARGET_PATH/shared/{backend,workers}.env` from
    `deploy/env/*.env.example` on first deploy (chmod 600, `INGEST_API_KEY`
    generated) and symlinks them into the release. Later deploys never

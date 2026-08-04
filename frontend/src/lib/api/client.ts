@@ -69,14 +69,30 @@ function wrapNetwork(err: unknown): never {
 
 export type JsonHeaders = Record<string, string>
 
+type JsonMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE'
+
+async function requestJson(
+  method: JsonMethod,
+  path: string,
+  headers?: JsonHeaders,
+  body?: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  try {
+    const hasBody = body !== undefined
+    const res = await fetch(uri(path), {
+      method,
+      headers: hasBody ? { 'Content-Type': 'application/json', ...headers } : headers,
+      ...(hasBody ? { body: JSON.stringify(body ?? {}) } : {}),
+    })
+    return await decode(res)
+  } catch (e) {
+    wrapNetwork(e)
+  }
+}
+
 export const api = {
   async getJson(path: string, headers?: JsonHeaders): Promise<Record<string, unknown>> {
-    try {
-      const res = await fetch(uri(path), { headers })
-      return await decode(res)
-    } catch (e) {
-      wrapNetwork(e)
-    }
+    return requestJson('GET', path, headers)
   },
 
   async postJson(
@@ -84,16 +100,7 @@ export const api = {
     body?: Record<string, unknown>,
     headers?: JsonHeaders,
   ): Promise<Record<string, unknown>> {
-    try {
-      const res = await fetch(uri(path), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...headers },
-        body: JSON.stringify(body ?? {}),
-      })
-      return await decode(res)
-    } catch (e) {
-      wrapNetwork(e)
-    }
+    return requestJson('POST', path, headers, body)
   },
 
   async patchJson(
@@ -101,24 +108,10 @@ export const api = {
     body?: Record<string, unknown>,
     headers?: JsonHeaders,
   ): Promise<Record<string, unknown>> {
-    try {
-      const res = await fetch(uri(path), {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', ...headers },
-        body: JSON.stringify(body ?? {}),
-      })
-      return await decode(res)
-    } catch (e) {
-      wrapNetwork(e)
-    }
+    return requestJson('PATCH', path, headers, body)
   },
 
   async deleteJson(path: string, headers?: JsonHeaders): Promise<Record<string, unknown>> {
-    try {
-      const res = await fetch(uri(path), { method: 'DELETE', headers })
-      return await decode(res)
-    } catch (e) {
-      wrapNetwork(e)
-    }
+    return requestJson('DELETE', path, headers)
   },
 }

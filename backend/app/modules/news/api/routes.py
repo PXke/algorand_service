@@ -5,10 +5,9 @@ from __future__ import annotations
 import hashlib
 from email.utils import formatdate
 
-from robyn import Request, Response, Robyn
-
 from app.core import serialization
 from app.core.config import settings
+from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
 from app.core.tracking import tracking_opted_out_from_headers
@@ -145,7 +144,7 @@ def article_detail(request: Request) -> Response:
     return serialization.to_builtins(detail)
 
 
-def register_news_routes(app: Robyn) -> None:
+def register_news_routes(app: Router) -> None:
     """Register all reader-facing news feed and article API endpoints."""
     app.get("/api/v1/news/stats")(stats)
     app.get("/api/v1/news/tags")(tags)

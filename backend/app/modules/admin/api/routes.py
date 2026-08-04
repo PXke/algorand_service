@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict
 
-from robyn import Request, Response, Robyn
-
 from app.core import serialization
+from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet, verified_admin_wallet
@@ -18,11 +17,9 @@ from app.modules.admin.schemas import (
     EditorialBriefCreate,
     GatekeeperAnchorCreate,
     GlossaryUpsertRequest,
-    OfficialChannelCreate,
     ScraperRunRequest,
     ServiceMergeRequest,
     SourceUpsertRequest,
-    ToolSuggestionResolveRequest,
 )
 from app.modules.admin.stores.cassandra import AdminCassandraStore
 
@@ -135,18 +132,6 @@ async def admin_delete_article(request: Request) -> Response:
     return {"deleted": True, "article_id": article_id, "source_blocked": blocked}
 
 
-async def admin_article_versions(request: Request) -> Response:
-    """List an article's revision history."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-    article_id = request.path_params.get("article_id", "")
-    import asyncio
-
-    versions = await asyncio.to_thread(store.list_versions, article_id)
-    return {"article_id": article_id, "versions": versions}
-
-
 async def admin_list_briefs(request: Request) -> dict:
     """List editorial briefs."""
     denied = require_admin_wallet(request)
@@ -196,20 +181,6 @@ async def admin_create_brief(request: Request) -> Response:
     return item
 
 
-async def admin_get_brief(request: Request) -> Response:
-    """Fetch one editorial brief by id."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-    brief_id = request.path_params.get("brief_id", "")
-    import asyncio
-
-    item = await asyncio.to_thread(store.get_brief, brief_id)
-    if item is None:
-        return json_error_response(404, "not_found", "Brief not found")
-    return item
-
-
 async def admin_assign_brief_now(request: Request) -> Response:
     """Queue a brief for (re)assignment now instead of waiting for its refresh schedule."""
     denied = require_admin_wallet(request)
@@ -239,54 +210,6 @@ async def admin_assign_brief_now(request: Request) -> Response:
         return {"status": "queued", "brief_id": brief_id}
     except Exception as exc:
         return json_error_response(500, "assign_failed", str(exc))
-
-
-async def admin_list_official_channels(request: Request) -> Response:
-    """List official channel entries, optionally filtered by kind."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-    kind = request.query_params.get("kind", "") or None
-    import asyncio
-
-    items = await asyncio.to_thread(store.list_official_channels, kind=kind)
-    return {"items": items}
-
-
-async def admin_add_official_channel(request: Request) -> Response:
-    """Insert or update an official channel entry."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-    try:
-        payload = serialization.decode(request.body, OfficialChannelCreate)
-    except Exception as exc:
-        return json_error_response(400, "invalid_request", str(exc))
-    wallet = verified_admin_wallet(request)
-    import asyncio
-
-    return await asyncio.to_thread(
-        store.upsert_official_channel,
-        kind=payload.kind,
-        channel_id=payload.channel_id.strip(),
-        label=payload.label,
-        added_by=wallet,
-    )
-
-
-async def admin_delete_official_channel(request: Request) -> Response:
-    """Delete one official channel entry."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-    kind = request.path_params.get("kind", "")
-    channel_id = request.path_params.get("channel_id", "")
-    if not kind or not channel_id:
-        return json_error_response(400, "invalid_request", "kind and channel_id required")
-    import asyncio
-
-    await asyncio.to_thread(store.delete_official_channel, kind=kind, channel_id=channel_id)
-    return {"deleted": True, "kind": kind, "channel_id": channel_id}
 
 
 async def admin_list_classifier_reviews(request: Request) -> Response:
@@ -571,22 +494,6 @@ async def admin_merge_services(request: Request) -> Response:
         target_service_id=payload.target_service_id,
         source_service_ids=payload.source_service_ids,
     )
-
-
-async def admin_list_service_sources(request: Request) -> Response:
-    """List the recorded sources for one service."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-    service_id = request.path_params.get("service_id", "")
-    if not service_id:
-        return json_error_response(400, "invalid_request", "service_id required")
-    import asyncio
-
-    from app.modules.registry.sources import list_sources
-
-    items = await asyncio.to_thread(list_sources, service_id)
-    return {"service_id": service_id, "items": items}
 
 
 def admin_delete_source(request: Request) -> Response:
@@ -985,22 +892,6 @@ async def admin_list_tool_suggestions(request: Request) -> Response:
 
     items = await asyncio.to_thread(store.list_tool_suggestions, include_resolved=include_resolved)
     return {"items": items}
-
-
-async def admin_resolve_tool_suggestions(request: Request) -> Response:
-    """Mark every unresolved suggestion for one capability as resolved (the tool now exists) — dismisses the whole group the Tool gaps panel shows, not one row at a time. Rows are kept (not deleted) so the request count stays visible as history; the table also self-prunes via a 90-day TTL."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-    try:
-        payload = serialization.decode(request.body, ToolSuggestionResolveRequest)
-    except Exception as exc:
-        return json_error_response(400, "invalid_request", str(exc))
-
-    import asyncio
-
-    resolved_count = await asyncio.to_thread(store.resolve_tool_suggestions, payload.capability)
-    return {"capability": payload.capability, "resolved_count": resolved_count}
 
 
 async def admin_list_compose_feedback(request: Request) -> Response:
@@ -1549,19 +1440,14 @@ async def admin_investigation_findings(request: Request) -> Response:
     return await asyncio.to_thread(_compute)
 
 
-def register_admin_routes(app: Robyn) -> None:
+def register_admin_routes(app: Router) -> None:
     """Register all admin API endpoints on the given Robyn app."""
     app.get("/api/v1/admin/analytics")(admin_analytics)
     app.patch("/api/v1/admin/articles/:article_id")(admin_patch_article)
     app.delete("/api/v1/admin/articles/:article_id")(admin_delete_article)
-    app.get("/api/v1/admin/articles/:article_id/versions")(admin_article_versions)
     app.get("/api/v1/admin/briefs")(admin_list_briefs)
     app.post("/api/v1/admin/briefs")(admin_create_brief)
-    app.get("/api/v1/admin/briefs/:brief_id")(admin_get_brief)
     app.post("/api/v1/admin/briefs/:brief_id/assign-now")(admin_assign_brief_now)
-    app.get("/api/v1/admin/official-channels")(admin_list_official_channels)
-    app.post("/api/v1/admin/official-channels")(admin_add_official_channel)
-    app.delete("/api/v1/admin/official-channels/:kind/:channel_id")(admin_delete_official_channel)
     app.get("/api/v1/admin/classifier-reviews")(admin_list_classifier_reviews)
     app.get("/api/v1/admin/publish-queue")(admin_list_publish_queue)
     app.get("/api/v1/admin/pending-feed-backlog")(admin_pending_feed_backlog)
@@ -1577,7 +1463,6 @@ def register_admin_routes(app: Robyn) -> None:
     app.get("/api/v1/admin/gatekeeper/validation-report")(admin_gatekeeper_validation_report)
     app.post("/api/v1/admin/sources")(admin_upsert_source)
     app.post("/api/v1/admin/sources/merge")(admin_merge_services)
-    app.get("/api/v1/admin/sources/:service_id/sources")(admin_list_service_sources)
     app.delete("/api/v1/admin/sources/:service_id")(admin_delete_source)
     app.get("/api/v1/admin/scrapers")(admin_list_scrapers)
     app.post("/api/v1/admin/scrapers/run")(admin_run_scraper)
@@ -1586,7 +1471,6 @@ def register_admin_routes(app: Robyn) -> None:
     app.post("/api/v1/admin/classifier-reviews/clear")(admin_clear_classifier_reviews)
     app.get("/api/v1/admin/domains")(admin_list_domains)
     app.get("/api/v1/admin/tool-suggestions")(admin_list_tool_suggestions)
-    app.post("/api/v1/admin/tool-suggestions/resolve")(admin_resolve_tool_suggestions)
     app.get("/api/v1/admin/compose-feedback")(admin_list_compose_feedback)
     app.get("/api/v1/admin/compose-sessions")(admin_list_compose_sessions)
     app.get("/api/v1/admin/compose-sessions/:session_id")(admin_get_compose_session)

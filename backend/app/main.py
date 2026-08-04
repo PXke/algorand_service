@@ -1,85 +1,17 @@
-"""Robyn app entrypoint: route registration, health checks, and startup wiring."""
+"""Falcon app entrypoint shim."""
 
 from __future__ import annotations
 
-from robyn import Request, Response, Robyn
-
-from app.core.config import settings
-from app.core.cors import register_cors
-from app.core.health import run_readiness_checks
-from app.core.observability import init_bugsnag
-from app.modules.admin.api.routes import register_admin_routes
-from app.modules.auth.api.routes import register_auth_routes
-from app.modules.contact.api.routes import register_contact_routes
-from app.modules.glossary.api.routes import register_glossary_routes
-from app.modules.ingest.api.routes import register_ingest_routes
-from app.modules.kyc.api.routes import register_kyc_routes
-from app.modules.media.api.routes import register_media_routes
-from app.modules.metrics.api.routes import register_metrics_routes
-from app.modules.news.api.routes import register_news_routes
-from app.modules.placements.api.routes import register_placement_routes
-from app.modules.registry.api.routes import register_registry_routes
-from app.modules.search.api.routes import register_search_routes
-from app.modules.seo.api.routes import register_seo_routes
-from app.modules.suggestions.api.routes import register_suggestions_routes
-
-app = Robyn(__file__)
-init_bugsnag(release_stage=settings.app_env or "prod")
-register_cors(app)
-
-
-@app.get("/health")
-def health() -> dict[str, str]:
-    """Report basic liveness for the API process."""
-    return {"status": "ok", "service": settings.app_name, "env": settings.app_env}
-
-
-@app.get("/health/ready")
-def health_ready() -> dict[str, object]:
-    """Report readiness, degraded if Redis or Cassandra checks fail."""
-    checks = run_readiness_checks()
-    ok = all(check.ok for check in checks if check.name in {"redis", "cassandra"})
-    return {
-        "status": "ok" if ok else "degraded",
-        "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
-    }
-
-
-register_auth_routes(app)
-register_media_routes(app)
-register_metrics_routes(app)
-register_news_routes(app)
-register_placement_routes(app)
-register_ingest_routes(app)
-register_admin_routes(app)
-register_registry_routes(app)
-register_search_routes(app)
-register_contact_routes(app)
-register_glossary_routes(app)
-if settings.suggestions_enabled:
-    register_suggestions_routes(app)
-if settings.x402_enabled:
-    register_kyc_routes(app)
-
-# SEO crawl surfaces (robots, sitemaps, feeds, OG cards) — SPA owns app HTML.
-# Registered last so nothing shadows the JSON API under /api/*; nginx decides
-# which paths reach these vs. the static Flutter build.
-register_seo_routes(app)
-
-
-@app.after_request()
-def add_robots_tag(request: Request, response: Response) -> Response:
-    """Tag `/api/*` responses noindex so crawlers skip the JSON API."""
-    if request.url.path.startswith("/api/"):
-        response.headers["X-Robots-Tag"] = "noindex"
-    return response
+from app.falcon_main import app
 
 
 if __name__ == "__main__":
-    # Robyn reads processes/workers off app.config (normally the `robyn` CLI's
-    # --processes/--workers). We start via `python -m app.main`, so set them here
-    # from settings — the default 1/1 serialises every request behind one slow
-    # blocking handler.
-    app.config.processes = max(1, settings.app_processes)
-    app.config.workers = max(1, settings.app_workers)
-    app.start(host=settings.app_host, port=settings.app_port)
+    # Development fallback; production should use gunicorn with gthread workers.
+    from wsgiref.simple_server import make_server
+
+    from app.core.config import settings
+
+    host = settings.app_host
+    port = settings.app_port
+    with make_server(host, port, app) as server:
+        server.serve_forever()

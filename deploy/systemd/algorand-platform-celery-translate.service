@@ -17,7 +17,7 @@ EnvironmentFile=-@TARGET_PATH@/releases/current/workers/.env
 # ONE translation batch running, full stop — translate_article_batch's own
 # Redis lock (local_translate_lock.py) is kept too, as defense-in-depth
 # against a rolling-deploy overlap window, not as the primary guarantee.
-ExecStart=@TARGET_PATH@/venv/bin/celery -A app.celery_app worker --loglevel=INFO -Q translate --concurrency=1 --hostname=translate@%%h
+ExecStart=/usr/bin/bash @TARGET_PATH@/releases/current/deploy/scripts/run_celery.sh translate
 Restart=on-failure
 RestartSec=5
 # Same cold-shutdown rationale as algorand-platform-celery.service: a batch
@@ -31,6 +31,7 @@ KillSignal=SIGQUIT
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=algorand-platform-celery-translate
 
 [Install]
 WantedBy=multi-user.target

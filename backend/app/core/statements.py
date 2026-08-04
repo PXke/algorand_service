@@ -196,30 +196,6 @@ class EditorialBriefStmts:
 
 
 # --------------------------------------------------------------------------- #
-# official_channels
-# --------------------------------------------------------------------------- #
-class OfficialChannelStmts:
-    """Prepared statements for the official-channels trust list."""
-
-    LIST_BY_KIND = _Stmt(
-        "SELECT kind, channel_id, label, added_by, created_at "
-        "FROM algorand_platform.official_channels WHERE kind = ? LIMIT ?"
-    )
-    LIST_ALL = _Stmt(
-        "SELECT kind, channel_id, label, added_by, created_at "
-        "FROM algorand_platform.official_channels LIMIT ?"
-    )
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.official_channels "
-        "(kind, channel_id, label, added_by, created_at) "
-        "VALUES (?, ?, ?, ?, ?)"
-    )
-    DELETE = _Stmt(
-        "DELETE FROM algorand_platform.official_channels WHERE kind = ? AND channel_id = ?"
-    )
-
-
-# --------------------------------------------------------------------------- #
 # classifier_feedback / classifier_feedback_by_time
 # --------------------------------------------------------------------------- #
 class ClassifierFeedbackStmts:

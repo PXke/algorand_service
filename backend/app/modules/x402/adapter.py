@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from robyn import Request
+from app.core.http import Request
 
 
 class RobynAdapter:
@@ -20,7 +20,8 @@ class RobynAdapter:
 
     def get_header(self, name: str) -> str | None:
         """Return a request header by name, or None if absent."""
-        return self._request.headers.get(name)
+        value = self._request.headers.get(name) or self._request.headers.get(name.lower())
+        return value
 
     def get_method(self) -> str:
         """Return the request's HTTP method."""
@@ -37,11 +38,11 @@ class RobynAdapter:
 
     def get_accept_header(self) -> str:
         """Return the request's Accept header, or empty string if absent."""
-        return self._request.headers.get("Accept") or ""
+        return self.get_header("Accept") or ""
 
     def get_user_agent(self) -> str:
         """Return the request's User-Agent header, or empty string if absent."""
-        return self._request.headers.get("User-Agent") or ""
+        return self.get_header("User-Agent") or ""
 
     def get_query_params(self) -> dict[str, Any] | None:
         """Return the request's query parameters as a dict."""

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from robyn import Request, Response, Robyn
-
+from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
 
@@ -33,7 +32,7 @@ def get_glossary_term(request: Request) -> Response:
     return asdict(term)
 
 
-def register_glossary_routes(app: Robyn) -> None:
+def register_glossary_routes(app: Router) -> None:
     """Attach the public glossary JSON API to the app."""
     app.get("/api/v1/glossary")(list_glossary)
     app.get("/api/v1/glossary/:slug")(get_glossary_term)

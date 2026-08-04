@@ -164,7 +164,7 @@ services:
     <<: *platform_app
     restart: unless-stopped
     working_dir: /app/backend
-    command: ["python", "-m", "app.main"]
+    command: ["bash", "-c", "exec gunicorn app.falcon_main:app -k app.core.gunicorn_affinity.AffinityThreadWorker --workers 1 --threads \"$${GUNICORN_THREADS:-$$(nproc)}\" --bind 0.0.0.0:8080"]
     ports:
       - "8080:8080"
     environment: &platform_test_env

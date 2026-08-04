@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from robyn import Request, Response
-
 from app.core.config import settings
+from app.core.http import Request, Response
 from app.core.http_errors import json_error_response
+from app.core.request_headers import session_token
 from app.modules.auth.services.session_store import SessionStore
 
 # Lazy redis client (redis.from_url does not connect until first command), so
@@ -25,9 +25,7 @@ def _session_wallet(request: Request) -> str:
     The session token is minted only after a nonce + wallet-signature proof at
     sign-in, so the wallet behind it has cryptographically proven key ownership.
     """
-    token = (
-        request.headers.get("x-session-token") or request.headers.get("X-Session-Token") or ""
-    ).strip()
+    token = session_token(request.headers)
     if not token:
         return ""
     rec = _session_store.get_session(token)

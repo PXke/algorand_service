@@ -16,8 +16,8 @@ dependencies = [
   "playwright>=1.45.0",
   "cassandra-driver>=3.29.0",
   "typesense>=0.21.0",
-  "scikit-learn>=1.4.0",
-  "scipy>=1.11.0",
+  # Unpinned: take latest; scipy comes in via sklearn (also optional in drift.py).
+  "scikit-learn",
   "pypdf>=4.0.0",
   "pillow>=10.0.0",
   "yt-dlp>=2025.1.1",
@@ -31,20 +31,15 @@ dev = [
 ]
 # Local MTTH gatekeeper (ModernBERT) + local_translate.py's CPU translation
 # engines (MiLMMT, SeamlessM4T). Heavy + CPU-tuned. Deploy uses one shared
-# venv for every service (see deploy.sh), so this extra is compiled into the
-# base requirements.lock.txt rather than kept out of it — every service gets
-# torch/transformers on disk, but only the dedicated gatekeeper-eval and
-# celery-translate workers ever actually import them at runtime.
+# venv for every service (see deploy.sh), so this extra is installed into that
+# venv — every service gets torch/transformers on disk, but only the dedicated
+# gatekeeper-eval and celery-translate workers ever actually import them at
+# runtime.
 #
-# intel-extension-for-pytorch (IPEX) was dropped 2026-08-01: no wheel exists
-# for this project's pinned Python 3.14 at all, and the one version range
-# that would otherwise resolve (2.2.0-2.5.0) is yanked upstream for a
-# security issue -- `uv pip compile` cannot solve this extra with IPEX in it,
-# full stop, on any Python 3.14 install. This extra had never actually been
-# locked/deployed before (requirements.lock.txt had no ml packages in it at
-# all until this same date), so this was a latent, pre-existing gap, not a
-# regression. Training/inference already fall back to plain torch without
-# IPEX per the gatekeeper's own code -- nothing here needed it.
+# intel-extension-for-pytorch (IPEX) was dropped 2026-08-01: no suitable wheel
+# for current Python, and the one version range that would otherwise resolve is
+# yanked upstream. Training/inference already fall back to plain torch without
+# IPEX per the gatekeeper's own code.
 ml = [
   "torch>=2.2.0",
   "transformers>=4.48.0",

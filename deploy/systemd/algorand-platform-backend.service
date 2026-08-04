@@ -1,7 +1,7 @@
 [Unit]
-Description=Algorand Platform Backend API (Robyn)
-After=network-online.target
-Wants=network-online.target
+Description=Algorand Platform Backend (Falcon + Gunicorn)
+After=network-online.target redis-server.service
+Wants=network-online.target redis-server.service
 
 [Service]
 Type=simple
@@ -9,15 +9,17 @@ User=@SERVICE_USER@
 Group=@SERVICE_USER@
 WorkingDirectory=@TARGET_PATH@/releases/current/backend
 EnvironmentFile=-@TARGET_PATH@/releases/current/backend/.env
-ExecStart=@TARGET_PATH@/venv/bin/python -m app.main
+# Gunicorn gthread: 1 worker, threads=nproc, each thread pinned to one core
+# (see deploy/scripts/run_backend.sh + app.core.gunicorn_affinity).
+# PYTHON_GIL=0 is set there only for free-threaded (python3.15t) venvs.
+ExecStart=/usr/bin/bash @TARGET_PATH@/releases/current/deploy/scripts/run_backend.sh
 Restart=on-failure
 RestartSec=5
-# Robyn doesn't drain on SIGTERM — don't wait the systemd default (90s) before
-# SIGKILL. KillMode=mixed signals the whole process group (Robyn workers too).
 KillMode=mixed
-TimeoutStopSec=10
+TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=algorand-platform-backend
 
 [Install]
 WantedBy=multi-user.target

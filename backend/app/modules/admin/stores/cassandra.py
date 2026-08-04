@@ -256,35 +256,6 @@ class AdminCassandraStore:
             )
         return True
 
-    def list_versions(self, article_id: str, *, limit: int = 20) -> list[dict]:
-        """List an article's revision history, newest first."""
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ArticleVersionStmts
-
-        try:
-            aid = UUID(article_id)
-        except ValueError:
-            return []
-        session = get_cassandra_session()
-        try:
-            rows = session.execute(ArticleVersionStmts.LIST, (aid, limit))
-        except Exception:
-            return []
-        out = []
-        for row in rows:
-            edited = row.edited_at
-            out.append(
-                {
-                    "version": int(row.version),
-                    "title": row.title,
-                    "summary": row.summary,
-                    "edit_reason": row.edit_reason,
-                    "editor": row.editor,
-                    "edited_at_epoch": int(edited.timestamp()) if edited else 0,
-                }
-            )
-        return out
-
     def create_brief(
         self,
         *,
@@ -388,67 +359,6 @@ class AdminCassandraStore:
             "linked_article_id": str(row.linked_article_id) if row.linked_article_id else "",
             "is_special_edition": bool(row.is_special_edition),
         }
-
-    def list_official_channels(self, *, kind: str | None = None, limit: int = 200) -> list[dict]:
-        """List official channel entries, optionally filtered by kind."""
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import OfficialChannelStmts
-
-        session = get_cassandra_session()
-        try:
-            if kind:
-                rows = session.execute(OfficialChannelStmts.LIST_BY_KIND, (kind, limit))
-            else:
-                rows = session.execute(OfficialChannelStmts.LIST_ALL, (limit,))
-        except Exception:
-            return []
-        items = []
-        for row in rows:
-            created = row.created_at
-            items.append(
-                {
-                    "kind": row.kind,
-                    "channel_id": row.channel_id,
-                    "label": row.label or "",
-                    "added_by": row.added_by or "",
-                    "created_at_epoch": int(created.timestamp()) if created else 0,
-                }
-            )
-        return items
-
-    def upsert_official_channel(
-        self,
-        *,
-        kind: str,
-        channel_id: str,
-        label: str,
-        added_by: str,
-    ) -> dict:
-        """Insert or update an official channel entry."""
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import OfficialChannelStmts
-
-        session = get_cassandra_session()
-        now = datetime.now(tz=UTC)
-        session.execute(
-            OfficialChannelStmts.INSERT,
-            (kind, channel_id, label, added_by, now),
-        )
-        return {
-            "kind": kind,
-            "channel_id": channel_id,
-            "label": label,
-            "added_by": added_by,
-            "created_at_epoch": int(now.timestamp()),
-        }
-
-    def delete_official_channel(self, *, kind: str, channel_id: str) -> None:
-        """Delete one official channel entry."""
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import OfficialChannelStmts
-
-        session = get_cassandra_session()
-        session.execute(OfficialChannelStmts.DELETE, (kind, channel_id))
 
     def _grade_meta_for_review(self, review_id: str) -> dict[str, str]:
         """Pull the article grade + subscores from a review item so they're stored alongside the accept/reject label (trainable features)."""
@@ -1154,25 +1064,6 @@ class AdminCassandraStore:
             for r in rows
             if include_resolved or not r.resolved
         ]
-
-    def resolve_tool_suggestions(self, capability: str) -> int:
-        """Mark every unresolved suggestion for one capability as resolved (the tool now exists) — dismisses the whole group the Tool gaps panel shows at once, not one row at a time. Rows are kept (not deleted) so the request count stays visible as history; the table also self-prunes via a 90-day TTL (migration 028)."""
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ToolInsightStmts
-
-        session = get_cassandra_session()
-        rows = session.execute(ToolInsightStmts.LIST_SUGGESTIONS, ("all",))
-        target = capability.strip().lower()
-        n = 0
-        for r in rows:
-            if (r.capability or "").strip().lower() != target or r.resolved:
-                continue
-            session.execute(
-                ToolInsightStmts.RESOLVE_SUGGESTION,
-                (True, "all", r.created_at, r.suggestion_id),
-            )
-            n += 1
-        return n
 
     def _publish_article_to_feed(self, article_id: str) -> bool:
         from uuid import UUID

@@ -155,6 +155,19 @@ apt-get update -qq
 # brotli_static in our nginx site (auto-loaded via /etc/nginx/modules-enabled).
 # ffmpeg: audio extraction for the local YouTube transcription pipeline.
 apt-get install -y -qq python3 python3-venv python3-dev build-essential rsync curl xz-utils brotli ffmpeg
+# Free-threaded Python 3.15 (python3.15t) via deadsnakes when available.
+if ! apt-cache show python3.15-nogil >/dev/null 2>&1; then
+  add-apt-repository -y ppa:deadsnakes/ppa 2>/dev/null || true
+  apt-get update -qq
+fi
+apt-get install -y -qq python3.15-nogil python3.15-venv python3.15-dev 2>/dev/null \
+  || echo "warn: python3.15-nogil not in apt — install manually for free-threaded venv" >&2
+# Source-build fallback for scientific stack when cp315t wheels are missing.
+apt-get install -y -qq gfortran libopenblas-dev liblapack-dev pkg-config ninja-build 2>/dev/null \
+  || echo "warn: fortran/blas build deps unavailable — numpy/scipy may fail on python3.15t" >&2
+# Rust toolchain for packages without cp315t wheels (tiktoken, etc.).
+apt-get install -y -qq rustc cargo 2>/dev/null \
+  || echo "warn: rustc/cargo unavailable — some ML deps may fail to build" >&2
 apt-get install -y -qq libnginx-mod-http-brotli \
   || echo "warn: libnginx-mod-http-brotli unavailable — install ngx_brotli before enabling brotli_static" >&2
 EOF
@@ -193,15 +206,15 @@ cmd_deploy() {
   eval "$(REPO_ROOT="$REPO_ROOT" SSH_SVC="$SSH_SVC" TARGET_PATH="$TARGET_PATH" \
     DEPLOY_FORCE_FULL="$DEPLOY_FORCE_FULL" bash "$SCRIPT_DIR/scripts/detect_changes.sh")"
   export SKIP_FRONTEND_BUILD PACKAGE_PRECOMPRESS DEPLOY_SKIP_MIGRATE
-  export DEPLOY_SYNC_NPM DEPLOY_SYNC_PYTHON
+  export DEPLOY_SYNC_NPM
   export DEPLOY_RESTART_BACKEND DEPLOY_RESTART_WORKERS DEPLOY_CHANGED_DEPLOY_CONFIG
 
   bash "$SCRIPT_DIR/scripts/sync_deps.sh"
   if [[ "${DEPLOY_SYNC_NPM:-0}" == "1" ]]; then
     export SKIP_FRONTEND_BUILD=0 PACKAGE_PRECOMPRESS=1 DEPLOY_CHANGED_FRONTEND=1
   fi
-  if [[ "${DEPLOY_SYNC_PYTHON:-0}" == "1" ]]; then
-    export DEPLOY_RESTART_BACKEND=1 DEPLOY_RESTART_WORKERS=1
+  if [[ "${DEPLOY_CHANGED_PYPROJECT:-0}" == "1" ]]; then
+    export DEPLOY_RESTART_BACKEND=1 DEPLOY_RESTART_WORKERS=1 PIP_FORCE=1
   fi
 
   echo ">>> Packaging release"
@@ -319,27 +332,67 @@ FRONTEND_HASH=\$(find '${CURRENT}/frontend_web' -type f ! -name '*.gz' ! -name '
   | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
 echo "\$FRONTEND_HASH" > '${SHARED}/.frontend_web.sha256'
 
-# Python venv shared across releases; deps are the pinned union of backend +
-# workers (requirements.lock.txt, regenerated via deploy/scripts/lock_requirements.sh
-# and committed to the repo — keeps prod on the exact versions tested in CI).
-if [[ ! -x '${VENV}/bin/python' ]]; then python3 -m venv '${VENV}'; fi
-# Reinstalling deps on every deploy is slow (and pointless when they're
-# unchanged). Hash the lock file and skip pip when it matches.
-REQ_HASH=\$(sha256sum '${CURRENT}/requirements.lock.txt' | cut -d' ' -f1)
-if [[ "\$(cat '${SHARED}/.requirements.sha256' 2>/dev/null)" == "\$REQ_HASH" ]]; then
-  echo "deps unchanged — skipping pip install"
+# Python venv shared across releases. Deps resolve live from
+# backend/ + workers/[ml] pyproject.toml (no lock file).
+PYTHON_BIN='${PYTHON_BIN:-}'
+if [[ -z "\$PYTHON_BIN" ]]; then
+  for _c in python3.15t python3.15 python3.13t python3.13 python3; do
+    if command -v "\$_c" >/dev/null 2>&1; then PYTHON_BIN="\$_c"; break; fi
+  done
+fi
+PYTHON_BIN="\${PYTHON_BIN:-python3}"
+echo "Using Python for venv: \$(\$PYTHON_BIN --version 2>&1)"
+if [[ "${VENV_RECREATE:-0}" == 1 ]]; then
+  echo "VENV_RECREATE=1 — removing existing venv"
+  rm -rf '${VENV}'
+fi
+if [[ ! -x '${VENV}/bin/python' ]]; then
+  \$PYTHON_BIN -m venv '${VENV}'
+  {
+    echo ""
+    echo "# Free-threaded: keep GIL disabled (python3.15t)"
+    echo "export PYTHON_GIL=\${PYTHON_GIL:-0}"
+  } >> '${VENV}/bin/activate'
+fi
+# Only set PYTHON_GIL=0 on free-threaded interpreters (fatal on GIL builds).
+unset PYTHON_GIL
+if '${VENV}/bin/python' -c 'import sys; raise SystemExit(0 if "free-threading" in sys.version else 1)'; then
+  export PYTHON_GIL=0
+fi
+# Skip pip when both pyprojects are unchanged (hash cache). Clear
+# shared/.requirements.sha256 or set PIP_FORCE=1 to re-resolve latest.
+REQ_HASH=\$(cat '${CURRENT}/backend/pyproject.toml' '${CURRENT}/workers/pyproject.toml' | sha256sum | cut -d' ' -f1)
+if [[ "${PIP_FORCE:-0}" != 1 && "\$(cat '${SHARED}/.requirements.sha256' 2>/dev/null)" == "\$REQ_HASH" ]]; then
+  echo "pyprojects unchanged — skipping pip install"
 else
+  # Free-threaded 3.15t has no scipy wheels yet; source builds hit a pythran/AST
+  # bug unless pythran is disabled.
+  export SCIPY_USE_PYTHRAN=0
+  # Hosts often mount a small tmpfs on /tmp; Rust/C builds need disk space.
+  export TMPDIR="\${TMPDIR:-${SHARED}/tmp}"
+  mkdir -p "\$TMPDIR"
+  # PyO3's declared max is often behind free-threaded alphas (3.15t).
+  export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
+  export PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY=1
+  export UNSAFE_PYO3_SKIP_VERSION_CHECK=1
   '${VENV}/bin/pip' install --quiet --upgrade pip setuptools wheel
-  # --extra-index-url: the lock file pins torch to its CPU-only build
-  # (==X.Y.Z+cpu, no bundled CUDA) -- plain PyPI doesn't have that exact
-  # local version, only download.pytorch.org/whl/cpu does. See the matching
-  # comment in deploy/scripts/lock_requirements.sh for why this must stay
-  # in sync with how the lock file itself is generated.
-  '${VENV}/bin/pip' install --quiet --extra-index-url https://download.pytorch.org/whl/cpu \
-    -r '${CURRENT}/requirements.lock.txt'
+  # --no-build-isolation: sklearn otherwise rebuilds scipy in a sandbox and hits
+  # a pythran/Python-3.15 AST bug; use the venv's already-built numpy/scipy.
+  # Pre-seed scientific stack when missing (first 3.15t install).
+  if ! '${VENV}/bin/python' -c 'import numpy, scipy' 2>/dev/null; then
+    '${VENV}/bin/pip' install --quiet --upgrade numpy
+    '${VENV}/bin/pip' install --quiet --upgrade scipy \
+      --config-settings=setup-args=-Duse-pythran=false || true
+  fi
+  '${VENV}/bin/pip' install --quiet --upgrade meson-python ninja cython
+  # --extra-index-url: prefer torch CPU wheels (no bundled CUDA).
+  '${VENV}/bin/pip' install --upgrade --no-build-isolation \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    -e '${CURRENT}/backend' \
+    -e '${CURRENT}/workers[ml]'
   echo "\$REQ_HASH" > '${SHARED}/.requirements.sha256'
   # Playwright browser is versioned to the playwright package — only refresh
-  # when the lock file (and thus pip install) changes.
+  # when deps are reinstalled.
   if ! '${VENV}/bin/python' -m playwright install chromium; then
     echo "WARN: playwright browser install FAILED — SPA scraping degraded until fixed"
   fi

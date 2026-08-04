@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from robyn import Request, Response, Robyn
-
 from app.core import serialization
 from app.core.errors import PlatformError
+from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
+from app.core.request_headers import session_token
 from app.modules.auth.models.schemas import NonceRequest, VerifyRequest
 from app.modules.auth.services.auth_service import AuthService
 from app.modules.auth.services.session_store import SessionStore
@@ -73,7 +73,7 @@ def auth_verify(request: Request) -> Response:
 
 def auth_session(request: Request) -> Response:
     """Look up the active session for the given session token."""
-    token = request.headers.get("x-session-token") or ""
+    token = session_token(request.headers)
     if not token:
         return json_error_response(401, "missing_session_token", "Session token required")
 
@@ -89,13 +89,13 @@ def auth_session(request: Request) -> Response:
 
 def auth_logout(request: Request) -> dict[str, bool]:
     """Revoke the session behind the given session token, if any."""
-    token = request.headers.get("x-session-token") or ""
+    token = session_token(request.headers)
     if token:
         auth_service.revoke_session(token)
     return {"ok": True}
 
 
-def register_auth_routes(app: Robyn) -> None:
+def register_auth_routes(app: Router) -> None:
     """Register the nonce and verify endpoints for wallet authentication."""
     app.post("/api/v1/auth/nonce")(auth_nonce)
     app.post("/api/v1/auth/verify-wallet-signature")(auth_verify)

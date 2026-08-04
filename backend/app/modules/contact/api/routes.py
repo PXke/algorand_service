@@ -14,12 +14,11 @@ from contextlib import suppress
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
-from robyn import Request, Response, Robyn
-
 if TYPE_CHECKING:
     import redis
 
 from app.core import serialization
+from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_response
 from app.modules.admin.auth import require_admin_wallet
 from app.modules.contact.store import insert_message, list_recent
@@ -71,7 +70,7 @@ def _rate_limited(ip: str) -> bool:
     return False
 
 
-def register_contact_routes(app: Robyn) -> None:
+def register_contact_routes(app: Router) -> None:
     """Wire the public contact-submit and admin contact-inbox routes onto app."""
 
     @app.post("/api/v1/contact")

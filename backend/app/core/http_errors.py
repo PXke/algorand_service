@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 
-from robyn import Response
+from app.core.http import Response
 
 from app.core.errors import PlatformError
 
 
 def json_error_response(status: int, code: str, message: str) -> Response:
-    """Build a Robyn Response with a uniform JSON error body."""
+    """Build a JSON error Response with a uniform error body."""
     return Response(
         status_code=status,
         headers={"Content-Type": "application/json"},

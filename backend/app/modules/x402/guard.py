@@ -13,7 +13,6 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from robyn import Request, Response
 from x402.http.types import (
     HTTPRequestContext,
     HTTPResponseInstructions,
@@ -23,6 +22,7 @@ from x402.http.types import (
 from x402.http.x402_http_server import x402HTTPResourceServerSync
 
 from app.core.config import settings
+from app.core.http import Request, Response
 from app.modules.x402.adapter import RobynAdapter
 from app.modules.x402.client import get_resource_server
 

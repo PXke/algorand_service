@@ -20,25 +20,12 @@ class Settings(msgspec.Struct, kw_only=True):
     app_env: str = "dev"
     app_host: str = "0.0.0.0"
     app_port: int = 8080
-    # Robyn concurrency. `processes` = separate OS processes (separate GILs -> true
-    # parallelism for the blocking Cassandra/Redis handlers); `workers` = Actix I/O
-    # worker threads per process. Default 1/1 serialises everything behind one slow
-    # request, so we run several. Tune per box via APP_PROCESSES / APP_WORKERS.
-    app_processes: int = 4
-    # `workers` does NOT size the pool that plain-`def` handlers run in -- measured,
-    # after briefly believing otherwise: 32 concurrent requests are served by 32
-    # distinct Python threads in ONE process whether workers is 2 or 8, so the
-    # runtime hands each sync request its own blocking-pool thread and `workers`
-    # only governs the Rust-side I/O threads above them. Raising it therefore buys
-    # no handler concurrency, and measured slightly worse throughput/p95 at 8+ than
-    # at 4 (more actix threads contending for the same single GIL).
-    #
-    # What actually caps a process is that GIL: sync-handler threads release it
-    # while blocked on a Cassandra/Redis socket, but every request also runs
-    # Robyn's own Python layer plus our decode/encode, and that part serialises.
-    # A 20ms-query handler plateaued at ~110-160 req/s per process regardless of
-    # thread count. So scale with `processes` (one GIL each), not `workers`.
-    app_workers: int = 2
+    # Gunicorn gthread sizing (see deploy/scripts/run_backend.sh). Default 1
+    # worker; threads default to CPU count (nproc) at runtime when unset.
+    app_processes: int = 1
+    app_threads: int = 0  # 0 = use nproc in run_backend.sh
+    # Legacy alias — mapped to GUNICORN_THREADS when APP_THREADS is unset.
+    app_workers: int = 0
 
     # Public-facing site (used to build absolute canonical / OG / sitemap URLs
     # in the SEO-rendered document routes). Override per-env via PUBLIC_SITE_URL.

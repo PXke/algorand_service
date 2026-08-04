@@ -23,7 +23,6 @@ def test_http_status_mapping() -> None:
 
 def test_json_error_response_shape() -> None:
     """json_error_response produces a JSON body with the given code and message."""
-    pytest.importorskip("robyn")
     from app.core.http_errors import json_error_response
 
     resp = json_error_response(400, "invalid_request", "bad input")

@@ -368,14 +368,6 @@ class EditorialBriefCreate(msgspec.Struct, kw_only=True):
     is_special_edition: bool = False
 
 
-class OfficialChannelCreate(msgspec.Struct, kw_only=True):
-    """Request body for adding an official (trusted) channel."""
-
-    kind: Annotated[str, Meta(pattern="^(discord|telegram|mail_domain)$")]
-    channel_id: Annotated[str, Meta(min_length=1, max_length=256)]
-    label: Annotated[str, Meta(max_length=256)] = ""
-
-
 class ClassifierFeedbackCreate(msgspec.Struct, kw_only=True):
     """Request body for recording classifier training feedback."""
 
@@ -490,10 +482,3 @@ class DomainSetRequest(msgspec.Struct, kw_only=True):
     full_site: bool = True
 
 
-class ToolSuggestionResolveRequest(msgspec.Struct, kw_only=True):
-    """Request body for resolving a tool-gap suggestion."""
-
-    # Bulk-resolve every unresolved suggestion for this exact capability name
-    # (the Tool gaps panel groups by capability, so "dismiss this group" is
-    # the natural admin action — not one row at a time).
-    capability: Annotated[str, Meta(min_length=1, max_length=200)]

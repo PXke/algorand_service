@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Refresh npm/Python locks when deploy scope says manifests changed.
+# Refresh npm locks when deploy scope says package.json changed.
+# Python deps are not locked — deploy installs live from pyproject.toml.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -7,7 +8,6 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 BUILD_DIR="$REPO_ROOT/deploy/build"
 
 DEPLOY_SYNC_NPM="${DEPLOY_SYNC_NPM:-0}"
-DEPLOY_SYNC_PYTHON="${DEPLOY_SYNC_PYTHON:-0}"
 # Back-compat if an old shell still exports the Flutter flag.
 DEPLOY_SYNC_FLUTTER="${DEPLOY_SYNC_FLUTTER:-0}"
 [[ "$DEPLOY_SYNC_FLUTTER" == "1" ]] && DEPLOY_SYNC_NPM=1
@@ -34,38 +34,11 @@ _sync_npm() {
   fi
 }
 
-_sync_python() {
-  command -v uv >/dev/null 2>&1 || {
-    echo "warn: uv not found — skipping Python lock refresh" >&2
-    return 0
-  }
-  local lock="$REPO_ROOT/requirements.lock.txt"
-  local before="" after=""
-  [[ -f "$lock" ]] && before=$(sha256sum "$lock" | awk '{print $1}')
-  log "Python lock refresh (pyproject.toml changed)"
-  # Delegate to lock_requirements.sh rather than a second, independently-
-  # maintained `uv pip compile` invocation -- that's exactly what silently
-  # stripped torch/transformers/tiktoken back out of the deployed lock file
-  # 2026-08-02 (this script's own compile call had never been updated when
-  # --extra ml/--extra-index-url/--index-strategy were added there).
-  LOCK_UPGRADE=1 "$SCRIPT_DIR/lock_requirements.sh" >&2
-  [[ -f "$lock" ]] && after=$(sha256sum "$lock" | awk '{print $1}')
-  if [[ "$before" != "$after" ]]; then
-    log "Python lock updated — commit requirements.lock.txt and requirements-dev.lock.txt"
-  fi
-}
-
 main() {
-  if [[ "$DEPLOY_SYNC_NPM" != "1" && "$DEPLOY_SYNC_PYTHON" != "1" ]]; then
+  if [[ "$DEPLOY_SYNC_NPM" != "1" ]]; then
     exit 0
   fi
-  # Plain `if`, not `[[ ... ]] && _sync`: a false test at the END of this
-  # function makes the function (and so the script) exit 1, which deploy.sh's
-  # `set -e` reads as a failed step and aborts the whole deploy — silently,
-  # since nothing printed an error. That fired whenever exactly one of the two
-  # flags was set (an npm-only sync being the common case).
-  if [[ "$DEPLOY_SYNC_NPM" == "1" ]]; then _sync_npm; fi
-  if [[ "$DEPLOY_SYNC_PYTHON" == "1" ]]; then _sync_python; fi
+  _sync_npm
 }
 
 main

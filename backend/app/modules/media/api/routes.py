@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING
 from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
-from robyn import Request, Response, Robyn
 
+from app.core.http import Request, Response, Router
 if TYPE_CHECKING:
     import redis
     import redis.asyncio
@@ -213,7 +213,7 @@ def _fetch_and_optimize(url: str) -> tuple[int, str, bytes]:
     return 200, ctype, data
 
 
-def register_media_routes(app: Robyn) -> None:
+def register_media_routes(app: Router) -> None:
     """Register the cached, size-limited image-proxy endpoint."""
 
     @app.get("/api/v1/img")

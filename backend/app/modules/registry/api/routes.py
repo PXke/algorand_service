@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from robyn import Request, Robyn
-
 from app.core import serialization
+from app.core.http import Request, Router
 from app.modules.registry.services.registry_service import RegistryService
 
 
-def register_registry_routes(app: Robyn) -> None:
+def register_registry_routes(app: Router) -> None:
     """Register the service-registry HTTP routes on the Robyn app."""
     registry_service = RegistryService()
 

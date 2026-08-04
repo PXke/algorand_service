@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 
-from robyn import Request, Response, Robyn
 from x402.extensions.bazaar import declare_discovery_extension
 
 from app.core import serialization
 from app.core.config import settings
+from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
+from app.core.query_params import query_param
 from app.modules.kyc.models.domain import KycError
 from app.modules.kyc.services.consent_message import build_kyc_consent_message
 from app.modules.kyc.services.enrollment_service import EnrollmentService
@@ -53,7 +54,7 @@ def kyc_test_ping(request: Request) -> Response:
 
 def kyc_consent_message(request: Request) -> Response:
     """Free, self-service: proves the requesting wallet's address to itself for the caller to display before they sign. No payment gate — the enrolled wallet is the one who benefits from being listed, not us."""
-    wallet = request.query_params.get("wallet_address") or ""
+    wallet = query_param(request.query_params.get("wallet_address", ""))
     if not wallet:
         return json_error_response(400, "invalid_request", "wallet_address required")
     message = build_kyc_consent_message(wallet_address=wallet)
@@ -86,7 +87,7 @@ def kyc_enroll(request: Request) -> Response:
 
 async def kyc_verify(request: Request) -> Response:
     """The paid product: any third party (an exchange, a faucet, ...) pays to check a wallet's KYC status. Charged whether or not the wallet is enrolled (same as any paid lookup/search API) — the payout to the enrolled wallet only fires on a hit, since there's no subject to reward on a miss. See LookupService for the core rule (payout always goes to the LOOKED-UP wallet, never the payer)."""
-    wallet = request.query_params.get("wallet") or ""
+    wallet = query_param(request.query_params.get("wallet", ""))
     if not wallet:
         return json_error_response(400, "invalid_request", "wallet query param required")
 
@@ -156,7 +157,7 @@ async def kyc_payout_retry(request: Request) -> Response:
     }
 
 
-def register_kyc_routes(app: Robyn) -> None:
+def register_kyc_routes(app: Router) -> None:
     """Register the KYC enrollment, consent-message, x402-gated lookup, and payout-retry routes."""
     app.get("/api/v1/kyc/_test/ping")(kyc_test_ping)
     app.get("/api/v1/kyc/consent-message")(kyc_consent_message)

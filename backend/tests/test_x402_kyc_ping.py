@@ -12,16 +12,14 @@ starting point, not a verified reference, if it needs fixing later.
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("robyn")
 pytest.importorskip("x402")
 
 from typing import Never
 
-import robyn
-from robyn.robyn import QueryParams, Url
 from x402.mechanisms.avm.constants import ALGORAND_TESTNET_CAIP2
 from x402.schemas.payments import PaymentRequirements
 from x402.schemas.responses import SupportedKind, SupportedResponse
@@ -29,23 +27,19 @@ from x402.schemas.v1 import PaymentRequirementsV1
 from x402.server import x402ResourceServerSync
 
 from app.core.config import settings
+from app.core.http import QueryParams, Request
 from app.modules.x402 import client as x402_client
 from app.modules.x402 import guard as x402_guard
 
 
-def _fake_request(headers: dict[str, str] | None = None) -> robyn.Request:
-    return robyn.Request(
-        query_params=QueryParams(),
-        headers=robyn.Headers(headers or {}),
-        path_params={},
-        body="",
+def _fake_request(headers: dict[str, str] | None = None) -> Request:
+    return Request(
         method="GET",
-        url=Url(scheme="http", host="localhost", path="/api/v1/kyc/_test/ping"),
-        form_data={},
-        files={},
-        ip_addr=None,
-        identity=None,
-        session=None,
+        headers=headers or {},
+        query_params=QueryParams(),
+        path_params={},
+        body=b"",
+        url=SimpleNamespace(scheme="http", host="localhost", path="/api/v1/kyc/_test/ping"),
     )
 
 

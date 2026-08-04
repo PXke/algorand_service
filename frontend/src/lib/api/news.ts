@@ -1,4 +1,5 @@
 import { api } from './client'
+import { arrayItemsOf } from './parse'
 
 export type ArticleItem = {
   article_id: string
@@ -18,12 +19,6 @@ export type ArticleItem = {
   views?: number
 }
 
-function itemsOf(body: Record<string, unknown>): ArticleItem[] {
-  const items = body.items
-  if (!Array.isArray(items)) return []
-  return items.filter((x): x is ArticleItem => !!x && typeof x === 'object') as ArticleItem[]
-}
-
 export const newsApi = {
   async fetchFeedPage(opts: {
     limit?: number
@@ -40,7 +35,7 @@ export const newsApi = {
     if (opts.lang) q.set('lang', opts.lang)
     const body = await api.getJson(`/api/v1/news/feed?${q}`)
     return {
-      items: itemsOf(body),
+      items: arrayItemsOf<ArticleItem>(body),
       next_cursor: typeof body.next_cursor === 'string' ? body.next_cursor : null,
     }
   },
@@ -49,7 +44,7 @@ export const newsApi = {
     const q = new URLSearchParams({ limit: String(limit), rank })
     if (lang) q.set('lang', lang)
     const body = await api.getJson(`/api/v1/news/hot?${q}`)
-    return itemsOf(body)
+    return arrayItemsOf<ArticleItem>(body)
   },
 
   async fetchTags(): Promise<{
@@ -67,13 +62,6 @@ export const newsApi = {
   async fetchArticle(id: string, lang?: string): Promise<ArticleItem> {
     const q = lang ? `?lang=${encodeURIComponent(lang)}` : ''
     return (await api.getJson(`/api/v1/news/articles/${id}${q}`)) as ArticleItem
-  },
-
-  async fetchPlacements(slot = 'feed', limit = 5) {
-    const body = await api.getJson(
-      `/api/v1/news/placements?slot=${encodeURIComponent(slot)}&limit=${limit}`,
-    )
-    return itemsOf(body) as unknown as Array<Record<string, unknown>>
   },
 
   async fetchPrice() {

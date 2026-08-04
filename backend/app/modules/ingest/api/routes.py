@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import secrets
+import json
 
 import msgspec
-from robyn import Request, Response, Robyn
 
 from app.core import serialization
 from app.core.config import settings
+from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_response
 from app.modules.ingest.queue import push_signal
 from app.modules.ingest.schemas import IngestSignalRequest
@@ -34,7 +35,7 @@ def _check_ingest_auth(request: Request) -> Response | None:
     return None
 
 
-def register_ingest_routes(app: Robyn) -> None:
+def register_ingest_routes(app: Router) -> None:
     """Register the external ingest-signal endpoint on the app."""
 
     @app.post("/api/v1/ingest/signal")
@@ -44,7 +45,7 @@ def register_ingest_routes(app: Robyn) -> None:
             return denied
 
         try:
-            body = request.json()
+            body = json.loads((request.body or b"{}").decode("utf-8"))
         except Exception:
             return json_error_response(400, "invalid_json", "Request body must be JSON")
 

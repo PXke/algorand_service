@@ -15,11 +15,10 @@ import re
 from collections.abc import Awaitable, Callable
 from uuid import UUID
 
-from robyn import Request, Response, Robyn
-
 from app.core import serialization
 from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS, html_lang_for
 from app.core.config import settings
+from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
 from app.core.tracking import tracking_opted_out_from_headers
@@ -199,7 +198,7 @@ def _response_for_head(response: Response) -> Response:
 
 
 def _mirror_head(
-    app: Robyn,
+    app: Router,
     path: str,
     get_handler: Callable[[Request], Response | Awaitable[Response]],
 ) -> None:
@@ -538,13 +537,13 @@ def _beacon_origin_ok(request: Request) -> bool:
     Skipped when no origins are configured (cors_origins empty = CORS disabled
     for local dev), so this can't lock out a dev setup.
     """
-    from app.core.cors import _origin_allowed
+    from app.core.cors import origin_allowed
 
     allowed = settings.cors_origins
     if not allowed:
         return True
     origin = _header(request, "origin")
-    return bool(origin) and _origin_allowed(origin, allowed)
+    return bool(origin) and origin_allowed(origin, allowed)
 
 
 def beacon_pageview(request: Request) -> Response:
@@ -697,7 +696,7 @@ def sitemap_news(request: Request) -> Response:
     )
 
 
-def register_seo_routes(app: Robyn) -> None:
+def register_seo_routes(app: Router) -> None:
     """Attach the server-rendered SEO document routes (front page, articles, sitemaps) to the app."""
     app.get("/")(home)
     app.get("/news")(news_index)

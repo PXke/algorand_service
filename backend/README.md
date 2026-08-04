@@ -1,4 +1,4 @@
-# Backend (Robyn)
+# Backend (Falcon + Gunicorn)
 
 The public/API + SSR surface of the newspaper platform. All wire schemas are
 `msgspec.Struct` (`app/schemas.py`) — pydantic has been fully removed. All
@@ -10,12 +10,14 @@ never raw `execute()` with inline CQL.
 
 ```bash
 cd backend
-python -m venv .venv
+python3.15t -m venv .venv   # or python3 / python3.15
 source .venv/bin/activate
 pip install -e .
 cp .env.example .env
-python -m app.main
+gunicorn app.falcon_main:app -k app.core.gunicorn_affinity.AffinityThreadWorker --workers 1 --threads "$(nproc)" --bind 127.0.0.1:8080 --reload
 ```
+
+Production uses `deploy/scripts/run_backend.sh` under systemd (see `deploy/systemd/`).
 
 ## Module-first backend structure
 

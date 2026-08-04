@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
-from robyn import Request, Robyn
-
 from app.core import serialization
+from app.core.http import Request, Router
+from app.core.query_params import query_param
 from app.modules.metrics.services.dashboard_service import MetricsDashboardService
 from app.modules.metrics.services.price_service import PriceMetricsService
 
 
-def register_metrics_routes(app: Robyn) -> None:
+def register_metrics_routes(app: Router) -> None:
     """Attach the price-metrics dashboard endpoints to the Robyn app."""
     service = PriceMetricsService()
     dashboard = MetricsDashboardService()
 
     @app.get("/api/v1/metrics/price")
     def price_metrics(request: Request) -> dict:
-        asset_id = request.query_params.get("asset_id", None)
+        asset_id = query_param(request.query_params.get("asset_id", "")) or None
         return serialization.to_builtins(service.get_spot(asset_id=asset_id))
 
     @app.get("/api/v1/metrics/price/history")
@@ -30,8 +30,7 @@ def register_metrics_routes(app: Robyn) -> None:
         from app.modules.metrics.stores.cassandra import load_price_history
 
         asset_id = (
-            (request.query_params.get("asset_id", None) or settings.price_metrics_asset_id)
-            .strip()
+            query_param(request.query_params.get("asset_id", settings.price_metrics_asset_id))
             .lower()
         )
 
@@ -46,5 +45,5 @@ def register_metrics_routes(app: Robyn) -> None:
 
     @app.get("/api/v1/metrics/dashboard")
     def metrics_dashboard(request: Request) -> dict:
-        asset_id = request.query_params.get("asset_id", None)
+        asset_id = query_param(request.query_params.get("asset_id", "")) or None
         return serialization.to_builtins(dashboard.get_dashboard(asset_id=asset_id))

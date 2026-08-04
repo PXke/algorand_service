@@ -9,7 +9,7 @@ User=@SERVICE_USER@
 Group=@SERVICE_USER@
 WorkingDirectory=@TARGET_PATH@/releases/current/workers
 EnvironmentFile=-@TARGET_PATH@/releases/current/workers/.env
-ExecStart=@TARGET_PATH@/venv/bin/celery -A app.celery_app worker --loglevel=INFO -Q default,scrape,pipeline,chain,security --concurrency=4
+ExecStart=/usr/bin/bash @TARGET_PATH@/releases/current/deploy/scripts/run_celery.sh worker
 Restart=on-failure
 RestartSec=5
 # Default SIGTERM is a *warm* shutdown — Celery waits for in-flight tasks, and
@@ -20,6 +20,7 @@ KillSignal=SIGQUIT
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=algorand-platform-celery
 
 [Install]
 WantedBy=multi-user.target

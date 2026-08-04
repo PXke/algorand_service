@@ -86,7 +86,7 @@ main() {
     fi
   fi
 
-  local ch_front=0 ch_back=0 ch_workers=0 ch_schema=0 ch_pyproj=0 ch_pkg=0 ch_deploy=0 ch_pylock=0
+  local ch_front=0 ch_back=0 ch_workers=0 ch_schema=0 ch_pyproj=0 ch_pkg=0 ch_deploy=0
 
   if (( full )); then
     ch_front=1 ch_back=1 ch_workers=1 ch_schema=1 ch_pyproj=1 ch_deploy=1
@@ -98,7 +98,6 @@ main() {
     _any_match "conduit/schema/*" "${files[@]}" && ch_schema=1
     _any_match "backend/pyproject.toml" "${files[@]}" && ch_pyproj=1
     _any_match "workers/pyproject.toml" "${files[@]}" && ch_pyproj=1
-    _any_match "requirements.lock.txt" "${files[@]}" && ch_pylock=1
     _any_match "frontend/package.json" "${files[@]}" && ch_pkg=1
     _any_match "frontend/package-lock.json" "${files[@]}" && ch_pkg=1
     _any_match "deploy/nginx/*" "${files[@]}" && ch_deploy=1
@@ -107,11 +106,8 @@ main() {
     _any_match "deploy/package.sh" "${files[@]}" && ch_deploy=1
   fi
 
-  local sync_npm=0 sync_python=0
+  local sync_npm=0
   [[ "$ch_pkg" == 1 ]] && _any_match "frontend/package.json" "${files[@]}" && sync_npm=1
-  if [[ "$ch_pyproj" == 1 ]]; then
-    sync_python=1
-  fi
 
   local skip_front=0 precompress=0 skip_migrate=0
   if [[ "$ch_front" == 1 ]]; then
@@ -143,7 +139,7 @@ main() {
     log "  schema:    $([[ "$skip_migrate" == 1 ]] && echo skip || echo migrate)"
     log "  nginx:     $(_yn "$ch_deploy")"
     if [[ "$sync_npm" == 1 ]]; then log "  deps:      npm install (package.json changed)"; fi
-    if [[ "$sync_python" == 1 ]]; then log "  deps:      refresh requirements.lock.txt (pyproject changed)"; fi
+    if [[ "$ch_pyproj" == 1 ]]; then log "  deps:      pip install from pyprojects (changed)"; fi
     log "  restart:   backend + workers (release cwd hygiene)"
   fi
 
@@ -154,7 +150,7 @@ main() {
   _export DEPLOY_CHANGED_SCHEMA "$ch_schema"
   _export DEPLOY_CHANGED_DEPLOY_CONFIG "$ch_deploy"
   _export DEPLOY_SYNC_NPM "$sync_npm"
-  _export DEPLOY_SYNC_PYTHON "$sync_python"
+  _export DEPLOY_CHANGED_PYPROJECT "$ch_pyproj"
   _export SKIP_FRONTEND_BUILD "$skip_front"
   _export PACKAGE_PRECOMPRESS "$precompress"
   _export DEPLOY_SKIP_MIGRATE "$skip_migrate"

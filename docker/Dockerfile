@@ -23,15 +23,15 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY pyproject.toml .
-COPY requirements.lock.txt requirements-dev.lock.txt .
 COPY backend/pyproject.toml backend/
 COPY workers/pyproject.toml workers/
+# Resolve live from pyprojects (no lock file). CPU torch index for [ml].
 RUN if [ "$PLATFORM_DEV" = "1" ]; then \
-      pip install -r requirements-dev.lock.txt \
-      && pip install --no-deps "./backend[dev]" ./workers; \
+      pip install --upgrade --extra-index-url https://download.pytorch.org/whl/cpu \
+        "./backend[dev]" "./workers[ml,dev]"; \
     else \
-      pip install -r requirements.lock.txt \
-      && pip install --no-deps ./backend ./workers; \
+      pip install --upgrade --extra-index-url https://download.pytorch.org/whl/cpu \
+        ./backend "./workers[ml]"; \
     fi
 
 # Playwright Chromium for worker browser scraper (hard targets / Discord web).
