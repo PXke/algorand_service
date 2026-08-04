@@ -286,13 +286,68 @@ def _translate_block(text: str, target_language: str, engine: str) -> str:
     translate_fn = _translate_text_seamless if engine == "seq2seq" else _translate_text_milmmt
     if heading:
         prefix, content = heading.group(1), heading.group(2)
-        return prefix + translate_fn(content, target_language)
-    if engine == "seq2seq":
-        if _is_table_block(text):
-            return _translate_table_block_seamless(text, target_language)
-        if _is_list_block(text):
-            return _translate_list_block_seamless(text, target_language)
-    return translate_fn(text, target_language)
+        translated_content = translate_fn(content, target_language)
+        translated = prefix + translated_content if translated_content.strip() else ""
+    elif engine == "seq2seq" and _is_table_block(text):
+        translated = _translate_table_block_seamless(text, target_language)
+    elif engine == "seq2seq" and _is_list_block(text):
+        translated = _translate_list_block_seamless(text, target_language)
+    else:
+        translated = translate_fn(text, target_language)
+    if not translated.strip():
+        # The engine returned nothing for a non-empty source block. Silently
+        # keeping that empty string here would drop the block wholesale --
+        # translated_blocks are just joined by position in
+        # _translate_article_no_lock, so an empty entry vanishes from the
+        # published body with nothing to show it was ever there. Found
+        # 2026-08-04: a whole 3-row table (explaining forward/reverse
+        # resolution and vaults) disappeared from a French NFDomains
+        # translation this way, published with no error and no trace in any
+        # log. Falling back to the source text keeps the content intact --
+        # a stray English block inside an otherwise-translated article is a
+        # visible, known degradation; a silently missing table is not.
+        logger.warning(
+            "local translation of a block returned empty (lang=%s engine=%s); falling back to source text",
+            target_language,
+            engine,
+        )
+        return text
+    return translated
+
+
+def _log_alignment_findings(english_body: str, translated_body: str, target_language: str) -> None:
+    """Best-effort observability: log (never raise, never block) any structural/digit drift found in a completed translation.
+
+    translation_eval.py's structural_alignment/digit_consistency checks
+    previously existed only in the offline eval harness -- real production
+    defects (a dropped citation link, a scrambled list item) were only ever
+    found by an ad-hoc manual audit, invisible otherwise. This does not fix
+    or reject anything; it exists so a real defect shows up in logs instead
+    of requiring another manual audit to notice. Lazy import: translation_eval
+    imports from this module at its own top level, so a top-level import here
+    would be circular.
+    """
+    try:
+        from app.modules.ai.translation_eval import digit_consistency, structural_alignment
+
+        structure = structural_alignment(english_body, translated_body)
+        digits = digit_consistency(english_body, translated_body)
+        problems = []
+        if not structure.block_count_matches:
+            problems.append("block count mismatch")
+        if structure.row_diffs:
+            problems.append(f"{len(structure.row_diffs)} row-count diff(s)")
+        if digits.ungrounded:
+            problems.append(f"{len(digits.ungrounded)} ungrounded digit(s)")
+        if problems:
+            logger.warning(
+                "translation alignment findings lang=%s: %s (read-only signal, not enforced -- "
+                "some findings are known false positives, e.g. reformatted currency figures)",
+                target_language,
+                "; ".join(problems),
+            )
+    except Exception:
+        logger.warning("alignment-findings check itself failed (fail-open)", exc_info=True)
 
 
 def _translate_article_no_lock(
@@ -320,11 +375,14 @@ def _translate_article_no_lock(
         else ""
     )
     translated_blocks = [_translate_block(b, target_language, engine) for b in blocks]
+    translated_body = "\n\n".join(translated_blocks).strip() or english_body
+
+    _log_alignment_findings(english_body, translated_body, target_language)
 
     return {
         "title": title.strip() or english_title,
         "summary": summary.strip() or english_summary,
-        "body": "\n\n".join(translated_blocks).strip() or english_body,
+        "body": translated_body,
     }
 
 

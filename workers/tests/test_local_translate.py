@@ -272,3 +272,93 @@ def test_translate_block_plain_paragraph_untouched_by_splitting(
     text = "Just a sentence with a dash - not a list."
     lt._translate_block(text, "ps", "seq2seq")
     assert calls == [text]
+
+
+def test_translate_block_falls_back_to_source_on_empty_milmmt_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whole-block MiLMMT call that returns nothing (found 2026-08-04: a real 3-row table vanished from a French article this way) keeps the English source instead of silently dropping the block."""
+    monkeypatch.setattr(lt, "_translate_text_milmmt", lambda _text, _lang: "")
+    table = "| Concept | Meaning |\n| --- | --- |\n| Vaults | Hold assets |"
+    result = lt._translate_block(table, "fr", "milmmt")
+    assert result == table
+
+
+def test_translate_block_falls_back_to_source_on_whitespace_only_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whitespace-only model output is treated the same as truly empty output."""
+    monkeypatch.setattr(lt, "_translate_text_milmmt", lambda _text, _lang: "   \n  ")
+    text = "A paragraph that deserves a real translation."
+    result = lt._translate_block(text, "fr", "milmmt")
+    assert result == text
+
+
+def test_translate_block_falls_back_to_source_on_empty_seq2seq_heading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback applies to the heading path too, not just the whole-block path."""
+    monkeypatch.setattr(lt, "_translate_text_seamless", lambda _text, _lang: "")
+    heading = "## A Real Heading"
+    result = lt._translate_block(heading, "ps", "seq2seq")
+    assert result == heading
+
+
+def test_translate_block_keeps_real_translation_when_non_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback must never trigger on a normal, successful translation."""
+    monkeypatch.setattr(lt, "_translate_text_milmmt", lambda _text, _lang: "Bonjour le monde")
+    result = lt._translate_block("Hello world", "fr", "milmmt")
+    assert result == "Bonjour le monde"
+
+
+# --- alignment-findings observability ----------------------------------------
+
+
+def test_log_alignment_findings_warns_on_block_count_mismatch(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A translation missing a whole block (the real NFDomains defect this exists to catch) is logged, not silent."""
+    with caplog.at_level("WARNING", logger=lt.logger.name):
+        lt._log_alignment_findings(
+            "## Heading\n\nFirst paragraph.\n\n## Second heading\n\nSecond paragraph.",
+            "## Heading\n\nFirst paragraph.",
+            "fr",
+        )
+    assert any("block count mismatch" in r.message for r in caplog.records)
+
+
+def test_log_alignment_findings_silent_on_clean_translation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A translation with matching structure and grounded digits logs nothing -- this is a signal, not noise on every call."""
+    with caplog.at_level("WARNING", logger=lt.logger.name):
+        lt._log_alignment_findings("Just a plain paragraph with no numbers.", "Juste un paragraphe.", "fr")
+    assert not caplog.records
+
+
+def test_log_alignment_findings_never_raises_when_the_check_itself_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bug in the eval-harness functions must never break the translation write path that calls this."""
+
+    def _boom(*_a: object, **_kw: object) -> None:
+        raise RuntimeError("eval harness bug")
+
+    monkeypatch.setattr("app.modules.ai.translation_eval.structural_alignment", _boom)
+    lt._log_alignment_findings("English body.", "Corps français.", "fr")  # must not raise
+
+
+def test_translate_article_no_lock_calls_alignment_findings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The observability check runs as part of the normal per-language translation flow, not just when called directly."""
+    calls: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(lt, "_log_alignment_findings", lambda en, tr, lang: calls.append((en, tr, lang)))
+    monkeypatch.setattr(lt, "_translate_block", lambda text, _lang, _engine: text.upper())
+
+    lt._translate_article_no_lock(
+        english_title="T", english_summary="S", english_body="Body.", target_language="fr"
+    )
+
+    assert len(calls) == 1
+    assert calls[0][2] == "fr"
