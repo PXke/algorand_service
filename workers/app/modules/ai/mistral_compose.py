@@ -658,21 +658,44 @@ _SPECIAL_EDITION_STAGE2_OVERRIDE = (
 )
 
 
-def _build_stage2_user(*, user: str, digest: str, is_special_edition: bool = False) -> str:
-    """Stage-2 user prompt: digest-only ground truth (no raw tool trace)."""
+_OUTLINE_FOLLOW_INSTRUCTION = (
+    "\n\nA Narrative Outline is included below (Throughline, planned Sections, "
+    "and Contrasts & Tensions To Keep). Use it as your organizing structure — "
+    "follow its section order and throughline, and make sure every contrast "
+    "or tension it names survives into the prose. It is a plan, not a "
+    "constraint on wording: adjust section boundaries if the material reads "
+    "better differently, but don't silently drop something it flags."
+)
+
+
+def _build_stage2_user(
+    *,
+    user: str,
+    digest: str,
+    is_special_edition: bool = False,
+    enumeration: str = "",
+    outline: str = "",
+) -> str:
+    """Stage-2 user prompt: digest-only ground truth (no raw tool trace). ``enumeration``/``outline`` (special-edition only, see _run_special_edition_deepening) are appended as additional structured ground truth and an organizing plan, on top of the digest."""
     narrative_guidance = _NARRATIVE_GUIDANCE + (
         _SPECIAL_EDITION_STAGE2_OVERRIDE if is_special_edition else ""
     )
+    extra_blocks = ""
+    if enumeration.strip():
+        extra_blocks += f"\n\n{enumeration}"
+    if outline.strip():
+        extra_blocks += f"\n\n{outline}" + _OUTLINE_FOLLOW_INSTRUCTION
     if digest.strip():
         return (
             user + "\n\n## Research Digest (PRIMARY AND ONLY ground truth for external facts):\n"
-            f"{digest}\n\n"
-            "Write the article strictly from this digest plus any source material above. "
+            f"{digest}"
+            + extra_blocks
+            + "\n\nWrite the article strictly from this material above. "
             "You cannot call tools or fetch additional pages.\n"
             + narrative_guidance
             + " Write it now."
         )
-    return user + narrative_guidance + " Write it now."
+    return user + extra_blocks + narrative_guidance + " Write it now."
 
 
 _RESEARCH_DIGEST_SYNTHESIS = (
@@ -2001,6 +2024,221 @@ def _run_digest_gap_fill(
     return _synthesize_research_digest(trace=trace, research_context=stage1_user)
 
 
+# --- Special-edition-only deepening: enumerate -> targeted gap-fill -> outline
+#
+# 2026-08-04 (owner request, after a special-edition recompose came out
+# shorter than two prior ordinary-tier versions of the same article): a
+# prose Research Digest can bury a coverage gap in a paragraph, and its own
+# "Unresolved Gaps" section is capped at 3 generic items. An explicit
+# structured enumeration forces an accounting of every named person/place/
+# date/service/number found so far, surfaces gaps a prose summary would
+# miss, and gives a concrete outline for Stage 2 to write FROM instead of
+# synthesizing organization cold from a raw digest.
+
+_ENTITY_ENUMERATION_PROMPT = (
+    "Research phase producing a structured ACCOUNTING, not the article. From "
+    "everything found so far (raw trace + digest below), enumerate every "
+    "distinct, named thing worth tracking for this special edition. Output "
+    "Markdown ONLY, exactly these sections:\n\n"
+    "## Entity Enumeration\n\n"
+    "### People\n"
+    "- Name — role/affiliation — what they're known for in this story — "
+    "source. If none named, write exactly: None\n\n"
+    "### Places\n"
+    "- Country/region/city — why it matters to this story — source. If none "
+    "named, write exactly: None\n\n"
+    "### Dates & Events\n"
+    "- Date — what happened — source. Order chronologically. If none, write "
+    "exactly: None\n\n"
+    "### Services, Products & Organizations\n"
+    "- Name — what it is/does — its role in this story — source. If none, "
+    "write exactly: None\n\n"
+    "### Key Numbers\n"
+    "- The figure — what it measures — source — whether independently "
+    "verified (on-chain/primary document) or only self-reported/secondhand. "
+    "If none, write exactly: None\n\n"
+    "### Coverage Gaps\n"
+    "- For each entity above where something material is missing (a person "
+    "with no stated role, a date with no confirmed source, a service with "
+    "no verified current numbers, a self-reported figure with no "
+    "independent check attempted), name the SPECIFIC missing fact and what "
+    "kind of tool call might resolve it. Up to 5. A gap you could have just "
+    "gone and checked already does not belong here. If genuinely nothing "
+    "material is missing, write exactly: None\n\n"
+    "Do not write the article."
+)
+
+
+def _run_entity_enumeration(*, trace: list[dict], digest: str) -> str:
+    """Structured People/Places/Dates/Services/Numbers accounting, synthesized from the trace + digest already gathered. Same lightweight digest-tier client as _synthesize_research_digest -- this is synthesis over already-fetched material, not new research. Empty trace or any failure yields "" (caller treats that as no enumeration available, never a hard failure)."""
+    raw_trace = _format_research_digest(trace)
+    if not raw_trace.strip():
+        return ""
+    try:
+        from app.core.config import MISTRAL_TEMP_RESEARCH
+
+        digest_client = get_mistral_digest_client()
+        enumeration = digest_client.chat_completion(
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        f"Research Digest so far:\n{digest}\n\n"
+                        "Raw tool trace (reference — synthesize, do not dump verbatim):\n"
+                        f"{raw_trace}\n\n{_ENTITY_ENUMERATION_PROMPT}"
+                    ),
+                },
+            ],
+            json_object=False,
+            temperature=MISTRAL_TEMP_RESEARCH,
+        )
+        return (enumeration or "").strip()
+    except Exception:
+        logger.warning("entity enumeration failed; continuing without it", exc_info=True)
+        return ""
+
+
+def _extract_enumeration_gaps(enumeration: str) -> str:
+    """Pull the '### Coverage Gaps' section out of an entity enumeration -- the signal that tells the compose loop whether a second, more targeted gap-fill research pass is worth running. Mirrors _extract_unresolved_gaps' parsing exactly, over a different section name."""
+    marker = "### Coverage Gaps"
+    idx = enumeration.find(marker)
+    if idx == -1:
+        return ""
+    section = enumeration[idx + len(marker) :]
+    next_heading = section.find("\n### ")
+    if next_heading != -1:
+        section = section[:next_heading]
+    section = section.strip().strip("-").strip()
+    if not section or section.lower().rstrip(".") == "none":
+        return ""
+    return section
+
+
+def _enumeration_gap_fill_nudge(gaps: str) -> str:
+    """A second, more targeted research pass beyond the plain digest gap-fill -- these gaps came from an explicit per-entity accounting (a specific person/date/service/number), not a generic 3-item cap on a prose summary."""
+    return (
+        "\n\nSTOP — the entity enumeration flagged specific coverage gaps; make "
+        f"one real attempt at resolving them before moving on:\n{gaps}\n\n"
+        "Call whichever tools could plausibly answer them. If a tool call does "
+        "not turn up the answer, that is a legitimate, acceptable outcome — do "
+        "NOT guess or recall the answer from memory/training instead. Stop "
+        "once you have made a genuine attempt at each gap."
+    )
+
+
+def _run_enumeration_gap_fill(
+    research_mistral: MistralClient,
+    system: str,
+    stage1_user: str,
+    research_schemas: list[dict],
+    research_handlers: dict,
+    trace: list,
+    debug: dict,
+    gaps: str,
+) -> None:
+    """One bounded extra tool-calling pass targeting the entity enumeration's own Coverage Gaps -- distinct from (and runs after) the plain digest gap-fill, since the enumeration surfaces gaps a prose digest's generic cap can miss entirely."""
+    from app.core.config import (
+        MISTRAL_TEMP_RESEARCH,
+        SPECIAL_EDITION_ENUMERATION_GAP_FILL_MAX_ROUNDS,
+    )
+
+    research_mistral.chat_with_tools(
+        [
+            {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
+            {"role": "user", "content": stage1_user + _enumeration_gap_fill_nudge(gaps)},
+        ],
+        tools=research_schemas,
+        handlers=research_handlers,
+        trace=trace,
+        debug=debug,
+        temperature=MISTRAL_TEMP_RESEARCH,
+        require_tool=None,
+        max_rounds=SPECIAL_EDITION_ENUMERATION_GAP_FILL_MAX_ROUNDS,
+        finalize_on_exhaustion=False,
+    )
+
+
+_NARRATIVE_OUTLINE_PROMPT = (
+    "Research, digest, and entity enumeration are complete. Before writing, "
+    "produce a narrative OUTLINE — not the article itself. Output Markdown "
+    "ONLY, exactly these sections:\n\n"
+    "## Narrative Outline\n\n"
+    "### Throughline\n"
+    "- One or two sentences: the single throughline connecting every section "
+    "below — what is this piece actually ABOUT, beyond a list of facts?\n\n"
+    "### Sections\n"
+    "- For each proposed section, in writing order: a working header, which "
+    "specific entities/facts from the enumeration it covers, and the ONE "
+    "thing a reader should take from it. Plan only — do not write prose.\n\n"
+    "### Contrasts & Tensions To Keep\n"
+    "- Any genuine contrast or tension surfaced in research (verified vs. "
+    "self-reported, deployed vs. only announced, a criticism alongside a "
+    "claim) that must survive into the write, not get smoothed over for a "
+    "cleaner narrative. If none, write exactly: None"
+)
+
+
+def _run_narrative_outline(*, digest: str, enumeration: str) -> str:
+    """A concrete section-by-section plan for Stage 2 to write from, instead of synthesizing organization cold from a raw digest. Same lightweight digest-tier client as digest synthesis -- this is planning over already-gathered material, not new research. Empty on failure (caller treats a missing outline as "write from the digest alone," never a hard failure)."""
+    if not digest.strip() and not enumeration.strip():
+        return ""
+    try:
+        from app.core.config import MISTRAL_TEMP_RESEARCH
+
+        digest_client = get_mistral_digest_client()
+        outline = digest_client.chat_completion(
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        f"Research Digest:\n{digest}\n\nEntity Enumeration:\n{enumeration}\n\n"
+                        f"{_NARRATIVE_OUTLINE_PROMPT}"
+                    ),
+                },
+            ],
+            json_object=False,
+            temperature=MISTRAL_TEMP_RESEARCH,
+        )
+        return (outline or "").strip()
+    except Exception:
+        logger.warning("narrative outline synthesis failed; continuing without it", exc_info=True)
+        return ""
+
+
+def _run_special_edition_deepening(
+    research_mistral: MistralClient,
+    system: str,
+    stage1_user: str,
+    research_schemas: list[dict],
+    research_handlers: dict,
+    trace: list,
+    debug: dict,
+    digest: str,
+) -> tuple[str, str, str]:
+    """Special-edition-only Stage 1c/1d: enumerate -> targeted gap-fill -> re-synthesize digest -> outline. Returns (digest, enumeration, outline); any disabled/failed step degrades gracefully (empty enumeration/outline, unchanged digest) rather than blocking the compose."""
+    from app.core.config import SPECIAL_EDITION_OUTLINE_ENABLED
+
+    if not SPECIAL_EDITION_OUTLINE_ENABLED:
+        return digest, "", ""
+
+    enumeration = _run_entity_enumeration(trace=trace, digest=digest)
+    gaps = _extract_enumeration_gaps(enumeration) if enumeration else ""
+    if gaps:
+        _run_enumeration_gap_fill(
+            research_mistral,
+            system,
+            stage1_user,
+            research_schemas,
+            research_handlers,
+            trace,
+            debug,
+            gaps,
+        )
+        digest = _synthesize_research_digest(trace=trace, research_context=stage1_user)
+    outline = _run_narrative_outline(digest=digest, enumeration=enumeration)
+    return digest, enumeration, outline
+
+
 def _append_stage2_debug_turn(debug: dict, digest: str, payload: dict) -> None:
     """The warm pass runs outside the tool loop, so its turn isn't in the debug transcript — add it so Sessions shows the draft. Store the ACTUAL digest text (not a placeholder): it's the only place to audit whether the research→write handoff (small-model synthesis) preserved or lost/garbled facts from the raw trace — previously this turn was a stub and the digest was never visible anywhere, so a bad handoff was undiagnosable after the fact."""
     if not isinstance(debug.get("messages"), list):
@@ -2089,8 +2327,32 @@ def _run_two_stage_compose(
         debug,
         digest,
     )
-    checkpoint("writing")  # research (+ gap-fill) done, now generating
-    gen_user = _build_stage2_user(user=user, digest=digest, is_special_edition=is_special_edition)
+    # Stage 1c/1d — special-edition-only: enumerate every named entity found
+    # (surfaces coverage gaps a prose digest's generic 3-item cap can miss),
+    # a second targeted gap-fill pass on exactly those, then a narrative
+    # outline so Stage 2 writes FROM a concrete structure instead of
+    # synthesizing organization cold from a raw digest.
+    enumeration = ""
+    outline = ""
+    if is_special_edition:
+        digest, enumeration, outline = _run_special_edition_deepening(
+            research_mistral,
+            system,
+            stage1_user,
+            research_schemas,
+            research_handlers,
+            trace,
+            debug,
+            digest,
+        )
+    checkpoint("writing")  # research (+ gap-fill/deepening) done, now generating
+    gen_user = _build_stage2_user(
+        user=user,
+        digest=digest,
+        is_special_edition=is_special_edition,
+        enumeration=enumeration,
+        outline=outline,
+    )
     gen_system = system + _STAGE2_GENERATION_GUIDANCE
     payload = mistral.chat_json_object(
         [

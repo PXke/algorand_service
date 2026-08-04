@@ -362,6 +362,18 @@ DIGEST_GAP_FILL_ENABLED = env_bool("DIGEST_GAP_FILL_ENABLED", True)
 # dead/quiet NFT marketplaces) hit this exact ceiling mid-gap-fill and never
 # got a real shot at resolving its flagged gaps.
 DIGEST_GAP_FILL_MAX_ROUNDS = env_int("DIGEST_GAP_FILL_MAX_ROUNDS", 8)
+# Special-edition-only deepening pass (2026-08-04, owner request): a
+# structured Entity Enumeration (people/places/dates/services/numbers, each
+# with an explicit "what's missing" call-out) surfaces coverage gaps a
+# prose digest's generic 3-gap cap can miss, a SECOND targeted gap-fill round
+# closes them, and a Narrative Outline gives Stage 2 a concrete structure to
+# write from instead of synthesizing organization from a raw digest cold.
+# Three extra Mistral calls per special edition -- acceptable given the
+# already-higher special-edition budget (4x research rounds/floor already).
+SPECIAL_EDITION_OUTLINE_ENABLED = env_bool("SPECIAL_EDITION_OUTLINE_ENABLED", True)
+SPECIAL_EDITION_ENUMERATION_GAP_FILL_MAX_ROUNDS = env_int(
+    "SPECIAL_EDITION_ENUMERATION_GAP_FILL_MAX_ROUNDS", 8
+)
 # A compose_session stuck in a non-terminal status (researching/writing) this
 # long is dead, not slow — the compose task's own hard time limit
 # (CELERY_TASK_TIME_LIMIT, 1860s/31min) means a crash that skips the

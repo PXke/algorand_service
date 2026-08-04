@@ -309,6 +309,73 @@ class TestExtractUnresolvedGaps:
         assert "irrelevant trailing section" not in gaps
 
 
+class TestExtractEnumerationGaps:
+    """Extracting the entity enumeration's Coverage Gaps section for the enumeration-driven gap-fill pass. Mirrors TestExtractUnresolvedGaps' cases exactly, over the '### Coverage Gaps' heading _run_entity_enumeration's prompt asks for."""
+
+    def test_none_returns_empty(self) -> None:
+        """A literal 'None' body returns an empty string."""
+        enumeration = "## Entity Enumeration\n\n### Coverage Gaps\n- None\n"
+        assert mc._extract_enumeration_gaps(enumeration) == ""
+
+    def test_missing_section_returns_empty(self) -> None:
+        """An enumeration missing the Coverage Gaps section returns an empty string."""
+        enumeration = "## Entity Enumeration\n\n### People\n- Jane Doe — CEO — source\n"
+        assert mc._extract_enumeration_gaps(enumeration) == ""
+
+    def test_real_gaps_extracted(self) -> None:
+        """Real gap bullets under Coverage Gaps are extracted."""
+        enumeration = (
+            "## Entity Enumeration\n\n"
+            "### People\n- Jane Doe — CEO — source\n\n"
+            "### Coverage Gaps\n"
+            "- Jane Doe's tenure start date is unconfirmed; a fetch of the "
+            "company's About page could confirm.\n"
+        )
+        gaps = mc._extract_enumeration_gaps(enumeration)
+        assert "tenure start date" in gaps
+        assert "People" not in gaps
+
+    def test_stops_at_next_heading(self) -> None:
+        """Extraction stops at the next section heading."""
+        enumeration = (
+            "### Coverage Gaps\n- the launch date is unconfirmed\n\n"
+            "### Trailing Section\n- irrelevant\n"
+        )
+        gaps = mc._extract_enumeration_gaps(enumeration)
+        assert "launch date" in gaps
+        assert "Trailing Section" not in gaps
+        assert "irrelevant" not in gaps
+
+
+def test_enumeration_gap_fill_nudge_states_the_gaps_and_bans_guessing() -> None:
+    """The nudge sent for the enumeration-driven gap-fill pass names the specific gaps and forbids answering from memory, same guardrail as the plain digest gap-fill nudge."""
+    nudge = mc._enumeration_gap_fill_nudge("- the launch date is unconfirmed")
+    assert "the launch date is unconfirmed" in nudge
+    assert "do NOT guess" in nudge or "NOT guess" in nudge
+
+
+def test_build_stage2_user_injects_enumeration_and_outline() -> None:
+    """enumeration/outline (special-edition only) are appended as extra structured ground truth and an organizing plan, on top of the digest."""
+    user = mc._build_stage2_user(
+        user="base",
+        digest="## Verified Facts\n- fact",
+        is_special_edition=True,
+        enumeration="## Entity Enumeration\n\n### People\n- Jane Doe",
+        outline="## Narrative Outline\n\n### Throughline\n- the piece is about X",
+    )
+    assert "Jane Doe" in user
+    assert "the piece is about X" in user
+    assert "organizing structure" in user
+
+
+def test_build_stage2_user_without_enumeration_or_outline_omits_them() -> None:
+    """When the deepening pass produced nothing (disabled or failed), no extra blocks or outline-follow instruction leak into the prompt."""
+    user = mc._build_stage2_user(
+        user="base", digest="## Verified Facts\n- fact", is_special_edition=True
+    )
+    assert "organizing structure" not in user
+
+
 def test_title_rule_avoids_leading_headline_with_unflattering_number() -> None:
     """The CompX clAMM draft (2026-07-14): the writer led the HEADLINE itself with '$2.28K TVL' — factually honest, but it turned a legitimate feature launch into a headline about how small the project still is. The title rule's "prefer a specific verified number" clause needs an exception for small/unflattering numbers, distinct from NUMERIC HONESTY (which governs the body, not headline choice). _ARTICLE_FORMAT_RULES feeds the shared `system` prompt used by both the single-stage and Stage 2 (gen_system = system + _STAGE2_GENERATION_GUIDANCE) paths, so one rule here covers both — no _NARRATIVE_GUIDANCE duplication needed, unlike _TOOLS_GUIDANCE-only rules."""
     assert "tiny TVL" in mc._ARTICLE_FORMAT_RULES
