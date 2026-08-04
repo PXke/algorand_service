@@ -1432,17 +1432,23 @@ def _classify_publish_outcome(result: dict) -> str | None:
     vetoes, compose failures, and edit-window fallbacks either never reached
     "ok" at all (nothing to overwrite) or already carry a self-explanatory
     status of their own (aborted_by_writer, error, credit_insufficient) --
-    only these three "a draft WAS produced, then a decision was made about
-    it" cases need translating.
+    only "a draft WAS produced, then a decision was made about it" cases
+    need translating. Covers both the create path's vocabulary (published/
+    review/duplicate) and the article-edit path's (edited/failed) -- caught
+    live 2026-08-04 when the Humanitarian Network special edition's own
+    recompose landed as "edited" and this function didn't recognize it,
+    leaving its session stuck at the same ambiguous "ok" this exists to fix.
     """
     status = str(result.get("status", ""))
     reason = str(result.get("reason", "") or result.get("hold_reason", ""))
-    if status in ("published", "approved_backlog", "auto_applied"):
+    if status in ("published", "approved_backlog", "auto_applied", "edited"):
         return "published"
     if status == "review":
         return "on_hold"
     if status == "duplicate":
         return f"rejected:{reason}" if reason else "rejected"
+    if status == "failed":
+        return f"rejected:{reason}" if reason else "rejected:failed"
     return None
 
 

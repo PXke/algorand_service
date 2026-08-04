@@ -14,12 +14,15 @@ from app.modules.newspaper.tasks import publish_tasks as pt
         ({"status": "published"}, "published"),
         ({"status": "approved_backlog"}, "published"),
         ({"status": "auto_applied"}, "published"),
+        ({"status": "edited"}, "published"),
         ({"status": "review"}, "on_hold"),
         (
             {"status": "duplicate", "reason": "same_facts_as_own_recent_article"},
             "rejected:same_facts_as_own_recent_article",
         ),
         ({"status": "duplicate"}, "rejected"),
+        ({"status": "failed", "reason": "update_failed"}, "rejected:update_failed"),
+        ({"status": "failed"}, "rejected:failed"),
     ],
 )
 def test_classify_publish_outcome_maps_known_terminal_statuses(
