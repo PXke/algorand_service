@@ -249,6 +249,49 @@ def record_compose_session(
 _NON_TERMINAL_STATUSES = ("researching", "writing")
 
 
+def finalize_compose_session_outcome(source_url: str, outcome: str) -> bool:
+    """Overwrite a compose session's terminal status='ok' with the real publish decision (e.g. "published", "on_hold", "rejected:same_facts_as_own_recent_article") made afterward by publish_from_queued_row -- a separate function compose_sessions previously had no way to report back to.
+
+    Root-caused 2026-08-04 (GoPlausible): "ok" only ever meant "the compose
+    produced a JSON payload without crashing" -- it said nothing about
+    whether that draft was published, held for review, or rejected as a
+    duplicate, so a rejected draft and a published one were indistinguishable
+    in the admin Sessions view. Every OTHER terminal status (aborted_by_writer,
+    error, credit_insufficient, stale, fallback) is already a complete answer
+    on its own and is intentionally left untouched here.
+
+    Only ever touches the MOST RECENT status='ok' row for this source_url --
+    safe because every compose is globally serialized by compose_lock, so at
+    most one row is a real candidate in practice. No-op (returns False)
+    if no such row exists, e.g. the compose never reached status='ok' at all.
+    """
+    if not source_url or not outcome:
+        return False
+    try:
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ToolInsightStmts
+
+        session = get_cassandra_session()
+        rows = session.execute(ToolInsightStmts.LIST_ALL_SUMMARY, (_BUCKET,))
+        target = None
+        for row in rows:
+            if (
+                row.status == "ok"
+                and (row.source_url or "") == source_url
+                and (target is None or row.created_at > target.created_at)
+            ):
+                target = row
+        if target is None:
+            return False
+        session.execute(
+            ToolInsightStmts.MARK_STALE, (outcome[:64], _BUCKET, target.created_at, target.session_id)
+        )
+        return True
+    except Exception:
+        logger.warning("failed to finalize compose session outcome for %s", source_url, exc_info=True)
+        return False
+
+
 def reap_stale_compose_sessions(*, stale_minutes: int | None = None) -> dict[str, int]:
     """Mark any compose_sessions row still stuck in a non-terminal status (researching/writing) past the staleness window as "stale". A crash that skips mistral_compose's own try/except checkpoint finalizers (killed process, OOM, or an exception before the first checkpoint call) otherwise leaves the row looking perpetually in-progress in the admin Sessions view until the table's 7-day TTL quietly drops it. Best-effort, never raises."""
     from datetime import UTC, datetime, timedelta

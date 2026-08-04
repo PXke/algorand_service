@@ -1422,8 +1422,51 @@ def _finalize_publish(
     }
 
 
-@single_flight(lambda row, **_kw: f"compose:{row.queue_id}", ttl=1800)
+def _classify_publish_outcome(result: dict) -> str | None:
+    """The compose_sessions terminal status a publish_from_queued_row outcome should be finalized to, or None to leave any "ok" row alone.
+
+    Root-caused 2026-08-04 (GoPlausible): "ok" only means the compose
+    produced a JSON payload without crashing -- it says nothing about
+    whether that draft got published, held, or rejected, so the two looked
+    identical in the admin Sessions view. Deliberately narrow: pre-compose
+    vetoes, compose failures, and edit-window fallbacks either never reached
+    "ok" at all (nothing to overwrite) or already carry a self-explanatory
+    status of their own (aborted_by_writer, error, credit_insufficient) --
+    only these three "a draft WAS produced, then a decision was made about
+    it" cases need translating.
+    """
+    status = str(result.get("status", ""))
+    reason = str(result.get("reason", "") or result.get("hold_reason", ""))
+    if status in ("published", "approved_backlog", "auto_applied"):
+        return "published"
+    if status == "review":
+        return "on_hold"
+    if status == "duplicate":
+        return f"rejected:{reason}" if reason else "rejected"
+    return None
+
+
 def publish_from_queued_row(
+    row: QueuedPublishRow,
+    *,
+    publish_tier: PublishTier | None = None,
+    enforce_domain_cap: bool = True,
+) -> dict[str, str]:
+    """Compose and insert one queue item (caller marks queue done); thin wrapper around _publish_from_queued_row_impl that also finalizes the compose session's status='ok' placeholder into the real publish decision (see _classify_publish_outcome)."""
+    result = _publish_from_queued_row_impl(
+        row, publish_tier=publish_tier, enforce_domain_cap=enforce_domain_cap
+    )
+    outcome = _classify_publish_outcome(result)
+    if outcome:
+        with contextlib.suppress(Exception):
+            from app.modules.ai.tool_insights_store import finalize_compose_session_outcome
+
+            finalize_compose_session_outcome(row.scrape_url, outcome)
+    return result
+
+
+@single_flight(lambda row, **_kw: f"compose:{row.queue_id}", ttl=1800)
+def _publish_from_queued_row_impl(
     row: QueuedPublishRow,
     *,
     publish_tier: PublishTier | None = None,

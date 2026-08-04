@@ -576,10 +576,10 @@ class ToolInsightStmts:
         "UPDATE algorand_platform.tool_usage_stats SET calls = calls + ?, errors = errors + ? "
         "WHERE day = ? AND tool = ?"
     )
-    # Reaper: cheap enough to list without paging — compose_sessions has a 7-day
-    # TTL, so the table never grows large.
+    # Reaper + outcome finalizer share this scan: cheap enough to list without
+    # paging — compose_sessions has a 7-day TTL, so the table never grows large.
     LIST_ALL_SUMMARY = _Stmt(
-        "SELECT created_at, session_id, status FROM algorand_platform.compose_sessions "
+        "SELECT created_at, session_id, status, source_url FROM algorand_platform.compose_sessions "
         "WHERE bucket = ? LIMIT 1000"
     )
     MARK_STALE = _Stmt(

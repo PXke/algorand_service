@@ -59,8 +59,17 @@
 
   function statusChipClass(status: string): string {
     if (ACTIVE_STATUSES.has(status)) return 'admin-chip active'
-    if (status === 'ok' || status === 'done') return 'admin-chip ok'
-    if (status === 'error' || status === 'failed') return 'admin-chip suspect'
+    // "ok" itself is finalized after the fact into the real publish decision
+    // (see finalize_compose_session_outcome) -- a plain "ok" surviving here
+    // means the compose succeeded but no decision has landed yet (or ever
+    // will, e.g. a manual/legacy session predating this).
+    if (status === 'ok' || status === 'done' || status === 'published') {
+      return 'admin-chip ok'
+    }
+    if (status === 'on_hold') return 'admin-chip hold'
+    if (status === 'error' || status === 'failed' || status.startsWith('rejected')) {
+      return 'admin-chip suspect'
+    }
     return 'admin-chip'
   }
 
@@ -415,6 +424,12 @@
     background: color-mix(in srgb, var(--gain) 12%, transparent);
     color: var(--gain);
     border-color: color-mix(in srgb, var(--gain) 45%, transparent);
+  }
+
+  .admin-chip.hold {
+    background: color-mix(in srgb, #b7791f 12%, transparent);
+    color: #b7791f;
+    border-color: color-mix(in srgb, #b7791f 45%, transparent);
   }
 
   .session-detail {
