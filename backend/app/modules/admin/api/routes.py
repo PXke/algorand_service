@@ -354,6 +354,22 @@ async def admin_bump_queue_priority(request: Request) -> Response | dict:
     return result
 
 
+async def admin_dead_end_queue_row_domain(request: Request) -> Response | dict:
+    """Permanently reject the source domain behind one publish_queue row, straight from the Queue tab — the one-click alternative to hunting the same domain down in the paginated Domains tab."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    import asyncio
+
+    queue_id = request.path_params.get("queue_id", "")
+    wallet = verified_admin_wallet(request)
+    result = await asyncio.to_thread(store.dead_end_queue_row_domain, queue_id, wallet=wallet)
+    if result is None:
+        return json_error_response(404, "not_found", "unknown queue_id or no resolvable domain")
+    _invalidate_domains_cache()
+    return result
+
+
 async def admin_training_stats(request: Request) -> Response:
     """Labelled-data volume + balance + grader readiness for the Training tab."""
     denied = require_admin_wallet(request)
@@ -1551,6 +1567,7 @@ def register_admin_routes(app: Robyn) -> None:
     app.get("/api/v1/admin/pending-feed-backlog")(admin_pending_feed_backlog)
     app.get("/api/v1/admin/publish-queue/:queue_id/breakdown")(admin_publish_queue_breakdown)
     app.post("/api/v1/admin/publish-queue/:queue_id/compose-next")(admin_bump_queue_priority)
+    app.post("/api/v1/admin/publish-queue/:queue_id/dead-end")(admin_dead_end_queue_row_domain)
     app.get("/api/v1/admin/training-stats")(admin_training_stats)
     app.post("/api/v1/admin/retrain")(admin_retrain)
     app.post("/api/v1/admin/classifier-feedback")(admin_classifier_feedback)

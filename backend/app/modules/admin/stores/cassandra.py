@@ -1114,6 +1114,25 @@ class AdminCassandraStore:
             wallet=wallet,
         )
 
+    def dead_end_queue_row_domain(self, queue_id: str, *, wallet: str) -> dict | None:
+        """Permanently reject the source domain behind one publish_queue row — the one-click "I never want to see this domain again" action for the Queue tab, reached straight from the row that surfaced it instead of hunting for the same domain through the paginated Domains tab (2026-08-04: Kryptonurd — the writer had already correctly aborted it as a dead project, but confirming that judgment as a permanent reject took several page-throughs to find). None when the row or a resolvable domain is missing."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import PublishQueueStmts
+
+        try:
+            qid = UUID(queue_id)
+        except ValueError:
+            return None
+        session = get_cassandra_session()
+        row = session.execute(PublishQueueStmts.GET_ROW, (qid,)).one()
+        if row is None:
+            return None
+        domain = self._domain_from_url(row.scrape_url or "")
+        if not domain:
+            return None
+        self.reject_domain_source(domain=domain, wallet=wallet, source_url_hint=row.scrape_url or "")
+        return {"queue_id": queue_id, "domain": domain}
+
     def list_tool_suggestions(self, *, include_resolved: bool = False) -> list[dict]:
         """Capabilities the writer model wished it had (via suggest_tool), newest first. Resolved suggestions (tools that have since shipped) are hidden by default so the Tool gaps panel only shows genuine gaps instead of growing forever — see resolve_tool_suggestions."""
         from app.core.cassandra import get_cassandra_session

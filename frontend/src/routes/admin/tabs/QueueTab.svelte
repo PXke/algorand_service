@@ -15,6 +15,9 @@
   let breakdownLoading = $state<Set<string>>(new Set())
   let bumpingId = $state<string | null>(null)
   let bumpError = $state<string | null>(null)
+  let deadEndingId = $state<string | null>(null)
+  let deadEndError = $state<string | null>(null)
+  let deadEndedDomains = $state<Record<string, string>>({})
 
   const filtered = $derived(
     filter === 'all' ? queue : queue.filter((x) => String(x.status ?? '') === filter),
@@ -104,6 +107,20 @@
     }
   }
 
+  async function deadEndDomain(queueId: string) {
+    if (!confirm('Permanently reject this row\'s source domain? It will never be re-crawled or re-composed.')) return
+    deadEndingId = queueId
+    deadEndError = null
+    try {
+      const result = await admin.deadEndQueueItemDomain(queueId)
+      deadEndedDomains = { ...deadEndedDomains, [queueId]: String(result.domain ?? '') }
+    } catch (e) {
+      deadEndError = e instanceof Error ? e.message : String(e)
+    } finally {
+      deadEndingId = null
+    }
+  }
+
   function signalsText(signals: unknown): string {
     if (!signals || typeof signals !== 'object' || Array.isArray(signals)) return ''
     return Object.entries(signals as Record<string, unknown>)
@@ -165,6 +182,9 @@
   {#if bumpError}
     <p class="admin-err">{bumpError}</p>
   {/if}
+  {#if deadEndError}
+    <p class="admin-err">{deadEndError}</p>
+  {/if}
 
   {#if loading}
     <p class="admin-muted">Loading…</p>
@@ -210,16 +230,32 @@
           {/if}
         </button>
 
-        {#if status === 'pending'}
+        {#if status === 'pending' || item.scrape_url}
           <div class="row-actions">
-            <button
-              class="btn compact"
-              type="button"
-              disabled={bumpingId === queueId}
-              onclick={() => composeNext(queueId)}
-            >
-              {bumpingId === queueId ? 'Pinning…' : 'Compose next'}
-            </button>
+            {#if status === 'pending'}
+              <button
+                class="btn compact"
+                type="button"
+                disabled={bumpingId === queueId}
+                onclick={() => composeNext(queueId)}
+              >
+                {bumpingId === queueId ? 'Pinning…' : 'Compose next'}
+              </button>
+            {/if}
+            {#if item.scrape_url}
+              {#if deadEndedDomains[queueId]}
+                <span class="admin-muted small">domain rejected: {deadEndedDomains[queueId]}</span>
+              {:else}
+                <button
+                  class="btn compact btn-danger"
+                  type="button"
+                  disabled={deadEndingId === queueId}
+                  onclick={() => deadEndDomain(queueId)}
+                >
+                  {deadEndingId === queueId ? 'Rejecting…' : 'Dead-end domain'}
+                </button>
+              {/if}
+            {/if}
           </div>
         {/if}
 
@@ -358,8 +394,16 @@
 
   .row-actions {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: 8px;
     margin-top: 8px;
+  }
+
+  .btn-danger {
+    background: var(--danger);
+    color: #fff;
+    border-color: var(--danger);
   }
 
   .row-head {

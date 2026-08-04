@@ -28,6 +28,8 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.getJson(`/api/v1/admin/publish-queue/${queueId}/breakdown`, h()),
     composeQueueItemNext: (queueId: string) =>
       api.postJson(`/api/v1/admin/publish-queue/${queueId}/compose-next`, {}, h()),
+    deadEndQueueItemDomain: (queueId: string) =>
+      api.postJson(`/api/v1/admin/publish-queue/${queueId}/dead-end`, {}, h()),
     getTrainingStats: () => api.getJson('/api/v1/admin/training-stats', h()),
     triggerRetrain: () => api.postJson('/api/v1/admin/retrain', {}, h()),
     listDomains: (status = 'all', page = 1, pageSize = 25) =>
