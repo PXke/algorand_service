@@ -13,14 +13,24 @@ import msgspec
 
 T = TypeVar("T")
 
-# Reused encoder/decoder factory caching is internal to msgspec; a module-level
-# encoder avoids rebuilding the encode config per call.
+# Reused encoder/decoder — constructing these per call is measurable on hot paths.
 _encoder = msgspec.json.Encoder()
+_decoder = msgspec.json.Decoder()
 
 
 def encode(obj: Any) -> bytes:  # noqa: ANN401 -- any msgspec.Struct / dict / list / primitive
     """JSON-encode any msgspec.Struct / dict / list / primitive (datetimes -> RFC 3339) to bytes."""
     return _encoder.encode(obj)
+
+
+def dumps(obj: Any) -> str:  # noqa: ANN401 -- same as encode
+    """JSON-encode to a UTF-8 string (Redis values, Response text, HTML embeds)."""
+    return _encoder.encode(obj).decode("utf-8")
+
+
+def loads(raw: str | bytes | bytearray) -> Any:  # noqa: ANN401 -- decoded JSON tree
+    """Decode JSON bytes/text to builtins (dict/list/…)."""
+    return _decoder.decode(raw)
 
 
 def to_builtins(obj: Any) -> Any:  # noqa: ANN401 -- any nested Struct/dict/list structure in or out

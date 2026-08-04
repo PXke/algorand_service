@@ -8,12 +8,12 @@ cache miss, never an error, so the dashboard still works if Redis is down.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from contextlib import suppress
 from functools import lru_cache
 from typing import TYPE_CHECKING, TypeVar
 
+from app.core import serialization
 from app.core.config import settings
 
 if TYPE_CHECKING:
@@ -47,10 +47,10 @@ def cached_json(key: str, ttl_seconds: int, compute: Callable[[], T]) -> T:
     with suppress(Exception):  # cache miss / Redis down → recompute
         hit = _client().get(full)
         if hit is not None:
-            return json.loads(hit)
+            return serialization.loads(hit)
     value = compute()
     with suppress(Exception):
-        _client().set(full, json.dumps(value, separators=(",", ":")), ex=ttl_seconds)
+        _client().set(full, serialization.dumps(value), ex=ttl_seconds)
     return value
 
 

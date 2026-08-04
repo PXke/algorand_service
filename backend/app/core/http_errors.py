@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
-
-from app.core.http import Response
-
+from app.core import serialization
 from app.core.errors import PlatformError
+from app.core.http import Response
 
 
 def json_error_response(status: int, code: str, message: str) -> Response:
@@ -14,7 +12,7 @@ def json_error_response(status: int, code: str, message: str) -> Response:
     return Response(
         status_code=status,
         headers={"Content-Type": "application/json"},
-        description=json.dumps({"error": {"code": code, "message": message}}),
+        description=serialization.dumps({"error": {"code": code, "message": message}}),
     )
 
 

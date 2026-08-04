@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 from uuid import UUID
 
+from app.core import serialization
 from app.core.feed_bucket import feed_month
 
 if TYPE_CHECKING:
@@ -362,8 +363,6 @@ class AdminCassandraStore:
 
     def _grade_meta_for_review(self, review_id: str) -> dict[str, str]:
         """Pull the article grade + subscores from a review item so they're stored alongside the accept/reject label (trainable features)."""
-        import json
-
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ClassifierReviewStmts
 
@@ -376,13 +375,13 @@ class AdminCassandraStore:
             )
             raw = dict(row.metadata or {}).get("raw") if row else None
             if raw:
-                parsed = json.loads(raw)
+                parsed = serialization.loads(raw)
                 if parsed.get("grade") is not None:
                     out["grade"] = str(parsed["grade"])
                 gd = parsed.get("grade_detail")
                 if gd is not None:
                     out["grade_detail"] = (
-                        gd if isinstance(gd, str) else json.dumps(gd, separators=(",", ":"))
+                        gd if isinstance(gd, str) else serialization.dumps(gd)
                     )
         except Exception:
             logger.debug("failed to parse review metadata for %s", review_id, exc_info=True)
@@ -538,10 +537,8 @@ class AdminCassandraStore:
         """Build the trainable feedback_meta blob: point-in-time grade dimensions (novelty/recency can't be recomputed later, so must be snapshotted here), any human-corrected scores (ground truth the grader prefers over auto-scores), and a text snapshot of the graded article (text-aware grader training pairs)."""
         feedback_meta = self._grade_meta_for_review(review_id) if review_id else {}
         if corrected_scores:
-            import json as _json
-
-            feedback_meta["corrected_scores"] = _json.dumps(
-                {k: float(v) for k, v in corrected_scores.items()}, separators=(",", ":")
+            feedback_meta["corrected_scores"] = serialization.dumps(
+                {k: float(v) for k, v in corrected_scores.items()}
             )
         if article_id:
             try:
@@ -674,8 +671,6 @@ class AdminCassandraStore:
 
     def get_gatekeeper_validation_report(self) -> dict | None:
         """Latest annotator-validation report, or None if never run."""
-        import json as _json
-
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import GatekeeperStmts
 
@@ -683,7 +678,7 @@ class AdminCassandraStore:
         if row is None or not row.report_json:
             return None
         try:
-            report = _json.loads(row.report_json)
+            report = serialization.loads(row.report_json)
         except Exception:
             report = {}
         return {
@@ -1151,8 +1146,6 @@ class AdminCassandraStore:
 
     def _review_replaces_article_id(self, review_id: str) -> str:
         """The published article this review's draft would replace on approval (recompose_published flow), or "" for normal reviews. Fail-open to "" so a metadata read error degrades to the normal publish path."""
-        import json
-
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ClassifierReviewStmts
 
@@ -1164,7 +1157,7 @@ class AdminCassandraStore:
             )
             raw = dict(row.metadata or {}).get("raw") if row else None
             if raw:
-                return str(json.loads(raw).get("replaces_article_id") or "")
+                return str(serialization.loads(raw).get("replaces_article_id") or "")
         except Exception:
             logger.warning(
                 "failed to read replaces_article_id for review %s", review_id, exc_info=True
@@ -1397,8 +1390,6 @@ class AdminCassandraStore:
     @staticmethod
     def _parse_review_raw_json(meta: dict) -> tuple:
         """Parse the review metadata's "raw" JSON blob into (parsed_dict, article_id, confidence, grade, grade_detail); article_id falls back to meta's own field on any parse failure or absence."""
-        import json
-
         article_id = ""
         confidence: float | None = None
         grade: float | None = None
@@ -1414,8 +1405,8 @@ class AdminCassandraStore:
                 grade_detail,
             )
         try:
-            parsed = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
+            parsed = serialization.loads(raw)
+        except Exception:
             return parsed, str(meta.get("article_id", "")), confidence, grade, grade_detail
         article_id = str(parsed.get("article_id", ""))
         try:
@@ -1429,8 +1420,8 @@ class AdminCassandraStore:
         gd = parsed.get("grade_detail")
         if gd:
             try:
-                grade_detail = json.loads(gd) if isinstance(gd, str) else gd
-            except (json.JSONDecodeError, TypeError):
+                grade_detail = serialization.loads(gd) if isinstance(gd, str) else gd
+            except Exception:
                 grade_detail = None
         return parsed, article_id, confidence, grade, grade_detail
 
@@ -1612,8 +1603,6 @@ class AdminCassandraStore:
 
     def publish_queue_breakdown(self, queue_id: str) -> dict | None:
         """One row's priority_breakdown (computed at enqueue, stored on the payload) plus content signals — the "why this score" companion to list_publish_queue. None when the row is missing/unreadable."""
-        import json
-
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import PublishQueueStmts
 
@@ -1626,8 +1615,8 @@ class AdminCassandraStore:
         if row is None:
             return None
         try:
-            payload = json.loads(row.payload or "{}")
-        except json.JSONDecodeError:
+            payload = serialization.loads(row.payload or "{}")
+        except Exception:
             return None
         return {
             "queue_id": queue_id,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from app.core import serialization
 from app.core.cache import cached_json
 from app.core.config import settings
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
@@ -284,10 +285,8 @@ class NewsService:
         body = article.body
 
         if lang and article.translations and lang in article.translations:
-            import json
-
             try:
-                t = json.loads(article.translations[lang])
+                t = serialization.loads(article.translations[lang])
                 if t.get("title"):
                     title = t["title"]
                 if t.get("summary"):
@@ -329,10 +328,8 @@ class NewsService:
         title = article.title
         summary = article.summary
         if lang and getattr(article, "translations", None) and lang in article.translations:
-            import json
-
             try:
-                t = json.loads(article.translations[lang])
+                t = serialization.loads(article.translations[lang])
                 if t.get("title"):
                     title = t["title"]
                 if t.get("summary"):

@@ -930,8 +930,6 @@ def admin_get_compose_session(request: Request) -> Response:
         return json_error_response(400, "invalid_request", "bad session_id/created_at")
 
     def _compute() -> dict:
-        import json as _json
-
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
@@ -942,7 +940,7 @@ def admin_get_compose_session(request: Request) -> Response:
         if row is None:
             return {"messages": [], "final_output": ""}
         try:
-            msgs = _json.loads(row.messages) if row.messages else []
+            msgs = serialization.loads(row.messages) if row.messages else []
         except Exception:
             msgs = []
         return {"messages": msgs, "final_output": row.final_output or ""}
@@ -1247,10 +1245,8 @@ def admin_recompose_review(request: Request) -> Response:
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import json as _json
-
     try:
-        body = _json.loads(request.body or "{}")
+        body = serialization.loads(request.body or "{}")
     except Exception:
         body = {}
     review_id = str(body.get("review_id", "")).strip()
@@ -1276,10 +1272,9 @@ def admin_backfill_translations(request: Request) -> Response:
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
-    import json as _json
 
     try:
-        body = _json.loads(request.body or "{}")
+        body = serialization.loads(request.body or "{}")
     except Exception:
         body = {}
     limit = body.get("limit", 500)
@@ -1315,8 +1310,6 @@ def admin_investigation_findings(request: Request) -> Response:
         return {"items": []}
 
     def _compute() -> dict:
-        import json as _json
-
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import InvestigationStmts
 
@@ -1328,7 +1321,7 @@ def admin_investigation_findings(request: Request) -> Response:
         items = []
         for r in rows:
             try:
-                result = _json.loads(r.result_json) if r.result_json else {}
+                result = serialization.loads(r.result_json) if r.result_json else {}
             except Exception:
                 result = {}
             items.append(

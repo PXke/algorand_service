@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import secrets
-import json
 
 import msgspec
 
@@ -45,7 +44,7 @@ def register_ingest_routes(app: Router) -> None:
             return denied
 
         try:
-            body = json.loads((request.body or b"{}").decode("utf-8"))
+            body = serialization.loads(request.body or b"{}")
         except Exception:
             return json_error_response(400, "invalid_json", "Request body must be JSON")
 

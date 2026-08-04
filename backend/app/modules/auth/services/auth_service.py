@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import secrets
 
 import msgspec
 
+from app.core import serialization
 from app.core.config import settings
 from app.core.errors import PlatformError
 from app.modules.auth.models.schemas import Arc0060Proof, Caip122Payload, SessionInfo
@@ -37,7 +37,7 @@ class AuthService:
         challenge = build_auth_challenge(nonce, wallet_address)
         self._store.set_nonce_challenge(
             wallet_address,
-            json.dumps(
+            serialization.dumps(
                 {
                     "nonce": challenge.nonce,
                     "signing_message": challenge.signing_message,
@@ -63,8 +63,8 @@ class AuthService:
             return None
 
         try:
-            stored = json.loads(raw)
-        except json.JSONDecodeError:
+            stored = serialization.loads(raw)
+        except Exception:
             return None
 
         if stored.get("nonce") != nonce:

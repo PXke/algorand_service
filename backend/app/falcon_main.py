@@ -107,6 +107,14 @@ def create_app() -> falcon.App:
         middleware.insert(0, CorsMiddleware(settings.cors_origins))
 
     app = falcon.App(middleware=middleware)
+
+    # Prefer msgspec for all resp.media / req.media JSON (Falcon recipe).
+    from app.core.serialization import _decoder, _encoder
+
+    json_handler = falcon.media.JSONHandler(dumps=_encoder.encode, loads=_decoder.decode)
+    app.req_options.media_handlers[falcon.MEDIA_JSON] = json_handler
+    app.resp_options.media_handlers[falcon.MEDIA_JSON] = json_handler
+
     app.add_route("/health", HealthResource())
     app.add_route("/health/ready", HealthReadyResource())
 

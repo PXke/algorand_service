@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 from x402.extensions.bazaar import declare_discovery_extension
 
 from app.core import serialization
@@ -47,7 +45,7 @@ def kyc_test_ping(request: Request) -> Response:
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
-        description=json.dumps({"ok": True, "paid_by": result.payer}),
+        description=serialization.dumps({"ok": True, "paid_by": result.payer}),
     )
 
 
@@ -122,7 +120,7 @@ def kyc_verify(request: Request) -> Response:
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
-        description=json.dumps(payload),
+        description=serialization.dumps(payload),
     )
 
 

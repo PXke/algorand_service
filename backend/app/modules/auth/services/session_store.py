@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 
 import redis
 
+from app.core import serialization
 from app.core.config import settings
 
 
@@ -62,7 +62,7 @@ class SessionStore:
         self._redis.setex(
             f"auth:session:{token}",
             settings.session_ttl_seconds,
-            json.dumps(rec.__dict__),
+            serialization.dumps(rec.__dict__),
         )
         return rec
 
@@ -76,10 +76,10 @@ class SessionStore:
         raw = self._redis.get(key)
         if not raw:
             return None
-        data = json.loads(raw)
+        data = serialization.loads(raw)
         now = int(time.time())
         data["expires_in_epoch"] = now + settings.session_ttl_seconds
-        self._redis.setex(key, settings.session_ttl_seconds, json.dumps(data))
+        self._redis.setex(key, settings.session_ttl_seconds, serialization.dumps(data))
         return SessionRecord(**data)
 
     def delete_session(self, token: str) -> None:

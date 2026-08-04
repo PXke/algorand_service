@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import inspect
-import json
 import re
 from types import SimpleNamespace
 from typing import Any, Callable
 
 import falcon
 
+from app.core import serialization
 from app.core.http import QueryParams, Request
 
 Handler = Callable[[Request], Any]
@@ -38,6 +38,7 @@ def _apply_result(resp: falcon.Response, result: Any) -> None:
         return
 
     if isinstance(result, (dict, list)):
+        # msgspec media handler (see falcon_main) serializes resp.media.
         resp.media = result
         return
     if isinstance(result, bytes):
@@ -47,7 +48,7 @@ def _apply_result(resp: falcon.Response, result: Any) -> None:
         resp.text = result
         return
 
-    resp.text = json.dumps(result, default=str)
+    resp.data = serialization.encode(serialization.to_builtins(result))
     resp.content_type = "application/json"
 
 

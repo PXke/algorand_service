@@ -23,9 +23,10 @@ def test_http_status_mapping() -> None:
 
 def test_json_error_response_shape() -> None:
     """json_error_response produces a JSON body with the given code and message."""
+    from app.core import serialization
     from app.core.http_errors import json_error_response
 
     resp = json_error_response(400, "invalid_request", "bad input")
     assert resp.status_code == 400
-    assert '"code": "invalid_request"' in resp.description
-    assert '"message": "bad input"' in resp.description
+    body = serialization.loads(resp.description)
+    assert body == {"error": {"code": "invalid_request", "message": "bad input"}}

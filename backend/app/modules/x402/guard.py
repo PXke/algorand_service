@@ -9,7 +9,6 @@ set, otherwise proceed with the now-paid-for work.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +20,7 @@ from x402.http.types import (
 )
 from x402.http.x402_http_server import x402HTTPResourceServerSync
 
+from app.core import serialization
 from app.core.config import settings
 from app.core.http import Request, Response
 from app.modules.x402.adapter import RobynAdapter
@@ -58,7 +58,7 @@ def _instructions_to_response(instr: HTTPResponseInstructions) -> Response:
     if instr.is_html:
         body = instr.body if isinstance(instr.body, str) else ""
     else:
-        body = json.dumps(instr.body if instr.body is not None else {})
+        body = serialization.dumps(instr.body if instr.body is not None else {})
     return Response(status_code=instr.status, headers=instr.headers, description=body)
 
 
@@ -110,7 +110,7 @@ def require_payment(
             error=Response(
                 status_code=500,
                 headers={"Content-Type": "application/json"},
-                description=json.dumps(
+                description=serialization.dumps(
                     {"error": {"code": "x402_misconfigured", "message": "No route matched"}}
                 ),
             )
@@ -122,7 +122,7 @@ def require_payment(
             error=Response(
                 status_code=402,
                 headers={"Content-Type": "application/json"},
-                description=json.dumps(
+                description=serialization.dumps(
                     {
                         "error": {
                             "code": "settlement_failed",

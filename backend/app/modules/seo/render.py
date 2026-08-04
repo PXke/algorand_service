@@ -11,7 +11,6 @@ on the app's `pxke-spa-ready` event so browser find does not match duplicates.
 from __future__ import annotations
 
 import html
-import json
 import re
 import unicodedata
 from datetime import UTC, datetime
@@ -21,6 +20,7 @@ import msgspec
 from algorand_shared.design import token
 from algorand_shared.taxonomy import display_tag_title
 
+from app.core import serialization
 from app.core.article_translation_langs import (
     ARTICLE_TRANSLATION_LANG_NAMES,
     SEO_HREFLANG_LOCALES,
@@ -78,14 +78,13 @@ def _attr(value: str) -> str:
 def _ssr_feed_script(items: list[ArticleFeedItem]) -> str:
     """Embed feed rows as JSON so the SPA can paint immediately without waiting on the API (the SSR HTML is removed once it mounts). Used on /, /news and /hot."""
     rows = [msgspec.structs.asdict(i) for i in items]
-    payload = json.dumps({"items": rows}, separators=(",", ":"), ensure_ascii=False)
-    payload = payload.replace("</", "<\\/")
+    payload = serialization.dumps({"items": rows}).replace("</", "<\\/")
     return f'<script type="application/json" id="pxke-ssr-feed">{payload}</script>'
 
 
 def _json_ld(data: dict | list) -> str:
     # `</` would otherwise let a script tag close early inside the body.
-    payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False).replace("</", "<\\/")
+    payload = serialization.dumps(data).replace("</", "<\\/")
     return f'<script type="application/ld+json">{payload}</script>'
 
 

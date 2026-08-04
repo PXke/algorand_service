@@ -14,7 +14,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import ipaddress
-import json
 import logging
 import re
 import time
@@ -23,6 +22,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+from app.core import serialization
 from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
 from app.core.config import settings
 
@@ -713,7 +713,7 @@ def _stage_direct_pageview(
     try:
         r = _uv_redis()
         token = _doc_seen_token(article_id, client_ip, user_agent)
-        payload = json.dumps(
+        payload = serialization.dumps(
             {
                 "day": day,
                 "path": path,
@@ -764,7 +764,7 @@ def _reconcile_due_direct_pageviews() -> None:
         if not raw or not confirmed:
             continue  # never confirmed (or already expired) -> drop, never counted
         try:
-            payload = json.loads(raw)
+            payload = serialization.loads(raw)
             _write_pageview_counters(
                 day=payload["day"],
                 path=payload["path"],

@@ -13,9 +13,10 @@ glossary terms were never translated at all.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+
+from app.core import serialization
 
 STATUS_DRAFT = "draft"
 STATUS_PUBLISHED = "published"
@@ -48,7 +49,7 @@ def _row_to_term(row: object, *, lang: str | None = None) -> GlossaryTerm:
     aliases = tuple(getattr(row, "aliases", None) or ())
     if lang and lang in translations:
         try:
-            blob = json.loads(translations[lang])
+            blob = serialization.loads(translations[lang])
             term = blob.get("term") or term
             definition = blob.get("definition") or definition
             aliases = tuple(blob.get("aliases") or aliases)
