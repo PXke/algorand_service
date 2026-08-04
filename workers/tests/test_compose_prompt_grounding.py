@@ -389,3 +389,9 @@ def test_research_phase_has_named_document_fallback() -> None:
     """Same session: the model knew the CGAP report's exact title from a search snippet, but gave up after only the generic /research/publication listing page 404'd (and its stale 2023 archive snapshot came back empty) -- it never searched the exact title, which would likely have surfaced the report's own permalink."""
     assert "NAMED-DOCUMENT FALLBACK" in mc._RESEARCH_PHASE_GUIDANCE
     assert "exact title in quotes" in mc._RESEARCH_PHASE_GUIDANCE
+
+
+def test_feedback_channels_tells_model_to_try_fetch_url_before_suggesting() -> None:
+    """fetch_url is a plain HTTP GET that substitutes for most missing dedicated tools -- owner's estimate is it covers ~90% of gaps a model might otherwise reach for suggest_tool over."""
+    assert "FETCH_URL AS A GENERAL FALLBACK" in mc._FEEDBACK_CHANNELS
+    assert "FETCH_URL AS A GENERAL FALLBACK" in mc._RESEARCH_PHASE_GUIDANCE
