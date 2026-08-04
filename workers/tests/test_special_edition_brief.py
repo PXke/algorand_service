@@ -95,6 +95,52 @@ def test_two_stage_compose_forwards_max_rounds_to_stage1(monkeypatch: pytest.Mon
     assert captured["max_rounds"] == 96
 
 
+def test_two_stage_compose_forwards_is_special_edition_to_review_and_revise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_two_stage_compose passes is_special_edition through to _review_and_revise, so the grader knows to skip the length constraint (root-caused 2026-08-04: the grader's "too long ... cut padding/filler" issue directly contradicted the special-edition prompt's "never cut a real finding short")."""
+    monkeypatch.setattr("app.core.config.RESEARCH_FLOOR_ENABLED", False)
+    monkeypatch.setattr("app.core.config.DIGEST_GAP_FILL_ENABLED", False)
+    monkeypatch.setattr(mc, "_synthesize_research_digest", lambda **_kw: "digest")
+
+    captured = {}
+
+    def _fake_review_and_revise(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return {"title": "t", "summary": "s", "body": "b"}
+
+    monkeypatch.setattr(mc, "_review_and_revise", _fake_review_and_revise)
+
+    class _FakeResearchClient:
+        def chat_with_tools(self, *_args: object, **_kwargs: object) -> str:
+            return ""
+
+        def usage_totals(self) -> dict[str, int]:
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    class _FakeWriteClient:
+        def chat_json_object(self, *_args: object, **_kw: object) -> dict:
+            return {"title": "t", "summary": "s", "body": "b"}
+
+        def usage_totals(self) -> dict[str, int]:
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    mc._run_two_stage_compose(
+        research_mistral=_FakeResearchClient(),
+        mistral=_FakeWriteClient(),
+        system="sys",
+        user="usr",
+        research_user=None,
+        tool_schemas=[],
+        tool_handlers={},
+        trace=[],
+        debug={},
+        checkpoint=lambda _stage: None,
+        is_special_edition=True,
+    )
+    assert captured["is_special_edition"] is True
+
+
 def test_compose_scrape_article_tags_special_edition(monkeypatch: pytest.MonkeyPatch) -> None:
     """compose_scrape_article injects the special-edition tag when the brief was flagged, on top of whatever tags the model itself returned."""
     monkeypatch.setattr(ac, "mistral_configured", lambda: True)

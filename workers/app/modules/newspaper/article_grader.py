@@ -460,13 +460,28 @@ def grade_article_schema(
     title: str,
     summary: str,
     body: str,
+    is_special_edition: bool = False,
 ) -> dict:
-    """Deterministic schema/structure checks only — not qualitative journalism."""
+    """Deterministic schema/structure checks only — not qualitative journalism.
+
+    ``is_special_edition`` skips the length score/issues entirely (both
+    floor and ceiling) rather than raising the cap: the special-edition
+    writer prompt explicitly says "there is no target length ... never cut
+    a real finding short to stay brief," so a fixed ceiling of any size
+    still contradicts it, and a fixed floor equally contradicts "let it run
+    as long as the material genuinely supports" (which cuts both ways for
+    a genuinely thin topic). Found 2026-08-04: the special-edition prompt
+    said this, but the very next stage's grader didn't know it, generated
+    a "too long ... cut padding/filler" issue the instant a properly deep
+    piece passed 2000 words, and that issue flowed straight into the
+    revision prompt as a literal instruction to undo the depth the research
+    floor fix (same session) was built to force.
+    """
     from app.core.config import LENGTH_OK_MAX_WORDS, LENGTH_OK_MIN_WORDS
     from app.modules.gatekeeper.structure import evaluate_structure
 
     words = len((body or "").split())
-    length_score = _length_score(words)
+    length_score = 1.0 if is_special_edition else _length_score(words)
     struct = evaluate_structure(body)
     structure_score = (sum(h.passed for h in struct) / len(struct)) if struct else 1.0
     has_heading = bool(re.search(r"(^|\n)\s*#{1,4}\s+\S", body or "", re.MULTILINE))
@@ -478,9 +493,9 @@ def grade_article_schema(
         issues.append("schema — title exceeds 120 characters")
     if len(summary or "") > 280:
         issues.append("schema — summary exceeds 280 characters")
-    if words < LENGTH_OK_MIN_WORDS:
+    if not is_special_edition and words < LENGTH_OK_MIN_WORDS:
         issues.append(f"short ({words} words) — fine only if the source is genuinely thin")
-    if words > LENGTH_OK_MAX_WORDS:
+    if not is_special_edition and words > LENGTH_OK_MAX_WORDS:
         issues.append(f"too long ({words} words) — over {LENGTH_OK_MAX_WORDS}; cut padding/filler")
     if not has_heading:
         issues.append("schema — body needs at least one ## section header")
@@ -516,6 +531,7 @@ def grade_article_draft(
     published_at: str = "",  # noqa: ARG001 -- name must match the real callee's keyword arg
     tags: tuple[str, ...] = (),  # noqa: ARG001 -- name must match the real callee's keyword arg
     summary: str = "",
+    is_special_edition: bool = False,
 ) -> dict:
     """Grade a draft: schema heuristic (grade/issues) plus informational signals.
 
@@ -523,7 +539,9 @@ def grade_article_draft(
     (narrative synthesis, Algorand technical depth) is scored separately via
     ``grade_article_quality_llm`` during compose revision.
     """
-    schema = grade_article_schema(title=title, summary=summary, body=body)
+    schema = grade_article_schema(
+        title=title, summary=summary, body=body, is_special_edition=is_special_edition
+    )
 
     # Informational signals for telemetry / human review — NOT fused into grade.
     from app.core.config import PAGE_STALE_MAX_AGE_DAYS

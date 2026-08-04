@@ -863,14 +863,21 @@ def _draft_score(review: dict, *, needs_revision: bool) -> float:
 
 
 def _grade_current_draft(
-    title: str, summary: str, body: str, quality_mistral: MistralClient
+    title: str,
+    summary: str,
+    body: str,
+    quality_mistral: MistralClient,
+    *,
+    is_special_edition: bool = False,
 ) -> dict:
     """Run the deterministic heuristic grader and the LLM quality rubric, merging the rubric result into the returned review dict under "quality". Either grader's failure degrades to an error marker rather than raising."""
     from app.modules.newspaper.article_grader import grade_article_draft
     from app.modules.newspaper.article_quality_llm import grade_article_quality_llm
 
     try:
-        review = grade_article_draft(title=title, summary=summary, body=body)
+        review = grade_article_draft(
+            title=title, summary=summary, body=body, is_special_edition=is_special_edition
+        )
     except Exception as exc:
         review = {"error": str(exc)[:200], "grade": None}
     try:
@@ -1131,6 +1138,7 @@ def _review_and_revise(
     debug: dict | None = None,
     user: str = "",
     research_user: str | None = None,
+    is_special_edition: bool = False,
 ) -> dict:
     """Stage 3+4 of two-stage compose: grade the draft, then revise if weak.
 
@@ -1205,7 +1213,9 @@ def _review_and_revise(
         if not body:
             return current
 
-        review = _grade_current_draft(title, summary, body, quality_mistral)
+        review = _grade_current_draft(
+            title, summary, body, quality_mistral, is_special_edition=is_special_edition
+        )
         quality = review["quality"]
         _record_grade(
             trace, debug, current, review, title=title, body=body, revise_count=revise_count
@@ -2025,6 +2035,7 @@ def _run_two_stage_compose(
         debug=debug,
         user=user,
         research_user=research_user,
+        is_special_edition=is_special_edition,
     )
 
 

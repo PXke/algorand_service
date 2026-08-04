@@ -7,6 +7,7 @@ from app.modules.newspaper.article_grader import (
     _length_score,
     _structure_score,
     composed_duplicates_latest_service_article,
+    grade_article_schema,
     prior_service_article_summary,
 )
 
@@ -20,6 +21,43 @@ def test_length_band_is_lax() -> None:
     # Outside the band ramps down (too short / bloated), but only at the extremes.
     assert _length_score(LENGTH_OK_MIN_WORDS // 2) < 1.0
     assert _length_score(LENGTH_OK_MAX_WORDS * 2) < 1.0
+
+
+# --- is_special_edition: skip the length constraint entirely --------------
+#
+# Root-caused 2026-08-04: the special-edition writer prompt explicitly says
+# "there is no target length ... never cut a real finding short to stay
+# brief," but the very next stage's grader didn't know it was grading a
+# special edition, generated a "too long ... cut padding/filler" issue the
+# instant a properly deep piece passed LENGTH_OK_MAX_WORDS, and that issue
+# flowed straight into the revision prompt as a literal instruction to undo
+# the depth the research floor exists to force.
+
+
+def test_special_edition_skips_the_too_long_issue() -> None:
+    """A draft well past LENGTH_OK_MAX_WORDS gets no length-based issue when graded as a special edition."""
+    body = "\n\n".join(f"## Section {i}\n\nSome real prose here." for i in range(1, 10))
+    body += " word " * (LENGTH_OK_MAX_WORDS + 500)
+    schema = grade_article_schema(title="T", summary="S", body=body, is_special_edition=True)
+    assert not any("too long" in i for i in schema["issues"])
+    assert schema["subscores"]["length"] == 1.0
+
+
+def test_special_edition_skips_the_too_short_issue() -> None:
+    """A thin draft under LENGTH_OK_MIN_WORDS also gets no length issue -- the prompt's "no target length" cuts both ways, not just the ceiling."""
+    schema = grade_article_schema(
+        title="T", summary="S", body="Just a short draft.", is_special_edition=True
+    )
+    assert not any("short (" in i for i in schema["issues"])
+    assert schema["subscores"]["length"] == 1.0
+
+
+def test_ordinary_article_still_flags_too_long() -> None:
+    """Without is_special_edition (the default), the existing length ceiling behavior is unchanged."""
+    body = "word " * (LENGTH_OK_MAX_WORDS + 500)
+    schema = grade_article_schema(title="T", summary="S", body=body)
+    assert any("too long" in i for i in schema["issues"])
+    assert schema["subscores"]["length"] < 1.0
 
 
 def test_structure_score_penalises_raw_text() -> None:
