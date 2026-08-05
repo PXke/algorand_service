@@ -272,6 +272,12 @@ class MistralClient:
         # a multi-round session doesn't re-pay for the same rejection every round.
         self._reasoning_effort_unsupported = not self._metadata.get("reasoning", True)
 
+    def _reasoning_payload_extra(self) -> dict[str, Any]:
+        """Extra payload fields for deep reasoning beyond the flat reasoning_effort field both providers share. DeepSeek's actual v4 API additionally wants an explicit thinking block and stream:false alongside reasoning_effort=high (owner-supplied 2026-08-05); Mistral needs nothing more here."""
+        if self._provider == "deepseek":
+            return {"thinking": {"type": "enabled"}, "stream": False}
+        return {}
+
     def usage_totals(self) -> dict[str, int]:
         """Cumulative token usage across every request this instance has made (a compose session's client(s) are created fresh per session, so this is the session total, not a lifetime counter)."""
         return dict(self._usage)
@@ -424,6 +430,7 @@ class MistralClient:
         }
         if MISTRAL_REASONING_EFFORT and not self._reasoning_effort_unsupported:
             payload["reasoning_effort"] = MISTRAL_REASONING_EFFORT
+        payload.update(self._reasoning_payload_extra())
         if json_object:
             payload["response_format"] = {"type": "json_object"}
 
@@ -598,6 +605,7 @@ class MistralClient:
         }
         if MISTRAL_REASONING_EFFORT and not self._reasoning_effort_unsupported:
             payload["reasoning_effort"] = MISTRAL_REASONING_EFFORT
+        payload.update(self._reasoning_payload_extra())
         return payload
 
     @staticmethod
