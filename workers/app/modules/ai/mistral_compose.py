@@ -334,6 +334,20 @@ _SOURCING_AND_FRAMING_RULES = (
     "verify as current, and never write promotional future-tense framing "
     "('is positioned to', 'is building toward') for a subject you could not confirm "
     "is still active.\n"
+    "SUPERSESSION CHECK: a project being alive is not the same as a tool, "
+    "library, or standard still being the CURRENT recommended way to do the "
+    "thing it does. Before centering a piece on a specific tool/framework/SDK "
+    "as 'the' way developers should do X, check for a newer successor from the "
+    "same ecosystem (a rewrite, a 'migrate to', a deprecation notice, a docs "
+    "page recommending something else, a release history that goes cold while "
+    "a sibling project's does not). If you find one, name it and frame the "
+    "older tool honestly — 'X is still supported, but Y is now the actively "
+    "developed/recommended option' — rather than writing X up as the current "
+    "state of the art. Every individual fact about X can be true and the piece "
+    "still misleads a reader deciding what to use today if the successor goes "
+    "unmentioned (root-caused 2026-08-04: a PyTeal explainer was fact-accurate "
+    "but omitted that Algorand Python/Puya has superseded it as the recommended "
+    "path, reading as current guidance when it was a stale snapshot).\n"
     "JOURNALISM RULES: only state facts a tool actually returned; cite the "
     "tool/source in the text; never assert wrongdoing about a named person or "
     "company unless a tool returned concrete evidence; when a SPECIFIC claim is "
@@ -638,6 +652,15 @@ _STAGE2_GENERATION_GUIDANCE = (
     "quotation marks and attribute it plainly (root-caused 2026-07-16: a "
     "draft invented a phrase and attributed it to a named council in quotes "
     "— fabricating a quotation is worse than fabricating a number).\n"
+    "SUPERSESSION CHECK: if the Research Digest mentions a newer successor, "
+    "replacement, or migration path for the tool/framework/standard this "
+    "piece centers on, say so plainly instead of writing the older one up as "
+    "the current recommended way to do the thing — every fact can be accurate "
+    "and the piece still misleads a reader deciding what to use today if the "
+    "successor goes unmentioned (root-caused 2026-08-04: a PyTeal explainer "
+    "omitted that Algorand Python/Puya has superseded it). You have no tools "
+    "in this phase, so only act on a successor the Digest itself surfaced — "
+    "do not go hunting for one from memory.\n"
 )
 
 
@@ -1108,12 +1131,36 @@ def _collect_fixable_issues(
     )
 
 
-def _revision_length_rule(*, too_long: bool, needs_depth: bool, draft_words: int) -> str:
-    """The word-budget instruction for a revision prompt. The reviser is judged by the 75% word-count guard downstream; give it that constraint as a CONCRETE number — "keep roughly the same length" alone still lost >25% of the words in ~10% of prod revisions, wasting the call."""
+# Root-caused 2026-08-04 (Humanitarian Network recompose #2): the needs_depth
+# branch below used to have no length floor at all -- it said "PRESERVE every
+# verified fact" but also told the model to "CUT the later restatements," and
+# a real revision pass used that license to rewrite a 2,471-word first draft
+# (the entity-enumeration/outline pipeline's actual output) down to 1,044
+# words, then 1,020, discarding the depth the whole special-edition pipeline
+# exists to produce. The `else` (reorganize-only) branch's "stay above 80%
+# or it will be rejected" was also a dead threat by this point -- the actual
+# enforcement guard in _attempt_revision was removed 2026-08-03 as
+# miscalibrated for the old Medium-tier writer, so nothing ever checked it.
+#
+# Owner directive: remove length limitation/targeting from revision entirely,
+# for every article, not just special editions -- no numeric floor or target
+# word count anywhere, just "don't shrink it as a side effect of fixing
+# something else." Only `too_long` (the one case where shrinking IS the
+# correct fix) still asks for trimming.
+_REVISION_NO_SHRINK_RULE = (
+    "There is NO length limit and NO target word count for this revision. Do "
+    "not shorten, condense, tighten, or produce a leaner synthesis of the "
+    "piece as a side effect of fixing the issues below. PRESERVE every "
+    "verified fact and every section from the draft."
+)
+
+
+def _revision_length_rule(*, too_long: bool, needs_depth: bool) -> str:
+    """The scope instruction for a revision prompt: what to fix, and (for everything except too_long) an explicit "don't shrink it" rule instead of a numeric word-count target."""
     if too_long:
-        rule = "Trim padding/filler to bring it under the limit, but keep every real fact."
-    elif needs_depth:
-        rule = (
+        return "Trim padding/filler to bring it under the limit, but keep every real fact."
+    if needs_depth:
+        return (
             "Improve narrative synthesis, Algorand technical depth, and critical "
             "distance — use verified facts from the Research Digest and, where "
             "sources are thin, your expert knowledge of Algorand layer-1 mechanics "
@@ -1124,26 +1171,18 @@ def _revision_length_rule(*, too_long: bool, needs_depth: bool, draft_words: int
             "unaudited protocol), name the actual risk/tradeoff a reader needs "
             "instead of just relaying the subject's own marketing framing. If a "
             "specific fact or judgment (a number, a named risk, a conclusion) "
-            "currently appears in more than one section, CUT the later restatements "
-            "and keep only the first mention — do not just reword the same point "
-            "each time it comes up. PRESERVE every verified fact. Do NOT invent "
-            "quotes, partnerships, or numbers. "
+            "currently appears in more than one section VERBATIM, cut the later "
+            "exact repeat and keep only the first mention — do not rewrite whole "
+            "passages or sections into a shorter synthesis just because a point "
+            "recurs. Do NOT invent quotes, partnerships, or numbers. "
+            + _REVISION_NO_SHRINK_RULE
         )
-    else:
-        rule = (
-            "PRESERVE every fact AND keep the same length — only REORGANIZE "
-            "the existing prose into section headings and short paragraphs; move "
-            "comparative data into a Markdown table if needed. Do NOT use narrative "
-            "bullet lists. Do NOT drop information, summarize away detail, or shorten "
-            "the article: "
-        )
-    if not too_long and not needs_depth:
-        min_words = int(draft_words * 0.8)
-        rule += (
-            f"the draft is {draft_words} words and your revision MUST stay above "
-            f"{min_words} words or it will be rejected."
-        )
-    return rule
+    return (
+        "PRESERVE every fact — only REORGANIZE the existing prose into section "
+        "headings and short paragraphs; move comparative data into a Markdown "
+        "table if needed. Do NOT use narrative bullet lists. Do NOT drop "
+        "information or summarize away detail. " + _REVISION_NO_SHRINK_RULE
+    )
 
 
 def _build_revision_prompt(
@@ -1153,7 +1192,6 @@ def _build_revision_prompt(
     *,
     too_long: bool,
     needs_depth: bool,
-    draft_words: int,
 ) -> str:
     issues_block = "\n".join(f"- {i}" for i in fixable[:10])
     carried_block = ""
@@ -1163,9 +1201,7 @@ def _build_revision_prompt(
             "do NOT reintroduce them while addressing the list above:\n"
             + "\n".join(f"- {i}" for i in already_fixed[:10])
         )
-    length_rule = _revision_length_rule(
-        too_long=too_long, needs_depth=needs_depth, draft_words=draft_words
-    )
+    length_rule = _revision_length_rule(too_long=too_long, needs_depth=needs_depth)
     return (
         gen_user + f"\n\nA reviewer flagged these problems:\n{issues_block}\n\n"
         f"{length_rule} Do NOT add, invent, or restate facts beyond the research "
@@ -1342,14 +1378,12 @@ def _review_and_revise(
         ever_raised.update(fixable)
         too_long = any(i.startswith("too long") for i in fixable)
         needs_depth = needs_revision
-        draft_words = len(body.split())
         revise_user = _build_revision_prompt(
             gen_user,
             fixable,
             already_fixed,
             too_long=too_long,
             needs_depth=needs_depth,
-            draft_words=draft_words,
         )
         gen_system = system + _STAGE2_GENERATION_GUIDANCE
 

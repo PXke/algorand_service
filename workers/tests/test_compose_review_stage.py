@@ -8,7 +8,38 @@ from typing import Any, Never
 
 import pytest
 
-from app.modules.ai.mistral_compose import _parse_article_fields, _review_and_revise
+from app.modules.ai.mistral_compose import (
+    _parse_article_fields,
+    _review_and_revise,
+    _revision_length_rule,
+)
+
+
+class TestRevisionLengthRule:
+    """Root-caused 2026-08-04 (Humanitarian Network recompose #2): the needs_depth revision branch had no length floor and told the model to 'CUT the later restatements,' which a real revision pass used to rewrite a 2,471-word draft down to 1,044 then 1,020 words. Owner directive: remove length limitation/targeting from revision entirely (not just for special editions) -- no numeric word-count target anywhere except the too_long case, which legitimately asks for trimming."""
+
+    def test_needs_depth_has_no_shrink_language_and_no_numeric_floor(self) -> None:
+        """The 'improve depth' branch must forbid net shrinkage without a numeric floor -- this is the exact branch that fired during the incident."""
+        rule = _revision_length_rule(too_long=False, needs_depth=True)
+        assert "NO length limit and NO target word count" in rule
+        assert "do not shorten" in rule.lower()
+        assert "MUST stay above" not in rule
+        assert "%" not in rule
+
+    def test_reorganize_only_has_no_shrink_language_and_no_numeric_floor(self) -> None:
+        """The reorganize-only branch (not too_long, not needs_depth) used to enforce an 80%-of-draft-words floor with a threat ('or it will be rejected') that nothing downstream actually checked anymore (the real guard was removed 2026-08-03) -- replaced with the same no-target-word-count rule."""
+        rule = _revision_length_rule(too_long=False, needs_depth=False)
+        assert "NO length limit and NO target word count" in rule
+        assert "REORGANIZE" in rule
+        assert "MUST stay above" not in rule
+        assert "will be rejected" not in rule
+        assert "%" not in rule
+
+    def test_too_long_still_asks_for_trimming(self) -> None:
+        """too_long is the one legitimate case for shrinking -- e.g. a grader-flagged 'too long' issue for a non-special-edition article -- and must still ask for it."""
+        rule = _revision_length_rule(too_long=True, needs_depth=False)
+        assert "Trim padding/filler" in rule
+        assert "NO length limit" not in rule
 
 
 class _FakeMistral:
@@ -215,7 +246,7 @@ def test_low_repetition_score_triggers_revision_with_cut_instruction(
     )
 
     assert seq.calls == 1
-    assert "CUT the later restatements" in seq.sent_users[0]
+    assert "cut the later exact repeat" in seq.sent_users[0]
     assert out["body"] == "the fact stated once and a tightened rest of the section"
 
 
