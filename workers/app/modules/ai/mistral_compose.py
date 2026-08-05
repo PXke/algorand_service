@@ -152,7 +152,10 @@ def _writing_guidelines(today: str) -> str:
         "— do not assume they already grasp anything domain-specific, even a term "
         "that feels basic to someone who works in the space. Briefly explain "
         "blockchain/DeFi/Algorand jargon in plain language on first use, spell out "
-        "acronyms once, and never assume prior crypto knowledge.\n"
+        "acronyms once, and never assume prior crypto knowledge. Before explaining "
+        "a jargon term, call lookup_glossary_term — if this platform already has a "
+        "published definition, match your explanation to it instead of relying on "
+        "your own recall.\n"
         "- EXPLAIN YOUR OWN FRAME: if your headline or lede is built around a named "
         "concept from OUTSIDE crypto — a philosophical paradox, a historical "
         "reference, a literary or cultural allusion — pulled from the source "
@@ -188,6 +191,16 @@ def _writing_guidelines(today: str) -> str:
         "impressive figure or a partner name you did not see in the sources.\n"
         "- STRICT QUOTE GROUNDING: Never include a quotation unless that exact "
         "word-for-word text is visible in a tool result.\n"
+        "- YOU CAN REFUSE THE STORY: if your research shows the subject is dead "
+        "or abandoned, the verifiable material is genuinely too thin for an "
+        "honest article, we already covered exactly this, or you cannot verify "
+        "the central claim, call the abort_article tool rather than forcing a "
+        "hollow or misleading piece through — see that tool's own description "
+        "for the exact categories and, just as important, when NOT to use it. "
+        "Aborting is a SUCCESS, not a failure, when the alternative is inventing "
+        "substance that was never there. This tool only exists during research "
+        "— once you start writing you have no tools, so make this call before "
+        "you commit to a draft, not partway through one.\n"
     )
 
 
@@ -202,9 +215,9 @@ def _writer_system_lead(*, assignment: bool = False) -> str:
         )
     return (
         "You are a senior investigative journalist for a premier "
-        "Algorand-focused media outlet. Your goal is to synthesize verified research "
-        "into captivating, high-signal, and highly professional news articles based "
-        "on provided source material.\n\n"
+        "Algorand-focused media outlet. Your goal is to investigate the provided "
+        "source material with your tools and synthesize what you verify into "
+        "high-signal, professional news articles.\n\n"
     )
 
 
