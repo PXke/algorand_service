@@ -12,6 +12,7 @@ import httpx
 from app.core.config import (
     DEEPSEEK_API_BASE,
     DEEPSEEK_API_KEY,
+    DEEPSEEK_MAX_TOKENS,
     DEEPSEEK_MODEL_DIGEST,
     DEEPSEEK_MODEL_RESEARCH,
     DEEPSEEK_MODEL_TRANSLATE,
@@ -278,6 +279,10 @@ class MistralClient:
             return {"thinking": {"type": "enabled"}, "stream": False}
         return {}
 
+    def _default_max_tokens(self) -> int:
+        """The max_tokens ceiling to use when a caller doesn't pass an explicit one — provider-specific because DeepSeek's thinking mode spends real, sometimes-large token counts on reasoning_content out of the SAME budget as the answer content, so it needs far more headroom than Mistral's tuned 12000 (see DEEPSEEK_MAX_TOKENS)."""
+        return DEEPSEEK_MAX_TOKENS if self._provider == "deepseek" else MISTRAL_MAX_TOKENS
+
     def usage_totals(self) -> dict[str, int]:
         """Cumulative token usage across every request this instance has made (a compose session's client(s) are created fresh per session, so this is the session total, not a lifetime counter)."""
         return dict(self._usage)
@@ -425,7 +430,7 @@ class MistralClient:
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "max_tokens": max_tokens if max_tokens is not None else MISTRAL_MAX_TOKENS,
+            "max_tokens": max_tokens if max_tokens is not None else self._default_max_tokens(),
             "temperature": temperature,
         }
         if MISTRAL_REASONING_EFFORT and not self._reasoning_effort_unsupported:
@@ -720,7 +725,7 @@ class MistralClient:
         # to produce its final answer until it has called this tool at least once.
         required_satisfied = require_tool is None
         required_nudged = False
-        response_reserve = max_tokens if max_tokens is not None else MISTRAL_MAX_TOKENS
+        response_reserve = max_tokens if max_tokens is not None else self._default_max_tokens()
         # Leave room for the model's reply plus a safety pad below the window.
         # An explicit context_tokens always wins; otherwise prefer this
         # instance's own live-fetched limit (correct for whatever self._model

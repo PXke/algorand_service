@@ -256,6 +256,16 @@ DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-chat")
 DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-chat")
 DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-chat")
 DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-chat")
+# DeepSeek's thinking mode returns reasoning in a separate reasoning_content
+# field, but BOTH reasoning_content and content draw from the same max_tokens
+# budget (visible as usage.completion_tokens_details.reasoning_tokens) —
+# root-caused 2026-08-05: a real article-write call under MISTRAL_MAX_TOKENS
+# (12000, tuned for Mistral, which doesn't visibly consume budget on
+# reasoning the same way) burned its entire budget on reasoning_content and
+# came back with an EMPTY content field, failing as "non-JSON content: ".
+# DeepSeek supports up to 384k output tokens, so there's ample room for a
+# larger ceiling without approaching a real limit.
+DEEPSEEK_MAX_TOKENS = env_int("DEEPSEEK_MAX_TOKENS", 40000)
 
 # Per-purpose provider routing: "mistral" (default, unchanged behavior) or
 # "deepseek". CANARY_PCT (0-100) sends that percentage of calls to the OTHER
