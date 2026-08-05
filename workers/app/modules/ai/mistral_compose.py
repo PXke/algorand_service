@@ -1445,6 +1445,21 @@ _CHART_EXAMPLE = (
 # honest closing Source list. Trimmed of the citation block reference_block.py
 # appends automatically after generation (that's not the model's own output,
 # so including it here would teach a duplicate Sources section).
+#
+# Deliberately SHORT (2026-08-05, owner request) — a full-length worked
+# example teaches its own structure just as hard as its intended format, and
+# that's not hypothetical: an earlier version of this example used a
+# colon-label headline and it "made every published headline a colon label"
+# (see the NOTE below). The same full 6-section arc this example used to have
+# (problem -> solution -> pricing table -> "Technical Foundation and
+# Philosophy" -> "Ecosystem Context" -> team) is suspected of the SAME
+# mechanism showing up differently: a live article on an unrelated topic
+# (Hampelman NFTs) grew its own "Algorand's Infrastructure: The Technical
+# Backbone" section, echoing this example's technical-section beat rather
+# than responding to what that story actually needed. Trimmed to the minimum
+# that still demonstrates the shape -- one flowing opening (not a separate
+# header per beat), one small table, one first-mention link, one closing
+# Source list -- so there's less rigid structure left to imitate wholesale.
 _GOOD_EXAMPLE_ARTICLE = {
     # NOTE: the example title must model the claim-style headline rule — a
     # few-shot example teaches format harder than any prohibition, which is
@@ -1458,81 +1473,34 @@ _GOOD_EXAMPLE_ARTICLE = {
     ),
     "tags": ["infrastructure", "api", "node", "indexer", "algorand"],
     "body": (
-        "## The Reliability Gap in Blockchain Development\n\n"
-        "For decentralized applications, uninterrupted access to chain data is "
-        "non-negotiable. Developers building on Algorand face a choice: run "
-        "their own nodes—a resource-intensive operation requiring "
-        "specialized expertise—or rely on third-party providers that may "
-        "introduce latency spikes, downtime, or restrictive terms. The "
-        "friction is real: without robust infrastructure, even well-designed "
-        "applications can fail at the point of user interaction.\n\n"
-        "## A Globally Distributed Solution\n\n"
-        "[Nodely](https://nodely.io/) resolves this by operating a globally "
-        "distributed network of nodes and indexers. Its infrastructure spans "
-        "20+ geographic locations, currently handling 115M+ daily API "
-        "requests through 75+ indexers. The platform supports 75+ customers "
-        "across 5+ AVM-compatible chains, including Algorand’s mainnet "
-        "and testnet, with full archival access to historical data.\n\n"
-        "Beyond core node services, Nodely provides additional utilities: an "
-        "IPFS Gateway for Algorand ASA CIDs, a BigQuery dataset for "
-        "analytics, and public node telemetry dashboards. 24/7 support is "
-        "available via Telegram or Discord, with free support extended to "
-        "non-commercial projects.\n\n"
-        "## Tiered Access for Every Stage\n\n"
-        "Nodely’s pricing model scales with project needs, eliminating "
-        "surprises with fixed costs:\n\n"
-        "| Tier | Price | Throughput | SLO | Notable Features |\n"
-        "|------|-------|------------|-----|------------------|\n"
-        "| Free | 0 ALGO/forever | 60 req/s per browser | 99.95% | IPFS "
-        "Gateway, no keys needed |\n"
-        "| Unlimited | $256/month | 6000 req/s per key/site, 500 req/s per "
-        "IP | 99.99% | Full API at 25 locations |\n"
-        "| Business | $256/month* | 500 req/s per IP, 200K reqs daily | "
-        "100% | Fee abstraction, validator node service, 1M TX included |\n"
-        "| Enterprise | $1024/month/region | Custom | Custom | Dedicated "
-        "infrastructure |\n\n"
-        "*Annual subscription only\n\n"
-        "The free tier is explicitly production-ready, requiring only that "
-        "projects attribute Nodely on their site. For teams ready to "
-        "self-host, Nodely offers setup tuning services, applying its "
-        "experience in running APIs at scale to optimize custom "
-        "configurations.\n\n"
-        "## Technical Foundation and Philosophy\n\n"
-        "Nodely’s infrastructure is built on vanilla open-source node "
-        "and indexer APIs, ensuring no vendor lock-in. Projects can "
-        "seamlessly migrate to self-hosted setups when ready. The "
-        "team’s background in telecom infrastructure since 2006 "
-        "enables bare-metal configurations that reduce latency by orders of "
-        "magnitude compared to cloud-based alternatives. Streaming add-ons "
-        "leverage projects open-sourced on Nodely’s "
-        "[GitHub](https://github.com/algonode), maintaining transparency "
-        "and community collaboration.\n\n"
-        "## Ecosystem Context\n\n"
-        "As of June 29, 2026, Algorand’s mainnet maintains 2,740 "
-        "full-time nodes. Nodely’s [status "
-        "page](https://algonode.betteruptime.com/) confirms all services "
-        "are operational, with the last update at 10:14am UTC. This "
-        "reliability is critical as the network continues to grow, "
-        "ensuring developers can focus on building rather than maintaining "
-        "infrastructure.\n\n"
-        "## Team and Evolution\n\n"
-        "Originally launched as AlgoNode, Nodely is developed by a team of "
-        "site reliability engineers with extensive experience in critical "
-        "infrastructure. The [AlgoNode GitHub "
-        "organization](https://github.com/algonode) (verified domain: "
-        "nodely.io) maintains 15+ open-source repositories supporting the "
-        "ecosystem.\n\n"
+        "## Free, Global Node Access — No Vendor Lock-In\n\n"
+        "Developers building on Algorand have long faced a tradeoff: run a "
+        "resource-intensive node themselves, or rely on a third-party "
+        "provider that risks latency spikes or restrictive terms. "
+        "[Nodely](https://nodely.io/) closes that gap with a globally "
+        "distributed network of nodes and indexers, now handling 115M+ "
+        "daily API requests across 20+ locations — with a production-ready "
+        "free tier, not just a trial.\n\n"
+        "## What The Free Tier Actually Includes\n\n"
+        "| Tier | Price | Throughput | Notable Features |\n"
+        "|------|-------|------------|-------------------|\n"
+        "| Free | 0 ALGO/forever | 60 req/s per browser | IPFS Gateway, no "
+        "keys needed |\n"
+        "| Unlimited | $256/month | 6000 req/s per key/site | Full API at "
+        "25 locations |\n\n"
+        "Built on vanilla open-source node and indexer APIs, the stack "
+        "avoids vendor lock-in — projects can migrate to self-hosting "
+        "whenever they’re ready.\n\n"
         "## Source\n"
         "- [Nodely](https://nodely.io/)\n"
-        "- [AlgoNode GitHub](https://github.com/algonode)\n"
-        "- [Nodely Status](https://algonode.betteruptime.com/)"
+        "- [AlgoNode GitHub](https://github.com/algonode)"
     ),
 }
 _GOOD_EXAMPLE = (
-    "\n\nWORKED EXAMPLE (a real published article that scored well — study "
-    "its structure, technical translation, data presentation and sourcing; "
-    "never reuse its topic, facts or specific phrasing for an unrelated "
-    "story):\n"
+    "\n\nWORKED EXAMPLE (a real published article, trimmed for length — "
+    "study its structure, data presentation and sourcing; never reuse its "
+    "topic, facts, specific phrasing, or exact section count/arc for an "
+    "unrelated story):\n"
     f"{json.dumps(_GOOD_EXAMPLE_ARTICLE)}\n"
 )
 
