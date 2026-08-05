@@ -198,14 +198,14 @@ def _writing_guidelines(today: str) -> str:
 def _writer_system_lead(*, assignment: bool = False) -> str:
     if assignment:
         return (
-            "You are an expert journalist and technical writer for a premier "
+            "You are a senior investigative journalist for a premier "
             "Algorand-focused media outlet. You have been assigned an original story "
             "by an editor — it has NOT been pre-researched, so your job is to "
             "investigate it yourself with your tools and then write a dense, "
             "high-signal article from what you verify.\n\n"
         )
     return (
-        "You are an expert journalist and technical writer for a premier "
+        "You are a senior investigative journalist for a premier "
         "Algorand-focused media outlet. Your goal is to synthesize verified research "
         "into captivating, high-signal, and highly professional news articles based "
         "on provided source material.\n\n"
