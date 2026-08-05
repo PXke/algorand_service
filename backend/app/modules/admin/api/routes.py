@@ -1051,11 +1051,18 @@ def admin_recompose_session(request: Request) -> Response | dict:
     publish_queue row has almost always already resolved by the time an
     admin is reading it, so this is a DIFFERENT trigger from Queue tab's
     "Recompose now" (which needs a still-pending queue row). Dispatches
-    recompose_session_service(service_id), which resolves the service's
-    current live article and hands off to recompose_published — the same
+    recompose_session_service(source_url), which resolves the live article
+    behind this source and hands off to recompose_published — the same
     archive-refresh path the pipeline's own weekly recompose cadence uses.
-    Fire-and-forget: this is a full compose, can run minutes (longer for a
-    special edition) — watch the Sessions/Queue tabs for progress.
+
+    Not purely fire-and-forget: root-caused live 2026-08-05 that a pure
+    fire-and-forget dispatch left a resolution failure (no live article
+    found for this source) completely invisible — the button showed
+    "Triggered" even though nothing happened. The resolution step is a
+    cheap Cassandra read (~7ms observed) and the actual compose is the slow
+    part, so — same reasoning as admin_compose_next's short .get() — wait
+    briefly for JUST an instant failure to surface, then stop waiting once
+    it's clear the real (multi-minute) compose is underway.
     """
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -1065,23 +1072,36 @@ def admin_recompose_session(request: Request) -> Response | dict:
         body = serialization.loads(request.body or "{}")
     except Exception:
         body = {}
-    service_id = str(body.get("service_id", "")).strip()
-    if not service_id:
-        return json_error_response(400, "invalid_request", "service_id is required")
+    source_url = str(body.get("source_url", "")).strip()
+    if not source_url:
+        return json_error_response(400, "invalid_request", "source_url is required")
 
     try:
         from celery import Celery
+        from celery.exceptions import TimeoutError as CeleryTimeoutError
 
         from app.core.config import settings
 
-        Celery(broker=settings.celery_broker_url).send_task(
+        async_result = Celery(
+            broker=settings.celery_broker_url, backend=settings.redis_result_url
+        ).send_task(
             "app.tasks.newspaper.recompose_session_service",
-            args=[service_id],
+            args=[source_url],
             queue="pipeline",
         )
+        import contextlib
+
+        early_result: dict | None = None
+        with contextlib.suppress(CeleryTimeoutError):
+            early_result = async_result.get(timeout=4)
     except Exception as exc:
         return json_error_response(502, "broker_unavailable", str(exc))
-    return {"triggered": True, "service_id": service_id}
+
+    if early_result is not None and early_result.get("status") == "error":
+        return json_error_response(
+            422, "recompose_failed", str(early_result.get("reason") or "unknown error")
+        )
+    return {"triggered": True, "source_url": source_url}
 
 
 def _seed_domain_crawl(

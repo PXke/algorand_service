@@ -2629,23 +2629,48 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
 
 
 @celery_app.task(name="app.tasks.newspaper.recompose_session_service")
-def recompose_session_service(service_id: str) -> dict[str, str]:
-    """Admin-triggered from the Sessions tab: "I just read this session's transcript, changed a prompt, and want to see the pipeline behave now" -- resolves this service's current live article and hands off to recompose_published, the SAME archive-refresh path used for the pipeline's own weekly recompose cadence.
+def recompose_session_service(source_url: str) -> dict[str, str]:
+    """Admin-triggered from the Sessions tab: "I just read this session's transcript, changed a prompt, and want to see the pipeline behave now" -- resolves the live article behind this source and hands off to recompose_published, the SAME archive-refresh path used for the pipeline's own weekly recompose cadence.
 
+    Takes source_url, NOT compose_sessions.service_id -- root-caused
+    2026-08-05 live: for a scraped-page compose, service_id is deliberately
+    set to the raw source_url itself (see tool_context in
+    _compose_via_writer_tools_locked), not a normalized service_id slug, so
+    find_latest_service_article(session.service_id) never matched anything.
+    Two real resolution paths from source_url:
+    - editorial://brief/<id> -> the brief's own linked_article_id (no
+      domain/service concept applies to an editorial assignment).
+    - a real page URL -> domain -> service_for_domain -> service_id ->
+      find_latest_service_article (the same chain service_for_domain/
+      find_latest_service_article already serve elsewhere).
     A compose session has no article_id of its own (compose_sessions and
-    articles_by_id are separate tables, linked only loosely by service_id/
-    source_url) and, by the time someone is reading it in the Sessions tab,
-    its originating publish_queue row has almost always already resolved --
-    recompose_session_service (unlike compose_queue_row_now) never touches
-    the queue at all, going straight from service_id to the live article via
-    find_latest_service_article, same lookup prior_service_article_summary
-    uses for "our own most recent article about this service."
+    articles_by_id are separate tables) and, by the time someone is reading
+    it in the Sessions tab, its originating publish_queue row has almost
+    always already resolved -- recompose_session_service (unlike
+    compose_queue_row_now) never touches the queue at all.
     """
-    from app.modules.newspaper.article_matching import find_latest_service_article
+    source_url = (source_url or "").strip()
+    if not source_url:
+        return {"status": "error", "reason": "no_source_url"}
 
-    article_id = find_latest_service_article(service_id)
+    article_id: str | None = None
+    if source_url.lower().startswith("editorial://brief/"):
+        from app.modules.newspaper.editorial_assignment import get_brief
+
+        brief = get_brief(source_url.rsplit("/", 1)[-1])
+        article_id = brief.linked_article_id if brief else None
+    else:
+        from app.modules.crawler.domain_tracker import domain_from_url
+        from app.modules.newspaper.article_matching import find_latest_service_article
+        from app.modules.newspaper.service_sources import service_for_domain
+
+        domain = domain_from_url(source_url)
+        service_id = service_for_domain(domain) if domain else ""
+        if service_id:
+            article_id = find_latest_service_article(service_id)
+
     if not article_id:
-        return {"status": "error", "reason": "no_live_article_for_service"}
+        return {"status": "error", "reason": "no_live_article_for_source"}
     return recompose_published(article_id)
 
 

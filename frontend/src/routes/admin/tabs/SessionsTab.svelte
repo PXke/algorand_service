@@ -263,14 +263,14 @@
     }
   }
 
-  async function recomposeSession(id: string, serviceId: string) {
-    if (!serviceId) {
-      recomposeSessionError = { ...recomposeSessionError, [id]: 'session has no service_id' }
+  async function recomposeSession(id: string, sourceUrl: string) {
+    if (!sourceUrl) {
+      recomposeSessionError = { ...recomposeSessionError, [id]: 'session has no source_url' }
       return
     }
     if (
       !confirm(
-        'Recompose the live article for this service now? This spends real Mistral usage ' +
+        'Recompose the live article for this source now? This spends real Mistral usage ' +
           'and can take several minutes (longer for a special edition).',
       )
     ) {
@@ -279,7 +279,7 @@
     recomposingSessionIds = new Set(recomposingSessionIds).add(id)
     recomposeSessionError = { ...recomposeSessionError, [id]: '' }
     try {
-      await admin.recomposeSession(id, serviceId)
+      await admin.recomposeSession(id, sourceUrl)
       recomposedSessionIds = new Set(recomposedSessionIds).add(id)
     } catch (e) {
       recomposeSessionError = {
@@ -345,7 +345,6 @@
       {@const id = sessionId(s)}
       {@const createdAt = String(s.created_at ?? '')}
       {@const source = String(s.source_url ?? '').trim()}
-      {@const serviceId = String(s.service_id ?? '').trim()}
       {@const status = String(s.status ?? '')}
       {@const model = String(s.model ?? '')}
       {@const rounds = Number(s.rounds ?? 0)}
@@ -426,9 +425,9 @@
                   <button
                     class="btn compact btn-danger"
                     type="button"
-                    disabled={recomposing || recomposed || !serviceId}
-                    title={serviceId ? '' : 'no service_id on this session'}
-                    onclick={() => recomposeSession(id, serviceId)}
+                    disabled={recomposing || recomposed || !source}
+                    title={source ? '' : 'no source_url on this session'}
+                    onclick={() => recomposeSession(id, source)}
                   >
                     {#if recomposing}
                       Triggering…
