@@ -782,7 +782,23 @@ _RESEARCH_DIGEST_SYNTHESIS = (
     "- If two tool results give conflicting numbers for the same metric on the same "
     "asset (e.g. two different prices for what should be one token), do not list "
     "both as if they agree — flag the conflict explicitly, or keep only the more "
-    "verifiable (on-chain/DEX) figure and drop the other.\n\n"
+    "verifiable (on-chain/DEX) figure and drop the other.\n"
+    "- COMPLETE LISTS, NOT SUBSETS: when a tool result enumerates multiple named "
+    "items (e.g. a page listing several guest collections, mechanics, or "
+    "features), your bullet must name every one — not a representative sample. "
+    "Stage 2 never sees the raw trace, only this digest; an item you drop here "
+    "does not exist for Stage 2 (root-caused 2026-08-05: a fetch_url result "
+    "listed three guest-access mechanics side by side, one of them a wallet-"
+    "history-based unlock — the digest kept two and silently dropped the "
+    "third, so the final article never mentioned it).\n"
+    "- NAMES AND URLS, VERBATIM: an on-chain asset's own `name` field and any "
+    "URL a tool result returns FOR that specific asset (its metadata/project "
+    "url, not a generic search hit) are themselves verified facts — carry them "
+    "over exactly as returned, never shorten, genericize, or drop them even if "
+    "they seem minor (root-caused 2026-08-05: an asset's on-chain name was "
+    "'Memento Mori', with its own url field pointing to the project's site — "
+    "the digest shortened it to 'Mori coin' and dropped the url, so Stage 2 "
+    "called an asset with a self-evident, on-the-nose name 'undisclosed').\n\n"
     "### Verbatim Quotes\n"
     "- Only word-for-word quotes visible in tool results, each with its source. "
     "If none exist, write exactly: None\n\n"
@@ -826,6 +842,53 @@ _RESEARCH_DIGEST_SYNTHESIS = (
 )
 
 
+def _asset_candidates_from_result(tool: str, result: object) -> list[dict]:
+    """The list of raw asset dicts a lookup_asset/lookup_asset_by_name result contains, regardless of which of the two shapes it is (a single asset dict vs a {"results": [...]} list)."""
+    if not isinstance(result, dict):
+        return []
+    candidates = result.get("results") if tool == "lookup_asset_by_name" else [result]
+    return candidates if isinstance(candidates, list) else []
+
+
+def _collect_asset_facts(trace: list[dict]) -> dict[Any, dict[str, str]]:
+    """{asset_id: {"name"/"unit_name"/"url": value}} for every asset seen across all lookup_asset/lookup_asset_by_name results in the trace."""
+    facts: dict[Any, dict[str, str]] = {}
+    for entry in trace:
+        tool = str(entry.get("tool", ""))
+        if tool not in ("lookup_asset", "lookup_asset_by_name"):
+            continue
+        for a in _asset_candidates_from_result(tool, entry.get("result")):
+            if not isinstance(a, dict) or a.get("asset_id") is None:
+                continue
+            record = facts.setdefault(a["asset_id"], {})
+            for field in ("name", "unit_name", "url"):
+                value = a.get(field)
+                if value:
+                    record[field] = value
+    return facts
+
+
+def _format_asset_fact_line(asset_id: int | str, record: dict[str, str]) -> str:
+    parts = [f"asset {asset_id}"]
+    if record.get("name"):
+        parts.append(f'name="{record["name"]}"')
+    if record.get("unit_name"):
+        parts.append(f'unit_name="{record["unit_name"]}"')
+    if record.get("url"):
+        parts.append(f'url={record["url"]}')
+    return "- " + ", ".join(parts)
+
+
+def _extract_asset_facts(trace: list[dict]) -> str:
+    """Every on-chain asset name/unit-name/url seen in lookup_asset* tool results, extracted mechanically (not by an LLM) — a hard safety net against digest-synthesis paraphrasing away or dropping one, since code can't lose a fact the way a summarization pass can. Root-caused 2026-08-05: a compose's raw trace had an asset's on-chain name "Memento Mori" and its own metadata url, but the LLM-synthesized digest shortened it to "Mori coin" and dropped the url — Stage 2, which only ever sees the digest, then called that same on-the-nose name "undisclosed"."""
+    facts = _collect_asset_facts(trace)
+    if not facts:
+        return ""
+    lines = ["### On-Chain Asset Names & URLs (verbatim — do not shorten, genericize, or drop)"]
+    lines.extend(_format_asset_fact_line(asset_id, record) for asset_id, record in facts.items())
+    return "\n".join(lines)
+
+
 def _synthesize_research_digest(
     *,
     trace: list[dict],
@@ -835,6 +898,7 @@ def _synthesize_research_digest(
     raw_trace = _format_research_digest(trace)
     if not raw_trace.strip():
         return ""
+    asset_facts = _extract_asset_facts(trace)
     try:
         from app.core.config import MISTRAL_TEMP_RESEARCH
 
@@ -854,7 +918,9 @@ def _synthesize_research_digest(
             temperature=MISTRAL_TEMP_RESEARCH,
         )
         text = (digest or "").strip()
-        return text if text else raw_trace
+        if not text:
+            return raw_trace
+        return f"{text}\n\n{asset_facts}" if asset_facts else text
     except Exception:
         logger.warning("research digest synthesis failed; using raw trace", exc_info=True)
         return raw_trace
