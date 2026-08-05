@@ -94,7 +94,7 @@ _INVALID_ADDRESS_ERROR = (
 
 
 def _tool_lookup_account(address: str) -> dict[str, Any]:
-    """Live state of an Algorand account: ALGO balance, ASAs held, the apps it created or opted into, and its rekey state.
+    """Live state of an Algorand account: ALGO balance, ASAs held, the apps it created or opted into, its rekey state, and signature type.
 
     auth_addr (2026-08-05, root-caused live): algod's response carries this
     field for a REKEYED account (one that delegated signing authority to a
@@ -119,29 +119,40 @@ def _tool_lookup_account(address: str) -> dict[str, Any]:
     if data.get("_status") == 404:
         return {"address": addr, "error": "account not found"}
     assets = data.get("assets", []) or []
+    created_assets = data.get("created-assets", []) or []
+    created_apps = data.get("created-apps", []) or []
+    opted_in_apps = data.get("apps-local-state", []) or []
     return {
         "address": addr,
         "balance_algo": round((data.get("amount", 0) or 0) / 1e6, 6),
         "min_balance_algo": round((data.get("min-balance", 0) or 0) / 1e6, 6),
         "status": data.get("status"),
         "auth_addr": data.get("auth-addr"),
+        # sig_type distinguishes a personal wallet (sig) from a multisig
+        # (msig, shared control across several signers) or a logicsig
+        # (lsig, contract-controlled) -- absent if this address has never
+        # sent a transaction. Real signal for "who/what actually controls
+        # this account," same investigative use as auth_addr.
+        "sig_type": data.get("sig-type"),
         "total_assets_held": len(assets),
         "assets": [
             {"asset_id": a.get("asset-id"), "amount": a.get("amount")}
             for a in assets[:25]
             if isinstance(a, dict)
         ],
+        # True counts alongside the 25-item-capped lists below, so a story
+        # about a prolific creator doesn't quietly look like a small one
+        # just because the tool only lists a slice.
+        "total_created_assets": len(created_assets),
+        "total_created_apps": len(created_apps),
+        "total_apps_opted_in": len(opted_in_apps),
         "created_assets": [
-            a.get("index")
-            for a in (data.get("created-assets", []) or [])[:25]
-            if isinstance(a, dict)
+            a.get("index") for a in created_assets[:25] if isinstance(a, dict)
         ],
-        "created_apps": [
-            a.get("id") for a in (data.get("created-apps", []) or [])[:25] if isinstance(a, dict)
-        ],
+        "created_apps": [a.get("id") for a in created_apps[:25] if isinstance(a, dict)],
         "opted_in_apps": [
             a.get("id")
-            for a in (data.get("apps-local-state", []) or [])[:25]
+            for a in opted_in_apps[:25]
             if isinstance(a, dict)
         ],
     }
@@ -167,7 +178,14 @@ def _asset_total_adjusted(p: dict[str, Any]) -> tuple[Any, Any, float | None]:
 
 
 def _tool_lookup_asset(asset_id: int | str) -> dict[str, Any]:
-    """Algorand Standard Asset (ASA) parameters: name, supply, decimals, creator, and the manager/freeze/clawback/reserve roles."""
+    """Algorand Standard Asset (ASA) parameters: name, supply, decimals, creator, the manager/freeze/clawback/reserve roles, and its metadata hash.
+
+    metadata_hash (2026-08-05): the on-chain commitment an ARC-3/ARC-19 NFT's
+    metadata is supposed to match (base64, 32 raw bytes) -- lets a
+    verification actually CHECK a fetched metadata JSON against what's
+    committed on-chain instead of trusting it blindly. None for assets that
+    don't set one (most fungible tokens).
+    """
     aid = str(asset_id).strip()
     if not aid.isdigit():
         return {"error": "asset_id must be a numeric ASA id"}
@@ -189,6 +207,7 @@ def _tool_lookup_asset(asset_id: int | str) -> dict[str, Any]:
         "total_adjusted": total_adjusted,
         "creator": p.get("creator"),
         "url": p.get("url"),
+        "metadata_hash": p.get("metadata-hash"),
         "default_frozen": p.get("default-frozen"),
         "manager": p.get("manager"),
         "freeze": p.get("freeze"),
@@ -558,19 +577,22 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
             "name": "lookup_account",
             "description": (
                 "Live on-chain state of an Algorand account by address: ALGO balance, "
-                "ASAs held, the apps it created or opted into, and auth_addr (set only "
-                "if this account was REKEYED — delegated its signing authority to a "
-                "different address). auth_addr is real evidence of common control even "
-                "when two accounts have different addresses: if two assets' creator "
-                "addresses differ but both accounts share the SAME auth_addr, the same "
-                "real signer controls both — do not conclude 'different creator, so "
-                "unrelated' without checking this first. Use to verify holdings, "
-                "treasury balances, or whether an account participates in a protocol. "
-                "The address MUST be one you actually found in a fetched page, search "
-                "result, or another tool's output — never construct, guess, or "
-                "pattern-match a plausible-looking one yourself (e.g. 'the project's name "
-                "as a prefix'). If you don't have a real address for this project, say so "
-                "in the article instead of inventing one to check."
+                "ASAs held, the apps it created or opted into, auth_addr, and sig_type. "
+                "auth_addr is set only if this account was REKEYED — delegated its "
+                "signing authority to a different address — and is real evidence of "
+                "common control even when two accounts have different addresses: if "
+                "two assets' creator addresses differ but both accounts share the SAME "
+                "auth_addr, the same real signer controls both — do not conclude "
+                "'different creator, so unrelated' without checking this first. "
+                "sig_type tells you whether the account is a personal wallet (sig), a "
+                "multisig with shared control (msig), or contract-controlled (lsig). "
+                "Use to verify holdings, treasury balances, or whether an account "
+                "participates in a protocol. The address MUST be one you actually found "
+                "in a fetched page, search result, or another tool's output — never "
+                "construct, guess, or pattern-match a plausible-looking one yourself "
+                "(e.g. 'the project's name as a prefix'). If you don't have a real "
+                "address for this project, say so in the article instead of inventing "
+                "one to check."
             ),
             "parameters": {
                 "type": "object",
@@ -587,8 +609,11 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
             "name": "lookup_asset",
             "description": (
                 "Algorand Standard Asset (ASA) parameters by asset id: name, total supply, "
-                "decimals, creator, and manager/freeze/clawback/reserve roles. Use to verify "
-                "a token's real supply or who controls it."
+                "decimals, creator, manager/freeze/clawback/reserve roles, and "
+                "metadata_hash. Use to verify a token's real supply or who controls it. "
+                "For an ARC-3/ARC-19 NFT, metadata_hash is the on-chain commitment its "
+                "metadata JSON is supposed to match — if you fetch that metadata, you "
+                "can actually check it against this instead of trusting it blindly."
             ),
             "parameters": {
                 "type": "object",
