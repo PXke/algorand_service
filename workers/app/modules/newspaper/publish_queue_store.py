@@ -189,6 +189,38 @@ def list_pending_queue(*, limit: int = 50) -> list[QueuedPublishRow]:
     return order_for_drain(out)
 
 
+def get_queued_row(queue_id: str) -> QueuedPublishRow | None:
+    """Load one publish-queue row by id, regardless of status — for admin actions that target a specific row directly (e.g. an immediate recompose) rather than draining in priority order. Callers that require a particular status (e.g. still "pending") must check row status themselves; this is a plain lookup."""
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import PublishQueueStmts
+
+    try:
+        qid = uuid.UUID(str(queue_id))
+    except ValueError:
+        return None
+    session = get_cassandra_session()
+    row = session.execute(PublishQueueStmts.GET_FULL, (qid,)).one()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row.payload or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    created = row.created_at
+    epoch = int(created.timestamp()) if created else 0
+    return QueuedPublishRow(
+        queue_id=str(qid),
+        priority=int(row.priority or 0),
+        topic=row.topic or "",
+        publish_kind=row.publish_kind or "",
+        service_id=row.service_id or "",
+        display_name=row.display_name or "",
+        scrape_url=row.scrape_url or "",
+        payload=payload,
+        created_at_epoch=epoch,
+    )
+
+
 def _queue_domain(row: QueuedPublishRow) -> str:
     """Source key for diversity: the registrable domain (eTLD+1), falling back to service_id. Collapsing subdomains is deliberate — explore.perawallet.app and perawallet.app are one source, so the interleave can't treat the same project's subdomains as distinct sources and let a burst from one entity through. Matches the key the per-domain compose cap/cooldown use, so the two layers agree."""
     from app.modules.crawler.domain_tracker import domain_from_url

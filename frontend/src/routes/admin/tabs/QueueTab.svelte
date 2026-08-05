@@ -15,6 +15,9 @@
   let breakdownLoading = $state<Set<string>>(new Set())
   let bumpingId = $state<string | null>(null)
   let bumpError = $state<string | null>(null)
+  let recomposingNowId = $state<string | null>(null)
+  let recomposeNowError = $state<string | null>(null)
+  let recomposedNowIds = $state<Set<string>>(new Set())
   let deadEndingId = $state<string | null>(null)
   let deadEndError = $state<string | null>(null)
   let deadEndedDomains = $state<Record<string, string>>({})
@@ -107,6 +110,28 @@
     }
   }
 
+  async function recomposeNow(queueId: string) {
+    if (
+      !confirm(
+        'Compose this row immediately, bypassing the standard pacing gate? ' +
+          'This spends real Mistral usage and can take several minutes ' +
+          '(longer for a special edition) — watch the Sessions tab for progress.',
+      )
+    ) {
+      return
+    }
+    recomposingNowId = queueId
+    recomposeNowError = null
+    try {
+      await admin.recomposeQueueItemNow(queueId)
+      recomposedNowIds = new Set(recomposedNowIds).add(queueId)
+    } catch (e) {
+      recomposeNowError = e instanceof Error ? e.message : String(e)
+    } finally {
+      recomposingNowId = null
+    }
+  }
+
   async function deadEndDomain(queueId: string) {
     if (!confirm('Permanently reject this row\'s source domain? It will never be re-crawled or re-composed.')) return
     deadEndingId = queueId
@@ -182,6 +207,9 @@
   {#if bumpError}
     <p class="admin-err">{bumpError}</p>
   {/if}
+  {#if recomposeNowError}
+    <p class="admin-err">{recomposeNowError}</p>
+  {/if}
   {#if deadEndError}
     <p class="admin-err">{deadEndError}</p>
   {/if}
@@ -240,6 +268,20 @@
                 onclick={() => composeNext(queueId)}
               >
                 {bumpingId === queueId ? 'Pinning…' : 'Compose next'}
+              </button>
+              <button
+                class="btn compact btn-danger"
+                type="button"
+                disabled={recomposingNowId === queueId || recomposedNowIds.has(queueId)}
+                onclick={() => recomposeNow(queueId)}
+              >
+                {#if recomposingNowId === queueId}
+                  Triggering…
+                {:else if recomposedNowIds.has(queueId)}
+                  Triggered ✓
+                {:else}
+                  Recompose now
+                {/if}
               </button>
             {/if}
             {#if item.scrape_url}

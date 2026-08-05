@@ -28,6 +28,14 @@
   let detailLoading = $state<Set<string>>(new Set())
   let detailErrors = $state<Set<string>>(new Set())
 
+  type ChatTurn = { role: 'user' | 'assistant'; content: string }
+  let interrogateOpenIds = $state<Set<string>>(new Set())
+  let interrogateHistory = $state<Record<string, ChatTurn[]>>({})
+  let interrogateDraft = $state<Record<string, string>>({})
+  let interrogateGroundTruth = $state<Record<string, boolean>>({})
+  let interrogateLoading = $state<Set<string>>(new Set())
+  let interrogateError = $state<Record<string, string>>({})
+
   const hasActiveSession = $derived(
     sessions.some((s) => ACTIVE_STATUSES.has(String(s.status ?? ''))),
   )
@@ -201,6 +209,56 @@
     return expandedIds.has(sessionId(s))
   }
 
+  function toggleInterrogate(id: string) {
+    const next = new Set(interrogateOpenIds)
+    if (next.has(id)) {
+      next.delete(id)
+    } else {
+      next.add(id)
+      if (!(id in interrogateGroundTruth)) {
+        interrogateGroundTruth = { ...interrogateGroundTruth, [id]: true }
+      }
+    }
+    interrogateOpenIds = next
+  }
+
+  async function askInterrogation(id: string) {
+    const question = (interrogateDraft[id] ?? '').trim()
+    if (!question || interrogateLoading.has(id)) return
+
+    const priorHistory = interrogateHistory[id] ?? []
+    interrogateHistory = { ...interrogateHistory, [id]: [...priorHistory, { role: 'user', content: question }] }
+    interrogateDraft = { ...interrogateDraft, [id]: '' }
+    interrogateLoading = new Set(interrogateLoading).add(id)
+    interrogateError = { ...interrogateError, [id]: '' }
+
+    try {
+      const res = await admin.interrogateComposeSession(id, {
+        question,
+        history: priorHistory,
+        ground_truth: interrogateGroundTruth[id] ?? true,
+      })
+      const answer = String(res.answer ?? '')
+      const fallbackTurn: ChatTurn = { role: 'assistant', content: answer }
+      const nextHistory: ChatTurn[] = Array.isArray(res.history)
+        ? (res.history as ChatTurn[])
+        : [...(interrogateHistory[id] ?? []), fallbackTurn]
+      interrogateHistory = { ...interrogateHistory, [id]: nextHistory }
+    } catch (e) {
+      // Roll back the optimistic user turn so a retry doesn't duplicate it.
+      interrogateHistory = { ...interrogateHistory, [id]: priorHistory }
+      interrogateDraft = { ...interrogateDraft, [id]: question }
+      interrogateError = {
+        ...interrogateError,
+        [id]: e instanceof Error ? e.message : String(e),
+      }
+    } finally {
+      const next = new Set(interrogateLoading)
+      next.delete(id)
+      interrogateLoading = next
+    }
+  }
+
   $effect(() => {
     admin
     void load()
@@ -313,6 +371,87 @@
                   <pre class="msg-mono accent">{finalOutputFor(detail)}</pre>
                 </section>
               {/if}
+
+              {@const interrogateOpen = interrogateOpenIds.has(id)}
+              {@const chatHistory = interrogateHistory[id] ?? []}
+              {@const asking = interrogateLoading.has(id)}
+              {@const askError = interrogateError[id]}
+              <section class="interrogate">
+                <button
+                  class="btn compact"
+                  type="button"
+                  onclick={() => toggleInterrogate(id)}
+                >
+                  {interrogateOpen ? 'Hide interrogation' : 'Interrogate this session'}
+                </button>
+
+                {#if interrogateOpen}
+                  <div class="interrogate-panel">
+                    <p class="admin-muted small">
+                      Revives this session's transcript into the same model that composed it and
+                      asks it your question. Its answers are leads to verify against the trace
+                      and live sources — an LLM cannot truly introspect its past reasoning, and
+                      under pressure it rationalises or capitulates rather than telling you it
+                      doesn't know.
+                    </p>
+                    <label class="ground-truth-toggle">
+                      <input
+                        type="checkbox"
+                        checked={interrogateGroundTruth[id] ?? true}
+                        onchange={(e) =>
+                          (interrogateGroundTruth = {
+                            ...interrogateGroundTruth,
+                            [id]: (e.target as HTMLInputElement).checked,
+                          })}
+                      />
+                      Confront with live ground truth (DNS on linked domains + its own transcript's
+                      fetch failures)
+                    </label>
+
+                    {#if chatHistory.length > 0}
+                      <div class="interrogate-history">
+                        {#each chatHistory as turn}
+                          <p class="chat-turn" class:assistant={turn.role === 'assistant'}>
+                            <span class="chat-role">{turn.role === 'user' ? 'you' : 'writer'}</span>
+                            {turn.content}
+                          </p>
+                        {/each}
+                      </div>
+                    {/if}
+
+                    {#if askError}
+                      <p class="admin-err">{askError}</p>
+                    {/if}
+
+                    <div class="interrogate-input">
+                      <textarea
+                        rows="2"
+                        placeholder="e.g. where did the '1,000 issuers' figure come from?"
+                        value={interrogateDraft[id] ?? ''}
+                        oninput={(e) =>
+                          (interrogateDraft = {
+                            ...interrogateDraft,
+                            [id]: (e.target as HTMLTextAreaElement).value,
+                          })}
+                        onkeydown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault()
+                            void askInterrogation(id)
+                          }
+                        }}
+                      ></textarea>
+                      <button
+                        class="btn compact"
+                        type="button"
+                        disabled={asking || !(interrogateDraft[id] ?? '').trim()}
+                        onclick={() => askInterrogation(id)}
+                      >
+                        {asking ? 'Asking…' : 'Ask'}
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              </section>
             {/if}
           </div>
         {/if}
@@ -479,5 +618,80 @@
     font-weight: 700;
     letter-spacing: 0.5px;
     color: var(--primary);
+  }
+
+  .interrogate {
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+
+  .interrogate-panel {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .ground-truth-toggle {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--subtle);
+  }
+
+  .ground-truth-toggle input {
+    margin-top: 2px;
+  }
+
+  .interrogate-history {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+
+  .chat-turn {
+    margin: 0;
+    padding: 8px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--on-surface) 4%, var(--panel));
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .chat-turn.assistant {
+    background: color-mix(in srgb, var(--primary) 8%, var(--panel));
+  }
+
+  .chat-role {
+    margin-right: 6px;
+    font-weight: 700;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--primary);
+  }
+
+  .interrogate-input {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+  }
+
+  .interrogate-input textarea {
+    flex: 1;
+    resize: vertical;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--on-surface);
+    padding: 8px;
+    font: inherit;
+    font-size: 12px;
   }
 </style>

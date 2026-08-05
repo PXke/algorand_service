@@ -243,6 +243,30 @@ def admin_bump_queue_priority(request: Request) -> Response | dict:
     return result
 
 
+def admin_recompose_now(request: Request) -> Response | dict:
+    """Compose this pending queue row IMMEDIATELY, bypassing the standard-publish pacing gate entirely — unlike "Compose next" (which only bumps priority and still waits for the pacing interval), this dispatches compose_queue_row_now, which calls publish_from_queued_row directly. Fire-and-forget: a real compose can run many minutes (a special edition's deepened research pass can take 20+), so this returns as soon as the task is queued rather than waiting on it — watch the Sessions/Queue tabs for progress."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    queue_id = request.path_params.get("queue_id", "")
+    if not queue_id:
+        return json_error_response(400, "invalid_request", "queue_id is required")
+    try:
+        from celery import Celery
+
+        from app.core.config import settings
+
+        Celery(broker=settings.celery_broker_url).send_task(
+            "app.tasks.newspaper.compose_queue_row_now",
+            args=[queue_id],
+            queue="pipeline",
+        )
+    except Exception as exc:
+        return json_error_response(502, "broker_unavailable", str(exc))
+    return {"triggered": True, "queue_id": queue_id}
+
+
 def admin_dead_end_queue_row_domain(request: Request) -> Response | dict:
     """Permanently reject the source domain behind one publish_queue row, straight from the Queue tab — the one-click alternative to hunting the same domain down in the paginated Domains tab."""
     denied = require_admin_wallet(request)
@@ -949,6 +973,75 @@ def admin_get_compose_session(request: Request) -> Response:
     return _compute()
 
 
+def admin_interrogate_compose_session(request: Request) -> Response | dict:
+    """Ask a revived compose session's writer one question — an interactive post-mortem on the same model/transcript that produced it, confronted with live ground truth (DNS + its own transcript's fetch failures) by default.
+
+    Wraps interrogate_compose_session_task (workers/app/modules/ai/interrogate.py)
+    via Celery. Unlike a compose trigger, this BLOCKS on the task's result —
+    one interrogation turn is a single bounded Mistral call, not a multi-minute
+    compose, so waiting for it (like admin_recompose_review's fire-and-forget
+    sibling routes do NOT) is the right shape here: the UI needs the actual
+    answer to render, not just an "it's running" acknowledgement.
+
+    Caveat surfaced to the admin, not just documented here: an LLM cannot truly
+    introspect its past reasoning — under pressure it rationalises or
+    capitulates. Its answers are leads to verify against the trace and live
+    sources, never verdicts on their own.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    session_id = request.path_params.get("session_id", "")
+    if not session_id:
+        return json_error_response(400, "invalid_request", "session_id is required")
+    try:
+        body = serialization.loads(request.body or "{}")
+    except Exception:
+        body = {}
+    question = str(body.get("question", "")).strip()
+    if not question:
+        return json_error_response(400, "invalid_request", "question is required")
+    ground_truth = bool(body.get("ground_truth", True))
+    history = body.get("history")
+    if not isinstance(history, list):
+        history = []
+
+    try:
+        from celery import Celery
+        from celery.exceptions import TimeoutError as CeleryTimeoutError
+
+        from app.core.config import settings
+
+        async_result = Celery(
+            broker=settings.celery_broker_url, backend=settings.redis_result_url
+        ).send_task(
+            "app.tasks.newspaper.interrogate_compose_session",
+            kwargs={
+                "target": "",
+                "question": question,
+                "ground_truth": ground_truth,
+                "history": history,
+                "session_id": session_id,
+            },
+            queue="pipeline",
+        )
+        try:
+            result = async_result.get(timeout=90)
+        except CeleryTimeoutError:
+            return json_error_response(
+                504, "timeout", "the writer model took too long to respond"
+            )
+    except Exception as exc:
+        return json_error_response(502, "broker_unavailable", str(exc))
+
+    if not result.get("ok"):
+        return json_error_response(
+            502, "interrogation_failed", str(result.get("error") or "unknown error")
+        )
+    return result
+
+
 def _seed_domain_crawl(
     session: object, domain: str, pending_url: str, *, single_page_only: bool, now: object
 ) -> tuple[bool, str]:
@@ -1351,6 +1444,7 @@ def register_admin_routes(app: Router) -> None:
     app.get("/api/v1/admin/pending-feed-backlog")(admin_pending_feed_backlog)
     app.get("/api/v1/admin/publish-queue/:queue_id/breakdown")(admin_publish_queue_breakdown)
     app.post("/api/v1/admin/publish-queue/:queue_id/compose-next")(admin_bump_queue_priority)
+    app.post("/api/v1/admin/publish-queue/:queue_id/recompose-now")(admin_recompose_now)
     app.post("/api/v1/admin/publish-queue/:queue_id/dead-end")(admin_dead_end_queue_row_domain)
     app.get("/api/v1/admin/training-stats")(admin_training_stats)
     app.post("/api/v1/admin/retrain")(admin_retrain)
@@ -1372,6 +1466,9 @@ def register_admin_routes(app: Router) -> None:
     app.get("/api/v1/admin/compose-feedback")(admin_list_compose_feedback)
     app.get("/api/v1/admin/compose-sessions")(admin_list_compose_sessions)
     app.get("/api/v1/admin/compose-sessions/:session_id")(admin_get_compose_session)
+    app.post("/api/v1/admin/compose-sessions/:session_id/interrogate")(
+        admin_interrogate_compose_session
+    )
     app.post("/api/v1/admin/domains/set")(admin_set_domain)
     app.post("/api/v1/admin/domains/clear")(admin_clear_domains)
     app.post("/api/v1/admin/classifier-reviews/compose-next")(admin_compose_next)

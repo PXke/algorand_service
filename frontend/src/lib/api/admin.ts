@@ -28,6 +28,8 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.getJson(`/api/v1/admin/publish-queue/${queueId}/breakdown`, h()),
     composeQueueItemNext: (queueId: string) =>
       api.postJson(`/api/v1/admin/publish-queue/${queueId}/compose-next`, {}, h()),
+    recomposeQueueItemNow: (queueId: string) =>
+      api.postJson(`/api/v1/admin/publish-queue/${queueId}/recompose-now`, {}, h()),
     deadEndQueueItemDomain: (queueId: string) =>
       api.postJson(`/api/v1/admin/publish-queue/${queueId}/dead-end`, {}, h()),
     getTrainingStats: () => api.getJson('/api/v1/admin/training-stats', h()),
@@ -67,6 +69,10 @@ export function createAdminApi(wallet: string, token: string | null) {
         `/api/v1/admin/compose-sessions/${sessionId}?created_at=${encodeURIComponent(createdAt)}`,
         h(),
       ),
+    interrogateComposeSession: (
+      sessionId: string,
+      body: { question: string; history?: Array<Record<string, string>>; ground_truth?: boolean },
+    ) => api.postJson(`/api/v1/admin/compose-sessions/${sessionId}/interrogate`, body, h()),
     listGatekeeperAnchors: () =>
       api.getJson('/api/v1/admin/gatekeeper/anchors', h()),
     getGatekeeperValidationReport: () =>

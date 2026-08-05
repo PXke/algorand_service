@@ -228,6 +228,11 @@ class PublishQueueStmts:
         "SELECT display_name, scrape_url, payload, created_at "
         "FROM algorand_platform.publish_queue WHERE queue_id = ?"
     )
+    GET_FULL = _Stmt(
+        "SELECT status, priority, topic, publish_kind, service_id, display_name, "
+        "scrape_url, payload, created_at "
+        "FROM algorand_platform.publish_queue WHERE queue_id = ?"
+    )
     COUNT_PENDING = _Stmt(
         "SELECT COUNT(*) AS n FROM algorand_platform.publish_queue_pending WHERE status = ?"
     )

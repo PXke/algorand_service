@@ -32,6 +32,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from app.celery_app import celery_app
 from app.modules.newspaper import defunct_entity_gate as _dg
 
 if TYPE_CHECKING:
@@ -292,3 +293,66 @@ def interrogate(
     new_history.append({"role": "user", "content": question})
     new_history.append({"role": "assistant", "content": answer})
     return answer, new_history
+
+
+# --------------------------------------------------------------------------- #
+# admin UI entry point (2026-08-05)
+# --------------------------------------------------------------------------- #
+# The admin backend is a separate service/codebase from workers (only
+# connected via Celery/Redis + shared Cassandra), so it cannot import this
+# module directly. Unlike a compose (which can run 20+ minutes and must be
+# fire-and-forget), one interrogation turn is a single bounded chat_completion
+# call, so the backend route dispatches this task and waits on it directly
+# rather than polling — same reasoning as admin_compose_next's short .get(),
+# just with a longer timeout sized for one LLM call instead of a cheap read.
+@celery_app.task(name="app.tasks.newspaper.interrogate_compose_session")
+def interrogate_compose_session_task(
+    *,
+    target: str,
+    question: str,
+    ground_truth: bool = True,
+    history: list[dict[str, str]] | None = None,
+    session_id: str = "",
+) -> dict[str, Any]:
+    """Revive a compose session (by source_url substring, article id, or exact session_id) and ask it one question. Returns {ok: True, answer, history, header} or {ok: False, error}."""
+    kwargs: dict[str, Any] = {}
+    if session_id:
+        kwargs["session_id"] = session_id
+    elif _looks_like_uuid(target):
+        kwargs["article_id"] = target
+    else:
+        kwargs["source_url"] = target
+
+    try:
+        rev = revive_session(**kwargs)
+    except LookupError as exc:
+        if "article_id" in kwargs and not session_id:
+            try:
+                rev = revive_session(source_url=target)
+            except LookupError as exc2:
+                return {"ok": False, "error": str(exc2)}
+        else:
+            return {"ok": False, "error": str(exc)}
+
+    try:
+        answer, new_history = interrogate(
+            rev, question, ground_truth=ground_truth, history=history or []
+        )
+    except Exception as exc:
+        logger.warning("interrogation call failed for %s", rev.source_url, exc_info=True)
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "ok": True,
+        "answer": answer,
+        "history": new_history,
+        "header": {
+            "source_url": rev.source_url,
+            "service_id": rev.service_id,
+            "model": rev.model,
+            "status": rev.status,
+            "rounds": rev.rounds,
+            "tool_calls": rev.tool_calls,
+            "session_id": str(rev.session_id),
+        },
+    }
