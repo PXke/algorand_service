@@ -347,15 +347,6 @@ _VERIFICATION_DISCIPLINE = (
     "than an unanswered question you flagged honestly. This matters most for "
     "first-coverage/new-service stories, where missing a major feature of the "
     "subject is worse than a routine update missing a minor detail.\n"
-    "NAME-SEARCH IS NOT A FULL LOOKUP: a tool that finds an asset BY NAME returns "
-    "identity metadata only (name, unit name, creator) — it is not a substitute "
-    "for the exact-id lookup (lookup_asset) that actually returns supply, "
-    "decimals, and holder data. When a name search surfaces an on-chain asset "
-    "relevant to the story, always follow up with the id lookup before "
-    "concluding — finding it is not the same as having verified what it actually "
-    "is (root-caused 2026-08-05: a name search found a token but the id lookup "
-    "never happened, so the piece called the coin's supply 'undisclosed' when "
-    "the number was one more tool call away).\n"
 )
 
 _METRICS_DISCIPLINE = (

@@ -135,6 +135,25 @@ def _tool_lookup_account(address: str) -> dict[str, Any]:
     }
 
 
+def _asset_total_adjusted(p: dict[str, Any]) -> tuple[Any, Any, float | None]:
+    """(total, decimals, total_adjusted) from an ASA's indexer/algod `params` dict.
+
+    total/decimals are raw base units — division-by-10**decimals done here,
+    not left to the model. Doing it in-prompt is exactly how a real incident
+    happened (2026-07-14): the writer manually converted a 15-digit raw ASA
+    total and got the decimal shift wrong, reporting "1 trillion" for what
+    total_adjusted here correctly computes as 1 billion. Shared by
+    lookup_asset and lookup_asset_by_name so a supply figure is computed the
+    same safe way regardless of which tool surfaced the asset.
+    """
+    total = p.get("total")
+    decimals = p.get("decimals")
+    total_adjusted = None
+    if isinstance(total, int | float) and isinstance(decimals, int) and decimals >= 0:
+        total_adjusted = round(total / (10**decimals), 6)
+    return total, decimals, total_adjusted
+
+
 def _tool_lookup_asset(asset_id: int | str) -> dict[str, Any]:
     """Algorand Standard Asset (ASA) parameters: name, supply, decimals, creator, and the manager/freeze/clawback/reserve roles."""
     aid = str(asset_id).strip()
@@ -148,16 +167,7 @@ def _tool_lookup_asset(asset_id: int | str) -> dict[str, Any]:
     if data.get("_status") == 404:
         return {"asset_id": int(aid), "error": "asset not found"}
     p = data.get("params", {}) or {}
-    total = p.get("total")
-    decimals = p.get("decimals")
-    # total/decimals are raw base units — division-by-10**decimals done here,
-    # not left to the model. Doing it in-prompt is exactly how a real incident
-    # happened (2026-07-14): the writer manually converted a 15-digit raw ASA
-    # total and got the decimal shift wrong, reporting "1 trillion" for what
-    # total_adjusted below correctly computes as 1 billion.
-    total_adjusted = None
-    if isinstance(total, int | float) and isinstance(decimals, int) and decimals >= 0:
-        total_adjusted = round(total / (10**decimals), 6)
+    total, decimals, total_adjusted = _asset_total_adjusted(p)
     return {
         "asset_id": int(aid),
         "name": p.get("name"),
@@ -195,7 +205,16 @@ def _mainnet_idx_get(path: str, params: dict | None = None) -> dict[str, Any]:
 
 
 def _tool_lookup_asset_by_name(name: str, limit: int = 5) -> dict[str, Any]:
-    """Search mainnet ASAs by ticker/unit-name (preferred) or display name when the numeric asset_id isn't known yet — lookup_asset needs an id, and algod itself can't search by name (only the indexer can). Use this first to find the id, then lookup_asset for the full parameters.
+    """Search mainnet ASAs by ticker/unit-name (preferred) or display name when the numeric asset_id isn't known yet.
+
+    lookup_asset needs an id, and algod itself can't search by name (only the
+    indexer can). Each result already includes decimal-corrected supply
+    (total/decimals/total_adjusted) from the same indexer response, so a
+    separate lookup_asset call is only needed for fields this doesn't return
+    (manager/freeze/clawback/reserve, metadata url) — root-caused 2026-08-05:
+    this used to return identity fields only, and a compose that found an
+    asset by name here never made the follow-up call, so it called a
+    perfectly knowable supply "undisclosed."
 
     Root-caused 2026-07-16: a ticker query (e.g. "WAD") used to hit the
     indexer's `name` param, which substring-matches a project's free-text
@@ -242,12 +261,16 @@ def _tool_lookup_asset_by_name(name: str, limit: int = 5) -> dict[str, Any]:
         if not isinstance(a, dict):
             continue
         p = a.get("params", {}) or {}
+        total, decimals, total_adjusted = _asset_total_adjusted(p)
         results.append(
             {
                 "asset_id": a.get("index"),
                 "name": p.get("name"),
                 "unit_name": p.get("unit-name"),
                 "creator": p.get("creator"),
+                "total": total,
+                "decimals": decimals,
+                "total_adjusted": total_adjusted,
             }
         )
     return {"query": q, "results": results[:n]}
@@ -519,8 +542,12 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
             "description": (
                 "Search mainnet Algorand Standard Assets by name or unit-name when "
                 "you don't have the numeric asset_id yet (algod's lookup_asset needs "
-                "an id and can't search by name). Returns candidate asset_ids to pass "
-                "into lookup_asset for full parameters."
+                "an id and can't search by name). Each result already includes total "
+                "supply (total_adjusted, decimal-corrected) alongside name/unit_name/"
+                "creator — you do NOT need a separate lookup_asset call just to report "
+                "a token's supply. Only call lookup_asset afterward if you need fields "
+                "this doesn't return: manager/freeze/clawback/reserve roles, or the "
+                "asset's metadata url."
             ),
             "parameters": {
                 "type": "object",
