@@ -889,16 +889,43 @@ def _extract_asset_facts(trace: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_full_research_trace(trace: list[dict]) -> str:
+    """Every tool call in the trace, only lightly truncated — the RESEARCH_DIGEST_MODE=raw alternative to an LLM-synthesized digest. Caps exist only to keep one pathological result (a huge page dump) from blowing the prompt, not to compress normal-sized results the way _format_research_digest's tighter caps (25 calls, 1500 chars/result — tuned for feeding INTO a synthesis prompt, not for being Stage 2's ground truth directly) do."""
+    import json as _json
+
+    lines: list[str] = []
+    for entry in trace:
+        tool = str(entry.get("tool", ""))
+        if not tool:
+            continue
+        try:
+            args_s = _json.dumps(entry.get("arguments", {}), separators=(",", ":"))[:500]
+            result_s = _json.dumps(entry.get("result", {}), separators=(",", ":"))[:8000]
+        except Exception:
+            args_s = str(entry.get("arguments", ""))[:500]
+            result_s = str(entry.get("result", ""))[:8000]
+        lines.append(f"- {tool}({args_s}) -> {result_s}")
+    return "\n".join(lines)
+
+
 def _synthesize_research_digest(
     *,
     trace: list[dict],
     research_context: str,
 ) -> str:
-    """Stage 1→2 handoff: model-synthesized digest instead of raw tool JSON."""
+    """Stage 1→2 handoff: model-synthesized digest instead of raw tool JSON, unless RESEARCH_DIGEST_MODE=raw (see config.py) — an experiment skipping synthesis entirely in favor of a large-context provider reading the trace itself, still with the deterministic asset-facts appendix since that's free regardless of mode."""
+    from app.core.config import RESEARCH_DIGEST_MODE
+
+    asset_facts = _extract_asset_facts(trace)
+    if RESEARCH_DIGEST_MODE == "raw":
+        full_trace = _format_full_research_trace(trace)
+        if not full_trace.strip():
+            return ""
+        return f"{full_trace}\n\n{asset_facts}" if asset_facts else full_trace
+
     raw_trace = _format_research_digest(trace)
     if not raw_trace.strip():
         return ""
-    asset_facts = _extract_asset_facts(trace)
     try:
         from app.core.config import MISTRAL_TEMP_RESEARCH
 

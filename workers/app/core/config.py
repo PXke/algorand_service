@@ -267,6 +267,16 @@ DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-chat")
 # larger ceiling without approaching a real limit.
 DEEPSEEK_MAX_TOKENS = env_int("DEEPSEEK_MAX_TOKENS", 40000)
 
+# "synthesize" (default): Stage 1->2 handoff is an LLM-synthesized Research
+# Digest (mistral_compose._synthesize_research_digest) — the only thing Stage
+# 2 sees, no raw trace. "raw": skip that synthesis pass entirely and hand
+# Stage 2 the (generously capped, not summarized) raw tool trace directly —
+# an experiment enabled by a large-context provider (DeepSeek's 1M) not
+# needing the compression a smaller context forced. Comparing the two is the
+# point: synthesis is a real lossy step (see 2026-08-05 digest-drop fixes)
+# but so is any compression scheme; this isn't assumed better, just testable.
+RESEARCH_DIGEST_MODE = env_str("RESEARCH_DIGEST_MODE", "synthesize").strip().lower()
+
 # Per-purpose provider routing: "mistral" (default, unchanged behavior) or
 # "deepseek". CANARY_PCT (0-100) sends that percentage of calls to the OTHER
 # provider instead of the configured default, so a purpose can stay put while
