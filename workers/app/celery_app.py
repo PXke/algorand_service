@@ -1,6 +1,7 @@
 """Celery app wiring: broker/backend config, beat schedule, Bugsnag, and prefork-safety hooks."""
 
 import os
+from pathlib import Path
 
 from celery import Celery
 from celery.schedules import crontab
@@ -204,6 +205,18 @@ def _build_beat_schedule() -> dict:
         }
     return schedule
 
+
+# PersistentScheduler's on-disk last-run-at bookkeeping defaults to a path
+# relative to CWD, which is the per-release directory under our deploy layout
+# (releases/current/workers). Every deploy replaces that directory, so beat
+# would otherwise "forget" every task's last run on each redeploy and re-fire
+# the whole schedule immediately regardless of its configured interval. Put it
+# next to workers/.env instead, which deploy.sh symlinks into the shared
+# directory that survives releases — falls back to the Celery default
+# (relative "celerybeat-schedule") when .env isn't a symlink, e.g. local dev.
+_env_symlink = Path(__file__).resolve().parent.parent / ".env"
+if _env_symlink.is_symlink():
+    celery_app.conf.beat_schedule_filename = str(_env_symlink.resolve().parent / "celerybeat-schedule")
 
 celery_app.conf.beat_schedule = _build_beat_schedule()
 celery_app.conf.task_serializer = "json"
