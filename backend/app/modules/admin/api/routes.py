@@ -1042,6 +1042,48 @@ def admin_interrogate_compose_session(request: Request) -> Response | dict:
     return result
 
 
+def admin_recompose_session(request: Request) -> Response | dict:
+    """Recompose the live article behind this compose session.
+
+    "I just read this transcript, changed a prompt, and want to see it behave now."
+
+    A compose session has no article_id of its own and its originating
+    publish_queue row has almost always already resolved by the time an
+    admin is reading it, so this is a DIFFERENT trigger from Queue tab's
+    "Recompose now" (which needs a still-pending queue row). Dispatches
+    recompose_session_service(service_id), which resolves the service's
+    current live article and hands off to recompose_published — the same
+    archive-refresh path the pipeline's own weekly recompose cadence uses.
+    Fire-and-forget: this is a full compose, can run minutes (longer for a
+    special edition) — watch the Sessions/Queue tabs for progress.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    try:
+        body = serialization.loads(request.body or "{}")
+    except Exception:
+        body = {}
+    service_id = str(body.get("service_id", "")).strip()
+    if not service_id:
+        return json_error_response(400, "invalid_request", "service_id is required")
+
+    try:
+        from celery import Celery
+
+        from app.core.config import settings
+
+        Celery(broker=settings.celery_broker_url).send_task(
+            "app.tasks.newspaper.recompose_session_service",
+            args=[service_id],
+            queue="pipeline",
+        )
+    except Exception as exc:
+        return json_error_response(502, "broker_unavailable", str(exc))
+    return {"triggered": True, "service_id": service_id}
+
+
 def _seed_domain_crawl(
     session: object, domain: str, pending_url: str, *, single_page_only: bool, now: object
 ) -> tuple[bool, str]:
@@ -1469,6 +1511,7 @@ def register_admin_routes(app: Router) -> None:
     app.post("/api/v1/admin/compose-sessions/:session_id/interrogate")(
         admin_interrogate_compose_session
     )
+    app.post("/api/v1/admin/compose-sessions/:session_id/recompose")(admin_recompose_session)
     app.post("/api/v1/admin/domains/set")(admin_set_domain)
     app.post("/api/v1/admin/domains/clear")(admin_clear_domains)
     app.post("/api/v1/admin/classifier-reviews/compose-next")(admin_compose_next)

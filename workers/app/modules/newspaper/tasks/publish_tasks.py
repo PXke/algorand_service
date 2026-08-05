@@ -2628,6 +2628,27 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
     return {"status": "ok", "review_id": review_id, "draft_article_id": draft_id}
 
 
+@celery_app.task(name="app.tasks.newspaper.recompose_session_service")
+def recompose_session_service(service_id: str) -> dict[str, str]:
+    """Admin-triggered from the Sessions tab: "I just read this session's transcript, changed a prompt, and want to see the pipeline behave now" -- resolves this service's current live article and hands off to recompose_published, the SAME archive-refresh path used for the pipeline's own weekly recompose cadence.
+
+    A compose session has no article_id of its own (compose_sessions and
+    articles_by_id are separate tables, linked only loosely by service_id/
+    source_url) and, by the time someone is reading it in the Sessions tab,
+    its originating publish_queue row has almost always already resolved --
+    recompose_session_service (unlike compose_queue_row_now) never touches
+    the queue at all, going straight from service_id to the live article via
+    find_latest_service_article, same lookup prior_service_article_summary
+    uses for "our own most recent article about this service."
+    """
+    from app.modules.newspaper.article_matching import find_latest_service_article
+
+    article_id = find_latest_service_article(service_id)
+    if not article_id:
+        return {"status": "error", "reason": "no_live_article_for_service"}
+    return recompose_published(article_id)
+
+
 @celery_app.task(name="app.tasks.newspaper.apply_recomposed_article")
 def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dict[str, str]:
     """Approved recompose of a published article: swap the draft's content onto the live article_id (same URL; published_at re-stamped to the apply time — recompose is a re-publish, owner policy 2026-07-15 — so the story returns to the top of the feed), version both states, re-index, re-translate, ping IndexNow. The unlisted draft row is left behind (same convention as recompose_review's superseded drafts — never in the feed or sitemap)."""

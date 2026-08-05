@@ -73,6 +73,12 @@ export function createAdminApi(wallet: string, token: string | null) {
       sessionId: string,
       body: { question: string; history?: Array<Record<string, string>>; ground_truth?: boolean },
     ) => api.postJson(`/api/v1/admin/compose-sessions/${sessionId}/interrogate`, body, h()),
+    recomposeSession: (sessionId: string, serviceId: string) =>
+      api.postJson(
+        `/api/v1/admin/compose-sessions/${sessionId}/recompose`,
+        { service_id: serviceId },
+        h(),
+      ),
     listGatekeeperAnchors: () =>
       api.getJson('/api/v1/admin/gatekeeper/anchors', h()),
     getGatekeeperValidationReport: () =>

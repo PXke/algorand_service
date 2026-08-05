@@ -13,6 +13,7 @@ from app.modules.newspaper.tasks.publish_tasks import (
     publish_from_chain_event,
     recompose_published,
     recompose_review,
+    recompose_session_service,
 )
 from app.modules.newspaper.tasks.queue_drain_tasks import (
     drain_breaking_publish_queue,
@@ -34,4 +35,5 @@ __all__ = [
     "publish_weekly_price_analysis",
     "recompose_published",
     "recompose_review",
+    "recompose_session_service",
 ]

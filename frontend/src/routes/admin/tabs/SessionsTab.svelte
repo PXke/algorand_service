@@ -36,6 +36,10 @@
   let interrogateLoading = $state<Set<string>>(new Set())
   let interrogateError = $state<Record<string, string>>({})
 
+  let recomposingSessionIds = $state<Set<string>>(new Set())
+  let recomposedSessionIds = $state<Set<string>>(new Set())
+  let recomposeSessionError = $state<Record<string, string>>({})
+
   const hasActiveSession = $derived(
     sessions.some((s) => ACTIVE_STATUSES.has(String(s.status ?? ''))),
   )
@@ -259,6 +263,36 @@
     }
   }
 
+  async function recomposeSession(id: string, serviceId: string) {
+    if (!serviceId) {
+      recomposeSessionError = { ...recomposeSessionError, [id]: 'session has no service_id' }
+      return
+    }
+    if (
+      !confirm(
+        'Recompose the live article for this service now? This spends real Mistral usage ' +
+          'and can take several minutes (longer for a special edition).',
+      )
+    ) {
+      return
+    }
+    recomposingSessionIds = new Set(recomposingSessionIds).add(id)
+    recomposeSessionError = { ...recomposeSessionError, [id]: '' }
+    try {
+      await admin.recomposeSession(id, serviceId)
+      recomposedSessionIds = new Set(recomposedSessionIds).add(id)
+    } catch (e) {
+      recomposeSessionError = {
+        ...recomposeSessionError,
+        [id]: e instanceof Error ? e.message : String(e),
+      }
+    } finally {
+      const next = new Set(recomposingSessionIds)
+      next.delete(id)
+      recomposingSessionIds = next
+    }
+  }
+
   $effect(() => {
     admin
     void load()
@@ -311,6 +345,7 @@
       {@const id = sessionId(s)}
       {@const createdAt = String(s.created_at ?? '')}
       {@const source = String(s.source_url ?? '').trim()}
+      {@const serviceId = String(s.service_id ?? '').trim()}
       {@const status = String(s.status ?? '')}
       {@const model = String(s.model ?? '')}
       {@const rounds = Number(s.rounds ?? 0)}
@@ -376,14 +411,37 @@
               {@const chatHistory = interrogateHistory[id] ?? []}
               {@const asking = interrogateLoading.has(id)}
               {@const askError = interrogateError[id]}
+              {@const recomposing = recomposingSessionIds.has(id)}
+              {@const recomposed = recomposedSessionIds.has(id)}
+              {@const recomposeErr = recomposeSessionError[id]}
               <section class="interrogate">
-                <button
-                  class="btn compact"
-                  type="button"
-                  onclick={() => toggleInterrogate(id)}
-                >
-                  {interrogateOpen ? 'Hide interrogation' : 'Interrogate this session'}
-                </button>
+                <div class="session-actions">
+                  <button
+                    class="btn compact"
+                    type="button"
+                    onclick={() => toggleInterrogate(id)}
+                  >
+                    {interrogateOpen ? 'Hide interrogation' : 'Interrogate this session'}
+                  </button>
+                  <button
+                    class="btn compact btn-danger"
+                    type="button"
+                    disabled={recomposing || recomposed || !serviceId}
+                    title={serviceId ? '' : 'no service_id on this session'}
+                    onclick={() => recomposeSession(id, serviceId)}
+                  >
+                    {#if recomposing}
+                      Triggering…
+                    {:else if recomposed}
+                      Triggered ✓
+                    {:else}
+                      Recompose this
+                    {/if}
+                  </button>
+                </div>
+                {#if recomposeErr}
+                  <p class="admin-err">{recomposeErr}</p>
+                {/if}
 
                 {#if interrogateOpen}
                   <div class="interrogate-panel">
@@ -624,6 +682,12 @@
     margin-top: 12px;
     border-top: 1px solid var(--border);
     padding-top: 12px;
+  }
+
+  .session-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
   }
 
   .interrogate-panel {
