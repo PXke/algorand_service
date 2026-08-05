@@ -242,6 +242,37 @@ MISTRAL_MODEL_TRANSLATE = env_str("MISTRAL_MODEL_TRANSLATE", "mistral-small-late
 # the param (e.g. when pinning a non-reasoning fallback model that rejects it).
 # Mistral is used for composition only, so this applies to all Mistral calls.
 MISTRAL_REASONING_EFFORT = env_str("MISTRAL_REASONING_EFFORT", "high")
+
+# DeepSeek: a second provider behind the same OpenAI-compatible connector
+# (mistral_client.MistralClient already speaks plain /chat/completions JSON,
+# nothing Mistral-specific in the wire format) — additive, off by default
+# (empty key), never changes Mistral's own behavior. Confirm these model
+# identifiers against DeepSeek's current docs before relying on them; the
+# marketing names (e.g. "DeepSeek-V4-Flash") are not always the literal API
+# `model` string.
+DEEPSEEK_API_KEY = env_str("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_BASE = env_str("DEEPSEEK_API_BASE", "https://api.deepseek.com").rstrip("/")
+DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-chat")
+DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-chat")
+DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-chat")
+DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-chat")
+
+# Per-purpose provider routing: "mistral" (default, unchanged behavior) or
+# "deepseek". CANARY_PCT (0-100) sends that percentage of calls to the OTHER
+# provider instead of the configured default, so a purpose can stay put while
+# sampling the alternative for comparison — compose_sessions.model records
+# whichever model actually ran, so a canary is visible after the fact with no
+# extra plumbing. A canary or explicit override that resolves to "deepseek"
+# silently falls back to Mistral if DEEPSEEK_API_KEY is unset (see
+# mistral_client._select_provider).
+LLM_PROVIDER_WRITER = env_str("LLM_PROVIDER_WRITER", "mistral").strip().lower()
+LLM_PROVIDER_WRITER_CANARY_PCT = env_int("LLM_PROVIDER_WRITER_CANARY_PCT", 0)
+LLM_PROVIDER_RESEARCH = env_str("LLM_PROVIDER_RESEARCH", "mistral").strip().lower()
+LLM_PROVIDER_RESEARCH_CANARY_PCT = env_int("LLM_PROVIDER_RESEARCH_CANARY_PCT", 0)
+LLM_PROVIDER_DIGEST = env_str("LLM_PROVIDER_DIGEST", "mistral").strip().lower()
+LLM_PROVIDER_DIGEST_CANARY_PCT = env_int("LLM_PROVIDER_DIGEST_CANARY_PCT", 0)
+LLM_PROVIDER_TRANSLATE = env_str("LLM_PROVIDER_TRANSLATE", "mistral").strip().lower()
+LLM_PROVIDER_TRANSLATE_CANARY_PCT = env_int("LLM_PROVIDER_TRANSLATE_CANARY_PCT", 0)
 # Output cap per call. A full JSON article (title+summary+long body+tags) can
 # exceed 4096 and get truncated mid-string → JSON parse fails → template junk.
 # 12000 comfortably fits a ~4000-word long-form article once JSON-escaped; the

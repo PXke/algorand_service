@@ -7,7 +7,7 @@ call rather than translate_article_mistral's block-aligned machinery.
 
 from __future__ import annotations
 
-from app.modules.ai.mistral_client import MistralClient, get_mistral_client
+from app.modules.ai.mistral_client import MistralClient, get_mistral_translate_client
 
 
 def translate_glossary_term_mistral(
@@ -19,9 +19,8 @@ def translate_glossary_term_mistral(
 ) -> dict[str, str]:
     """Translate a glossary term+definition pair to the target language."""
     from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANG_NAMES
-    from app.core.config import MISTRAL_MODEL_TRANSLATE
 
-    mistral = client or get_mistral_client(model=MISTRAL_MODEL_TRANSLATE)
+    mistral = client or get_mistral_translate_client()
     lang_name = ARTICLE_TRANSLATION_LANG_NAMES.get(target_language, target_language)
 
     system = (

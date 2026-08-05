@@ -25,7 +25,9 @@ from app.core.config import REDIS_URL
 
 logger = logging.getLogger(__name__)
 
-_KEY = "mistral:credit_exhausted"
+
+def _key(provider: str) -> str:
+    return f"{provider}:credit_exhausted"
 
 
 def _seconds_until_next_month_utc(now: datetime | None = None) -> int:
@@ -41,8 +43,12 @@ def _seconds_until_next_month_utc(now: datetime | None = None) -> int:
     return max(1, int((reset_at - now).total_seconds()))
 
 
-def mark_credit_exhausted() -> None:
-    """Set the circuit breaker, TTL'd to the next monthly credit reset.
+def mark_credit_exhausted(provider: str = "mistral") -> None:
+    """Set the circuit breaker for `provider`, TTL'd to the next monthly credit reset.
+
+    Keyed per-provider (not one global flag) since adding a second provider
+    (DeepSeek) means a dead key on one must never short-circuit the other's
+    calls too.
 
     Best-effort: a Redis failure here just means the next call finds out the
     slow way (a real 401), never blocks anything.
@@ -51,18 +57,20 @@ def mark_credit_exhausted() -> None:
         import redis
 
         client = redis.from_url(REDIS_URL, decode_responses=True)
-        client.set(_KEY, "1", ex=_seconds_until_next_month_utc())
-        logger.warning("Mistral credit exhausted — short-circuiting further calls until reset")
+        client.set(_key(provider), "1", ex=_seconds_until_next_month_utc())
+        logger.warning(
+            "%s credit exhausted — short-circuiting further calls until reset", provider
+        )
     except Exception:
-        logger.warning("failed to set mistral credit-exhausted flag", exc_info=True)
+        logger.warning("failed to set %s credit-exhausted flag", provider, exc_info=True)
 
 
-def is_credit_exhausted() -> bool:
-    """True if a prior call already confirmed Mistral credit is exhausted this cycle. Fails open (False) on any Redis error -- never blocks real work on a cache outage."""
+def is_credit_exhausted(provider: str = "mistral") -> bool:
+    """True if a prior call already confirmed `provider`'s credit is exhausted this cycle. Fails open (False) on any Redis error -- never blocks real work on a cache outage."""
     try:
         import redis
 
         client = redis.from_url(REDIS_URL, decode_responses=True)
-        return bool(client.get(_KEY))
+        return bool(client.get(_key(provider)))
     except Exception:
         return False

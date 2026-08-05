@@ -354,7 +354,7 @@ def _publish_breaking_row(
 @celery_app.task(name="app.tasks.newspaper.drain_breaking_publish_queue")
 def drain_breaking_publish_queue() -> dict[str, object]:
     """Publish breaking-tier items immediately up to the separate daily cap."""
-    if is_credit_exhausted():
+    if is_credit_exhausted(config.LLM_PROVIDER_WRITER):
         return {"status": "skipped", "reason": "mistral_credit_exhausted", "published": 0}
     slots = remaining_breaking_publish_slots()
     if slots <= 0:
@@ -519,7 +519,7 @@ def _standard_drain_setup() -> tuple[int, dict | None]:
     if backlog_result is not None:
         return slots, backlog_result
 
-    if is_credit_exhausted():
+    if is_credit_exhausted(config.LLM_PROVIDER_WRITER):
         return slots, {"status": "skipped", "reason": "mistral_credit_exhausted", "published": 0}
 
     return slots, None
@@ -830,7 +830,7 @@ def drain_approved_feed_queue() -> dict[str, object]:
 @celery_app.task(name="app.tasks.newspaper.ensure_review_ready")
 def ensure_review_ready() -> dict[str, object]:
     """Keep exactly one composed article waiting in the review queue at all times (when candidates exist), so the admin always has one to act on."""
-    if is_credit_exhausted():
+    if is_credit_exhausted(config.LLM_PROVIDER_WRITER):
         return {"status": "skipped", "reason": "mistral_credit_exhausted"}
     from app.modules.crawler.classifier_review_store import review_queue_full
 

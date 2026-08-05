@@ -21,6 +21,7 @@ from app.modules.ai.mistral_client import (
     get_mistral_client,
     get_mistral_digest_client,
     get_mistral_research_client,
+    get_mistral_translate_client,
 )
 from app.modules.ai.reference_block import append_reference_block
 from app.modules.ai.story_spike import StorySpikedError
@@ -3057,9 +3058,7 @@ def translate_article_mistral(
         digits_block,
         glossary_block,
     )
-    from app.core.config import MISTRAL_MODEL_TRANSLATE
-
-    mistral = client or get_mistral_client(model=MISTRAL_MODEL_TRANSLATE)
+    mistral = client or get_mistral_translate_client()
 
     lang_name = ARTICLE_TRANSLATION_LANG_NAMES.get(target_language, target_language)
     blocks = split_markdown_blocks(english_body)

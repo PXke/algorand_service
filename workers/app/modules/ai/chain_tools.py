@@ -407,6 +407,50 @@ def _tool_get_asset_holder_share(asset_id: int | str, address: str) -> dict[str,
     }
 
 
+def _tool_lookup_asset_holders(asset_id: int | str, limit: int = 10) -> dict[str, Any]:
+    """Current holders of an ASA (balance > 0), via the mainnet indexer — the real 'is this collection actually held/traded' signal, the reverse of get_asset_holder_share (which needs a candidate address already in hand). For a 1/1 NFT (total=1), one call says whether the creator still holds it (never sold/distributed) or a different address does (a real transfer happened) — root-caused 2026-08-05: a compose treated a whole NFT collection as unverified/obscure after checking only DEX token-pool listings, which don't apply to 1/1 NFTs, instead of just checking whether any of the assets had actually moved off the creator's wallet.
+
+    Capped at one indexer page (up to 100 raw balances, `limit` of those
+    returned by size) — holder_count_is_complete tells you whether that page
+    was the whole picture or there are more beyond it.
+    """
+    aid = str(asset_id).strip()
+    if not aid.isdigit():
+        return {"error": "asset_id must be numeric"}
+    n = max(1, min(int(limit), 20))
+    asset = _tool_lookup_asset(aid)
+    if asset.get("error"):
+        return asset
+    creator = asset.get("creator")
+    decimals = asset.get("decimals")
+    data = _mainnet_idx_get(
+        f"/v2/assets/{aid}/balances", params={"currency-greater-than": 0, "limit": 100}
+    )
+    if not isinstance(data, dict):
+        return {"error": "unexpected indexer response"}
+    if data.get("error"):
+        return data
+    balances = data.get("balances", []) or []
+
+    def _adj(amount: int | float) -> int | float:
+        if isinstance(decimals, int) and decimals >= 0:
+            return round(amount / (10**decimals), 6)
+        return amount
+
+    balances = sorted(balances, key=lambda b: b.get("amount", 0), reverse=True)
+    return {
+        "asset_id": asset.get("asset_id"),
+        "creator": creator,
+        "holder_count_this_page": len(balances),
+        "holder_count_is_complete": not data.get("next-token"),
+        "creator_still_holds": any(b.get("address") == creator for b in balances),
+        "top_holders": [
+            {"address": b.get("address"), "amount_adjusted": _adj(b.get("amount", 0))}
+            for b in balances[:n]
+        ],
+    }
+
+
 def _tool_lookup_application(app_id: int | str) -> dict[str, Any]:
     """An application's (smart contract's) creator and DECODED global state — the on-chain variables a protocol exposes (e.g. governance proposal/vote tallies, admin addresses, parameters). Point it at a governance app id to verify what actually executed on-chain."""
     aid = str(app_id).strip()
@@ -716,6 +760,33 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "lookup_asset_holders",
+            "description": (
+                "Current holders of an ASA (balance > 0), via the indexer — checks "
+                "whether a collection/token is actually held or traded, rather than "
+                "just naming it. For a 1/1 NFT, this tells you in one call whether the "
+                "creator STILL holds it (never sold/distributed) or someone else does "
+                "(a real transfer happened) — do not call a collection 'unverified' or "
+                "'no signs of trading' based only on DEX pool-listing tools, which "
+                "don't apply to 1/1 NFTs at all. For a fungible token, use it to see "
+                "real concentration (top holders) instead of assuming from supply alone."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "integer", "description": "numeric ASA id"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "1-20 top holders to return by balance, default 10",
+                    },
+                },
+                "required": ["asset_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_consensus_stats",
             "description": (
                 "Algorand network consensus participation: ALGO stake currently ONLINE "
@@ -757,6 +828,7 @@ CHAIN_HANDLERS: dict[str, Any] = {
     "lookup_first_funding": _tool_lookup_first_funding,
     "lookup_application": _tool_lookup_application,
     "get_asset_holder_share": _tool_get_asset_holder_share,
+    "lookup_asset_holders": _tool_lookup_asset_holders,
     "get_consensus_stats": _tool_get_consensus_stats,
     "testnet_lookup": _tool_testnet_lookup,
 }

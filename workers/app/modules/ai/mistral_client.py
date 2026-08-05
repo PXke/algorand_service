@@ -10,6 +10,20 @@ from typing import Any
 import httpx
 
 from app.core.config import (
+    DEEPSEEK_API_BASE,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_MODEL_DIGEST,
+    DEEPSEEK_MODEL_RESEARCH,
+    DEEPSEEK_MODEL_TRANSLATE,
+    DEEPSEEK_MODEL_WRITER,
+    LLM_PROVIDER_DIGEST,
+    LLM_PROVIDER_DIGEST_CANARY_PCT,
+    LLM_PROVIDER_RESEARCH,
+    LLM_PROVIDER_RESEARCH_CANARY_PCT,
+    LLM_PROVIDER_TRANSLATE,
+    LLM_PROVIDER_TRANSLATE_CANARY_PCT,
+    LLM_PROVIDER_WRITER,
+    LLM_PROVIDER_WRITER_CANARY_PCT,
     MISTRAL_API_BASE,
     MISTRAL_API_KEY,
     MISTRAL_BACKOFF_BASE_SECONDS,
@@ -22,6 +36,7 @@ from app.core.config import (
     MISTRAL_MODEL,
     MISTRAL_MODEL_DIGEST,
     MISTRAL_MODEL_RESEARCH,
+    MISTRAL_MODEL_TRANSLATE,
     MISTRAL_MODEL_WRITER,
     MISTRAL_REASONING_EFFORT,
     MISTRAL_TIMEOUT_SECONDS,
@@ -194,12 +209,14 @@ class MistralCreditError(MistralError):
 _model_metadata_cache: dict[str, dict[str, Any]] = {}
 
 
-def _fetch_model_metadata(*, api_base: str, api_key: str, model: str) -> dict[str, Any]:
+def _fetch_model_metadata(
+    *, api_base: str, api_key: str, model: str, provider: str = "mistral"
+) -> dict[str, Any]:
     """{"max_context_length": int, "reasoning": bool} for `model`, or {} on any failure — callers fall back to their existing hardcoded defaults, so a slow/unreachable /v1/models never blocks a compose."""
     cached = _model_metadata_cache.get(model)
     if cached is not None:
         return cached
-    if is_credit_exhausted():
+    if is_credit_exhausted(provider):
         return {}
     try:
         with httpx.Client(timeout=10.0) as client:
@@ -228,15 +245,22 @@ class MistralClient:
         api_base: str | None = None,
         model: str | None = None,
         timeout: float | None = None,
+        provider: str = "mistral",
     ) -> None:
-        """Wire credentials/model/timeout, defaulting to config, and fetch live model metadata."""
+        """Wire credentials/model/timeout, defaulting to config, and fetch live model metadata. `provider` is a label only ("mistral"/"deepseek") — it doesn't change the wire format, just which credit-exhaustion breaker (mistral_credit_guard) this instance's 401/402s trip, so a dead key on one provider can't silently short-circuit the other's calls too."""
+        self._provider = provider
         self._api_key = (api_key if api_key is not None else MISTRAL_API_KEY).strip()
         self._api_base = (api_base if api_base is not None else MISTRAL_API_BASE).rstrip("/")
         self._model = model if model is not None else MISTRAL_MODEL
         self._timeout = float(timeout if timeout is not None else MISTRAL_TIMEOUT_SECONDS)
         self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         self._metadata = (
-            _fetch_model_metadata(api_base=self._api_base, api_key=self._api_key, model=self._model)
+            _fetch_model_metadata(
+                api_base=self._api_base,
+                api_key=self._api_key,
+                model=self._model,
+                provider=self._provider,
+            )
             if self._api_key
             else {}
         )
@@ -303,11 +327,10 @@ class MistralClient:
             and "not enabled" in resp.text
         )
 
-    @staticmethod
-    def _raise_for_error_status(resp: httpx.Response) -> None:
+    def _raise_for_error_status(self, resp: httpx.Response) -> None:
         """Raise the appropriate MistralError subtype for a non-retryable error status."""
         if resp.status_code in (401, 402):
-            mark_credit_exhausted()
+            mark_credit_exhausted(self._provider)
             raise MistralCreditError(f"Mistral API {resp.status_code}: {resp.text[:500]}")
         if resp.status_code >= 400:
             raise MistralError(f"Mistral API {resp.status_code}: {resp.text[:500]}")
@@ -320,9 +343,9 @@ class MistralClient:
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         """POST one chat/completions request through the shared rate-limit gate, retrying on 429 with Retry-After / exponential backoff. Returns the parsed JSON body or raises MistralError."""
-        if is_credit_exhausted():
+        if is_credit_exhausted(self._provider):
             raise MistralCreditError(
-                "Mistral credit exhausted (cached — will retry after the monthly reset)"
+                f"{self._provider} credit exhausted (cached — will retry after the monthly reset)"
             )
         url = f"{self._api_base}/chat/completions"
         headers = {
@@ -794,16 +817,67 @@ def _retry_after_seconds(resp: httpx.Response) -> float | None:
         return None
 
 
+_PROVIDER_CONFIG: dict[str, tuple[str, int, str]] = {
+    # purpose -> (configured default provider, canary %, DeepSeek model for this purpose)
+    "writer": (LLM_PROVIDER_WRITER, LLM_PROVIDER_WRITER_CANARY_PCT, DEEPSEEK_MODEL_WRITER),
+    "research": (
+        LLM_PROVIDER_RESEARCH,
+        LLM_PROVIDER_RESEARCH_CANARY_PCT,
+        DEEPSEEK_MODEL_RESEARCH,
+    ),
+    "digest": (LLM_PROVIDER_DIGEST, LLM_PROVIDER_DIGEST_CANARY_PCT, DEEPSEEK_MODEL_DIGEST),
+    "translate": (
+        LLM_PROVIDER_TRANSLATE,
+        LLM_PROVIDER_TRANSLATE_CANARY_PCT,
+        DEEPSEEK_MODEL_TRANSLATE,
+    ),
+}
+
+
+def _select_provider(purpose: str) -> str:
+    """Which provider actually serves this call: `purpose`'s configured default, or its canary alternate on a random roll (LLM_PROVIDER_<PURPOSE>_CANARY_PCT). Falls back to mistral if that resolves to deepseek but DEEPSEEK_API_KEY is unset — a canary or override can never hard-fail a compose just because the second provider isn't configured yet."""
+    import random
+
+    default_provider, canary_pct, _ = _PROVIDER_CONFIG[purpose]
+    provider = default_provider
+    if canary_pct > 0 and random.random() * 100 < canary_pct:
+        provider = "deepseek" if provider == "mistral" else "mistral"
+    if provider == "deepseek" and not DEEPSEEK_API_KEY.strip():
+        return "mistral"
+    return provider
+
+
+def _client_for_purpose(
+    purpose: str, *, mistral_model: str, timeout: float | None = None
+) -> MistralClient:
+    """A client for `purpose` ("writer"/"research"/"digest"/"translate"), routed to Mistral or DeepSeek per that purpose's LLM_PROVIDER_<PURPOSE> config (+ canary). `mistral_model` is used when Mistral serves the call — same model as today's behavior when DeepSeek isn't configured, so this is a no-op change until DEEPSEEK_API_KEY is actually set."""
+    if _select_provider(purpose) == "deepseek":
+        _, _, deepseek_model = _PROVIDER_CONFIG[purpose]
+        return MistralClient(
+            api_key=DEEPSEEK_API_KEY,
+            api_base=DEEPSEEK_API_BASE,
+            model=deepseek_model,
+            timeout=timeout,
+            provider="deepseek",
+        )
+    return MistralClient(model=mistral_model, timeout=timeout, provider="mistral")
+
+
 def get_mistral_client(*, model: str | None = None) -> MistralClient:
-    """Build a Mistral client for the writer tier, or an override model."""
-    return MistralClient(model=model or MISTRAL_MODEL_WRITER)
+    """Build a client for the writer tier (or an override model), routed to Mistral or DeepSeek per LLM_PROVIDER_WRITER."""
+    return _client_for_purpose("writer", mistral_model=model or MISTRAL_MODEL_WRITER)
 
 
 def get_mistral_research_client(*, timeout: float | None = None) -> MistralClient:
-    """Build a Mistral client pinned to the research-tier model, optionally with a non-default per-request timeout (special editions use a longer one -- see MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER)."""
-    return MistralClient(model=MISTRAL_MODEL_RESEARCH, timeout=timeout)
+    """Build a client pinned to the research-tier model, routed to Mistral or DeepSeek per LLM_PROVIDER_RESEARCH, optionally with a non-default per-request timeout (special editions use a longer one -- see MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER)."""
+    return _client_for_purpose("research", mistral_model=MISTRAL_MODEL_RESEARCH, timeout=timeout)
 
 
 def get_mistral_digest_client() -> MistralClient:
-    """Build a Mistral client pinned to the digest-tier model."""
-    return MistralClient(model=MISTRAL_MODEL_DIGEST)
+    """Build a client pinned to the digest-tier model, routed to Mistral or DeepSeek per LLM_PROVIDER_DIGEST."""
+    return _client_for_purpose("digest", mistral_model=MISTRAL_MODEL_DIGEST)
+
+
+def get_mistral_translate_client() -> MistralClient:
+    """Build a client pinned to the translate-tier model, routed to Mistral or DeepSeek per LLM_PROVIDER_TRANSLATE. A dedicated factory (rather than get_mistral_client(model=MISTRAL_MODEL_TRANSLATE), the old call pattern) so translate calls can be routed independently of generic writer calls."""
+    return _client_for_purpose("translate", mistral_model=MISTRAL_MODEL_TRANSLATE)
