@@ -2597,15 +2597,24 @@ def _record_compose_telemetry(
     raw: str,
     *,
     report_errors_model: str,
+    writer_model: str,
     duration_ms: int,
     session_id: UUID,
     created_at: datetime,
     debug: dict,
     usage_so_far: Callable[[], dict[str, int]],
 ) -> None:
-    """Best-effort: store investigation findings and tool-insight telemetry for this compose session. Never raises — a telemetry failure must not fail the compose."""
-    from app.core.config import MISTRAL_MODEL_WRITER
+    """Best-effort: store investigation findings and tool-insight telemetry for this compose session. Never raises — a telemetry failure must not fail the compose.
 
+    `writer_model` must be the writer client's own resolved model (e.g.
+    ``mistral.model``), not a config constant — a canary/DeepSeek-routed call
+    resolves to a different model than its purpose's configured default, and
+    compose_sessions.model is the only record of which model actually wrote
+    this article (root-caused 2026-08-05, alongside the provider-routing
+    work: this was hardcoded to MISTRAL_MODEL_WRITER, so a canary call would
+    have been mislabeled as Mistral in the one place an A/B comparison
+    would look).
+    """
     try:
         from app.modules.newspaper.investigation_store import store_investigation_findings
 
@@ -2632,7 +2641,7 @@ def _record_compose_telemetry(
             trace=trace,
             service_id=source_url,
             source_url=source_url,
-            model=MISTRAL_MODEL_WRITER,
+            model=writer_model,
             final_output=raw,
             status="ok",
             duration_ms=duration_ms,
@@ -2667,7 +2676,6 @@ def _compose_via_writer_tools_locked(
             from app.core.config import (
                 MISTRAL_MAX_TOOL_ROUNDS,
                 MISTRAL_MODEL_RESEARCH,
-                MISTRAL_MODEL_WRITER,
                 MISTRAL_TIMEOUT_SECONDS,
                 MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER,
                 WRITER_TWO_STAGE,
@@ -2728,9 +2736,9 @@ def _compose_via_writer_tools_locked(
                         service_id=source_url,
                         source_url=source_url,
                         model=(
-                            MISTRAL_MODEL_RESEARCH
+                            research_mistral.model
                             if stage_status == "researching"
-                            else MISTRAL_MODEL_WRITER
+                            else mistral.model
                         ),
                         status=stage_status,
                         duration_ms=int((_time.monotonic() - _t0) * 1000),
@@ -2787,8 +2795,9 @@ def _compose_via_writer_tools_locked(
                 trace,
                 raw,
                 report_errors_model=(
-                    MISTRAL_MODEL_RESEARCH if WRITER_TWO_STAGE else MISTRAL_MODEL_WRITER
+                    research_mistral.model if WRITER_TWO_STAGE else mistral.model
                 ),
+                writer_model=mistral.model,
                 duration_ms=_duration_ms,
                 session_id=_sid,
                 created_at=_screated,

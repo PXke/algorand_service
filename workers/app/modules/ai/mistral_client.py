@@ -276,6 +276,16 @@ class MistralClient:
         """Cumulative token usage across every request this instance has made (a compose session's client(s) are created fresh per session, so this is the session total, not a lifetime counter)."""
         return dict(self._usage)
 
+    @property
+    def model(self) -> str:
+        """The model this instance actually resolved to — read this instead of a config constant when recording which model served a call (a canary-routed instance's real model differs from its purpose's configured default)."""
+        return self._model
+
+    @property
+    def provider(self) -> str:
+        """"mistral" or "deepseek" — which provider this instance actually resolved to."""
+        return self._provider
+
     def _retry_after_network_error(
         self, exc: httpx.RequestError, *, attempt: int, last_attempt: bool
     ) -> None:
