@@ -94,7 +94,18 @@ _INVALID_ADDRESS_ERROR = (
 
 
 def _tool_lookup_account(address: str) -> dict[str, Any]:
-    """Live state of an Algorand account: ALGO balance, ASAs held, and the apps it created or opted into."""
+    """Live state of an Algorand account: ALGO balance, ASAs held, the apps it created or opted into, and its rekey state.
+
+    auth_addr (2026-08-05, root-caused live): algod's response carries this
+    field for a REKEYED account (one that delegated signing authority to a
+    different address) but it used to be silently discarded. This is real
+    evidence of common control even when two accounts have different
+    addresses -- caught live comparing two NFT-collection creator addresses
+    that turned out to share the same auth-addr, meaning the same real
+    signer controls both despite looking unrelated by address alone. None
+    when the account has never been rekeyed (auth-addr == the account's own
+    address, algod omits the field in that case).
+    """
     addr = (address or "").strip()
     if not addr:
         return {"error": "address required"}
@@ -113,6 +124,7 @@ def _tool_lookup_account(address: str) -> dict[str, Any]:
         "balance_algo": round((data.get("amount", 0) or 0) / 1e6, 6),
         "min_balance_algo": round((data.get("min-balance", 0) or 0) / 1e6, 6),
         "status": data.get("status"),
+        "auth_addr": data.get("auth-addr"),
         "total_assets_held": len(assets),
         "assets": [
             {"asset_id": a.get("asset-id"), "amount": a.get("amount")}
@@ -483,7 +495,13 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
             "name": "lookup_account",
             "description": (
                 "Live on-chain state of an Algorand account by address: ALGO balance, "
-                "ASAs held, and the apps it created or opted into. Use to verify holdings, "
+                "ASAs held, the apps it created or opted into, and auth_addr (set only "
+                "if this account was REKEYED — delegated its signing authority to a "
+                "different address). auth_addr is real evidence of common control even "
+                "when two accounts have different addresses: if two assets' creator "
+                "addresses differ but both accounts share the SAME auth_addr, the same "
+                "real signer controls both — do not conclude 'different creator, so "
+                "unrelated' without checking this first. Use to verify holdings, "
                 "treasury balances, or whether an account participates in a protocol. "
                 "The address MUST be one you actually found in a fetched page, search "
                 "result, or another tool's output — never construct, guess, or "
