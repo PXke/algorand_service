@@ -138,20 +138,6 @@ def _writing_guidelines(today: str) -> str:
         "actor, the change, the stakes. Protocol mechanics belong mid-piece, in the "
         "section where they earn their place explaining this story's friction; "
         "mention them there, once, not as a ritual opener.\n"
-        "- Technical Stakes & Depth: RELEVANCE GATES THE BRIDGE — only when a "
-        "specific mechanic in Algorand's layer-1 architecture genuinely bears on "
-        "THIS story's friction, not by default, does it belong in the piece: name "
-        "the specific legacy friction being eliminated and which piece of "
-        "infrastructure actually resolves it — throughput, Pure Proof-of-Stake "
-        "(PPoS) finality, ASA tokenization, state proofs, or something else "
-        "entirely, depending on the story — not just name-dropped (state proofs do "
-        "not fix wallet phishing; a PPoS explainer does not deepen a partnership "
-        "announcement) — a wrong-context mechanic reads as filler and damages trust "
-        "more than saying less. When no layer-1 mechanic is truly implicated, skip "
-        "the bridge rather than manufacture one. If a mechanic IS genuinely "
-        "implicated but sources are thin on it, you may draw on your own expert "
-        "knowledge of Algorand's layer-1 infrastructure to explain it accurately — "
-        "but never invent quotes, partnerships, or numbers.\n"
         "- Concrete Scenarios: Translate abstract blockchain concepts into concrete "
         "operational scenarios to make the implications vivid for the reader.\n"
         "- Diff noise is not news: mechanical artifacts in a page diff — canonical "
@@ -217,6 +203,33 @@ def _writer_system_lead(*, assignment: bool = False) -> str:
     )
 
 
+# Root-caused 2026-08-05: the old "Technical Stakes & Depth" rule mandated a
+# per-article bridge to layer-1 mechanics, which kept reaching for the same
+# 2-3 named mechanics (PPoS finality, sub-cent fees) regardless of fit -- the
+# repeated finality/fees boilerplate flagged on the live Hampelman NFT
+# article. Owner directive: remove the mandate entirely and instead give the
+# model accurate standing background about Algorand up front, once, as
+# reference -- not an instruction to restate it. This also fixes a real
+# staleness problem the old rule had to work around case-by-case (pretrained
+# knowledge citing an older "4-second finality" figure): stating the current
+# facts once here means the model has them right if it draws on them at all,
+# without a mandate pushing it to draw on them by default.
+_ALGORAND_PRIMER = (
+    "ABOUT ALGORAND (background only — most stories do not need to restate any "
+    "of this; draw on a fact here only when it genuinely explains something "
+    "about THIS specific story, never as a default opener or mid-piece "
+    "ritual): Algorand is a public, permissionless layer-1 blockchain running "
+    "Pure Proof-of-Stake consensus, with single-block transaction finality "
+    "(no forking, no probabilistic settlement) and negligible fees. It "
+    "supports native asset issuance (ASAs) without requiring a smart contract "
+    "for simple tokens, alongside a full smart-contract layer (Algorand "
+    "Python, the successor to PyTeal) for more complex applications. Its "
+    "ecosystem has broadened beyond its early DeFi/NFT activity toward "
+    "real-world-asset tokenization, payments infrastructure, and "
+    "institutional/government pilots.\n\n"
+)
+
+
 def _writer_system_prompt(today: str, *, assignment: bool = False) -> str:
     assignment_extra = ""
     if assignment:
@@ -228,6 +241,7 @@ def _writer_system_prompt(today: str, *, assignment: bool = False) -> str:
         )
     return (
         _writer_system_lead(assignment=assignment)
+        + _ALGORAND_PRIMER
         + _writing_guidelines(today)
         + assignment_extra
         + _BANNED_LEXICON
