@@ -288,6 +288,69 @@ def _tool_lookup_asset_by_name(name: str, limit: int = 5) -> dict[str, Any]:
     return {"query": q, "results": results[:n]}
 
 
+def _find_incoming_funder(transactions: list[Any], addr: str) -> dict[str, Any] | None:
+    """First transaction in `transactions` that pays/transfers INTO `addr` (not sent by it), formatted as a funding result — or None if none of them are incoming."""
+    for t in transactions:
+        if not isinstance(t, dict) or t.get("sender") == addr:
+            continue  # this account paying OUT at its own creation round isn't its funder
+        pay = t.get("payment-transaction") or {}
+        axfer = t.get("asset-transfer-transaction") or {}
+        if pay.get("receiver") != addr and axfer.get("receiver") != addr:
+            continue
+        return {
+            "funder": t.get("sender"),
+            "txid": t.get("id"),
+            "tx_type": t.get("tx-type"),
+            "amount_microalgo": pay.get("amount"),
+            "asset_id": axfer.get("asset-id"),
+            "asset_amount": axfer.get("amount"),
+        }
+    return None
+
+
+def _tool_lookup_first_funding(address: str) -> dict[str, Any]:
+    """Who first funded this Algorand account, via the mainnet indexer.
+
+    Added 2026-08-05 (owner request), same investigative thread as
+    auth_addr: two accounts can look unrelated by creator address alone but
+    share a common funder, which is real evidence worth checking. Uses the
+    account's own created-at-round (the indexer tracks this natively) to
+    query transactions at EXACTLY that round rather than paging through full
+    history — the transaction that funded the account and the one that
+    created it are the same event.
+    """
+    addr = (address or "").strip()
+    if not _is_valid_address(addr):
+        return {"address": addr, "error": _INVALID_ADDRESS_ERROR}
+    acct = _mainnet_idx_get(f"/v2/accounts/{addr}")
+    if not isinstance(acct, dict):
+        return {"error": "unexpected indexer response"}
+    if acct.get("error"):
+        return acct
+    if acct.get("_status") == 404:
+        return {"address": addr, "found": False, "error": "account not found on mainnet"}
+    created_round = (acct.get("account") or {}).get("created-at-round")
+    if created_round is None:
+        return {"address": addr, "found": False, "error": "no created-at-round available"}
+    txns = _mainnet_idx_get(
+        f"/v2/accounts/{addr}/transactions",
+        params={"min-round": created_round, "max-round": created_round, "limit": 20},
+    )
+    if not isinstance(txns, dict):
+        return {"error": "unexpected indexer response"}
+    if txns.get("error"):
+        return txns
+    funding = _find_incoming_funder(txns.get("transactions") or [], addr)
+    if funding is not None:
+        return {"address": addr, "found": True, "created_at_round": created_round, **funding}
+    return {
+        "address": addr,
+        "found": False,
+        "created_at_round": created_round,
+        "error": "no incoming funding transaction found at the account's creation round",
+    }
+
+
 def _tool_get_asset_holder_share(asset_id: int | str, address: str) -> dict[str, Any]:
     """A specific address's share of an ASA's total supply, computed here (not left to the model) — use this instead of manually dividing lookup_asset's total by lookup_account's raw holding, which is exactly how a real fabricated "99.99%" concentration claim happened (2026-07-14): the model got the decimal-shift arithmetic wrong on a 15-digit raw amount."""
     addr = (address or "").strip()
@@ -583,6 +646,27 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "lookup_first_funding",
+            "description": (
+                "Who first funded an Algorand account — the sender of the payment/"
+                "asset-transfer confirmed in the account's own creation round, via "
+                "the mainnet indexer. Use to check whether two accounts that look "
+                "unrelated by address alone (different creators, different "
+                "auth_addr) actually share a common funder — real evidence of a "
+                "connection, not name-based guessing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "description": "58-char Algorand address"}
+                },
+                "required": ["address"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_asset_holder_share",
             "description": (
                 "A specific address's share of an ASA's total supply, as a real "
@@ -645,6 +729,7 @@ CHAIN_HANDLERS: dict[str, Any] = {
     "lookup_account": _tool_lookup_account,
     "lookup_asset": _tool_lookup_asset,
     "lookup_asset_by_name": _tool_lookup_asset_by_name,
+    "lookup_first_funding": _tool_lookup_first_funding,
     "lookup_application": _tool_lookup_application,
     "get_asset_holder_share": _tool_get_asset_holder_share,
     "get_consensus_stats": _tool_get_consensus_stats,

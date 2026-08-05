@@ -935,7 +935,19 @@ def _tool_get_defi_tvl(protocol: str = "") -> dict[str, Any]:
 
 
 def _tool_search_nfd_directory(name: str = "", address: str = "") -> dict[str, Any]:
-    """Resolve an Algorand NFD (.algo name) via the NFDomains public API. Pass `name` (e.g. 'gazer.algo') to look up its owner address; pass `address` to reverse-lookup the .algo name(s) that address owns. Exactly one of name/address should be set."""
+    """Resolve an Algorand NFD (.algo name) via the NFDomains public API.
+
+    Pass `name` (e.g. 'gazer.algo') to look up its owner address; pass
+    `address` to reverse-lookup the .algo name(s) that address owns. Exactly
+    one of name/address should be set.
+
+    Name lookups use view=full (2026-08-05, root-caused live): the previous
+    view=tiny silently dropped properties.verified entirely -- an NFD owner
+    can cryptographically verify Discord/GitHub/X/Bluesky/Telegram handles
+    and additional linked Algorand addresses (caAlgo), which is exactly the
+    kind of independent identity corroboration a "who is really behind this
+    project" investigation needs and no other tool here provides.
+    """
     name = (name or "").strip()
     address = (address or "").strip()
     if not name and not address:
@@ -943,17 +955,31 @@ def _tool_search_nfd_directory(name: str = "", address: str = "") -> dict[str, A
     try:
         if name:
             slug = name if name.endswith(".algo") else f"{name}.algo"
-            resp = _guarded_get(f"https://api.nf.domains/nfd/{slug}", params={"view": "tiny"})
+            resp = _guarded_get(f"https://api.nf.domains/nfd/{slug}", params={"view": "full"})
             if resp.status_code == 404:
                 return {"name": slug, "found": False}
             resp.raise_for_status()
             data = resp.json()
+            verified = ((data.get("properties") or {}).get("verified") or {})
             return {
                 "name": data.get("name", slug),
                 "found": True,
                 "owner": data.get("owner"),
                 "deposit_account": data.get("depositAccount"),
                 "url": (data.get("properties") or {}).get("userDefined", {}).get("url"),
+                "time_created": data.get("timeCreated"),
+                # Cryptographically verified by the NFD owner, not self-reported
+                # free text -- absence of a field means not verified, never
+                # "confirmed absent."
+                "verified_discord": verified.get("discord"),
+                "verified_github": verified.get("github"),
+                "verified_x": verified.get("x") or verified.get("twitter"),
+                "verified_bluesky_did": verified.get("blueskydid"),
+                "verified_telegram": verified.get("telegram"),
+                # Other Algorand addresses this same NFD identity has verified as
+                # its own -- an on-chain-verified alternative to comparing raw
+                # creator addresses or auth_addr.
+                "linked_algorand_addresses": data.get("caAlgo") or [],
             }
         resp = _guarded_get(
             "https://api.nf.domains/nfd/lookup", params={"address": address, "view": "tiny"}
@@ -983,7 +1009,12 @@ _NFD_DIRECTORY_SCHEMA = {
             "address, or reverse-resolve an address to the .algo name(s) it "
             "owns — via NFDomains' own public API. Use to verify a claimed "
             ".algo identity actually resolves on-chain, or to find the name "
-            "behind an address you already have."
+            "behind an address you already have. A name lookup also returns "
+            "any Discord/GitHub/X/Bluesky/Telegram handles and additional "
+            "Algorand addresses the owner has cryptographically VERIFIED as "
+            "theirs — real corroboration for who is behind a project, not "
+            "self-reported claims; a missing field means unverified, not "
+            "confirmed absent."
         ),
         "parameters": {
             "type": "object",
