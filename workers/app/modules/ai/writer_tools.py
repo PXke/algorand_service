@@ -183,6 +183,35 @@ def _tool_get_article(article_id: str) -> dict[str, Any]:
     }
 
 
+def _tool_lookup_glossary_term(term: str) -> dict[str, Any]:
+    """Look up a term against this platform's admin-curated glossary, matching the term itself or any of its aliases (case-insensitive).
+
+    Use before explaining a piece of Algorand/crypto jargon so the article's
+    explanation matches the platform's own published definition instead of
+    relying on your own recall (see EXPLAIN YOUR OWN FRAME / Audience in your
+    writing guidelines — this is the accurate source to draw that explanation
+    from). The deterministic post-compose linker adds the actual hyperlink
+    automatically later; this tool is for READING the definition while you
+    write, not for producing a link yourself.
+    """
+    from app.modules.newspaper.glossary_linker import published_terms_cached
+
+    q = (term or "").strip().lower()
+    if not q:
+        return {"error": "term is required", "found": False}
+    for entry in published_terms_cached():
+        candidates = (entry.term, *entry.aliases)
+        if any(q == c.strip().lower() for c in candidates):
+            return {
+                "found": True,
+                "term": entry.term,
+                "slug": entry.slug,
+                "definition": entry.definition,
+                "url": f"/glossary/{entry.slug}",
+            }
+    return {"found": False}
+
+
 def _tool_trending_articles(limit: int = 5) -> dict[str, Any]:
     """Most-read recent articles on this platform — what readers actually click.
 
@@ -668,6 +697,32 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "lookup_glossary_term",
+            "description": (
+                "Look up a term in this platform's admin-curated Algorand/crypto "
+                "glossary (matches the term or any of its aliases, case-insensitive). "
+                "Returns {found, term, slug, definition, url} or {found: false} if "
+                "not in the glossary. Use before explaining a piece of jargon so "
+                "your explanation matches the platform's own published definition. "
+                "This is read-only — the actual hyperlink into the article is added "
+                "automatically after you finish, not by calling this tool."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term": {
+                        "type": "string",
+                        "description": "the term or acronym to look up, e.g. 'ASA' or "
+                        "'Pure Proof-of-Stake'",
+                    },
+                },
+                "required": ["term"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "review_draft",
             "description": (
                 "Self-assess your draft BEFORE finishing: returns a quality grade 0-10 with "
@@ -699,6 +754,7 @@ TOOL_HANDLERS: dict[str, Any] = {
     "search_platform": _tool_search_platform,
     "search_crawled_pages": _tool_search_crawled_pages,
     "get_article": _tool_get_article,
+    "lookup_glossary_term": _tool_lookup_glossary_term,
     "source_history": _tool_source_history,
     "trending_articles": _tool_trending_articles,
     "review_draft": _tool_review_draft,
