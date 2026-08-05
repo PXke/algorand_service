@@ -194,6 +194,15 @@ def test_technical_stakes_bridge_is_relevance_gated() -> None:
     assert "expert knowledge of Algorand" in guidelines
 
 
+def test_writing_guidelines_requires_explaining_the_articles_own_frame() -> None:
+    """Root-caused 2026-08-05 on the live Hampelman NFT article: the headline and lede invoked 'Ship of Theseus' (and a token named after 'Memento Mori') pulled straight from the source material's own framing, but neither concept was ever defined or developed in the body -- a reader unfamiliar with either reference had no way to understand why the piece led with it. The existing jargon-explaining rule only covers blockchain/DeFi/Algorand terms, so it never caught this."""
+    guidelines = mc._writing_guidelines("2026-07-09")
+    assert "EXPLAIN YOUR OWN FRAME" in guidelines
+    assert "OUTSIDE crypto" in guidelines
+    assert "return to it at least once more" in guidelines
+    assert "Ship of Theseus" in guidelines
+
+
 def test_writing_guidelines_bans_cross_section_restatement() -> None:
     """Root-caused 2026-07-15 on a real NFT-marketplace article: 'fees are undisclosed' and 'AlgoSeas volume is self-reported/unverified' each showed up in the per-subject prose, the comparison table, a bulleted 'why this matters' analysis, AND a reader-guidance section — four independent re-derivations of the same two facts. The existing 'state the challenge once' rule didn't catch this because it's scoped to criticism of a project's shortcomings, not general factual restatement across a table/bullets/guidance structure."""
     guidelines = mc._writing_guidelines("2026-07-09")
