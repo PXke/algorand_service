@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 
@@ -559,16 +559,42 @@ class MistralClient:
                 continue
         return seen_calls
 
+    # Tools that are genuinely optional/low-stakes (a nice-to-have side
+    # effect, not research) but where a model can keep finding "new" near-
+    # duplicate arguments forever, defeating the exact-signature dedup above
+    # entirely — root-caused 2026-08-06: a special-edition session made 33
+    # suggest_glossary_term calls (a different term each time, so never an
+    # exact repeat) instead of ever transitioning to writing, even after
+    # being told directly to stop, piling up enough extra rounds of real
+    # context to help exhaust the eventual output budget. Capped per
+    # session, not banned outright — a handful of genuinely new terms is
+    # legitimate, unbounded is not.
+    _CALL_CAPPED_TOOLS: ClassVar[dict[str, int]] = {
+        "suggest_glossary_term": 8,
+        "suggest_tool": 6,
+    }
+
+    @staticmethod
+    def _seed_tool_call_counts_from_trace(trace: list[dict[str, Any]] | None) -> dict[str, int]:
+        """Per-tool-name call counts already made this session, seeded from the shared trace so a cap holds across every chained stage of a special-edition compose (research, entity-enumeration gap-fill, ...), not just one chat_with_tools invocation."""
+        counts: dict[str, int] = {}
+        for entry in trace or ():
+            name = entry.get("tool")
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+        return counts
+
     def _run_tool_call(
         self,
         call: dict[str, Any],
         *,
         handlers: dict[str, Any],
         seen_calls: set[str],
+        tool_call_counts: dict[str, int],
         require_tool: str | None,
         trace: list[dict[str, Any]] | None,
     ) -> tuple[dict[str, Any], bool]:
-        """Execute one model-requested tool call (or nudge past an exact repeat this session), record it to the trace, and return (tool_result_message, satisfied_require_tool). A StorySpikedError (the writer aborting the article) is recorded to the trace then re-raised uncaught — every other tool failure is caught and fed back as an error result."""
+        """Execute one model-requested tool call (or refuse/nudge past a cap or exact repeat this session), record it to the trace, and return (tool_result_message, satisfied_require_tool). A StorySpikedError (the writer aborting the article) is recorded to the trace then re-raised uncaught — every other tool failure is caught and fed back as an error result."""
         fn = call.get("function") or {}
         name = fn.get("name", "")
         try:
@@ -576,7 +602,20 @@ class MistralClient:
         except json.JSONDecodeError:
             args = {}
         sig = f"{name}:{json.dumps(args, sort_keys=True)}"
-        if sig in seen_calls and name != "suggest_tool":
+        cap = self._CALL_CAPPED_TOOLS.get(name)
+        if cap is not None and tool_call_counts.get(name, 0) >= cap:
+            # A varying-argument tool a model can call forever without ever
+            # tripping the exact-signature dedup below — refuse outright
+            # once it's had a generous allowance, rather than nudge (a nudge
+            # here would just be one more low-value round).
+            result = {
+                "error": (
+                    f"{name} has been called {tool_call_counts[name]} times already "
+                    "this session — that's enough. Stop calling it and write the "
+                    "article now with what you already have."
+                )
+            }
+        elif sig in seen_calls and name != "suggest_tool":
             # Identical call already executed this session — don't re-run
             # the handler or resend the (unchanged) data; nudge to write.
             note = (
@@ -593,6 +632,8 @@ class MistralClient:
             result = {"note": note}
         else:
             seen_calls.add(sig)
+            if cap is not None:
+                tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
             handler = handlers.get(name)
             try:
                 result = handler(**args) if handler else {"error": f"unknown tool {name}"}
@@ -701,6 +742,7 @@ class MistralClient:
         *,
         handlers: dict[str, Any],
         seen_calls: set[str],
+        tool_call_counts: dict[str, int],
         require_tool: str | None,
         trace: list[dict[str, Any]] | None,
         required_satisfied: bool,
@@ -723,6 +765,7 @@ class MistralClient:
                 call,
                 handlers=handlers,
                 seen_calls=seen_calls,
+                tool_call_counts=tool_call_counts,
                 require_tool=require_tool,
                 trace=trace,
             )
@@ -759,6 +802,7 @@ class MistralClient:
         # times. Cache (name+args) signatures and refuse to re-run an identical
         # call, nudging the model to write instead.
         seen_calls = self._seed_seen_calls_from_trace(trace)
+        tool_call_counts = self._seed_tool_call_counts_from_trace(trace)
         # Enforce a mandatory tool (e.g. review_draft): the model is not allowed
         # to produce its final answer until it has called this tool at least once.
         required_satisfied = require_tool is None
@@ -807,6 +851,7 @@ class MistralClient:
                 tool_calls,
                 handlers=handlers,
                 seen_calls=seen_calls,
+                tool_call_counts=tool_call_counts,
                 require_tool=require_tool,
                 trace=trace,
                 required_satisfied=required_satisfied,
