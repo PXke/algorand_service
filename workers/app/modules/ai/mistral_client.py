@@ -176,6 +176,24 @@ def _message_text(message: dict[str, Any]) -> str:
     return str(content or "")
 
 
+def _for_conversation_history(message: dict[str, Any]) -> dict[str, Any]:
+    """A copy of an assistant message safe to append to `convo` for resending in later rounds — strips `reasoning_content` (DeepSeek's separate thinking-trace field, sibling to `content`).
+
+    Root-caused 2026-08-06: a multi-round tool-calling loop appended the RAW
+    API response message into convo every round, including reasoning_content
+    — so round 2 resent round 1's full reasoning trace, round 3 resent both,
+    and so on, compounding across rounds within one loop. A real special-
+    edition session (many rounds, plus its own extra gap-fill loop) hit 4.6M
+    cumulative prompt tokens this way before failing outright. Reasoning is
+    meant to inform THIS round's decision, not be replayed as if the model
+    already said it out loud in a prior turn — stripping it costs nothing
+    (each round still reasons fresh) and removes the compounding entirely.
+    """
+    if "reasoning_content" not in message:
+        return message
+    return {k: v for k, v in message.items() if k != "reasoning_content"}
+
+
 class MistralError(Exception):
     """Raised on a Mistral API failure."""
 
@@ -656,7 +674,7 @@ class MistralClient:
         required_nudged) so a stubborn model can't loop forever.
         """
         if not required_satisfied and not required_nudged:
-            convo.append(msg)
+            convo.append(_for_conversation_history(msg))
             convo.append(
                 {
                     "role": "user",
@@ -696,7 +714,7 @@ class MistralClient:
                 debug["rounds"] = round_idx + 1
                 debug["salvaged"] = True
             return salvaged, required_satisfied
-        convo.append(msg)
+        convo.append(_for_conversation_history(msg))
         for call in tool_calls:
             tool_message, satisfied = self._run_tool_call(
                 call,
