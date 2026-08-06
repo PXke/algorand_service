@@ -30,7 +30,8 @@ def test_queues_a_draft_row_for_each_extracted_term(fake_cassandra_session: Magi
     result = suggest_glossary_terms(payload, client=client, service_id="svc-1")
 
     assert result is payload  # never mutates the article fields
-    assert fake_cassandra_session.execute.call_count == 1
+    # 2 calls per queued term: a near-duplicate-slug lookup, then the insert.
+    assert fake_cassandra_session.execute.call_count == 2
 
 
 def test_skips_cassandra_entirely_when_classifier_returns_no_terms(
@@ -49,7 +50,8 @@ def test_caps_at_max_terms_even_if_the_model_returns_more(fake_cassandra_session
 
     suggest_glossary_terms({"title": "T", "body": "Body."}, client=_client(many_terms), service_id="svc-1")
 
-    assert fake_cassandra_session.execute.call_count == 3
+    # _MAX_TERMS=3 terms queued, 2 calls each (near-duplicate lookup + insert).
+    assert fake_cassandra_session.execute.call_count == 6
 
 
 def test_disabled_by_config_never_calls_the_model(monkeypatch: pytest.MonkeyPatch) -> None:

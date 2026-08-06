@@ -55,6 +55,30 @@ def _slugify(term: str) -> str:
     return slug[:200]
 
 
+def _slug_words(slug: str) -> set[str]:
+    return {w for w in slug.split("-") if w}
+
+
+def _find_near_duplicate_slug(
+    new_slug: str, existing_slugs: list[str], *, min_overlap: float = 0.6
+) -> str | None:
+    """An existing slug that shares most of new_slug's distinguishing words (e.g. 'aid-trust-portal' vs 'aid-trust-portal-atp'), or None. Word-overlap, not edit-distance — a model rewording the SAME concept tends to keep the same core nouns and add/drop a qualifier, which this catches; unrelated terms that happen to share one common word don't (min_overlap is against the SMALLER set, so a short slug fully contained in a longer one still counts)."""
+    new_words = _slug_words(new_slug)
+    if not new_words:
+        return None
+    for existing in existing_slugs:
+        if existing == new_slug:
+            continue  # exact match — handled separately by the INSERT's IF NOT EXISTS
+        existing_words = _slug_words(existing)
+        smaller = min(len(new_words), len(existing_words))
+        if smaller == 0:
+            continue
+        overlap = len(new_words & existing_words) / smaller
+        if overlap >= min_overlap:
+            return existing
+    return None
+
+
 def _make_suggest_glossary_term_handler(
     context: dict[str, Any] | None,
 ) -> Callable[..., dict[str, Any]]:
@@ -75,11 +99,38 @@ def _make_suggest_glossary_term_handler(
             from app.core.cassandra import get_cassandra_session
             from app.core.statements import GlossaryStmts
 
+            session = get_cassandra_session()
+
+            # Near-duplicate check BEFORE inserting: the exact-slug IF NOT
+            # EXISTS below only catches a verbatim repeat — a model
+            # rewording the same concept ("Aid Trust Portal" then "Aid
+            # Trust Portal (ATP)") produces a different slug and sails
+            # through, piling up near-identical drafts for an admin to
+            # de-dup by hand (root-caused 2026-08-06, alongside the same
+            # session's excessive call-volume issue — a different problem
+            # needing a different fix, since capping call COUNT doesn't
+            # stop each of those calls from being a real near-duplicate).
+            existing_slugs = [
+                row.slug for row in session.execute(GlossaryStmts.LIST_ALL) if row.slug
+            ]
+            near_dup = _find_near_duplicate_slug(slug, existing_slugs)
+            if near_dup is not None:
+                return {
+                    "ok": False,
+                    "already_exists": True,
+                    "slug": near_dup,
+                    "hint": (
+                        f"a very similar term already exists ('{near_dup}') — this looks "
+                        "like the same concept reworded, not a new term; no need to "
+                        "suggest it again"
+                    ),
+                }
+
             service_id = str(ctx.get("service_id", "")).strip()
             model = str(ctx.get("model", "")).strip()
             created_by = f"writer:{service_id or model or 'unknown'}"
             now = datetime.now(tz=UTC)
-            result = get_cassandra_session().execute(
+            result = session.execute(
                 GlossaryStmts.INSERT_SUGGESTED,
                 (slug, term, definition, [], now, now, created_by),
             )
