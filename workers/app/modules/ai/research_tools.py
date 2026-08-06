@@ -1428,6 +1428,76 @@ def _tool_telegram_channel_lookup(handle: str = "") -> dict[str, Any]:
     return out
 
 
+def _tool_lookup_discord_invite_stats(invite: str) -> dict[str, Any]:
+    """Real member/online counts for a Discord server, via Discord's own public invite-resolution endpoint (no bot token needed — this is the same unauthenticated API Discord itself uses to preview an invite before you join). Accepts a full discord.gg/invite URL or a bare invite code.
+
+    Root-caused 2026-08-06: a compose could only confirm that a Discord
+    invite LINK exists, never how large or active the community behind it
+    actually is — "links to a Discord" and "32 members, 8 online" are very
+    different claims, and only the second is a real signal.
+    """
+    import re
+
+    raw = (invite or "").strip()
+    if not raw:
+        return {"error": "invite is required"}
+    match = re.search(r"(?:discord\.gg/|discord\.com/invite/)([A-Za-z0-9-]+)", raw)
+    code = match.group(1) if match else raw.rstrip("/").split("/")[-1]
+    if not code:
+        return {"error": "could not extract an invite code from input"}
+    try:
+        resp = _guarded_get(
+            f"https://discord.com/api/v10/invites/{code}", params={"with_counts": "true"}
+        )
+    except Exception as exc:
+        return {"invite_code": code, "error": str(exc)[:200]}
+    if resp.status_code == 404:
+        return {"invite_code": code, "exists": False, "error": "invite not found or expired"}
+    if resp.status_code != 200:
+        return {"invite_code": code, "error": f"discord API {resp.status_code}"}
+    try:
+        data = resp.json()
+    except Exception:
+        return {"invite_code": code, "error": "unexpected discord response"}
+    guild = data.get("guild") or {}
+    profile = data.get("profile") or {}
+    return {
+        "invite_code": code,
+        "exists": True,
+        "guild_name": guild.get("name"),
+        "member_count": profile.get("member_count"),
+        "online_count": profile.get("online_count"),
+        "description": (guild.get("description") or profile.get("description") or "")[:300]
+        or None,
+    }
+
+
+_DISCORD_INVITE_STATS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "lookup_discord_invite_stats",
+        "description": (
+            "Real member and online counts for a Discord server, via its own "
+            "public invite preview (no bot/auth needed). Pass a discord.gg "
+            "invite URL or bare code. A project's Discord link existing tells "
+            "you nothing about community size — 'has a Discord' and '32 "
+            "members, 8 online' are very different claims; use this before "
+            "characterizing a community as active or substantial."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "invite": {
+                    "type": "string",
+                    "description": "discord.gg/XXXX URL, or the bare invite code",
+                },
+            },
+            "required": ["invite"],
+        },
+    },
+}
+
+
 _TELEGRAM_LOOKUP_SCHEMA = {
     "type": "function",
     "function": {
@@ -2018,4 +2088,6 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if TELEGRAM_BOT_TOKEN:
         schemas.append(_TELEGRAM_LOOKUP_SCHEMA)
         handlers["telegram_channel_lookup"] = _tool_telegram_channel_lookup
+    schemas.append(_DISCORD_INVITE_STATS_SCHEMA)
+    handlers["lookup_discord_invite_stats"] = _tool_lookup_discord_invite_stats
     return schemas, handlers
