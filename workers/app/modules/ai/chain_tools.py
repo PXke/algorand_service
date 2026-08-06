@@ -544,9 +544,15 @@ def _tool_get_asset_holder_share(asset_id: int | str, address: str) -> dict[str,
 def _tool_lookup_asset_holders(asset_id: int | str, limit: int = 10) -> dict[str, Any]:
     """Current holders of an ASA (balance > 0), via the mainnet indexer — the real 'is this collection actually held/traded' signal, the reverse of get_asset_holder_share (which needs a candidate address already in hand). For a 1/1 NFT (total=1), one call says whether the creator still holds it (never sold/distributed) or a different address does (a real transfer happened) — root-caused 2026-08-05: a compose treated a whole NFT collection as unverified/obscure after checking only DEX token-pool listings, which don't apply to 1/1 NFTs, instead of just checking whether any of the assets had actually moved off the creator's wallet.
 
-    Capped at one indexer page (up to 100 raw balances, `limit` of those
-    returned by size) — holder_count_is_complete tells you whether that page
-    was the whole picture or there are more beyond it.
+    creator_still_holds is checked via a DIRECT lookup of the creator's own
+    account, not by searching for them in the holders page below — root-
+    caused 2026-08-06 against a real fungible token where the creator held
+    ~99.99999% of supply: the holders page is capped at 100 raw balances in
+    indexer-default order, NOT sorted by amount, so a creator with a
+    100+-holder token can easily be absent from that page despite holding
+    virtually everything, producing a false "creator no longer holds it".
+    top_holders (best-of-page-100, amount-sorted) is still useful for who
+    else holds it, just not authoritative for the creator specifically.
     """
     aid = str(asset_id).strip()
     if not aid.isdigit():
@@ -557,6 +563,28 @@ def _tool_lookup_asset_holders(asset_id: int | str, limit: int = 10) -> dict[str
         return asset
     creator = asset.get("creator")
     decimals = asset.get("decimals")
+    asset_id_int = asset.get("asset_id")
+
+    def _adj(amount: int | float) -> int | float:
+        if isinstance(decimals, int) and decimals >= 0:
+            return round(amount / (10**decimals), 6)
+        return amount
+
+    creator_account = _tool_lookup_account(creator) if creator else {"error": "no creator on record"}
+    creator_lookup_error = creator_account.get("error")
+    creator_holding = (
+        0
+        if creator_lookup_error
+        else next(
+            (
+                a.get("amount")
+                for a in (creator_account.get("assets") or [])
+                if a.get("asset_id") == asset_id_int
+            ),
+            0,
+        )
+    )
+
     data = _mainnet_idx_get(
         f"/v2/assets/{aid}/balances", params={"currency-greater-than": 0, "limit": 100}
     )
@@ -564,20 +592,15 @@ def _tool_lookup_asset_holders(asset_id: int | str, limit: int = 10) -> dict[str
         return {"error": "unexpected indexer response"}
     if data.get("error"):
         return data
-    balances = data.get("balances", []) or []
-
-    def _adj(amount: int | float) -> int | float:
-        if isinstance(decimals, int) and decimals >= 0:
-            return round(amount / (10**decimals), 6)
-        return amount
-
-    balances = sorted(balances, key=lambda b: b.get("amount", 0), reverse=True)
+    balances = sorted(data.get("balances", []) or [], key=lambda b: b.get("amount", 0), reverse=True)
     return {
-        "asset_id": asset.get("asset_id"),
+        "asset_id": asset_id_int,
         "creator": creator,
+        "creator_still_holds": bool(creator_holding),
+        "creator_holding_adjusted": _adj(creator_holding) if creator_holding else 0,
+        **({"creator_lookup_error": creator_lookup_error} if creator_lookup_error else {}),
         "holder_count_this_page": len(balances),
         "holder_count_is_complete": not data.get("next-token"),
-        "creator_still_holds": any(b.get("address") == creator for b in balances),
         "top_holders": [
             {"address": b.get("address"), "amount_adjusted": _adj(b.get("amount", 0))}
             for b in balances[:n]
