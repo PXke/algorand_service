@@ -1472,6 +1472,142 @@ def _tool_lookup_discord_invite_stats(invite: str) -> dict[str, Any]:
     }
 
 
+def _rdap_registrar_name(entities: list[Any]) -> str | None:
+    for e in entities:
+        if not isinstance(e, dict) or "registrar" not in (e.get("roles") or []):
+            continue
+        for field in e.get("vcardArray") or []:
+            if not isinstance(field, list) or len(field) != 2:
+                continue
+            for entry in field[1:]:
+                if isinstance(entry, list) and len(entry) == 4 and entry[0] == "fn":
+                    return entry[3]
+    return None
+
+
+def _tool_lookup_domain_registration(domain: str) -> dict[str, Any]:
+    """Registration/expiration date and registrar for a domain, via RDAP (the standardized, free WHOIS successor — rdap.org auto-routes to the correct registry, no key needed). A domain registered weeks ago vs. years ago is a real legitimacy/maturity signal a reader deserves, and this is the on-the-record source for it rather than guessing from how polished a site looks."""
+    import re
+
+    raw = (domain or "").strip().lower()
+    raw = re.sub(r"^https?://", "", raw).split("/")[0]
+    host = re.sub(r"^www\.", "", raw)
+    if not host or "." not in host:
+        return {"error": "a valid domain is required, e.g. example.com"}
+    try:
+        resp = _guarded_get(f"https://rdap.org/domain/{host}", timeout=15.0)
+    except Exception as exc:
+        return {"domain": host, "error": str(exc)[:200]}
+    if resp.status_code == 404:
+        return {"domain": host, "found": False, "error": "no RDAP record (unregistered, or a ccTLD RDAP.org doesn't route)"}
+    if resp.status_code != 200:
+        return {"domain": host, "error": f"RDAP {resp.status_code}"}
+    try:
+        data = resp.json()
+    except Exception:
+        return {"domain": host, "error": "unexpected RDAP response"}
+    events = {e.get("eventAction"): e.get("eventDate") for e in data.get("events") or []}
+    return {
+        "domain": host,
+        "found": True,
+        "registered_at": events.get("registration"),
+        "expires_at": events.get("expiration"),
+        "last_changed_at": events.get("last changed"),
+        "registrar": _rdap_registrar_name(data.get("entities") or []),
+    }
+
+
+_DOMAIN_REGISTRATION_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "lookup_domain_registration",
+        "description": (
+            "Registration date, expiration date, and registrar for a domain, "
+            "via RDAP (the standardized WHOIS successor, no key needed). Use "
+            "to check whether a project's site is brand-new or established — "
+            "a domain registered weeks ago is a real, checkable signal, not "
+            "a guess from how the site looks."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "domain": {
+                    "type": "string",
+                    "description": "bare domain or a URL containing one, e.g. 'example.com'",
+                },
+            },
+            "required": ["domain"],
+        },
+    },
+}
+
+
+def _wayback_capture_date(resp: httpx.Response) -> str | None:
+    """The capture date (YYYY-MM-DD) from a CDX API response's single data row, or None — row 0 is always a header, not data."""
+    try:
+        rows = resp.json()
+    except Exception:
+        return None
+    if not isinstance(rows, list) or len(rows) < 2:
+        return None
+    ts = rows[1][1] if isinstance(rows[1], list) and len(rows[1]) > 1 else None
+    if not isinstance(ts, str) or len(ts) < 8:
+        return None
+    return f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}"
+
+
+def _tool_lookup_wayback_snapshots(url: str) -> dict[str, Any]:
+    """First and most recent known Internet Archive snapshot dates for a URL, via the Wayback Machine's CDX API (free, no key). Use to check how long a site has actually existed, or whether its content changed recently, instead of trusting a fetch_url's current state as the whole history — root-caused 2026-08-06: a compose tried to fetch archive.ph directly for exactly this kind of check and hit a 429, with no fallback."""
+    raw = (url or "").strip()
+    if not raw:
+        return {"error": "url is required"}
+    try:
+        first_resp = _guarded_get(
+            "https://web.archive.org/cdx/search/cdx",
+            params={"url": raw, "output": "json", "limit": "1"},
+            timeout=20.0,
+        )
+        last_resp = _guarded_get(
+            "https://web.archive.org/cdx/search/cdx",
+            params={"url": raw, "output": "json", "limit": "-1"},
+            timeout=20.0,
+        )
+    except Exception as exc:
+        return {"url": raw, "error": str(exc)[:200]}
+    if first_resp.status_code != 200 or last_resp.status_code != 200:
+        return {
+            "url": raw,
+            "error": f"wayback CDX {first_resp.status_code}/{last_resp.status_code}",
+        }
+    first_seen = _wayback_capture_date(first_resp)
+    last_seen = _wayback_capture_date(last_resp)
+    if first_seen is None and last_seen is None:
+        return {"url": raw, "found": False, "error": "no archive.org snapshots found"}
+    return {"url": raw, "found": True, "first_seen": first_seen, "last_seen": last_seen}
+
+
+_WAYBACK_SNAPSHOTS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "lookup_wayback_snapshots",
+        "description": (
+            "First and most recent Internet Archive (Wayback Machine) "
+            "snapshot dates for a URL, free and no key needed. Use to check "
+            "how long a site has actually existed, or to catch that its "
+            "content changed recently, instead of relying only on what it "
+            "shows right now."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "the URL to check"},
+            },
+            "required": ["url"],
+        },
+    },
+}
+
+
 def _tool_lookup_world_population() -> dict[str, Any]:
     """Latest total world population figure, via the World Bank's public API (no key needed) — for cross-checking a claim that some on-chain counter, token supply, or tracker is meant to mirror world population. Returns the most recent available year's figure; World Bank publishes annual estimates, not a live/real-time count, so treat this as 'the real figure as of the cited year', not today's exact population."""
     try:
@@ -2136,4 +2272,8 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     handlers["lookup_discord_invite_stats"] = _tool_lookup_discord_invite_stats
     schemas.append(_WORLD_POPULATION_SCHEMA)
     handlers["lookup_world_population"] = _tool_lookup_world_population
+    schemas.append(_DOMAIN_REGISTRATION_SCHEMA)
+    handlers["lookup_domain_registration"] = _tool_lookup_domain_registration
+    schemas.append(_WAYBACK_SNAPSHOTS_SCHEMA)
+    handlers["lookup_wayback_snapshots"] = _tool_lookup_wayback_snapshots
     return schemas, handlers
