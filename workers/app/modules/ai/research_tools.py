@@ -1472,6 +1472,50 @@ def _tool_lookup_discord_invite_stats(invite: str) -> dict[str, Any]:
     }
 
 
+def _tool_lookup_world_population() -> dict[str, Any]:
+    """Latest total world population figure, via the World Bank's public API (no key needed) — for cross-checking a claim that some on-chain counter, token supply, or tracker is meant to mirror world population. Returns the most recent available year's figure; World Bank publishes annual estimates, not a live/real-time count, so treat this as 'the real figure as of the cited year', not today's exact population."""
+    try:
+        # No mrnev param: it 400s on this network path for reasons unclear
+        # (reproduced with plain curl, not a client bug) — the API already
+        # sorts newest-first by default, so per_page=1 alone gets the same
+        # latest-year record.
+        resp = _guarded_get(
+            "https://api.worldbank.org/v2/country/WLD/indicator/SP.POP.TOTL",
+            params={"format": "json", "per_page": "1"},
+        )
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+    if resp.status_code != 200:
+        return {"error": f"World Bank API {resp.status_code}"}
+    try:
+        data = resp.json()
+        record = data[1][0]
+    except Exception:
+        return {"error": "unexpected World Bank response shape"}
+    return {
+        "population": record.get("value"),
+        "year": record.get("date"),
+        "source": "World Bank (indicator SP.POP.TOTL)",
+    }
+
+
+_WORLD_POPULATION_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "lookup_world_population",
+        "description": (
+            "Latest total world population figure from the World Bank's "
+            "public data API (no key needed, no arguments). Use to check a "
+            "claim that some on-chain counter, token supply, or tracker is "
+            "meant to mirror world population, instead of reporting the "
+            "claim unverified. Figure is the most recent annual estimate, "
+            "not a live count."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+
 _DISCORD_INVITE_STATS_SCHEMA = {
     "type": "function",
     "function": {
@@ -2090,4 +2134,6 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         handlers["telegram_channel_lookup"] = _tool_telegram_channel_lookup
     schemas.append(_DISCORD_INVITE_STATS_SCHEMA)
     handlers["lookup_discord_invite_stats"] = _tool_lookup_discord_invite_stats
+    schemas.append(_WORLD_POPULATION_SCHEMA)
+    handlers["lookup_world_population"] = _tool_lookup_world_population
     return schemas, handlers
