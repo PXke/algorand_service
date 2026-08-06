@@ -370,6 +370,68 @@ def _tool_lookup_first_funding(address: str) -> dict[str, Any]:
     }
 
 
+def _tx_direction_and_counterparty(
+    t: dict[str, Any], addr: str
+) -> tuple[str, str | None, int | None, int | None]:
+    """(direction, counterparty, asset_id, raw_amount) for one transaction from `addr`'s point of view. Degrades gracefully for tx-types with no payment/asset-transfer inner object (app calls, key registration, etc.) — counterparty/asset_id/amount just come back None, the tx_type field alone still tells the caller what happened."""
+    pay = t.get("payment-transaction") or {}
+    axfer = t.get("asset-transfer-transaction") or {}
+    receiver = axfer.get("receiver") or pay.get("receiver")
+    amount = axfer.get("amount") if axfer else pay.get("amount")
+    asset_id = axfer.get("asset-id") if axfer else None
+    if t.get("sender") == addr:
+        return "sent", receiver, asset_id, amount
+    return "received", t.get("sender"), asset_id, amount
+
+
+def _summarize_transaction(t: dict[str, Any], addr: str) -> dict[str, Any]:
+    from datetime import UTC, datetime
+
+    round_time = t.get("round-time")
+    iso_time = (
+        datetime.fromtimestamp(round_time, tz=UTC).isoformat()
+        if isinstance(round_time, int | float)
+        else None
+    )
+    direction, counterparty, asset_id, amount = _tx_direction_and_counterparty(t, addr)
+    return {
+        "txid": t.get("id"),
+        "round": t.get("confirmed-round"),
+        "round_time": iso_time,
+        "tx_type": t.get("tx-type"),
+        "direction": direction,
+        "counterparty": counterparty,
+        "asset_id": asset_id,
+        "amount_raw": amount,
+    }
+
+
+def _tool_lookup_account_transactions(address: str, limit: int = 10) -> dict[str, Any]:
+    """Recent transactions for an Algorand account, newest first, via the mainnet indexer — the general 'is this account still active, and doing what' signal chain_tools lacked. lookup_account gives a current balance snapshot; lookup_first_funding gives one specific historical moment (account creation); this gives the actual recent activity pattern — whether a claimed recurring process is still firing, whether an account has gone quiet, or what kind of transactions it's really doing, instead of guessing from a balance alone.
+
+    amount_raw is unconverted (no decimals applied) — use get_asset_holder_share
+    or lookup_asset's decimals field to convert an asset amount yourself if the
+    story needs the real token count, not the raw integer.
+    """
+    addr = (address or "").strip()
+    if not _is_valid_address(addr):
+        return {"address": addr, "error": _INVALID_ADDRESS_ERROR}
+    n = max(1, min(int(limit), 30))
+    data = _mainnet_idx_get(f"/v2/accounts/{addr}/transactions", params={"limit": n})
+    if not isinstance(data, dict):
+        return {"error": "unexpected indexer response"}
+    if data.get("error"):
+        return data
+    txns = [t for t in (data.get("transactions") or []) if isinstance(t, dict)]
+    results = [_summarize_transaction(t, addr) for t in txns]
+    return {
+        "address": addr,
+        "transaction_count_this_page": len(results),
+        "most_recent_round_time": results[0]["round_time"] if results else None,
+        "transactions": results,
+    }
+
+
 def _tool_get_asset_holder_share(asset_id: int | str, address: str) -> dict[str, Any]:
     """A specific address's share of an ASA's total supply, computed here (not left to the model) — use this instead of manually dividing lookup_asset's total by lookup_account's raw holding, which is exactly how a real fabricated "99.99%" concentration claim happened (2026-07-14): the model got the decimal-shift arithmetic wrong on a 15-digit raw amount."""
     addr = (address or "").strip()
@@ -736,6 +798,33 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "lookup_account_transactions",
+            "description": (
+                "Recent transactions for an Algorand account, newest first, via "
+                "the mainnet indexer — use to check whether an account is "
+                "actually still active and what it's doing, not just its current "
+                "balance. lookup_account only gives a snapshot; this shows the "
+                "real recent activity pattern — confirm a claimed recurring "
+                "process is still firing, spot that an account has gone quiet, "
+                "or see who it's actually transacting with. amount_raw is "
+                "unconverted (no decimals applied)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "description": "58-char Algorand address"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "1-30 most recent transactions to return, default 10",
+                    },
+                },
+                "required": ["address"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_asset_holder_share",
             "description": (
                 "A specific address's share of an ASA's total supply, as a real "
@@ -826,6 +915,7 @@ CHAIN_HANDLERS: dict[str, Any] = {
     "lookup_asset": _tool_lookup_asset,
     "lookup_asset_by_name": _tool_lookup_asset_by_name,
     "lookup_first_funding": _tool_lookup_first_funding,
+    "lookup_account_transactions": _tool_lookup_account_transactions,
     "lookup_application": _tool_lookup_application,
     "get_asset_holder_share": _tool_get_asset_holder_share,
     "lookup_asset_holders": _tool_lookup_asset_holders,
