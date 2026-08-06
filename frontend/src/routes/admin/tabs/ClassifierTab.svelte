@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { AdminApi } from '../../../lib/api/admin'
+  import Markdown from '../../../components/Markdown.svelte'
 
   type ReviewItem = Record<string, unknown>
   type Quality = 'high' | 'medium' | 'low' | 'spam'
@@ -31,8 +32,38 @@
   let investigationLoading = $state(false)
   let investigationFindings = $state<Finding[] | null>(null)
 
-  const current = $derived(reviews[0] ?? null)
-  const waitingCount = $derived(Math.max(0, reviews.length - 1))
+  // Which item in the queue is on screen — decoupled from index 0 so
+  // approve/reject isn't the only way to see what else is waiting. Clamped
+  // whenever the list changes (load, decide, recompose) so it never points
+  // past the end.
+  let currentIndex = $state(0)
+
+  const current = $derived(reviews[currentIndex] ?? null)
+  const waitingCount = $derived(Math.max(0, reviews.length - currentIndex - 1))
+
+  function clampIndex() {
+    if (reviews.length === 0) {
+      currentIndex = 0
+    } else if (currentIndex >= reviews.length) {
+      currentIndex = reviews.length - 1
+    } else if (currentIndex < 0) {
+      currentIndex = 0
+    }
+  }
+
+  function goPrev() {
+    if (currentIndex > 0) {
+      currentIndex -= 1
+      resetItemState()
+    }
+  }
+
+  function goNext() {
+    if (currentIndex < reviews.length - 1) {
+      currentIndex += 1
+      resetItemState()
+    }
+  }
 
   const subscores = $derived.by(() => {
     const detail = current?.grade_detail
@@ -115,6 +146,7 @@
           (Number(b.storage_score) || 0) - (Number(a.storage_score) || 0),
       )
       reviews = items
+      currentIndex = 0
       resetItemState()
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
@@ -210,6 +242,7 @@
       })
       onmessage?.(approved ? 'Approved' : 'Rejected')
       reviews = reviews.filter((r) => itemKey(r) !== itemKey(current))
+      clampIndex()
       resetItemState()
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
@@ -291,10 +324,25 @@
       {#if reviews.length === 0}
         Article proposals land here before publishing.
       {:else}
-        Article proposal 1 of {reviews.length} — sorted by interest score.
+        Article proposal {currentIndex + 1} of {reviews.length} — sorted by interest score.
       {/if}
     </p>
     <div class="toolbar-actions">
+      {#if reviews.length > 1}
+        <div class="nav-actions">
+          <button class="btn" type="button" disabled={currentIndex === 0} onclick={() => goPrev()}>
+            ← Prev
+          </button>
+          <button
+            class="btn"
+            type="button"
+            disabled={currentIndex >= reviews.length - 1}
+            onclick={() => goNext()}
+          >
+            Next →
+          </button>
+        </div>
+      {/if}
       <button
         class="btn"
         type="button"
@@ -404,7 +452,9 @@
             </div>
           {/if}
           {#if String(current.article_body ?? '').trim()}
-            <pre class="text-preview article-body">{String(current.article_body)}</pre>
+            <div class="article-body-render">
+              <Markdown source={String(current.article_body)} />
+            </div>
           {/if}
         </section>
       {/if}
@@ -533,6 +583,14 @@
     align-items: center;
   }
 
+  .nav-actions {
+    display: flex;
+    gap: 8px;
+    padding-inline-end: 8px;
+    margin-inline-end: 4px;
+    border-inline-end: 1px solid var(--border);
+  }
+
   .empty h3 {
     margin: 0 0 6px;
   }
@@ -640,8 +698,30 @@
     color: var(--muted);
   }
 
-  .article-body {
-    max-height: 400px;
+  .article-body-render {
+    max-height: 480px;
+    overflow: auto;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+  }
+  /* Compact the reading-page-tuned Markdown styles down to admin-panel
+     scale — full serif/lede sizing reads oversized inside a review card. */
+  .article-body-render :global(.md) {
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  .article-body-render :global(.md h2) {
+    font-size: 16px;
+    margin: 20px 0 8px;
+  }
+  .article-body-render :global(.md h3) {
+    font-size: 14px;
+    margin: 14px 0 6px;
+  }
+  .article-body-render :global(.md > p.lede) {
+    font-size: 1em;
   }
 
   .article-preview h4 {
