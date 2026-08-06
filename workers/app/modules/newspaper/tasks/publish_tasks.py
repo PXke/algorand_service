@@ -1004,6 +1004,7 @@ def _grade_and_gate(
     published_at: str = "",
     tags: tuple[str, ...] = (),
     label: str = "",
+    is_special_edition: bool = False,
 ) -> tuple[dict[str, str], float | None, bool]:
     """Quality grade + deterministic gatekeeper for one draft, in the shape every caller needs.
 
@@ -1023,6 +1024,14 @@ def _grade_and_gate(
     ~all Tier-2 recomposes regardless of quality (owner confirmed 2026-07-12:
     grades were consistently 7.3-10 while completeness failed almost
     universally). Still recorded in grade_meta for visibility.
+
+    is_special_edition must be threaded through from the caller — root-caused
+    2026-08-06: grade_article_schema has skipped the length floor/ceiling for
+    special editions since 2026-08-04, but this function (the one every
+    held-for-review/recompose path actually calls) never accepted the flag at
+    all, so a genuinely deep special edition still showed the reviewer a
+    "too long — cut padding/filler" issue the in-compose revision loop
+    already knew not to raise.
     """
     import json as _json
 
@@ -1039,6 +1048,7 @@ def _grade_and_gate(
             source_url=source_url,
             published_at=published_at,
             tags=tags,
+            is_special_edition=is_special_edition,
         )
         grade_value = float(grade["grade"])
         grade_meta = {
@@ -1143,6 +1153,7 @@ def _hold_for_review(
         service_id=row.scrape_url,
         published_at=str(payload.get("published_at", "")),
         tags=tuple(held_tags),
+        is_special_edition=bool(payload.get("is_special_edition", False)),
     )
     review_id = ""
     if not route_to_backlog:
@@ -2578,6 +2589,7 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
         page_text=page_text,
         service_id=source_url or f"article:{article_id}",
         label=article_id,
+        is_special_edition=bool(getattr(brief_for_recompose, "is_special_edition", False)),
     )
 
     from app.core import config as worker_config
