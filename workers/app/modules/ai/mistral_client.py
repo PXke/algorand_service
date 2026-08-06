@@ -15,12 +15,15 @@ from app.core.config import (
     DEEPSEEK_MAX_TOKENS,
     DEEPSEEK_MODEL_DIGEST,
     DEEPSEEK_MODEL_RESEARCH,
+    DEEPSEEK_MODEL_RUBRIC,
     DEEPSEEK_MODEL_TRANSLATE,
     DEEPSEEK_MODEL_WRITER,
     LLM_PROVIDER_DIGEST,
     LLM_PROVIDER_DIGEST_CANARY_PCT,
     LLM_PROVIDER_RESEARCH,
     LLM_PROVIDER_RESEARCH_CANARY_PCT,
+    LLM_PROVIDER_RUBRIC,
+    LLM_PROVIDER_RUBRIC_CANARY_PCT,
     LLM_PROVIDER_TRANSLATE,
     LLM_PROVIDER_TRANSLATE_CANARY_PCT,
     LLM_PROVIDER_WRITER,
@@ -889,6 +892,7 @@ _PROVIDER_CONFIG: dict[str, tuple[str, int, str]] = {
         LLM_PROVIDER_TRANSLATE_CANARY_PCT,
         DEEPSEEK_MODEL_TRANSLATE,
     ),
+    "rubric": (LLM_PROVIDER_RUBRIC, LLM_PROVIDER_RUBRIC_CANARY_PCT, DEEPSEEK_MODEL_RUBRIC),
 }
 
 
@@ -939,3 +943,8 @@ def get_mistral_digest_client() -> MistralClient:
 def get_mistral_translate_client() -> MistralClient:
     """Build a client pinned to the translate-tier model, routed to Mistral or DeepSeek per LLM_PROVIDER_TRANSLATE. A dedicated factory (rather than get_mistral_client(model=MISTRAL_MODEL_TRANSLATE), the old call pattern) so translate calls can be routed independently of generic writer calls."""
     return _client_for_purpose("translate", mistral_model=MISTRAL_MODEL_TRANSLATE)
+
+
+def get_mistral_rubric_client(*, timeout: float | None = None) -> MistralClient:
+    """Build a client for the LLM quality rubric, routed to Mistral or DeepSeek per LLM_PROVIDER_RUBRIC — independently of LLM_PROVIDER_RESEARCH, even though it shares research's Mistral-side model tier (a judgment task, not generation, doesn't need the writer's Large tier). Split into its own purpose 2026-08-06 so a compose can route its research tool loop to one provider while grading with another."""
+    return _client_for_purpose("rubric", mistral_model=MISTRAL_MODEL_RESEARCH, timeout=timeout)

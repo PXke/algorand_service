@@ -256,6 +256,13 @@ DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-chat")
 DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-chat")
 DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-chat")
 DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-chat")
+# The LLM quality rubric (article_quality_llm.py) shares the research-tier
+# Mistral model but gets its OWN provider knob, separate from research's
+# LLM_PROVIDER_RESEARCH — a compose can route its tool-calling research loop
+# to one provider while keeping the rubric on another (e.g. DeepSeek's extra
+# research depth is worth it, but Mistral's rubric grading is trusted more
+# while DeepSeek's is newer/less proven).
+DEEPSEEK_MODEL_RUBRIC = env_str("DEEPSEEK_MODEL_RUBRIC", "deepseek-chat")
 # DeepSeek's thinking mode returns reasoning in a separate reasoning_content
 # field, but BOTH reasoning_content and content draw from the same max_tokens
 # budget (visible as usage.completion_tokens_details.reasoning_tokens) —
@@ -293,6 +300,8 @@ LLM_PROVIDER_DIGEST = env_str("LLM_PROVIDER_DIGEST", "mistral").strip().lower()
 LLM_PROVIDER_DIGEST_CANARY_PCT = env_int("LLM_PROVIDER_DIGEST_CANARY_PCT", 0)
 LLM_PROVIDER_TRANSLATE = env_str("LLM_PROVIDER_TRANSLATE", "mistral").strip().lower()
 LLM_PROVIDER_TRANSLATE_CANARY_PCT = env_int("LLM_PROVIDER_TRANSLATE_CANARY_PCT", 0)
+LLM_PROVIDER_RUBRIC = env_str("LLM_PROVIDER_RUBRIC", "mistral").strip().lower()
+LLM_PROVIDER_RUBRIC_CANARY_PCT = env_int("LLM_PROVIDER_RUBRIC_CANARY_PCT", 0)
 # Output cap per call. A full JSON article (title+summary+long body+tags) can
 # exceed 4096 and get truncated mid-string → JSON parse fails → template junk.
 # 12000 comfortably fits a ~4000-word long-form article once JSON-escaped; the

@@ -21,6 +21,7 @@ from app.modules.ai.mistral_client import (
     get_mistral_client,
     get_mistral_digest_client,
     get_mistral_research_client,
+    get_mistral_rubric_client,
     get_mistral_translate_client,
 )
 from app.modules.ai.reference_block import append_reference_block
@@ -1423,14 +1424,10 @@ def _review_and_revise(
 
     # LLM rubric grading (narrative synthesis/technical depth/critical
     # distance) is a judgment task, not generation — it doesn't need the
-    # writer's Large-tier model. Was previously (silently) run on `mistral`
-    # itself, the SAME Large client used for Stage 2 generation, despite
-    # grade_article_quality_llm's own docstring calling itself a "Fast
-    # Small-tier rubric" — that intent only ever applied to its unused
-    # default. Use the research-tier client explicitly (cheaper; and as of
-    # 2026-07-15, mistral-small-latest gets reasoning_effort="high" for free
-    # since MistralClient now knows it actually supports reasoning).
-    quality_mistral = get_mistral_research_client()
+    # writer's Large-tier model, and (2026-08-06) it's its own routing
+    # purpose so a compose can send its research tool loop to one provider
+    # while grading with another (e.g. DeepSeek research, Mistral rubric).
+    quality_mistral = get_mistral_rubric_client()
 
     def _note_revision_failure(reason: str) -> None:
         # Surface WHY the revision didn't happen instead of silently keeping the
