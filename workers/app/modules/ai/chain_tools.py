@@ -385,19 +385,11 @@ def _tx_direction_and_counterparty(
 
 
 def _summarize_transaction(t: dict[str, Any], addr: str) -> dict[str, Any]:
-    from datetime import UTC, datetime
-
-    round_time = t.get("round-time")
-    iso_time = (
-        datetime.fromtimestamp(round_time, tz=UTC).isoformat()
-        if isinstance(round_time, int | float)
-        else None
-    )
     direction, counterparty, asset_id, amount = _tx_direction_and_counterparty(t, addr)
     return {
         "txid": t.get("id"),
         "round": t.get("confirmed-round"),
-        "round_time": iso_time,
+        "round_time": _iso_round_time(t),
         "tx_type": t.get("tx-type"),
         "direction": direction,
         "counterparty": counterparty,
@@ -428,6 +420,86 @@ def _tool_lookup_account_transactions(address: str, limit: int = 10) -> dict[str
         "address": addr,
         "transaction_count_this_page": len(results),
         "most_recent_round_time": results[0]["round_time"] if results else None,
+        "transactions": results,
+    }
+
+
+def _iso_round_time(t: dict[str, Any]) -> str | None:
+    from datetime import UTC, datetime
+
+    round_time = t.get("round-time")
+    return (
+        datetime.fromtimestamp(round_time, tz=UTC).isoformat()
+        if isinstance(round_time, int | float)
+        else None
+    )
+
+
+def _summarize_asset_transaction(t: dict[str, Any]) -> dict[str, Any]:
+    axfer = t.get("asset-transfer-transaction") or {}
+    amount = axfer.get("amount") or 0
+    close_amount = axfer.get("close-amount") or 0
+    # A zero-amount axfer with no close-to is routine opt-in/opt-out
+    # housekeeping (the standard way to declare intent to hold an asset on
+    # Algorand), not a real transfer of ownership — root-caused 2026-08-06:
+    # an asset's most RECENT transaction by timestamp was exactly this kind
+    # of noise (an unrelated account opting out with nothing to redirect),
+    # while the actual last real transfer was 3+ years earlier. Flagging it
+    # explicitly instead of trusting round_time recency alone.
+    is_real_transfer = amount > 0 or close_amount > 0
+    return {
+        "txid": t.get("id"),
+        "round": t.get("confirmed-round"),
+        "round_time": _iso_round_time(t),
+        "tx_type": t.get("tx-type"),
+        "sender": t.get("sender"),
+        "receiver": axfer.get("receiver") or axfer.get("close-to"),
+        "amount_raw": amount,
+        "is_real_transfer": is_real_transfer,
+    }
+
+
+def _tool_lookup_asset_transactions(asset_id: int | str, limit: int = 10) -> dict[str, Any]:
+    """Recent transaction/transfer history for a specific ASA, via the mainnet indexer — marketplace-agnostic, on-chain-native event history for one asset (creation, every transfer, to/from whom), unlike lookup_asset_holders which only gives a current snapshot. Use to check how much something has actually traded, independent of any one marketplace's own listing page.
+
+    is_real_transfer distinguishes an actual ownership-moving transfer
+    (amount or close-amount > 0) from routine zero-amount opt-in/opt-out
+    housekeeping, which is common and NOT evidence of recent trading —
+    most_recent_real_transfer_round_time is the signal to trust for "when
+    did this last actually change hands", not the newest entry by itself.
+
+    The indexer returns an asset's transactions oldest-first with no
+    server-side reverse-sort option (confirmed 2026-08-06 — unlike account
+    transactions, which ARE newest-first by default), so this fetches one
+    bounded page (up to 1000) and returns the LAST `limit` of those as
+    "most recent". Accurate for any asset with fewer than ~1000 transactions
+    in its entire history — true for virtually every NFT and most tokens.
+    If `page_may_be_incomplete` is true, the asset has more history than
+    this single page covers and the results may reflect early activity
+    rather than truly recent activity.
+    """
+    aid = str(asset_id).strip()
+    if not aid.isdigit():
+        return {"error": "asset_id must be numeric"}
+    n = max(1, min(int(limit), 30))
+    page_size = 1000
+    data = _mainnet_idx_get(f"/v2/assets/{aid}/transactions", params={"limit": page_size})
+    if not isinstance(data, dict):
+        return {"error": "unexpected indexer response"}
+    if data.get("error"):
+        return data
+    txns = [t for t in (data.get("transactions") or []) if isinstance(t, dict)]
+    tail = txns[-n:]
+    results = [_summarize_asset_transaction(t) for t in tail]
+    real_transfers = [r for r in results if r["is_real_transfer"]]
+    return {
+        "asset_id": int(aid),
+        "most_recent_real_transfer_round_time": (
+            real_transfers[-1]["round_time"] if real_transfers else None
+        ),
+        "transaction_count_this_page": len(txns),
+        "page_may_be_incomplete": len(txns) >= page_size and bool(data.get("next-token")),
+        "most_recent_activity_round_time": results[-1]["round_time"] if results else None,
         "transactions": results,
     }
 
@@ -825,6 +897,37 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "lookup_asset_transactions",
+            "description": (
+                "Recent transaction/transfer history for a specific ASA, via "
+                "the mainnet indexer — marketplace-agnostic on-chain event "
+                "history for one asset (creation, every transfer, to/from "
+                "whom), unlike lookup_asset_holders which only gives a "
+                "current snapshot. Use to check how much something has "
+                "actually traded/moved, independent of any single "
+                "marketplace's own listing page. amount_raw is unconverted. "
+                "IMPORTANT: a zero-amount transaction is routine opt-in/"
+                "opt-out housekeeping, not a real transfer — use "
+                "most_recent_real_transfer_round_time (not the newest entry "
+                "by itself) for 'when did this last actually change hands'; "
+                "each entry's is_real_transfer flag marks which is which."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "integer", "description": "numeric ASA id"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "1-30 most recent transactions to return, default 10",
+                    },
+                },
+                "required": ["asset_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_asset_holder_share",
             "description": (
                 "A specific address's share of an ASA's total supply, as a real "
@@ -916,6 +1019,7 @@ CHAIN_HANDLERS: dict[str, Any] = {
     "lookup_asset_by_name": _tool_lookup_asset_by_name,
     "lookup_first_funding": _tool_lookup_first_funding,
     "lookup_account_transactions": _tool_lookup_account_transactions,
+    "lookup_asset_transactions": _tool_lookup_asset_transactions,
     "lookup_application": _tool_lookup_application,
     "get_asset_holder_share": _tool_get_asset_holder_share,
     "lookup_asset_holders": _tool_lookup_asset_holders,
