@@ -119,7 +119,13 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.newspaper.publish_weekly_price_analysis",
         "schedule": crontab(
             minute=int(os.getenv("PRICE_ANALYSIS_CRON_MINUTE", "0")),
-            hour=int(os.getenv("PRICE_ANALYSIS_CRON_HOUR", "9")),
+            # Default moved off DeepSeek peak hours (2026-08-15): 9 sat inside
+            # the 06:00-10:00 UTC peak window. The compose itself is also
+            # gated by article_composer's off-peak check regardless of this
+            # cron hour (see peak_hours.py) -- this default just avoids
+            # scheduling the one hour-configurable LLM task to immediately
+            # collide with peak on every run.
+            hour=int(os.getenv("PRICE_ANALYSIS_CRON_HOUR", "11")),
             day_of_week=os.getenv("PRICE_ANALYSIS_CRON_DOW", "mon"),
         ),
     }

@@ -192,3 +192,38 @@ def test_run_skips_cleanly_when_mistral_unavailable(monkeypatch: pytest.MonkeyPa
     result = weekly_digest_publish.run_weekly_digest_publish()
     assert result["status"] == "mistral_failed"
     assert result["week"] == "2026-W23"
+
+
+def test_run_skips_cleanly_during_peak_hours(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The weekly-digest path is one of the 9 real compose-triggering task paths -- a PeakHoursBlockedError (owner decision 2026-08-15: no exceptions) must be reported as a routine skip, not logged/returned as a Mistral failure."""
+    import app.core.config as config
+    from app.modules.ai.mistral_client import PeakHoursBlockedError
+
+    monkeypatch.setattr(config, "PRICE_ANALYSIS_ENABLED", True)
+    ctx = WeeklyDigestContext(
+        week_key="2026-W23",
+        week_label="2026-06-02",
+        price=WeeklyPriceSnapshot(
+            asset_id="algorand",
+            asset_name="Algorand",
+            currency="USD",
+            price_usd=1.0,
+            week_open_usd=1.0,
+            week_high_usd=1.0,
+            week_low_usd=1.0,
+            week_change_pct=0.0,
+            as_of=datetime(2026, 6, 2, tzinfo=UTC),
+        ),
+        articles=(),
+    )
+
+    monkeypatch.setattr(weekly_digest_publish, "build_weekly_digest", lambda **_kw: ctx)
+
+    def fail_compose(_ctx: WeeklyDigestContext) -> Never:
+        raise PeakHoursBlockedError("peak hours (DeepSeek billing) — next off-peak start at ...")
+
+    monkeypatch.setattr(weekly_digest_publish, "compose_weekly_digest", fail_compose)
+
+    result = weekly_digest_publish.run_weekly_digest_publish()
+    assert result["status"] == "skipped_peak_hours"
+    assert result["week"] == "2026-W23"

@@ -786,7 +786,11 @@ def _compose_or_error(
     first_coverage: bool,
 ) -> tuple[ArticleComposeResult | None, dict[str, str] | None]:
     """Compose the article via Mistral. Returns (composed_result, None) on success, or (None, error_response) on a busy-lock, writer-spike, or Mistral failure."""
-    from app.modules.ai.mistral_client import MistralCreditError, MistralError
+    from app.modules.ai.mistral_client import (
+        MistralCreditError,
+        MistralError,
+        PeakHoursBlockedError,
+    )
     from app.modules.ai.story_spike import StorySpikedError
 
     prior_coverage_block = ""
@@ -838,6 +842,9 @@ def _compose_or_error(
             "reason": f"{spike.category}: {spike.reason}",
         }
     except MistralError as exc:
+        if isinstance(exc, PeakHoursBlockedError):
+            logger.info("compose deferred for %s (%s): %s", row.service_id, row.scrape_url, exc)
+            return None, {"status": "skipped_peak_hours", "detail": str(exc)[:200]}
         credit_issue = isinstance(exc, MistralCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
         logger.error(
@@ -2011,7 +2018,11 @@ def _recompose_via_writer(
     old_article_id: str,
 ) -> tuple[ArticleComposeResult | None, dict[str, str] | None]:
     """Compose a fresh proposal for a recompose. Returns (composed, None) on success, or (None, error_response) on a busy-lock, writer-spike, or Mistral failure — restoring/re-enqueuing the review on failure so it isn't lost."""
-    from app.modules.ai.mistral_client import MistralCreditError, MistralError
+    from app.modules.ai.mistral_client import (
+        MistralCreditError,
+        MistralError,
+        PeakHoursBlockedError,
+    )
     from app.modules.ai.story_spike import StorySpikedError
     from app.modules.crawler.classifier_review_store import enqueue_classifier_review
 
@@ -2057,12 +2068,24 @@ def _recompose_via_writer(
             "reason": f"{spike.category}: {spike.reason}",
         }
     except MistralError as exc:
+        peak_hours = isinstance(exc, PeakHoursBlockedError)
         credit_issue = isinstance(exc, MistralCreditError)
-        status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
-        logger.error(
-            "Mistral recompose failed for review %s (%s): %s", review_id, url, exc, exc_info=True
+        status = (
+            "skipped_peak_hours"
+            if peak_hours
+            else ("mistral_credit_insufficient" if credit_issue else "mistral_failed")
         )
-        # Compose failed — restore the original proposal so the review isn't lost.
+        if peak_hours:
+            logger.info("recompose of review %s (%s) deferred: %s", review_id, url, exc)
+        else:
+            logger.error(
+                "Mistral recompose failed for review %s (%s): %s",
+                review_id,
+                url,
+                exc,
+                exc_info=True,
+            )
+        # Compose failed (or was deferred) — restore the original proposal so the review isn't lost.
         enqueue_classifier_review(
             url=url,
             page_text=page_text,
@@ -2513,7 +2536,11 @@ def _recompose_published_compose(
     brief_for_recompose: EditorialBrief | None,
 ) -> tuple[ArticleComposeResult | None, dict[str, str] | None]:
     """Compose the archive-refresh draft. Recomposes from the ORIGINAL INPUT (the brief body, when this article came from an editorial brief) rather than the prior article's own OUTPUT — handing the writer its own previous body as "source material" just re-launders whatever was in it, including a wrong premise (Pera Wallet incident 2026-07-20: two recomposes kept declaring Pera defunct because the prior draft said so, never re-checking). Returns (composed, None) on success, or (None, error_response) on a writer spike or Mistral failure; raises via self.retry on a busy compose lock."""
-    from app.modules.ai.mistral_client import MistralCreditError, MistralError
+    from app.modules.ai.mistral_client import (
+        MistralCreditError,
+        MistralError,
+        PeakHoursBlockedError,
+    )
     from app.modules.ai.story_spike import StorySpikedError
 
     try:
@@ -2565,6 +2592,9 @@ def _recompose_published_compose(
             "reason": f"{spike.category}: {spike.reason}",
         }
     except MistralError as exc:
+        if isinstance(exc, PeakHoursBlockedError):
+            logger.info("recompose_published deferred for %s: %s", article_id, exc)
+            return None, {"status": "skipped_peak_hours", "detail": str(exc)[:200]}
         credit_issue = isinstance(exc, MistralCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
         logger.error("recompose_published failed for %s: %s", article_id, exc, exc_info=True)

@@ -6,8 +6,8 @@ from typing import Any, Never
 
 import pytest
 
-from app.modules.ai.mistral_client import MistralError
-from app.modules.newspaper.article_composer import compose_scrape_article
+from app.modules.ai.mistral_client import MistralError, PeakHoursBlockedError
+from app.modules.newspaper.article_composer import compose_scrape_article, compose_weekly_digest
 from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
 
 
@@ -179,3 +179,92 @@ def test_compose_scrape_recap_topic_does_not_double_fold_transcript(
     )
     assert result.composer == "mistral_transcript"
     assert captured["transcript_text"] == "the video said something important"
+
+
+def test_peak_hours_blocked_error_is_a_mistral_error() -> None:
+    """Every existing `except MistralError` call site (publish_tasks.py) must catch this with zero changes there."""
+    assert issubclass(PeakHoursBlockedError, MistralError)
+
+
+def test_compose_scrape_raises_peak_hours_blocked_during_peak_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owner decision 2026-08-15: confine ALL compose (no exceptions) to off-peak hours -- checked before the real Mistral call is ever made, so no tokens are spent during peak."""
+    import app.core.config as config
+    import app.modules.newspaper.article_composer as composer_module
+
+    monkeypatch.setattr(config, "MISTRAL_ENABLED", True)
+    monkeypatch.setattr(config, "MISTRAL_API_KEY", "key")
+    monkeypatch.setattr(composer_module, "is_off_peak_now", lambda: False)
+    monkeypatch.setattr(composer_module, "next_off_peak_at", lambda: None)
+
+    def fail_if_called(**_kwargs: object) -> Never:
+        raise AssertionError("must not call Mistral while peak-hours-blocked")
+
+    monkeypatch.setattr(composer_module, "compose_scrape_article_mistral", fail_if_called)
+
+    with pytest.raises(PeakHoursBlockedError):
+        compose_scrape_article(
+            service_name="Svc",
+            source_url="https://example.com",
+            page_title="Page",
+            page_text="body",
+            txid="TX",
+            round_num=1,
+            diff=None,
+            is_first_snapshot=True,
+            publish_kind=PublishKind.SERVICE_DISCOVERY,
+        )
+
+
+def test_compose_scrape_allowed_off_peak(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Off-peak (the common case) composes exactly as before -- the guard must not interfere when it's not blocking."""
+    import app.core.config as config
+    import app.modules.newspaper.article_composer as composer_module
+
+    monkeypatch.setattr(config, "MISTRAL_ENABLED", True)
+    monkeypatch.setattr(config, "MISTRAL_API_KEY", "key")
+    monkeypatch.setattr(composer_module, "is_off_peak_now", lambda: True)
+
+    class FakeFields:
+        title = "Title"
+        summary = "Summary"
+        body = "Body"
+
+    monkeypatch.setattr(
+        composer_module, "compose_scrape_article_mistral", lambda **_kw: FakeFields()
+    )
+
+    result = compose_scrape_article(
+        service_name="Svc",
+        source_url="https://example.com",
+        page_title="Page",
+        page_text="body",
+        txid="TX",
+        round_num=1,
+        diff=None,
+        is_first_snapshot=True,
+        publish_kind=PublishKind.SERVICE_DISCOVERY,
+    )
+    assert result.title == "Title"
+
+
+def test_compose_weekly_digest_raises_peak_hours_blocked_during_peak_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The weekly-digest path is one of the 9 real compose-triggering task paths -- must be gated identically to compose_scrape_article, no exceptions."""
+    import app.core.config as config
+    import app.modules.newspaper.article_composer as composer_module
+
+    monkeypatch.setattr(config, "MISTRAL_ENABLED", True)
+    monkeypatch.setattr(config, "MISTRAL_API_KEY", "key")
+    monkeypatch.setattr(composer_module, "is_off_peak_now", lambda: False)
+    monkeypatch.setattr(composer_module, "next_off_peak_at", lambda: None)
+
+    def fail_if_called(_ctx: object) -> Never:
+        raise AssertionError("must not call Mistral while peak-hours-blocked")
+
+    monkeypatch.setattr(composer_module, "compose_weekly_digest_article_mistral", fail_if_called)
+
+    with pytest.raises(PeakHoursBlockedError):
+        compose_weekly_digest(object())  # guard raises before context is ever touched

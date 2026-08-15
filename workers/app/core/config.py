@@ -1172,6 +1172,25 @@ PAUSE_INTAKE_ON_FEED_BACKLOG = env_bool("PAUSE_INTAKE_ON_FEED_BACKLOG", False)
 # each task's own scheduling interval.
 AUTO_COMPOSE_PAUSED = env_bool("AUTO_COMPOSE_PAUSED", False)
 
+# DeepSeek peak/off-peak billing (effective 2026-08-16 16:00 UTC): peak hours
+# cost roughly 2-4x off-peak for the same tokens. Comma-separated "HH-HH"
+# UTC ranges (end exclusive) -- default matches DeepSeek's announced
+# schedule (01:00-04:00, 06:00-10:00 UTC). Checked at the SAME shared
+# funnel point as AUTO_COMPOSE_PAUSED (article_composer.compose_scrape_
+# article/compose_weekly_digest, not scattered per-task entries) for
+# exactly the reason documented above: a gate checked only at celery-beat
+# entries misses on-demand-triggered composes entirely (2026-08-09 leak).
+# Owner decision 2026-08-15: confine ALL compose (including breaking news --
+# no exception) to off-peak hours, with a start-margin so a long-running
+# compose already in flight when off-peak ends is fine, but a NEW one won't
+# be started close enough to peak that it could still be running once peak
+# begins.
+LLM_PEAK_HOURS_UTC = env_str("LLM_PEAK_HOURS_UTC", "1-4,6-10")
+# Real DeepSeek benchmark composes ran up to ~60 minutes (2026-08-14/15
+# LumiRogue benchmark); 90 gives real buffer above that observed worst case
+# rather than cutting it close.
+LLM_PEAK_MARGIN_MINUTES = env_int("LLM_PEAK_MARGIN_MINUTES", 90)
+
 # Let the Mistral writer call live tools (price, chain head, platform search)
 # on demand while composing. Off = single-shot prompt with pre-gathered context.
 WRITER_TOOLS_ENABLED = env_bool("WRITER_TOOLS_ENABLED", True)

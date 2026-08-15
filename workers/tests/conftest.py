@@ -129,3 +129,11 @@ def _no_live_mistral_model_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(mc, "_fetch_model_metadata", lambda **_kw: {})
     mc._model_metadata_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_peak_hours_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """article_composer's _require_off_peak() (2026-08-15) checks the real wall clock against config.LLM_PEAK_HOURS_UTC — every test that reaches compose_scrape_article/compose_weekly_digest without this would otherwise flakily pass or fail depending on what UTC hour the suite happens to run at. Autouse, default off (empty windows = fail-open = always off-peak) so the whole suite is time-independent by default; a test that specifically wants to exercise the peak-hours gate can monkeypatch config.LLM_PEAK_HOURS_UTC back to a real value itself afterward."""
+    import app.core.config as config
+
+    monkeypatch.setattr(config, "LLM_PEAK_HOURS_UTC", "")

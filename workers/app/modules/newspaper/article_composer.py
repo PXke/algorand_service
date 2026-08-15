@@ -7,13 +7,14 @@ from dataclasses import dataclass
 
 from app.core import config
 from app.core.config import mistral_configured
-from app.modules.ai.mistral_client import MistralError
+from app.modules.ai.mistral_client import MistralError, PeakHoursBlockedError
 from app.modules.ai.mistral_compose import (
     compose_assignment_article_mistral,
     compose_recap_from_transcript_mistral,
     compose_scrape_article_mistral,
     compose_weekly_digest_article_mistral,
 )
+from app.modules.newspaper.peak_hours import is_off_peak_now, next_off_peak_at
 from app.modules.newspaper.publish_policy import PublishKind, PublishTopic, trim_text_to_chars
 from app.modules.newspaper.weekly_digest import WeeklyDigestContext
 
@@ -52,6 +53,23 @@ def _require_mistral() -> None:
         raise MistralError("MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback")
 
 
+def _require_off_peak() -> None:
+    """DeepSeek peak/off-peak billing (owner decision 2026-08-15): confine ALL compose, no exceptions (including breaking news), to off-peak hours -- checked here, the single shared funnel every one of the 9 real compose-triggering task paths (beat-scheduled AND on-demand) already goes through, for the exact reason AUTO_COMPOSE_PAUSED is checked at every entry point instead of each task's own schedule (see that flag's own docstring: a gate checked only at celery-beat entries missed an on-demand trigger path entirely, 2026-08-09).
+
+    Raises PeakHoursBlockedError (a MistralError subclass) so every existing
+    `except MistralError` call site catches this with zero changes there --
+    but each of those sites MUST check isinstance(exc, PeakHoursBlockedError)
+    before logging/reporting, since this is an intentional, routine skip, not
+    a real failure.
+    """
+    if not is_off_peak_now():
+        next_at = next_off_peak_at()
+        raise PeakHoursBlockedError(
+            f"peak hours (DeepSeek billing) — next off-peak start at "
+            f"{next_at.isoformat() if next_at else 'unknown'}"
+        )
+
+
 def compose_scrape_article(
     *,
     service_name: str,
@@ -83,6 +101,7 @@ def compose_scrape_article(
     del mistral_only  # see docstring above
     topic = publish_topic or PublishTopic.GENERIC
     _require_mistral()
+    _require_off_peak()
 
     # COMMUNITY_RECAP gets the full transcript via compose_recap_from_transcript_mistral
     # below; every other topic previously dropped transcript_text entirely. Fold it into
@@ -176,6 +195,7 @@ def compose_weekly_digest(
     """Weekly digest: CoinGecko snapshot + recent feed articles, via Mistral."""
     del mistral_only  # see compose_scrape_article
     _require_mistral()
+    _require_off_peak()
     fields = compose_weekly_digest_article_mistral(context)
     body = trim_text_to_chars(fields.body, config.WEEKLY_DIGEST_MAX_BODY_CHARS)
     return ArticleComposeResult(

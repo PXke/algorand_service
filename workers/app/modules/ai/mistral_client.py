@@ -256,6 +256,17 @@ class MistralCreditError(MistralError):
     """
 
 
+class PeakHoursBlockedError(MistralError):
+    """Raised by article_composer's peak-hours guard (2026-08-15) -- NOT a real API failure, deliberately not renamed off "Mistral" yet (see the mistral_* -> llm_* rename task) so it's caught by every existing `except MistralError` call site with zero changes there.
+
+    Every one of those sites must check `isinstance(exc, PeakHoursBlockedError)`
+    BEFORE falling through to the generic "mistral_failed" branch: unlike a
+    real failure, this is an intentional, expected, routine skip (we chose
+    not to call the API), so it must never log at ERROR level or report a
+    status that reads as something being broken.
+    """
+
+
 # Live model metadata (max context length, reasoning_effort support) from
 # Mistral's own GET /v1/models, cached per model name for this process's
 # lifetime — refreshes naturally on every deploy/restart. Root-caused
