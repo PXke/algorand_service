@@ -119,7 +119,14 @@ main() {
   fi
   [[ "$ch_schema" == 1 || "$full" == 1 ]] && skip_migrate=0 || skip_migrate=1
 
-  local restart_backend=1 restart_workers=1
+  # Default policy is "always restart both" (release cwd hygiene -- even an
+  # unrelated service needs a restart to pick up the new release symlink
+  # target). Respect an explicit caller override when given, though: root-
+  # caused 2026-08-15, this previously hardcoded restart_workers=1 with NO
+  # regard for any caller-supplied DEPLOY_RESTART_WORKERS at all, silently
+  # discarding an explicit opt-out (e.g. "don't restart celery mid-benchmark")
+  # before it ever reached the rest of the deploy pipeline.
+  local restart_backend="${DEPLOY_RESTART_BACKEND:-1}" restart_workers="${DEPLOY_RESTART_WORKERS:-1}"
 
   _yn() { [[ "$1" == 1 ]] && echo yes || echo skip; }
   if (( full )); then

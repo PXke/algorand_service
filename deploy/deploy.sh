@@ -214,7 +214,23 @@ cmd_deploy() {
     export SKIP_FRONTEND_BUILD=0 PACKAGE_PRECOMPRESS=1 DEPLOY_CHANGED_FRONTEND=1
   fi
   if [[ "${DEPLOY_CHANGED_PYPROJECT:-0}" == "1" ]]; then
-    export DEPLOY_RESTART_BACKEND=1 DEPLOY_RESTART_WORKERS=1 PIP_FORCE=1
+    export DEPLOY_RESTART_BACKEND=1 PIP_FORCE=1
+    # New/updated dependencies only take effect in a process after it
+    # restarts -- normally worth forcing DEPLOY_RESTART_WORKERS=1 here too.
+    # But root-caused 2026-08-15: this used to stomp an explicit caller
+    # opt-out unconditionally and silently (celery worker/beat got restarted
+    # against a direct "do not restart" instruction, with zero warning
+    # printed anywhere in the deploy output). detect_changes.sh's own
+    # default is always "1" unless a caller explicitly passed
+    # DEPLOY_RESTART_WORKERS=0, so seeing "0" here can only mean an
+    # intentional opt-out -- respect it, but warn loudly, since the
+    # deployed workers/beat will now be running stale dependencies until
+    # someone restarts them by hand.
+    if [[ "${DEPLOY_RESTART_WORKERS:-1}" == "0" ]]; then
+      echo ">>> WARNING: pyproject.toml changed (dependencies updated) but DEPLOY_RESTART_WORKERS=0 was set -- celery worker/beat will NOT be restarted and will keep running against their OLD installed packages until restarted manually." >&2
+    else
+      export DEPLOY_RESTART_WORKERS=1
+    fi
   fi
 
   echo ">>> Packaging release"
