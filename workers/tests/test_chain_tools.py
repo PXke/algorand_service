@@ -603,6 +603,132 @@ def test_algod_redis_failure_fails_open(monkeypatch: pytest.MonkeyPatch) -> None
     assert calls["n"] == 1
 
 
+def test_nft_collection_distribution_timeline_uses_asset_ids_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """asset_ids bypasses the created-assets sampling entirely -- checks exactly the given ids, no algod account call at all."""
+    creator = chain_tools._encode_address(b"\x04" * 32)
+    buyer = chain_tools._encode_address(b"\x05" * 32)
+
+    def fake_algod_get(_path: str, **_kwargs: object) -> dict:
+        raise AssertionError("must not call algod when asset_ids is given")
+
+    def fake_idx_get(path: str, params: dict | None = None, **_kwargs: object) -> dict:  # noqa: ARG001
+        return {
+            "transactions": [
+                {
+                    "id": "TX1",
+                    "confirmed-round": 100,
+                    "round-time": 1_700_000_000,
+                    "tx-type": "axfer",
+                    "sender": creator,
+                    "asset-transfer-transaction": {"amount": 1, "receiver": buyer},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(chain_tools, "_algod_get", fake_algod_get)
+    monkeypatch.setattr(chain_tools, "_mainnet_idx_get", fake_idx_get)
+
+    result = chain_tools._tool_nft_collection_distribution_timeline(
+        creator, asset_ids=[111, 222]
+    )
+
+    assert result["sampled"] == 2
+    assert result["total_created_assets"] == 2
+    assert result["claimed_count"] == 2
+    assert all(item["claimed"] for item in result["items"])
+    assert result["items"][0]["claimed_by"] == buyer
+
+
+def test_nft_collection_distribution_timeline_flags_unclaimed_assets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An asset with no real transfer FROM the creator (still held, or only opt-in noise) is reported claimed: false, not silently omitted."""
+    creator = chain_tools._encode_address(b"\x06" * 32)
+    monkeypatch.setattr(
+        chain_tools,
+        "_mainnet_idx_get",
+        lambda _path, params=None, **_kwargs: {"transactions": []},  # noqa: ARG005
+    )
+
+    result = chain_tools._tool_nft_collection_distribution_timeline(creator, asset_ids=[999])
+
+    assert result["claimed_count"] == 0
+    assert result["unclaimed_count"] == 1
+    assert result["items"][0]["claimed"] is False
+
+
+def test_nft_collection_distribution_timeline_flags_a_later_resale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real transfer AFTER the creator's initial send, from a non-creator sender, marks resold_since -- a signal this tool deliberately doesn't price, since that would require a different investigation."""
+    creator = chain_tools._encode_address(b"\x07" * 32)
+    buyer1 = chain_tools._encode_address(b"\x08" * 32)
+    buyer2 = chain_tools._encode_address(b"\x09" * 32)
+
+    def fake_idx_get(_path: str, params: dict | None = None, **_kwargs: object) -> dict:  # noqa: ARG001
+        return {
+            "transactions": [
+                {
+                    "id": "TX1",
+                    "confirmed-round": 100,
+                    "round-time": 1_700_000_000,
+                    "tx-type": "axfer",
+                    "sender": creator,
+                    "asset-transfer-transaction": {"amount": 1, "receiver": buyer1},
+                },
+                {
+                    "id": "TX2",
+                    "confirmed-round": 200,
+                    "round-time": 1_700_000_500,
+                    "tx-type": "axfer",
+                    "sender": buyer1,
+                    "asset-transfer-transaction": {"amount": 1, "receiver": buyer2},
+                },
+            ]
+        }
+
+    monkeypatch.setattr(chain_tools, "_mainnet_idx_get", fake_idx_get)
+
+    result = chain_tools._tool_nft_collection_distribution_timeline(creator, asset_ids=[1])
+
+    assert result["items"][0]["resold_since"] is True
+    assert result["resold_count"] == 1
+    # claimed_by is still the FIRST (creator-originated) recipient, not the reseller's buyer.
+    assert result["items"][0]["claimed_by"] == buyer1
+
+
+def test_nft_collection_distribution_timeline_samples_from_created_assets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No asset_ids given -- samples up to max_assets from the creator's own created-assets list (oldest-first), and reports the true total alongside the sample size."""
+    creator = chain_tools._encode_address(b"\x0a" * 32)
+    created = [{"index": 1000 + i} for i in range(10)]
+    monkeypatch.setattr(
+        chain_tools,
+        "_algod_get",
+        lambda _path, **_kwargs: {"created-assets": created},
+    )
+    monkeypatch.setattr(
+        chain_tools,
+        "_mainnet_idx_get",
+        lambda _path, params=None, **_kwargs: {"transactions": []},  # noqa: ARG005
+    )
+
+    result = chain_tools._tool_nft_collection_distribution_timeline(creator, max_assets=3)
+
+    assert result["total_created_assets"] == 10
+    assert result["sampled"] == 3
+    assert "sampled 3 of 10" in result["note"]
+
+
+def test_nft_collection_distribution_timeline_requires_a_valid_address() -> None:
+    """A malformed creator_address is rejected before any network call, same as every other chain tool."""
+    result = chain_tools._tool_nft_collection_distribution_timeline("not-a-real-address")
+    assert "error" in result
+
+
 def test_cache_key_is_order_independent_for_params() -> None:
     """Two logically-identical param dicts in different insertion order produce the same cache key."""
     key_a = chain_tools._cache_key("mainnet_idx", "/v2/assets", {"name": "foo", "limit": 5})

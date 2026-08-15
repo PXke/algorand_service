@@ -891,6 +891,130 @@ def _tool_get_asset_transaction_volume(
     }
 
 
+_COLLECTION_TIMELINE_DEFAULT_SAMPLE = 40
+_COLLECTION_TIMELINE_MAX_SAMPLE = 100
+
+
+def _tool_nft_collection_distribution_timeline(
+    creator_address: str,
+    max_assets: int = _COLLECTION_TIMELINE_DEFAULT_SAMPLE,
+    asset_ids: list[int] | None = None,
+) -> dict[str, Any]:
+    """WHEN each item in an NFT collection was first sent out by its creator -- a real "is adoption rising, flat, or stalled since mint" trend, reconstructed from on-chain transfer history.
+
+    Deliberately does NOT return a price. Self-reported gap (2026-08-14,
+    LumiRogue Ankh benchmark): three separate compose sessions asked for an
+    Algorand NFT collection's floor-price/volume HISTORY. Investigated live
+    2026-08-15 before building anything: the obvious design (pair each real
+    transfer with a co-grouped Payment transaction to derive a sale price)
+    does NOT hold for this collection -- every sampled Ankh's first transfer
+    is an UNGROUPED direct creator-to-buyer send with no payment transaction
+    anywhere nearby (checked group field, checked payments to the creator
+    account in the same round window, checked for a marketplace app-call
+    referencing the asset -- all empty). The buyer very likely pays through
+    an off-chain channel (this project is Base44-hosted) and the creator
+    hands over the NFT separately once that clears -- there is no ALGO price
+    to recover from chain data for THIS distribution mechanism. What IS
+    real and verifiable from the exact same data: exactly when each item
+    left the creator's hands, which is still genuine adoption-trend signal
+    without inventing a price that was never on-chain to begin with.
+
+    A secondary-marketplace RESALE (a later transfer where the sender is NOT
+    the creator) would be a different, potentially price-bearing event, but
+    none were observed in this investigation's samples -- flagged separately
+    per asset (resold: true/false) rather than assumed.
+
+    max_assets bounds real cost: a large collection (this one has 1,000
+    items) can't be walked exhaustively in one call, since each asset needs
+    its own transaction-history fetch. Defaults to a moderate sample from
+    the creator's created-assets list (oldest-first, i.e. the order they
+    were minted); pass asset_ids explicitly to check specific items instead
+    of a sample. sampled/total_created_assets makes clear this is a sample,
+    not a census, exactly like get_asset_transaction_volume's complete flag.
+    """
+    addr = (creator_address or "").strip()
+    if not addr:
+        return {"error": "creator_address required"}
+    if not _is_valid_address(addr):
+        return {"address": addr, "error": _INVALID_ADDRESS_ERROR}
+
+    from app.core.config import CHAIN_CACHE_TTL_FAST, CHAIN_CACHE_TTL_SLOW
+
+    if asset_ids:
+        sample_ids = [int(a) for a in asset_ids][:_COLLECTION_TIMELINE_MAX_SAMPLE]
+        total_created = len(sample_ids)
+    else:
+        acct = _algod_get(f"/v2/accounts/{addr}", cache_ttl=CHAIN_CACHE_TTL_FAST)
+        if not isinstance(acct, dict):
+            return {"error": "unexpected algod response"}
+        if acct.get("error"):
+            return acct
+        if acct.get("_status") == 404:
+            return {"address": addr, "error": "account not found"}
+        created = [a for a in (acct.get("created-assets") or []) if isinstance(a, dict)]
+        total_created = len(created)
+        cap = max(1, min(int(max_assets), _COLLECTION_TIMELINE_MAX_SAMPLE))
+        sample_ids = [a.get("index") for a in created[:cap] if a.get("index") is not None]
+
+    items: list[dict[str, Any]] = []
+    for aid in sample_ids:
+        data = _mainnet_idx_get(
+            f"/v2/assets/{aid}/transactions",
+            params={"limit": _ASA_VOLUME_PAGE},
+            cache_ttl=CHAIN_CACHE_TTL_SLOW,
+        )
+        if not isinstance(data, dict) or data.get("error"):
+            items.append({"asset_id": aid, "claimed": False, "error": "lookup failed"})
+            continue
+        real_transfers = [
+            s
+            for s in (_summarize_asset_transaction(t) for t in (data.get("transactions") or []))
+            if s["is_real_transfer"]
+        ]
+        real_transfers.sort(key=lambda s: (s["round"] is None, s["round"]))
+        first_from_creator = next((s for s in real_transfers if s["sender"] == addr), None)
+        if first_from_creator is None:
+            items.append({"asset_id": aid, "claimed": False})
+            continue
+        later_resale = any(
+            s["round"] is not None
+            and first_from_creator["round"] is not None
+            and s["round"] > first_from_creator["round"]
+            and s["sender"] != addr
+            for s in real_transfers
+        )
+        items.append(
+            {
+                "asset_id": aid,
+                "claimed": True,
+                "claimed_at": first_from_creator["round_time"],
+                "claimed_at_round": first_from_creator["round"],
+                "claimed_by": first_from_creator["receiver"],
+                "resold_since": later_resale,
+            }
+        )
+
+    claimed = [i for i in items if i.get("claimed")]
+    claimed_dates = sorted(i["claimed_at"] for i in claimed if i.get("claimed_at"))
+    return {
+        "creator_address": addr,
+        "total_created_assets": total_created,
+        "sampled": len(sample_ids),
+        "note": (
+            f"sampled {len(sample_ids)} of {total_created} created assets -- "
+            "a TREND from this sample, not a census of the whole collection"
+            if len(sample_ids) < total_created
+            else "every created asset was checked"
+        ),
+        "claimed_count": len(claimed),
+        "unclaimed_count": len(items) - len(claimed),
+        "resold_count": sum(1 for i in claimed if i.get("resold_since")),
+        "earliest_claim_at": claimed_dates[0] if claimed_dates else None,
+        "most_recent_claim_at": claimed_dates[-1] if claimed_dates else None,
+        "items": items,
+    }
+
+
 def _tool_get_asset_holder_share(asset_id: int | str, address: str) -> dict[str, Any]:
     """A specific address's share of an ASA's total supply, computed here (not left to the model) — use this instead of manually dividing lookup_asset's total by lookup_account's raw holding, which is exactly how a real fabricated "99.99%" concentration claim happened (2026-07-14): the model got the decimal-shift arithmetic wrong on a 15-digit raw amount.
 
@@ -1761,6 +1885,51 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "nft_collection_distribution_timeline",
+            "description": (
+                "WHEN each item in an NFT collection was first sent out by "
+                "its creator, from real on-chain transfer history -- a "
+                "genuine 'is adoption rising, flat, or stalled since mint' "
+                "trend. Does NOT return a price: confirmed live 2026-08-15 "
+                "that not every collection's distribution is a priced "
+                "atomic-swap sale -- some (e.g. a project accepting "
+                "off-chain payment before sending the NFT) have no ALGO "
+                "price recoverable from the chain at all. Don't guess a "
+                "price from this tool's output; it only tells you when "
+                "items moved and to whom. Each item is flagged resold_since "
+                "if it changed hands again after the creator's initial "
+                "send (a DIFFERENT, potentially price-bearing event this "
+                "tool doesn't itself investigate). Bounded by max_assets "
+                "(default 40, cap 100) for a large collection -- 'sampled' "
+                "vs 'total_created_assets' in the response makes clear "
+                "whether this is a full census or a trend sample; pass "
+                "asset_ids explicitly to check specific items instead. "
+                "Slow (one transaction-history fetch per sampled asset)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "creator_address": {
+                        "type": "string",
+                        "description": "the collection creator's Algorand address",
+                    },
+                    "max_assets": {
+                        "type": "integer",
+                        "description": "how many created assets to sample (oldest-first), default 40, max 100 -- ignored if asset_ids is given",
+                    },
+                    "asset_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "optional: specific ASA ids to check instead of sampling from created_assets",
+                    },
+                },
+                "required": ["creator_address"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_asset_holder_share",
             "description": (
                 "A specific address's share of an ASA's total supply, as a real "
@@ -1940,6 +2109,7 @@ CHAIN_HANDLERS: dict[str, Any] = {
     "lookup_arc69_metadata": _tool_lookup_arc69_metadata,
     "lookup_asset_transactions": _tool_lookup_asset_transactions,
     "get_asset_transaction_volume": _tool_get_asset_transaction_volume,
+    "nft_collection_distribution_timeline": _tool_nft_collection_distribution_timeline,
     "lookup_application": _tool_lookup_application,
     "application_boxes": _tool_application_boxes,
     "get_asset_holder_share": _tool_get_asset_holder_share,
