@@ -124,11 +124,19 @@ def fake_cassandra_session(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 @pytest.fixture(autouse=True)
 def _no_live_mistral_model_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
-    """MistralClient.__init__ fetches live model metadata (context length, reasoning_effort support) from Mistral's own GET /v1/models — never let that touch the network in tests (added 2026-07-15; every real MistralClient() construction anywhere in the suite would otherwise pay a real, uncontrolled network round-trip). Autouse so this protects every test, not just the ones that already know to mock it. Also clears the module-level cache each test so one test's metadata can't leak into another's assertions. A test that wants specific metadata can still monkeypatch _fetch_model_metadata itself afterward to override this."""
+    """Any OpenAI-compatible provider's __init__ fetches live model metadata (context length, reasoning_effort support) from that provider's own GET /v1/models — never let that touch the network in tests (added 2026-07-15; every real construction anywhere in the suite would otherwise pay a real, uncontrolled network round-trip). Autouse so this protects every test, not just the ones that already know to mock it. Also clears the module-level cache each test so one test's metadata can't leak into another's assertions. A test that wants specific metadata can still monkeypatch _fetch_model_metadata itself afterward to override this.
+
+    Patched at llm_openai_compatible.py (2026-08-15 rename: this is where
+    OpenAICompatibleProvider.__init__ actually calls it from) -- also
+    re-patched on mistral_client's backward-compat re-export of the same
+    name, in case any test still patches that path directly.
+    """
+    import app.modules.ai.llm_openai_compatible as loc
     import app.modules.ai.mistral_client as mc
 
+    monkeypatch.setattr(loc, "_fetch_model_metadata", lambda **_kw: {})
     monkeypatch.setattr(mc, "_fetch_model_metadata", lambda **_kw: {})
-    mc._model_metadata_cache.clear()
+    loc._model_metadata_cache.clear()
 
 
 @pytest.fixture(autouse=True)

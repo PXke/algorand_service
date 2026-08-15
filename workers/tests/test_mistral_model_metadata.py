@@ -3,7 +3,10 @@
 conftest.py's autouse _no_live_mistral_model_metadata fixture blanks
 _fetch_model_metadata to {} for every other test in the suite — these tests
 import the REAL function before that patch applies, so they can still
-exercise its actual behavior directly.
+exercise its actual behavior directly. The real implementation lives in
+llm_openai_compatible.py (2026-08-15 rename) -- mc (mistral_client) is kept
+around only for MistralClient itself, since that's still the name every
+production caller and most other tests construct it under.
 """
 
 from __future__ import annotations
@@ -14,12 +17,13 @@ from typing import Never, Self
 import httpx
 import pytest
 
+import app.modules.ai.llm_openai_compatible as loc
 import app.modules.ai.mistral_client as mc
-from app.modules.ai.mistral_client import (
-    MistralClient,
+from app.modules.ai.llm_openai_compatible import (
+    _fetch_model_metadata as _real_fetch_model_metadata,
 )
 from app.modules.ai.mistral_client import (
-    _fetch_model_metadata as _real_fetch_model_metadata,
+    MistralClient,
 )
 
 
@@ -170,7 +174,7 @@ def test_client_seeds_reasoning_unsupported_from_live_metadata(
 ) -> None:
     """Marks reasoning_effort unsupported when live metadata reports reasoning: False."""
     monkeypatch.setattr(
-        mc,
+        loc,
         "_fetch_model_metadata",
         lambda **_kw: {"max_context_length": 262144, "reasoning": False},
     )
@@ -185,7 +189,7 @@ def test_client_keeps_reasoning_supported_when_metadata_says_so(
 ) -> None:
     """Keeps reasoning_effort supported when live metadata reports reasoning: True."""
     monkeypatch.setattr(
-        mc,
+        loc,
         "_fetch_model_metadata",
         lambda **_kw: {"max_context_length": 262144, "reasoning": True},
     )
@@ -201,7 +205,7 @@ def test_client_defaults_to_reasoning_supported_when_metadata_fetch_fails(
     """Defaults to assuming reasoning_effort is supported when metadata is unknown."""
     # conftest's autouse fixture already does this ({}), but assert the
     # actual fallback semantics explicitly rather than relying on it.
-    monkeypatch.setattr(mc, "_fetch_model_metadata", lambda **_kw: {})
+    monkeypatch.setattr(loc, "_fetch_model_metadata", lambda **_kw: {})
 
     client = MistralClient(api_key="test-key", model="mistral-large-latest")
 

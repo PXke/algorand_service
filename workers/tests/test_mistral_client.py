@@ -204,7 +204,7 @@ def test_post_short_circuits_when_credit_already_marked_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Once the circuit breaker is set, _post must fail fast with NO HTTP call at all — this is the actual fix for the 17-hour hourly re-hammering of a dead key (2026-07-23/24): every later call in the outage window skips straight to MistralCreditError instead of repeating the request."""
-    monkeypatch.setattr("app.modules.ai.mistral_client.is_credit_exhausted", lambda: True)
+    monkeypatch.setattr("app.modules.ai.llm_openai_compatible.is_credit_exhausted", lambda _provider: True)
 
     class _ExplodingClient:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -243,19 +243,20 @@ def test_post_marks_exhausted_on_401() -> None:
         def post(self, _url: str, headers: dict | None = None, json: dict | None = None) -> Any:  # noqa: ARG002, ANN401 -- name must match the real callee's keyword arg
             return FakeResponse()
 
+    import app.modules.ai.llm_openai_compatible as compat_module
     import app.modules.ai.mistral_client as mistral_module
 
     original_httpx = httpx.Client
-    original_mark = mistral_module.mark_credit_exhausted
+    original_mark = compat_module.mark_credit_exhausted
     mistral_module.httpx.Client = FakeClient
-    mistral_module.mark_credit_exhausted = lambda: marked.append(True)
+    compat_module.mark_credit_exhausted = lambda _provider: marked.append(True)
     try:
         client = MistralClient(api_key="test-key")
         with pytest.raises(MistralCreditError):
             client.chat_completion([{"role": "user", "content": "hi"}])
     finally:
         mistral_module.httpx.Client = original_httpx
-        mistral_module.mark_credit_exhausted = original_mark
+        compat_module.mark_credit_exhausted = original_mark
 
     assert marked == [True]
 

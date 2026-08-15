@@ -19,14 +19,19 @@ from app.modules.ai.mistral_client import MistralClient
 
 
 def test_mistral_client_is_an_llm_provider() -> None:
-    """MistralClient (the shared implementation behind OpenAICompatibleProvider) satisfies the abstract LLMProvider interface."""
+    """MistralClient satisfies the abstract LLMProvider interface (via OpenAICompatibleProvider)."""
     client = MistralClient(api_key="test-key")
     assert isinstance(client, LLMProvider)
 
 
-def test_open_ai_compatible_provider_is_mistral_client() -> None:
-    """OpenAICompatibleProvider is the name every new provider subclasses -- not a separate reimplementation."""
-    assert OpenAICompatibleProvider is MistralClient
+def test_mistral_client_is_a_mistral_provider() -> None:
+    """MistralClient is MistralProvider (2026-08-15 rename) -- kept as a name every existing bare `MistralClient(...)` call site still resolves to Mistral's own config defaults, same as before the physical move."""
+    assert MistralClient is MistralProvider
+
+
+def test_mistral_provider_is_an_open_ai_compatible_provider() -> None:
+    """MistralProvider is a thin subclass of the shared implementation, not a separate reimplementation."""
+    assert issubclass(MistralProvider, OpenAICompatibleProvider)
 
 
 def test_mistral_provider_defaults_to_mistral_config() -> None:
