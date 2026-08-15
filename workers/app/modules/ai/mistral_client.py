@@ -48,7 +48,7 @@ from app.core.config import (
     MISTRAL_TIMEOUT_SECONDS,
     MISTRAL_TOOL_RESULT_MAX_CHARS,
 )
-from app.modules.ai.llm_provider import LLMProvider
+from app.modules.ai.llm_provider import LLMCreditError, LLMError, LLMProvider
 from app.modules.ai.llm_rate_limit import throttle_llm_call
 from app.modules.ai.mistral_credit_guard import is_credit_exhausted, mark_credit_exhausted
 from app.modules.ai.story_spike import StorySpikedError
@@ -236,24 +236,22 @@ def _for_conversation_history(message: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in message.items() if k != "reasoning_content"}
 
 
-class MistralError(Exception):
-    """Raised on a Mistral API failure."""
-
-    pass
+# LLMError/LLMCreditError (llm_provider.py) are the canonical exception names
+# for the whole multi-provider abstraction -- llm_anthropic_provider.py and
+# llm_gemini_provider.py already raise them directly. MistralError/
+# MistralCreditError are kept as literal aliases (not separate classes) so
+# every existing `except MistralError`/`isinstance(exc, MistralCreditError)`
+# call site (30+, see the mistral_* -> llm_* rename task) keeps working
+# unchanged, while also fixing what was, until this alias, a real gap: those
+# call sites could not catch a failure raised by the Anthropic/Gemini
+# providers, only by this OpenAI-compatible one, because the two hierarchies
+# were disconnected Exception subclasses with no relationship to each other.
+MistralError = LLMError
+MistralCreditError = LLMCreditError
 
 
 class MistralRateLimitError(MistralError):
     """Raised when the API keeps returning 429 after the retry budget."""
-
-
-class MistralCreditError(MistralError):
-    """Raised on 401/402 — Mistral rejects the request outright, no retry.
-
-    Seen in practice (2026-07-10) as 401 "Unauthorized" once monthly prepaid
-    credit ran out; some providers disable the key itself rather than
-    returning a billing-specific code, so this also covers a genuinely bad/
-    revoked key — either way, waiting and retrying the same request won't help.
-    """
 
 
 class PeakHoursBlockedError(MistralError):
