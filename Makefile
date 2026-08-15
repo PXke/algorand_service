@@ -8,7 +8,7 @@ export PLATFORM_TAG
 PLATFORM_DEV ?= 1
 export PLATFORM_DEV
 
-.PHONY: help lint lint-fix docker-build docker-up docker-down docker-test docker-app docker-localnet docker-app-test docker-smoke docker-reset docker-clean-cache dev-ui dev-ui-localnet
+.PHONY: help lint lint-fix docker-build docker-up docker-down docker-test docker-app docker-localnet docker-app-test docker-smoke docker-stack-smoke docker-reset docker-clean-cache dev-ui dev-ui-localnet
 
 help:
 	@echo "Quality:"
@@ -23,6 +23,7 @@ help:
 	@echo "  make docker-localnet  deps + app + Algorand localnet (algod)"
 	@echo "  make docker-app-test  deps + app + pytest (no localnet)"
 	@echo "  make docker-smoke     P1: trigger publish + check news feed (needs docker-app)"
+	@echo "  make docker-stack-smoke  API health + feed read + celery ping (needs docker-app)"
 	@echo "  make docker-reset     down -v, prune images/volumes"
 	@echo ""
 	@echo "Full-stack local dev:"
@@ -70,6 +71,11 @@ docker-app-test:
 
 docker-smoke:
 	./docker/bin/smoke-newspaper.sh
+
+docker-stack-smoke:
+	docker compose build migrate
+	docker compose --profile app up -d --wait backend worker
+	./docker/bin/smoke-stack.sh
 
 dev-ui:
 	./docker/bin/dev-ui.sh

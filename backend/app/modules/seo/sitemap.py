@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 # Google News only wants articles from roughly the last two days.
 _NEWS_WINDOW_SECONDS = 48 * 3600
+# Google News sitemap hard cap (spec, not a soft target) — this site's daily
+# publish cap keeps a 48h window far under it in practice, but the slice
+# below is cheap insurance against ever emitting a spec-invalid file.
+_NEWS_SITEMAP_MAX_URLS = 1000
 # Google's hard cap is 50k URLs / 50MB per file; split well before that.
 MAX_URLS_PER_SITEMAP = 5000
 
@@ -32,7 +36,6 @@ _tombstone_cache: dict[str, object] = {"mono": 0.0, "ids": set()}
 class _UrlEntry:
     loc: str
     lastmod: str | None = None
-    changefreq: str | None = None
     alternates: list[tuple[str, str]] = field(default_factory=list)
 
 
@@ -103,11 +106,12 @@ def _hreflang_link(hreflang: str, href: str) -> str:
 
 
 def _url_xml(entry: _UrlEntry) -> str:
+    # No <changefreq>/<priority>: Google and Bing have both stated for years
+    # that they ignore these entirely, so emitting them is pure payload with
+    # no crawl-behavior effect.
     parts = [f"<loc>{escape(entry.loc)}</loc>"]
     if entry.lastmod:
         parts.append(f"<lastmod>{entry.lastmod}</lastmod>")
-    if entry.changefreq:
-        parts.append(f"<changefreq>{entry.changefreq}</changefreq>")
     for hreflang, href in entry.alternates:
         parts.append(_hreflang_link(hreflang, href))
     return "<url>" + "".join(parts) + "</url>"
@@ -173,7 +177,6 @@ def _static_entries(items: list[ArticleFeedItem]) -> list[_UrlEntry]:
             _UrlEntry(
                 loc=absolute(f"/topic/{tag}"),
                 lastmod=_iso_date(topic_newest) if topic_newest else None,
-                changefreq="daily",
             )
         )
     glossary_entries = []
@@ -181,21 +184,20 @@ def _static_entries(items: list[ArticleFeedItem]) -> list[_UrlEntry]:
         from app.modules.glossary.store import list_terms
 
         glossary_entries = [
-            _UrlEntry(loc=absolute(f"/glossary/{t.slug}"), changefreq="monthly")
-            for t in list_terms(published_only=True)
+            _UrlEntry(loc=absolute(f"/glossary/{t.slug}")) for t in list_terms(published_only=True)
         ]
     except Exception:
         logger.debug("glossary sitemap entries skipped", exc_info=True)
 
     return [
-        _UrlEntry(loc=site_url() + "/", lastmod=lastmod, changefreq="hourly"),
-        _UrlEntry(loc=absolute("/news"), lastmod=lastmod, changefreq="hourly"),
-        _UrlEntry(loc=absolute("/hot"), lastmod=lastmod, changefreq="hourly"),
-        _UrlEntry(loc=absolute("/about"), changefreq="monthly"),
-        _UrlEntry(loc=absolute("/contact"), changefreq="monthly"),
-        _UrlEntry(loc=absolute("/topics"), lastmod=lastmod, changefreq="daily"),
+        _UrlEntry(loc=site_url() + "/", lastmod=lastmod),
+        _UrlEntry(loc=absolute("/news"), lastmod=lastmod),
+        _UrlEntry(loc=absolute("/hot"), lastmod=lastmod),
+        _UrlEntry(loc=absolute("/about")),
+        _UrlEntry(loc=absolute("/contact")),
+        _UrlEntry(loc=absolute("/topics"), lastmod=lastmod),
         *topic_entries,
-        _UrlEntry(loc=absolute("/glossary"), changefreq="weekly"),
+        _UrlEntry(loc=absolute("/glossary")),
         *glossary_entries,
     ]
 
@@ -266,6 +268,10 @@ def news_sitemap_xml(items: list[ArticleFeedItem]) -> str:
     cutoff = int(time.time()) - _NEWS_WINDOW_SECONDS
     tombstones = _tombstoned_ids()
     recent = [i for i in items if i.published_at_epoch >= cutoff and i.article_id not in tombstones]
+    # items is already newest-first (keyset-paginated feed query), so this
+    # keeps the most recent entries if the 48h window ever somehow exceeds
+    # the cap rather than truncating arbitrarily.
+    recent = recent[:_NEWS_SITEMAP_MAX_URLS]
     entries = []
     for item in recent:
         pub = datetime.fromtimestamp(item.published_at_epoch, tz=UTC).isoformat()

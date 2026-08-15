@@ -102,6 +102,12 @@ def _compose_edit_fields(
                 linked_id,
                 fields.unsourced_hold_reason,
             )
+        if fields.broken_link_hold_reason:
+            logger.warning(
+                "article edit for %s has an unverified broken-link claim: %s",
+                linked_id,
+                fields.broken_link_hold_reason,
+            )
         return fields, None
     except ComposeBusyError:
         raise
@@ -237,6 +243,7 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
         ping_article(
             linked_id,
             translation_langs=translation_lang_codes(existing.translations),
+            slug=existing.slug,
         )
     except Exception:
         pass

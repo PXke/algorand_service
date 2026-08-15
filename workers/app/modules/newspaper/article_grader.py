@@ -535,9 +535,13 @@ def grade_article_draft(
 ) -> dict:
     """Grade a draft: schema heuristic (grade/issues) plus informational signals.
 
-    The headline ``grade`` is schema/structure only. Qualitative journalism
-    (narrative synthesis, Algorand technical depth) is scored separately via
-    ``grade_article_quality_llm`` during compose revision.
+    The ``grade`` returned here is schema/structure+length only — qualitative
+    journalism (narrative synthesis, technical depth, critical distance,
+    repetition) is scored separately via ``grade_article_quality_llm``, since
+    that needs an LLM call this function deliberately doesn't make. Callers
+    that have both should run ``fuse_quality_into_grade(review, quality)``
+    afterward to fold the rubric into the final grade with real weight —
+    every current call site does.
     """
     schema = grade_article_schema(
         title=title, summary=summary, body=body, is_special_edition=is_special_edition
@@ -594,3 +598,48 @@ def grade_article_draft(
         "closest_similarity": round(closest_sim, 2),
         "closest_title": closest_title,
     }
+
+
+_QUALITY_DIMENSIONS = ("narrative_synthesis", "technical_depth", "critical_distance", "repetition")
+# The editorial judgment a human actually cares about, weighted 3x the
+# mechanical checks COMBINED (0.75 vs 0.25) — structure/length are cheap
+# sanity checks (do headers/tables/links exist, is the length in range),
+# not a substitute for whether the piece is actually good journalism.
+# Structure keeps its old edge over length (both scaled down from the
+# original 0.55/0.45 split, same relative emphasis).
+_QUALITY_WEIGHT = 0.75
+_STRUCTURE_WEIGHT = 0.15
+_LENGTH_WEIGHT = 0.10
+
+
+def _quality_score_0_1(quality: dict) -> float | None:
+    """Average the LLM rubric's four 1-5 dimensions into a 0..1 score, or None if the rubric produced no usable scores at all (disabled, empty body, or every dimension came back unparseable)."""
+    scored = [v for k in _QUALITY_DIMENSIONS if isinstance(v := quality.get(k), int | float)]
+    if not scored:
+        return None
+    return sum((v - 1) / 4 for v in scored) / len(scored)
+
+
+def fuse_quality_into_grade(review: dict, quality: dict) -> dict:
+    """Recompute review["grade"] to weigh the LLM rubric's editorial judgment, not just schema/structure+length.
+
+    Root-caused 2026-08-06: grade_article_draft's "grade" was purely
+    structure_score*0.55 + length_score*0.45 — a real article's rubric
+    scores climbed markedly across three revision passes (technical_depth
+    3->5, repetition 3->5) while structure/length stayed pinned at the same
+    values the whole time, so the headline "grade" reported the exact same
+    7.3 in every round despite genuinely improving journalism. Mutates and
+    returns `review` in place; leaves review["grade"] untouched (schema-only)
+    if the rubric produced no usable scores, so a disabled/failed rubric
+    degrades gracefully instead of zeroing out the grade.
+    """
+    quality_score = _quality_score_0_1(quality)
+    subscores = review.get("subscores") or {}
+    structure, length = subscores.get("structure"), subscores.get("length")
+    if quality_score is None or not isinstance(structure, int | float) or not isinstance(length, int | float):
+        return review
+    fused = _QUALITY_WEIGHT * quality_score + _STRUCTURE_WEIGHT * structure + _LENGTH_WEIGHT * length
+    review["grade"] = round(10.0 * fused, 1)
+    subscores["quality"] = round(quality_score, 2)
+    review["subscores"] = subscores
+    return review

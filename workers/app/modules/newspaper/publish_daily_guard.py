@@ -128,3 +128,48 @@ class PublishCapExceededError(Exception):
     """Raised when a publish-slot reservation exceeds the daily cap."""
 
     pass
+
+
+# --------------------------------------------------------------------------- #
+# Daily lane tracking (Lane 1 human / Lane 2 scale / Lane 3 discovery) — one
+# of the standard-tier daily slots per lane, mirroring the counter keys above.
+# --------------------------------------------------------------------------- #
+def _lanes_key(day: str) -> str:
+    return f"news:publish_lanes_used:{day}"
+
+
+def lanes_used_today() -> set[str]:
+    """Which of today's lanes have already consumed their slot.
+
+    Lanes are "human", "scale", "discovery" — drain_standard_publish_queue
+    checks this before picking a lane for the next run.
+
+    Fails open (empty set, i.e. "no lane used yet") on a Redis blip — the
+    standard-publish drain must never stop composing entirely just because
+    lane bookkeeping is momentarily unreachable; worst case a lane's slot
+    gets picked again by the plain-priority fallback for this one run.
+    """
+    try:
+        client = _client()
+        raw = client.smembers(_lanes_key(_day_key()))
+        return set(raw)
+    except Exception:
+        logger.warning("lanes_used_today: Redis unavailable, treating as no lanes used", exc_info=True)
+        return set()
+
+
+def record_lane_used(lane: str) -> None:
+    """Mark one lane as consumed for today.
+
+    Same TTL as the publish counters (expires well past day-end, cheap to
+    let it linger). Best-effort: a Redis blip here must not fail an
+    otherwise-successful compose+publish.
+    """
+    try:
+        day = _day_key()
+        key = _lanes_key(day)
+        client = _client()
+        client.sadd(key, lane)
+        client.expire(key, 90_000)
+    except Exception:
+        logger.warning("record_lane_used(%s): Redis unavailable, lane not recorded", lane, exc_info=True)

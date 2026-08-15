@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 _STOPWORDS = {
     "the",
@@ -111,10 +114,28 @@ def upsert_crawled_page(
 ) -> CrawledPageRecord:
     """Insert or update a crawled page's cached record, keyed by its url-derived id."""
     from app.core.cassandra import get_cassandra_session
+    from app.core.config import CRAWLED_PAGE_BODY_MAX_CHARS
     from app.core.statements import CrawledPageStmts
 
     now = crawled_at or datetime.now(tz=UTC)
     domain = _normalize_domain(url)
+    if len(body) > CRAWLED_PAGE_BODY_MAX_CHARS:
+        # A real page's readable text never gets remotely this large — almost
+        # always non-text content misread as a page (root-caused 2026-08-06: a
+        # 23MB body took down the whole task as an uncaught Cassandra
+        # InvalidRequest, 16MB over its native-protocol message limit).
+        # Truncate rather than skip storage entirely: a genuinely huge
+        # legitimate page still gets a usable (if partial) cached copy, and a
+        # truncated non-text blob is harmless noise, not a crash.
+        logger.warning(
+            "crawled page body for %s is %d chars (cap %d) — truncating; "
+            "likely non-text content (binary file, oversized asset) rather "
+            "than a real page",
+            url,
+            len(body),
+            CRAWLED_PAGE_BODY_MAX_CHARS,
+        )
+        body = body[:CRAWLED_PAGE_BODY_MAX_CHARS]
     description = _short_description(body)
     keywords = build_keywords(title=title, body=body, domain=domain)
     page_uuid = page_id_for_url(url)

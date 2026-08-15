@@ -47,7 +47,7 @@
     <div class="media">
       <img
         src={media}
-        alt=""
+        alt={article.title ?? ''}
         width="680"
         height="425"
         loading="eager"

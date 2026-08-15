@@ -16,7 +16,28 @@ from app.modules.scraper.crawler_types import CrawlerType
 logger = logging.getLogger(__name__)
 
 # SPA root containers in the RAW html (extracted text never contains tags).
-_SPA_ROOT_MARKERS = ('id="root"', "id='root'", 'id="app"', "id='app'", "__next", "__nuxt", "ng-app")
+# The framework-named ones (__next/__nuxt/ng-app, id="root"/"app") only catch
+# a page built with that exact framework's default scaffold -- a hand-rolled
+# or vanilla-JS SPA (root-caused 2026-08-10: pixelcity.aetheralabs.es uses
+# <div class="app-shell">, matching none of these) needs its own root wrapper
+# to be recognized too. This list is evidence-based, not exhaustive -- extend
+# it as new live specimens turn up rather than trying to enumerate every
+# possible convention up front.
+_SPA_ROOT_MARKERS = (
+    'id="root"',
+    "id='root'",
+    'id="app"',
+    "id='app'",
+    'id="app-root"',
+    "id='app-root'",
+    'class="app-shell"',
+    "class='app-shell'",
+    'class="app-root"',
+    "class='app-root'",
+    "__next",
+    "__nuxt",
+    "ng-app",
+)
 _MIN_HTTP_TEXT = 300
 # HTTP statuses where a browser engine might still succeed: anti-bot gates and
 # rate limits often serve a JS challenge or block the plain client by UA. A hard
@@ -26,6 +47,30 @@ _BROWSER_RETRY_STATUSES = frozenset({403, 429, 503})
 # With an SPA root present, this much extracted text still means most of the
 # page is client-rendered — fall back to the browser engine.
 _SPA_TEXT_SUFFICIENT = 5000
+# Collapsed accordion/FAQ markup in the raw pre-render HTML — present in the
+# server-rendered HTML even before any click, since JS only toggles it.
+# Signals content a plain-HTTP fetch cannot see regardless of overall text
+# length (a page full of question TITLES with no answers isn't "thin").
+_COLLAPSED_ACCORDION_MARKERS = ('aria-expanded="false"', "aria-expanded='false'", "<details")
+# A visible "still loading"/"empty" placeholder in the EXTRACTED TEXT itself
+# (not raw markup) — the framework-agnostic backstop for exactly the shape of
+# bug the root-marker list above can only ever partially catch: root-caused
+# live 2026-08-10, pixelcity.aetheralabs.es's gallery page's raw pre-JS HTML
+# read comfortably over _MIN_HTTP_TEXT (a genuine "SIN OBRAS MINTEADAS AUN" /
+# "no works minted yet" placeholder, ~680 chars) AND had no recognized SPA
+# root marker, so it passed both checks above as if it were real, settled
+# content. This targets the SYMPTOM (a visible loading/empty placeholder)
+# rather than any one framework's markup convention, so it generalizes past
+# whatever root-container naming a given site happens to use. Evidence-based
+# and short by design, same rationale as _SPA_ROOT_MARKERS above — the
+# Spanish forms are here because two unrelated Spanish-speaker-run projects
+# hit this exact bug shape in one week (LumiRogue, Pixel City).
+_LOADING_PLACEHOLDER_MARKERS = (
+    "cargando...",
+    "consultando...",
+    "loading...",
+    "please enable javascript",
+)
 
 
 def _browser_might_help(exc: Exception) -> bool:
@@ -42,7 +87,7 @@ def _browser_might_help(exc: Exception) -> bool:
 
 
 def needs_spa_fallback(text: str, raw_html: str = "") -> bool:
-    """Whether HTTP-fetched text is too thin (or an SPA shell) to trust, and a Playwright render should be tried instead. Shared by the crawler pipeline and any other caller (e.g. the writer's fetch_url tool) that fetches arbitrary pages over plain HTTP first."""
+    """Whether HTTP-fetched text is too thin (or an SPA shell, has collapsed accordion/FAQ content, or visibly shows a loading/empty placeholder) to trust, and a Playwright render should be tried instead. Shared by the crawler pipeline and any other caller (e.g. the writer's fetch_url tool) that fetches arbitrary pages over plain HTTP first. The Playwright render alone isn't enough for the accordion case — see browser_scrape.py's _expand_collapsed_content, which clicks/opens the collapsed elements before extracting text."""
     from app.core.config import SPA_FALLBACK_ENABLED
 
     if not SPA_FALLBACK_ENABLED:
@@ -51,7 +96,12 @@ def needs_spa_fallback(text: str, raw_html: str = "") -> bool:
         return True
     raw = raw_html.lower()
     has_spa_root = any(marker in raw for marker in _SPA_ROOT_MARKERS)
-    return has_spa_root and len(text) < _SPA_TEXT_SUFFICIENT
+    if has_spa_root and len(text) < _SPA_TEXT_SUFFICIENT:
+        return True
+    if any(marker in raw for marker in _COLLAPSED_ACCORDION_MARKERS):
+        return True
+    low_text = text.lower()
+    return any(marker in low_text for marker in _LOADING_PLACEHOLDER_MARKERS)
 
 
 class WebCrawlerDriver:
@@ -96,7 +146,9 @@ class WebCrawlerDriver:
             mark_url_done(queue_id, status=status)
         return {"status": "skipped", "reason": reason, "url": url}
 
-    def _pre_fetch_gate(self, url: str, domain: str, *, queue_id: str) -> dict[str, object] | None:
+    def _pre_fetch_gate(
+        self, url: str, domain: str, *, queue_id: str, source: str = "web"
+    ) -> dict[str, object] | None:
         """Sequential pre-fetch checks (recrawl cooldowns, page budget, robots.txt). Returns a skip result if any blocks the fetch, else None to proceed."""
         from app.modules.crawler.domain_tracker import (
             domain_crawl_budget_exhausted,
@@ -106,8 +158,21 @@ class WebCrawlerDriver:
         from app.modules.crawler.url_queue import recently_crawled
 
         # Per-URL recrawl cooldown: don't fetch the same link twice within the
-        # window even if it slipped back into the queue.
-        if recently_crawled(url):
+        # window even if it slipped back into the queue. EXCEPT the one-shot
+        # seed an admin's domain approval creates (source="frontier_approval",
+        # see admin/api/routes.py's _seed_domain_crawl) — that is a rare,
+        # deliberate "crawl this now" action, not routine re-discovery, and
+        # the 30-day cooldown (CRAWL_URL_RECRAWL_COOLDOWN_SECONDS) can easily
+        # already be running from a completely unrelated incidental fetch
+        # (e.g. a writer's fetch_url link-following into this URL from some
+        # other article's research). Root-caused 2026-08-06: an admin-approved
+        # domain's discovery seed was silently skipped this way, with no
+        # visible error anywhere, the day after an unrelated writer session
+        # happened to fetch the same URL. Domain-level cooldown/budget/robots
+        # below are NOT bypassed — those are politeness/volume caps, not a
+        # relevance judgment, same reasoning as the content-quality gate a few
+        # lines below in scrape_from_queue_item.
+        if source != "frontier_approval" and recently_crawled(url):
             return self._skip(queue_id, url, status="skipped", reason="url_recrawl_cooldown")
         if not should_recrawl_domain(domain):
             return self._skip(queue_id, url, status="skipped", reason="domain_recrawl_cooldown")
@@ -158,7 +223,7 @@ class WebCrawlerDriver:
         source = str(item.get("source", "web"))
         domain = domain_from_url(url)
 
-        gate_skip = self._pre_fetch_gate(url, domain, queue_id=queue_id)
+        gate_skip = self._pre_fetch_gate(url, domain, queue_id=queue_id, source=source)
         if gate_skip is not None:
             return gate_skip
 

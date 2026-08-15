@@ -81,10 +81,17 @@
         })
         if (ac.signal.aborted) return
         const items = feed.items
-        const idx = items.findIndex((a) => a.article_id === id)
+        // `id` is the route param, which is the article's SLUG, not its UUID
+        // -- fetchArticle() resolves either, but `next.article_id` is always
+        // the real UUID the feed items are keyed by. Comparing feed items
+        // against the raw slug never matched, so this article could appear
+        // in its own "related stories" and prev/next navigation was always
+        // null (found 2026-08-09, reported live: self-listed as related).
+        const selfId = next.article_id
+        const idx = items.findIndex((a) => a.article_id === selfId)
         newer = idx > 0 ? items[idx - 1] : null
         older = idx >= 0 && idx < items.length - 1 ? items[idx + 1] : null
-        related = items.filter((a) => a.article_id !== id).slice(0, 4)
+        related = items.filter((a) => a.article_id !== selfId).slice(0, 4)
       } catch (e) {
         if (ac.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return
         article = null

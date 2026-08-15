@@ -142,6 +142,45 @@ def test_explorer_link_to_missing_entity_is_delinked() -> None:
     assert "the token" in out["body"]
 
 
+def test_legacy_algoexplorer_link_to_verified_asset_is_rewritten_to_allo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the Kaafila incident (2026-08-10): a real, once-valid algoexplorer.io citation (AlgoExplorer has since gone dark) survives link_gate's traced-url exemption, so this gate must catch it — a verified entity behind a legacy-domain link gets its link REWRITTEN to the live explorer, not just delinked, so the citation still works for readers."""
+    monkeypatch.setattr(chain_entity_gate, "_lookup_status", lambda _kind, _value: "mainnet")
+    payload = {"body": "See [it on-chain](https://algoexplorer.io/asset/239444645) for details."}
+    out = link_and_verify_chain_entities(payload, [])
+    assert "algoexplorer.io" not in out["body"]
+    assert "[it on-chain](https://allo.info/asset/239444645)" in out["body"]
+
+
+def test_legacy_algoexplorer_address_link_is_rewritten_to_allo_account_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The address path (algoexplorer.io/address/... -> allo.info/account/...) rewrites correctly too, matching the exact Kaafila reserve-account citation shape."""
+    monkeypatch.setattr(chain_entity_gate, "_lookup_status", lambda _kind, _value: "mainnet")
+    payload = {
+        "body": (
+            f"The [reserve account](https://algoexplorer.io/address/{_REAL_ADDR}) still "
+            "holds the full allocation."
+        )
+    }
+    out = link_and_verify_chain_entities(payload, [])
+    assert f"[reserve account](https://allo.info/account/{_REAL_ADDR})" in out["body"]
+
+
+def test_legacy_algoexplorer_link_to_missing_entity_is_delinked_not_rewritten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy-domain link to an entity that doesn't exist at all is delinked (existing dead-explorer rule), never rewritten to a working domain for a nonexistent target."""
+    monkeypatch.setattr(chain_entity_gate, "_lookup_status", lambda _kind, _value: "missing")
+    payload = {"body": "See [the token](https://algoexplorer.io/asset/999999999999) for details."}
+    out = link_and_verify_chain_entities(payload, [])
+    assert "algoexplorer.io" not in out["body"]
+    assert "allo.info" not in out["body"]
+    assert "[the token](" not in out["body"]
+    assert "the token" in out["body"]
+
+
 def test_algoglyph_incident_regression(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the real incident: a genuine asset + genuine creator address gets linked (so a reader — or this gate — can verify the real 25.08% share), while an address that never appeared in research stays unverified."""
     monkeypatch.setattr(chain_entity_gate, "_lookup_status", lambda _kind, _value: "mainnet")

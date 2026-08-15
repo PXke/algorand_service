@@ -3,7 +3,10 @@
 #
 # PyPI wheels enable PyO3 abi3, which free-threaded interpreters reject
 # (SystemError: invalid PyModuleDef). HuggingFace's recipe is:
-#   maturin build --no-default-features --features ext-module
+#   maturin build --no-default-features --features ext-module,parity-aware-bpe
+# (ext-module drops abi3; parity-aware-bpe must be re-added explicitly since
+# it's part of the crate's default feature set too -- see the maturin build
+# invocation below for why dropping it silently breaks AutoTokenizer.)
 #
 # transformers<=5.14 still pins tokenizers<=0.23.0, so we stamp the wheel
 # as 0.23.0 while building from tokenizers main (free-threaded support).
@@ -63,13 +66,27 @@ for rel in ("pyproject.toml", "Cargo.toml"):
     print(f"stamped {rel} -> 0.23.0")
 PY
 
+# Default features are "ext-module,abi3,parity-aware-bpe" (see
+# bindings/python/Cargo.toml). We drop abi3 (breaks free-threaded builds)
+# but must keep parity-aware-bpe: it gates ParityBpeTrainer's pyo3 export
+# (#[cfg(feature = "parity-aware-bpe")] in trainers.rs), while the
+# generated Python stub (trainers/__init__.py) imports it unconditionally.
+# Building with just ext-module produces a wheel that installs fine but
+# throws AttributeError: module 'trainers' has no attribute
+# 'ParityBpeTrainer' the moment transformers imports AutoTokenizer --
+# silently breaking every local-translation task (found 2026-08-07, all
+# 4 recomposed articles stuck with translations=[]).
 maturin build --release --interpreter "$PYTHON" \
-  --no-default-features --features ext-module \
+  --no-default-features --features ext-module,parity-aware-bpe \
   -o "${WORKDIR}/wheels"
 
 WHEEL="$(ls "${WORKDIR}/wheels"/tokenizers-*.whl | head -1)"
 "$PIP" install --force-reinstall --no-deps "$WHEEL"
 "$PIP" install -U --upgrade-strategy only-if-needed "transformers>=4.48.0"
 
-PYTHON_GIL=0 "$PYTHON" -c 'import tokenizers, transformers, torch; print("ok", tokenizers.__version__, transformers.__version__, torch.__version__)'
+# Import AutoTokenizer specifically, not just the top-level packages --
+# transformers lazy-loads submodules, so `import transformers` alone does
+# not exercise the tokenization_utils_tokenizers -> tokenizers.trainers
+# chain where the parity-aware-bpe gap above actually surfaces.
+PYTHON_GIL=0 "$PYTHON" -c 'import tokenizers, transformers, torch; from transformers import AutoTokenizer, AutoModelForCausalLM; print("ok", tokenizers.__version__, transformers.__version__, torch.__version__)'
 echo ">>> free-threaded tokenizers + transformers ready in $VENV" >&2

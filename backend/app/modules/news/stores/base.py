@@ -29,6 +29,11 @@ class StoredArticle:
     # a recompose re-publish (which re-stamps published_at). None = never
     # recomposed.
     first_published_at_epoch: int | None = None
+    # Admin-only unpublish: content stays intact, but NewsService.get_article
+    # must treat this as not-found for every public caller. Never true for a
+    # row read via the feed projection (draft articles are removed from
+    # articles_feed), only via a direct articles_by_id lookup by id/slug.
+    draft: bool = False
 
 
 class ArticleStore(Protocol):

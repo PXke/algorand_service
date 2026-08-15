@@ -28,7 +28,9 @@ from app.modules.placements.api.routes import register_placement_routes
 from app.modules.registry.api.routes import register_registry_routes
 from app.modules.search.api.routes import register_search_routes
 from app.modules.seo.api.routes import register_seo_routes
+from app.modules.sharing.api.routes import register_sharing_routes
 from app.modules.suggestions.api.routes import register_suggestions_routes
+
 
 class CorsMiddleware:
     """CORS handling equivalent to previous Robyn hooks."""
@@ -130,6 +132,7 @@ def create_app() -> falcon.App:
     register_search_routes(router)
     register_contact_routes(router)
     register_glossary_routes(router)
+    register_sharing_routes(router)
     if settings.suggestions_enabled:
         register_suggestions_routes(router)
     if settings.x402_enabled:

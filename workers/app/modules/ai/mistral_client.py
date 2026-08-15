@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
+from collections.abc import Callable
 from typing import Any, ClassVar
 
 import httpx
@@ -18,6 +20,7 @@ from app.core.config import (
     DEEPSEEK_MODEL_RUBRIC,
     DEEPSEEK_MODEL_TRANSLATE,
     DEEPSEEK_MODEL_WRITER,
+    LLM_MAX_TOOL_ROUNDS,
     LLM_PROVIDER_DIGEST,
     LLM_PROVIDER_DIGEST_CANARY_PCT,
     LLM_PROVIDER_RESEARCH,
@@ -36,7 +39,6 @@ from app.core.config import (
     MISTRAL_CONTEXT_TOKENS,
     MISTRAL_MAX_RETRIES,
     MISTRAL_MAX_TOKENS,
-    MISTRAL_MAX_TOOL_ROUNDS,
     MISTRAL_MODEL,
     MISTRAL_MODEL_DIGEST,
     MISTRAL_MODEL_RESEARCH,
@@ -46,8 +48,9 @@ from app.core.config import (
     MISTRAL_TIMEOUT_SECONDS,
     MISTRAL_TOOL_RESULT_MAX_CHARS,
 )
+from app.modules.ai.llm_provider import LLMProvider
+from app.modules.ai.llm_rate_limit import throttle_llm_call
 from app.modules.ai.mistral_credit_guard import is_credit_exhausted, mark_credit_exhausted
-from app.modules.ai.mistral_rate_limit import throttle_mistral
 from app.modules.ai.story_spike import StorySpikedError
 from app.modules.ai.token_budget import fit_messages_to_budget, serialize_tool_result
 
@@ -179,6 +182,42 @@ def _message_text(message: dict[str, Any]) -> str:
     return str(content or "")
 
 
+def _ensure_tool_call_ids(tool_calls: list[dict[str, Any]]) -> None:
+    """Backfill a synthetic `id` and a missing `type` (mutated in place) on any tool_call that lacks them.
+
+    Root-caused 2026-08-13: DeepSeek's tool_calls responses, as returned to
+    this client, come back with NO `id` field at all on every single call —
+    confirmed live against a stored compose_sessions transcript (model
+    deepseek-v4-flash, every assistant tool_call and its paired tool-result's
+    tool_call_id empty). That's harmless within a single provider's own
+    multi-round loop (each round only needs internal consistency, which
+    `_run_tool_call`'s `call.get("id", "")` fallback preserves). It breaks
+    the moment this history is later echoed into a call served by Mistral's
+    stricter API (e.g. the revision pass, `_merged_convo_with_prior_debug`
+    prepending an earlier DeepSeek-run stage's transcript into a Mistral
+    request): Mistral rejects it outright with "messages[N]: missing field
+    `id`" — every one of 5 real LumiRogue recompose attempts hit this and
+    silently lost the revision-tool-call pass. Assigning an id here, at the
+    moment a tool_calls list is first received, keeps it consistent across
+    every later use of the SAME list object (the echoed assistant message
+    via `_for_conversation_history` and the tool-result's tool_call_id both
+    read from these same dicts) regardless of which provider serves a later
+    round.
+
+    `type` backfilled for the identical reason, confirmed live 2026-08-14:
+    OpenAI's stricter API rejects a replayed tool_calls entry missing `type`
+    with "Missing required parameter: 'messages[N].tool_calls[0].type'" --
+    same failure shape as the `id` gap (a field some upstream provider's raw
+    response omits, that a later-stage call served by a stricter provider
+    then chokes on), so it gets the same fix at the same defensive point.
+    """
+    for call in tool_calls:
+        if not call.get("id"):
+            call["id"] = f"call_{uuid.uuid4().hex[:24]}"
+        if not call.get("type"):
+            call["type"] = "function"
+
+
 def _for_conversation_history(message: dict[str, Any]) -> dict[str, Any]:
     """A copy of an assistant message safe to append to `convo` for resending in later rounds — strips `reasoning_content` (DeepSeek's separate thinking-trace field, sibling to `content`).
 
@@ -257,8 +296,17 @@ def _fetch_model_metadata(
     return {}  # not cached — a transient failure should be retried by the next instance
 
 
-class MistralClient:
-    """Thin connector for Mistral Chat Completions (RFC 9110 HTTP JSON)."""
+class MistralClient(LLMProvider):
+    """Thin connector for Mistral Chat Completions (RFC 9110 HTTP JSON).
+
+    Also serves DeepSeek today (both speak the same OpenAI-compatible wire
+    format -- see `provider`) and, as of 2026-08-14, is the shared
+    implementation behind every OpenAI-compatible provider in
+    llm_openai_compatible.py (OpenAICompatibleProvider = this class; Mistral/
+    DeepSeek/OpenAI/Kimi/GLM are thin subclasses supplying their own
+    api_key/api_base/model defaults) -- kept here, not yet physically moved,
+    pending the mistral_* -> llm_* rename.
+    """
 
     def __init__(
         self,
@@ -293,6 +341,11 @@ class MistralClient:
         # couldn't reach, and stays off for every later call on this instance so
         # a multi-round session doesn't re-pay for the same rejection every round.
         self._reasoning_effort_unsupported = not self._metadata.get("reasoning", True)
+        # One instance == one compose session's worth of calls on one role
+        # (see usage_totals' docstring above), so a per-instance key is
+        # exactly the right granularity to pin every round's growing,
+        # shared-prefix conversation to the same cache entry.
+        self._prompt_cache_key = uuid.uuid4().hex
 
     def _reasoning_payload_extra(self) -> dict[str, Any]:
         """Extra payload fields for deep reasoning beyond the flat reasoning_effort field both providers share. DeepSeek's actual v4 API additionally wants an explicit thinking block and stream:false alongside reasoning_effort=high (owner-supplied 2026-08-05); Mistral needs nothing more here."""
@@ -320,6 +373,18 @@ class MistralClient:
         if self._provider == "deepseek":
             return max(base, DEEPSEEK_MAX_TOKENS)
         return base
+
+    def _max_tokens_field_name(self) -> str:
+        """Which request field carries the output-token cap. "max_tokens" for every provider this class has served historically (Mistral, DeepSeek) -- confirmed live 2026-08-14 that OpenAI's GPT-5.6 family rejects that field outright ("Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead", 400 unsupported_parameter), so OpenAIProvider overrides this to "max_completion_tokens" instead of hardcoding a payload key here."""
+        return "max_tokens"
+
+    def _supports_temperature(self) -> bool:
+        """Whether this provider's model accepts an explicit `temperature` value. True for every provider this class has served historically -- confirmed live 2026-08-14 that OpenAI's GPT-5.6 family rejects anything but its own default ("Unsupported value: 'temperature' does not support 0.3 with this model. Only the default (1) value is supported.", 400 unsupported_value), so OpenAIProvider overrides this to False and the field is omitted entirely (letting the API fall back to its own default, which IS accepted)."""
+        return True
+
+    def _supports_prompt_cache_key(self) -> bool:
+        """Whether to send `prompt_cache_key` on every request. Mistral's own API documents this as the opt-in that pins a growing, shared-prefix conversation to the same server-side cache entry (90% off cached input) -- added 2026-08-14 after finding the agentic writer/research loop was paying full price on every round's already-seen context. Defaults False: DeepSeek, OpenAI, and Kimi already cache automatically with no request-side flag (confirmed 2026-08-14), and sending an unrecognized extra field to a stricter API is a real risk not worth taking for zero benefit -- only MistralProvider overrides this to True."""
+        return False
 
     def usage_totals(self) -> dict[str, int]:
         """Cumulative token usage across every request this instance has made (a compose session's client(s) are created fresh per session, so this is the session total, not a lifetime counter)."""
@@ -379,11 +444,14 @@ class MistralClient:
 
     @staticmethod
     def _wants_reasoning_effort_retry(resp: httpx.Response, payload: dict[str, Any]) -> bool:
-        return (
-            resp.status_code == 400
-            and "reasoning_effort" in payload
-            and "reasoning_effort" in resp.text
-            and "not enabled" in resp.text
+        """True if a 400 is rejecting the reasoning_effort field itself -- providers phrase this differently (Mistral: "not enabled"; OpenAI/gpt-5.6-luna: "are not supported ... in /v1/chat/completions"), so match on the param name being singled out rather than one exact phrase."""
+        if resp.status_code != 400 or "reasoning_effort" not in payload:
+            return False
+        text = resp.text
+        if "reasoning_effort" not in text:
+            return False
+        return any(
+            phrase in text for phrase in ("not enabled", "not supported", "unsupported")
         )
 
     def _raise_for_error_status(self, resp: httpx.Response) -> None:
@@ -415,7 +483,7 @@ class MistralClient:
         # timeout errors are equally transient and were previously fatal on the
         # first try (e.g. a read timeout on the big two-stage revision call).
         for attempt in range(MISTRAL_MAX_RETRIES + 1):
-            throttle_mistral()
+            throttle_llm_call()
             last_attempt = attempt >= MISTRAL_MAX_RETRIES
             try:
                 with httpx.Client(timeout=self._timeout) as client:
@@ -468,9 +536,12 @@ class MistralClient:
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "max_tokens": self._effective_max_tokens(max_tokens),
-            "temperature": temperature,
+            self._max_tokens_field_name(): self._effective_max_tokens(max_tokens),
         }
+        if self._supports_temperature():
+            payload["temperature"] = temperature
+        if self._supports_prompt_cache_key():
+            payload["prompt_cache_key"] = self._prompt_cache_key
         if MISTRAL_REASONING_EFFORT and not self._reasoning_effort_unsupported:
             payload["reasoning_effort"] = MISTRAL_REASONING_EFFORT
         payload.update(self._reasoning_payload_extra())
@@ -538,6 +609,49 @@ class MistralClient:
             prior = debug.get("messages")
             if isinstance(prior, list) and prior:
                 convo = prior + convo
+            # Belt-and-suspenders alongside _ensure_tool_call_ids' per-round
+            # backfill: root-caused 2026-08-13 (LumiRogue recompose,
+            # ed06b874) that the revision pass's OWN chat_with_tools call —
+            # not the research pass that generated `prior` — can still hit
+            # "messages[N]: missing field `id`" against Mistral's stricter
+            # API despite the per-round backfill existing since 2026-08-13's
+            # earlier fix. Static + synthetic testing of the per-round path
+            # couldn't reproduce a gap in isolation, so rather than leave the
+            # exact mechanism unresolved, re-assert the invariant on the
+            # WHOLE merged transcript right here — the one place every
+            # later-stage call's outgoing `messages` passes through before a
+            # request is ever built, regardless of which round or pass
+            # originally produced a given tool_calls entry.
+            for idx, m in enumerate(convo):
+                tcs = m.get("tool_calls")
+                if not tcs:
+                    continue
+                _ensure_tool_call_ids(tcs)
+                # A tool-role message's own tool_call_id is a SEPARATE field
+                # on a SEPARATE message, set once at generation time
+                # (mistral_client._run_tool_call / mistral_compose's
+                # synthetic _debug_tool_turn) and never revisited by the
+                # backfill above, which only touches the assistant side.
+                # Root-caused 2026-08-15: a synthetic debug-transcript entry
+                # (the deterministic grader's bookkeeping turn) built its
+                # tool-role pair with no tool_call_id at all; the id backfill
+                # above gave the assistant side a fresh id but left the
+                # paired tool message pointing at nothing, so a later replay
+                # through a stricter provider rejected it ("messages with
+                # role 'tool' must have a 'tool_call_id'", GPT-5.6-luna,
+                # confirmed live). Re-pairing by position here (the same 1:1
+                # ordering _run_tool_call already produces for a real
+                # multi-tool-call round) closes this generically, not just
+                # for the one call site that happened to trigger it.
+                for offset, call in enumerate(tcs):
+                    pos = idx + 1 + offset
+                    if pos >= len(convo):
+                        break
+                    tool_msg = convo[pos]
+                    if tool_msg.get("role") != "tool":
+                        break
+                    if not tool_msg.get("tool_call_id"):
+                        tool_msg["tool_call_id"] = call.get("id", "")
             debug["messages"] = convo  # mutated in place → full transcript
             debug["model"] = self._model
         return convo
@@ -602,6 +716,7 @@ class MistralClient:
         except json.JSONDecodeError:
             args = {}
         sig = f"{name}:{json.dumps(args, sort_keys=True)}"
+        is_fetch_continuation = name == "fetch_url" and bool(args.get("continue_reading"))
         cap = self._CALL_CAPPED_TOOLS.get(name)
         if cap is not None and tool_call_counts.get(name, 0) >= cap:
             # A varying-argument tool a model can call forever without ever
@@ -615,9 +730,18 @@ class MistralClient:
                     "article now with what you already have."
                 )
             }
-        elif sig in seen_calls and name != "suggest_tool":
+        elif sig in seen_calls and name != "suggest_tool" and not is_fetch_continuation:
             # Identical call already executed this session — don't re-run
             # the handler or resend the (unchanged) data; nudge to write.
+            # fetch_url continuations are exempt: _wrap_fetch_url_scroll
+            # tracks a per-URL offset in `context`, so repeated calls with
+            # continue_reading=true and the SAME surface arguments (same
+            # url/max_chars) are not actually duplicates — each one advances
+            # the stateful offset and returns the NEXT window of the page.
+            # Root-caused 2026-08-06: the model self-reported (via
+            # report_compose_issue) that reading a 62-slide PDF took 6 calls
+            # instead of ~3 because it had to keep changing max_chars just to
+            # dodge this exact-signature dedup on legitimate continuations.
             note = (
                 "You already called this tool with these exact arguments "
                 "this session; its data has not changed. Do NOT call it "
@@ -678,19 +802,57 @@ class MistralClient:
         tools: list[dict[str, Any]],
         response_reserve: int,
         temperature: float,
+        round_budget_note: str = "",
     ) -> dict[str, Any]:
+        # The note is appended to a COPY for just this one request, never to
+        # `convo` itself -- it must never be persisted/echoed back, or it
+        # compounds across rounds exactly like the reasoning_content bug
+        # _for_conversation_history was built to stop (2026-08-06): round 2
+        # would resend round 1's note, round 3 both, etc. A fresh, correct
+        # note is cheap to recompute every round; a stale one accumulating
+        # in the transcript is not.
+        messages = [*convo, {"role": "user", "content": round_budget_note}] if round_budget_note else convo
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": convo,
-            "max_tokens": response_reserve,
-            "temperature": temperature,
+            "messages": messages,
+            self._max_tokens_field_name(): response_reserve,
             "tools": tools,
             "tool_choice": "auto",
         }
+        if self._supports_temperature():
+            payload["temperature"] = temperature
+        if self._supports_prompt_cache_key():
+            payload["prompt_cache_key"] = self._prompt_cache_key
         if MISTRAL_REASONING_EFFORT and not self._reasoning_effort_unsupported:
             payload["reasoning_effort"] = MISTRAL_REASONING_EFFORT
+        forced = self._tool_reasoning_effort_override()
+        if forced is not None:
+            payload["reasoning_effort"] = forced
         payload.update(self._reasoning_payload_extra())
         return payload
+
+    def _tool_reasoning_effort_override(self) -> str | None:
+        """Force a specific reasoning_effort value on tool-calling requests specifically, overriding whatever the block above decided (including sending nothing at all). Default None -- no override, today's exact behavior for every provider this class has served historically.
+
+        Confirmed live 2026-08-14: GPT-5.6 rejects function tools + reasoning_effort outright ("Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions... set reasoning_effort to 'none'", 400) -- and it rejects this REGARDLESS of whether we send the field at all (live metadata already marks it reasoning_effort_unsupported, so the block above never adds it, yet the model still 400s citing reasoning_effort). The model apparently reasons by some non-'none' default internally unless explicitly told otherwise; omitting the field isn't the same as disabling it. OpenAIProvider overrides this to "none".
+        """
+        return None
+
+    @staticmethod
+    def _round_budget_note(round_idx: int, rounds: int) -> str:
+        """Live "N of M rounds, K remain" text for show_round_budget=True. On the LAST round, says so explicitly — the model should wrap up with what it has rather than start a new investigation it can't finish."""
+        remaining = rounds - round_idx - 1
+        if remaining <= 0:
+            return (
+                f"[research budget: round {round_idx + 1} of {rounds} — this is your LAST "
+                "round. Wrap up with what you have rather than starting a new line of "
+                "investigation you can't finish.]"
+            )
+        return (
+            f"[research budget: round {round_idx + 1} of {rounds} — {remaining} remain "
+            "after this one. Depth is cheap here; if there's more worth verifying, keep "
+            "going rather than settling for merely plausible.]"
+        )
 
     @staticmethod
     def _extract_message(data: dict[str, Any]) -> dict[str, Any]:
@@ -774,6 +936,16 @@ class MistralClient:
             convo.append(tool_message)
         return None, required_satisfied
 
+    @staticmethod
+    def _fire_on_round(on_round: Callable[[], None] | None) -> None:
+        """Best-effort invoke chat_with_tools' per-round callback — a checkpoint failure must never abort the compose loop."""
+        if on_round is None:
+            return
+        try:
+            on_round()
+        except Exception:
+            logger.debug("chat_with_tools on_round callback failed", exc_info=True)
+
     def chat_with_tools(
         self,
         messages: list[dict[str, Any]],
@@ -788,13 +960,26 @@ class MistralClient:
         require_tool: str | None = None,
         context_tokens: int | None = None,
         finalize_on_exhaustion: bool = True,
+        on_round: Callable[[], None] | None = None,
+        show_round_budget: bool = False,
     ) -> str:
-        """Agentic loop: let the model call the provided tools, execute them, feed results back, and return the final assistant message content. Tools are real functions the writer invokes on demand (live price, chain stats, platform search, recent articles). Pass ``debug`` to capture the full transcript (it tracks ``convo`` live + records the round count)."""
+        """Agentic loop: let the model call the provided tools, execute them, feed results back, and return the final assistant message content. Tools are real functions the writer invokes on demand (live price, chain stats, platform search, recent articles). Pass ``debug`` to capture the full transcript (it tracks ``convo`` live + records the round count). ``on_round``, if given, fires after every round (whether or not it made tool calls) — callers use this to checkpoint compose_sessions live, since ``trace``/``debug`` are mutated in place round by round but nothing previously re-persisted them until the whole multi-round call returned, leaving the admin Sessions tab showing zero progress for the entire length of a long research pass. Never allowed to abort the loop — a checkpoint failure is swallowed, not raised.
+
+        ``show_round_budget``: inject a live "round N of M, K remain" note
+        into each outgoing request (never persisted into the transcript —
+        see _tool_round_payload). Off by default; the static one-time
+        mention in the research-phase system prompt (RESEARCH BUDGET,
+        2026-08-13) already covers most callers cheaply. This is for the
+        research pass specifically, where "how much runway do I actually
+        have left" is a genuine per-round decision (push an interactive
+        flow further, chase one more unverified claim) rather than a
+        one-off framing set at the start.
+        """
         if not self._api_key:
             raise MistralError("MISTRAL_API_KEY is not set")
         self._log_task_context("chat_with_tools")
 
-        rounds = max_rounds if max_rounds is not None else MISTRAL_MAX_TOOL_ROUNDS
+        rounds = max_rounds if max_rounds is not None else LLM_MAX_TOOL_ROUNDS
         convo = self._merged_convo_with_prior_debug(messages, debug)
         last_content = ""
         # Guard against runaway loops: the data tools (price, market, chain head)
@@ -824,13 +1009,21 @@ class MistralClient:
             # OLDEST tool results (in place) so the request never overflows.
             if convo_budget > 0:
                 fit_messages_to_budget(convo, convo_budget)
+            round_budget_note = (
+                self._round_budget_note(round_idx, rounds) if show_round_budget else ""
+            )
             payload = self._tool_round_payload(
-                convo, tools=tools, response_reserve=response_reserve, temperature=temperature
+                convo,
+                tools=tools,
+                response_reserve=response_reserve,
+                temperature=temperature,
+                round_budget_note=round_budget_note,
             )
             data = self._post(payload)
             msg = self._extract_message(data)
             last_content = _message_text(msg) or last_content
             tool_calls = msg.get("tool_calls") or []
+            _ensure_tool_call_ids(tool_calls)
             if not tool_calls:
                 should_continue, required_nudged, final = self._handle_no_tool_calls_round(
                     convo,
@@ -843,6 +1036,7 @@ class MistralClient:
                     debug=debug,
                 )
                 if should_continue:
+                    self._fire_on_round(on_round)
                     continue
                 return final
             salvaged, required_satisfied = self._process_tool_calls_round(
@@ -860,6 +1054,7 @@ class MistralClient:
             )
             if salvaged is not None:
                 return salvaged
+            self._fire_on_round(on_round)
         # Out of rounds: ask once more without tools for a final write-up.
         if debug is not None:
             debug["rounds"] = rounds

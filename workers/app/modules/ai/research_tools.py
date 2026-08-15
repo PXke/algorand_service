@@ -14,6 +14,8 @@ aborts the article.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
 import re
 from typing import TYPE_CHECKING, Any
@@ -312,8 +314,50 @@ def _github_get(
     return resp
 
 
+_GITHUB_OWNER_STARS_PAGE_CAP = 3  # up to 300 repos scanned for the star total, so one huge org can't turn this into dozens of requests
+
+
+def _github_owner_total_stars(owner: str, total_repos: int | None) -> tuple[int | None, bool]:
+    """Sum stargazers_count across an owner's repos, paginated up to _GITHUB_OWNER_STARS_PAGE_CAP pages.
+
+    Returns (total_stars, complete) — complete is False if the owner has more
+    repos than the page cap covers, so a caller can tell "the real total" from
+    "a lower bound" the same way get_asset_transaction_volume's page cap does.
+    """
+    total = 0
+    checked = 0
+    for page in range(1, _GITHUB_OWNER_STARS_PAGE_CAP + 1):
+        try:
+            resp = _github_get(
+                f"https://api.github.com/users/{owner}/repos",
+                params={"per_page": 100, "page": page},
+            )
+            resp.raise_for_status()
+            page_repos = resp.json()
+        except Exception:
+            return None, False
+        if not page_repos:
+            break
+        total += sum(r.get("stargazers_count", 0) or 0 for r in page_repos if isinstance(r, dict))
+        checked += len(page_repos)
+        if len(page_repos) < 100:
+            break
+    complete = total_repos is None or checked >= total_repos
+    return total, complete
+
+
 def _github_owner_repos(owner: str) -> dict[str, Any]:
-    """Repo list for a GitHub org/user, most recently pushed first — returned when the model passes an owner instead of owner/name (the top prod failure mode for this tool), so it can pick a repo and call again instead of dead-ending."""
+    """Repo list for a GitHub org/user, most recently pushed first — returned when the model passes an owner instead of owner/name (the top prod failure mode for this tool), so it can pick a repo and call again instead of dead-ending.
+
+    total_public_repos / total_stars_across_all_repos (added 2026-08-10,
+    root-caused live): the 8-repo 'repos' list below is sorted by recency, not
+    stars, so a real org-wide claim like "carries no stars" silently drew on
+    only the 8 MOST RECENTLY PUSHED repos out of many more -- a live incident
+    (chopmob-cloud/AlgoVoi) had exactly this happen: the 8-repo window
+    genuinely showed 0 stars each, while 4 different, less-recently-touched
+    repos elsewhere in the org's 112 total had 1 star each. Without an
+    explicit org-wide total, "0 in the sample" reads as "0 for the org."
+    """
     try:
         resp = _github_get(
             f"https://api.github.com/users/{owner}/repos",
@@ -325,8 +369,28 @@ def _github_owner_repos(owner: str) -> dict[str, Any]:
         repos = resp.json()
     except Exception as exc:
         return {"owner": owner, "error": str(exc)[:200]}
+
+    # The org-wide total/star-aggregate lookups below are enrichment, not the
+    # core "list repos to pick from" contract above -- a failure here (or a
+    # response shape a test double doesn't model) must degrade to None, never
+    # take down a call that would otherwise have succeeded.
+    total_repos: int | None = None
+    try:
+        profile_resp = _github_get(f"https://api.github.com/users/{owner}")
+        profile_resp.raise_for_status()
+        data = profile_resp.json()
+        if isinstance(data, dict):
+            total_repos = data.get("public_repos")
+    except Exception:
+        logger.debug("github owner profile lookup failed for %s", owner, exc_info=True)
+
+    total_stars, stars_complete = _github_owner_total_stars(owner, total_repos)
+
     return {
         "owner": owner,
+        "total_public_repos": total_repos,
+        "total_stars_across_all_repos": total_stars,
+        "total_stars_may_be_incomplete": not stars_complete,
         "repos": [
             {
                 "repo": r.get("full_name"),
@@ -338,7 +402,15 @@ def _github_owner_repos(owner: str) -> dict[str, Any]:
             for r in repos
             if isinstance(r, dict)
         ][:8],
-        "hint": "call github_activity again with one of these 'owner/name' repos",
+        "hint": (
+            f"'repos' is only the 8 MOST RECENTLY PUSHED of {total_repos} total "
+            "public repos, sorted by recency not stars -- do NOT generalize star "
+            "counts, activity, or adoption from this list alone to the whole "
+            "organisation. total_stars_across_all_repos is the real org-wide "
+            "aggregate (see total_stars_may_be_incomplete for very large orgs). "
+            "Call github_activity again with one of these 'owner/name' repos "
+            "for full detail on one."
+        ),
     }
 
 
@@ -635,7 +707,15 @@ def _fetch_failure_hint(url: str, error: str, *, status_code: int | None = None)
     if status_code in (404, 410) or "404" in error or "410" in error:
         return (
             "the page is gone — fetch_archive_text can read a Wayback Machine "
-            "snapshot of it if the historical content matters"
+            "snapshot of it if the historical content matters. If you guessed "
+            "this URL yourself (e.g. a bare /about or /terms path) rather than "
+            "following a real <a href> on the page, this 404 does NOT prove a "
+            "site's link or button is broken -- most single-page apps have no "
+            "server route for guessed paths even when the on-page control "
+            "works fine via JavaScript (root-caused 2026-08-10, recurred "
+            "2026-08-12 on lumirogue.com's 'Terms of use'). Use click_element "
+            "on the visible button/link text before reporting anything as a "
+            "broken link"
         )
     low = error.lower()
     if (
@@ -744,6 +824,247 @@ def _fetch_pdf_document(resp: Any, *, base: str, cap: int, offset: int) -> dict[
     return _slice_document_text(text, url=base, title=title, links=[], max_chars=cap, offset=offset)
 
 
+_PDF_URL_IN_ATTR_RE = re.compile(r'(?:href|src)=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', re.I)
+_GDOCS_VIEWER_URL_RE = re.compile(
+    r"(?:docs\.google\.com/(?:viewer|gview)\?[^\"'<> ]*url=)([^\"'&<> ]+)", re.I
+)
+
+
+def _find_pdf_url_in_html(html: str, base: str) -> str | None:
+    """Scan a page's HTML for the actual PDF file behind a JS-based viewer — a direct .pdf href/src anywhere in the markup, or a Google Docs/gview viewer's url= query param."""
+    from urllib.parse import unquote, urljoin
+
+    m = _GDOCS_VIEWER_URL_RE.search(html)
+    if m:
+        return unquote(m.group(1))
+    m = _PDF_URL_IN_ATTR_RE.search(html)
+    if m:
+        return urljoin(base, m.group(1))
+    return None
+
+
+def _tool_extract_pdf_from_page(url: str) -> dict[str, Any]:
+    """Find and read the actual PDF behind a page that embeds it in a JS-based viewer (Google Docs viewer, PDF.js, a slide-deck embed) instead of linking it directly.
+
+    fetch_url only reads the wrapper page's own chrome/text in that case
+    (self-reported gap, 2026-08-10: CGAP's 62-slide 'Stablecoins in
+    Humanitarian Cash Transfers' deck rendered via a JS viewer with no
+    accessible download URL on its landing page, so its exact wording could
+    only be attested secondhand). Tries the page's raw HTML first, then --
+    since some viewers inject the file only via client-side JS -- a
+    Playwright-rendered copy. Once a direct PDF URL is found, extracts up to
+    40 pages of text the same way fetch_url does for a URL that's already a
+    direct PDF link.
+    """
+    u = (url or "").strip()
+    if not u:
+        return {"error": "url required"}
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u
+
+    pdf_url: str | None = None
+    try:
+        resp = _guarded_get_with_retry(u, headers={"Accept": "text/html"}, timeout=15.0)
+        resp.raise_for_status()
+        if "pdf" in resp.headers.get("content-type", "").lower():
+            return _fetch_pdf_document(resp, base=str(resp.url), cap=8000, offset=0)
+        pdf_url = _find_pdf_url_in_html(resp.text, str(resp.url))
+    except Exception as exc:
+        return {"url": u, "error": str(exc)[:200]}
+
+    if not pdf_url:
+        try:
+            from app.modules.scraper.core.browser_scrape import fetch_page
+
+            rendered = fetch_page(u, skip_login_wall_check=True)
+            pdf_url = _find_pdf_url_in_html(rendered.html, rendered.final_url)
+        except Exception:
+            pdf_url = None
+
+    if not pdf_url:
+        return {
+            "url": u,
+            "error": (
+                "no direct PDF file URL found on this page (checked raw HTML "
+                "and a rendered copy) -- the document may only be downloadable "
+                "manually, or the viewer uses a pattern this tool doesn't "
+                "recognize yet"
+            ),
+        }
+
+    try:
+        pdf_resp = _guarded_get_with_retry(pdf_url, timeout=20.0)
+        pdf_resp.raise_for_status()
+    except Exception as exc:
+        return {
+            "url": u,
+            "found_pdf_url": pdf_url,
+            "error": f"found a PDF URL but fetching it failed: {str(exc)[:160]}",
+        }
+
+    result = _fetch_pdf_document(pdf_resp, base=pdf_url, cap=8000, offset=0)
+    result["found_pdf_url"] = pdf_url
+    return result
+
+
+_GOOGLE_DOC_ID_RE = re.compile(r"/document/d/([a-zA-Z0-9_-]+)")
+
+
+def _tool_fetch_google_doc(url: str, max_chars: int = 6000, offset: int = 0) -> dict[str, Any]:
+    """Read a published/shared Google Doc's full plain text via its own export endpoint, instead of fetch_url hitting the JS-rendered editor shell (which shows a loading UI, not the document's words).
+
+    Only works for a doc whose sharing is "Anyone with the link can view" (or
+    published to the web) — a private doc's export endpoint 401s/redirects to
+    a login page, same as any other access-controlled page this pipeline
+    can't authenticate into. Paginated the same way fetch_url is: call again
+    with the same url and a later offset (from has_more/_next_offset) to keep
+    reading.
+    """
+    u = (url or "").strip()
+    if not u:
+        return {"error": "url required"}
+    m = _GOOGLE_DOC_ID_RE.search(u)
+    if not m:
+        return {"url": u, "error": "not a docs.google.com/document/d/<id>/... URL"}
+    doc_id = m.group(1)
+    export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+    try:
+        resp = _guarded_get_with_retry(export_url, timeout=15.0)
+    except Exception as exc:
+        return {"url": u, "error": str(exc)[:200]}
+    if resp.status_code in (401, 403) or "accounts.google.com" in str(resp.url):
+        return {
+            "url": u,
+            "error": (
+                "doc is not publicly viewable (export endpoint requires login) -- "
+                "sharing must be set to 'Anyone with the link can view'"
+            ),
+        }
+    try:
+        resp.raise_for_status()
+    except Exception as exc:
+        return {"url": u, "error": str(exc)[:200]}
+    raw = _slice_document_text(
+        resp.text, url=u, title="", links=[], max_chars=max_chars, offset=offset
+    )
+    return _publicize_fetch_result(raw)
+
+
+_SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.I)
+_BUNDLE_GREP_MAX_SCRIPTS = 12
+_BUNDLE_GREP_MAX_BYTES_TOTAL = 6_000_000
+_BUNDLE_GREP_CONTEXT_CHARS = 180
+_BUNDLE_GREP_NOISY_HOSTS = (
+    "google-analytics",
+    "googletagmanager",
+    "doubleclick",
+    "facebook.net",
+    "hotjar",
+    "sentry.io",
+    "segment.",
+    "intercom.",
+)
+
+
+def _bundle_script_urls(html: str, base: str) -> list[str]:
+    """<script src=...> URLs on a page, resolved to absolute, deduped, and stripped of obvious third-party trackers/ads -- those never carry app logic and would otherwise crowd out the real bundles under the script cap."""
+    from urllib.parse import urljoin, urlparse
+
+    script_urls: list[str] = []
+    seen: set[str] = set()
+    for m in _SCRIPT_SRC_RE.finditer(html):
+        src = urljoin(base, m.group(1))
+        if src in seen:
+            continue
+        seen.add(src)
+        host = (urlparse(src).hostname or "").lower()
+        if any(noisy in host for noisy in _BUNDLE_GREP_NOISY_HOSTS):
+            continue
+        script_urls.append(src)
+    return script_urls[:_BUNDLE_GREP_MAX_SCRIPTS]
+
+
+def _bundle_body_matches(
+    body: str, src: str, term: str, *, limit: int
+) -> list[dict[str, Any]]:
+    """Every occurrence of term (case-insensitive) in one script body, with surrounding context, up to limit."""
+    matches: list[dict[str, Any]] = []
+    body_lower = body.lower()
+    term_lower = term.lower()
+    start = 0
+    while len(matches) < limit:
+        idx = body_lower.find(term_lower, start)
+        if idx < 0:
+            break
+        lo = max(0, idx - _BUNDLE_GREP_CONTEXT_CHARS)
+        hi = min(len(body), idx + len(term) + _BUNDLE_GREP_CONTEXT_CHARS)
+        matches.append({"script_url": src, "context": body[lo:hi]})
+        start = idx + len(term)
+    return matches
+
+
+def _tool_grep_frontend_bundle(url: str, search_term: str, max_matches: int = 5) -> dict[str, Any]:
+    """Search a page's own JS bundles for a literal string — for verifying what a single-page app actually DOES (a wallet-connect requirement, a fee constant, a feature flag) when that behavior lives only in client-side JS and never renders as text fetch_url can read.
+
+    Root-caused 2026-07-24 (AlgoRank incident): an article claimed a dApp
+    needed no wallet to vote, based on what fetch_url's rendered-text view
+    showed; the live JS bundle actually required a wallet-connect call before
+    the vote write, and no tool existed to check the bundle directly instead
+    of the rendered page. Grep beats WebFetch/fetch_url here because the
+    claim lives in source code, not in anything the DOM ever displays.
+
+    Fetches the page's own <script src=...> bundles (same-origin and CDN,
+    skipping obvious third-party analytics/ad scripts) up to a byte budget,
+    and returns each match with surrounding context. A miss across every
+    bundle is itself informative — it means the term isn't in the client
+    code at all, not that the check failed.
+    """
+    u = (url or "").strip()
+    term = (search_term or "").strip()
+    if not u:
+        return {"error": "url required"}
+    if not term:
+        return {"error": "search_term required"}
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u
+    n_matches = max(1, min(int(max_matches), 20))
+
+    try:
+        page = _guarded_get_with_retry(u, headers={"Accept": "text/html"}, timeout=15.0)
+        page.raise_for_status()
+    except Exception as exc:
+        return {"url": u, "error": str(exc)[:200]}
+
+    script_urls = _bundle_script_urls(page.text, str(page.url))
+    if not script_urls:
+        return {"url": u, "error": "no <script src=...> bundles found on this page"}
+
+    matches: list[dict[str, Any]] = []
+    scripts_checked: list[str] = []
+    bytes_total = 0
+    for src in script_urls:
+        if bytes_total >= _BUNDLE_GREP_MAX_BYTES_TOTAL or len(matches) >= n_matches:
+            break
+        try:
+            resp = _guarded_get_with_retry(src, timeout=15.0)
+            resp.raise_for_status()
+        except Exception:
+            continue
+        body = resp.text
+        bytes_total += len(body.encode("utf-8", errors="ignore"))
+        scripts_checked.append(src)
+        matches.extend(_bundle_body_matches(body, src, term, limit=n_matches - len(matches)))
+
+    return {
+        "url": u,
+        "search_term": term,
+        "scripts_checked": scripts_checked,
+        "scripts_found_on_page": len(script_urls),
+        "match_count": len(matches),
+        "matches": matches,
+    }
+
+
 def _extract_html_text_and_links(
     resp: Any,  # noqa: ANN401 -- httpx.Response, kept loosely typed to match the caller
     *,
@@ -788,12 +1109,41 @@ def _maybe_render_spa_fallback(
     text: str,
     plain_text: str,
     links: list[dict[str, str]],
+    playwright_session: Any = None,  # noqa: ANN401 -- PlaywrightSession, kept loose to dodge an import cycle
 ) -> tuple[str, str, list[dict[str, str]], str]:
-    """Retry a thin/SPA-shaped response (React/Vue/Next shell, or a "please enable JavaScript" page) with the Playwright renderer — same signal the web crawler uses. Returns (title, text, links, base), rendered values if it helped, the original ones otherwise (a failed render beats no result at all)."""
+    """Render the page with Playwright before returning it. Returns (title, text, links, base), rendered values if it helped, the original ones otherwise (a failed render beats no result at all).
+
+    Root-caused 2026-08-11 (self-reported, hesab.com): used to only render
+    when a thin/SPA-shaped-response heuristic (needs_spa_fallback) fired,
+    which is a real page-shape detector but not built to catch "the HTML
+    looks like a normal page, but the numbers a writer actually needs are
+    filled in by a client-side fetch()". Rather than keep tuning that
+    heuristic's edge cases, this now always renders every HTML fetch when a
+    persistent per-compose PlaywrightSession is available (see
+    maybe_start_session in browser_scrape.py) -- reusing one browser across
+    the whole compose is what makes "always render" affordable; a fresh
+    Chromium launch per call was not. Falls back to the old heuristic-gated
+    one-shot render for callers with no session (compose failed to start
+    one, or this is called outside a compose at all).
+    """
     from app.modules.scraper.crawler_registry import is_web_spa_enabled
+
+    if not is_web_spa_enabled():
+        return title, text, links, base
+    if playwright_session is not None:
+        try:
+            rendered = playwright_session.fetch(base)
+            return (
+                rendered.title or title,
+                rendered.text or text,
+                links,  # the session's plain-text extraction carries no link list
+                rendered.final_url or base,
+            )
+        except Exception:
+            return title, text, links, base
     from app.modules.scraper.crawlers.web_crawler import needs_spa_fallback
 
-    if not (is_web_spa_enabled() and needs_spa_fallback(plain_text, raw_html=resp.text)):
+    if not needs_spa_fallback(plain_text, raw_html=resp.text):
         return title, text, links, base
     try:
         from app.modules.scraper.core.browser_scraper import BrowserScraper
@@ -813,6 +1163,7 @@ def _fetch_url_internal(
     url: str,
     max_chars: int = 6000,
     offset: int = 0,
+    playwright_session: Any = None,  # noqa: ANN401 -- PlaywrightSession
 ) -> dict[str, Any]:
     """Fetch and slice a URL; returns raw dict (may include ``_next_offset``)."""
     import httpx
@@ -833,17 +1184,35 @@ def _fetch_url_internal(
     except Exception as exc:
         return _fetch_url_error(u, exc)
     ctype = resp.headers.get("content-type", "")
+    ctype_lower = ctype.lower()
     base = str(resp.url)
     # PDFs (whitepapers, audits, tokenomics docs) are common source links; read
     # their text instead of refusing them. pypdf is already a dependency.
-    if "pdf" in ctype.lower() or base.lower().split("?")[0].endswith(".pdf"):
+    if "pdf" in ctype_lower or base.lower().split("?")[0].endswith(".pdf"):
         return _fetch_pdf_document(resp, base=base, cap=cap, offset=offset)
-    if "html" not in ctype and "text" not in ctype:
+    # Public JSON/XML APIs (sitemaps, service status endpoints, etc.) are a
+    # documented fetch_url fallback for writer tools -- don't refuse them just
+    # because they aren't HTML. Pretty-print JSON for readability; XML/other
+    # text-ish payloads pass through as-is.
+    if "html" not in ctype_lower and "json" in ctype_lower:
+        body = resp.text
+        with contextlib.suppress(ValueError):
+            body = json.dumps(json.loads(resp.text), indent=2)
+        return _slice_document_text(body, url=base, title=base, links=[], max_chars=cap, offset=offset)
+    if "html" not in ctype_lower and "xml" in ctype_lower:
+        return _slice_document_text(resp.text, url=base, title=base, links=[], max_chars=cap, offset=offset)
+    if "html" not in ctype_lower and "text" not in ctype_lower:
         return {"url": u, "error": f"unsupported content-type: {ctype[:60]}"}
 
     title, text, plain_text, links = _extract_html_text_and_links(resp, base=base)
     title, text, links, base = _maybe_render_spa_fallback(
-        resp, base=base, title=title, text=text, plain_text=plain_text, links=links
+        resp,
+        base=base,
+        title=title,
+        text=text,
+        plain_text=plain_text,
+        links=links,
+        playwright_session=playwright_session,
     )
     return _slice_document_text(
         text,
@@ -895,13 +1264,50 @@ def _augment_github_archived(url: str, result: dict[str, Any]) -> dict[str, Any]
     return result
 
 
+_SPA_ROUTER_NOTFOUND_PHRASES = (
+    "could not be found in this application",
+    "page could not be found",
+)
+
+
+def _augment_spa_notfound_warning(result: dict[str, Any]) -> dict[str, Any]:
+    """When fetch_url lands on a client-side-router "not found" page (HTTP 200, but the SPA's own JS painted a 404), warn the writer this does NOT prove a real UI link/button is broken.
+
+    Root-caused 2026-08-10 (lumirogue.com "About") and recurred 2026-08-12
+    (same site, "Terms of use", both from a bare-guessed /about and /terms
+    URL): a single-page app routes entirely client-side, so a guessed path
+    with no matching route renders this same "not found" shell even though
+    the real on-page button (no <a href> at all) opens a working modal via
+    JS. This never raises an HTTP error -- the server returns a normal 200
+    with the app shell, so _fetch_failure_hint's 404 branch never runs.
+    Fail-open: matched only on distinctive client-router copy, not a bare
+    "404" (too many false positives on real dead pages' own wording).
+    """
+    text = result.get("text") if isinstance(result.get("text"), str) else ""
+    low = text.lower()
+    if not any(phrase in low for phrase in _SPA_ROUTER_NOTFOUND_PHRASES):
+        return result
+    result["text"] = (
+        "[CLIENT-SIDE ROUTE CHECK] This looks like a single-page app's own "
+        "'not found' shell for a guessed URL, not necessarily a broken link "
+        "or missing page -- the real UI control (if one exists) may have no "
+        "href at all and only work via a JS click. Do not report this as a "
+        "broken link/page without also trying click_element on the visible "
+        "button/link text.\n\n" + text
+    )
+    return result
+
+
 def _tool_fetch_url(
     url: str,
     max_chars: int = 6000,
     offset: int = 0,
+    playwright_session: Any = None,  # noqa: ANN401 -- PlaywrightSession; only set by callers that manage one (see writer_tools' scroll wrapper)
 ) -> dict[str, Any]:
     """Fetch a web page and return its cleaned main text (public tool result)."""
-    raw = _fetch_url_internal(url, max_chars=max_chars, offset=offset)
+    raw = _fetch_url_internal(
+        url, max_chars=max_chars, offset=offset, playwright_session=playwright_session
+    )
     if raw.get("error"):
         return raw
     result = _publicize_fetch_result(raw)
@@ -909,7 +1315,277 @@ def _tool_fetch_url(
         result = _augment_github_archived(url, result)
     except Exception:
         logger.debug("github-archived augmentation failed", exc_info=True)
+    try:
+        result = _augment_spa_notfound_warning(result)
+    except Exception:
+        logger.debug("SPA not-found augmentation failed", exc_info=True)
     return result
+
+
+def _tool_click_element(
+    url: str,
+    click_text: str,
+    playwright_session: Any = None,  # noqa: ANN401 -- PlaywrightSession; injected from compose context, see writer_tools._wrap_browser_actions
+) -> dict[str, Any]:
+    """Click a specific element (button, tab, footer item) on a page by its visible text, and return the page's content AFTER the click.
+
+    fetch_url and browser_scrape's rendering only ever follow real hrefs or
+    read what's already on the page — many SPA "links" are actually buttons
+    with NO href at all, whose real content only appears via a JS action (an
+    in-page modal, a non-standard accordion toggle, a tab switch). Use this
+    when a page visibly has such a control and its content matters to a
+    claim you're making (self-reported gap, 2026-08-10 — root-caused live
+    the same day: an article said lumirogue.com's footer 'About this
+    project' / 'Terms of use' were broken links returning 404. The guessed
+    /about and /terms URLs genuinely do 404, but that's not the real user
+    experience — the footer items are buttons with no href, and clicking
+    either opens a working in-page modal with real content). Slow (loads
+    and interacts with a full browser) — expect several seconds. If the
+    click_text doesn't match anything, the error lists what WAS clickable
+    on the page so you can retry with the right text.
+    """
+    u = (url or "").strip()
+    if not u:
+        return {"error": "url required"}
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u
+    text = (click_text or "").strip()
+    if not text:
+        return {"error": "click_text required"}
+    try:
+        if playwright_session is not None:
+            result = playwright_session.click_and_read(u, text)
+        else:
+            from app.modules.scraper.core.browser_scrape import click_and_read
+
+            result = click_and_read(u, text)
+    except Exception as exc:
+        return _fetch_url_error(u, exc)
+    return {
+        "url": result.final_url,
+        "title": result.title,
+        "clicked": text,
+        "text": result.text[:8000],
+    }
+
+
+def _tool_type_into_page(
+    url: str,
+    field_text: str,
+    value: str,
+    submit: bool = False,
+    playwright_session: Any = None,  # noqa: ANN401 -- PlaywrightSession; injected from compose context, see writer_tools._wrap_browser_actions
+) -> dict[str, Any]:
+    """Type into a search box, filter, or form field on a page by the field's label/placeholder, optionally submit, and return the page's content afterward.
+
+    Self-reported gap, 2026-08-11: fetch_url and click_element can only
+    read what's already reachable by URL or a click -- some real content
+    only appears after typing (an on-chain explorer's address search box,
+    a directory's filter field, a docs site's search). Use submit=true to
+    press Enter after filling (e.g. a search box that navigates on submit);
+    leave it false for a filter that reacts live as you type. If
+    field_text doesn't match anything, the error lists what fields WERE on
+    the page so you can retry with the right one. Slow (loads and
+    interacts with a full browser) — expect several seconds.
+    """
+    u = (url or "").strip()
+    if not u:
+        return {"error": "url required"}
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u
+    field = (field_text or "").strip()
+    if not field:
+        return {"error": "field_text required"}
+    if playwright_session is None:
+        return {
+            "error": (
+                "no browser session available for this compose -- type_into_page "
+                "requires Playwright rendering to be enabled"
+            )
+        }
+    try:
+        result = playwright_session.type_and_read(u, field, value or "", submit=bool(submit))
+    except Exception as exc:
+        return _fetch_url_error(u, exc)
+    return {
+        "url": result.final_url,
+        "title": result.title,
+        "typed_into": field,
+        "submitted": bool(submit),
+        "text": result.text[:8000],
+    }
+
+
+def _tool_capture_screenshot(
+    url: str,
+    full_page: bool = False,
+    playwright_session: Any = None,  # noqa: ANN401 -- PlaywrightSession; injected from compose context, see writer_tools._wrap_browser_actions
+) -> dict[str, Any]:
+    """Screenshot a live page and return a public image_url, to illustrate an article with real visual evidence instead of describing it in prose alone -- a game's actual UI, a dashboard's current state, what a marketplace listing really looks like.
+
+    Owner request 2026-08-11 (after personally buying a Lumi Rogue Ankh and
+    playing the game). Use narrowly: reach for this when a screenshot
+    genuinely shows something prose can't capture as well, not as a
+    decorative addition to every article -- most articles are well served
+    by the source's own og:image, already resolved automatically. full_page
+    captures the whole scrollable page (a long leaderboard); the default
+    (viewport only) is what a real visitor sees without scrolling, which is
+    usually the right shot. Slow (loads and screenshots a full browser) —
+    expect several seconds.
+    """
+    u = (url or "").strip()
+    if not u:
+        return {"error": "url required"}
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u
+    if playwright_session is None:
+        return {
+            "error": (
+                "no browser session available for this compose -- capture_screenshot "
+                "requires Playwright rendering to be enabled"
+            )
+        }
+    try:
+        png_bytes = playwright_session.capture_screenshot(u, full_page=bool(full_page))
+    except Exception as exc:
+        return _fetch_url_error(u, exc)
+    from app.modules.scraper.core.browser_scrape import save_screenshot
+
+    image_url = save_screenshot(png_bytes)
+    if image_url is None:
+        return {
+            "error": (
+                "screenshot captured but could not be saved -- storage may not be "
+                "configured on this host"
+            )
+        }
+    return {"url": u, "image_url": image_url, "full_page": bool(full_page)}
+
+
+def _tool_inspect_network_hosts(
+    url: str,
+    click_text: str = "",
+    playwright_session: Any = None,  # noqa: ANN401 -- PlaywrightSession; injected from compose context, see writer_tools._wrap_browser_actions
+) -> dict[str, Any]:
+    """Load a page and report which hosts it ACTUALLY made network requests to, with a best-effort Algorand mainnet-vs-testnet call from known algod/indexer hostnames -- ground truth for what a dapp really does, immune to stale page copy.
+
+    Use this, not grep_frontend_bundle, for any "is this mainnet or
+    testnet" / "are fees real" / "what does connecting actually do" claim.
+    Root-caused live 2026-08-13: lumirogue.com's OWN rendered UI text said
+    "Algorand Testnet" -- grep_frontend_bundle dutifully found and quoted
+    it -- while the site's wallet code was hardcoded to mainnet (chainId
+    416001). grep_frontend_bundle is a literal text search; it can't trace
+    which of several config objects a minified bundle actually wires up at
+    runtime. This tool sidesteps that entirely by watching what the page's
+    OWN code does when it runs, not what its text claims. Pass click_text
+    (e.g. "Connect Wallet") when the relevant network call only fires after
+    an interaction, not on page load. Slow (loads a full browser) — expect
+    several seconds.
+
+    A `detected_network: "unknown"` result is NOT a dead end -- confirmed
+    live 2026-08-15 (also lumirogue.com): a site whose chain calls run
+    server-side behind its own backend (Base44-hosted here) never exposes
+    an algod/indexer host to the BROWSER at all, no matter how far you
+    click through the connect flow -- this tool can only watch what the
+    browser itself requests. When this happens, fall back to an on-chain
+    query tool (application_boxes, lookup_asset, lookup_application)
+    against any app/asset ID already found on the page instead of trusting
+    the page's own network label.
+    """
+    u = (url or "").strip()
+    if not u:
+        return {"error": "url required"}
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u
+    if playwright_session is None:
+        return {
+            "error": (
+                "no browser session available for this compose -- "
+                "inspect_network_hosts requires Playwright rendering to be enabled"
+            )
+        }
+    try:
+        return playwright_session.inspect_network_hosts(u, click_text=(click_text or "").strip())
+    except Exception as exc:
+        return _fetch_url_error(u, exc)
+
+
+def _interactive_dispatch(
+    act: str,
+    playwright_session: Any,  # noqa: ANN401 -- PlaywrightSession
+    url: str,
+    target: str,
+    value: str,
+    submit: bool,
+) -> Any:  # noqa: ANN401 -- BrowserPageResult
+    """Perform one play_interactive action (open/click/type/read). Raises ValueError for a usage error (missing arg, unknown action), or whatever the session raises for a real render/interaction failure -- _tool_play_interactive sorts those into the right error shape."""
+    if act == "open":
+        u = (url or "").strip()
+        if not u:
+            raise ValueError("url required for action='open'")
+        if not u.startswith(("http://", "https://")):
+            u = "https://" + u
+        return playwright_session.interactive_open(u)
+    if act == "click":
+        t = (target or "").strip()
+        if not t:
+            raise ValueError("target required for action='click'")
+        return playwright_session.interactive_click(t)
+    if act == "type":
+        t = (target or "").strip()
+        if not t:
+            raise ValueError("target required for action='type'")
+        return playwright_session.interactive_type(t, value or "", submit=bool(submit))
+    if act == "read":
+        return playwright_session.interactive_read()
+    raise ValueError(f"unknown action {act!r} -- must be one of open/click/type/read/close")
+
+
+def _tool_play_interactive(
+    action: str,
+    url: str = "",
+    target: str = "",
+    value: str = "",
+    submit: bool = False,
+    playwright_session: Any = None,  # noqa: ANN401 -- PlaywrightSession; injected from compose context, see writer_tools._wrap_play_interactive
+) -> dict[str, Any]:
+    """Explore a live web app/game across multiple steps on the SAME page state, to discover how its mechanics actually work.
+
+    Owner request 2026-08-11: not to master or complete a game, just to
+    discover its systems -- what a button does, what a menu reveals, how a
+    form responds. fetch_url/click_element/type_into_page each start from a
+    fresh page every call, so nothing the model does in one call is still
+    true in the next (confirmed live: a click-to-open-search then a
+    type-into-the-revealed-input failed across two separate calls because
+    the second started from a blank page again). This keeps ONE page open
+    across action='open' -> 'click'/'type'/'read' -> 'close', so acting on
+    the actual resulting state is possible. The per-compose step budget
+    (see the "budget" field on every response) is small on purpose:
+    exploring a system takes a handful of steps, not a playthrough.
+    """
+    act = (action or "").strip().lower()
+    if playwright_session is None:
+        return {
+            "error": (
+                "no browser session available for this compose -- play_interactive "
+                "requires Playwright rendering to be enabled"
+            )
+        }
+    if act == "close":
+        playwright_session.interactive_close()
+        return {"action": "close", "status": "closed"}
+    try:
+        result = _interactive_dispatch(act, playwright_session, url, target, value, submit)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        return _fetch_url_error(url or target or "interactive session", exc)
+    return {
+        "action": act,
+        "url": result.final_url,
+        "title": result.title,
+        "text": result.text[:6000],
+    }
 
 
 def _tool_get_defi_tvl(protocol: str = "") -> dict[str, Any]:
@@ -932,6 +1608,63 @@ def _tool_get_defi_tvl(protocol: str = "") -> dict[str, Any]:
         return {"chain": "Algorand", "error": "Algorand not present in DeFiLlama chains"}
     except Exception as exc:
         return {"protocol": p or "algorand-chain", "error": str(exc)[:200]}
+
+
+def _downsample_monthly(points: list[dict[str, Any]]) -> list[dict[str, str | float]]:
+    """Collapse a daily {date, totalLiquidityUSD} series to one point per calendar month (the last day seen in that month) — DeFiLlama's raw series runs 1,000+ daily points for any protocol tracked more than a few years, far past what a research tool response should return in one call. Keeping the LAST day of each month (not first/average) matches how a reader intuitively reads a monthly chart: "where did it end up that month."."""
+    from datetime import UTC, datetime
+
+    by_month: dict[str, dict[str, Any]] = {}
+    for pt in points:
+        ts = pt.get("date")
+        tvl = pt.get("totalLiquidityUSD")
+        if ts is None or tvl is None:
+            continue
+        month_key = datetime.fromtimestamp(int(ts), tz=UTC).strftime("%Y-%m")
+        by_month[month_key] = {"month": month_key, "tvl_usd": tvl}
+    return [by_month[k] for k in sorted(by_month)]
+
+
+def _tool_get_defi_tvl_history(protocol: str, months: int = 24) -> dict[str, Any]:
+    """Historical DeFi TVL trend for one protocol from DeFiLlama (USD), downsampled to one point per month. Use to chart adoption/decline over time instead of inferring a trend from a single current-TVL snapshot -- `get_defi_tvl` only gives you today's number."""
+    p = (protocol or "").strip().lower().replace(" ", "-")
+    if not p:
+        return {
+            "error": "protocol is required, e.g. 'tinyman' — use get_defi_tvl for the Algorand chain total"
+        }
+    months = max(1, min(months, 60))
+    try:
+        resp = _guarded_get(f"https://api.llama.fi/protocol/{p}")
+        # Unlike /tvl/{slug} (404 on a bad slug), /protocol/{slug} answers an
+        # unknown slug with 400 — verified live 2026-08-07 against a garbage
+        # slug, not documented behavior to assume from the sibling endpoint.
+        if resp.status_code in (400, 404):
+            return {
+                "protocol": p,
+                "error": "not found on DeFiLlama — try the slug, e.g. 'tinyman'",
+            }
+        resp.raise_for_status()
+        data = resp.json()
+        chain_tvls = data.get("chainTvls") or {}
+        # A multi-chain protocol has one series per chain; prefer Algorand's,
+        # falling back to the top-level combined series if Algorand isn't its
+        # own key (single-chain protocols keep everything under one entry).
+        series = ((chain_tvls.get("Algorand") or {}).get("tvl")) or data.get("tvl") or []
+        if not series:
+            return {"protocol": p, "error": "no TVL history available for this protocol"}
+        monthly = _downsample_monthly(series)[-months:]
+        if not monthly:
+            return {"protocol": p, "error": "no TVL history available for this protocol"}
+        values = [m["tvl_usd"] for m in monthly]
+        return {
+            "protocol": p,
+            "monthly_tvl_usd": monthly,
+            "peak_tvl_usd": max(values),
+            "current_tvl_usd": values[-1],
+            "source": "DeFiLlama",
+        }
+    except Exception as exc:
+        return {"protocol": p, "error": str(exc)[:200]}
 
 
 def _tool_search_nfd_directory(name: str = "", address: str = "") -> dict[str, Any]:
@@ -960,7 +1693,7 @@ def _tool_search_nfd_directory(name: str = "", address: str = "") -> dict[str, A
                 return {"name": slug, "found": False}
             resp.raise_for_status()
             data = resp.json()
-            verified = ((data.get("properties") or {}).get("verified") or {})
+            verified = (data.get("properties") or {}).get("verified") or {}
             return {
                 "name": data.get("name", slug),
                 "found": True,
@@ -1000,21 +1733,110 @@ def _tool_search_nfd_directory(name: str = "", address: str = "") -> dict[str, A
         return {"error": str(exc)[:200]}
 
 
+def _tool_list_nfd_segments(parent_name: str, limit: int = 20) -> dict[str, Any]:
+    """List the child segments (subdomains) issued under a parent Algorand NFD (.algo name), via NFDomains' public API.
+
+    search_nfd_directory only resolves ONE name at a time; it has no way to
+    answer "how many identities has this project actually issued" (e.g. every
+    *.lumirogue.algo the game hands out to players) short of guessing names
+    one by one. Self-reported gap, 2026-08-13 (suggest_tool, LumiRogue
+    session): "I could not LIST all .lumirogue.algo subdomains the game has
+    issued -- that would have given the exact number of player identities."
+    Two real API calls: resolve the parent to its appID, then browse by
+    parentAppID (documented for exactly this: "the parent NFD Application ID
+    to find. Used for fetching segments").
+    """
+    parent = (parent_name or "").strip()
+    if not parent:
+        return {"error": "parent_name is required"}
+    slug = parent if parent.endswith(".algo") else f"{parent}.algo"
+    try:
+        resp = _guarded_get(f"https://api.nf.domains/nfd/{slug}", params={"view": "full"})
+        if resp.status_code == 404:
+            return {"parent": slug, "found": False}
+        resp.raise_for_status()
+        parent_data = resp.json()
+        app_id = parent_data.get("appID")
+        if not app_id:
+            return {"parent": slug, "found": True, "error": "parent NFD has no appID on record"}
+        # The parent's own record reports its true total segment count
+        # (segmentCount) independent of pagination below -- surface it
+        # directly so a capped `limit` never silently understates "how many
+        # identities has this project issued".
+        reported_total = (parent_data.get("properties") or {}).get("internal", {}).get(
+            "segmentCount"
+        )
+        browse_resp = _guarded_get(
+            "https://api.nf.domains/nfd/browse",
+            params={"parentAppID": app_id, "limit": max(1, min(int(limit), 200))},
+        )
+        browse_resp.raise_for_status()
+        rows = browse_resp.json()
+        segments = [
+            {
+                "name": r.get("name"),
+                "owner": r.get("owner"),
+                "state": r.get("state"),
+                "expired": r.get("expired"),
+            }
+            for r in (rows if isinstance(rows, list) else [])
+        ]
+        return {
+            "parent": slug,
+            "found": True,
+            "reported_total_segments": int(reported_total) if reported_total else None,
+            "returned": len(segments),
+            "segments": segments,
+        }
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
+_LIST_NFD_SEGMENTS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "list_nfd_segments",
+        "description": (
+            "List the child segments (subdomains) issued under a parent "
+            "Algorand NFD, e.g. every *.lumirogue.algo a project has handed "
+            "out — via NFDomains' public API. Use for a real 'how many "
+            "on-chain identities has this project issued' count, instead of "
+            "counting names you happen to spot elsewhere (a scoreboard, a "
+            "screenshot). Also returns the parent's own reported total "
+            "segment count, which stays accurate even if more segments exist "
+            "than `limit` returns."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "parent_name": {
+                    "type": "string",
+                    "description": "the parent NFD, e.g. 'lumirogue.algo' (the .algo suffix is optional)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "max segments to return, default 20, capped at 200",
+                },
+            },
+            "required": ["parent_name"],
+        },
+    },
+}
+
+
 _NFD_DIRECTORY_SCHEMA = {
     "type": "function",
     "function": {
         "name": "search_nfd_directory",
         "description": (
-            "Resolve an Algorand NFD (.algo human-readable name) to its owner "
-            "address, or reverse-resolve an address to the .algo name(s) it "
-            "owns — via NFDomains' own public API. Use to verify a claimed "
-            ".algo identity actually resolves on-chain, or to find the name "
-            "behind an address you already have. A name lookup also returns "
-            "any Discord/GitHub/X/Bluesky/Telegram handles and additional "
-            "Algorand addresses the owner has cryptographically VERIFIED as "
-            "theirs — real corroboration for who is behind a project, not "
-            "self-reported claims; a missing field means unverified, not "
-            "confirmed absent."
+            "Resolve an Algorand NFD (.algo name) to its owner address, or "
+            "reverse-resolve an address to the .algo name(s) it owns, via "
+            "NFDomains' public API. Use to verify a claimed .algo identity "
+            "actually resolves on-chain, or find the name behind an address. A "
+            "name lookup also returns Discord/GitHub/X/Bluesky/Telegram handles "
+            "and other addresses the owner has cryptographically VERIFIED as "
+            "theirs — real corroboration, not self-reported; a missing field "
+            "means unverified, not confirmed absent."
         ),
         "parameters": {
             "type": "object",
@@ -1467,8 +2289,7 @@ def _tool_lookup_discord_invite_stats(invite: str) -> dict[str, Any]:
         "guild_name": guild.get("name"),
         "member_count": profile.get("member_count"),
         "online_count": profile.get("online_count"),
-        "description": (guild.get("description") or profile.get("description") or "")[:300]
-        or None,
+        "description": (guild.get("description") or profile.get("description") or "")[:300] or None,
     }
 
 
@@ -1499,7 +2320,11 @@ def _tool_lookup_domain_registration(domain: str) -> dict[str, Any]:
     except Exception as exc:
         return {"domain": host, "error": str(exc)[:200]}
     if resp.status_code == 404:
-        return {"domain": host, "found": False, "error": "no RDAP record (unregistered, or a ccTLD RDAP.org doesn't route)"}
+        return {
+            "domain": host,
+            "found": False,
+            "error": "no RDAP record (unregistered, or a ccTLD RDAP.org doesn't route)",
+        }
     if resp.status_code != 200:
         return {"domain": host, "error": f"RDAP {resp.status_code}"}
     try:
@@ -1950,16 +2775,17 @@ _GITHUB_SCHEMA = {
     "function": {
         "name": "github_activity",
         "description": (
-            "Recent GitHub activity for a repo (metadata, latest releases, recent "
-            "commits, and top contributors) — use to report shipped updates, version "
-            "launches, dev momentum, or who actually builds a project. Pass "
-            "'owner/name' or a github.com URL; passing just an owner/org lists its "
-            "repositories so you can pick one. IMPORTANT: an 'archived: true' repo "
-            "does NOT mean the project is dead — projects routinely archive an old "
-            "repo after migrating. When a repo is archived this returns "
-            "'owner_liveness' showing the owner's OTHER repos; if the owner is still "
-            "pushing elsewhere, the project is alive (superseded repo), so never call "
-            "it defunct or tell readers to migrate away on the archived flag alone."
+            "Recent GitHub activity for a repo (metadata, releases, commits, top "
+            "contributors) — for shipped updates, dev momentum, or who builds a "
+            "project. Pass 'owner/name' or a github.com URL; a bare owner/org lists "
+            "its repos to pick from — that list is only the 8 MOST RECENTLY PUSHED "
+            "repos, sorted by recency not stars, so use total_stars_across_all_repos "
+            "(not the per-repo 'stars' in that list) for any org-wide star/adoption "
+            "claim. An 'archived: true' repo does NOT mean the project is dead — it "
+            "routinely means migration. When archived, this also returns "
+            "'owner_liveness' (the owner's other repos); if the owner is still "
+            "pushing elsewhere, the project is alive — never call it defunct on the "
+            "archived flag alone."
         ),
         "parameters": {
             "type": "object",
@@ -2052,6 +2878,298 @@ _FETCH_SCHEMA = {
     },
 }
 
+_CLICK_ELEMENT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "click_element",
+        "description": (
+            "Click a specific element (button, tab, footer item) on a page "
+            "by its visible text, and return the page's content AFTER the "
+            "click. Many SPA 'links' are actually buttons with no real "
+            "href — fetch_url can't see content that only appears via a JS "
+            "action (an in-page modal, a tab switch, a non-standard "
+            "toggle). Use when a page visibly has such a control and its "
+            "content matters to a claim you're making. Slow (loads a full "
+            "browser) — expect several seconds. On no match, the error "
+            "lists what text WAS clickable so you can retry."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "click_text": {
+                    "type": "string",
+                    "description": "visible text of the element to click, e.g. 'About this project'",
+                },
+            },
+            "required": ["url", "click_text"],
+        },
+    },
+}
+
+_TYPE_INTO_PAGE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "type_into_page",
+        "description": (
+            "Type into a search box, filter, or form field on a page "
+            "(matched by its label/placeholder) and return the page's "
+            "content afterward. Use when real content only appears after "
+            "typing — an on-chain explorer's address search, a "
+            "directory's filter field, a docs site's search box. Set "
+            "submit=true to press Enter after filling (e.g. a search box "
+            "that navigates on submit); leave it false for a filter that "
+            "reacts live as you type. Slow (loads a full browser) — "
+            "expect several seconds. On no match, the error lists what "
+            "fields WERE on the page so you can retry."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "field_text": {
+                    "type": "string",
+                    "description": "label, placeholder, or name of the field to type into, e.g. 'Search address'",
+                },
+                "value": {"type": "string", "description": "text to type into the field"},
+                "submit": {
+                    "type": "boolean",
+                    "description": "press Enter after typing, default false",
+                },
+            },
+            "required": ["url", "field_text", "value"],
+        },
+    },
+}
+
+_CAPTURE_SCREENSHOT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "capture_screenshot",
+        "description": (
+            "Screenshot a live page and get back a public image_url to "
+            "illustrate the article — real visual evidence (a game's "
+            "actual UI, a dashboard's current state, a marketplace "
+            "listing) instead of describing it in prose alone. Use "
+            "narrowly: reach for this when a screenshot genuinely shows "
+            "something prose can't, not as a decorative addition — most "
+            "articles are already well served by the source's own "
+            "automatically-resolved og:image. full_page captures the "
+            "whole scrollable page (e.g. a long leaderboard); the default "
+            "(viewport only) is what a real visitor sees without "
+            "scrolling. Slow (loads a full browser) — expect several "
+            "seconds."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "full_page": {
+                    "type": "boolean",
+                    "description": "capture the whole scrollable page instead of just the viewport, default false",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+}
+
+_PLAY_INTERACTIVE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "play_interactive",
+        "description": (
+            "Explore a live web app/game across MULTIPLE steps on the SAME "
+            "page state, to discover how its mechanics actually work — "
+            "what a button does, what a menu reveals, how a form "
+            "responds. Unlike fetch_url/click_element/type_into_page, "
+            "which each start from a fresh page every call, this keeps "
+            "ONE page open across a short sequence of actions so you can "
+            "act on what actually happened, not just the page's start "
+            "state. Use to discover mechanics, NOT to master, complete, "
+            "or grind a game — a handful of exploratory steps is the "
+            "point. Bounded to a small step budget per compose (see the "
+            "budget field in each response); once it's spent, no more "
+            "steps are available this compose. "
+            "action='open' (needs url) starts a session, closing any "
+            "previous one. "
+            "action='click' (needs target) clicks visible text on the "
+            "current page. "
+            "action='type' (needs target + value, optional submit) types "
+            "into a field on the current page. "
+            "action='read' re-reads the current page with no action — "
+            "useful after a timer/animation. "
+            "action='close' ends the session early, before the budget "
+            "runs out. "
+            "Slow (loads/interacts with a full browser) — expect several "
+            "seconds per step."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["open", "click", "type", "read", "close"],
+                },
+                "url": {"type": "string", "description": "required for action='open'"},
+                "target": {
+                    "type": "string",
+                    "description": "visible text to click (action='click'), or field label/placeholder to type into (action='type')",
+                },
+                "value": {"type": "string", "description": "text to type, for action='type'"},
+                "submit": {
+                    "type": "boolean",
+                    "description": "press Enter after typing, for action='type', default false",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+_EXTRACT_PDF_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "extract_pdf_from_page",
+        "description": (
+            "Find and read the actual PDF behind a page that embeds it in a "
+            "JS-based viewer (Google Docs viewer, PDF.js, a slide-deck "
+            "embed) instead of linking it directly — fetch_url only reads "
+            "the wrapper page's own chrome/text in that case, not the "
+            "document itself. Also works directly if url is already a "
+            "plain PDF link. Returns up to 40 pages of extracted text."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "the page that displays/embeds the PDF (or a direct PDF URL)",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+}
+
+_FETCH_GOOGLE_DOC_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "fetch_google_doc",
+        "description": (
+            "Read a publicly-shared Google Doc's full plain text — "
+            "fetch_url on a docs.google.com/document/... URL only sees the "
+            "JS editor shell loading, not the document's words. Only works "
+            "when the doc's sharing is 'Anyone with the link can view'; a "
+            "private doc reports that plainly instead of an empty page. "
+            "Paginated like fetch_url — call again with the same url and a "
+            "later offset (from has_more) to keep reading."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "the docs.google.com/document/d/... URL"},
+                "max_chars": {
+                    "type": "integer",
+                    "description": "characters per window, default 6000 (max 12000)",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "0 (default) = start; pass a later offset to continue reading",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+}
+
+_INSPECT_NETWORK_HOSTS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "inspect_network_hosts",
+        "description": (
+            "Load a page and report which hosts it ACTUALLY made network "
+            "requests to, with a best-effort mainnet-vs-testnet call from "
+            "known Algorand algod/indexer hostnames -- ground truth for "
+            "what a dapp really does, immune to stale or wrong page copy. "
+            "Use this for any 'is this mainnet or testnet' / 'are fees "
+            "real' claim instead of quoting the page's own text or "
+            "grep_frontend_bundle, either of which can be stale relative "
+            "to what the app's code is actually wired to run against. Pass "
+            "click_text (e.g. 'Connect Wallet') when the relevant network "
+            "call only fires after an interaction. Slow (loads a full "
+            "browser) — expect several seconds. "
+            "detected_network:'unknown' does NOT mean the network can't be "
+            "determined -- it means this specific method (watching the "
+            "BROWSER's own requests) found no algod/indexer host, which "
+            "happens whenever a site's real chain calls run server-side "
+            "behind its own backend (e.g. a Base44-hosted app) rather than "
+            "client-side -- confirmed live 2026-08-15 on lumirogue.com, "
+            "where even clicking through to a specific wallet only revealed "
+            "a WalletConnect relay host, never an Algorand endpoint, "
+            "because the app's chain calls never cross the browser at all. "
+            "On 'unknown', do NOT default to trusting the page's own "
+            "Mainnet/Testnet label -- instead resolve it independently via "
+            "an on-chain query tool (application_boxes, lookup_asset, "
+            "lookup_application) against any app/asset ID already found on "
+            "the page: if the ID resolves on one network, that's your "
+            "answer, immune to this specific site's backend architecture."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "click_text": {
+                    "type": "string",
+                    "description": "optional: visible text of an element to click first, e.g. 'Connect Wallet'",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+}
+
+_GREP_BUNDLE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "grep_frontend_bundle",
+        "description": (
+            "Search a page's own client-side JS bundles for a literal string "
+            "— use when a claim depends on what a single-page app's code "
+            "actually DOES (requires a wallet connection, enforces a fee, "
+            "gates a feature) rather than what its rendered page shows. "
+            "fetch_url only sees rendered/DOM text; SPA logic that never "
+            "prints to the page is invisible to it. A miss across every "
+            "bundle means the term genuinely isn't in the client code, not "
+            "that the check failed. NOT reliable for mainnet-vs-testnet or "
+            "'where does this button actually go' -- a minified bundle "
+            "often defines several config objects (a wallet library's "
+            "mainnet AND testnet blocks both exist as text) and resolves "
+            "which one is actually used through variable indirection this "
+            "text search can't trace, and a click handler's real target is "
+            "rarely textually near the button's own label. Use "
+            "inspect_network_hosts for network identity and click_element "
+            "for where a button actually goes; both observe real behavior "
+            "instead of reading text."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "the app's page URL"},
+                "search_term": {
+                    "type": "string",
+                    "description": "literal substring to search for, e.g. 'connectWallet' or 'requireSignature'",
+                },
+                "max_matches": {
+                    "type": "integer",
+                    "description": "1-20 matches to return, default 5",
+                },
+            },
+            "required": ["url", "search_term"],
+        },
+    },
+}
+
 _DEFILLAMA_SCHEMA = {
     "type": "function",
     "function": {
@@ -2069,6 +3187,34 @@ _DEFILLAMA_SCHEMA = {
                     "description": "optional protocol slug, e.g. 'tinyman'",
                 },
             },
+        },
+    },
+}
+
+_DEFILLAMA_HISTORY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "get_defi_tvl_history",
+        "description": (
+            "Historical DeFi TVL trend for one protocol from DeFiLlama (USD), "
+            "downsampled to one point per month. Use to show an adoption or "
+            "decline CURVE over time — get_defi_tvl only gives today's single "
+            "number, so a 'growing' or 'shrinking' claim needs this instead of "
+            "inferring a trend from one snapshot."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "protocol": {
+                    "type": "string",
+                    "description": "protocol slug, e.g. 'tinyman' (required — this has no chain-wide mode)",
+                },
+                "months": {
+                    "type": "integer",
+                    "description": "how many trailing months to return, 1-60, default 24",
+                },
+            },
+            "required": ["protocol"],
         },
     },
 }
@@ -2209,7 +3355,7 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     telegram_channel_lookup needs TELEGRAM_BOT_TOKEN (already configured for
     Telegram distribution), so they register only when usable. github_activity,
     github_repository_search, github_repository_contents, search_token_listings,
-    fetch_url, get_defi_tvl, discourse_forum, get_node_stats,
+    fetch_url, click_element, get_defi_tvl, get_defi_tvl_history, discourse_forum, get_node_stats,
     medium_api_article_list, package_download_stats, search_nfd_directory,
     app_store_metrics, reddit_api_post_history and xgov_proposal_status hit
     free public APIs and are always available (GITHUB_TOKEN optional).
@@ -2224,12 +3370,22 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         _GITHUB_CONTENTS_SCHEMA,
         _TOKEN_LISTINGS_SCHEMA,
         _FETCH_SCHEMA,
+        _CLICK_ELEMENT_SCHEMA,
+        _TYPE_INTO_PAGE_SCHEMA,
+        _CAPTURE_SCREENSHOT_SCHEMA,
+        _PLAY_INTERACTIVE_SCHEMA,
+        _EXTRACT_PDF_SCHEMA,
+        _INSPECT_NETWORK_HOSTS_SCHEMA,
+        _GREP_BUNDLE_SCHEMA,
+        _FETCH_GOOGLE_DOC_SCHEMA,
         _DEFILLAMA_SCHEMA,
+        _DEFILLAMA_HISTORY_SCHEMA,
         _DISCOURSE_SCHEMA,
         _NODE_STATS_SCHEMA,
         _MEDIUM_SCHEMA,
         _PACKAGE_DOWNLOADS_SCHEMA,
         _NFD_DIRECTORY_SCHEMA,
+        _LIST_NFD_SEGMENTS_SCHEMA,
         _APP_STORE_METRICS_SCHEMA,
         # reddit_api_post_history deliberately has NO schema (2026-07-16):
         # reddit blocks this server's IP — offering the tool just burned one
@@ -2243,12 +3399,22 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         "github_repository_contents": _tool_github_repo_contents,
         "search_token_listings": _tool_search_token_listings,
         "fetch_url": _tool_fetch_url,
+        "click_element": _tool_click_element,
+        "type_into_page": _tool_type_into_page,
+        "capture_screenshot": _tool_capture_screenshot,
+        "play_interactive": _tool_play_interactive,
+        "extract_pdf_from_page": _tool_extract_pdf_from_page,
+        "inspect_network_hosts": _tool_inspect_network_hosts,
+        "grep_frontend_bundle": _tool_grep_frontend_bundle,
+        "fetch_google_doc": _tool_fetch_google_doc,
         "get_defi_tvl": _tool_get_defi_tvl,
+        "get_defi_tvl_history": _tool_get_defi_tvl_history,
         "discourse_forum": _tool_discourse_forum,
         "get_node_stats": _tool_get_node_stats,
         "medium_api_article_list": _tool_medium_articles,
         "package_download_stats": _tool_package_download_stats,
         "search_nfd_directory": _tool_search_nfd_directory,
+        "list_nfd_segments": _tool_list_nfd_segments,
         "app_store_metrics": _tool_app_store_metrics,
         "reddit_api_post_history": _tool_reddit_history,
         "xgov_proposal_status": _tool_xgov_proposal,

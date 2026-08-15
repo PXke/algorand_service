@@ -18,6 +18,8 @@
   let recomposingNowId = $state<string | null>(null)
   let recomposeNowError = $state<string | null>(null)
   let recomposedNowIds = $state<Set<string>>(new Set())
+  let pickingId = $state<string | null>(null)
+  let pickError = $state<string | null>(null)
   let deadEndingId = $state<string | null>(null)
   let deadEndError = $state<string | null>(null)
   let deadEndedDomains = $state<Record<string, string>>({})
@@ -132,6 +134,19 @@
     }
   }
 
+  async function pickForToday(queueId: string) {
+    pickingId = queueId
+    pickError = null
+    try {
+      await admin.pickQueueItemForToday(queueId)
+      await load()
+    } catch (e) {
+      pickError = e instanceof Error ? e.message : String(e)
+    } finally {
+      pickingId = null
+    }
+  }
+
   async function deadEndDomain(queueId: string) {
     if (!confirm('Permanently reject this row\'s source domain? It will never be re-crawled or re-composed.')) return
     deadEndingId = queueId
@@ -210,6 +225,9 @@
   {#if recomposeNowError}
     <p class="admin-err">{recomposeNowError}</p>
   {/if}
+  {#if pickError}
+    <p class="admin-err">{pickError}</p>
+  {/if}
   {#if deadEndError}
     <p class="admin-err">{deadEndError}</p>
   {/if}
@@ -243,6 +261,11 @@
               {String(item.display_name ?? item.service_id ?? queueId)}
             </strong>
             <span class="priority admin-muted">prio {Number(item.priority ?? 0)}</span>
+            {#if item.human_pick_day}
+              <span class="human-pick-badge" title="Pinned as Lane 1 (human pick)">
+                picked for {String(item.human_pick_day)}
+              </span>
+            {/if}
           </div>
 
           {#if item.last_reason}
@@ -268,6 +291,21 @@
                 onclick={() => composeNext(queueId)}
               >
                 {bumpingId === queueId ? 'Pinning…' : 'Compose next'}
+              </button>
+              <button
+                class="btn compact"
+                type="button"
+                disabled={pickingId === queueId || Boolean(item.human_pick_day)}
+                onclick={() => pickForToday(queueId)}
+                title="Reserve one of today's 3 publish slots (Lane 1) for this row"
+              >
+                {#if pickingId === queueId}
+                  Picking…
+                {:else if item.human_pick_day}
+                  Picked ✓
+                {:else}
+                  Pick for today
+                {/if}
               </button>
               <button
                 class="btn compact btn-danger"
@@ -480,6 +518,16 @@
   .priority {
     font-size: 11px;
     font-weight: 600;
+  }
+
+  .human-pick-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--primary) 16%, transparent);
+    color: var(--primary);
+    white-space: nowrap;
   }
 
   .last-reason {

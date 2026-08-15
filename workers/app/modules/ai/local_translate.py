@@ -59,6 +59,19 @@ from app.modules.ai.mistral_compose import split_markdown_blocks
 
 logger = logging.getLogger(__name__)
 
+# transformers' default weight-loading path spins up a ThreadPoolExecutor
+# (core_model_loading.py, GLOBAL_WORKERS) to load safetensors shards
+# concurrently. Under free-threaded CPython (python3.15t -- see
+# build_tokenizers_ft.sh), that reliably segfaults inside the interpreter
+# itself partway through SeamlessM4Tv2ForTextToText.from_pretrained (found
+# 2026-08-07: reproduced with a bare `from_pretrained` call, fully cached
+# weights, dmesg showed the crash in python3.15t's own binary on a
+# ThreadPoolExecutor thread -- a free-threading/thread-pool interaction
+# bug, not anything specific to this model or our code). Forcing the
+# documented synchronous fallback avoids the crash entirely; must be set
+# before transformers is imported anywhere in this process.
+os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
+
 ENGINE_FOR_LANG: dict[str, str] = {
     "ps": "seq2seq",
 }

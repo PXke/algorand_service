@@ -66,14 +66,26 @@ export const newsApi = {
       const body = await api.getJson(path, optsOf(opts.signal))
       return {
         items: arrayItemsOf<ArticleItem>(body),
-        next_cursor: typeof body.next_cursor === 'string' ? body.next_cursor : null,
+        // The API returns next_cursor as a JSON number (a millisecond epoch,
+        // see backend cassandra.py's list_feed_page), never a string —
+        // root-caused 2026-08-06: a stale `typeof === 'string'` guard here
+        // silently discarded every real cursor as null, breaking "load
+        // more" pagination everywhere this is called (News/Topic pages,
+        // the admin Articles tab) while the initial page still loaded fine.
+        next_cursor: typeof body.next_cursor === 'number' ? String(body.next_cursor) : null,
       }
     }
     return cachedGet(path, opts.signal, async () => {
       const body = await api.getJson(path, optsOf(opts.signal))
       return {
         items: arrayItemsOf<ArticleItem>(body),
-        next_cursor: typeof body.next_cursor === 'string' ? body.next_cursor : null,
+        // The API returns next_cursor as a JSON number (a millisecond epoch,
+        // see backend cassandra.py's list_feed_page), never a string —
+        // root-caused 2026-08-06: a stale `typeof === 'string'` guard here
+        // silently discarded every real cursor as null, breaking "load
+        // more" pagination everywhere this is called (News/Topic pages,
+        // the admin Articles tab) while the initial page still loaded fine.
+        next_cursor: typeof body.next_cursor === 'number' ? String(body.next_cursor) : null,
       }
     })
   },

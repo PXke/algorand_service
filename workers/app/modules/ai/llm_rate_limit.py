@@ -1,16 +1,22 @@
-"""Client-side rate limiting for the Mistral API, coordinated across all Celery worker processes via Redis.
+"""Client-side rate limiting for LLM provider calls (Mistral and DeepSeek), coordinated across all Celery worker processes via Redis.
 
-Why this exists: our account caps mistral-medium at a low requests/second AND a
-tokens/minute budget (e.g. 0.42 rps / 375k TPM on mistral-medium-2505). The
-article writer runs an agentic tool loop and several drains can compose at once,
-so without a shared gate the workers burst past the per-second ceiling and the
-gateway rejects with instant 429s.
+Why this exists: provider accounts cap requests/second AND a tokens/minute
+budget (e.g. Mistral's mistral-medium-2505 was 0.42 rps / 375k TPM). The
+article writer runs an agentic tool loop and several drains can compose at
+once, so without a shared gate the workers burst past the per-second ceiling
+and the gateway rejects with instant 429s.
 
 The gate is a leaky bucket on a single Redis key holding the next free slot
 timestamp. Each caller atomically reserves the next slot (>= now, spaced by the
 configured interval) and sleeps until then, so requests leave at most one per
 interval no matter how many workers ask at once. If Redis is unreachable we fall
 back to a process-local interval (best effort — better than no spacing).
+
+One shared gate covers both providers rather than a gate each (2026-08-13):
+they've never actually collided with either provider's real limit in
+practice (zero observed 429s from either), so the extra bookkeeping of a
+second Redis key/interval isn't earning its keep yet — split it if that
+ever changes.
 """
 
 from __future__ import annotations
@@ -18,9 +24,9 @@ from __future__ import annotations
 import threading
 import time
 
-from app.core.config import MISTRAL_MIN_REQUEST_INTERVAL_SECONDS, REDIS_URL
+from app.core.config import LLM_MIN_REQUEST_INTERVAL_SECONDS, REDIS_URL
 
-_KEY = "mistral:ratelimit:next_slot"
+_KEY = "llm:ratelimit:next_slot"
 
 # Atomically reserve the next departure slot: max(now, last + interval), then
 # store it back. Returns the reserved slot (epoch seconds, as a string to keep
@@ -62,13 +68,13 @@ def _reserve_slot_local(interval: float) -> float:
         return slot
 
 
-def throttle_mistral() -> None:
-    """Block until this process is allowed to send one Mistral request.
+def throttle_llm_call() -> None:
+    """Block until this process is allowed to send one LLM request (Mistral or DeepSeek).
 
     Reserves the next slot in the shared leaky bucket and sleeps until it is due.
     Never raises: any Redis failure degrades to process-local pacing.
     """
-    interval = float(MISTRAL_MIN_REQUEST_INTERVAL_SECONDS)
+    interval = float(LLM_MIN_REQUEST_INTERVAL_SECONDS)
     if interval <= 0:
         return
     try:

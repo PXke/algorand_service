@@ -46,20 +46,18 @@ ABORT_ARTICLE_SCHEMA: dict[str, Any] = {
     "function": {
         "name": "abort_article",
         "description": (
-            "Abort this article — stop and refuse to write it. This is TERMINAL "
-            "and IRREVERSIBLE: it ends the session immediately, nothing you write "
-            "afterward is published, and your research is discarded. Call it ONLY "
-            "when your research shows there is no real story: the project is dead "
-            "or abandoned (years-old token, dust holders, no recent on-chain or web "
-            "activity, template landing page), the verifiable substance is too thin "
-            "for an honest article, we already covered exactly this, or you cannot "
-            "verify the central claim and writing would mean inventing. Aborting is "
-            "a SUCCESS when the alternative is a hollow or fabricated article. "
-            "CRITICAL: if you have enough material to write, do NOT call this — just "
-            "write the article. NEVER call it to report progress, confirm your "
-            "sources, or say that an abort is not needed. Do NOT use it for fixable "
-            "friction (a tool erroring, one page not loading) — report those with "
-            "report_compose_issue and keep researching."
+            "Abort this article — stop and refuse to write it. TERMINAL and "
+            "IRREVERSIBLE: ends the session immediately, nothing is published, "
+            "research is discarded. Call ONLY when research shows there is no "
+            "real story: the project is dead/abandoned (years-old token, dust "
+            "holders, no recent activity, template landing page), verifiable "
+            "substance is too thin for an honest article, this is duplicate "
+            "coverage, or you cannot verify the central claim and writing would "
+            "mean inventing. Aborting is a SUCCESS when the alternative is a "
+            "hollow or fabricated article. If you have enough to write, do NOT "
+            "call this. NEVER call it to report progress or confirm an abort "
+            "isn't needed. For fixable friction (a tool erroring, one page not "
+            "loading), use report_compose_issue and keep researching instead."
         ),
         "parameters": {
             "type": "object",

@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from app.modules.newspaper.editorial_assignment import EditorialBrief
 
 from app.celery_app import celery_app
+from app.core import config as worker_config
 from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
 from app.core.redis_lock import single_flight
 from app.modules.newspaper.article_composer import ArticleComposeResult, compose_scrape_article
@@ -201,7 +202,20 @@ def _with_hero_image(body: str, og_image: str, alt: str, source_url: str = "") -
         )
         return body
     safe_alt = (alt or "").replace("]", "").replace("[", "")
-    return f"![{safe_alt}]({og_image})\n\n{body}"
+    # og_image is the raw URL scraped from the source page's share-image meta
+    # tag -- sites routinely publish these with literal spaces or other
+    # unencoded characters in the path (found live 2026-08-09:
+    # ".../SCxj-Build on Algorand Course.png" broke the hero image at the
+    # very top of an article). A bare markdown link destination can't contain
+    # unescaped whitespace per CommonMark, so the parser truncates the URL at
+    # the first space and spills the rest as literal text right after the
+    # image. quote() with a safe set covering URL-structural characters
+    # re-encodes only what's actually unsafe, without double-encoding any
+    # %XX sequences the URL may already have.
+    from urllib.parse import quote
+
+    safe_og_image = quote(og_image, safe="!#$%&'()*+,/:;=?@[]~")
+    return f"![{safe_alt}]({safe_og_image})\n\n{body}"
 
 
 def _merge_tags(base: list[str], extra: list[str] | None) -> list[str]:
@@ -435,6 +449,7 @@ def _fresh_auto_approve_passes(
     source_url: str,
     defunct_domains: tuple[str, ...] = (),
     unsourced_hold_reason: str = "",
+    broken_link_hold_reason: str = "",
 ) -> tuple[bool, dict[str, str]]:
     """Strict autonomous-approve gate for content that would otherwise wait for a human review click (owner decision 2026-07-12): grade + headline + gatekeeper factuality AND completeness must ALL clear a bar at least as strict as recompose_published's — fresh content has zero prior human vetting at all, unlike recompose which only touches content a human already approved once, so there's no argument for a looser bar here. Unlike recompose (which deliberately drops completeness from its gate — see the comment at its call site), fresh candidates are exactly what completeness's domain_provenance check exists to triage, so gate_ok uses gate.passed (factuality AND completeness), not factuality alone. Fails CLOSED: any missing or errored signal blocks auto-approve, never allows it. Always returns metadata (even on failure) for the review-row audit trail."""
     import json as _json
@@ -457,6 +472,13 @@ def _fresh_auto_approve_passes(
     if unsourced_hold_reason:
         meta["auto_applied"] = "0"
         meta["unsourced_hold_reason"] = unsourced_hold_reason[:200]
+        return False, meta
+    # Same reasoning again: an unverified broken-link claim can sit inside an
+    # otherwise well-graded draft (grade/headline/gatekeeper don't read the
+    # trace for click_element attempts), so this is its own hard fail too.
+    if broken_link_hold_reason:
+        meta["auto_applied"] = "0"
+        meta["broken_link_hold_reason"] = broken_link_hold_reason[:200]
         return False, meta
     grade_value: float | None = None
     try:
@@ -560,8 +582,8 @@ def _novelty_duplicate_veto(ctx: _ComposeVetoCtx) -> dict | None:
     # reassure: composed_duplicates_latest_service_article (post-compose,
     # the draft's own real title/body) is the enforcement point for this
     # shape now.
-    is_aggregate_page = str(ctx.row.payload.get("page_text", "")).lstrip().startswith(
-        "# SERVICE WATCH:"
+    is_aggregate_page = (
+        str(ctx.row.payload.get("page_text", "")).lstrip().startswith("# SERVICE WATCH:")
     )
     if not is_aggregate_page:
         svc_sim, svc_closest = recent_same_service_similarity(page_title, ctx.row.service_id)
@@ -818,7 +840,13 @@ def _compose_or_error(
     except MistralError as exc:
         credit_issue = isinstance(exc, MistralCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
-        logger.error("Mistral compose failed for %s (%s): %s", row.service_id, row.scrape_url, exc)
+        logger.error(
+            "Mistral compose failed for %s (%s): %s",
+            row.service_id,
+            row.scrape_url,
+            exc,
+            exc_info=True,
+        )
         return None, {"status": status, "service_id": row.service_id, "detail": str(exc)}
 
 
@@ -851,6 +879,7 @@ def _determine_review_divert(
     """
     defunct_domains = tuple(getattr(composed, "defunct_domains", ()) or ())
     unsourced_hold_reason = str(getattr(composed, "unsourced_hold_reason", "") or "")
+    broken_link_hold_reason = str(getattr(composed, "broken_link_hold_reason", "") or "")
     gate_enforced_review = (
         _gate_enforces_review(
             clf_decision=clf_decision,
@@ -862,6 +891,7 @@ def _determine_review_divert(
         or _quality_floor_fails(getattr(composed, "heuristic_grade", None))
         or bool(defunct_domains)
         or bool(unsourced_hold_reason)
+        or bool(broken_link_hold_reason)
     )
     if defunct_domains:
         logger.warning(
@@ -875,6 +905,12 @@ def _determine_review_divert(
             source_url,
             unsourced_hold_reason,
         )
+    if broken_link_hold_reason:
+        logger.warning(
+            "broken-link-claim gate diverting %s to review — %s",
+            source_url,
+            broken_link_hold_reason,
+        )
     # Human-readable divert reason for the review card, so a reviewer sees WHAT
     # tripped the hold (which dead domain / which unsourced specifics) instead of
     # a bare "diverted_by: gatekeeper" and having to re-read the whole draft.
@@ -883,6 +919,8 @@ def _determine_review_divert(
         hold_reasons.append("dead linked domain(s): " + ", ".join(defunct_domains[:5]))
     if unsourced_hold_reason:
         hold_reasons.append(unsourced_hold_reason)
+    if broken_link_hold_reason:
+        hold_reasons.append(broken_link_hold_reason)
     return gate_enforced_review, defunct_domains, "; ".join(hold_reasons)
 
 
@@ -934,6 +972,7 @@ def _maybe_auto_approve(
     payload: dict,
     defunct_domains: tuple[str, ...],
     unsourced_hold_reason: str,
+    broken_link_hold_reason: str,
     clf_category: str,
     clf_confidence: float,
     signals: ContentSignals,
@@ -950,6 +989,7 @@ def _maybe_auto_approve(
         source_url=row.scrape_url,
         defunct_domains=defunct_domains,
         unsourced_hold_reason=unsourced_hold_reason,
+        broken_link_hold_reason=broken_link_hold_reason,
     )
     if not fresh_auto_approved:
         return needs_review, False
@@ -1111,10 +1151,24 @@ def _hold_for_review(
         return {"status": "duplicate_review_pending", "service_id": row.service_id}
     from app.modules.crawler.classifier_review_store import review_queue_full
 
-    # Backlog-bound drafts are already approved — the review slot being
-    # occupied must not block them.
+    # review_queue_full() is ALSO checked upstream, before compose starts
+    # (queue_drain_tasks.py), specifically to avoid burning a Mistral
+    # compose on a row whose review can't land — that is the real
+    # protection. By the time we're here the compose (minutes) has already
+    # run, so this is only a race window: the queue can fill mid-compose.
+    # Root-caused live 2026-08-10 (Pixel City / pixelcity-aetheralabs-es):
+    # this branch used to discard the finished draft outright, exactly the
+    # "throw away a finished compose" failure already fixed once for the
+    # daily-cap race (_stash_capped_compose_to_backlog). enqueue_classifier_review
+    # has no hard capacity limit — MAX_PENDING_REVIEWS is an advisory
+    # compose-time throttle, not a storage invariant — so store and enqueue
+    # anyway; the reviewer just sees two pending items instead of one.
     if not route_to_backlog and review_queue_full():
-        return {"status": "review_queue_full", "service_id": row.service_id}
+        logger.warning(
+            "review queue filled mid-compose for %s — storing and enqueuing "
+            "anyway instead of discarding the finished draft",
+            row.service_id,
+        )
 
     held_kind = _source_kind_from_url(row.scrape_url)
     held_title, held_summary = composed.title, composed.summary
@@ -1385,9 +1439,10 @@ def _finalize_publish(
     # Notify IndexNow (Bing/Ecosia/DuckDuckGo, Yandex, Seznam, Naver) so the new
     # story gets crawled in minutes. Best-effort — never let it block a publish.
     try:
+        from app.modules.newspaper.article_store import ensure_article_slug
         from app.modules.newspaper.indexnow import ping_article
 
-        ping_article(article_id)
+        ping_article(article_id, slug=ensure_article_slug(article_id, title))
     except Exception:
         logger.warning("IndexNow ping failed for article %s", article_id, exc_info=True)
     page_text = str(payload.get("page_text", ""))
@@ -1482,6 +1537,23 @@ def publish_from_queued_row(
     return result
 
 
+def _stamp_service_recompose_cooldown(service_id: str, *, ok: bool) -> None:
+    """Stamp the SAME re-scrape cooldown run_mistral_diff_check's own loop checks (scrape_throttled/mark_scraped, SERVICE_RESCRAPE_DAYS) -- for ANY compose attempt on this service, not just ones the beat itself triggered.
+
+    Without this, an admin "Recompose now" (which deliberately bypasses the
+    pacing CHECK, by design) never stamped the cooldown either, so the beat
+    could turn around and recompose the same service again within days
+    (found live 2026-08-09: algoseas.io recomposed 2 days after a manual
+    compose, well inside the 30-day window). A failed compose still stamps
+    -- just the short failure backoff, not the full window -- so a
+    transient error doesn't block a legitimate retry for 30 days.
+    """
+    with contextlib.suppress(Exception):
+        from app.modules.scraper.core.scrape_cooldown import mark_scraped
+
+        mark_scraped(service_id, ok=ok)
+
+
 @single_flight(lambda row, **_kw: f"compose:{row.queue_id}", ttl=1800)
 def _publish_from_queued_row_impl(
     row: QueuedPublishRow,
@@ -1559,6 +1631,7 @@ def _publish_from_queued_row_impl(
         enrichment_block=enrichment_block,
         first_coverage=first_coverage,
     )
+    _stamp_service_recompose_cooldown(row.service_id, ok=compose_error is None)
     if compose_error is not None:
         return compose_error
 
@@ -1582,6 +1655,7 @@ def _publish_from_queued_row_impl(
         source_url=row.scrape_url,
     )
     unsourced_hold_reason = str(getattr(composed, "unsourced_hold_reason", "") or "")
+    broken_link_hold_reason = str(getattr(composed, "broken_link_hold_reason", "") or "")
 
     hero_image, image_field = _resolve_hero_and_image(payload, row, composed)
 
@@ -1595,6 +1669,7 @@ def _publish_from_queued_row_impl(
         payload=payload,
         defunct_domains=defunct_domains,
         unsourced_hold_reason=unsourced_hold_reason,
+        broken_link_hold_reason=broken_link_hold_reason,
         clf_category=clf_category,
         clf_confidence=clf_confidence,
         signals=signals,
@@ -1648,7 +1723,11 @@ def _publish_from_queued_row_impl(
     )
 
 
-@celery_app.task(name="app.tasks.newspaper.compose_queue_row_now")
+@celery_app.task(
+    name="app.tasks.newspaper.compose_queue_row_now",
+    soft_time_limit=worker_config.COMPOSE_TASK_SOFT_TIME_LIMIT,
+    time_limit=worker_config.COMPOSE_TASK_TIME_LIMIT,
+)
 def compose_queue_row_now(queue_id: str) -> dict[str, str]:
     """Admin-triggered immediate compose of one publish_queue row, bypassing is_standard_publish_due — the pacing gate that normally decides whether drain_standard_publish_queue is even allowed to run at all, checked inside the drain task itself rather than inside publish_from_queued_row. This is a deliberate manual override ("compose this NOW, I want to see the pipeline behave") added 2026-08-05 after repeatedly needing a one-off script to bypass the gate by hand during pipeline testing. The automatic drain's own pacing is untouched — only this admin-triggered path skips it.
 
@@ -1873,7 +1952,11 @@ def run_publish_pipeline(
     )
 
 
-@celery_app.task(name="app.tasks.newspaper.publish_from_chain_event")
+@celery_app.task(
+    name="app.tasks.newspaper.publish_from_chain_event",
+    soft_time_limit=worker_config.COMPOSE_TASK_SOFT_TIME_LIMIT,
+    time_limit=worker_config.COMPOSE_TASK_TIME_LIMIT,
+)
 def publish_from_chain_event(
     *,
     service_id: str,
@@ -1976,7 +2059,9 @@ def _recompose_via_writer(
     except MistralError as exc:
         credit_issue = isinstance(exc, MistralCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
-        logger.error("Mistral recompose failed for review %s (%s): %s", review_id, url, exc)
+        logger.error(
+            "Mistral recompose failed for review %s (%s): %s", review_id, url, exc, exc_info=True
+        )
         # Compose failed — restore the original proposal so the review isn't lost.
         enqueue_classifier_review(
             url=url,
@@ -2015,7 +2100,11 @@ def _recompose_resolve_image(
         return "", ""
 
 
-@celery_app.task(name="app.tasks.newspaper.recompose_review")
+@celery_app.task(
+    name="app.tasks.newspaper.recompose_review",
+    soft_time_limit=worker_config.COMPOSE_TASK_SOFT_TIME_LIMIT,
+    time_limit=worker_config.COMPOSE_TASK_TIME_LIMIT,
+)
 def recompose_review(review_id: str) -> dict[str, str]:
     """Re-run composition on a pending review's stored source and REPLACE the review with a fresh proposal. Lets an admin watch a previously bad article improve as the writer/grader evolve, without waiting for the source to change. This is a deliberate manual replay, so it bypasses the dedup / novelty / domain gates the normal pipeline applies."""
     import json as _json
@@ -2226,14 +2315,14 @@ def translate_article_task(
         try:
             from app.modules.newspaper.indexnow import ping_translation
 
-            ping_translation(article_id, lang)
+            ping_translation(article_id, lang, slug=article.slug)
         except Exception:
             logger.warning(
                 "IndexNow ping failed for translation %s/%s", article_id, lang, exc_info=True
             )
         return {"status": "ok", "article_id": article_id, "lang": lang}
     except Exception as e:
-        logger.error(f"Failed to translate article {article_id} to {lang}: {e}")
+        logger.error(f"Failed to translate article {article_id} to {lang}: {e}", exc_info=True)
         return {"status": "error", "reason": str(e)}
 
 
@@ -2270,7 +2359,7 @@ def translate_glossary_term_task(slug: str, lang: str) -> dict[str, str]:
         session.execute(GlossaryStmts.UPDATE_TRANSLATIONS, (translations, slug))
         return {"status": "ok", "slug": slug, "lang": lang}
     except Exception as e:
-        logger.error(f"Failed to translate glossary term {slug} to {lang}: {e}")
+        logger.error(f"Failed to translate glossary term {slug} to {lang}: {e}", exc_info=True)
         return {"status": "error", "reason": str(e)}
 
 
@@ -2280,15 +2369,22 @@ def translate_glossary_term_task(slug: str, lang: str) -> dict[str, str]:
 # instead of a normal (if now-legacy) single-language translation.
 @celery_app.task(
     name="app.tasks.newspaper.translate_article_batch",
-    # Generous, not yet precisely tuned -- see local_translate_lock.py's TTL
-    # comment for the 51-minute/41-block measurement this is sized against.
+    # The original 5h50m/6h limits were sized against a 51-minute/41-block
+    # measurement (see local_translate_lock.py's TTL comment) that real
+    # production data has since disproven: a single content-heavy special
+    # edition took 1h41m for 'ps' alone (SeamlessM4T's per-cell beam search)
+    # plus ~1h per MiLMMT language, and got SIGKILLed by the 6h hard limit
+    # mid-'ru' with 5 of 8 languages never attempted (found 2026-08-08).
+    # Widened well past any observed worst case -- on-CPU translation is
+    # explicitly latency-tolerant (this platform's whole design), so there
+    # is no cost to a generous ceiling beyond bounding genuine hangs.
     # Both engines share this one task's queue (see celery_app.py's
     # task_routes "translate" entry and the dedicated
     # algorand-platform-celery-translate systemd unit), so overriding here
     # rather than the app-wide task_soft_time_limit/task_time_limit leaves
     # every OTHER task's limits untouched.
-    soft_time_limit=21000,  # 5h50m
-    time_limit=21600,  # 6h hard kill
+    soft_time_limit=57600,  # 16h
+    time_limit=59400,  # 16h30m hard kill
 )
 def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
     """Background task to translate an article into every language in `langs`, batched by engine.
@@ -2320,7 +2416,7 @@ def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
             try:
                 from app.modules.newspaper.indexnow import ping_translation
 
-                ping_translation(article_id, lang)
+                ping_translation(article_id, lang, slug=article.slug)
             except Exception:
                 logger.warning(
                     "IndexNow ping failed for translation %s/%s", article_id, lang, exc_info=True
@@ -2336,7 +2432,7 @@ def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
         status = "ok" if not outcome["failed"] else "partial"
         return {"status": status, "article_id": article_id, **outcome}
     except Exception as e:
-        logger.error(f"Failed to batch-translate article {article_id}: {e}")
+        logger.error(f"Failed to batch-translate article {article_id}: {e}", exc_info=True)
         return {"status": "error", "reason": str(e)}
 
 
@@ -2471,7 +2567,7 @@ def _recompose_published_compose(
     except MistralError as exc:
         credit_issue = isinstance(exc, MistralCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
-        logger.error("recompose_published failed for %s: %s", article_id, exc)
+        logger.error("recompose_published failed for %s: %s", article_id, exc, exc_info=True)
         return None, {"status": status, "detail": str(exc)[:200]}
 
 
@@ -2494,7 +2590,13 @@ def _recompose_published_hero_image(
         return og_image, ""
 
 
-@celery_app.task(name="app.tasks.newspaper.recompose_published", bind=True, max_retries=20)
+@celery_app.task(
+    name="app.tasks.newspaper.recompose_published",
+    bind=True,
+    max_retries=20,
+    soft_time_limit=worker_config.COMPOSE_TASK_SOFT_TIME_LIMIT,
+    time_limit=worker_config.COMPOSE_TASK_TIME_LIMIT,
+)
 def recompose_published(self: Task, article_id: str) -> dict[str, str]:
     """Archive refresh: re-compose a PUBLISHED article into a NEW unlisted draft. When the draft clears the (strict) RECOMPOSE_AUTO_APPLY bar — grade, headline style, gatekeeper — it swaps onto the live article_id immediately (autonomous mode); otherwise it holds in the review queue for a human. Either way apply_recomposed_article does the swap: the URL survives and published_at is re-stamped to the apply time (recompose is a re-publish — owner policy 2026-07-15 — the story returns to the top of the feed).
 
@@ -2502,7 +2604,10 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
     compose time, which would replace the live page before any approval
     (human or automatic) — and approving it would double-publish the feed row.
     """
-    from app.modules.crawler.classifier_review_store import enqueue_classifier_review
+    from app.modules.crawler.classifier_review_store import (
+        enqueue_classifier_review,
+        has_pending_review_for_url,
+    )
     from app.modules.newspaper.article_store import get_article, insert_stored_article
     from app.modules.newspaper.security import sanitize_body
 
@@ -2511,6 +2616,25 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
         return {"status": "error", "reason": "article_not_found"}
     service_id = existing.service_id or ""
     source_url = (existing.source_url or "").strip()
+
+    # Same "a pending review already covers this" veto the normal pipeline
+    # applies before a compose (_pending_review_veto) -- recompose_published
+    # never had it, so every manual/API re-trigger (admin "Recompose" click,
+    # recompose_archive.py, recompose_session_service) while a prior draft
+    # was still awaiting review just paid for another full compose and left
+    # yet another orphaned unlisted draft behind (root-caused 2026-08-13:
+    # 10 accumulated orphan drafts for one article, none ever applied,
+    # nothing ever pointed a caller at the one already pending).
+    review_url_key = source_url or f"article:{article_id}"
+    try:
+        pending = has_pending_review_for_url(review_url_key)
+    except Exception:
+        # Fail OPEN: an infra hiccup on this check must never block a
+        # legitimate recompose -- worst case reverts to the pre-2026-08-13
+        # behavior of one extra compose, not a stuck task.
+        pending = False
+    if pending:
+        return {"status": "duplicate_review_pending", "article_id": article_id}
 
     # Fresh source when the article has a real page behind it; the article's
     # own prose otherwise (editorial briefs, chain triggers) — the two-stage
@@ -2533,15 +2657,18 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
 
         brief_for_recompose = get_brief(source_url.rsplit("/", 1)[-1])
 
-    composed, compose_error = _recompose_published_compose(
-        self,
-        article_id=article_id,
-        service_id=service_id,
-        source_url=source_url,
-        page_text=page_text,
-        page_title=page_title,
-        brief_for_recompose=brief_for_recompose,
-    )
+    from app.modules.ai.writer_tools import recomposing_article
+
+    with recomposing_article(article_id):
+        composed, compose_error = _recompose_published_compose(
+            self,
+            article_id=article_id,
+            service_id=service_id,
+            source_url=source_url,
+            page_text=page_text,
+            page_title=page_title,
+            brief_for_recompose=brief_for_recompose,
+        )
     if compose_error is not None:
         return compose_error
 
@@ -2640,7 +2767,11 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
     return {"status": "ok", "review_id": review_id, "draft_article_id": draft_id}
 
 
-@celery_app.task(name="app.tasks.newspaper.recompose_session_service")
+@celery_app.task(
+    name="app.tasks.newspaper.recompose_session_service",
+    soft_time_limit=worker_config.COMPOSE_TASK_SOFT_TIME_LIMIT,
+    time_limit=worker_config.COMPOSE_TASK_TIME_LIMIT,
+)
 def recompose_session_service(source_url: str) -> dict[str, str]:
     """Admin-triggered from the Sessions tab: "I just read this session's transcript, changed a prompt, and want to see the pipeline behave now" -- resolves the live article behind this source and hands off to recompose_published, the SAME archive-refresh path used for the pipeline's own weekly recompose cadence.
 
@@ -2672,12 +2803,28 @@ def recompose_session_service(source_url: str) -> dict[str, str]:
         brief = get_brief(source_url.rsplit("/", 1)[-1])
         article_id = brief.linked_article_id if brief else None
     else:
+        from urllib.parse import urlparse
+
         from app.modules.crawler.domain_tracker import domain_from_url
         from app.modules.newspaper.article_matching import find_latest_service_article
         from app.modules.newspaper.service_sources import service_for_domain
 
-        domain = domain_from_url(source_url)
-        service_id = service_for_domain(domain) if domain else ""
+        # service_by_domain is keyed by whatever a source's own registration
+        # call passed as its "domain" -- in practice that's often the full
+        # host (museum.datahistory.org), not domain_from_url's deliberately
+        # subdomain-collapsed eTLD+1 (datahistory.org). Root-caused live
+        # 2026-08-07: an admin recompose of the Data History Museum article
+        # silently no-op'd (fast "no_live_article_for_source", no compose
+        # ever started) because domain_from_url stripped exactly the
+        # subdomain the lookup needed. Try the full host first -- it's what
+        # a service is actually registered under far more often than not --
+        # and fall back to the collapsed eTLD+1 for services registered at
+        # their root domain.
+        host = (urlparse(source_url).hostname or "").lower()
+        service_id = service_for_domain(host) if host else ""
+        if not service_id:
+            domain = domain_from_url(source_url)
+            service_id = service_for_domain(domain) if domain else ""
         if service_id:
             article_id = find_latest_service_article(service_id)
 
@@ -2688,7 +2835,16 @@ def recompose_session_service(source_url: str) -> dict[str, str]:
 
 @celery_app.task(name="app.tasks.newspaper.apply_recomposed_article")
 def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dict[str, str]:
-    """Approved recompose of a published article: swap the draft's content onto the live article_id (same URL; published_at re-stamped to the apply time — recompose is a re-publish, owner policy 2026-07-15 — so the story returns to the top of the feed), version both states, re-index, re-translate, ping IndexNow. The unlisted draft row is left behind (same convention as recompose_review's superseded drafts — never in the feed or sitemap)."""
+    """Approved recompose of a published article: swap the draft's content onto the live article_id (same URL; published_at re-stamped to the apply time — recompose is a re-publish, owner policy 2026-07-15 — so the story returns to the top of the feed), version both states, re-index, re-translate, ping IndexNow. The unlisted draft row is left behind (same convention as recompose_review's superseded drafts — never in the feed or sitemap).
+
+    DRAFT GUARD (2026-08-11): when live_article_id is itself a drafted
+    (admin-withdrawn) article, none of that publish-adjacent fanout may
+    run — Typesense indexing and an IndexNow ping would actively surface a
+    withdrawn article in search, exactly what draft status exists to
+    prevent. Content still updates (replace_article_content handles that
+    unconditionally, see its own draft guard); only the indexing/
+    translation/IndexNow side effects below are skipped.
+    """
     import time as _time
     from uuid import UUID as _UUID
 
@@ -2703,6 +2859,8 @@ def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dic
         return {"status": "error", "reason": "draft_or_live_missing"}
 
     session = get_cassandra_session()
+    live_draft_row = session.execute(ArticleStmts.GET_PUBLISHED_AT_AND_DRAFT, (_UUID(live_article_id),)).one()
+    live_is_drafted = bool(getattr(live_draft_row, "draft", False)) if live_draft_row else False
     tags_row = session.execute(ArticleStmts.GET_TAGS, (_UUID(draft_article_id),)).one()
     tags = list(tags_row.tags or []) if tags_row else []
     if "updated" not in {t.lower() for t in tags}:
@@ -2737,6 +2895,14 @@ def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dic
         editor="recompose",
     )
 
+    if live_is_drafted:
+        logger.info(
+            "apply_recomposed_article: %s is a draft — content updated, "
+            "index/translate/IndexNow fanout skipped",
+            live_article_id,
+        )
+        return {"status": "ok_draft_preserved", "article_id": live_article_id}
+
     index_article.delay(
         article_id=live_article_id,
         title=draft.title,
@@ -2750,7 +2916,7 @@ def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dic
     try:
         from app.modules.newspaper.indexnow import ping_article
 
-        ping_article(live_article_id, translation_langs=[])
+        ping_article(live_article_id, translation_langs=[], slug=live.slug)
     except Exception:
         pass
     return {"status": "ok", "article_id": live_article_id}

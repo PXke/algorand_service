@@ -21,7 +21,7 @@ celery_app = Celery(
 
 # Kill hung tasks instead of wedging a worker slot forever. Sized generously: a
 # single article compose is one-at-a-time (rate-limited to ~0.42 rps) and may run
-# up to MISTRAL_MAX_TOOL_ROUNDS agentic rounds, so a healthy compose can legitimately
+# up to LLM_MAX_TOOL_ROUNDS agentic rounds, so a healthy compose can legitimately
 # take several minutes. The hard limit leaves 60s of grace so a task that catches
 # SoftTimeLimitExceeded can return partial progress before the kill.
 celery_app.conf.task_soft_time_limit = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "1800"))

@@ -11,6 +11,7 @@ from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet, verified_admin_wallet
 from app.modules.admin.schemas import (
+    ArticleDraftRequest,
     ArticlePatchRequest,
     ClassifierFeedbackCreate,
     DomainSetRequest,
@@ -19,6 +20,7 @@ from app.modules.admin.schemas import (
     GlossaryUpsertRequest,
     ScraperRunRequest,
     ServiceMergeRequest,
+    ShareLinkCreateRequest,
     SourceUpsertRequest,
 )
 from app.modules.admin.stores.cassandra import AdminCassandraStore
@@ -80,6 +82,68 @@ def admin_patch_article(request: Request) -> Response:
     wallet = verified_admin_wallet(request)
 
     updated = store.update_article(article_id, title=payload.title, summary=payload.summary, body=payload.body, editor=f"admin:{wallet}", )
+    if updated is None:
+        return json_error_response(404, "not_found", "Article not found")
+    return asdict(updated)
+
+
+def admin_get_article(request: Request) -> Response:
+    """Fetch one article's full detail for the admin editor. Bypasses the public draft gate (news_service.get_article, which treats a drafted article as not-found) — this is the only read path that can still see a currently-drafted article's content."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+    article = store.get_article(article_id)
+    if article is None:
+        return json_error_response(404, "not_found", "Article not found")
+    return asdict(article)
+
+
+def admin_list_article_versions(request: Request) -> Response:
+    """Version history for one article (title/editor/reason/date), newest first."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+    return {"items": store.list_article_versions(article_id)}
+
+
+def admin_get_article_version(request: Request) -> Response:
+    """Full content (title/summary/body) of one prior version, for the diff view."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+    try:
+        version = int(request.path_params.get("version", ""))
+    except ValueError:
+        return json_error_response(400, "invalid_request", "version must be an integer")
+    result = store.get_article_version(article_id, version)
+    if result is None:
+        return json_error_response(404, "not_found", "Version not found")
+    return result
+
+
+def admin_list_draft_articles(request: Request) -> Response:
+    """Currently-drafted articles (absent from the public feed, so the normal article list can never find them again to restore)."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    return {"items": store.list_draft_articles()}
+
+
+def admin_set_article_draft(request: Request) -> Response:
+    """Toggle an article's admin-only draft flag (unpublish/restore), reversibly."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+    try:
+        payload = serialization.decode(request.body or b"{}", ArticleDraftRequest)
+    except Exception as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+
+    updated = store.set_article_draft(article_id, payload.draft)
     if updated is None:
         return json_error_response(404, "not_found", "Article not found")
     return asdict(updated)
@@ -238,6 +302,19 @@ def admin_bump_queue_priority(request: Request) -> Response | dict:
 
     queue_id = request.path_params.get("queue_id", "")
     result = store.bump_queue_priority(queue_id)
+    if result is None:
+        return json_error_response(404, "not_found", "unknown queue_id or not pending")
+    return result
+
+
+def admin_set_human_pick(request: Request) -> Response | dict:
+    """Pin a pending queue row as today's Lane 1 (human pick) slot — one of the day's 3 standard-tier publishes reserved for a deliberate human choice rather than the automated significance/discovery lanes. Distinct from "Compose next" (bump_queue_priority), which only reorders the automated ranking; this reserves a specific lane so the other two lanes know to fill the remaining slots instead."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    queue_id = request.path_params.get("queue_id", "")
+    result = store.set_human_pick_for_today(queue_id)
     if result is None:
         return json_error_response(404, "not_found", "unknown queue_id or not pending")
     return result
@@ -513,6 +590,96 @@ def admin_delete_glossary_term(request: Request) -> Response:
     if not deleted:
         return json_error_response(404, "not_found", "Glossary entry not found")
     return {"deleted": True, "slug": slug}
+
+
+def _valid_uuid(value: str) -> bool:
+    """True when `value` parses as a UUID -- guards sharing.store's unguarded UUID(...) calls so a malformed id 400s cleanly instead of 500ing."""
+    from uuid import UUID
+
+    try:
+        UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def admin_create_share_link(request: Request) -> Response:
+    """Mint a new share link for one article -- the returned item is the only place a usable token is ever handed back."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+    if not _valid_uuid(article_id):
+        return json_error_response(400, "invalid_request", "article_id required")
+    try:
+        payload = serialization.decode(request.body or b"{}", ShareLinkCreateRequest)
+    except serialization.DecodeError as exc:
+        return json_error_response(400, "invalid_request", str(exc))
+    from app.modules.sharing.store import create_link
+
+    wallet = verified_admin_wallet(request)
+    link = create_link(article_id, label=payload.label.strip(), created_by=wallet or "")
+    return serialization.to_builtins(link)
+
+
+def admin_list_share_links(request: Request) -> Response:
+    """List every share link (active and revoked) ever minted for one article."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+    if not _valid_uuid(article_id):
+        return json_error_response(400, "invalid_request", "article_id required")
+    from app.modules.sharing.store import list_links_for_article
+
+    return {"items": serialization.to_builtins(list_links_for_article(article_id))}
+
+
+def admin_revoke_share_link(request: Request) -> Response:
+    """Revoke a share link -- it stops resolving for public readers but the row (and share history) persists."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+    token = request.path_params.get("token", "")
+    if not article_id or not token:
+        return json_error_response(400, "invalid_request", "article_id and token required")
+    from app.modules.sharing.store import revoke_link
+
+    link = revoke_link(token)
+    if link is None or link.article_id != article_id:
+        return json_error_response(404, "not_found", "Share link not found")
+    return serialization.to_builtins(link)
+
+
+def admin_list_article_comments(request: Request) -> Response:
+    """The full shared comment thread for one article -- the same thread every share-link holder sees."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+    if not _valid_uuid(article_id):
+        return json_error_response(400, "invalid_request", "article_id required")
+    from app.modules.sharing.store import list_comments
+
+    return {"items": serialization.to_builtins(list_comments(article_id))}
+
+
+def admin_delete_article_comment(request: Request) -> Response:
+    """Delete one comment (moderation against spam or an accidentally-shared link)."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+    comment_id = request.path_params.get("comment_id", "")
+    if not _valid_uuid(article_id) or not _valid_uuid(comment_id):
+        return json_error_response(400, "invalid_request", "article_id and comment_id required")
+    from app.modules.sharing.store import delete_comment
+
+    deleted = delete_comment(article_id, comment_id)
+    if not deleted:
+        return json_error_response(404, "not_found", "Comment not found")
+    return {"deleted": True, "comment_id": comment_id}
 
 
 def admin_list_scrapers(request: Request) -> Response:
@@ -1042,18 +1209,13 @@ def admin_interrogate_compose_session(request: Request) -> Response | dict:
     return result
 
 
-def admin_recompose_session(request: Request) -> Response | dict:
-    """Recompose the live article behind this compose session.
+def _dispatch_recompose(source_url: str) -> Response | dict:
+    """Dispatch recompose_session_service(source_url) and wait briefly for an instant failure to surface.
 
-    "I just read this transcript, changed a prompt, and want to see it behave now."
-
-    A compose session has no article_id of its own and its originating
-    publish_queue row has almost always already resolved by the time an
-    admin is reading it, so this is a DIFFERENT trigger from Queue tab's
-    "Recompose now" (which needs a still-pending queue row). Dispatches
-    recompose_session_service(source_url), which resolves the live article
-    behind this source and hands off to recompose_published — the same
-    archive-refresh path the pipeline's own weekly recompose cadence uses.
+    Shared by admin_recompose_session (source_url from the request body) and
+    admin_recompose_article (source_url resolved from the article's own
+    record) — same underlying trigger, just two different starting points an
+    admin has in hand.
 
     Not purely fire-and-forget: root-caused live 2026-08-05 that a pure
     fire-and-forget dispatch left a resolution failure (no live article
@@ -1064,18 +1226,6 @@ def admin_recompose_session(request: Request) -> Response | dict:
     briefly for JUST an instant failure to surface, then stop waiting once
     it's clear the real (multi-minute) compose is underway.
     """
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-
-    try:
-        body = serialization.loads(request.body or "{}")
-    except Exception:
-        body = {}
-    source_url = str(body.get("source_url", "")).strip()
-    if not source_url:
-        return json_error_response(400, "invalid_request", "source_url is required")
-
     try:
         from celery import Celery
         from celery.exceptions import TimeoutError as CeleryTimeoutError
@@ -1102,6 +1252,53 @@ def admin_recompose_session(request: Request) -> Response | dict:
             422, "recompose_failed", str(early_result.get("reason") or "unknown error")
         )
     return {"triggered": True, "source_url": source_url}
+
+
+def admin_recompose_session(request: Request) -> Response | dict:
+    """Recompose the live article behind this compose session.
+
+    "I just read this transcript, changed a prompt, and want to see it behave now."
+
+    A compose session has no article_id of its own and its originating
+    publish_queue row has almost always already resolved by the time an
+    admin is reading it, so this is a DIFFERENT trigger from Queue tab's
+    "Recompose now" (which needs a still-pending queue row). Dispatches
+    recompose_session_service(source_url), which resolves the live article
+    behind this source and hands off to recompose_published — the same
+    archive-refresh path the pipeline's own weekly recompose cadence uses.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    try:
+        body = serialization.loads(request.body or "{}")
+    except Exception:
+        body = {}
+    source_url = str(body.get("source_url", "")).strip()
+    if not source_url:
+        return json_error_response(400, "invalid_request", "source_url is required")
+
+    return _dispatch_recompose(source_url)
+
+
+def admin_recompose_article(request: Request) -> Response | dict:
+    """Recompose the given article directly from the Articles admin page — "reprocess this one now" without going through a compose session or publish-queue row. Resolves the article's own source_url and dispatches the same recompose_session_service path admin_recompose_session and the pipeline's own weekly cadence use."""
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+    article_id = request.path_params.get("article_id", "")
+
+    article = store.get_article(article_id)
+    if article is None:
+        return json_error_response(404, "not_found", "Article not found")
+    source_url = (article.source_url or "").strip()
+    if not source_url:
+        return json_error_response(
+            422, "no_source_url", "Article has no source_url to recompose from"
+        )
+
+    return _dispatch_recompose(source_url)
 
 
 def _seed_domain_crawl(
@@ -1496,8 +1693,14 @@ def admin_investigation_findings(request: Request) -> Response:
 def register_admin_routes(app: Router) -> None:
     """Register all admin API endpoints on the given Robyn app."""
     app.get("/api/v1/admin/analytics")(admin_analytics)
+    app.get("/api/v1/admin/articles/drafts")(admin_list_draft_articles)
+    app.get("/api/v1/admin/articles/:article_id/versions")(admin_list_article_versions)
+    app.get("/api/v1/admin/articles/:article_id/versions/:version")(admin_get_article_version)
+    app.get("/api/v1/admin/articles/:article_id")(admin_get_article)
     app.patch("/api/v1/admin/articles/:article_id")(admin_patch_article)
     app.delete("/api/v1/admin/articles/:article_id")(admin_delete_article)
+    app.post("/api/v1/admin/articles/:article_id/draft")(admin_set_article_draft)
+    app.post("/api/v1/admin/articles/:article_id/recompose")(admin_recompose_article)
     app.get("/api/v1/admin/briefs")(admin_list_briefs)
     app.post("/api/v1/admin/briefs")(admin_create_brief)
     app.post("/api/v1/admin/briefs/:brief_id/assign-now")(admin_assign_brief_now)
@@ -1507,6 +1710,7 @@ def register_admin_routes(app: Router) -> None:
     app.get("/api/v1/admin/publish-queue/:queue_id/breakdown")(admin_publish_queue_breakdown)
     app.post("/api/v1/admin/publish-queue/:queue_id/compose-next")(admin_bump_queue_priority)
     app.post("/api/v1/admin/publish-queue/:queue_id/recompose-now")(admin_recompose_now)
+    app.post("/api/v1/admin/publish-queue/:queue_id/pick-for-today")(admin_set_human_pick)
     app.post("/api/v1/admin/publish-queue/:queue_id/dead-end")(admin_dead_end_queue_row_domain)
     app.get("/api/v1/admin/training-stats")(admin_training_stats)
     app.post("/api/v1/admin/retrain")(admin_retrain)
@@ -1541,3 +1745,10 @@ def register_admin_routes(app: Router) -> None:
     app.get("/api/v1/admin/glossary")(admin_list_glossary)
     app.post("/api/v1/admin/glossary")(admin_upsert_glossary_term)
     app.delete("/api/v1/admin/glossary/:slug")(admin_delete_glossary_term)
+    app.post("/api/v1/admin/articles/:article_id/share-links")(admin_create_share_link)
+    app.get("/api/v1/admin/articles/:article_id/share-links")(admin_list_share_links)
+    app.delete("/api/v1/admin/articles/:article_id/share-links/:token")(admin_revoke_share_link)
+    app.get("/api/v1/admin/articles/:article_id/comments")(admin_list_article_comments)
+    app.delete("/api/v1/admin/articles/:article_id/comments/:comment_id")(
+        admin_delete_article_comment
+    )

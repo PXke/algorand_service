@@ -45,10 +45,20 @@ _TXID_RE = re.compile(r"\b[A-Z2-7]{52}\b")
 _ASSET_CTX_RE = re.compile(r"(?i)\b(?:asset(?:[\s-]+id)?|asa)\s*[#:]?\s*(\d{3,15})\b")
 # Explorer links the writer already emitted — their ids get verified too, and
 # a link to a nonexistent entity is delinked (the id itself is handled by the
-# entity rules above).
+# entity rules above). Includes algoexplorer.io (root-caused live 2026-08-10,
+# Kaafila article): the writer legitimately found that domain quoted verbatim
+# inside a real fetched page (kaafila.org's own 2021-era token page cites it),
+# so link_gate's "traced = trusted" rule correctly let it through even though
+# AlgoExplorer itself has since gone dark (DNS no longer resolves) — a real,
+# once-valid citation going stale, not a fabricated url. _LEGACY_EXPLORER_
+# DOMAINS below get their surviving (entity-verified) links REWRITTEN to the
+# gate's own live explorer rather than merely delinked, so the citation
+# survives instead of being dropped.
+_LEGACY_EXPLORER_DOMAINS = frozenset({"algoexplorer.io", "testnet.algoexplorer.io"})
 _EXPLORER_URL_RE = re.compile(
     r"https?://(?:www\.)?"
-    r"(?:allo\.info|lora\.algokit\.io/(?:mainnet|testnet)|explorer\.perawallet\.app)"
+    r"(allo\.info|lora\.algokit\.io/(?:mainnet|testnet)|explorer\.perawallet\.app"
+    r"|algoexplorer\.io|testnet\.algoexplorer\.io)"
     r"/(asset|account|address|tx|transaction)s?/([A-Za-z0-9]+)",
     re.IGNORECASE,
 )
@@ -167,9 +177,9 @@ def find_chain_entities(body: str) -> list[tuple[str, str]]:
     for m in _ASSET_CTX_RE.finditer(body):
         _add("asset", m.group(1))
     for m in _EXPLORER_URL_RE.finditer(body):
-        kind = _EXPLORER_KIND.get(m.group(1).lower())
+        kind = _EXPLORER_KIND.get(m.group(2).lower())
         if kind:
-            _add(kind, m.group(2))
+            _add(kind, m.group(3))
     return ordered
 
 
@@ -256,15 +266,34 @@ def _delink_dead_explorer_urls(body: str, statuses: dict[tuple[str, str], str]) 
         um = _EXPLORER_URL_RE.search(match.group(2))
         if um is None:
             return match.group(0)
-        kind = _EXPLORER_KIND.get(um.group(1).lower())
+        kind = _EXPLORER_KIND.get(um.group(2).lower())
         if kind is None:
             return match.group(0)
-        status = statuses.get((kind, um.group(2)))
+        status = statuses.get((kind, um.group(3)))
         if status in ("missing", "invalid"):
             return match.group(1)
         return match.group(0)
 
     return _MD_LINK_RE.sub(_delink, body)
+
+
+def _rewrite_legacy_explorer_urls(body: str, statuses: dict[tuple[str, str], str]) -> str:
+    """Rewrite a legacy-domain explorer link (_LEGACY_EXPLORER_DOMAINS) whose entity is verified live to the gate's own current explorer — a citation surviving from a since-decayed source shouldn't just lose its link, it should point somewhere that still works. Run AFTER _delink_dead_explorer_urls, which already dropped any legacy link whose entity doesn't exist at all."""
+
+    def _rewrite(match: re.Match) -> str:
+        um = _EXPLORER_URL_RE.search(match.group(2))
+        if um is None or um.group(1).lower() not in _LEGACY_EXPLORER_DOMAINS:
+            return match.group(0)
+        kind = _EXPLORER_KIND.get(um.group(2).lower())
+        if kind is None:
+            return match.group(0)
+        status = statuses.get((kind, um.group(3)))
+        if status not in ("mainnet", "testnet"):
+            return match.group(0)
+        new_url = _explorer_url(kind, um.group(3), status)
+        return f"[{match.group(1)}]({new_url})"
+
+    return _MD_LINK_RE.sub(_rewrite, body)
 
 
 def _auto_link_entities(
@@ -331,6 +360,7 @@ def link_and_verify_chain_entities(
 
     statuses = _compute_entity_statuses(body, checked=checked, budget=budget)
     body = _delink_dead_explorer_urls(body, statuses)
+    body = _rewrite_legacy_explorer_urls(body, statuses)
     body, linked, unverified = _auto_link_entities(body, statuses=statuses, corpus=corpus)
 
     if body != payload.get("body"):

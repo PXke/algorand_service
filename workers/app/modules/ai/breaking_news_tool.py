@@ -25,19 +25,18 @@ MARK_BREAKING_NEWS_SCHEMA: dict[str, Any] = {
         "name": "mark_breaking_news",
         "description": (
             "Flag THIS story as breaking news — urgent enough to publish immediately "
-            "instead of waiting for the next scheduled slot. Reserve this for what an "
-            "editor would actually interrupt the print run for: an active exploit or "
-            "loss of funds happening now, a live network outage or consensus failure, "
-            "a credible and imminent security threat, or a first-of-its-kind regulatory "
-            "or protocol event with immediate real-world stakes. Do NOT call this for "
-            "routine launches, feature updates, funding news, partnerships, or content "
-            "that merely uses words like 'launch' or 'major' — and never for anything "
-            "praising uptime, reliability, or the ABSENCE of an incident, no matter how "
-            "many urgent-sounding words appear near it. If the story would read the same "
-            "whether published today or in three days, it is not breaking. This does not "
-            "block or change what you write — call it once you're confident, then "
-            "continue normally. Calling it does not skip fact-checking or review; it "
-            "only affects how quickly a verified story reaches readers."
+            "instead of waiting for the next scheduled slot. Reserve for what an "
+            "editor would interrupt the print run for: an active exploit or loss of "
+            "funds happening now, a live network outage or consensus failure, a "
+            "credible imminent security threat, or a first-of-its-kind regulatory/"
+            "protocol event with immediate real-world stakes. Do NOT call for routine "
+            "launches, feature updates, funding news, partnerships, or content merely "
+            "using words like 'launch'/'major' — and never for anything praising "
+            "uptime or the ABSENCE of an incident, regardless of urgent-sounding "
+            "language nearby. If the story would read the same today or in three "
+            "days, it is not breaking. Does not block or change what you write — call "
+            "once confident, then continue; fact-checking and review still happen, "
+            "this only affects how fast a verified story reaches readers."
         ),
         "parameters": {
             "type": "object",

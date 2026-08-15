@@ -256,6 +256,80 @@ def query_corporate_registry(company_name: str, jurisdiction: str = "") -> dict[
         return {"error": str(exc), "note": "OpenCorporates may require OPENCORPORATES_API_TOKEN"}
 
 
+def query_uk_companies_house(company_name: str = "", company_number: str = "") -> dict[str, Any]:
+    """UK Companies House: incorporation date, status, registered office, SIC codes for a UK-registered company.
+
+    query_corporate_registry (OpenCorporates) covers ~140 jurisdictions
+    including the UK, but is disabled entirely without a paid
+    OPENCORPORATES_API_TOKEN. Companies House's own API is free and
+    UK-specific, so it's worth having as a dedicated tool rather than only
+    reachable through OpenCorporates' aggregation — useful whenever a story
+    claims a project is "a registered UK company" or names a UK entity.
+
+    Pass company_number for a direct profile lookup (exact, richer detail);
+    company_name for a name search (returns candidates, no company_number
+    guessing). Uses COMPANIES_HOUSE_API_KEY (HTTP Basic auth, username=key,
+    no password) — free to obtain from Companies House's developer hub.
+    """
+    import base64
+
+    from app.core.net_guard import guarded_get
+
+    key = os.getenv("COMPANIES_HOUSE_API_KEY", "").strip()
+    if not key:
+        return {"error": "COMPANIES_HOUSE_API_KEY not configured"}
+    number = (company_number or "").strip()
+    name = (company_name or "").strip()
+    if not number and not name:
+        return {"error": "company_name or company_number required"}
+
+    # HTTP Basic auth, username=key, no password -- guarded_get has no auth=
+    # kwarg (SSRF-guarded GET, header-only), so build the header directly.
+    basic = base64.b64encode(f"{key}:".encode()).decode()
+    headers = {"User-Agent": _UA, "Accept": "application/json", "Authorization": f"Basic {basic}"}
+    try:
+        if number:
+            resp = guarded_get(
+                f"https://api.company-information.service.gov.uk/company/{number}",
+                headers=headers,
+                timeout=_TIMEOUT,
+            )
+            if resp.status_code == 404:
+                return {"company_number": number, "error": "no company with this number"}
+            resp.raise_for_status()
+            c = resp.json()
+            return {
+                "name": c.get("company_name"),
+                "number": c.get("company_number"),
+                "status": c.get("company_status"),
+                "type": c.get("type"),
+                "incorporated": c.get("date_of_creation"),
+                "sic_codes": c.get("sic_codes"),
+                "registered_office": c.get("registered_office_address"),
+            }
+        resp = guarded_get(
+            "https://api.company-information.service.gov.uk/search/companies",
+            headers=headers,
+            params={"q": name, "items_per_page": 5},
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        out = [
+            {
+                "name": item.get("title"),
+                "number": item.get("company_number"),
+                "status": item.get("company_status"),
+                "incorporated": item.get("date_of_creation"),
+                "address": item.get("address_snippet"),
+            }
+            for item in (data.get("items") or [])[:5]
+        ]
+        return {"query": name, "matches": len(out), "companies": out}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 # --- History ---------------------------------------------------------------
 def query_court_dockets(entity_name: str) -> dict[str, Any]:
     """CourtListener: civil/criminal cases, bankruptcies. Token optional via COURTLISTENER_TOKEN."""
@@ -419,6 +493,27 @@ ENTITY_OSINT_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "query_uk_companies_house",
+            "description": (
+                "UK Companies House: incorporation date, status, registered "
+                "office, SIC codes for a UK-registered company. Free, "
+                "UK-specific alternative to query_corporate_registry for "
+                "verifying a 'registered UK company' claim. Pass "
+                "company_number for an exact profile, or company_name to "
+                "search for candidates."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "company_name": {"type": "string"},
+                    "company_number": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "query_court_dockets",
             "description": (
                 "CourtListener: lawsuits, bankruptcies, criminal cases against an entity."
@@ -454,6 +549,7 @@ ARCHIVE_HANDLERS: dict[str, Any] = {
 ENTITY_OSINT_HANDLERS: dict[str, Any] = {
     "screen_sanctions_and_pep": screen_sanctions_and_pep,
     "query_corporate_registry": query_corporate_registry,
+    "query_uk_companies_house": query_uk_companies_house,
     "query_court_dockets": query_court_dockets,
     "search_leak_databases": search_leak_databases,
 }
@@ -466,16 +562,22 @@ def investigative_tools(
 
     Archive/infrastructure tools always register. Entity-background OSINT joins
     only for investigative lanes, and query_corporate_registry only when
-    OPENCORPORATES_API_TOKEN is set — without it OpenCorporates returns a
-    permanent 401, so registering it just burns a writer turn.
+    OPENCORPORATES_API_TOKEN is set (without it OpenCorporates returns a
+    permanent 401, so registering it just burns a writer turn) — same reasoning
+    for query_uk_companies_house and COMPANIES_HOUSE_API_KEY.
     """
     schemas = list(ARCHIVE_SCHEMAS)
     handlers = dict(ARCHIVE_HANDLERS)
     if include_entity_osint:
         has_oc_token = bool(os.getenv("OPENCORPORATES_API_TOKEN", "").strip())
+        has_ch_key = bool(os.getenv("COMPANIES_HOUSE_API_KEY", "").strip())
+        skip_unconfigured = {
+            "query_corporate_registry": not has_oc_token,
+            "query_uk_companies_house": not has_ch_key,
+        }
         for schema in ENTITY_OSINT_SCHEMAS:
             name = schema["function"]["name"]
-            if name == "query_corporate_registry" and not has_oc_token:
+            if skip_unconfigured.get(name):
                 continue
             schemas.append(schema)
             handlers[name] = ENTITY_OSINT_HANDLERS[name]

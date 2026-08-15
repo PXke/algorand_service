@@ -138,3 +138,25 @@ def test_unsourced_specifics_block_auto_approve_before_any_grading() -> None:
     assert passed is False
     assert meta["auto_applied"] == "0"
     assert "1,000" in meta["unsourced_hold_reason"]
+
+
+def test_broken_link_claim_blocks_auto_approve_before_any_grading() -> None:
+    """An unverified broken-link claim must fail auto-approve closed on its own too: grade/headline/gatekeeper can't see whether the writer ever tried click_element, so a draft wrongly calling a real JS-modal feature "broken" would otherwise clear the AND-gate and re-open the hold (lumirogue.com, recurred 2026-08-10 and 2026-08-12).
+
+    Short-circuits before any grading, so no Cassandra/Mistral is touched.
+    """
+    from app.modules.newspaper.tasks.publish_tasks import _fresh_auto_approve_passes
+
+    passed, meta = _fresh_auto_approve_passes(
+        title=_GOOD_TITLE,
+        body="The Terms of use page returns a 404.",
+        page_text="platform",
+        source_url="editorial://brief/x",
+        broken_link_hold_reason=(
+            "unverified broken-link claim(s), no click_element/play_interactive "
+            "click attempted this session: returns a 404"
+        ),
+    )
+    assert passed is False
+    assert meta["auto_applied"] == "0"
+    assert "404" in meta["broken_link_hold_reason"]

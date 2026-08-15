@@ -28,16 +28,15 @@ CONFIRM_ALERT_TOPIC_SCHEMA: dict[str, Any] = {
         "name": "confirm_alert_topic",
         "description": (
             "Confirm THIS story genuinely is an active alert: 'scam_alert' for a "
-            "real scam/phishing/drainer campaign targeting users (wallet drainer "
-            "live now, fake site impersonating a project, malicious airdrop), or "
+            "real scam/phishing/drainer campaign targeting users right now, or "
             "'network_incident' for a real degradation of the chain or core "
             "infrastructure (outage, consensus stall, exploit in progress). Call "
-            "it only when the SUBJECT of the story is the alert itself — never "
-            "because security words appear in the material (a research paper "
-            "discussing 'malicious servers', a security-feature announcement, or "
-            "a post-mortem of a long-resolved incident is NOT an active alert). "
-            "Confirming controls the article's alert tag and follow-up routing; "
-            "it does not change what you write or skip any review."
+            "only when the SUBJECT of the story IS the alert — never because "
+            "security words appear in the material (a research paper mentioning "
+            "'malicious servers', a security-feature announcement, or a post-mortem "
+            "of a resolved incident is NOT an active alert). Controls the article's "
+            "alert tag and follow-up routing; does not change what you write or "
+            "skip review."
         ),
         "parameters": {
             "type": "object",

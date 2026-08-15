@@ -207,6 +207,76 @@ class ContactMessageItem(msgspec.Struct, kw_only=True):
     created_at_epoch: int
 
 
+# ── Draft sharing ────────────────────────────────────────────────────────────
+class ShareLinkCreateRequest(msgspec.Struct, kw_only=True):
+    """Admin request to mint a new share link for one article."""
+
+    label: Annotated[str, Meta(max_length=120)] = ""
+
+
+class ShareLinkItem(msgspec.Struct, kw_only=True):
+    """One share link, admin-facing.
+
+    The token itself is included only here — the one response an
+    admin-authenticated caller ever sees it in.
+    """
+
+    token: str
+    article_id: str
+    label: str
+    created_at_epoch: int
+    created_by: str
+    revoked: bool
+    revoked_at_epoch: int | None = None
+
+
+class CommentQuoteAnchor(msgspec.Struct, kw_only=True):
+    """A W3C TextQuoteSelector-style anchor.
+
+    The exact selected text plus a short span of surrounding context,
+    resolved client-side against the rendered DOM at read time (see
+    frontend/src/lib/textHighlight.ts) — never raw offsets into the
+    markdown source.
+    """
+
+    quote: Annotated[str, Meta(min_length=1, max_length=4000)]
+    prefix: Annotated[str, Meta(max_length=200)] = ""
+    suffix: Annotated[str, Meta(max_length=200)] = ""
+
+
+class CreateCommentRequest(msgspec.Struct, kw_only=True):
+    """Public (token-gated) request to add a comment, optionally anchored to a text quote."""
+
+    body: Annotated[str, Meta(min_length=1, max_length=2000)]
+    author_name: Annotated[str, Meta(max_length=80)] = ""
+    anchor: CommentQuoteAnchor | None = None  # None = a general, unanchored comment
+
+
+class CommentItem(msgspec.Struct, kw_only=True):
+    """One stored comment.
+
+    Same shape for the admin read and the public (token-gated) read — the
+    thread is shared, per product decision.
+    """
+
+    comment_id: str
+    article_id: str
+    body: str
+    author_name: str
+    created_at_epoch: int
+    anchor_quote: str | None = None
+    anchor_prefix: str | None = None
+    anchor_suffix: str | None = None
+
+
+class SharedArticleResponse(msgspec.Struct, kw_only=True):
+    """What a share-token holder sees: the article plus enough link metadata for the page header."""
+
+    article: ArticleDetail
+    is_draft: bool
+    link_label: str
+
+
 # ── Suggestions ───────────────────────────────────────────────────────────────
 class CreateSuggestionRequest(msgspec.Struct, kw_only=True):
     """Request body for a treasury-payment-gated service suggestion."""
@@ -351,6 +421,12 @@ class ArticlePatchRequest(msgspec.Struct, kw_only=True):
     title: Annotated[str, Meta(max_length=512)] | None = None
     summary: Annotated[str, Meta(max_length=2000)] | None = None
     body: Annotated[str, Meta(max_length=200_000)] | None = None
+
+
+class ArticleDraftRequest(msgspec.Struct, kw_only=True):
+    """Request body for toggling an article's admin-only draft flag."""
+
+    draft: bool
 
 
 class EditorialBriefCreate(msgspec.Struct, kw_only=True):

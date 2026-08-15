@@ -26,6 +26,7 @@ from app.modules.newspaper.publish_policy import (
 )
 from app.modules.newspaper.publish_queue_store import (
     QueuedPublishRow,
+    clear_human_pick,
     is_terminal_outcome,
     list_pending_queue,
     mark_queue_done,
@@ -351,9 +352,15 @@ def _publish_breaking_row(
     return entry, status, review_full
 
 
-@celery_app.task(name="app.tasks.newspaper.drain_breaking_publish_queue")
+@celery_app.task(
+    name="app.tasks.newspaper.drain_breaking_publish_queue",
+    soft_time_limit=config.COMPOSE_TASK_SOFT_TIME_LIMIT,
+    time_limit=config.COMPOSE_TASK_TIME_LIMIT,
+)
 def drain_breaking_publish_queue() -> dict[str, object]:
     """Publish breaking-tier items immediately up to the separate daily cap."""
+    if config.AUTO_COMPOSE_PAUSED:
+        return {"status": "skipped", "reason": "auto_compose_paused", "published": 0}
     if is_credit_exhausted(config.LLM_PROVIDER_WRITER):
         return {"status": "skipped", "reason": "mistral_credit_exhausted", "published": 0}
     slots = remaining_breaking_publish_slots()
@@ -506,11 +513,15 @@ def _publish_standard_row(
 
 
 def _standard_drain_setup() -> tuple[int, dict | None]:
-    """Slot budget and early-exit checks before composing anything: daily cap, admin-approved backlog release, and credit exhaustion. Returns (slots, early_result) — early_result is a terminal drain result the caller should return immediately, else None to proceed.
+    """Slot budget and early-exit checks before composing anything: auto-compose pause, daily cap, admin-approved backlog release, and credit exhaustion. Returns (slots, early_result) — early_result is a terminal drain result the caller should return immediately, else None to proceed.
 
     Backlog release never composes (it only publishes already-paid-for
-    work), so it must run even while Mistral credit is exhausted.
+    work), so it must run even while Mistral credit is exhausted -- but NOT
+    while auto-compose is explicitly paused, since that's an operator saying
+    "nothing automatic happens right now," full stop.
     """
+    if config.AUTO_COMPOSE_PAUSED:
+        return 0, {"status": "skipped", "reason": "auto_compose_paused", "published": 0}
     slots = remaining_standard_publish_slots()
     if slots <= 0:
         return slots, {"status": "skipped", "reason": "standard_daily_cap_reached", "published": 0}
@@ -525,14 +536,104 @@ def _standard_drain_setup() -> tuple[int, dict | None]:
     return slots, None
 
 
-@celery_app.task(name="app.tasks.newspaper.drain_standard_publish_queue")
+def _today_str() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(tz=UTC).strftime("%Y-%m-%d")
+
+
+def _select_lane_for_today(pending: list[QueuedPublishRow]) -> str | None:
+    """Which of the 3 daily lanes this run's fresh compose should draw from.
+
+    Lanes are human pick / biggest-significant / genuinely-new. Returns None
+    to fall back to the plain priority order (all 3 lanes already used
+    today, or a lane's pool was empty when its turn came — a quiet day must
+    never stall a slot).
+
+    Order matters: a human pick always wins if present and unused; discovery
+    (Lane 3, "genuinely new") is checked before scale (Lane 2, "biggest") so
+    a day with both a discovery and an update candidate doesn't let the
+    (usually more numerous) update pool crowd out the one-shot discovery
+    lane.
+    """
+    from app.modules.newspaper.publish_daily_guard import lanes_used_today
+
+    today = _today_str()
+    used = lanes_used_today()
+    if "human" not in used and any(
+        getattr(row, "human_pick_day", None) == today for row in pending
+    ):
+        return "human"
+    if "discovery" not in used and any(
+        row.publish_kind == PublishKind.SERVICE_DISCOVERY.value for row in pending
+    ):
+        return "discovery"
+    if "scale" not in used and any(
+        row.publish_kind != PublishKind.SERVICE_DISCOVERY.value for row in pending
+    ):
+        return "scale"
+    return None
+
+
+def _record_lane_consumed(row: QueuedPublishRow, lane: str | None) -> None:
+    """After a successful fresh compose+publish, mark the lane spent and clear a consumed human pin."""
+    if lane is None:
+        return
+    from app.modules.newspaper.publish_daily_guard import record_lane_used
+
+    record_lane_used(lane)
+    if lane == "human":
+        clear_human_pick(row.queue_id)
+
+
+def _publish_standard_row_for_lane(
+    row: QueuedPublishRow, published: int, lane: str | None
+) -> tuple[dict | None, int, dict | None]:
+    """`_publish_standard_row`, gated by this run's selected lane (see `_select_lane_for_today`).
+
+    A non-matching row is left pending (never marked/skipped as rejected) so
+    a later row or a later run can take it. Returns the same
+    (entry, published_delta, early_stop) shape as `_publish_standard_row`.
+    """
+    if lane is not None and not _row_matches_lane(row, lane):
+        return None, 0, None
+    entry, published_delta, early_stop = _publish_standard_row(row, published)
+    if published_delta:
+        _record_lane_consumed(row, lane)
+    return entry, published_delta, early_stop
+
+
+def _row_matches_lane(row: QueuedPublishRow, lane: str) -> bool:
+    if lane == "human":
+        return getattr(row, "human_pick_day", None) == _today_str()
+    if lane == "discovery":
+        return row.publish_kind == PublishKind.SERVICE_DISCOVERY.value
+    if lane == "scale":
+        return row.publish_kind != PublishKind.SERVICE_DISCOVERY.value
+    return True
+
+
+@celery_app.task(
+    name="app.tasks.newspaper.drain_standard_publish_queue",
+    soft_time_limit=config.COMPOSE_TASK_SOFT_TIME_LIMIT,
+    time_limit=config.COMPOSE_TASK_TIME_LIMIT,
+)
 def drain_standard_publish_queue() -> dict[str, object]:
-    """Publish standard-tier items on the ~3h schedule, up to 7/day."""
+    """Publish standard-tier items on the ~3h schedule, up to 7/day.
+
+    Composes at most one fresh row per run, so the 3-lane split (human pick /
+    biggest-significant / genuinely-new) plays out ACROSS runs over the day:
+    each run's `_select_lane_for_today` call picks whichever lane hasn't had
+    its slot filled yet, and only rows matching that lane are eligible for
+    THIS run's fresh compose below (review-bound rows are unaffected — see
+    _process_review_row, which is intentionally outside the lane split).
+    """
     slots, early_result = _standard_drain_setup()
     if early_result is not None:
         return early_result
 
     pending = _pending_for_tier(PublishTier.STANDARD, limit=config.PUBLISH_QUEUE_BATCH_LIMIT)
+    lane = _select_lane_for_today(pending)
     published = 0
     results: list[dict[str, str]] = []
 
@@ -570,7 +671,9 @@ def drain_standard_publish_queue() -> dict[str, object]:
 
             if published >= 1:
                 break
-            entry, published_delta, early_stop = _publish_standard_row(row, published)
+            entry, published_delta, early_stop = _publish_standard_row_for_lane(
+                row, published, lane
+            )
             if early_stop is not None:
                 return {**early_stop, "results": results}
             published += published_delta
@@ -790,9 +893,16 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
             # The article just became publicly visible — same IndexNow ping the
             # direct-publish path sends. Best-effort, never blocks the release.
             try:
+                from app.modules.newspaper.article_store import ensure_article_slug
                 from app.modules.newspaper.indexnow import ping_article
 
-                ping_article(str(art.article_id))
+                # ensure_article_slug is idempotent -- the slug was already
+                # claimed by _claim_slug_for_feed above, this just reads it
+                # back so IndexNow submits the permanent URL, not the id.
+                ping_article(
+                    str(art.article_id),
+                    slug=ensure_article_slug(art.article_id, art.title),
+                )
             except Exception:
                 pass
             try:
@@ -830,6 +940,8 @@ def drain_approved_feed_queue() -> dict[str, object]:
 @celery_app.task(name="app.tasks.newspaper.ensure_review_ready")
 def ensure_review_ready() -> dict[str, object]:
     """Keep exactly one composed article waiting in the review queue at all times (when candidates exist), so the admin always has one to act on."""
+    if config.AUTO_COMPOSE_PAUSED:
+        return {"status": "skipped", "reason": "auto_compose_paused"}
     if is_credit_exhausted(config.LLM_PROVIDER_WRITER):
         return {"status": "skipped", "reason": "mistral_credit_exhausted"}
     from app.modules.crawler.classifier_review_store import review_queue_full

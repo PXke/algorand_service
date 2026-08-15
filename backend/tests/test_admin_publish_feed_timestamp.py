@@ -27,6 +27,7 @@ class _FakeSession:
         self._feed_row = feed_row
         self.feed_inserts: list[tuple] = []
         self.published_at_updates: list[tuple] = []
+        self.slug_updates: list[tuple] = []
 
     def prepare(self, cql: str) -> str:
         return cql
@@ -37,6 +38,8 @@ class _FakeSession:
             return _Result(self._feed_row)
         if q.startswith("INSERT INTO algorand_platform.articles_feed"):
             self.feed_inserts.append(tuple(params))
+        elif q.startswith("UPDATE algorand_platform.articles_feed SET slug"):
+            self.slug_updates.append(tuple(params))
         elif q.startswith("UPDATE algorand_platform.articles_by_id SET published_at"):
             self.published_at_updates.append(tuple(params))
         return _Result(None)
@@ -64,10 +67,15 @@ def test_publish_article_to_feed_stamps_release_time_not_compose_time(
         tags=["a", "b"],
         image_url="https://example.com/img.png",
         source_url="https://example.com/",
+        slug="a-real-slug",
     )
     fake = _FakeSession(feed_row)
     _patch(monkeypatch, fake)
-    monkeypatch.setattr("app.modules.seo.indexnow.ping_article", lambda *_a, **_kw: None)
+    pinged: list[dict] = []
+    monkeypatch.setattr(
+        "app.modules.seo.indexnow.ping_article",
+        lambda *a, **kw: pinged.append({"args": a, "kwargs": kw}),
+    )
 
     store = AdminCassandraStore()
     before = datetime.now(tz=UTC)
@@ -82,3 +90,42 @@ def test_publish_article_to_feed_stamps_release_time_not_compose_time(
 
     assert len(fake.published_at_updates) == 1
     assert fake.published_at_updates[0] == (feed_published_at, article_id)
+
+    # Root-caused live 2026-08-10 (Bing Webmaster Tools submitted-URL audit):
+    # an admin-approved article's feed row never carried its slug at all, so
+    # IndexNow and the homepage fell back to the raw uuid for every such
+    # article. The slug must be carried onto the feed row on release, and
+    # threaded through to the IndexNow ping.
+    assert len(fake.slug_updates) == 1
+    assert fake.slug_updates[0] == (
+        "a-real-slug",
+        feed_published_at.strftime("%Y-%m"),
+        feed_published_at,
+        article_id,
+    )
+    assert pinged[0]["kwargs"]["slug"] == "a-real-slug"
+
+
+def test_publish_article_to_feed_skips_slug_write_when_article_has_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No slug write at all for an article that never claimed one — nothing to carry, and no accidental empty-string slug landing in the feed."""
+    article_id = uuid4()
+    feed_row = SimpleNamespace(
+        article_id=article_id,
+        service_id="svc",
+        title="Title",
+        summary="Summary",
+        published_at=datetime.now(tz=UTC) - timedelta(hours=5),
+        tags=["a", "b"],
+        image_url="https://example.com/img.png",
+        source_url="https://example.com/",
+        slug=None,
+    )
+    fake = _FakeSession(feed_row)
+    _patch(monkeypatch, fake)
+    monkeypatch.setattr("app.modules.seo.indexnow.ping_article", lambda *_a, **_kw: None)
+
+    store = AdminCassandraStore()
+    assert store._publish_article_to_feed(str(article_id)) is True
+    assert fake.slug_updates == []

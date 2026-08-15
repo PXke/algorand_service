@@ -15,11 +15,12 @@ Catch regressions on every push via tests, lint, and release packaging smoke.
 - Ruff check + `ruff format --check` on `backend/`, `workers/`, `deploy/scripts`
 - Vulture dead-code scan (`pyproject.toml` `[tool.vulture]`)
 - Shellcheck on `deploy/*.sh` and `deploy/scripts/*.sh`
-- Pytest coverage report (`--cov=app`) in CI (no codecov upload yet)
+- Pytest coverage report (`--cov=app`) in a dedicated `backend-coverage` job (serial `-n0`; parallel suite stays fast)
 - Local: `make lint` / `make lint-fix`
 - Conduit `go test ./...`
 - Flutter `dart analyze lib` + `flutter test`
 - `docker-test` CI job: `make docker-test` stack (Python **3.14-slim-bookworm** image, lint + pytest in container)
+- Stack smoke after docker-test: API `/health/ready` + feed read + `celery inspect ping` (`docker/bin/smoke-stack.sh`)
 - Weekly/manual release-candidate workflow builds versioned tarball + sha256
 - Dependabot for pip, go, and GitHub Actions
 
@@ -32,7 +33,7 @@ Catch regressions on every push via tests, lint, and release packaging smoke.
 
 - Integration tests with Testcontainers (Cassandra, Redis, Typesense)
 - Coverage thresholds and upload to codecov
-- E2E: API + worker + chain smoke in CI
+- Full newspaper publish smoke in CI (`make docker-smoke` — needs scrape; keep manual for now)
 - Bandit / Trivy image scanning
 - Required status checks before merge to main
 - Performance regression bench for chain tail batch size

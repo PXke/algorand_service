@@ -98,6 +98,7 @@ def test_render_article_head_has_core_tags() -> None:
     head, body = render.render_article(_article())
     assert head.count("<title>") == 1
     assert 'rel="canonical" href="https://algorand.pxke.me/news/articles/abc123"' in head
+    assert 'http-equiv="content-language" content="en"' in head
     assert 'property="og:type" content="article"' in head
     assert "img.io/hero.png" in head
     assert 'name="twitter:card" content="summary_large_image"' in head
@@ -145,6 +146,10 @@ def test_render_article_hreflang_for_translations() -> None:
     assert "/fa/news/articles/" in head
     assert 'property="og:locale" content="fa_IR"' in head
     assert 'rel="canonical" href="https://algorand.pxke.me/fa/news/articles/abc123"' in head
+    # Bing doesn't read hreflang at all — content-language is the page-level
+    # signal it actually uses, and must reflect the REQUESTED locale (fa),
+    # not English, on a translated page.
+    assert 'http-equiv="content-language" content="fa"' in head
     # Visible translation picker in the body (not just <head> hreflang).
     assert 'aria-label="Translations"' in body
     assert 'hreflang="fa"' in body
@@ -212,20 +217,6 @@ def test_article_has_breadcrumb_and_image_meta() -> None:
     assert 'property="og:image:height" content="630"' in head
     assert 'property="og:image:alt"' in head
     assert 'name="twitter:image:alt"' in head
-
-
-def test_article_icon_like_image_also_gets_share_card() -> None:
-    """A source favicon/logo in image_url (the workers' brand-icon fallback) must not leak into og:image as a stretched square icon — it gets the same generated card as a fully missing image."""
-    head, _ = render.render_article(_article(image_url="https://x.io/favicon.ico"))
-    assert "/og/article/abc123.png" in head
-    assert "favicon.ico" not in head
-
-
-def test_article_real_image_omits_dimensions() -> None:
-    """Omits og:image dimensions for a real hero image while keeping alt text."""
-    head, _ = render.render_article(_article(image_url="https://img.io/h.png"))
-    assert "og:image:width" not in head  # unknown dims for a real hero image
-    assert 'property="og:image:alt"' in head  # alt still present
 
 
 def test_head_has_rss_alternate_link() -> None:
@@ -329,6 +320,23 @@ def test_pick_related_articles_shares_tags() -> None:
     related = render.pick_related_articles(article, feed, limit=3)
     assert len(related) == 1
     assert related[0].article_id == "id1"
+
+
+def test_pick_related_articles_ignores_meta_tag_only_matches() -> None:
+    """Sharing only a provenance/meta tag (discovery, web, ...) is not relatedness.
+
+    Regression for a real bug (found 2026-08-09): almost every service-discovery
+    article carries "discovery"/"web", so an unfiltered tag-intersection matched
+    a DeFi swap-aggregator piece against dozens of unrelated articles that only
+    shared those two provenance tags, not an actual topic.
+    """
+    article = _article(tags=["defi", "discovery", "web"])
+    feed = _feed(3)
+    feed[0].tags = ["discovery", "web"]  # only provenance overlap -- not related
+    feed[1].tags = ["defi"]  # genuine topical overlap -- related
+    feed[2].tags = ["nft"]  # no overlap at all
+    related = render.pick_related_articles(article, feed, limit=5)
+    assert [item.article_id for item in related] == ["id1"]
 
 
 def test_render_article_related_stories() -> None:
@@ -568,6 +576,15 @@ def test_news_sitemap_windows_recent_only() -> None:
     assert "<url>" not in old
 
 
+def test_news_sitemap_caps_at_1000_urls() -> None:
+    """Google News sitemap spec hard-caps at 1000 URLs — this site's daily publish cap keeps a 48h window far under that in practice, but the slice must still hold if it's ever exceeded."""
+    import time
+
+    many = _feed(1005, epoch=int(time.time()) - 3600)
+    xml = sitemap.news_sitemap_xml(many)
+    assert xml.count("<url>") == 1000
+
+
 def test_sitemap_excludes_tombstoned_articles(monkeypatch: pytest.MonkeyPatch) -> None:
     """Excludes hard-deleted (tombstoned) articles from the sitemap."""
     items = _feed(3)
@@ -756,60 +773,51 @@ def test_llms_txt_lists_feed_and_topics() -> None:
 # --- title length budget + SSR visibility -------------------------------------
 
 
-def test_short_title_keeps_brand_suffix() -> None:
-    """Keeps the brand suffix on a short title."""
-    head, _ = render.render_article(_article(title="Short headline"))
-    assert "<title>Short headline — " in head
-
-
-def test_long_title_drops_brand_suffix_but_stays_whole() -> None:
-    """Drops the brand suffix but keeps the full title intact once it's already near the length budget."""
-    t = "Algorand Foundation Restructures Leadership For The Coming Years"  # 65 chars
-    head, _ = render.render_article(_article(title=t))
-    assert f"<title>{t}</title>" in head
-
-
-def test_overlong_title_is_served_whole_not_truncated() -> None:
-    """Serves an overlong headline whole — the engine shortens it better than a blind cut can."""
-    t = (
-        "Algorand Foundation Restructures Leadership to Accelerate "
-        "AI-Driven On-Chain Activity Across the Entire Ecosystem"
-    )
-    head, _ = render.render_article(_article(title=t))
-    assert f"<title>{t}</title>" in head
-    assert "…</title>" not in head
-    # Full headline still rides in og:title untouched.
-    assert f'property="og:title" content="{t}"' in head
-
-
-def test_translated_title_over_65_chars_keeps_its_tail() -> None:
-    """Keeps the tail of a translated headline: translations run 15-25% longer than the English source, so a flat 65-char cut truncated ~95% of fr/es/ru titles (2026-07-29)."""
-    t = (
-        "La Fondation Algorand restructure sa direction pour accélérer "
-        "une activité on-chain pilotée par intelligence artificielle"
-    )
-    assert len(t) > 65
-    head, _ = render.render_article(_article(title=t))
-    assert f"<title>{t}</title>" in head
-    assert "…</title>" not in head
-
-
-def test_title_width_budget_counts_cjk_as_double_width() -> None:
-    """Drops the brand suffix on a CJK headline that a character count would wave through: 40 Han glyphs occupy ~80 Latin advance widths, over the ~65-unit SERP budget."""
-    t = "阿尔戈兰德基金会重组领导层以加速整个生态系统中由人工智能驱动的链上活动增长"
-    assert len(t) < 65  # a character count says this fits...
-    assert render._display_width(t) > 65  # ...but its rendered width does not
-    head, _ = render.render_article(_article(title=t))
-    assert f"<title>{t}</title>" in head
-    assert f"{t} — " not in head
+@pytest.mark.parametrize(
+    ("title", "expect_brand_suffix", "expect_ellipsis"),
+    [
+        ("Short headline", True, False),
+        ("Algorand Foundation Restructures Leadership For The Coming Years", False, False),
+        (
+            "Algorand Foundation Restructures Leadership to Accelerate "
+            "AI-Driven On-Chain Activity Across the Entire Ecosystem",
+            False,
+            False,
+        ),
+        (
+            "La Fondation Algorand restructure sa direction pour accélérer "
+            "une activité on-chain pilotée par intelligence artificielle",
+            False,
+            False,
+        ),
+        (
+            "阿尔戈兰德基金会重组领导层以加速整个生态系统中由人工智能驱动的链上活动增长",
+            False,
+            False,
+        ),
+    ],
+    ids=["short", "near-budget", "overlong-en", "overlong-fr", "cjk-width"],
+)
+def test_title_budget(
+    title: str, expect_brand_suffix: bool, expect_ellipsis: bool
+) -> None:
+    """Title budget: short keeps brand suffix; long/CJK drop it; never blind-truncate mid-headline."""
+    head, _ = render.render_article(_article(title=title))
+    if expect_brand_suffix:
+        assert f"<title>{title} — " in head
+    else:
+        assert f"<title>{title}</title>" in head
+        assert f"{title} — " not in head
+    if expect_ellipsis:
+        assert "…</title>" in head
+    else:
+        assert "…</title>" not in head
 
 
 def test_pathological_title_still_guarded() -> None:
     """Clamps only a runaway title, so a model glitch can never ship a multi-KB <title>."""
     t = "Algorand " * 60
     head, _ = render.render_article(_article(title=t))
-    import re
-
     m = re.search(r"<title>(.*?)</title>", head)
     assert m is not None
     assert render._display_width(m.group(1)) <= 201
@@ -831,32 +839,26 @@ def test_spa_ready_script_removes_ssr_from_dom() -> None:
 # --- icon-like image_url must not become a hero or share image -----------------
 
 
-def test_favicon_image_url_never_becomes_hero_or_og_image() -> None:
-    """Falls back to the generated share card and omits a hero <img> when image_url is favicon-like."""
+def test_icon_like_vs_real_share_image() -> None:
+    """Icon/favicon URLs fall back to generated OG card; real heroes keep absolute + proxied img."""
     head, body = render.render_article(_article(image_url="https://brain-chain.app/favicon.svg"))
     assert "favicon.svg" not in head
     assert "favicon.svg" not in body
-    # Metas fall back to the generated share card instead.
     assert 'property="og:image" content="https://algorand.pxke.me/og/article/' in head
-    # No stretched-icon hero in the SSR body.
     assert "<img" not in body
 
-
-def test_icon_named_png_also_treated_as_icon() -> None:
-    """Treats a logo-named PNG as icon-like, omitting it as a hero image too."""
     head, body = render.render_article(_article(image_url="https://example.com/logo-dark.png"))
     assert "logo-dark.png" not in head
     assert "<img" not in body
 
+    head, _ = render.render_article(_article(image_url="https://x.io/favicon.ico"))
+    assert "/og/article/abc123.png" in head
+    assert "favicon.ico" not in head
 
-def test_real_share_image_still_renders_hero() -> None:
-    """Renders a real (non-icon-like) image as both the share image and the body hero.
+    head, _ = render.render_article(_article(image_url="https://img.io/h.png"))
+    assert "og:image:width" not in head
+    assert 'property="og:image:alt"' in head
 
-    The two surfaces use different URLs on purpose: og:/twitter: tags need an
-    absolute URL a remote scraper can fetch, while the in-page hero goes through
-    the same-origin image proxy so the document and its LCP image share one
-    connection (no extra DNS/TLS hop to the origin host).
-    """
     head, body = render.render_article(_article())
     assert "img.io/hero.png" in head
     assert '<img src="/api/v1/img?url=https%3A%2F%2Fimg.io%2Fhero.png"' in body

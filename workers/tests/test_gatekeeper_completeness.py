@@ -39,3 +39,13 @@ def test_named_persons_unscreened() -> None:
     assert "Jane Doe" in names
     # Once screened, nothing is reported.
     assert c.named_persons_unscreened(src, '{"screen_sanctions_and_pep": {}}') == []
+
+
+def test_named_persons_unscreened_ignores_marketing_copy() -> None:
+    """Marketing bullet phrases (Capitalized runs that aren't names) must not be reported as candidate persons -- found 2026-08-07 on a Polkagold review row whose gk_reasons listed "Robust Ecosystem Role" and "Digital Trust" alongside a genuine founder mention."""
+    src = (
+        "Founder Jane Doe launched the protocol. Robust Ecosystem Role. "
+        "Innovative Distribution Model. Digital Trust. The Reserve Digital Commodity."
+    )
+    names = c.named_persons_unscreened(src, tool_trace="{}")
+    assert names == ["Jane Doe"]

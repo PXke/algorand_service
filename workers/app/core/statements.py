@@ -55,6 +55,15 @@ class ArticleStmts:
         "SELECT published_at, first_published_at FROM algorand_platform.articles_by_id "
         "WHERE article_id = ?"
     )
+    # Mirrors backend's ArticleStmts.GET_PUBLISHED_AT_AND_DRAFT -- used by
+    # replace_article_content's draft guard (2026-08-11) so an approved
+    # recompose of a DRAFTED article can't silently un-draft it back onto
+    # the public feed, same failure shape as the admin content-edit path
+    # fixed 2026-08-11 (AdminCassandraStore._write_article).
+    GET_PUBLISHED_AT_AND_DRAFT = _Stmt(
+        "SELECT published_at, first_published_at, draft FROM algorand_platform.articles_by_id "
+        "WHERE article_id = ?"
+    )
     GET_IMAGE_META = _Stmt(
         "SELECT service_id, source_url, image_url FROM algorand_platform.articles_by_id "
         "WHERE article_id = ?"
@@ -93,6 +102,15 @@ class ArticleStmts:
         "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ?, "
         "image_url = ?, published_at = ?, first_published_at = ?, updated_at = ? "
         "WHERE article_id = ?"
+    )
+    # Same content swap as UPDATE_CONTENT_FULL, but for a DRAFTED live article
+    # (2026-08-11): published_at/first_published_at are deliberately left
+    # alone -- a draft has no feed row to re-stamp for, and touching them
+    # would corrupt what set_article_draft's restore path re-inserts if the
+    # owner later un-drafts it.
+    UPDATE_CONTENT_KEEP_TIMESTAMPS = _Stmt(
+        "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ?, "
+        "image_url = ?, updated_at = ? WHERE article_id = ?"
     )
     # Slug claim (migration 056). Kept as separate writes rather than widening
     # the INSERTs above: those take positional params at several call sites,
@@ -225,7 +243,7 @@ class PublishQueueStmts:
         "FROM algorand_platform.publish_queue_pending WHERE status = ? LIMIT ?"
     )
     GET_DETAIL = _Stmt(
-        "SELECT display_name, scrape_url, payload, created_at "
+        "SELECT display_name, scrape_url, payload, created_at, human_pick_day "
         "FROM algorand_platform.publish_queue WHERE queue_id = ?"
     )
     GET_FULL = _Stmt(
@@ -253,6 +271,12 @@ class PublishQueueStmts:
         "WHERE status = ? AND priority = ? AND created_at = ? AND queue_id = ?"
     )
     DELETE_DEDUPE = _Stmt("DELETE FROM algorand_platform.publish_queue_dedupe WHERE dedupe_key = ?")
+    SET_HUMAN_PICK = _Stmt(
+        "UPDATE algorand_platform.publish_queue SET human_pick_day = ?, updated_at = ? WHERE queue_id = ?"
+    )
+    CLEAR_HUMAN_PICK = _Stmt(
+        "UPDATE algorand_platform.publish_queue SET human_pick_day = null, updated_at = ? WHERE queue_id = ?"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -606,6 +630,18 @@ class ServiceProfileStmts:
         "INSERT INTO algorand_platform.service_profiles ("
         "service_id, impressiveness_score, text_chars, reasons, updated_at"
         ") VALUES (?, ?, ?, ?, ?)"
+    )
+    # Kept separate from INSERT above: impressiveness updates on every
+    # content-changed ingest, scale only every SERVICE_SCALE_REFRESH_DAYS --
+    # a merged upsert would null out one column's value every time the other
+    # writes.
+    GET_SCALE = _Stmt(
+        "SELECT scale_score, scale_updated_at FROM algorand_platform.service_profiles "
+        "WHERE service_id = ?"
+    )
+    UPSERT_SCALE = _Stmt(
+        "UPDATE algorand_platform.service_profiles "
+        "SET scale_score = ?, scale_source = ?, scale_updated_at = ? WHERE service_id = ?"
     )
 
 

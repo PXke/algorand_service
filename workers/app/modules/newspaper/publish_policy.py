@@ -310,6 +310,7 @@ def build_publish_intent(
     published_at: str = "",
     mail_from: str = "",
     stored_service_weight: int = 0,
+    stored_scale_signal: float | None = None,
     chain_triggered: bool = False,
     relevance: float | None = None,
     novelty: float | None = None,
@@ -353,6 +354,7 @@ def build_publish_intent(
         published_at=published_at,
         mail_from=mail_from,
         stored_service_weight=stored_service_weight,
+        scale_signal=stored_scale_signal,
         relevance=relevance,
         novelty=novelty,
         is_event=bool(event_id),
@@ -370,6 +372,7 @@ def build_publish_intent(
             f"+timeliness={breakdown.timeliness_bonus}"
             f"(score={breakdown.timeliness_score})"
             f"+diff={breakdown.diff_bonus}+announce={breakdown.announce_bonus}"
+            f"+scale={breakdown.scale_bonus}"
             f"+classifier={breakdown.classifier_adjust}"
             f"×nov_factor={breakdown.novelty_factor}"
             f"{' [seo_spam]' if breakdown.seo_spam else ''} "

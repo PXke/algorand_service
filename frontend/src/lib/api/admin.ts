@@ -30,6 +30,8 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.postJson(`/api/v1/admin/publish-queue/${queueId}/compose-next`, {}, h()),
     recomposeQueueItemNow: (queueId: string) =>
       api.postJson(`/api/v1/admin/publish-queue/${queueId}/recompose-now`, {}, h()),
+    pickQueueItemForToday: (queueId: string) =>
+      api.postJson(`/api/v1/admin/publish-queue/${queueId}/pick-for-today`, {}, h()),
     deadEndQueueItemDomain: (queueId: string) =>
       api.postJson(`/api/v1/admin/publish-queue/${queueId}/dead-end`, {}, h()),
     getTrainingStats: () => api.getJson('/api/v1/admin/training-stats', h()),
@@ -95,6 +97,8 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.deleteJson(`/api/v1/admin/sources/${encodeURIComponent(serviceId)}`, h()),
     mergeSources: (body: { target_service_id: string; fold_service_ids: string[] }) =>
       api.postJson('/api/v1/admin/sources/merge', body, h()),
+    getArticle: (id: string) =>
+      api.getJson(`/api/v1/admin/articles/${id}`, h()),
     patchArticle: (id: string, body: Record<string, unknown>) =>
       api.patchJson(`/api/v1/admin/articles/${id}`, body, h()),
     deleteArticle: (id: string, blockSource = false) =>
@@ -102,6 +106,16 @@ export function createAdminApi(wallet: string, token: string | null) {
         `/api/v1/admin/articles/${id}${blockSource ? '?block_source=true' : ''}`,
         h(),
       ),
+    recomposeArticle: (id: string) =>
+      api.postJson(`/api/v1/admin/articles/${id}/recompose`, {}, h()),
+    setArticleDraft: (id: string, draft: boolean) =>
+      api.postJson(`/api/v1/admin/articles/${id}/draft`, { draft }, h()),
+    listDraftArticles: () =>
+      api.getJson('/api/v1/admin/articles/drafts', h()),
+    listArticleVersions: (id: string) =>
+      api.getJson(`/api/v1/admin/articles/${id}/versions`, h()),
+    getArticleVersion: (id: string, version: number) =>
+      api.getJson(`/api/v1/admin/articles/${id}/versions/${version}`, h()),
     recomposeReview: (body: { review_id: string }) =>
       api.postJson('/api/v1/admin/classifier-reviews/recompose', body, h()),
     investigationFindings: (url: string) =>
@@ -119,5 +133,18 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.postJson('/api/v1/admin/glossary', body, h()),
     deleteGlossaryTerm: (slug: string) =>
       api.deleteJson(`/api/v1/admin/glossary/${encodeURIComponent(slug)}`, h()),
+    createShareLink: (articleId: string, label = '') =>
+      api.postJson(`/api/v1/admin/articles/${articleId}/share-links`, { label }, h()),
+    listShareLinks: (articleId: string) =>
+      api.getJson(`/api/v1/admin/articles/${articleId}/share-links`, h()),
+    revokeShareLink: (articleId: string, token: string) =>
+      api.deleteJson(
+        `/api/v1/admin/articles/${articleId}/share-links/${encodeURIComponent(token)}`,
+        h(),
+      ),
+    listArticleComments: (articleId: string) =>
+      api.getJson(`/api/v1/admin/articles/${articleId}/comments`, h()),
+    deleteComment: (articleId: string, commentId: string) =>
+      api.deleteJson(`/api/v1/admin/articles/${articleId}/comments/${commentId}`, h()),
   }
 }

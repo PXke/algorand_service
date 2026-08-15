@@ -147,6 +147,59 @@ def test_chat_completion_raises_on_http_error() -> None:
         mistral_module.httpx.Client = original
 
 
+def test_wants_reasoning_effort_retry_matches_mistral_phrasing() -> None:
+    """Mistral's own rejection text ("... reasoning_effort is not enabled for this model") must still trigger the retry-without-it path."""
+
+    class FakeResponse:
+        status_code = 400
+        text = '{"error":{"message":"reasoning_effort is not enabled for this model"}}'
+
+    assert (
+        MistralClient._wants_reasoning_effort_retry(FakeResponse(), {"reasoning_effort": "high"})
+        is True
+    )
+
+
+def test_wants_reasoning_effort_retry_matches_openai_phrasing() -> None:
+    """OpenAI (gpt-5.6-luna) phrases the same rejection differently -- "Function tools with reasoning_effort are not supported ... in /v1/chat/completions" -- confirmed live 2026-08-14: the original "not enabled"-only match missed this, so the whole compose died on the first call instead of retrying without the field."""
+
+    class FakeResponse:
+        status_code = 400
+        text = (
+            '{"error":{"message":"Function tools with reasoning_effort are not supported '
+            'for gpt-5.6-luna in /v1/chat/completions. To use function tools, use '
+            '/v1/responses or set reasoning_effort to \'none\'.","param":"reasoning_effort"}}'
+        )
+
+    assert (
+        MistralClient._wants_reasoning_effort_retry(FakeResponse(), {"reasoning_effort": "high"})
+        is True
+    )
+
+
+def test_wants_reasoning_effort_retry_false_when_payload_has_no_reasoning_effort() -> None:
+    """A 400 that happens to mention reasoning_effort in its text must not trigger the retry loop if we never sent the field -- nothing to strip out."""
+
+    class FakeResponse:
+        status_code = 400
+        text = "reasoning_effort is not supported"
+
+    assert MistralClient._wants_reasoning_effort_retry(FakeResponse(), {}) is False
+
+
+def test_wants_reasoning_effort_retry_false_on_unrelated_400() -> None:
+    """An ordinary 400 unrelated to reasoning_effort must not be swallowed into a silent retry."""
+
+    class FakeResponse:
+        status_code = 400
+        text = '{"error":{"message":"invalid model"}}'
+
+    assert (
+        MistralClient._wants_reasoning_effort_retry(FakeResponse(), {"reasoning_effort": "high"})
+        is False
+    )
+
+
 def test_post_short_circuits_when_credit_already_marked_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

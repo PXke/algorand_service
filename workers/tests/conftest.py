@@ -43,6 +43,7 @@ class FakeRedis:
     def __init__(self) -> None:
         """Start with an empty in-process key/value store."""
         self.store: dict[str, str] = {}
+        self.sets: dict[str, set[str]] = {}
 
     def get(self, key: str) -> str | None:
         """Return the stored value for a key, or None if absent."""
@@ -73,6 +74,17 @@ class FakeRedis:
     def exists(self, key: str) -> int:
         """Return 1 if the key exists, else 0."""
         return 1 if key in self.store else 0
+
+    def sadd(self, key: str, *values: str) -> int:
+        """Add members to a set key, returning the count actually added."""
+        existing = self.sets.setdefault(key, set())
+        before = len(existing)
+        existing.update(values)
+        return len(existing) - before
+
+    def smembers(self, key: str) -> set[str]:
+        """Return a set key's members (empty set if absent)."""
+        return set(self.sets.get(key, set()))
 
 
 @pytest.fixture

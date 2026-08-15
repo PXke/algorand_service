@@ -18,8 +18,10 @@ from app.modules.newspaper.publish_policy import (
 )
 from app.modules.newspaper.publish_queue_store import enqueue_publish
 from app.modules.newspaper.service_profile_store import (
+    get_stored_scale_signal,
     get_stored_service_weight,
     upsert_service_profile,
+    upsert_service_scale,
 )
 from app.modules.newspaper.snapshot_store import (
     get_latest_snapshot,
@@ -207,6 +209,42 @@ def _stable_content_hash(text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _resolve_stale_scale_signal(
+    *, service_id: str, display_name: str, source_url: str, outbound_links: list[str]
+) -> float | None:
+    """Return this service's scale signal, refreshing it first if stale/never-scored.
+
+    Piggybacked on this call site (the only existing per-service write path)
+    rather than a separate scheduled job — this is already doing comparable-
+    cost inline work here (novelty/service-profile lookups). None means "no
+    score available" (never resolved yet, or a resolver error this run) and
+    must NOT be conflated with a resolved-and-tiny 0.0 — compute_priority
+    treats None as the neutral unresolved floor, not as "small". A resolver
+    failure/timeout here must never break ingest.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    score, updated_at = get_stored_scale_signal(service_id)
+    stale = updated_at is None or (
+        datetime.now(tz=UTC) - updated_at > timedelta(days=config.SERVICE_SCALE_REFRESH_DAYS)
+    )
+    if not stale:
+        return score
+
+    try:
+        from app.modules.newspaper.service_scale import resolve_service_scale
+
+        fresh_score, source = resolve_service_scale(
+            display_name=display_name,
+            source_url=source_url,
+            outbound_links=outbound_links,
+        )
+        upsert_service_scale(service_id=service_id, scale_score=fresh_score, scale_source=source)
+        return fresh_score
+    except Exception:
+        return score
+
+
 def ingest_publish_signal(
     *,
     service_id: str,
@@ -323,6 +361,12 @@ def ingest_publish_signal(
         source_url=source_url,
     )
     stored_weight = get_stored_service_weight(service_id)
+    scale_signal = _resolve_stale_scale_signal(
+        service_id=service_id,
+        display_name=display_name,
+        source_url=source_url,
+        outbound_links=list(outbound_links),
+    )
 
     intent = build_publish_intent(
         service_id=service_id,
@@ -335,6 +379,7 @@ def ingest_publish_signal(
         source_url=source_url,
         mail_from=mail_from,
         stored_service_weight=stored_weight,
+        stored_scale_signal=scale_signal,
         chain_triggered=round_num > 0,
         relevance=signals.relevance,
         novelty=novelty,

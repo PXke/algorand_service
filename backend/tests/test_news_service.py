@@ -88,6 +88,106 @@ def test_get_article_detail() -> None:
     assert detail.trigger_round == 42
 
 
+def test_get_article_hides_draft_articles() -> None:
+    """A draft article is admin-only -- every caller of get_article is a public route, so it must read as not-found, same as a deleted one."""
+    store = InMemoryArticleStore()
+    store.insert(
+        StoredArticle(
+            article_id="id-draft",
+            service_id="svc",
+            title="Withdrawn",
+            summary="S",
+            body="Body",
+            published_at_epoch=1,
+            draft=True,
+        )
+    )
+    assert NewsService(store=store).get_article("id-draft") is None
+
+
+def test_get_article_ignoring_draft_gate_returns_the_draft() -> None:
+    """The one intentional hole through the draft gate.
+
+    get_article still hides the draft (regression guard on the
+    _fetch_detail refactor), while get_article_ignoring_draft_gate returns
+    it, with was_draft=True.
+    """
+    store = InMemoryArticleStore()
+    store.insert(
+        StoredArticle(
+            article_id="id-draft",
+            service_id="svc",
+            title="Withdrawn",
+            summary="S",
+            body="Body",
+            published_at_epoch=1,
+            draft=True,
+        )
+    )
+    service = NewsService(store=store)
+
+    assert service.get_article("id-draft") is None
+
+    result = service.get_article_ignoring_draft_gate("id-draft")
+    assert result is not None
+    detail, was_draft = result
+    assert detail.title == "Withdrawn"
+    assert was_draft is True
+
+
+def test_get_article_ignoring_draft_gate_reports_false_for_a_live_article() -> None:
+    """was_draft is False for an already-published article fetched through the same bypass method."""
+    store = InMemoryArticleStore()
+    store.insert(
+        StoredArticle(
+            article_id="id-live",
+            service_id="svc",
+            title="Live",
+            summary="S",
+            body="Body",
+            published_at_epoch=1,
+        )
+    )
+    result = NewsService(store=store).get_article_ignoring_draft_gate("id-live")
+    assert result is not None
+    _detail, was_draft = result
+    assert was_draft is False
+
+
+def test_get_article_ignoring_draft_gate_returns_none_for_missing_article() -> None:
+    """A nonexistent article_id returns None, not a tuple -- callers must not unpack a missing article."""
+    store = InMemoryArticleStore()
+    assert NewsService(store=store).get_article_ignoring_draft_gate("does-not-exist") is None
+
+
+def test_get_articles_bulk_excludes_drafts() -> None:
+    """The bulk fetch used for RSS/enrichment must not leak a draft either."""
+    store = InMemoryArticleStore()
+    store.insert(
+        StoredArticle(
+            article_id="id-live",
+            service_id="svc",
+            title="Live",
+            summary="S",
+            body="Body",
+            published_at_epoch=1,
+        )
+    )
+    store.insert(
+        StoredArticle(
+            article_id="id-draft",
+            service_id="svc",
+            title="Withdrawn",
+            summary="S",
+            body="Body",
+            published_at_epoch=1,
+            draft=True,
+        )
+    )
+    items = NewsService(store=store).get_articles(["id-live", "id-draft"])
+    assert list(items.keys()) == ["id-live"]
+
+
 def test_get_article_applies_translation_overlay() -> None:
     """Overlays the stored translation's title/summary/body when a lang is requested."""
     import json

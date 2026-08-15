@@ -37,11 +37,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install --upgrade --extra-index-url https://download.pytorch.org/whl/cpu \
             -e "./backend[dev]" -e "./workers[ml,dev]"
-      - name: Pytest with coverage
+      - name: Pytest (parallel)
         working-directory: backend
+        run: PYTHONPATH=. pytest tests/ -q
+
+  backend-coverage:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install backend deps
         run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade --extra-index-url https://download.pytorch.org/whl/cpu \
+            -e "./backend[dev]" -e "./workers[ml,dev]"
           pip install pytest-cov
-          PYTHONPATH=. pytest tests/ -q --cov=app --cov-report=term-missing
+      - name: Pytest coverage (serial)
+        working-directory: backend
+        run: PYTHONPATH=. pytest tests/ -q -n0 --cov=app --cov-report=term-missing
 
   workers:
     runs-on: ubuntu-latest
@@ -58,6 +74,8 @@ jobs:
             -e "./backend[dev]" -e "./workers[ml,dev]"
       - name: Workers pytest
         working-directory: workers
+        env:
+          RUN_ML_TESTS: "1"
         run: PYTHONPATH=. pytest tests/ -q
       - name: Import smoke
         working-directory: workers
@@ -97,6 +115,16 @@ jobs:
           PLATFORM_TAG: ci-${{ github.sha }}
           PLATFORM_DEV: "1"
         run: ./docker/bin/compose-test.sh
+      - name: Stack smoke (API + worker)
+        env:
+          PLATFORM_TAG: ci-${{ github.sha }}
+          PLATFORM_DEV: "1"
+        run: |
+          docker compose --profile app up -d --wait backend worker
+          ./docker/bin/smoke-stack.sh
+      - name: Tear down compose stack
+        if: always()
+        run: docker compose --profile app --profile test down -v
       - name: Prune CI images
         if: always()
         run: docker image prune -af

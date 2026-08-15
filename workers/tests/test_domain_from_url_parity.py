@@ -35,6 +35,12 @@ VECTORS = [
     ("https://sub.notion.site/p", "sub.notion.site"),
     ("not-a-url", ""),
     ("", ""),
+    # Bare hostname, no scheme -- the natural way a caller/model references a
+    # source by name rather than a full URL (2026-08-07 fix: this used to
+    # silently return "" for every one of these).
+    ("lora.algokit.io", "algokit.io"),
+    ("www.algorand.co", "algorand.co"),
+    ("foo.medium.com", "foo.medium.com"),
 ]
 
 

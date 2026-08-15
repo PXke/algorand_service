@@ -70,21 +70,34 @@ class IndexNowClient:
     def article_url(
         self, article_id: str, lang: str | None = None, slug: str | None = None
     ) -> str:
-        """Absolute article URL; non-English locales use ?lang= (matches SSR/sitemap).
+        """Absolute article URL.
 
-        Prefers the permanent slug (migration 056). Callers that pass only an id
-        still produce a working URL — the site 301s id -> slug — but they cost a
-        redirect and, for IndexNow and social cards, publish the pre-migration
-        form of a URL that is meant to be permanent.
+        Non-English locales live under a path segment (/xx/news/articles/...),
+        matching the SSR/sitemap URL scheme exactly (see backend
+        seo.render.article_path) -- NOT the old ?lang= query param, which this
+        used to still emit after the rest of the site migrated off it
+        (root-caused live 2026-08-10 via Bing Webmaster Tools: every URL
+        IndexNow submitted still used ?lang=, and every one used the raw
+        article_id instead of its slug, since no caller had a slug to pass in
+        the first place -- see below).
+
+        Prefers the permanent slug (migration 056). Callers that pass only an
+        id still produce a working URL — the site 301s id -> slug — but they
+        cost a redirect and submit the pre-migration form of a URL that is
+        meant to be permanent.
         """
-        base = f"{self.site()}/news/articles/{slug or article_id}"
+        path_id = slug or article_id
         code = (lang or "").strip()
         if code and code != "en":
-            return f"{base}?lang={code}"
-        return base
+            return f"{self.site()}/{code}/news/articles/{path_id}"
+        return f"{self.site()}/news/articles/{path_id}"
 
     def article_urls(
-        self, article_id: str, translation_langs: Iterable[str] | None = None
+        self,
+        article_id: str,
+        translation_langs: Iterable[str] | None = None,
+        *,
+        slug: str | None = None,
     ) -> list[str]:
         """Deduped English URL plus each translated-locale URL for an article."""
         langs: list[str] = []
@@ -95,8 +108,8 @@ class IndexNowClient:
                 continue
             seen.add(code)
             langs.append(code)
-        urls = [self.article_url(article_id)]
-        urls.extend(self.article_url(article_id, lang) for lang in langs)
+        urls = [self.article_url(article_id, slug=slug)]
+        urls.extend(self.article_url(article_id, lang, slug=slug) for lang in langs)
         return dedupe_urls(urls)
 
     def sitemap_url(self) -> str:
@@ -108,29 +121,45 @@ class IndexNowClient:
         return f"{self.site()}/sitemap-news.xml"
 
     def content_change_urls(
-        self, article_id: str, *, translation_langs: Iterable[str] | None = None
+        self,
+        article_id: str,
+        *,
+        translation_langs: Iterable[str] | None = None,
+        slug: str | None = None,
     ) -> list[str]:
         """Article URL(s) plus sitemaps — use on publish, edit, or delete."""
-        urls = self.article_urls(article_id, translation_langs)
+        urls = self.article_urls(article_id, translation_langs, slug=slug)
         urls.extend((self.sitemap_url(), self.sitemap_news_url()))
         return dedupe_urls(urls)
 
-    def translation_change_urls(self, article_id: str, lang: str) -> list[str]:
+    def translation_change_urls(
+        self, article_id: str, lang: str, *, slug: str | None = None
+    ) -> list[str]:
         """New or updated locale URL plus sitemaps — use when a translation lands."""
         return dedupe_urls(
-            [self.article_url(article_id, lang), self.sitemap_url(), self.sitemap_news_url()]
+            [
+                self.article_url(article_id, lang, slug=slug),
+                self.sitemap_url(),
+                self.sitemap_news_url(),
+            ]
         )
 
     # ── Pinging ─────────────────────────────────────────────────────────────
     def ping_article(
-        self, article_id: str, *, translation_langs: Iterable[str] | None = None
+        self,
+        article_id: str,
+        *,
+        translation_langs: Iterable[str] | None = None,
+        slug: str | None = None,
     ) -> None:
         """Ping IndexNow for an article's content change (publish, edit, or delete)."""
-        self.ping(self.content_change_urls(article_id, translation_langs=translation_langs))
+        self.ping(
+            self.content_change_urls(article_id, translation_langs=translation_langs, slug=slug)
+        )
 
-    def ping_translation(self, article_id: str, lang: str) -> None:
+    def ping_translation(self, article_id: str, lang: str, *, slug: str | None = None) -> None:
         """Ping IndexNow for a newly landed translation of an article."""
-        self.ping(self.translation_change_urls(article_id, lang))
+        self.ping(self.translation_change_urls(article_id, lang, slug=slug))
 
     def ping(self, urls: list[str] | Iterable[str]) -> None:
         """Notify IndexNow of added/updated/removed URLs. No-op without key/URLs."""

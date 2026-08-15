@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from typing import Never
+from typing import Any, Never
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -30,6 +31,37 @@ def _install_no_network_guard() -> None:
 
 
 _install_no_network_guard()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never burn wall clock on time.sleep in unit tests."""
+    monkeypatch.setattr("time.sleep", lambda *_a, **_kw: None)
+
+
+def stmt_cql(registry: type, name: str) -> str:
+    """Raw CQL for a ``_Stmt`` registry entry without triggering ``prepare_cached``."""
+    return registry.__dict__[name].cql
+
+
+def patch_cassandra(monkeypatch: pytest.MonkeyPatch, session: Any | None = None) -> MagicMock:
+    """Patch ``get_cassandra_session`` + ``prepare_cached`` (identity) for unit tests."""
+    if session is None:
+        session = MagicMock()
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: session)
+    return session
+
+
+def execute_pairs(session: MagicMock) -> list[tuple[object, object]]:
+    """``(stmt, params)`` for ``session.execute`` calls that passed params."""
+    pairs: list[tuple[object, object]] = []
+    for c in session.execute.call_args_list:
+        if len(c.args) < 2:
+            continue
+        pairs.append((c.args[0], c.args[1]))
+    return pairs
+
 
 # Must import after the guard installs above (not a style choice — see its
 # docstring): anything importing app.main transitively must never race ahead

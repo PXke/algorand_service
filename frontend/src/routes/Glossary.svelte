@@ -16,7 +16,13 @@
   const filtered = $derived.by(() => {
     const q = query.trim().toLowerCase()
     return terms
-      .filter((t) => !q || t.term.toLowerCase().includes(q) || t.definition.toLowerCase().includes(q))
+      .filter(
+        (t) =>
+          !q ||
+          t.term.toLowerCase().includes(q) ||
+          t.definition.toLowerCase().includes(q) ||
+          (t.aliases ?? []).some((alias) => alias.toLowerCase().includes(q)),
+      )
       .slice()
       .sort((a, b) => a.term.localeCompare(b.term))
   })

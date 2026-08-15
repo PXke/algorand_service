@@ -59,23 +59,59 @@ def _slug_words(slug: str) -> set[str]:
     return {w for w in slug.split("-") if w}
 
 
+def _existing_candidates(rows: object) -> list[tuple[str, str]]:
+    """(candidate_slug, canonical_slug) for every existing term's own slug AND each of its aliases.
+
+    An alias is just as much "this concept already exists" as the term
+    itself — a suggestion matching only an alias (e.g. 'LST' when 'Liquid
+    Staking' already covers it via that alias) is exactly the case that was
+    slipping through when only canonical slugs were checked (root-caused
+    2026-08-07). The canonical_slug is what gets reported back, never a
+    synthetic alias-slug the admin wouldn't recognize.
+    """
+    candidates: list[tuple[str, str]] = []
+    for row in rows:
+        canonical = getattr(row, "slug", None)
+        if not canonical:
+            continue
+        candidates.append((canonical, canonical))
+        for alias in getattr(row, "aliases", None) or ():
+            alias_slug = _slugify(alias)
+            if alias_slug:
+                candidates.append((alias_slug, canonical))
+    return candidates
+
+
+def _find_exact_existing_match(new_slug: str, candidates: list[tuple[str, str]]) -> str | None:
+    """The canonical slug of an existing term whose own slug OR an alias exactly equals new_slug.
+
+    Catches an exact ALIAS hit the DB's IF NOT EXISTS structurally cannot:
+    that guard only enforces uniqueness on the term's own primary-key slug,
+    never on its aliases column.
+    """
+    for candidate_slug, canonical in candidates:
+        if candidate_slug == new_slug:
+            return canonical
+    return None
+
+
 def _find_near_duplicate_slug(
-    new_slug: str, existing_slugs: list[str], *, min_overlap: float = 0.6
+    new_slug: str, candidates: list[tuple[str, str]], *, min_overlap: float = 0.6
 ) -> str | None:
-    """An existing slug that shares most of new_slug's distinguishing words (e.g. 'aid-trust-portal' vs 'aid-trust-portal-atp'), or None. Word-overlap, not edit-distance — a model rewording the SAME concept tends to keep the same core nouns and add/drop a qualifier, which this catches; unrelated terms that happen to share one common word don't (min_overlap is against the SMALLER set, so a short slug fully contained in a longer one still counts)."""
+    """The canonical slug of an existing term (or one of its aliases) that shares most of new_slug's distinguishing words (e.g. 'aid-trust-portal' vs 'aid-trust-portal-atp'), or None. Word-overlap, not edit-distance — a model rewording the SAME concept tends to keep the same core nouns and add/drop a qualifier, which this catches; unrelated terms that happen to share one common word don't (min_overlap is against the SMALLER set, so a short slug fully contained in a longer one still counts)."""
     new_words = _slug_words(new_slug)
     if not new_words:
         return None
-    for existing in existing_slugs:
-        if existing == new_slug:
-            continue  # exact match — handled separately by the INSERT's IF NOT EXISTS
-        existing_words = _slug_words(existing)
-        smaller = min(len(new_words), len(existing_words))
+    for candidate_slug, canonical in candidates:
+        if candidate_slug == new_slug:
+            continue  # exact match — handled separately by _find_exact_existing_match
+        candidate_words = _slug_words(candidate_slug)
+        smaller = min(len(new_words), len(candidate_words))
         if smaller == 0:
             continue
-        overlap = len(new_words & existing_words) / smaller
+        overlap = len(new_words & candidate_words) / smaller
         if overlap >= min_overlap:
-            return existing
+            return canonical
     return None
 
 
@@ -101,19 +137,35 @@ def _make_suggest_glossary_term_handler(
 
             session = get_cassandra_session()
 
-            # Near-duplicate check BEFORE inserting: the exact-slug IF NOT
-            # EXISTS below only catches a verbatim repeat — a model
-            # rewording the same concept ("Aid Trust Portal" then "Aid
-            # Trust Portal (ATP)") produces a different slug and sails
-            # through, piling up near-identical drafts for an admin to
-            # de-dup by hand (root-caused 2026-08-06, alongside the same
-            # session's excessive call-volume issue — a different problem
-            # needing a different fix, since capping call COUNT doesn't
-            # stop each of those calls from being a real near-duplicate).
-            existing_slugs = [
-                row.slug for row in session.execute(GlossaryStmts.LIST_ALL) if row.slug
-            ]
-            near_dup = _find_near_duplicate_slug(slug, existing_slugs)
+            # Duplicate check BEFORE inserting, against every existing term's
+            # own slug AND its aliases (root-caused 2026-08-07: aliases were
+            # invisible to this check entirely, so a suggestion matching only
+            # an alias sailed through as if genuinely new). Exact match first
+            # — the DB's IF NOT EXISTS below only catches a verbatim repeat
+            # of a term's OWN slug, never an alias hit, so that case must be
+            # caught here. Near-duplicate second: a model rewording the same
+            # concept ("Aid Trust Portal" then "Aid Trust Portal (ATP)")
+            # produces a different slug and would otherwise sail through too,
+            # piling up near-identical drafts for an admin to de-dup by hand
+            # (root-caused 2026-08-06, alongside the same session's excessive
+            # call-volume issue — a different problem needing a different fix,
+            # since capping call COUNT doesn't stop each call being a real
+            # near-duplicate).
+            candidates = _existing_candidates(session.execute(GlossaryStmts.LIST_ALL))
+
+            exact = _find_exact_existing_match(slug, candidates)
+            if exact is not None:
+                return {
+                    "ok": False,
+                    "already_exists": True,
+                    "slug": exact,
+                    "hint": (
+                        "this term (or one of its aliases) is already in the glossary "
+                        "-- no need to suggest it again"
+                    ),
+                }
+
+            near_dup = _find_near_duplicate_slug(slug, candidates)
             if near_dup is not None:
                 return {
                     "ok": False,

@@ -65,6 +65,7 @@ def _row(aid: UUID) -> MagicMock:
     row.translations = None
     row.tags = ["tag"]
     row.first_published_at = None
+    row.slug = "existing-slug"
     return row
 
 
@@ -143,7 +144,7 @@ def test_update_article_writes_complete_feed_row(monkeypatch: pytest.MonkeyPatch
 
     inserts = [
         (stmt, params)
-        for stmt, params in (c.args for c in session.execute.call_args_list)
+        for stmt, params in (c.args for c in session.execute.call_args_list if len(c.args) == 2)
         if isinstance(stmt, str) and stmt.startswith("INSERT INTO algorand_platform.articles_feed")
     ]
     assert len(inserts) == 1
@@ -156,3 +157,42 @@ def test_update_article_writes_complete_feed_row(monkeypatch: pytest.MonkeyPatch
     assert "https://example.com/src" in params
     # In-place snippet edit: published_at survives (only recompose re-dates).
     assert params[1] == _PUBLISHED_AT
+
+
+def test_update_article_carries_slug_onto_the_feed_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Root-caused live 2026-08-10 (GSC 'Page with redirect'): INSERT_FULL has no slug column of its own (kept as a separate write per migration 056), so without an explicit carry the feed row's slug silently goes untouched -- fine on a genuinely unchanged row, but the homepage reads slug from THIS projection, and any desync sends it back to uuid-form links. update_article must carry the article's real slug onto the feed row on every edit."""
+    aid = uuid4()
+    session = _session(monkeypatch)
+    session.execute.return_value.one.return_value = _row(aid)
+
+    assert update_article(article_id=str(aid), title="New", summary="NS", body="NB")
+
+    slug_updates = [
+        (stmt, params)
+        for stmt, params in (c.args for c in session.execute.call_args_list if len(c.args) == 2)
+        if isinstance(stmt, str) and stmt.startswith("UPDATE algorand_platform.articles_feed SET slug")
+    ]
+    assert len(slug_updates) == 1
+    _, params = slug_updates[0]
+    assert params[0] == "existing-slug"
+    assert params[3] == aid
+
+
+def test_update_article_skips_slug_write_when_article_has_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No slug write at all for an article that never claimed one -- nothing to carry, and no accidental empty-string slug landing in the feed."""
+    aid = uuid4()
+    session = _session(monkeypatch)
+    row = _row(aid)
+    row.slug = None
+    session.execute.return_value.one.return_value = row
+
+    assert update_article(article_id=str(aid), title="New", summary="NS", body="NB")
+
+    slug_updates = [
+        stmt
+        for stmt, _params in (c.args for c in session.execute.call_args_list if len(c.args) == 2)
+        if isinstance(stmt, str) and stmt.startswith("UPDATE algorand_platform.articles_feed SET slug")
+    ]
+    assert slug_updates == []

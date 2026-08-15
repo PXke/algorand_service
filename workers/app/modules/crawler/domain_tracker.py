@@ -308,6 +308,18 @@ def domain_from_url(url: str) -> str:
     low = raw.lower()
     if low.startswith("browser://http://") or low.startswith("browser://https://"):
         raw = raw[len("browser://") :]
+    elif "://" not in raw and "." in raw:
+        # A bare hostname with no scheme ("lora.algokit.io") reads as a PATH to
+        # urlparse, not a netloc -- .hostname comes back empty and this whole
+        # function silently returns "" for what is obviously a domain. Found
+        # 2026-08-07: source_history({"source": "lora.algokit.io"}) returned
+        # zero articles despite two existing ones, because the tool's own
+        # domain-match branch never fires when a caller passes a bare
+        # hostname (the normal, natural way to reference a source) rather
+        # than a full URL. The "." guard keeps "not-a-url" (no dot) still
+        # returning "" -- only strings that already look host-shaped gain a
+        # scheme here.
+        raw = f"https://{raw}"
     parsed = urlparse(raw)
     host = (parsed.hostname or "").lower().strip(".")
     if not host:

@@ -178,6 +178,16 @@ def test_hero_allows_cdn_hosted_og_images() -> None:
         assert _with_hero_image("body", image, "t", source_url="https://rug.ninja/") != "body"
 
 
+def test_hero_url_encodes_literal_spaces() -> None:
+    """A raw og:image URL with unencoded spaces (found live 2026-08-09, risein.com) must not
+    break markdown link parsing -- CommonMark truncates a bare link destination at the first
+    unescaped whitespace, spilling the rest as literal text right after the image."""
+    image = "https://files.risein.com/courses/algorand/SCxj-Build on Algorand Course.png"
+    out = _with_hero_image("body", image, "t", source_url="https://risein.com/courses/x")
+    assert "SCxj-Build%20on%20Algorand%20Course.png" in out
+    assert " on Algorand Course.png)" not in out
+
+
 def test_hero_allows_same_platform_shared_media_host() -> None:
     # Live 2026-07-13 bug: every Medium-sourced article silently lost its hero
     # image because domain_from_url deliberately keeps multi-tenant platform

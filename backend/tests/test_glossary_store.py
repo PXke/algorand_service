@@ -180,7 +180,7 @@ def test_enqueue_glossary_term_translations_fires_one_task_per_language() -> Non
     for args, kwargs in calls:
         assert args[0] == "app.tasks.newspaper.translate_glossary_term"
         assert kwargs["args"][0] == "liquid-staking"
-        assert kwargs["queue"] == "pipeline"
+        assert kwargs["queue"] == "translate"
     langs_dispatched = {kwargs["args"][1] for _args, kwargs in calls}
     assert langs_dispatched == set(ARTICLE_TRANSLATION_LANGS)
 

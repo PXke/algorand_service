@@ -152,6 +152,95 @@ def test_recompose_editorial_composes_from_brief_not_prior_body(
     assert captured["keywords"] == "wallet,algorand"
 
 
+def test_recompose_published_skips_compose_when_a_review_is_already_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-caused 2026-08-13: recompose_published had no dedup against an already-pending review for the same article, so repeated manual/API triggers (admin "Recompose" click, recompose_archive.py) each paid for a full compose and left yet another orphaned unlisted draft -- one real article accumulated 10 of them. Must skip BEFORE composing, same as the normal pipeline's _pending_review_veto."""
+    from types import SimpleNamespace
+
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    art = SimpleNamespace(
+        service_id="svc",
+        source_url="https://example.com/x",
+        body="body",
+        title="t",
+        tags=[],
+        summary="s",
+    )
+    monkeypatch.setattr("app.modules.newspaper.article_store.get_article", lambda _aid: art)
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.has_pending_review_for_url",
+        lambda _url: True,
+    )
+
+    def _boom(**_kw: object) -> Never:
+        raise AssertionError("must not compose when a review is already pending")
+
+    monkeypatch.setattr(pt, "compose_scrape_article", _boom)
+
+    result = pt.recompose_published.run("33333333-3333-3333-3333-333333333333")
+    assert result == {
+        "status": "duplicate_review_pending",
+        "article_id": "33333333-3333-3333-3333-333333333333",
+    }
+
+
+def test_recompose_published_proceeds_when_the_pending_check_itself_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dedup check fails OPEN: a Cassandra hiccup on has_pending_review_for_url must never block a legitimate recompose."""
+    from types import SimpleNamespace
+
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    art = SimpleNamespace(
+        service_id="svc",
+        source_url="https://example.com/x",
+        body="body",
+        title="t",
+        tags=[],
+        summary="s",
+    )
+    monkeypatch.setattr("app.modules.newspaper.article_store.get_article", lambda _aid: art)
+
+    def _raise(_url: str) -> Never:
+        raise ConnectionError("cassandra down")
+
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.has_pending_review_for_url", _raise
+    )
+    monkeypatch.setattr(
+        pt,
+        "get_scraper_for_url",
+        lambda _url: SimpleNamespace(
+            scrape=lambda **_kw: (_ for _ in ()).throw(RuntimeError("skip"))
+        ),
+    )
+
+    captured: dict = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_compose(**kw: object) -> Never:
+        captured.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(pt, "compose_scrape_article", _fake_compose)
+    monkeypatch.setattr(
+        pt.worker_config if hasattr(pt, "worker_config") else pt,
+        "SERVICE_CONTEXT_ENABLED",
+        False,
+        raising=False,
+    )
+
+    with pytest.raises(_Stop):
+        pt.recompose_published.run("44444444-4444-4444-4444-444444444444")
+
+    assert captured  # compose was reached despite the check erroring
+
+
 def test_recompose_web_article_still_uses_generic_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """A normal web article recompose is unchanged: generic topic, no brief."""
     from types import SimpleNamespace

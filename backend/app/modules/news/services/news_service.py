@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 
 from app.core import serialization
@@ -11,6 +12,29 @@ from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.news.services.trigger_kind import classify_article_trigger
 from app.modules.news.stores.base import ArticleStore, StoredArticle
 from app.modules.news.stores.factory import get_article_store
+
+
+def _drain_view_future(view_future: object | None) -> None:
+    """Best-effort drain of an in-flight view-count fetch whose result won't be used, so it doesn't dangle unread."""
+    if view_future is None:
+        return
+    with contextlib.suppress(Exception):
+        view_future.result()  # type: ignore[attr-defined]
+
+
+def _resolve_views(article_id: str, view_future: object | None) -> int:
+    """Resolve the article's view count from the in-flight Cassandra fetch, or the in-memory store's own lookup."""
+    if view_future is None:
+        from app.modules.news.stores.view_counts import get_views
+
+        return get_views(article_id)
+    try:
+        row = view_future.result().one()  # type: ignore[attr-defined]
+        if row is not None and row.views is not None:
+            return int(row.views)
+    except Exception:
+        pass
+    return 0
 
 
 class NewsService:
@@ -205,6 +229,36 @@ class NewsService:
         the in-memory store). View counts are fetched in parallel with the article
         body when Cassandra is in use.
         """
+        detail, _was_draft = self._fetch_detail(article_id, lang, overlap=overlap)
+        return detail
+
+    def get_article_ignoring_draft_gate(
+        self, article_id: str, lang: str | None = None
+    ) -> tuple[ArticleDetail, bool] | None:
+        """Fetch one article's full detail WITHOUT the admin-only draft gate, returning (detail, was_draft).
+
+        This is the one intentional hole through get_article's draft check
+        (see its own docstring above) -- callable ONLY from
+        app/modules/sharing/api/routes.py, and only after that route has
+        independently resolved and validated a share token scoped to exactly
+        this article_id via sharing.store.resolve_active_link. There is no
+        authorization check inside this method itself; the token check IS
+        the authorization. Never call this from anywhere else.
+        """
+        detail, was_draft = self._fetch_detail(article_id, lang, allow_draft=True)
+        if detail is None:
+            return None
+        return detail, was_draft
+
+    def _fetch_detail(
+        self,
+        article_id: str,
+        lang: str | None = None,
+        *,
+        overlap: Callable[[], object] | None = None,
+        allow_draft: bool = False,
+    ) -> tuple[ArticleDetail | None, bool]:
+        """Shared fetch body for get_article / get_article_ignoring_draft_gate. Returns (detail_or_None, was_draft)."""
         from uuid import UUID
 
         view_future = None
@@ -228,27 +282,23 @@ class NewsService:
             _overlap()
             article = get(article_id)
         if article is None:
-            if view_future is not None:
-                try:
-                    view_future.result()
-                except Exception:
-                    pass
-            return None
+            _drain_view_future(view_future)
+            return None, False
 
-        views = 0
-        if view_future is not None:
-            try:
-                row = view_future.result().one()
-                if row is not None and row.views is not None:
-                    views = int(row.views)
-            except Exception:
-                views = 0
-        else:
-            from app.modules.news.stores.view_counts import get_views
+        was_draft = bool(article.draft)
+        # A draft article is admin-only -- every caller of get_article is a
+        # public route (SSR document, JSON API, share-card, legacy-redirect
+        # lookup). Admin's own preview goes through AdminCassandraStore,
+        # which reads CassandraArticleStore directly and never calls here.
+        # allow_draft is the one deliberate, narrowly-scoped exception --
+        # see get_article_ignoring_draft_gate's own docstring.
+        if was_draft and not allow_draft:
+            _drain_view_future(view_future)
+            return None, was_draft
 
-            views = get_views(article.article_id)
+        views = _resolve_views(article.article_id, view_future)
 
-        return self._to_detail(article, lang=lang, views=views)
+        return self._to_detail(article, lang=lang, views=views), was_draft
 
     def get_articles(
         self, article_ids: list[str], lang: str | None = None
@@ -263,6 +313,10 @@ class NewsService:
             }
         else:
             stored = getter(article_ids)
+        # Same admin-only gate as get_article — RSS/enrichment ids normally
+        # come from the feed (which a draft is removed from), but this stays
+        # correct even if a caller ever passes an id directly.
+        stored = {aid: a for aid, a in stored.items() if not a.draft}
 
         views: dict[str, int] = {}
         try:

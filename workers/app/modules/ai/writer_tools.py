@@ -9,12 +9,40 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from app.modules.ai.chart_tools import CHART_DATA_SCHEMA, _tool_chart_data
 
 logger = logging.getLogger(__name__)
+
+# Root-caused live 2026-08-11 (Lumi Rogue incident follow-up): recent_articles,
+# search_platform, trending_articles, source_history and get_article all read
+# the LIVE published feed with zero awareness that one specific article_id is
+# the very one currently being recomposed -- a self-search during recompose
+# can surface (or a direct get_article can fetch) the article's OWN
+# pre-recompose content with no signal that it's self-referential, risking
+# exactly the self-reinforcement failure already fixed once for editorial
+# briefs (recompose reads the ORIGINAL brief, never its own prior OUTPUT, for
+# the same reason). This context var lets recompose_published mark which
+# article_id is "itself" for the duration of one compose; every tool below
+# that reads the feed excludes or flags that id instead of treating it as
+# independent prior coverage.
+_recomposing_article_id: ContextVar[str | None] = ContextVar(
+    "_recomposing_article_id", default=None
+)
+
+
+@contextmanager
+def recomposing_article(article_id: str | None) -> Iterator[None]:
+    """Mark article_id as "the article currently being recomposed" for every writer tool called inside this block. No-op (still valid, just filters nothing) when article_id is falsy."""
+    token = _recomposing_article_id.set(article_id or None)
+    try:
+        yield
+    finally:
+        _recomposing_article_id.reset(token)
 
 
 def _tool_get_algo_market() -> dict[str, Any]:
@@ -62,12 +90,14 @@ def _tool_get_price_history(days: int = 7) -> dict[str, Any]:
 def _tool_recent_articles(limit: int = 5) -> dict[str, Any]:
     from app.modules.newspaper.article_store import list_feed_articles
 
-    rows = list_feed_articles(limit=max(1, min(int(limit), 15)))
+    self_id = _recomposing_article_id.get()
+    rows = list_feed_articles(limit=max(1, min(int(limit), 15)) + (1 if self_id else 0))
     return {
         "articles": [
             {"article_id": r.article_id, "title": r.title, "summary": (r.summary or "")[:160]}
             for r in rows
-        ]
+            if r.article_id != self_id
+        ][: max(1, min(int(limit), 15))]
     }
 
 
@@ -78,9 +108,12 @@ def _tool_search_platform(query: str, limit: int = 5) -> dict[str, Any]:
     q = (query or "").lower().strip()
     if not q:
         return {"matches": []}
+    self_id = _recomposing_article_id.get()
     terms = [t for t in q.split() if t]
     matches = []
     for r in list_feed_articles(limit=200):
+        if r.article_id == self_id:
+            continue
         hay = f"{r.title} {r.summary or ''}".lower()
         if any(t in hay for t in terms):
             matches.append(
@@ -151,13 +184,19 @@ def _tool_search_crawled_pages(
     return {"query": q, "count": len(matches), "matches": matches}
 
 
-def _tool_get_article(article_id: str) -> dict[str, Any]:
+def _tool_get_article(article_id: str, offset: int = 0) -> dict[str, Any]:
     """Load the FULL text of a previously published article by id.
 
     Use after recent_articles / search_platform / source_history to read prior
     coverage in depth — to build on it, avoid repeating it, or link it. Returns
     the full markdown body. Does NOT expose trigger txids/rounds (those must
     never appear in a new article body).
+
+    offset (self-reported gap, 2026-08-11: five separate reports of long prior
+    articles truncating with "no way to continue reading" -- lumirogue.com,
+    hay.app, goplausible.com, pop.allo.info): a bare hard cap used to drop the
+    rest of the body with no recovery. When body_truncated is true, call again
+    with offset=<the returned next_offset> to read the rest of the same body.
     """
     from app.modules.newspaper.article_store import get_article
 
@@ -169,18 +208,38 @@ def _tool_get_article(article_id: str) -> dict[str, Any]:
         return {"error": "no article found for that id"}
     body = detail.body or ""
     # The agent loop truncates each serialized tool result to 4000 chars; keep the
-    # body within that window so the metadata fields below survive, and place body
-    # last so any overflow only clips the body tail rather than dropping fields.
-    truncated = len(body) > 3000
-    return {
+    # body window within that budget so the metadata fields below survive, and
+    # place body last so any overflow only clips the body tail rather than
+    # dropping fields.
+    off = max(0, int(offset))
+    window = 3000
+    chunk = body[off : off + window]
+    has_more = off + window < len(body)
+    result = {
         "article_id": detail.article_id,
         "title": detail.title,
         "summary": detail.summary,
         "source_url": detail.source_url,
         "published_at_epoch": detail.published_at_epoch,
-        "body_truncated": truncated,
-        "body": body[:3000],
+        "body_chars": len(body),
+        "body_truncated": has_more,
+        "next_offset": off + window if has_more else None,
+        "body": chunk,
     }
+    if aid == _recomposing_article_id.get():
+        # Root-caused live 2026-08-11: a bare fetch here gives no signal that
+        # this IS the article currently being rewritten -- its content is
+        # exactly the pre-recompose draft under revision, not independent
+        # prior coverage. Any claim in it needs re-verification from scratch,
+        # not carrying-forward (same reasoning as recompose's own
+        # brief-not-prior-output fix for editorial assignments).
+        result["is_the_article_currently_being_recomposed"] = True
+        result["warning"] = (
+            "This is the PRE-RECOMPOSE version of the article you are currently "
+            "writing, not an independent source. Do not treat any claim in it as "
+            "already-verified -- re-check it from scratch or drop it."
+        )
+    return result
 
 
 def _tool_lookup_glossary_term(term: str) -> dict[str, Any]:
@@ -220,7 +279,8 @@ def _tool_trending_articles(limit: int = 5) -> dict[str, Any]:
     from app.modules.newspaper.article_store import list_feed_articles
     from app.modules.newspaper.view_counts import get_views_bulk
 
-    rows = list_feed_articles(limit=60)
+    self_id = _recomposing_article_id.get()
+    rows = [r for r in list_feed_articles(limit=60) if r.article_id != self_id]
     counts = get_views_bulk([r.article_id for r in rows])
     ranked = sorted(rows, key=lambda r: counts.get(r.article_id, 0), reverse=True)
     n = max(1, min(int(limit), 10))
@@ -256,8 +316,13 @@ def _tool_source_history(source: str, limit: int = 8) -> dict[str, Any]:
             service_ids.add(svc.service_id)
     if not service_ids:
         return {"source": source, "articles": [], "note": "no matching tracked source"}
+    self_id = _recomposing_article_id.get()
     n = max(1, min(int(limit), 15))
-    rows = [r for r in list_feed_articles(limit=300) if r.service_id in service_ids]
+    rows = [
+        r
+        for r in list_feed_articles(limit=300)
+        if r.service_id in service_ids and r.article_id != self_id
+    ]
     rows.sort(key=lambda r: r.published_at_epoch, reverse=True)
     return {
         "source": source,
@@ -276,7 +341,7 @@ def _tool_source_history(source: str, limit: int = 8) -> dict[str, Any]:
 def _tool_review_draft(title: str, body: str) -> dict[str, Any]:
     """Self-assessment: schema heuristic + LLM rubric (narrative/depth)."""
     from app.modules.ai.mistral_client import get_mistral_rubric_client
-    from app.modules.newspaper.article_grader import grade_article_draft
+    from app.modules.newspaper.article_grader import fuse_quality_into_grade, grade_article_draft
     from app.modules.newspaper.article_quality_llm import grade_article_quality_llm
 
     try:
@@ -284,7 +349,7 @@ def _tool_review_draft(title: str, body: str) -> dict[str, Any]:
         review["quality"] = grade_article_quality_llm(
             title=title, body=body, client=get_mistral_rubric_client()
         )
-        return review
+        return fuse_quality_into_grade(review, review["quality"])
     except Exception as exc:
         return {"error": str(exc)[:200], "grade": None}
 
@@ -437,6 +502,8 @@ _CAPABILITY_ALIASES = {
     "algod": "lookup_application",
     "http": "fetch_url",
     "store": "app_store_metrics",
+    "box": "application_boxes",
+    "boxes": "application_boxes",
 }
 
 
@@ -647,7 +714,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "Load the FULL markdown text of a previously published article by id "
                 "(get the id from recent_articles, search_platform or source_history). "
                 "Use to read prior coverage in depth so you can build on it, link it, or "
-                "avoid repeating it — the other tools only return titles and summaries."
+                "avoid repeating it — the other tools only return titles and summaries. "
+                "Long bodies return one window at a time; when body_truncated is true, "
+                "call again with offset=next_offset to keep reading the same article."
             ),
             "parameters": {
                 "type": "object",
@@ -655,6 +724,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "article_id": {
                         "type": "string",
                         "description": "article_id from another tool's result",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "0 (default) = start; pass the returned next_offset to continue reading",
                     },
                 },
                 "required": ["article_id"],
@@ -770,6 +843,21 @@ TOOL_HANDLERS: dict[str, Any] = {
 _ENTITY_OSINT_TOPICS = ("scam_alert", "editorial_assignment")
 
 
+def _register_toolset(
+    schemas: list[dict[str, Any]], handlers: dict[str, Any], module_path: str, func_name: str
+) -> None:
+    """Import module_path, call its func_name() as a (schemas, handlers) loader, and merge the result in-place. Swallows any failure (missing config, bad import) so one toolset's trouble never blocks the others'."""
+    try:
+        import importlib
+
+        mod = importlib.import_module(module_path)
+        toolset_schemas, toolset_handlers = getattr(mod, func_name)()
+        schemas.extend(toolset_schemas)
+        handlers.update(toolset_handlers)
+    except Exception:
+        logger.warning("failed to load toolset %s.%s", module_path, func_name, exc_info=True)
+
+
 def all_tools(
     context: dict[str, Any] | None = None,
     *,
@@ -793,22 +881,12 @@ def all_tools(
             handlers.update(inv_handlers)
     except Exception:
         logger.warning("failed to load investigative tools", exc_info=True)
-    try:
-        from app.modules.ai.research_tools import research_tools
-
-        research_schemas, research_handlers = research_tools()
-        schemas.extend(research_schemas)
-        handlers.update(research_handlers)
-    except Exception:
-        logger.warning("failed to load research tools", exc_info=True)
-    try:
-        from app.modules.ai.chain_tools import chain_tools
-
-        chain_schemas, chain_handlers = chain_tools()
-        schemas.extend(chain_schemas)
-        handlers.update(chain_handlers)
-    except Exception:
-        logger.warning("failed to load chain tools", exc_info=True)
+    _register_toolset(schemas, handlers, "app.modules.ai.research_tools", "research_tools")
+    _register_toolset(schemas, handlers, "app.modules.ai.chain_tools", "chain_tools")
+    _register_toolset(
+        schemas, handlers, "app.modules.ai.nft_marketplace_tools", "nft_marketplace_tools"
+    )
+    _register_toolset(schemas, handlers, "app.modules.ai.wallet_tools", "wallet_tools")
     try:
         from app.modules.ai.story_spike import ABORT_ARTICLE_SCHEMA, abort_article_handler
 
@@ -847,15 +925,44 @@ def all_tools(
     except Exception:
         logger.warning("failed to load suggest_glossary_term tool", exc_info=True)
     # Registered last, once every toolset is merged, so the already-have-it
-    # check sees the FULL tool registry for this compose.
+    # check sees every SCHEMA offered for this compose. Deliberately built
+    # from schema names, not handlers.keys() -- a handler can exist with no
+    # schema (reddit_api_post_history is the canonical case: kept registered
+    # as a truthful stub for any stale reference, but its schema was removed
+    # 2026-07-16 specifically so it's never offered/callable). Checking
+    # against handlers instead let the already-have-it nudge point the model
+    # at a tool it genuinely could not call, confirmed live 2026-08-07 (a
+    # VibeKit compose asked for reddit_search, got told "already_available:
+    # reddit_api_post_history", and that name wasn't in its own callable
+    # tool list).
+    known_tool_names = {s["function"]["name"] for s in schemas}
     handlers["report_compose_issue"] = _make_report_compose_issue_handler(context)
-    handlers["suggest_tool"] = _make_suggest_tool_handler(context, set(handlers))
+    handlers["suggest_tool"] = _make_suggest_tool_handler(context, known_tool_names)
+    _wrap_playwright_backed_tools(handlers, context)
+    return schemas, handlers
+
+
+def _wrap_playwright_backed_tools(handlers: dict[str, Any], context: dict[str, Any] | None) -> None:
+    """Inject this compose's persistent PlaywrightSession into every tool that renders a page, and layer on each tool's own extra behavior (fetch_url's scroll/enqueue, play_interactive's step budget). Mutates `handlers` in place; no-ops for any tool not present (a toolset can be disabled/fail to load)."""
     if "fetch_url" in handlers:
         handlers["fetch_url"] = _wrap_fetch_url_enqueue(
             _wrap_fetch_url_scroll(handlers["fetch_url"], context),
             context,
         )
-    return schemas, handlers
+    for browser_action in (
+        "click_element",
+        "type_into_page",
+        "capture_screenshot",
+        "inspect_network_hosts",
+        "nft_asset_listing_status",
+        "nft_collection_market_stats",
+    ):
+        if browser_action in handlers:
+            handlers[browser_action] = _wrap_browser_action(handlers[browser_action], context)
+    if "play_interactive" in handlers:
+        handlers["play_interactive"] = _wrap_play_interactive(handlers["play_interactive"], context)
+    if "connect_wallet" in handlers:
+        handlers["connect_wallet"] = _wrap_connect_wallet(handlers["connect_wallet"], context)
 
 
 def _canonical_fetch_url(url: str) -> str:
@@ -890,7 +997,12 @@ def _wrap_fetch_url_scroll(
             offset = 0
             offsets.pop(url, None)
             window_caps[url] = max(500, min(int(max_chars), 12000))
-        raw = _fetch_url_internal(url, max_chars=max_chars, offset=offset)
+        raw = _fetch_url_internal(
+            url,
+            max_chars=max_chars,
+            offset=offset,
+            playwright_session=ctx.get("_playwright_session"),
+        )
         if raw.get("error"):
             return raw
         next_offset = raw.get("_next_offset")
@@ -900,6 +1012,76 @@ def _wrap_fetch_url_scroll(
             offsets.pop(url, None)
             window_caps.pop(url, None)
         return _publicize_fetch_result(raw)
+
+    return _wrapped
+
+
+def _wrap_browser_action(
+    handler: Callable[..., dict[str, Any]], context: dict[str, Any] | None
+) -> Callable[..., dict[str, Any]]:
+    """Inject this compose's persistent PlaywrightSession (if any) into click_element/type_into_page calls, so they reuse the same browser as fetch_url instead of each launching their own."""
+    ctx = context or {}
+
+    def _wrapped(**kwargs: Any) -> dict[str, Any]:  # noqa: ANN401 -- arbitrary LLM tool-call arguments
+        return handler(**kwargs, playwright_session=ctx.get("_playwright_session"))
+
+    return _wrapped
+
+
+def _wrap_play_interactive(
+    handler: Callable[..., dict[str, Any]], context: dict[str, Any] | None
+) -> Callable[..., dict[str, Any]]:
+    """Inject the persistent PlaywrightSession into play_interactive and enforce PLAY_INTERACTIVE_MAX_STEPS for this compose.
+
+    open/click/type/read each count as one step toward the budget; close
+    does not -- ending a session early should never cost what it's trying
+    to save. A call that errors (e.g. a click_text that doesn't match
+    anything) also doesn't count -- the model retrying a wrong guess
+    shouldn't burn the exploration budget it's trying to use well.
+    """
+    from app.core.config import PLAY_INTERACTIVE_MAX_STEPS
+
+    ctx = context or {}
+    state = ctx.setdefault("_play_interactive_steps_used", [0])
+
+    def _wrapped(**kwargs: Any) -> dict[str, Any]:  # noqa: ANN401 -- arbitrary LLM tool-call arguments
+        action = str(kwargs.get("action") or "").strip().lower()
+        if action != "close" and state[0] >= PLAY_INTERACTIVE_MAX_STEPS:
+            return {
+                "error": (
+                    f"play_interactive step budget ({PLAY_INTERACTIVE_MAX_STEPS}) for "
+                    "this compose is spent -- write from what you've already discovered"
+                ),
+                "budget": {"used": state[0], "max": PLAY_INTERACTIVE_MAX_STEPS},
+            }
+        result = handler(**kwargs, playwright_session=ctx.get("_playwright_session"))
+        if action != "close" and "error" not in result:
+            state[0] += 1
+        result["budget"] = {"used": state[0], "max": PLAY_INTERACTIVE_MAX_STEPS}
+        return result
+
+    return _wrapped
+
+
+def _wrap_connect_wallet(
+    handler: Callable[..., dict[str, Any]], context: dict[str, Any] | None
+) -> Callable[..., dict[str, Any]]:
+    """Inject the persistent PlaywrightSession into connect_wallet and enforce WALLET_CONNECT_MAX_PER_COMPOSE for this compose -- a materially higher-stakes action than a generic click/type, so it gets its own, smaller, separate budget from PLAY_INTERACTIVE_MAX_STEPS."""
+    from app.core.config import WALLET_CONNECT_MAX_PER_COMPOSE
+
+    ctx = context or {}
+    state = ctx.setdefault("_connect_wallet_calls_used", [0])
+
+    def _wrapped(**kwargs: Any) -> dict[str, Any]:  # noqa: ANN401 -- arbitrary LLM tool-call arguments
+        if state[0] >= WALLET_CONNECT_MAX_PER_COMPOSE:
+            return {
+                "error": (
+                    f"connect_wallet budget ({WALLET_CONNECT_MAX_PER_COMPOSE}) for this "
+                    "compose is spent"
+                ),
+            }
+        state[0] += 1
+        return handler(**kwargs, playwright_session=ctx.get("_playwright_session"))
 
     return _wrapped
 

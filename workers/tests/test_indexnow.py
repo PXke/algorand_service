@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 from algorand_shared import indexnow as shared_indexnow
-
 from app.modules.newspaper import indexnow
 
 
@@ -18,9 +17,21 @@ def test_article_url_is_path_based_no_hash() -> None:
 
 
 def test_article_url_with_lang() -> None:
-    """Appends ?lang= for a non-English locale and omits it for English."""
-    assert indexnow.article_url("x", "fa").endswith("/news/articles/x?lang=fa")
+    """Path-segments a non-English locale (matching SSR/sitemap) and omits it for English.
+
+    Root-caused live 2026-08-10 via Bing Webmaster Tools: every URL IndexNow
+    submitted for a translated locale still used the pre-migration ?lang=
+    query param, and every URL used the raw article id rather than its slug.
+    """
+    assert indexnow.article_url("x", "fa").endswith("/fa/news/articles/x")
+    assert "?lang=" not in indexnow.article_url("x", "fa")
     assert indexnow.article_url("x", "en") == indexnow.article_url("x")
+
+
+def test_article_url_prefers_slug_over_id() -> None:
+    """Uses the permanent slug when given one, not the raw article id."""
+    assert indexnow.article_url("x", slug="real-slug").endswith("/news/articles/real-slug")
+    assert indexnow.article_url("x", "fa", slug="real-slug").endswith("/fa/news/articles/real-slug")
 
 
 def test_article_urls_includes_translations() -> None:
@@ -28,8 +39,8 @@ def test_article_urls_includes_translations() -> None:
     urls = indexnow.article_urls("id1", ["fa", "ar", "fa"])
     assert urls == [
         "https://algorand.pxke.me/news/articles/id1",
-        "https://algorand.pxke.me/news/articles/id1?lang=fa",
-        "https://algorand.pxke.me/news/articles/id1?lang=ar",
+        "https://algorand.pxke.me/fa/news/articles/id1",
+        "https://algorand.pxke.me/ar/news/articles/id1",
     ]
 
 
@@ -39,7 +50,7 @@ def test_content_change_urls_includes_sitemaps(monkeypatch: pytest.MonkeyPatch) 
     urls = indexnow.content_change_urls("id1", translation_langs=["fa"])
     assert "https://algorand.pxke.me/sitemap.xml" in urls
     assert "https://algorand.pxke.me/sitemap-news.xml" in urls
-    assert "https://algorand.pxke.me/news/articles/id1?lang=fa" in urls
+    assert "https://algorand.pxke.me/fa/news/articles/id1" in urls
 
 
 def test_ping_noop_without_urls(monkeypatch: pytest.MonkeyPatch) -> None:

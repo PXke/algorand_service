@@ -18,7 +18,7 @@ from urllib.parse import quote
 
 import msgspec
 from algorand_shared.design import token
-from algorand_shared.taxonomy import display_tag_title
+from algorand_shared.taxonomy import display_tag_title, is_meta_tag
 
 from app.core import serialization
 from app.core.article_translation_langs import (
@@ -218,12 +218,18 @@ def _meta_block(
     og_locale_alternates: list[str] | None = None,
     hreflang_links: list[tuple[str, str]] | None = None,
     og_section: str | None = None,
+    lang: str = "en",
 ) -> str:
     full_title = _clamped_title(title)
     parts = [
         f"<title>{html.escape(full_title)}</title>",
         f'<meta name="description" content="{_attr(description)}">',
         f'<link rel="canonical" href="{_attr(canonical)}">',
+        # Bing does not read hreflang/xhtml:link at all (Google-only feature);
+        # it determines a page's language from <html lang>, this tag, and its
+        # own NLP over the body text. <html lang> is already set per-locale
+        # (see shell.py); this is the other page-level signal Bing wants.
+        f'<meta http-equiv="content-language" content="{_attr(lang)}">',
         '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">',
         f'<link rel="alternate" type="application/rss+xml" '
         f'title="{_attr(settings.site_name)}" href="{_attr(absolute("/feed.xml"))}">',
@@ -424,15 +430,23 @@ def pick_related_articles(
     *,
     limit: int = 5,
 ) -> list[ArticleFeedItem]:
-    """Stories sharing a tag with this article (mirrors the SPA detail page)."""
-    tags = {t.strip().lower() for t in (article.tags or []) if t.strip()}
+    """Stories sharing a TOPICAL tag with this article (mirrors the SPA detail page).
+
+    Meta/provenance tags (discovery, web, updated, news, ...) are excluded from
+    the match, same as the SPA's primaryTopic() -- without this, any two
+    service-discovery articles "match" regardless of subject, since almost
+    every one of them carries "discovery"/"web" (found 2026-08-09: a DeFi
+    swap-aggregator piece matched 24 unrelated articles, nearly all of them
+    sharing nothing but those two provenance tags).
+    """
+    tags = {t.strip().lower() for t in (article.tags or []) if t.strip() and not is_meta_tag(t)}
     if not tags:
         return []
     related: list[ArticleFeedItem] = []
     for item in feed:
         if item.article_id == article.article_id:
             continue
-        item_tags = {t.strip().lower() for t in (item.tags or []) if t.strip()}
+        item_tags = {t.strip().lower() for t in (item.tags or []) if t.strip() and not is_meta_tag(t)}
         if tags & item_tags:
             related.append(item)
         if len(related) >= limit:
@@ -639,6 +653,7 @@ def render_article(
         og_locale_alternates=og_alternates,
         hreflang_links=hreflang_links,
         og_section=primary_label,
+        lang=html_lang_for(lang_code) if lang_code else "en",
     )
 
     body_html = md_to_html(article.body)

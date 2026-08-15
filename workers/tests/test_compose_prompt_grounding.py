@@ -44,6 +44,19 @@ def test_narrative_guidance_carries_grounding_to_stage_two() -> None:
     assert "play2earn" in mc._NARRATIVE_GUIDANCE
 
 
+def test_tools_guidance_requires_asset_affiliation_check() -> None:
+    """Lumi Rogue incident (2026-08-11): two independent composes both cited an unrelated 'LUMI' ASA as the project's own token purely because lookup_asset_by_name matched the name -- Algorand names/tickers are not reserved, so a match is not affiliation. Pins the cross-check-the-creator-address rule."""
+    assert "ASSET AFFILIATION CHECK" in mc._TOOLS_GUIDANCE
+    assert "is NOT proof of affiliation" in mc._TOOLS_GUIDANCE
+    assert "ASSET AFFILIATION CHECK" in mc._RESEARCH_PHASE_GUIDANCE
+
+
+def test_narrative_guidance_carries_asset_affiliation_check() -> None:
+    """Same reasoning as the ONE PRODUCT ONE SOURCE / NAMED REAL-WORLD ASSET carry-forward tests above -- _TOOLS_GUIDANCE alone does not reach Stage 2, _NARRATIVE_GUIDANCE needs its own copy."""
+    assert "creator/owner address was actually cross-checked" in mc._NARRATIVE_GUIDANCE
+    assert "not affiliation" in mc._NARRATIVE_GUIDANCE
+
+
 def test_stakes_rule_allows_algorand_expert_knowledge(monkeypatch: pytest.MonkeyPatch) -> None:
     """Thin sources must not block layer-1 explanation — use protocol expertise, not invented partnerships or quotes."""
     captured = {}
@@ -247,6 +260,45 @@ def test_stage2_special_edition_override_survives_the_no_digest_branch() -> None
     """The override also applies on the empty-digest fallback branch, not just the digest-present one."""
     user = mc._build_stage2_user(user="base", digest="", is_special_edition=True)
     assert "SPECIAL EDITION OVERRIDE" in user
+
+
+def test_stage2_extras_under_budget_are_not_touched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A normal-sized digest+extras well under the cap passes through unchanged."""
+    monkeypatch.setattr("app.core.config.MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 1000)
+    digest = "## Verified Facts\n- fact"
+    user = mc._build_stage2_user(
+        user="base", digest=digest, is_special_edition=True, enumeration="## Named Entities\n- x"
+    )
+    assert "[digest truncated]" not in user
+    assert "[enumeration/outline truncated]" not in user
+    assert digest in user
+
+
+def test_stage2_oversized_extras_get_truncated_not_sent_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A digest+enumeration/outline combo that exceeds the cap is trimmed instead of sent whole -- root-caused live 2026-08-07: an uncapped special-edition Stage-2 prompt grew large enough that the write call came back with an empty completion on both the original attempt and its own built-in corrective retry, losing the whole compose."""
+    monkeypatch.setattr("app.core.config.MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 100)
+    digest = "F" * 80
+    enumeration = "E" * 80
+    user = mc._build_stage2_user(
+        user="base", digest=digest, is_special_edition=True, enumeration=enumeration
+    )
+    assert "[enumeration/outline truncated]" in user or "[digest truncated]" in user
+    # The combined digest+extras block actually shrank -- not just annotated.
+    assert user.count("F") + user.count("E") < len(digest) + len(enumeration)
+
+
+def test_stage2_extras_trims_enumeration_before_touching_the_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """extra_blocks (enumeration/outline) is the first thing trimmed -- it's additive detail on top of an intact digest, so a special edition that must shed content loses the least essential part first."""
+    monkeypatch.setattr("app.core.config.MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 100)
+    digest = "D" * 50
+    extra_blocks = "X" * 200
+    trimmed_digest, trimmed_extras = mc._cap_stage2_extras(digest, extra_blocks)
+    assert trimmed_digest == digest  # untouched: extras alone covered the overage
+    assert len(trimmed_extras) < len(extra_blocks)
 
 
 def test_special_edition_instructions_tell_the_model_to_search_wide() -> None:
@@ -501,3 +553,24 @@ def test_feedback_channels_tells_model_to_try_fetch_url_before_suggesting() -> N
     """fetch_url is a plain HTTP GET that substitutes for most missing dedicated tools -- owner's estimate is it covers ~90% of gaps a model might otherwise reach for suggest_tool over."""
     assert "FETCH_URL AS A GENERAL FALLBACK" in mc._FEEDBACK_CHANNELS
     assert "FETCH_URL AS A GENERAL FALLBACK" in mc._RESEARCH_PHASE_GUIDANCE
+
+
+def test_round_budget_guidance_states_the_real_configured_ceiling() -> None:
+    """Root-caused 2026-08-13: the model has zero visibility into LLM_MAX_TOOL_ROUNDS (round_idx is internal telemetry only, never injected into a message) -- a LumiRogue research pass stopped at 19 of 24 rounds, leaving an interactive demo unexplored past the first screen. The guidance must state the model's ACTUAL configured ceiling, not a hardcoded placeholder that would drift from the real value."""
+    from app.core.config import LLM_MAX_TOOL_ROUNDS
+
+    guidance = mc._round_budget_guidance()
+    assert f"up to {LLM_MAX_TOOL_ROUNDS} tool-call rounds" in guidance
+    assert "cheap to spend" in guidance
+    assert "NOT a reason to stop early" in guidance
+
+
+def test_round_budget_guidance_reflects_a_changed_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stated number tracks the config value live, so it can never go stale relative to the real ceiling the loop enforces."""
+    monkeypatch.setattr("app.core.config.LLM_MAX_TOOL_ROUNDS", 7)
+    assert "up to 7 tool-call rounds" in mc._round_budget_guidance()
+
+
+def test_research_phase_guidance_includes_round_budget() -> None:
+    """Every real two-stage research call site goes through _research_phase_guidance(trace), not the static _RESEARCH_PHASE_GUIDANCE constant -- confirm the round-budget nudge actually reaches them."""
+    assert "RESEARCH BUDGET" in mc._research_phase_guidance([])

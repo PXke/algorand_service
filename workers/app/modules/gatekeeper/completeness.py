@@ -10,10 +10,9 @@ to the trace and looped back to the research phase for self-correction.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-
-from app.modules.gatekeeper.fact_align import extract_entities
 
 
 @dataclass(frozen=True)
@@ -36,7 +35,18 @@ DEFAULT_RULES: tuple[CompletenessRule, ...] = (
     CompletenessRule(
         name="domain_provenance",
         triggers=("http://", "https://", "www.", "website", "domain"),
-        required_any=("resolve_domain_infrastructure", "fetch_archive_snapshot"),
+        # lookup_domain_registration (a plain WHOIS age/registrar check) added
+        # 2026-08-07: it satisfies the same underlying question -- is this
+        # domain aged/legitimate rather than a fresh scam clone -- as the two
+        # heavier investigative-tier tools, but wasn't recognized, so writers
+        # who reached for the lighter tool always failed this rule even after
+        # doing real diligence (found on a held Polkagold recompose that had
+        # checked polkagold.tech's registration date and got flagged anyway).
+        required_any=(
+            "resolve_domain_infrastructure",
+            "fetch_archive_snapshot",
+            "lookup_domain_registration",
+        ),
     ),
     CompletenessRule(
         name="company_backing",
@@ -89,34 +99,47 @@ def check_completeness(
     )
 
 
+# Anchored directly on a title word's actual position, requiring a Capitalized
+# one-or-two-word run immediately after it ("Founder Jane Doe", "CEO Mike
+# Smith"). The previous version scanned the WHOLE page for any 2+-word
+# Capitalized run via extract_entities (a deliberately permissive scanner
+# shared with numeric-entailment grounding, where over-matching is harmless)
+# with no positional link to where a title word appeared -- so it happily
+# matched marketing bullet copy anywhere on the page ("Robust Ecosystem
+# Role", "Algorand Foundation", "Tinyman Farms"). A curated stoplist was
+# tried first and abandoned: crypto/marketing prose is dense enough with
+# Title-Case product and protocol names that the list needed for real
+# coverage was unbounded whack-a-mole (found 2026-08-07 on a held Polkagold
+# review row -- the stoplist version still let "Algorand Foundation" and
+# "Polkadot Treasury" through). Anchoring on adjacency to the title word
+# itself is what real prose naming a person actually looks like, and no
+# marketing bullet phrase happens to be immediately preceded by "Founder"
+# or "CEO" by coincidence.
+_TITLE_WORDS = (
+    "co-founder",
+    "cofounder",
+    "founder",
+    "ceo",
+    "president",
+    "chairman",
+    "chief",
+    "mr",
+    "ms",
+    "dr",
+)
+_NAME_AFTER_TITLE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(t) for t in _TITLE_WORDS) + r")\.?\s+"
+    r"([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)?)",
+    re.IGNORECASE,
+)
+
+
 def named_persons_unscreened(source_text: str, tool_trace: str) -> list[str]:
     """Candidate person names in the source for whom no sanctions/PEP screen appears in the trace — the actionable detail behind the human_identity rule, surfaced for the self-correction prompt."""
     if "screen_sanctions_and_pep" in (tool_trace or ""):
         return []
     src = source_text or ""
-    if not any(t in src.lower() for t in ("founder", "ceo", "co-founder", "president")):
-        return []
-    # Two-word Capitalized runs are the cheap proxy for personal names; strip a
-    # leading role/title word the greedy extractor may have swallowed.
-    titles = {
-        "founder",
-        "ceo",
-        "president",
-        "chairman",
-        "chief",
-        "co-founder",
-        "cofounder",
-        "mr",
-        "ms",
-        "dr",
-    }
-    names: list[str] = []
-    for e in extract_entities(src):
-        if e.startswith("$") or " " not in e:
-            continue
-        words = e.split()
-        if words[0].lower() in titles:
-            words = words[1:]
-        if len(words) >= 2:
-            names.append(" ".join(words))
-    return names
+    seen: dict[str, None] = {}
+    for m in _NAME_AFTER_TITLE_RE.finditer(src):
+        seen.setdefault(m.group(1), None)
+    return list(seen)

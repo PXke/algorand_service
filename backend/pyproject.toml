@@ -33,12 +33,15 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  "pytest-xdist>=3.6",
   "ruff>=0.8.0",
   "vulture>=2.14",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Parallel by default (pytest-xdist). Override with `-n0` for a serial run.
+addopts = ["-n", "auto"]
 # "../shared" mirrors what deploy/scripts/link_shared.sh does in the prod venv
 # (a .pth pointing at releases/current/shared). Declaring it here instead of
 # relying on that link means tests resolve algorand_shared from repo state, so

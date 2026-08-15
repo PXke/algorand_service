@@ -49,6 +49,8 @@ def run_mistral_diff_check(
 
     if pause_on_feed_backlog is None:
         pause_on_feed_backlog = config.PAUSE_INTAKE_ON_FEED_BACKLOG
+    if config.AUTO_COMPOSE_PAUSED:
+        return {"status": "skipped", "reason": "auto_compose_paused", "checked": 0}
     if not mistral_configured():
         return {"status": "skipped", "reason": "mistral_not_configured", "checked": 0}
     if has_pending_classifier_review():

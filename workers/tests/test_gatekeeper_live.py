@@ -43,6 +43,19 @@ def test_missing_screen_fails_completeness() -> None:
     assert any("Jane Doe" in r for r in g.reasons)
 
 
+def test_domain_provenance_failure_does_not_list_unscreened_names() -> None:
+    """domain_provenance failing alone must not surface named_persons_unscreened's list -- that detail belongs to human_identity, and attaching it to an unrelated rule misleads the reviewer (found 2026-08-07 on a held Polkagold review row, whose reasons named marketing bullet phrases as if they were unscreened people)."""
+    g = run_deterministic_gate(
+        source_text="The team announced it at https://example.io today.",
+        tool_trace="{}",
+        article_text="A neutral writeup.",
+    )
+    assert not g.completeness_passed
+    assert "domain_provenance" in g.failed_rules
+    assert "human_identity" not in g.failed_rules
+    assert not any("(" in r for r in g.reasons)
+
+
 def test_as_metadata_shape() -> None:
     """as_metadata() returns exactly the expected gk_* string-keyed fields."""
     g = run_deterministic_gate("s", "{}", "no numbers here")

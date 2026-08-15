@@ -54,9 +54,12 @@ class ArticleStmts:
     GET_PUBLISHED_AT = _Stmt(
         "SELECT published_at FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
+    GET_PUBLISHED_AT_AND_DRAFT = _Stmt(
+        "SELECT published_at, draft FROM algorand_platform.articles_by_id WHERE article_id = ?"
+    )
     GET_FEED_ROW = _Stmt(
         "SELECT article_id, service_id, title, summary, published_at, tags, "
-        "image_url, source_url FROM algorand_platform.articles_by_id WHERE article_id = ?"
+        "image_url, source_url, slug FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
     GET_SUMMARY_CARD = _Stmt(
         "SELECT article_id, title, summary, service_id, body FROM algorand_platform.articles_by_id "
@@ -78,6 +81,96 @@ class ArticleStmts:
         "UPDATE algorand_platform.articles_by_id SET published_at = ? WHERE article_id = ?"
     )
     DELETE = _Stmt("DELETE FROM algorand_platform.articles_by_id WHERE article_id = ?")
+    # Admin-only unpublish/restore toggle (migration 059). Content is never
+    # touched here -- the caller separately adds/removes the articles_feed
+    # row, which is what actually controls public reachability via the feed,
+    # sitemap and Most Read. This column only gates the direct-by-id lookup.
+    SET_DRAFT = _Stmt(
+        "UPDATE algorand_platform.articles_by_id SET draft = ? WHERE article_id = ?"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# draft_articles ("currently drafted" admin index, migration 059)
+# --------------------------------------------------------------------------- #
+class DraftArticleStmts:
+    """Prepared statements for the draft-articles admin index."""
+
+    INSERT = _Stmt(
+        "INSERT INTO algorand_platform.draft_articles "
+        "(article_id, title, source_url, drafted_at) VALUES (?, ?, ?, ?)"
+    )
+    DELETE = _Stmt("DELETE FROM algorand_platform.draft_articles WHERE article_id = ?")
+    # Unbounded scan is fine here -- see the migration's table comment.
+    LIST = _Stmt(
+        "SELECT article_id, title, source_url, drafted_at "
+        "FROM algorand_platform.draft_articles LIMIT 200"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# share_links / share_links_by_article
+# --------------------------------------------------------------------------- #
+class ShareLinkStmts:
+    """Prepared statements for share_links + its share_links_by_article reverse index.
+
+    Column is `share_token`, not `token` -- `token` is a reserved CQL
+    keyword (the token() partitioner function) and CREATE TABLE rejects it
+    outright as a bare column name (caught live during the 2026-08-12
+    deploy). The Python-level field/API stays named `token` throughout
+    (ShareLinkItem.token, the :token URL path param) -- only the underlying
+    CQL column is renamed.
+    """
+
+    GET = _Stmt(
+        "SELECT share_token, article_id, label, created_at, created_by, revoked, revoked_at "
+        "FROM algorand_platform.share_links WHERE share_token = ?"
+    )
+    INSERT = _Stmt(
+        "INSERT INTO algorand_platform.share_links "
+        "(share_token, article_id, label, created_at, created_by, revoked, revoked_at) "
+        "VALUES (?, ?, ?, ?, ?, false, null)"
+    )
+    REVOKE = _Stmt(
+        "UPDATE algorand_platform.share_links SET revoked = true, revoked_at = ? "
+        "WHERE share_token = ?"
+    )
+    LIST_BY_ARTICLE = _Stmt(
+        "SELECT article_id, created_at, share_token, label, created_by, revoked, revoked_at "
+        "FROM algorand_platform.share_links_by_article WHERE article_id = ?"
+    )
+    INSERT_BY_ARTICLE = _Stmt(
+        "INSERT INTO algorand_platform.share_links_by_article "
+        "(article_id, created_at, share_token, label, created_by, revoked, revoked_at) "
+        "VALUES (?, ?, ?, ?, ?, false, null)"
+    )
+    REVOKE_BY_ARTICLE = _Stmt(
+        "UPDATE algorand_platform.share_links_by_article SET revoked = true, revoked_at = ? "
+        "WHERE article_id = ? AND created_at = ? AND share_token = ?"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# draft_comments
+# --------------------------------------------------------------------------- #
+class DraftCommentStmts:
+    """Prepared statements for draft_comments (small per-article partition, full scan)."""
+
+    LIST_BY_ARTICLE = _Stmt(
+        "SELECT article_id, created_at, comment_id, body, author_name, "
+        "anchor_quote, anchor_prefix, anchor_suffix "
+        "FROM algorand_platform.draft_comments WHERE article_id = ?"
+    )
+    INSERT = _Stmt(
+        "INSERT INTO algorand_platform.draft_comments "
+        "(article_id, created_at, comment_id, body, author_name, "
+        "anchor_quote, anchor_prefix, anchor_suffix) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    DELETE = _Stmt(
+        "DELETE FROM algorand_platform.draft_comments "
+        "WHERE article_id = ? AND created_at = ? AND comment_id = ?"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -107,6 +200,17 @@ class FeedStmts:
         "DELETE FROM algorand_platform.articles_feed "
         "WHERE bucket = ? AND published_at = ? AND article_id = ?"
     )
+    # INSERT_FULL has no slug column of its own (kept as a separate write,
+    # mirroring the workers service's article_store.py) -- a feed row that
+    # never carries one falls back to a uuid URL everywhere that reads slug
+    # from this projection (homepage links, sitemap), which is what an
+    # admin-approved article did unconditionally until this was added
+    # (root-caused live 2026-08-10 via a Bing Webmaster Tools submitted-URL
+    # audit showing raw article ids).
+    SET_FEED_SLUG = _Stmt(
+        "UPDATE algorand_platform.articles_feed SET slug = ? "
+        "WHERE bucket = ? AND published_at = ? AND article_id = ?"
+    )
     COUNT_TODAY = _Stmt(
         "SELECT article_id FROM algorand_platform.articles_feed "
         "WHERE bucket = ? AND published_at >= ? AND published_at < ?"
@@ -131,6 +235,10 @@ class ArticleVersionStmts:
     LIST = _Stmt(
         "SELECT version, title, summary, edit_reason, editor, edited_at "
         "FROM algorand_platform.article_versions WHERE article_id = ? LIMIT ?"
+    )
+    GET_ONE = _Stmt(
+        "SELECT version, title, summary, body, edit_reason, editor, edited_at "
+        "FROM algorand_platform.article_versions WHERE article_id = ? AND version = ?"
     )
     LIST_VERSIONS = _Stmt(
         "SELECT version FROM algorand_platform.article_versions WHERE article_id = ?"
@@ -423,12 +531,12 @@ class PublishQueueStmts:
     )
     GET_ROW = _Stmt(
         "SELECT queue_id, status, last_reason, priority, topic, publish_kind, "
-        "service_id, display_name, scrape_url, created_at, updated_at "
+        "service_id, display_name, scrape_url, created_at, updated_at, human_pick_day "
         "FROM algorand_platform.publish_queue WHERE queue_id = ?"
     )
     LIST_RECENT = _Stmt(
         "SELECT queue_id, status, last_reason, priority, topic, publish_kind, "
-        "service_id, display_name, scrape_url, created_at, updated_at "
+        "service_id, display_name, scrape_url, created_at, updated_at, human_pick_day "
         "FROM algorand_platform.publish_queue LIMIT ?"
     )
     GET_PAYLOAD = _Stmt("SELECT payload FROM algorand_platform.publish_queue WHERE queue_id = ?")
@@ -454,6 +562,12 @@ class PublishQueueStmts:
         "INSERT INTO algorand_platform.publish_queue_pending "
         "(status, priority, created_at, queue_id, service_id, topic, publish_kind) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    SET_HUMAN_PICK = _Stmt(
+        "UPDATE algorand_platform.publish_queue SET human_pick_day = ?, updated_at = ? WHERE queue_id = ?"
+    )
+    CLEAR_HUMAN_PICK = _Stmt(
+        "UPDATE algorand_platform.publish_queue SET human_pick_day = null, updated_at = ? WHERE queue_id = ?"
     )
 
 
@@ -505,7 +619,7 @@ class NewsStmts:
     GET_FULL = _Stmt(
         "SELECT article_id, service_id, title, summary, body, "
         "trigger_txid, trigger_round, source_url, published_at, updated_at, tags, "
-        "image_url, translations, slug "
+        "image_url, translations, slug, draft "
         "FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
     # Slug -> article id. A single-partition read on the reverse index, never a

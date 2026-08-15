@@ -49,6 +49,11 @@ ALGOD_TOKEN = env_str("ALGOD_TOKEN", "")
 TESTNET_INDEXER_URL = env_str("TESTNET_INDEXER_URL", "https://testnet-idx.algonode.cloud").rstrip(
     "/"
 )
+# Public AlgoNode testnet ALGOD-compatible endpoint -- the indexer above has
+# no concept of box storage, so reading a contract's boxes (e.g. counting how
+# many entries a Testnet registry app actually holds) needs algod's own
+# /v2/applications/{id}/boxes route instead.
+TESTNET_ALGOD_URL = env_str("TESTNET_ALGOD_URL", "https://testnet-api.algonode.cloud").rstrip("/")
 # Public AlgoNode MAINNET indexer — read-only, name-search capable (unlike
 # algod, which only looks up assets by numeric id). Backs lookup_asset_by_name.
 MAINNET_INDEXER_URL = env_str("MAINNET_INDEXER_URL", "https://mainnet-idx.algonode.cloud").rstrip(
@@ -112,10 +117,42 @@ CONTENT_UPDATE_RELEVANCE_FLOOR = env_float("CONTENT_UPDATE_RELEVANCE_FLOOR", 0.3
 # "nothing happened" articles motivated this (Tinyman Medium reformat,
 # zk-colorsort date tick, Blockshake redesign). 0 disables.
 NEWS_REFORMAT_SIMILARITY = env_float("NEWS_REFORMAT_SIMILARITY", 0.85)
+# Hard cap on a crawled page's stored body — a real page's readable text never
+# gets remotely close to this; something this large is almost always non-text
+# content misread as a page (a binary file like an .apk, an oversized asset)
+# rather than a legitimately huge article. Root-caused 2026-08-06: a 23MB body
+# blew straight past Cassandra's 16MB native-protocol message limit as an
+# UNCAUGHT InvalidRequest, failing the whole index_crawled_page task. 500K
+# chars leaves ~32x headroom under that limit for the rest of the row.
+CRAWLED_PAGE_BODY_MAX_CHARS = env_int("CRAWLED_PAGE_BODY_MAX_CHARS", 500_000)
 PUBLISH_IMMEDIATE_PRIORITY = env_int("PUBLISH_IMMEDIATE_PRIORITY", 95)
 PUBLISH_QUEUE_DRAIN_SECONDS = env_int("PUBLISH_QUEUE_DRAIN_SECONDS", 900)
 PUBLISH_BREAKING_DRAIN_SECONDS = env_int("PUBLISH_BREAKING_DRAIN_SECONDS", 120)
 PUBLISH_QUEUE_BATCH_LIMIT = env_int("PUBLISH_QUEUE_BATCH_LIMIT", 50)
+
+# Drain-order fairness (2026-08-06): four composable mechanisms, each fixing
+# one starvation mode found live with real data (71 pending service_discovery
+# rows, oldest 15 days, none in the top-15 by priority; xGov Governance alone
+# holding 6 of the top-15 content_update slots via 6 distinct per-proposal
+# service_ids under one display name):
+#   1. Age bonus (below) — no row waits forever behind fresher/higher-scoring
+#      competitors; capped so an old low-value row can catch up to a fair
+#      shot, not leapfrog to permanent first place.
+#   2. Fairness grouping by registrable DOMAIN, not service_id — a service
+#      modeled internally as many small service_ids (one per xGov proposal)
+#      still only gets one shot per drain round, not one per service_id.
+#   3. Weighted-random draw (Efraimidis-Spirakis key = U**(1/weight)) instead
+#      of a strict sort — priority still dominates on average, but doesn't
+#      guarantee the identical winner every single drain.
+#   4. Kind-interleave (DRAIN_DISCOVERY_INTERLEAVE_EVERY below) — service_
+#      discovery's own priority ceiling (~100) can never outscore a
+#      substantial content_update (~400+), so without a reserved cadence new-
+#      service coverage is structurally unable to compete at all.
+DRAIN_AGE_BONUS_PER_DAY = env_float("DRAIN_AGE_BONUS_PER_DAY", 4.0)
+DRAIN_AGE_BONUS_MAX = env_float("DRAIN_AGE_BONUS_MAX", 120.0)
+# 1 of every N drain picks is reserved for the discovery lane (when any are
+# pending), regardless of how the content_update backlog scores.
+DRAIN_DISCOVERY_INTERLEAVE_EVERY = env_int("DRAIN_DISCOVERY_INTERLEAVE_EVERY", 5)
 
 # Queue maintenance (Phase 5 — archive & defer)
 PUBLISH_DEFER_PRIORITY_THRESHOLD = env_int("PUBLISH_DEFER_PRIORITY_THRESHOLD", 45)
@@ -145,6 +182,42 @@ BROWSER_TIMEOUT_MS = env_int("BROWSER_TIMEOUT_MS", 35_000)
 BROWSER_WAIT_MS = env_int("BROWSER_WAIT_MS", 2500)
 BROWSER_CHANNEL = env_str("BROWSER_CHANNEL", "")
 BROWSER_STORAGE_STATE_PATH = env_str("BROWSER_STORAGE_STATE_PATH", "")
+
+# capture_screenshot tool (2026-08-11): where captured PNGs are saved on disk
+# and the public URL prefix nginx serves them under. STORAGE_DIR must be
+# OUTSIDE any release dir -- releases get replaced wholesale on every deploy,
+# but a screenshot embedded in a live article must keep resolving. See
+# deploy/nginx/algorand-platform.conf's /media/screenshots/ location, which
+# serves this same directory from the persistent `shared/` tree, not a
+# release path. Empty STORAGE_DIR is a deliberate kill switch: the tool
+# refuses rather than silently writing to some default path that may not
+# exist or be writable on a given host.
+SCREENSHOT_STORAGE_DIR = env_str("SCREENSHOT_STORAGE_DIR", "")
+SCREENSHOT_PUBLIC_BASE_URL = env_str(
+    "SCREENSHOT_PUBLIC_BASE_URL", "https://algorand.pxke.me/media/screenshots"
+)
+
+# play_interactive tool (2026-08-11, owner request: discover a game's actual
+# mechanics through a few real clicks/inputs, not master or complete it).
+# Bounded on purpose -- exploring a system takes a handful of steps; an
+# unbounded budget would let one compose turn into an open-ended playthrough
+# and burn the compose's time/cost budget on a single tool.
+PLAY_INTERACTIVE_MAX_STEPS = env_int("PLAY_INTERACTIVE_MAX_STEPS", 8)
+
+# connect_wallet tool (2026-08-11, agent-wallet Phase 1: WalletConnect LOGIN
+# only, see workers/app/modules/wallet/signer.py's docstring for the actual
+# security boundary). Off by default -- a dedicated MainNet keypair (holds
+# real ALGO) whose signing is allowlisted down to zero capability to move
+# value or change account control, but still gated behind an explicit
+# opt-in like every other capability-boundary flag here (INVESTIGATIVE_TOOLS_
+# ENABLED, MISTRAL_ENABLED) rather than being on by default.
+AGENT_WALLET_ENABLED = env_bool("AGENT_WALLET_ENABLED", False)
+# Read only inside workers/app/modules/wallet/signer.py. Empty = not configured.
+AGENT_WALLET_MNEMONIC = env_str("AGENT_WALLET_MNEMONIC", "")
+# Separate, smaller budget from PLAY_INTERACTIVE_MAX_STEPS -- connect_wallet is
+# a materially higher-stakes action (it signs something, even if narrowly
+# scoped) than a generic click/type.
+WALLET_CONNECT_MAX_PER_COMPOSE = env_int("WALLET_CONNECT_MAX_PER_COMPOSE", 1)
 
 SCRAPE_COOLDOWN_SECONDS = env_int("SCRAPE_COOLDOWN_SECONDS", 3600)
 # Watch cadence for monitored services: a healthy source is re-scraped for
@@ -206,6 +279,11 @@ COINGECKO_CACHE_TTL = env_int("COINGECKO_CACHE_TTL", 300)  # spot tick, 5 min
 COINGECKO_WEEKLY_CACHE_TTL = env_int("COINGECKO_WEEKLY_CACHE_TTL", 3600)  # 7d chart, 1h
 COINGECKO_NAME_TTL = env_int("COINGECKO_NAME_TTL", 604800)  # asset name is static, 7 days
 COINGECKO_STALE_TTL = env_int("COINGECKO_STALE_TTL", 86400)  # last-good fallback on error
+# Chain-tools indexer/algod cache: tiered by how fast the underlying data
+# actually changes (same philosophy as COINGECKO_*_TTL above).
+CHAIN_CACHE_TTL_STATIC = env_int("CHAIN_CACHE_TTL_STATIC", 604800)  # 7d: permanent once confirmed (asset params, historical blocks/txns)
+CHAIN_CACHE_TTL_SLOW = env_int("CHAIN_CACHE_TTL_SLOW", 300)  # 5m: changes with activity, not sub-minute (app state, holder balances, tx aggregates)
+CHAIN_CACHE_TTL_FAST = env_int("CHAIN_CACHE_TTL_FAST", 60)  # 1m: current-state snapshots (account balance, consensus stats)
 PRICE_METRICS_SAMPLE_LIMIT = env_int("PRICE_METRICS_SAMPLE_LIMIT", 200)
 PRICE_METRICS_BRIEF_MAX_CHARS = env_int("PRICE_METRICS_BRIEF_MAX_CHARS", 4000)
 
@@ -274,6 +352,70 @@ DEEPSEEK_MODEL_RUBRIC = env_str("DEEPSEEK_MODEL_RUBRIC", "deepseek-chat")
 # larger ceiling without approaching a real limit.
 DEEPSEEK_MAX_TOKENS = env_int("DEEPSEEK_MAX_TOKENS", 40000)
 
+# Benchmark-candidate providers (2026-08-14, ahead of a DeepSeek pricing
+# change): same additive shape as DEEPSEEK_* above -- empty API key by
+# default, never changes existing behavior. MODEL_* defaults are the exact
+# names supplied when this work was scoped (Gemini 3.7 / GPT 5.6 "Luna" /
+# Kimi K3 / GLM 5.2) -- placeholders to override once the real API's exact
+# model-ID string is confirmed, not verified against any provider's docs.
+OPENAI_API_KEY = env_str("OPENAI_API_KEY", "")
+OPENAI_API_BASE = env_str("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+OPENAI_MODEL_WRITER = env_str("OPENAI_MODEL_WRITER", "gpt-5.6-luna")
+OPENAI_MODEL_RESEARCH = env_str("OPENAI_MODEL_RESEARCH", "gpt-5.6-luna")
+OPENAI_MODEL_DIGEST = env_str("OPENAI_MODEL_DIGEST", "gpt-5.6-luna")
+OPENAI_MODEL_TRANSLATE = env_str("OPENAI_MODEL_TRANSLATE", "gpt-5.6-luna")
+OPENAI_MODEL_RUBRIC = env_str("OPENAI_MODEL_RUBRIC", "gpt-5.6-luna")
+
+KIMI_API_KEY = env_str("KIMI_API_KEY", "")
+KIMI_API_BASE = env_str("KIMI_API_BASE", "https://api.moonshot.ai/v1").rstrip("/")
+KIMI_MODEL_WRITER = env_str("KIMI_MODEL_WRITER", "kimi-k2.7-code")
+KIMI_MODEL_RESEARCH = env_str("KIMI_MODEL_RESEARCH", "kimi-k2.7-code")
+KIMI_MODEL_DIGEST = env_str("KIMI_MODEL_DIGEST", "kimi-k2.7-code")
+KIMI_MODEL_TRANSLATE = env_str("KIMI_MODEL_TRANSLATE", "kimi-k2.7-code")
+KIMI_MODEL_RUBRIC = env_str("KIMI_MODEL_RUBRIC", "kimi-k2.7-code")
+# Same shape as DEEPSEEK_MAX_TOKENS above: confirmed live 2026-08-14 that
+# Kimi K3's thinking cannot be disabled at any setting, and its reasoning
+# tokens draw from the same completion budget as the visible answer -- a
+# small explicit max_tokens (e.g. the LLM quality rubric's 800) risks the
+# exact 2026-08-06 DeepSeek incident (reasoning consumes the whole budget,
+# content comes back empty) recurring on a different provider.
+KIMI_MAX_TOKENS = env_int("KIMI_MAX_TOKENS", 40000)
+
+GLM_API_KEY = env_str("GLM_API_KEY", "")
+GLM_API_BASE = env_str("GLM_API_BASE", "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
+GLM_MODEL_WRITER = env_str("GLM_MODEL_WRITER", "glm-5.2")
+GLM_MODEL_RESEARCH = env_str("GLM_MODEL_RESEARCH", "glm-5.2")
+GLM_MODEL_DIGEST = env_str("GLM_MODEL_DIGEST", "glm-5.2")
+GLM_MODEL_TRANSLATE = env_str("GLM_MODEL_TRANSLATE", "glm-5.2")
+GLM_MODEL_RUBRIC = env_str("GLM_MODEL_RUBRIC", "glm-5.2")
+
+# Gemini's native API is NOT OpenAI-compatible (contents/parts, functionCall,
+# role="model") -- GeminiProvider (llm_gemini_provider.py) translates to/from
+# it, unlike the OpenAI-compatible providers above which share one wire format.
+GEMINI_API_KEY = env_str("GEMINI_API_KEY", "")
+GEMINI_API_BASE = env_str(
+    "GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"
+).rstrip("/")
+GEMINI_MODEL_WRITER = env_str("GEMINI_MODEL_WRITER", "gemini-3.7")
+GEMINI_MODEL_RESEARCH = env_str("GEMINI_MODEL_RESEARCH", "gemini-3.7")
+GEMINI_MODEL_DIGEST = env_str("GEMINI_MODEL_DIGEST", "gemini-3.7")
+GEMINI_MODEL_TRANSLATE = env_str("GEMINI_MODEL_TRANSLATE", "gemini-3.7")
+GEMINI_MODEL_RUBRIC = env_str("GEMINI_MODEL_RUBRIC", "gemini-3.7")
+
+# Anthropic's Messages API is also not OpenAI-compatible (top-level `system`
+# field separate from `messages`, tool_use/tool_result content blocks instead
+# of tool_calls, `usage.{input,output}_tokens` instead of `usage.
+# {prompt,completion}_tokens") -- AnthropicProvider (llm_anthropic_provider.py)
+# translates to/from it, same reasoning as Gemini above. Added 2026-08-14 at
+# the owner's request to include Claude Sonnet 5 in the provider comparison.
+ANTHROPIC_API_KEY = env_str("ANTHROPIC_API_KEY", "")
+ANTHROPIC_API_BASE = env_str("ANTHROPIC_API_BASE", "https://api.anthropic.com/v1").rstrip("/")
+ANTHROPIC_MODEL_WRITER = env_str("ANTHROPIC_MODEL_WRITER", "claude-sonnet-5")
+ANTHROPIC_MODEL_RESEARCH = env_str("ANTHROPIC_MODEL_RESEARCH", "claude-sonnet-5")
+ANTHROPIC_MODEL_DIGEST = env_str("ANTHROPIC_MODEL_DIGEST", "claude-sonnet-5")
+ANTHROPIC_MODEL_TRANSLATE = env_str("ANTHROPIC_MODEL_TRANSLATE", "claude-sonnet-5")
+ANTHROPIC_MODEL_RUBRIC = env_str("ANTHROPIC_MODEL_RUBRIC", "claude-sonnet-5")
+
 # "synthesize" (default): Stage 1->2 handoff is an LLM-synthesized Research
 # Digest (mistral_compose._synthesize_research_digest) — the only thing Stage
 # 2 sees, no raw trace. "raw": skip that synthesis pass entirely and hand
@@ -300,7 +442,7 @@ LLM_PROVIDER_DIGEST = env_str("LLM_PROVIDER_DIGEST", "mistral").strip().lower()
 LLM_PROVIDER_DIGEST_CANARY_PCT = env_int("LLM_PROVIDER_DIGEST_CANARY_PCT", 0)
 LLM_PROVIDER_TRANSLATE = env_str("LLM_PROVIDER_TRANSLATE", "mistral").strip().lower()
 LLM_PROVIDER_TRANSLATE_CANARY_PCT = env_int("LLM_PROVIDER_TRANSLATE_CANARY_PCT", 0)
-LLM_PROVIDER_RUBRIC = env_str("LLM_PROVIDER_RUBRIC", "mistral").strip().lower()
+LLM_PROVIDER_RUBRIC = env_str("LLM_PROVIDER_RUBRIC", "deepseek").strip().lower()
 LLM_PROVIDER_RUBRIC_CANARY_PCT = env_int("LLM_PROVIDER_RUBRIC_CANARY_PCT", 0)
 # Output cap per call. A full JSON article (title+summary+long body+tags) can
 # exceed 4096 and get truncated mid-string → JSON parse fails → template junk.
@@ -324,14 +466,14 @@ MISTRAL_TOOL_RESULT_MAX_CHARS = env_int("MISTRAL_TOOL_RESULT_MAX_CHARS", 24000)
 # Headroom kept below the context limit (response max_tokens is reserved on top)
 # so token-estimate error never tips a request over the edge.
 MISTRAL_CONTEXT_SAFETY_TOKENS = env_int("MISTRAL_CONTEXT_SAFETY_TOKENS", 4000)
-MISTRAL_TIMEOUT_SECONDS = env_int("MISTRAL_TIMEOUT_SECONDS", 120)
+MISTRAL_TIMEOUT_SECONDS = env_int("MISTRAL_TIMEOUT_SECONDS", 480)
 # Special editions' research client resends the full accumulated tool-call
 # trace every chat_with_tools round; root-caused 2026-08-04 (Humanitarian
 # Network recompose) at round 16 / 49 tool calls, a single round's request
 # exceeded the plain 120s timeout on 5 straight attempts and the whole
 # 21-minute compose was lost. Same *4-style scaling convention as the other
 # special-edition knobs (RESEARCH_MIN_TOOL_CALLS, RESEARCH_FLOOR_MAX_PASSES,
-# MISTRAL_MAX_TOOL_ROUNDS) but deliberately smaller (2x, not 4x): the
+# LLM_MAX_TOOL_ROUNDS) but deliberately smaller (2x, not 4x): the
 # compose_lock is a GLOBAL mutex, so a special edition stuck retrying a truly
 # dead API would block every other compose on the platform for the full
 # worst-case retry window -- 2x balances "tolerate a slow big-context round"
@@ -350,11 +492,26 @@ MISTRAL_ENABLED = env_bool("MISTRAL_ENABLED", False)
 MISTRAL_MAX_SOURCE_CHARS = env_int("MISTRAL_MAX_SOURCE_CHARS", 48_000)
 # Stage-1 RESEARCH sees a smaller source clip. The research pass only decides
 # what to look up — it doesn't write from the source — yet its user prompt is
-# re-sent on EVERY tool round (up to MISTRAL_MAX_TOOL_ROUNDS, plus the research
+# re-sent on EVERY tool round (up to LLM_MAX_TOOL_ROUNDS, plus the research
 # floor's extra pass), so full-size source there multiplies input tokens ~14x
 # per article for no research benefit. Stage-2 generation (a single call)
 # always gets the full MISTRAL_MAX_SOURCE_CHARS clip.
 MISTRAL_RESEARCH_SOURCE_CHARS = env_int("MISTRAL_RESEARCH_SOURCE_CHARS", 16_000)
+# Stage-2's single write call has NO context-budget trimming the way the
+# multi-round research loop does (fit_messages_to_budget only runs inside
+# chat_with_tools) -- and unlike the raw-source clip above, the digest +
+# special-edition enumeration/outline handed to Stage 2 were never capped at
+# all, since they're already-synthesized (expected-compact) model output, not
+# raw scrape text. Root-caused live 2026-08-07: a special-edition recompose's
+# accumulated digest+enumeration+outline grew large enough that the write
+# call came back with an EMPTY completion (not a clean context-length error)
+# on both the original attempt and chat_json_object's own built-in corrective
+# retry -- the whole 31-minute compose lost with nothing to show for it. This
+# caps the combined digest+enumeration+outline block specifically (the parts
+# with no upstream size limit), leaving plenty of room under
+# MISTRAL_CONTEXT_TOKENS for a genuinely deep special edition while making
+# runaway growth a clean truncation instead of a silent empty response.
+MISTRAL_STAGE2_EXTRAS_MAX_CHARS = env_int("MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 160_000)
 # Periodic re-scrape of ALL monitored sources to detect content diffs and compose
 # updates (MISTRAL_DIFF_POLL_SECONDS, default 600s) is read directly via
 # os.getenv in celery_app.py's beat schedule — not duplicated here, since a
@@ -367,11 +524,36 @@ MISTRAL_RESEARCH_SOURCE_CHARS = env_int("MISTRAL_RESEARCH_SOURCE_CHARS", 16_000)
 # into "write now" with an incomplete picture. Raised to 14, then to 24
 # (2026-07-15, owner request): a research-hostile story (4 dead/quiet NFT
 # marketplaces, many 0-result searches) hit the DIGEST_GAP_FILL ceiling and
-# never got a real chance to fill its gaps. Each round costs one more
-# throttled Mistral call (MISTRAL_MIN_REQUEST_INTERVAL_SECONDS apart), so the
-# extra 10 rounds is ~+150s worst case — still cheap against the ~30min task
-# time limit. The (tool+args) dedup guard still bounds true runaway loops.
-MISTRAL_MAX_TOOL_ROUNDS = env_int("MISTRAL_MAX_TOOL_ROUNDS", 24)
+# never got a real chance to fill its gaps. Raised 24 -> 48 (2026-08-13, owner
+# request): the LumiRogue recompose that finally used play_interactive to
+# actually enter the demo AND verified the Testnet-footer/mainnet-code
+# discrepancy on-chain ran the full 24 rounds and still had more threads
+# worth chasing (leaderboard provenance, NFD segments, guest-collection
+# history) -- research-hungry stories with a rich on-chain surface were
+# genuinely round-constrained, not just slow. Each round costs one more
+# throttled LLM call (LLM_MIN_REQUEST_INTERVAL_SECONDS apart); a compose
+# using the full budget now runs ~35-40min of research alone, which is WHY
+# the compose-task time limits below were widened alongside this change --
+# raising this constant without them risks the exact silent mid-compose
+# kill the 2026-08-04 Humanitarian Network incident hit at the OLD ceiling.
+# The (tool+args) dedup guard still bounds true runaway loops.
+LLM_MAX_TOOL_ROUNDS = env_int("LLM_MAX_TOOL_ROUNDS", 48)
+# Every celery task that composes an article (recompose_published,
+# recompose_review, recompose_session_service, compose_queue_row_now,
+# publish_from_chain_event, drain_standard_publish_queue,
+# drain_breaking_publish_queue) previously relied on the app-wide
+# task_soft_time_limit/task_time_limit (celery_app.py, 1800s/1860s = 30/31min)
+# -- fine when LLM_MAX_TOOL_ROUNDS was 24 and a deep compose ran ~22min,
+# but the 24->48 raise above pushes a full-budget research pass alone to
+# ~35-40min, which would get SIGTERM'd mid-compose exactly like the
+# 2026-08-04 Humanitarian Network incident (that one lost a 21-minute compose
+# to the OLD, tighter per-round Mistral HTTP timeout; this is the same
+# failure shape one level up, at the whole-task level). Per-task override
+# (not raising the app-wide default) so every OTHER celery task's timeout
+# stays untouched -- same reasoning translate_article_batch_task already
+# documents for its own override.
+COMPOSE_TASK_SOFT_TIME_LIMIT = env_int("COMPOSE_TASK_SOFT_TIME_LIMIT", 5400)  # 90m
+COMPOSE_TASK_TIME_LIMIT = env_int("COMPOSE_TASK_TIME_LIMIT", 5700)  # 95m
 # Voxtral audio transcription (local YouTube pipeline) — same Mistral account,
 # different endpoint (/audio/transcriptions, multipart) from the chat models above.
 MISTRAL_VOXTRAL_MODEL = env_str("MISTRAL_VOXTRAL_MODEL", "voxtral-mini-latest")
@@ -399,6 +581,16 @@ MISTRAL_TEMP_WRITE = env_float("MISTRAL_TEMP_WRITE", 0.6)
 WRITER_REVIEW_ENABLED = env_bool("WRITER_REVIEW_ENABLED", True)
 WRITER_REVIEW_MIN_GRADE = env_float("WRITER_REVIEW_MIN_GRADE", 7.0)
 WRITER_REVISION_MAX_PASSES = env_int("WRITER_REVISION_MAX_PASSES", 2)
+# 2026-08-11 (owner request): the revision call used to be a plain no-tools
+# chat_json_object -- it could only reorganize/reword facts already sitting
+# in the research digest, even when a rubric/gate issue is exactly the kind
+# a fresh tool call could resolve (an unverified claim, a stale figure, a
+# dead link with a real replacement one search away). Giving revision its
+# own bounded tool-call budget instead of reusing LLM_MAX_TOOL_ROUNDS:
+# revision is meant to be surgical (fix the handful of flagged issues), not
+# a second full research pass, and each of the WRITER_REVISION_MAX_PASSES
+# outer passes gets this budget independently.
+WRITER_REVISION_TOOL_MAX_ROUNDS = env_int("WRITER_REVISION_TOOL_MAX_ROUNDS", 8)
 # Stage 3 qualitative rubric (Small tier): narrative synthesis + technical depth,
 # scored 1-5. quality_needs_revision() triggers on strictly-below, so this is the
 # lowest score considered PASSING — 4, not 3: a 3 still carries real, written
@@ -421,7 +613,7 @@ LENGTH_OK_MAX_WORDS = env_int("LENGTH_OK_MAX_WORDS", 2000)
 # several trivial calls that all skim the same one or two domains.
 RESEARCH_MIN_TOOL_CALLS = env_int("RESEARCH_MIN_TOOL_CALLS", 6)
 RESEARCH_FLOOR_ENABLED = env_bool("RESEARCH_FLOOR_ENABLED", True)
-# Raised 1->2 alongside MISTRAL_MAX_TOOL_ROUNDS (2026-07-15, owner request):
+# Raised 1->2 alongside LLM_MAX_TOOL_ROUNDS (2026-07-15, owner request):
 # more headroom for research-hostile stories, still bounded.
 RESEARCH_FLOOR_MAX_PASSES = env_int("RESEARCH_FLOOR_MAX_PASSES", 2)
 # Digest synthesis (Stage 1b) can flag specific unresolved-but-material gaps
@@ -492,10 +684,14 @@ TELEGRAM_CHAT_ID = env_str("TELEGRAM_CHAT_ID", "")
 # write:statuses + write:media scopes) on that instance.
 MASTODON_INSTANCE_URL = env_str("MASTODON_INSTANCE_URL", "")
 MASTODON_ACCESS_TOKEN = env_str("MASTODON_ACCESS_TOKEN", "")
-# Client-side rate limiting (Redis-coordinated across all workers). Spacing is a
-# hard floor on time between calls (leaky bucket) — at least 15s/call to stay
-# well under the per-second AND tokens/minute caps and avoid 429 storms.
-MISTRAL_MIN_REQUEST_INTERVAL_SECONDS = env_float("MISTRAL_MIN_REQUEST_INTERVAL_SECONDS", 15.0)
+# Client-side rate limiting (Redis-coordinated across all workers), shared by
+# BOTH LLM providers (Mistral and DeepSeek — see llm_rate_limit.py). Spacing
+# is a hard floor on time between calls (leaky bucket). Lowered 15.0 -> 5.0
+# (2026-08-13): the 15s floor was tuned for mistral-medium-2505 alone back
+# when it was the only provider; DeepSeek now serves most compose traffic
+# and had never been observed to actually need that much headroom (zero 429s
+# from either provider in 7 days of prod logs at the old value).
+LLM_MIN_REQUEST_INTERVAL_SECONDS = env_float("LLM_MIN_REQUEST_INTERVAL_SECONDS", 5.0)
 MISTRAL_MAX_RETRIES = env_int("MISTRAL_MAX_RETRIES", 4)
 # Retry backoff on 429 / 5xx / network errors: base * 2**attempt, capped. Honors
 # Retry-After when present. Larger so a rate-limited call waits meaningfully.
@@ -608,6 +804,23 @@ UNSOURCED_SPECIFICS_GATE_ENFORCE = env_bool("UNSOURCED_SPECIFICS_GATE_ENFORCE", 
 # passed, presented as still open. See stale_deadline_gate.py — a revision
 # issue, not a hold, since the fix is a tense rewrite the writer can do itself.
 STALE_DEADLINE_GATE_ENABLED = env_bool("STALE_DEADLINE_GATE_ENABLED", True)
+# Broken-link-claim gate: a body sentence asserting a link/page is broken,
+# 404s, or doesn't work must be backed by an actual click_element/
+# play_interactive click attempt somewhere in the trace, not just a guessed
+# fetch_url. Root-caused 2026-08-10 (lumirogue.com): a draft called the site's
+# "About this project"/"Terms of use" footer links broken because /about and
+# /terms genuinely 404 — but those are JS buttons with no real href, opening
+# working in-page modals when clicked. The prompt-only fix (telling the writer
+# to try click_element first) did NOT hold: the identical mistake recurred
+# 2026-08-12 on the same links. ENABLED runs the scan and records findings
+# (payload['_broken_link_claims']); ENFORCE additionally diverts a flagged
+# draft to human review. Ships ENFORCE=False (unlike the two gates above,
+# which graduated to enforcing after a tuning pass) since this pattern-match
+# is coarser than unsourced_specifics' proximity-window numeric check — it
+# only asks "was ANY click attempted this compose", not "was THIS SPECIFIC
+# link clicked" — so it needs a real precision read on live traffic first.
+BROKEN_LINK_CLAIM_GATE_ENABLED = env_bool("BROKEN_LINK_CLAIM_GATE_ENABLED", True)
+BROKEN_LINK_CLAIM_GATE_ENFORCE = env_bool("BROKEN_LINK_CLAIM_GATE_ENFORCE", False)
 # Root-caused 2026-08-04 (vestige.fi): build_text_diff's 200-line cap silently
 # dropped 1,573 of 1,773 real diff lines (89%) before the writer ever saw
 # them -- two new asset-manager pages, mostly repetitive label/value
@@ -719,6 +932,17 @@ ANNOUNCE_PRIORITY_BONUS = env_int("ANNOUNCE_PRIORITY_BONUS", 40)
 # (bonus scaled by confidence when True, a halving-style malus when False).
 # Inert in training mode, where predict_publish defers everything to review.
 CLASSIFIER_PRIORITY_WEIGHT = env_int("CLASSIFIER_PRIORITY_WEIGHT", 30)
+# Real-world project scale (DeFiLlama TVL, or GitHub org stars as a fallback) —
+# a secondary/modifier signal sized like ANNOUNCE_PRIORITY_BONUS, meant to
+# decide close calls between otherwise-equal candidates, not approach
+# relevance/novelty's weight (those stay the spine: "is this on-topic",
+# "is this fresh"). Feeds Lane 2 ("biggest/most significant") of the
+# publish-queue lane split — see service_scale.py.
+SCALE_PRIORITY_WEIGHT = env_int("SCALE_PRIORITY_WEIGHT", 40)
+# How often a service's scale signal is re-resolved (DeFiLlama/GitHub calls
+# are cheap but not free) — piggybacked on the existing per-service ingest
+# write path, not a separate scheduled job.
+SERVICE_SCALE_REFRESH_DAYS = env_int("SERVICE_SCALE_REFRESH_DAYS", 21)
 
 # YouTube transcripts (Stage 2) via a third-party API — the prod IP is anti-bot
 # blocked for direct yt-dlp/captions. Provider-agnostic: URL template (may use
@@ -935,13 +1159,27 @@ MAX_PENDING_REVIEWS = env_int("MAX_PENDING_REVIEWS", 1)
 # for hours.
 PAUSE_INTAKE_ON_FEED_BACKLOG = env_bool("PAUSE_INTAKE_ON_FEED_BACKLOG", False)
 
+# Single kill-switch for ALL automatic composition (celery-beat AND
+# admin-triggered). Before this existed, "pause auto-compose for testing"
+# was done by setting MISTRAL_DIFF_POLL_SECONDS / PUBLISH_QUEUE_DRAIN_SECONDS
+# / PUBLISH_BREAKING_DRAIN_SECONDS / ENSURE_REVIEW_READY_SECONDS to a huge
+# interval (2026-08-05) -- that only blocks celery-beat's OWN schedule. It
+# does NOT block _trigger_compose_next() in admin/stores/cassandra.py, which
+# fires drain_standard_publish_queue directly (by design, so approving a
+# review composes the next candidate immediately) -- a leak that let a
+# 107-item backlog auto-drain itself while the beat freeze was still active
+# (found live 2026-08-09). Check this flag at every entry point instead of
+# each task's own scheduling interval.
+AUTO_COMPOSE_PAUSED = env_bool("AUTO_COMPOSE_PAUSED", False)
+
 # Let the Mistral writer call live tools (price, chain head, platform search)
 # on demand while composing. Off = single-shot prompt with pre-gathered context.
 WRITER_TOOLS_ENABLED = env_bool("WRITER_TOOLS_ENABLED", True)
 
 # Investigative-journalism tools for the writer agent (Phase 1: free/no-key
 # OSINT lookups). Optional API keys: OPENSANCTIONS_API_KEY,
-# OPENCORPORATES_API_TOKEN, COURTLISTENER_TOKEN, GITHUB_TOKEN.
+# OPENCORPORATES_API_TOKEN, COURTLISTENER_TOKEN, GITHUB_TOKEN,
+# COMPANIES_HOUSE_API_KEY (free UK-specific corporate registry lookup).
 INVESTIGATIVE_TOOLS_ENABLED = env_bool("INVESTIGATIVE_TOOLS_ENABLED", True)
 
 # Free public Bluesky post search for community sentiment (no Twitter/X, no key).

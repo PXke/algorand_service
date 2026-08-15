@@ -1,6 +1,7 @@
 <script lang="ts">
   import { marked, Renderer } from 'marked'
   import { looksLikeLogoUrl, proxiedImageUrl } from '../lib/images'
+  import { renderChartHtml } from '../lib/chartRender'
 
   let { source = '' }: { source?: string } = $props()
 
@@ -53,6 +54,21 @@
         return out.replace('<a ', '<a target="_blank" rel="noopener noreferrer" ')
       }
       return out
+    }
+
+    // The compose pipeline's chart_data tool embeds a ```chart fenced JSON
+    // block (see chartRender.ts) — render it as an actual chart instead of
+    // falling through to a plain code block showing raw JSON to readers.
+    // Anything that fails to parse (malformed JSON, unsupported shape)
+    // degrades to the normal code-block rendering rather than breaking the
+    // article, since chart data still originates from an LLM.
+    const baseCode = renderer.code.bind(renderer)
+    renderer.code = (token) => {
+      if (token.lang === 'chart') {
+        const chart = renderChartHtml(token.text)
+        if (chart) return chart
+      }
+      return baseCode(token)
     }
 
     return marked.parse(cleaned, {
@@ -390,5 +406,64 @@
     font-size: 0.85em;
     color: var(--muted);
     line-height: 1.45;
+  }
+
+  /* chart_data tool output — see chartRender.ts. Sits where a plain code
+     block would otherwise land, styled like the rest of the site's data
+     panels (mono figures, tabular-nums) rather than the serif prose voice. */
+  .md :global(.chart-figure) {
+    margin: 0 0 18px;
+    padding: 16px 16px 12px;
+    background: var(--callout);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .md :global(.chart-title) {
+    margin: 0 0 10px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    color: var(--muted);
+  }
+  .md :global(.chart-svg) {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .md :global(.chart-grid) {
+    stroke: var(--border);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+  .md :global(.chart-baseline) {
+    stroke: var(--on-surface);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+  .md :global(.chart-axis-label) {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    fill: var(--subtle);
+  }
+  .md :global(.chart-legend) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 10px;
+  }
+  .md :global(.chart-legend-item) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .md :global(.chart-legend-swatch) {
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
   }
 </style>

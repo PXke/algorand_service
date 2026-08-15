@@ -33,11 +33,26 @@ _QUOTE_SPAN_RE = re.compile(
 )
 
 _FOLD_RE = re.compile(r"[^a-z0-9]+")
+# Fenced code blocks (```chart JSON, ```json, plain ``` ... ```) -- quote
+# characters inside these are structural syntax, not prose attribution, and
+# de-quoting one corrupts it. Root-caused live 2026-08-10 (Alpha Arcade
+# article): a ```chart block's "title": "Top wallets..." lost its quotes to
+# this gate, leaving invalid JSON (`"title": Top wallets..., "x": [...]`)
+# where a bare, unquoted phrase sits where a JSON string value must be.
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 
 
 def _fold(text: str) -> str:
     """Case/punctuation-insensitive form for verbatim comparison."""
     return _FOLD_RE.sub(" ", (text or "").lower()).strip()
+
+
+def _protected_spans(body: str) -> list[tuple[int, int]]:
+    return [m.span() for m in _CODE_FENCE_RE.finditer(body)]
+
+
+def _in_any_span(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start <= pos < end for start, end in spans)
 
 
 def _ground_corpus(trace: list[dict] | None, extra_texts: list[str]) -> str:
@@ -71,8 +86,11 @@ def unquote_ungrounded_quotes(
         return payload
     corpus = _ground_corpus(trace, list(extra_texts or []))
     removed: list[str] = []
+    protected = _protected_spans(body)
 
     def _replace(match: re.Match) -> str:
+        if _in_any_span(match.start(), protected):
+            return match.group(0)  # inside a fenced code block -- structural, not prose
         inner = match.group(1) if match.group(1) is not None else match.group(2)
         folded = _fold(inner)
         if len(folded.split()) < QUOTE_MIN_WORDS:

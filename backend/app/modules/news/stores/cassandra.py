@@ -57,6 +57,7 @@ def _full_row_to_stored(row: Any) -> StoredArticle:
         slug=getattr(row, "slug", None),
         translations=dict(row.translations) if row.translations else None,
         updated_at_epoch=_epoch(getattr(row, "updated_at", None)) or None,
+        draft=bool(getattr(row, "draft", False)),
     )
 
 

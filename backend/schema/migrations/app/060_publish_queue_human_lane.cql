@@ -1,0 +1,11 @@
+-- Publish-queue priority lanes: one of the daily standard-tier slots is a
+-- deliberate human pick (Lane 1) rather than whatever wins the automated
+-- formula (Lane 2 "biggest/significant", Lane 3 "genuinely new" =
+-- service_discovery). This column is how an admin marks a pending row as
+-- today's pick.
+--
+-- Sentinel is a UTC "YYYY-MM-DD" day string, not a boolean: a pin left over
+-- from a day it was never consumed on must be distinguishable from a pin
+-- made today, so it can't silently carry forward and jump a later day's
+-- queue. NULL/absent reads as "no pin" for all existing and untouched rows.
+ALTER TABLE publish_queue ADD human_pick_day text;

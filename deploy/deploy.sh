@@ -384,7 +384,15 @@ else
     '${VENV}/bin/pip' install --quiet --upgrade scipy \
       --config-settings=setup-args=-Duse-pythran=false || true
   fi
-  '${VENV}/bin/pip' install --quiet --upgrade meson-python ninja cython
+  '${VENV}/bin/pip' install --quiet --upgrade meson-python ninja cython maturin
+  # maturin's own build hook shells out to the `maturin` binary by bare name
+  # (subprocess.check_output(['maturin', ...])), not by venv-relative path --
+  # every other tool here is invoked via its full '\${VENV}/bin/...' path, so
+  # nothing above ever put the venv's bin/ on PATH. Without this, a package
+  # whose build backend is maturin (e.g. cryptography, needed by pyWalletConnect,
+  # built from source here since no prebuilt wheel exists yet for free-threaded
+  # cp315t) fails with FileNotFoundError: 'maturin' even though it's installed.
+  export PATH="${VENV}/bin:\$PATH"
   # --extra-index-url: prefer torch CPU wheels (no bundled CUDA).
   '${VENV}/bin/pip' install --upgrade --no-build-isolation \
     --extra-index-url https://download.pytorch.org/whl/cpu \

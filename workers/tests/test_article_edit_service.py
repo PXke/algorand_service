@@ -100,6 +100,7 @@ def test_edit_reregisters_match_keys_anchored_to_publish_time(
             extra_tags=(),
             defunct_domains=(),
             unsourced_hold_reason="",
+            broken_link_hold_reason="",
         ),
     )
     monkeypatch.setattr(
@@ -236,6 +237,7 @@ def test_edit_recomposes_fully_without_leaking_the_old_body(
             extra_tags=("special-edition",),
             defunct_domains=(),
             unsourced_hold_reason="",
+            broken_link_hold_reason="",
         )
 
     monkeypatch.setattr(
@@ -291,6 +293,7 @@ def test_edit_merges_extra_tags_from_the_recompose(monkeypatch: pytest.MonkeyPat
             extra_tags=("special-edition",),
             defunct_domains=(),
             unsourced_hold_reason="",
+            broken_link_hold_reason="",
         ),
     )
 

@@ -157,6 +157,16 @@ def enqueue_glossary_term_translations(slug: str) -> None:
     dispatch over the shared broker as _enqueue_article_translations
     (backend and workers are separate services/venvs, so this can't import
     the task directly).
+
+    queue="translate" (root-caused 2026-08-11): a bulk glossary-review pass
+    that published 105 drafts at once fanned out ~840 of these tasks onto
+    "pipeline" — the SAME queue as compose/recompose — and stalled an
+    unrelated recompose behind the whole batch. translate_glossary_term
+    itself is a Mistral API call, not local-model work, so it isn't a
+    perfect fit for "translate" (sized/concurrency-1 for the local engine),
+    but it's explicitly "never on the article's critical path" (see the
+    task's own docstring) — running slowly on a queue that never competes
+    with compose is the right tradeoff, not running fast on one that does.
     """
     try:
         from celery import Celery
@@ -169,7 +179,7 @@ def enqueue_glossary_term_translations(slug: str) -> None:
             app.send_task(
                 "app.tasks.newspaper.translate_glossary_term",
                 args=[slug, lang],
-                queue="pipeline",
+                queue="translate",
             )
     except Exception:
         import logging

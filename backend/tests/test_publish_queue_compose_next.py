@@ -9,9 +9,16 @@ from uuid import UUID
 
 from app.core.statements import PublishQueueStmts
 from app.modules.admin.stores.cassandra import AdminCassandraStore
+from tests.conftest import stmt_cql
 
 _QUEUE_ID = "00000000-0000-0000-0000-000000000001"
 _CREATED_AT = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
+
+_GET_ROW = stmt_cql(PublishQueueStmts, "GET_ROW")
+_MAX_PENDING_PRIORITY = stmt_cql(PublishQueueStmts, "MAX_PENDING_PRIORITY")
+_UPDATE_PRIORITY = stmt_cql(PublishQueueStmts, "UPDATE_PRIORITY")
+_DELETE_PENDING = stmt_cql(PublishQueueStmts, "DELETE_PENDING")
+_INSERT_PENDING = stmt_cql(PublishQueueStmts, "INSERT_PENDING")
 
 
 class _FakeSession:
@@ -22,9 +29,9 @@ class _FakeSession:
 
     def execute(self, stmt: object, params: tuple = ()) -> object:
         self.calls.append((stmt, params))
-        if stmt is PublishQueueStmts.GET_ROW:
+        if stmt == _GET_ROW:
             return SimpleNamespace(one=lambda: self._row)
-        if stmt is PublishQueueStmts.MAX_PENDING_PRIORITY:
+        if stmt == _MAX_PENDING_PRIORITY:
             return SimpleNamespace(one=lambda: self._max_row)
         return SimpleNamespace(one=lambda: None)
 
@@ -47,31 +54,36 @@ def _pending_row(*, priority: int = 100) -> SimpleNamespace:
     )
 
 
+def _run(fake: _FakeSession, queue_id: str = _QUEUE_ID) -> dict | None:
+    store = AdminCassandraStore()
+    with (
+        patch("app.core.cassandra.get_cassandra_session", return_value=fake),
+        patch("app.core.cassandra.prepare_cached", lambda cql: cql),
+    ):
+        return store.bump_queue_priority(queue_id)
+
+
 def test_bump_sets_priority_above_current_max() -> None:
     """The row's new priority is one above the current highest pending priority."""
     fake = _FakeSession(row=_pending_row(priority=100), max_row=SimpleNamespace(priority=307))
-    store = AdminCassandraStore()
-    with patch("app.core.cassandra.get_cassandra_session", return_value=fake):
-        result = store.bump_queue_priority(_QUEUE_ID)
+    result = _run(fake)
     assert result == {"queue_id": _QUEUE_ID, "priority": 308}
 
 
 def test_bump_updates_base_table_and_resyncs_pending_index() -> None:
     """Bumping writes UPDATE_PRIORITY on the base table, then deletes the old publish_queue_pending clustering row and inserts the new one (required since priority is a clustering column)."""
     fake = _FakeSession(row=_pending_row(priority=100), max_row=SimpleNamespace(priority=307))
-    store = AdminCassandraStore()
-    with patch("app.core.cassandra.get_cassandra_session", return_value=fake):
-        store.bump_queue_priority(_QUEUE_ID)
+    _run(fake)
 
     stmts_called = [c[0] for c in fake.calls]
-    assert PublishQueueStmts.UPDATE_PRIORITY in stmts_called
-    assert PublishQueueStmts.DELETE_PENDING in stmts_called
-    assert PublishQueueStmts.INSERT_PENDING in stmts_called
+    assert _UPDATE_PRIORITY in stmts_called
+    assert _DELETE_PENDING in stmts_called
+    assert _INSERT_PENDING in stmts_called
 
-    delete_call = next(c for c in fake.calls if c[0] is PublishQueueStmts.DELETE_PENDING)
+    delete_call = next(c for c in fake.calls if c[0] == _DELETE_PENDING)
     assert delete_call[1] == ("pending", 100, _CREATED_AT, UUID(_QUEUE_ID))
 
-    insert_call = next(c for c in fake.calls if c[0] is PublishQueueStmts.INSERT_PENDING)
+    insert_call = next(c for c in fake.calls if c[0] == _INSERT_PENDING)
     assert insert_call[1] == (
         "pending",
         308,
@@ -86,29 +98,23 @@ def test_bump_updates_base_table_and_resyncs_pending_index() -> None:
 def test_bump_handles_already_highest_priority_row() -> None:
     """Bumping the row that's already the max still strictly increases its priority (no accidental tie)."""
     fake = _FakeSession(row=_pending_row(priority=307), max_row=SimpleNamespace(priority=307))
-    store = AdminCassandraStore()
-    with patch("app.core.cassandra.get_cassandra_session", return_value=fake):
-        result = store.bump_queue_priority(_QUEUE_ID)
+    result = _run(fake)
     assert result == {"queue_id": _QUEUE_ID, "priority": 308}
 
 
 def test_bump_handles_empty_pending_index() -> None:
     """No other pending rows (MAX_PENDING_PRIORITY returns None) still produces a valid bump."""
     fake = _FakeSession(row=_pending_row(priority=50), max_row=None)
-    store = AdminCassandraStore()
-    with patch("app.core.cassandra.get_cassandra_session", return_value=fake):
-        result = store.bump_queue_priority(_QUEUE_ID)
+    result = _run(fake)
     assert result == {"queue_id": _QUEUE_ID, "priority": 51}
 
 
 def test_bump_returns_none_for_unknown_queue_id() -> None:
     """A queue_id with no matching row returns None, no writes issued."""
     fake = _FakeSession(row=None, max_row=SimpleNamespace(priority=100))
-    store = AdminCassandraStore()
-    with patch("app.core.cassandra.get_cassandra_session", return_value=fake):
-        result = store.bump_queue_priority(_QUEUE_ID)
+    result = _run(fake)
     assert result is None
-    assert not any(c[0] is PublishQueueStmts.UPDATE_PRIORITY for c in fake.calls)
+    assert not any(c[0] == _UPDATE_PRIORITY for c in fake.calls)
 
 
 def test_bump_returns_none_for_non_pending_row() -> None:
@@ -116,18 +122,14 @@ def test_bump_returns_none_for_non_pending_row() -> None:
     row = _pending_row(priority=100)
     row.status = "done"
     fake = _FakeSession(row=row, max_row=SimpleNamespace(priority=307))
-    store = AdminCassandraStore()
-    with patch("app.core.cassandra.get_cassandra_session", return_value=fake):
-        result = store.bump_queue_priority(_QUEUE_ID)
+    result = _run(fake)
     assert result is None
-    assert not any(c[0] is PublishQueueStmts.UPDATE_PRIORITY for c in fake.calls)
+    assert not any(c[0] == _UPDATE_PRIORITY for c in fake.calls)
 
 
 def test_bump_rejects_malformed_queue_id() -> None:
     """A non-UUID queue_id returns None without touching Cassandra."""
     fake = _FakeSession(row=_pending_row(), max_row=SimpleNamespace(priority=100))
-    store = AdminCassandraStore()
-    with patch("app.core.cassandra.get_cassandra_session", return_value=fake):
-        result = store.bump_queue_priority("not-a-uuid")
+    result = _run(fake, "not-a-uuid")
     assert result is None
     assert fake.calls == []

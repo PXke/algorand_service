@@ -154,6 +154,54 @@ def expanded_search_terms(query: str) -> list[str]:
     return out
 
 
+def upsert_article_document(
+    *,
+    article_id: str,
+    title: str,
+    summary: str,
+    body: str,
+    service_id: str,
+    published_at_epoch: int,
+) -> None:
+    """Upsert an article's searchable fields directly from the backend (admin restore-from-draft path). Best-effort -- never raises. Workers' upsert_article_document (search/core/indexer.py) is the primary write path and additionally computes the `tokens` field; that field is optional, so a doc written from here just ranks by title/summary/body/synonyms until the article is next edited/recomposed, which re-indexes it with tokens from the workers side."""
+    client = get_typesense_client()
+    if client is None:
+        return
+    try:
+        ensure_articles_collection()
+        client.collections[ARTICLES_COLLECTION].documents.upsert(
+            {
+                "id": article_id,
+                "title": title,
+                "summary": summary,
+                "body": body,
+                "service_id": service_id,
+                "published_at": published_at_epoch,
+            }
+        )
+    except Exception:
+        logger.warning("typesense_article_upsert_failed id=%s", article_id, exc_info=True)
+
+
+def delete_article_document(article_id: str) -> None:
+    """Remove an article from the Typesense search index. Best-effort -- never raises, and a missing document is not an error (nothing indexed yet is a normal state, not a failure).
+
+    Root-caused live 2026-08-10: neither delete_article nor the new draft
+    toggle ever removed a withdrawn article's document here, so its title/
+    summary/body stayed fully searchable (and returned in results) even
+    though its public URL correctly 404s -- the search RESULT itself leaked
+    a withdrawn article's existence and content.
+    """
+    client = get_typesense_client()
+    if client is None:
+        return
+    try:
+        client.collections[ARTICLES_COLLECTION].documents[article_id].delete()
+    except Exception as exc:
+        if "404" not in str(exc):
+            logger.warning("typesense_article_delete_failed id=%s", article_id, exc_info=True)
+
+
 def clear_search_index() -> dict[str, object]:
     """Drop article/page search collections so a pipeline reset starts clean."""
     client = get_typesense_client()

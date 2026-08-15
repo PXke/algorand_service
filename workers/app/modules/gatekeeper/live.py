@@ -60,8 +60,19 @@ def run_deterministic_gate(
 
     reasons: list[str] = []
     if not comp.passed:
-        unscreened = named_persons_unscreened(source_text, tool_trace)
-        who = f" ({', '.join(unscreened)})" if unscreened else ""
+        # named_persons_unscreened is the human_identity rule's own actionable
+        # detail (candidate names lacking a sanctions/PEP screen) -- attaching
+        # it whenever ANY rule fails, including domain_provenance or
+        # company_backing, misleadingly implies those unrelated failures are
+        # about people too. Worse, on a marketing-heavy source page the
+        # extractor's "two Capitalized words" proxy for a person name matches
+        # plenty of non-name phrases ("Robust Ecosystem Role"), which reads
+        # as noise when it's surfaced next to a failure it has nothing to do
+        # with (found 2026-08-07 auditing a held Polkagold review row).
+        who = ""
+        if "human_identity" in comp.failed_rules:
+            unscreened = named_persons_unscreened(source_text, tool_trace)
+            who = f" ({', '.join(unscreened)})" if unscreened else ""
         reasons.append(f"missing mandatory checks: {', '.join(comp.failed_rules)}{who}")
     if fact.score < cfg.fact_min:
         reasons.append(

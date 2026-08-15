@@ -22,7 +22,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 COMPOSE_LOCK_KEY = "compose:article"
-COMPOSE_LOCK_TTL = 1860
+# Backstop only, not the primary safety mechanism — a genuinely dead holder
+# (crashed worker, killed task) is caught promptly by _try_reclaim() below,
+# which checks Celery's live task list directly and doesn't depend on this
+# TTL at all. Set generously above any real compose duration instead: the
+# old 1860s (31min) value was already shorter than observed real runs
+# (root-caused 2026-08-06 live — an ordinary, non-special-edition recompose
+# was still actively calling the LLM past the 31-minute mark, meaning the
+# Redis key had already silently expired while the compose was genuinely
+# still in progress, which lets a brand-new, unrelated compose acquire the
+# "held" lock immediately — no reclaim check ever runs in that path, since
+# reclaim only triggers when acquire() finds the key still present. This is
+# very likely the real explanation for the original, never-fully-explained
+# "composition happened during the freeze window" mystery from earlier
+# work on this platform).
+COMPOSE_LOCK_TTL = 10800
 _RAW_LOCK_KEY = f"lock:{COMPOSE_LOCK_KEY}"
 _META_KEY = f"lock:{COMPOSE_LOCK_KEY}:meta"
 # Never attempt to reclaim a lock younger than this. Real composes routinely

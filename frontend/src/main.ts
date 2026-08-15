@@ -66,9 +66,51 @@ function registerSwWhenIdle(): void {
   }
 }
 
+/**
+ * The backend server-renders a full head block so crawlers get real meta
+ * tags before any JS runs -- but PageMeta.svelte's svelte:head
+ * unconditionally injects its own copy of several of the same tags on
+ * mount, since it has no way to know the backend already rendered them
+ * (this isn't Svelte's own SSR, so its usual head-diffing doesn't apply).
+ * Root-caused via a Bing audit 2026-08-10: every article page carried two
+ * description metas and two canonical links, flagged as an on-page SEO
+ * error. Removing the server-rendered set right before mount is safe
+ * specifically because nothing Svelte-managed exists in the DOM yet --
+ * every match here is guaranteed to be the backend's copy, about to be
+ * replaced by PageMeta's.
+ *
+ * Deliberately NOT included: og:image*, twitter:image*, and the ld+json
+ * script. PageMeta only renders those when a route passes an `image` or
+ * `jsonLd` prop -- most routes (Home, Topic, Glossary, ...) pass neither,
+ * relying entirely on the backend's copy. Stripping those unconditionally
+ * would silently delete real content on every route that doesn't supply
+ * its own replacement, not fix a duplicate.
+ */
+function stripServerRenderedHeadTags(): void {
+  const selectors = [
+    'title',
+    'meta[name="description"]',
+    'link[rel="canonical"]',
+    'meta[name="robots"]',
+    'meta[property="og:title"]',
+    'meta[property="og:description"]',
+    'meta[property="og:url"]',
+    'meta[property="og:type"]',
+    'meta[property="og:site_name"]',
+    'meta[property="og:locale"]',
+    'meta[name="twitter:card"]',
+    'meta[name="twitter:title"]',
+    'meta[name="twitter:description"]',
+  ]
+  for (const selector of selectors) {
+    document.head.querySelectorAll(selector).forEach((el) => el.remove())
+  }
+}
+
 // Don't block first paint on /auth/session — wallet state can hydrate after.
 void restoreSession()
 startPageviewTracking()
+stripServerRenderedHeadTags()
 mount(App, {
   target: document.getElementById('app')!,
 })

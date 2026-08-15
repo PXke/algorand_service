@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from app.core.config import MISTRAL_MAX_SOURCE_CHARS
+from app.modules.ai.llm_provider import LLMProvider
 from app.modules.ai.mistral_client import (
     MistralClient,
     MistralCreditError,
@@ -25,6 +26,7 @@ from app.modules.ai.mistral_client import (
     get_mistral_translate_client,
 )
 from app.modules.ai.reference_block import append_reference_block
+from app.modules.ai.session_register import SessionRegister, SessionRegisterCassandra
 from app.modules.ai.story_spike import StorySpikedError
 from app.modules.metrics.price_metrics_store import load_mistral_context
 from app.modules.newspaper.weekly_digest import WeeklyDigestContext
@@ -73,6 +75,12 @@ class MistralArticleFields:
     # non-empty reason forces the draft into human review instead of
     # auto-publishing (GoPlausible incident 2026-07-20).
     unsourced_hold_reason: str = ""
+    # A "this link/page is broken/404s" claim with no click_element/
+    # play_interactive click attempt anywhere in the trace this compose
+    # (broken_link_claim_gate, ENFORCE mode) — a non-empty reason forces the
+    # draft into human review instead of auto-publishing (lumirogue.com,
+    # recurred 2026-08-10 and 2026-08-12).
+    broken_link_hold_reason: str = ""
 
 
 # The single hardest accuracy rule. The small model, told to write full-depth,
@@ -112,7 +120,12 @@ def _writing_guidelines(today: str) -> str:
         "plainly — never soften a verified fact — but the goal is to inform readers, "
         "not to humiliate a small team for shipping something real. Where warranted, "
         "let the piece close with a fair, honest note of hope or potential rather "
-        "than pure negativity.\n"
+        "than pure negativity. State a shortcoming as the fact itself, not a punchy "
+        "summarizing label for it — 'a project running on pocket money' editorializes "
+        "where 'a four-figure liquidity pool and weekly volume in the tens of "
+        "dollars' lets the reader draw that conclusion themselves (flagged 2026-08-06: "
+        "otherwise-fair, well-sourced criticism read as a bit rude because of exactly "
+        "one line like this).\n"
         "- NO REPETITION, ANYWHERE (the one rule every other repetition note in "
         "these instructions points back to — this is the single source of truth): "
         "state each specific fact, number, or judgment ONCE, in the single section "
@@ -167,6 +180,44 @@ def _writing_guidelines(today: str) -> str:
         "how many times is too many (root-caused 2026-08-05: a first pass never "
         "explained 'Ship of Theseus'/'Memento Mori' at all; a second pass "
         "over-corrected to 5 and 3 mentions in 862 words).\n"
+        "- TEACH WHEN A CONCEPT IS LOAD-BEARING: Audience above requires a brief "
+        "inline gloss the first time jargon appears — that is the floor, not the "
+        "ceiling. When this specific story genuinely turns on a concept a general "
+        "reader won't already have (how rekeying actually changes control of an "
+        "account, what an AMM liquidity pool is doing mechanically, why ASA opt-in "
+        "exists) and a one-line gloss would leave the reader unable to follow the "
+        "rest of the piece, you may go further: a short explanatory passage, or a "
+        "clearly-introduced mini walkthrough of a few sentences, placed where the "
+        "concept first becomes load-bearing to the story (mid-narrative — see OPEN "
+        "LIKE A STORY, NOT A PITCH; never as the opener). Keep it proportionate to "
+        "the article's own length and specific to what THIS story needs explained, "
+        "not a generic protocol primer. Once taught, NO REPETITION, ANYWHERE still "
+        "applies — explain it once, then refer back to it. This is something you "
+        "may reach for when it genuinely serves comprehension, not a mandate to "
+        "add one to every piece.\n"
+        "- HOW A READER WOULD ACTUALLY TRY IT: distinct from teaching a concept "
+        "above — when the story covers a product, app, or game a reader could "
+        "realistically use TODAY (not a roadmap item or a defunct project), and "
+        "what they'd concretely need to start (a wallet, a specific network — "
+        "mainnet vs Testnet matters enormously here, see Recency below for why "
+        "that distinction is load-bearing — an account minimum, a first action "
+        "like connect/mint/opt-in) is verifiable from your sources, weave that "
+        "into the narrative the way you would any other fact, not as a bolted-on "
+        "how-to list (still bound by Narrative Synthesis's ban on bullets). If "
+        "the source material doesn't make the concrete first step clear, use "
+        "fetch_url/click_element/type_into_page on the product's own site rather "
+        "than guessing at onboarding steps — NO UNSOURCED SPECIFICS applies to "
+        "'how to start' exactly as much as to a user count. When the subject is "
+        "an actual PLAYABLE game or interactive demo (not just a marketing page "
+        "with a connect-wallet button), a single click_element attempt only "
+        "confirms the button exists — it tells you nothing about what's actually "
+        "inside. Spend a few play_interactive steps entering it and seeing the "
+        "real first screen/area (root-caused 2026-08-13: this got skipped "
+        "roughly half the time across real LumiRogue composes purely because "
+        "nothing told the model it mattered, not because the tool failed when "
+        "tried — every attempt that WAS made succeeded). Skip this entirely "
+        "when it wouldn't be genuinely actionable for the reader (Testnet-only "
+        "with no public mainnet path, invite-gated, discontinued).\n"
         f"- Recency & Temporal Anchoring: Today is {today} (UTC). Source pages often "
         "contain outdated figures. Never present a number, price, ranking, TVL/volume, "
         "or 'current' claim as present-day unless the source clearly dates it to "
@@ -190,6 +241,19 @@ def _writing_guidelines(today: str) -> str:
         "impressive figure or a partner name you did not see in the sources.\n"
         "- STRICT QUOTE GROUNDING: Never include a quotation unless that exact "
         "word-for-word text is visible in a tool result.\n"
+        "- PAGE COPY IS NOT GROUND TRUTH FOR STAKES: a dapp's own rendered text/UI "
+        "labels can be stale or simply wrong about anything with real "
+        "consequences — which network it runs on, whether fees/assets are real, "
+        "what a button actually does. Root-caused live 2026-08-13: a site's own "
+        "wallet-connect footer read 'Algorand Testnet' while its wallet code was "
+        "hardcoded to mainnet — an article that quoted the footer text was "
+        "backwards about real economic stakes. For a mainnet/testnet claim, use "
+        "inspect_network_hosts (observes which hosts the page's own code actually "
+        "talks to) rather than quoting page text or grep_frontend_bundle, which "
+        "can't tell which of several config blocks in a minified bundle is the "
+        "one actually wired up. For 'where does this button go', prefer "
+        "click_element (it now follows a new-tab destination too) over guessing "
+        "from the button's label.\n"
         "- YOU CAN REFUSE THE STORY: if your research shows the subject is dead "
         "or abandoned, the verifiable material is genuinely too thin for an "
         "honest article, we already covered exactly this, or you cannot verify "
@@ -198,8 +262,10 @@ def _writing_guidelines(today: str) -> str:
         "for the exact categories and, just as important, when NOT to use it. "
         "Aborting is a SUCCESS, not a failure, when the alternative is inventing "
         "substance that was never there. This tool only exists during research "
-        "— once you start writing you have no tools, so make this call before "
-        "you commit to a draft, not partway through one.\n"
+        "and later revision passes — the actual DRAFTING call itself has no "
+        "tools at all, so if you already suspect the story can't be substantiated, "
+        "make this call before you commit to a draft rather than hoping a later "
+        "revision pass will save it.\n"
     )
 
 
@@ -408,6 +474,20 @@ _SOURCING_AND_FRAMING_RULES = (
     "same source is a weaker but real citation, use that instead and say so. Only "
     "cite pages you successfully read, or attribute the fact to where it actually "
     "came from (a search result snippet, an on-chain lookup, an archived copy).\n"
+    "CLIENT-SIDE ROUTE 404 CHECK: a fetch_url 404 (or a 200 page whose own text "
+    "says something like 'could not be found in this application') on a URL YOU "
+    "guessed — a bare /about, /terms, /faq path rather than one you followed "
+    "from a real <a href> — does NOT prove a site's link or button is broken. "
+    "Single-page apps route entirely in client-side JavaScript; a path with no "
+    "matching route renders this same not-found shell even when the real "
+    "on-page control (often a button with no href at all) works fine and opens "
+    "a modal via JS. Before reporting any link/page as broken or missing, "
+    "verify with click_element on the control's visible text — a fetch_url "
+    "guess alone is not evidence. Root-caused 2026-08-10 (lumirogue.com "
+    "'About') and recurred 2026-08-12 on the same site's 'Terms of use': an "
+    "article claimed no terms of use were published, when clicking the real "
+    "button opened a complete, substantive terms page the guessed URL never "
+    "reached.\n"
     "MEMORY IS NOT A SOURCE: a specific fact you recognize — a real product name, "
     "a transaction, a price, a date — is not verified just because it feels "
     "familiar from training. If it did not appear in an actual tool result THIS "
@@ -422,6 +502,21 @@ _SOURCING_AND_FRAMING_RULES = (
     "using it. Never transplant a feature, guarantee, or mechanism from a "
     "lookalike product onto the story's subject, and never fill a gap in how "
     "THIS product works by assuming it works like a well-known analogue.\n"
+    "ASSET AFFILIATION CHECK: the same lookalike trap applies on-chain. A name "
+    "or ticker match from lookup_asset_by_name (or any entity search) is NOT "
+    "proof of affiliation — Algorand names/tickers are not reserved, and an "
+    "unrelated project can coincidentally share your subject's name. Before "
+    "reporting a found ASA, account, or application as belonging to the "
+    "entity you are covering, cross-check its creator/owner address against "
+    "an address you have ALREADY established as that entity's in THIS "
+    "session (an NFT collection's creator, an NFD-linked wallet, a payment "
+    "address from its own site) — if you cannot make that connection, either "
+    "state plainly that you found a same-named token with no confirmed link, "
+    "or drop it. Root-caused 2026-08-11: two independent composes, five days "
+    "apart, both cited an unrelated 'LUMI' ASA as Lumi Rogue's own token "
+    "purely because of the name match — its creator address was never "
+    "checked against anything the game had actually established as its own, "
+    "and the project has never created a token.\n"
     "UNDOCUMENTED MECHANICS: if your sources do not document how something "
     "works (docs missing, page is a stub), describe it only at the level the "
     "sources support and say plainly that the details are not yet documented. "
@@ -494,6 +589,40 @@ _FEEDBACK_CHANNELS = (
     "real friction, not nitpicks, then continue.\n"
 )
 
+# Same as _FEEDBACK_CHANNELS but drops the "call suggest_tool for every gap"
+# mandate — used once this session has already hit suggest_tool's per-session
+# cap (mistral_client._CALL_CAPPED_TOOLS). Root-caused 2026-08-06: a
+# special-edition compose restarts this same system prompt fresh at the start
+# of each research pass (floor, gap-fill, enumeration gap-fill), so a later
+# pass has no way to know an earlier pass already discharged the "report every
+# gap" instruction — it kept trying anyway, burning a full round-trip on a
+# call already guaranteed to be refused (5 wasted calls in one real session).
+_FEEDBACK_CHANNELS_TOOL_GAPS_DONE = (
+    "TOOL GAPS: already reported for this story in an earlier research pass — "
+    "do not call suggest_tool again this pass unless you hit a genuinely NEW "
+    "capability gap you have not already flagged.\n"
+    "FETCH_URL AS A GENERAL FALLBACK: before concluding a capability does not "
+    "exist, try fetch_url directly — it is a plain HTTP GET and covers most "
+    "specific-data needs a dedicated tool would: a specific report/document at a "
+    "guessed or discovered URL, a project's own API endpoint (many publish a "
+    "public JSON API at a predictable path like /api/stats or /api/v1/...), an "
+    "RSS/Atom feed, a GitHub raw file.\n"
+    "PIPELINE FEEDBACK: when instructions, source material, an existing tool, or "
+    "the research→write handoff genuinely blocked or degraded your work, call "
+    "report_compose_issue with a specific category and summary. This feeds "
+    "engineering — report real friction, not nitpicks, then continue.\n"
+)
+
+
+def _feedback_channels_for(trace: list[dict]) -> str:
+    """_FEEDBACK_CHANNELS, or the trimmed _FEEDBACK_CHANNELS_TOOL_GAPS_DONE variant once this session has already hit suggest_tool's per-session call cap — see that constant's comment for why."""
+    cap = MistralClient._CALL_CAPPED_TOOLS.get("suggest_tool")
+    if cap is None:
+        return _FEEDBACK_CHANNELS
+    count = sum(1 for entry in trace if entry.get("tool") == "suggest_tool")
+    return _FEEDBACK_CHANNELS_TOOL_GAPS_DONE if count >= cap else _FEEDBACK_CHANNELS
+
+
 _SELF_REVIEW_RULES = (
     "SELF-REVIEW (MANDATORY — every article, no exceptions): you MUST call "
     "review_draft at least once before you finish; do NOT output the final JSON "
@@ -561,16 +690,59 @@ _TOOLS_GUIDANCE = (
 # Two-stage research pass: same rules WITHOUT the self-review/"then WRITE"
 # steering — the warm pass produces the article separately, and review_draft
 # has no draft to grade yet.
-_RESEARCH_PHASE_GUIDANCE = (
+_RESEARCH_PHASE_GUIDANCE_BASE = (
     _RESEARCH_MISSION_AND_ROUTING
     + _VERIFICATION_DISCIPLINE
     + _METRICS_DISCIPLINE
     + _SOURCING_AND_FRAMING_RULES
     + _NO_FABRICATION
     + _STRICT_QUOTE_GROUNDING
-    + _FEEDBACK_CHANNELS
-    + _RESEARCH_PHASE_ADDENDUM
 )
+
+_RESEARCH_PHASE_GUIDANCE = (
+    _RESEARCH_PHASE_GUIDANCE_BASE + _FEEDBACK_CHANNELS + _RESEARCH_PHASE_ADDENDUM
+)
+
+
+def _round_budget_guidance() -> str:
+    """Tells the research pass its actual round ceiling and explicitly permits spending it.
+
+    The model otherwise has ZERO visibility into LLM_MAX_TOOL_ROUNDS —
+    round_idx is tracked purely for internal telemetry (debug["rounds"]),
+    never injected into any message — so "stop when you judge you have
+    enough" is the model's only real signal, with no sense of how much
+    headroom is actually left. Root-caused 2026-08-13: a LumiRogue research
+    pass stopped at round 19 of a 24-round ceiling, leaving an interactive
+    demo unexplored past its first screen and three of its own flagged
+    verification gaps unpursued, purely because it judged what it had
+    "enough" — not because it ran out of runway. Owner call the same day:
+    DeepSeek is cheap enough that depth is worth more than a few extra tool
+    calls, so this makes that explicit instead of leaving it to the model's
+    unprompted guess at how generous the budget is.
+    """
+    from app.core.config import LLM_MAX_TOOL_ROUNDS
+
+    return (
+        f"\nRESEARCH BUDGET: you have up to {LLM_MAX_TOOL_ROUNDS} tool-call "
+        "rounds for this research pass, and that budget is cheap to spend — depth "
+        "beats speed here. Having a plausible draft's worth of material is NOT a "
+        "reason to stop early: if there is more you could verify (push an "
+        "interactive flow further than the first screen, chase a claim you "
+        "couldn't confirm, try the capability you almost reached for before "
+        "settling for a workaround), keep going. Only stop when you are "
+        "genuinely out of new angles to check, not merely because you have "
+        "something presentable.\n"
+    )
+
+
+def _research_phase_guidance(trace: list[dict]) -> str:
+    """_RESEARCH_PHASE_GUIDANCE with a trace-aware feedback-channels block (see _feedback_channels_for) — use this at every research-pass call site instead of the static constant, so a later pass in the same compose (floor/gap-fill/special-edition) doesn't re-issue an already-discharged "call suggest_tool" mandate. Identical output to the static constant when trace is empty (the first pass)."""
+    return (
+        _RESEARCH_PHASE_GUIDANCE_BASE
+        + _feedback_channels_for(trace)
+        + _RESEARCH_PHASE_ADDENDUM
+        + _round_budget_guidance()
+    )
 
 
 def _format_research_digest(trace: list[dict]) -> str:
@@ -638,7 +810,16 @@ _NARRATIVE_GUIDANCE = (
     "product/domain in its URL — search results often include SIMILAR or "
     "competitor products, and their features/guarantees must never be "
     "transplanted onto the story's subject or used to fill gaps in how it "
-    "works. A project's claims about itself (its own site/forum posts) are "
+    "works. The same applies to any ASA/account/application the Digest "
+    "surfaced by a name or ticker match: report it as the subject's own ONLY "
+    "if the Digest shows its creator/owner address was actually cross-checked "
+    "against an address already established as the subject's — a name match "
+    "alone (Algorand names/tickers are not reserved) is not affiliation; "
+    "otherwise say plainly it's an unconfirmed same-named token, or drop it "
+    "(root-caused 2026-08-11: an unrelated 'LUMI' ASA cited as Lumi Rogue's "
+    "own token on name alone, twice, five days apart — the project has never "
+    "created a token). A project's claims about itself (its own site/forum "
+    "posts) are "
     "attributed statements ('according to the project'), not established facts "
     "— and for speculative or token-launch subjects, include the risk context "
     "a fair journalist would. Where a *product-specific* mechanism is "
@@ -755,17 +936,53 @@ def _build_stage2_user(
         extra_blocks += f"\n\n{enumeration}"
     if outline.strip():
         extra_blocks += f"\n\n{outline}" + _OUTLINE_FOLLOW_INSTRUCTION
+    digest, extra_blocks = _cap_stage2_extras(digest, extra_blocks)
     if digest.strip():
         return (
             user + "\n\n## Research Digest (PRIMARY AND ONLY ground truth for external facts):\n"
-            f"{digest}"
-            + extra_blocks
-            + "\n\nWrite the article strictly from this material above. "
+            f"{digest}" + extra_blocks + "\n\nWrite the article strictly from this material above. "
             "You cannot call tools or fetch additional pages.\n"
             + narrative_guidance
             + " Write it now."
         )
     return user + extra_blocks + narrative_guidance + " Write it now."
+
+
+def _cap_stage2_extras(digest: str, extra_blocks: str) -> tuple[str, str]:
+    """Cap digest + extra_blocks (enumeration/outline) to MISTRAL_STAGE2_EXTRAS_MAX_CHARS combined.
+
+    Neither has an upstream size limit -- both are already-synthesized model
+    output expected to stay compact, but a deep special edition's digest can
+    still grow unboundedly across research/gap-fill/deepening passes. Trims
+    extra_blocks first (it's additive detail on top of the digest, the
+    smaller and less essential of the two for a special edition that still
+    has its digest intact) then the digest's own tail if that alone isn't
+    enough, rather than silently sending an oversized request that risks the
+    empty-completion failure this cap exists to prevent.
+    """
+    from app.core.config import MISTRAL_STAGE2_EXTRAS_MAX_CHARS
+
+    total = len(digest) + len(extra_blocks)
+    if total <= MISTRAL_STAGE2_EXTRAS_MAX_CHARS:
+        return digest, extra_blocks
+    logger.warning(
+        "Stage-2 digest+extras (%d chars) exceeds MISTRAL_STAGE2_EXTRAS_MAX_CHARS (%d) -- trimming",
+        total,
+        MISTRAL_STAGE2_EXTRAS_MAX_CHARS,
+    )
+    extras_marker = "\n\n[enumeration/outline truncated]"
+    digest_marker = "\n\n[digest truncated]"
+
+    # extras alone can cover the overage (accounting for its own marker's
+    # length) -- digest stays untouched.
+    if len(digest) + len(extras_marker) <= MISTRAL_STAGE2_EXTRAS_MAX_CHARS:
+        extras_budget = MISTRAL_STAGE2_EXTRAS_MAX_CHARS - len(digest) - len(extras_marker)
+        return digest, extra_blocks[: max(0, extras_budget)] + extras_marker
+
+    # Even dropping extras entirely isn't enough -- the digest itself is
+    # over budget, so trim its tail too.
+    digest_budget = MISTRAL_STAGE2_EXTRAS_MAX_CHARS - len(digest_marker)
+    return digest[: max(0, digest_budget)] + digest_marker, ""
 
 
 _RESEARCH_DIGEST_SYNTHESIS = (
@@ -876,7 +1093,7 @@ def _format_asset_fact_line(asset_id: int | str, record: dict[str, str]) -> str:
     if record.get("unit_name"):
         parts.append(f'unit_name="{record["unit_name"]}"')
     if record.get("url"):
-        parts.append(f'url={record["url"]}')
+        parts.append(f"url={record['url']}")
     return "- " + ", ".join(parts)
 
 
@@ -913,12 +1130,13 @@ def _synthesize_research_digest(
     *,
     trace: list[dict],
     research_context: str,
+    provider: str = "",
 ) -> str:
-    """Stage 1→2 handoff: model-synthesized digest instead of raw tool JSON, unless RESEARCH_DIGEST_MODE=raw (see config.py) — an experiment skipping synthesis entirely in favor of a large-context provider reading the trace itself, still with the deterministic asset-facts appendix since that's free regardless of mode."""
+    """Stage 1→2 handoff: model-synthesized digest instead of raw tool JSON, unless RESEARCH_DIGEST_MODE=raw (see config.py) or the research provider is deepseek — deepseek's context window is large enough to read the raw trace directly (owner call, 2026-08-06), so it always skips synthesis regardless of the config value; RESEARCH_DIGEST_MODE=raw remains a manual override for forcing raw mode on mistral too. Deterministic asset-facts appendix is still added either way, since that's free regardless of mode."""
     from app.core.config import RESEARCH_DIGEST_MODE
 
     asset_facts = _extract_asset_facts(trace)
-    if RESEARCH_DIGEST_MODE == "raw":
+    if RESEARCH_DIGEST_MODE == "raw" or provider == "deepseek":
         full_trace = _format_full_research_trace(trace)
         if not full_trace.strip():
             return ""
@@ -1048,18 +1266,50 @@ def _research_floor_nudge(have: int, need: int, digest: str) -> str:
 
 
 def _debug_tool_turn(debug: dict | None, name: str, arguments: dict, result: dict) -> None:
-    """Record a (synthetic) tool call + result into the debug transcript so the admin Sessions view shows it. Two-stage compose calls the grader directly rather than via the model's tool loop, so these turns aren't captured automatically the way the legacy single-loop's were."""
+    """Record a (synthetic) tool call + result into the debug transcript so the admin Sessions view shows it. Two-stage compose calls the grader directly rather than via the model's tool loop, so these turns aren't captured automatically the way the legacy single-loop's were.
+
+    The synthetic pair needs its OWN id/tool_call_id linkage, generated here
+    and shared between both messages -- exactly like a real API response's
+    tool_calls[].id and _run_tool_call's paired tool-role message. Root-
+    caused 2026-08-15: this previously built the assistant tool_calls entry
+    with no `id` at all and the tool-role message with no `tool_call_id` at
+    all, two SEPARATE gaps that neither matched each other nor got backfilled
+    together -- `_ensure_tool_call_ids` (mistral_client.py) only ever patches
+    the assistant side, so once this synthetic pair is later merged into a
+    revision-pass request (`_merged_convo_with_prior_debug`) and replayed
+    through a stricter provider, the id backfill on the assistant side made
+    the tool-role message's still-missing tool_call_id impossible to
+    reconcile after the fact ("messages with role 'tool' must have a
+    'tool_call_id'", GPT-5.6-luna, confirmed live). Assigning a real id up
+    front for both sides closes the gap at its source instead of patching
+    around it downstream again.
+    """
     import json as _json
+    import uuid as _uuid
 
     if debug is None or not isinstance(debug.get("messages"), list):
         return
+    call_id = f"call_{_uuid.uuid4().hex[:24]}"
     debug["messages"].append(
         {
             "role": "assistant",
-            "tool_calls": [{"function": {"name": name, "arguments": _json.dumps(arguments)}}],
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": _json.dumps(arguments)},
+                }
+            ],
         }
     )
-    debug["messages"].append({"role": "tool", "name": name, "content": _json.dumps(result)[:4000]})
+    debug["messages"].append(
+        {
+            "role": "tool",
+            "name": name,
+            "tool_call_id": call_id,
+            "content": _json.dumps(result)[:4000],
+        }
+    )
 
 
 def _record_grade(
@@ -1101,7 +1351,7 @@ def _grade_current_draft(
     is_special_edition: bool = False,
 ) -> dict:
     """Run the deterministic heuristic grader and the LLM quality rubric, merging the rubric result into the returned review dict under "quality". Either grader's failure degrades to an error marker rather than raising."""
-    from app.modules.newspaper.article_grader import grade_article_draft
+    from app.modules.newspaper.article_grader import fuse_quality_into_grade, grade_article_draft
     from app.modules.newspaper.article_quality_llm import grade_article_quality_llm
 
     try:
@@ -1115,7 +1365,7 @@ def _grade_current_draft(
     except Exception as exc:
         quality = {"model": "llm_rubric_error", "error": str(exc)[:200], "issues": []}
     review["quality"] = quality
-    return review
+    return fuse_quality_into_grade(review, quality)
 
 
 def _link_gate_issues(body: str, trace: list[dict], link_check_cache: dict) -> list[str]:
@@ -1221,6 +1471,21 @@ def _unsourced_specifics_gate_issues(
         return []
 
 
+def _broken_link_claim_gate_issues(body: str, trace: list[dict]) -> list[str]:
+    """Broken-link-claim feedback: an unverified "this link is broken/404s" claim is fed back so the writer clicks the actual control (or softens the claim) here — better than the post-hoc gate holding the whole draft for a human (lumirogue.com, recurred 2026-08-10 and 2026-08-12)."""
+    from app.core.config import BROKEN_LINK_CLAIM_GATE_ENABLED
+
+    if not BROKEN_LINK_CLAIM_GATE_ENABLED:
+        return []
+    try:
+        from app.modules.newspaper.broken_link_claim_gate import broken_link_claim_revision_issues
+
+        return broken_link_claim_revision_issues(body, trace)
+    except Exception:
+        logger.warning("broken-link-claim check failed during revision", exc_info=True)
+        return []
+
+
 def _collect_fixable_issues(
     review: dict,
     quality: dict,
@@ -1256,6 +1521,9 @@ def _collect_fixable_issues(
     unsourced_fixable = _unsourced_specifics_gate_issues(body, trace, user, research_user)
     if unsourced_fixable:
         review["unsourced_specifics"] = unsourced_fixable
+    broken_link_fixable = _broken_link_claim_gate_issues(body, trace)
+    if broken_link_fixable:
+        review["broken_link_claims"] = broken_link_fixable
     stale_deadline_fixable = _stale_deadline_gate_issues(body)
     if stale_deadline_fixable:
         review["stale_deadlines"] = stale_deadline_fixable
@@ -1267,6 +1535,7 @@ def _collect_fixable_issues(
         + chain_fixable
         + authority_fixable
         + unsourced_fixable
+        + broken_link_fixable
         + stale_deadline_fixable
     )
 
@@ -1343,9 +1612,16 @@ def _build_revision_prompt(
     length_rule = _revision_length_rule(too_long=too_long, needs_depth=needs_depth)
     return (
         gen_user + f"\n\nA reviewer flagged these problems:\n{issues_block}\n\n"
-        f"{length_rule} Do NOT add, invent, or restate facts beyond the research "
-        "digest above, and do not pad with new filler. Return the full revised "
-        f"article as the same JSON object.{carried_block}"
+        f"{length_rule} You have tool access again for this revision, specifically "
+        "to fix the flagged problems above — call a tool when a flagged issue is "
+        "something a fresh lookup could actually resolve (an unverified or stale "
+        "figure, a dead link that has a real live replacement, an asset/claim that "
+        "needs re-checking). Do NOT invent facts, and do not use tools to go "
+        "research a new angle unrelated to the flagged issues or pad with new "
+        "filler — every new fact you add must come from an actual tool result in "
+        "this pass, the same STRICT QUOTE GROUNDING / NO UNSOURCED SPECIFICS rules "
+        "from your instructions still apply. Return the full revised article as "
+        f"the same JSON object.{carried_block}"
     )
 
 
@@ -1356,6 +1632,10 @@ def _attempt_revision(
     *,
     temperature: float,
     note_failure: Callable[[str], None],
+    tool_schemas: list[dict] | None = None,
+    tool_handlers: dict | None = None,
+    trace: list[dict] | None = None,
+    debug: dict | None = None,
 ) -> dict | None:
     """Call the reviser. Returns the revised fields, or None — having already called note_failure — if the call failed or came back empty.
 
@@ -1371,15 +1651,41 @@ def _attempt_revision(
     same ratio check as a lazy gut job would have) and silently reverting to
     the still-repetitive draft — defeating the revision pass it was
     supposed to be protecting.
+
+    tool_schemas/handlers (2026-08-11): when given (and non-empty), the
+    reviser gets a bounded WRITER_REVISION_TOOL_MAX_ROUNDS tool-call budget
+    instead of a single tool-less completion — a flagged issue like "this
+    figure looks stale" or "dead link, no replacement in the digest" is
+    exactly the kind a fresh fetch_url/search_web/chain-tool call can
+    actually fix, not just reword. Falls back to the old tool-less
+    chat_json_object path when no tools are given.
     """
+    from app.modules.ai.mistral_client import _parse_json_object
+
+    messages = [
+        {"role": "system", "content": gen_system},
+        {"role": "user", "content": revise_user},
+    ]
     try:
-        revised = mistral.chat_json_object(
-            [
-                {"role": "system", "content": gen_system},
-                {"role": "user", "content": revise_user},
-            ],
-            temperature=temperature,
-        )
+        if tool_schemas and tool_handlers:
+            from app.core.config import WRITER_REVISION_TOOL_MAX_ROUNDS
+
+            raw = mistral.chat_with_tools(
+                messages,
+                tools=tool_schemas,
+                handlers=tool_handlers,
+                trace=trace,
+                debug=debug,
+                temperature=temperature,
+                require_tool=None,
+                max_rounds=WRITER_REVISION_TOOL_MAX_ROUNDS,
+            )
+            revised = _parse_json_object(raw)
+            if revised is None:
+                note_failure("revision (tool-enabled) did not return a valid JSON object")
+                return None
+        else:
+            revised = mistral.chat_json_object(messages, temperature=temperature)
     except Exception as exc:
         note_failure(f"revision call failed: {type(exc).__name__}: {exc}")
         return None
@@ -1400,6 +1706,8 @@ def _review_and_revise(
     user: str = "",
     research_user: str | None = None,
     is_special_edition: bool = False,
+    revision_tool_schemas: list[dict] | None = None,
+    revision_tool_handlers: dict | None = None,
 ) -> dict:
     """Stage 3+4 of two-stage compose: grade the draft, then revise if weak.
 
@@ -1410,6 +1718,14 @@ def _review_and_revise(
     back clean stops the loop early — most drafts never need a second). Every
     grading is recorded in the trace like review_draft tool calls so
     telemetry/insights see them.
+
+    revision_tool_schemas/handlers (2026-08-11, owner request): the revision
+    call itself DOES get tool access (same research toolset as stage 1,
+    minus review_draft) — a flagged issue is often exactly the kind a fresh
+    tool call could resolve (an unverified claim, a stale figure, a dead
+    link with a findable replacement), not just a reorganize-the-prose job.
+    None/empty falls back to the old tool-less behavior (e.g. a caller that
+    hasn't wired tools through, or WRITER_TOOLS_ENABLED off upstream).
     """
     from app.core.config import (
         MISTRAL_TEMP_WRITE,
@@ -1528,6 +1844,10 @@ def _review_and_revise(
             revise_user,
             temperature=MISTRAL_TEMP_WRITE,
             note_failure=_note_revision_failure,
+            tool_schemas=revision_tool_schemas,
+            tool_handlers=revision_tool_handlers,
+            trace=trace,
+            debug=debug,
         )
         if revised is None:
             return best_current
@@ -1877,6 +2197,7 @@ def _parse_article_fields(payload: dict[str, Any]) -> MistralArticleFields:
         confirmed_alert=payload.get("_confirmed_alert"),
         defunct_domains=tuple(payload.get("_defunct_domains") or ()),
         unsourced_hold_reason=str(payload.get("_unsourced_hold_reason") or ""),
+        broken_link_hold_reason=str(payload.get("_broken_link_hold_reason") or ""),
     )
 
 
@@ -1895,9 +2216,21 @@ def compose_scrape_article_mistral(
     publish_topic: str = "",
     first_coverage: bool = False,
     prior_coverage_block: str = "",
-    client: MistralClient | None = None,
+    client: LLMProvider | None = None,
+    research_client: LLMProvider | None = None,
+    session_register: SessionRegister | None = None,
 ) -> MistralArticleFields:
     """Generate newspaper article fields from scrape context via Mistral.
+
+    ``research_client``/``session_register`` (2026-08-14): override the
+    stage-1 research client and/or the compose-session transcript sink used
+    for this one call. Both default to None, which resolves to today's exact
+    production behavior (``get_mistral_research_client()`` /
+    ``SessionRegisterCassandra()``) -- added so a standalone benchmark
+    caller (compose_runner.py) can plug in a different provider and a local
+    file-backed register without a queue/Celery/publish coupling, while
+    every existing production call site (which never passes these) is
+    unaffected.
 
     ``first_coverage``: the service has never had a published article (e.g. its
     one-shot discovery row expired unpublished), so a diff-driven update would
@@ -2005,6 +2338,8 @@ Source material (may be days or years old — judge figures against today's date
         source_url=source_url,
         mistral=mistral,
         topic=publish_topic,
+        research_client=research_client,
+        session_register=session_register,
     )
 
 
@@ -2027,10 +2362,12 @@ def _compose_via_writer_tools(
     system: str,
     user: str,
     source_url: str,
-    mistral: MistralClient,
+    mistral: LLMProvider,
     topic: str = "",
     research_user: str | None = None,
     is_special_edition: bool = False,
+    research_client: LLMProvider | None = None,
+    session_register: SessionRegister | None = None,
 ) -> MistralArticleFields:
     """Shared research -> write -> grade/revise loop behind every writer-tools compose path. Only depends on the system/user prompt pair and a label (``source_url``) used for tool scoping and session/investigation bookkeeping — it doesn't assume the source material was a real scraped page, so callers can feed it a from-scratch topic assignment just as well as a scrape diff.
 
@@ -2040,8 +2377,10 @@ def _compose_via_writer_tools(
     Defaults to ``user``.
 
     ``is_special_edition``: quadruples the stage-1 research round budget
-    (MISTRAL_MAX_TOOL_ROUNDS) for a genuinely deeper investigation, on top
+    (LLM_MAX_TOOL_ROUNDS) for a genuinely deeper investigation, on top
     of the prompt's own depth instructions.
+
+    ``research_client``/``session_register``: see compose_scrape_article_mistral's docstring.
     """
     from app.modules.newspaper.compose_lock import compose_lock
 
@@ -2054,6 +2393,8 @@ def _compose_via_writer_tools(
             topic=topic,
             research_user=research_user,
             is_special_edition=is_special_edition,
+            research_client=research_client,
+            session_register=session_register,
         )
 
 
@@ -2067,6 +2408,7 @@ def _run_research_floor(
     debug: dict,
     *,
     is_special_edition: bool = False,
+    checkpoint: Callable[[str], None] | None = None,
 ) -> None:
     """Research FLOOR: if the cold-research pass stopped too early (the exact failure where it reads an existing profile and quits), send it back to dig deeper — bounded to RESEARCH_FLOOR_MAX_PASSES extra passes.
 
@@ -2097,9 +2439,7 @@ def _run_research_floor(
     # nudges) got waved through 16 short of the 24-source target, writing a
     # 1,050-word piece that read no deeper than an ordinary article. The
     # floor exists specifically so quadrupling the target has teeth.
-    max_passes = (
-        RESEARCH_FLOOR_MAX_PASSES * 4 if is_special_edition else RESEARCH_FLOOR_MAX_PASSES
-    )
+    max_passes = RESEARCH_FLOOR_MAX_PASSES * 4 if is_special_edition else RESEARCH_FLOOR_MAX_PASSES
     for _ in range(max(0, max_passes)):
         have = _distinct_research_calls(trace)
         if have >= min_calls:
@@ -2107,7 +2447,7 @@ def _run_research_floor(
         nudge = _research_floor_nudge(have, min_calls, _format_research_digest(trace))
         research_mistral.chat_with_tools(
             [
-                {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
+                {"role": "system", "content": system + _research_phase_guidance(trace)},
                 {"role": "user", "content": stage1_user + nudge},
             ],
             tools=research_schemas,
@@ -2117,6 +2457,8 @@ def _run_research_floor(
             temperature=MISTRAL_TEMP_RESEARCH,
             require_tool=None,
             finalize_on_exhaustion=False,
+            on_round=(lambda: checkpoint("researching")) if checkpoint else None,
+            show_round_budget=True,
         )
 
 
@@ -2129,6 +2471,8 @@ def _run_digest_gap_fill(
     trace: list,
     debug: dict,
     digest: str,
+    *,
+    checkpoint: Callable[[str], None] | None = None,
 ) -> str:
     """Gap-fill: the digest may flag specific unresolved-but-material gaps. Give the model ONE bounded extra research pass targeting exactly those before handing off to the tool-less writer, which otherwise either omits the gap (fine) or invents/recalls something to fill it. Re-synthesizes the digest afterward so the writer sees whatever was actually found (or an honest "still unresolved") rather than the pre-gap-fill digest."""
     from app.core.config import (
@@ -2144,7 +2488,7 @@ def _run_digest_gap_fill(
         return digest
     research_mistral.chat_with_tools(
         [
-            {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
+            {"role": "system", "content": system + _research_phase_guidance(trace)},
             {"role": "user", "content": stage1_user + _gap_fill_nudge(gaps)},
         ],
         tools=research_schemas,
@@ -2157,8 +2501,12 @@ def _run_digest_gap_fill(
         # The 2026-07-14 gap-fill pass ran out of rounds here and burned a
         # full discarded article write.
         finalize_on_exhaustion=False,
+        on_round=(lambda: checkpoint("researching")) if checkpoint else None,
+        show_round_budget=True,
     )
-    return _synthesize_research_digest(trace=trace, research_context=stage1_user)
+    return _synthesize_research_digest(
+        trace=trace, research_context=stage1_user, provider=research_mistral.provider
+    )
 
 
 # --- Special-edition-only deepening: enumerate -> targeted gap-fill -> outline
@@ -2272,6 +2620,8 @@ def _run_enumeration_gap_fill(
     trace: list,
     debug: dict,
     gaps: str,
+    *,
+    checkpoint: Callable[[str], None] | None = None,
 ) -> None:
     """One bounded extra tool-calling pass targeting the entity enumeration's own Coverage Gaps -- distinct from (and runs after) the plain digest gap-fill, since the enumeration surfaces gaps a prose digest's generic cap can miss entirely."""
     from app.core.config import (
@@ -2281,7 +2631,7 @@ def _run_enumeration_gap_fill(
 
     research_mistral.chat_with_tools(
         [
-            {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
+            {"role": "system", "content": system + _research_phase_guidance(trace)},
             {"role": "user", "content": stage1_user + _enumeration_gap_fill_nudge(gaps)},
         ],
         tools=research_schemas,
@@ -2292,6 +2642,8 @@ def _run_enumeration_gap_fill(
         require_tool=None,
         max_rounds=SPECIAL_EDITION_ENUMERATION_GAP_FILL_MAX_ROUNDS,
         finalize_on_exhaustion=False,
+        on_round=(lambda: checkpoint("researching")) if checkpoint else None,
+        show_round_budget=True,
     )
 
 
@@ -2351,6 +2703,8 @@ def _run_special_edition_deepening(
     trace: list,
     debug: dict,
     digest: str,
+    *,
+    checkpoint: Callable[[str], None] | None = None,
 ) -> tuple[str, str, str]:
     """Special-edition-only Stage 1c/1d: enumerate -> targeted gap-fill -> re-synthesize digest -> outline. Returns (digest, enumeration, outline); any disabled/failed step degrades gracefully (empty enumeration/outline, unchanged digest) rather than blocking the compose."""
     from app.core.config import SPECIAL_EDITION_OUTLINE_ENABLED
@@ -2370,8 +2724,11 @@ def _run_special_edition_deepening(
             trace,
             debug,
             gaps,
+            checkpoint=checkpoint,
         )
-        digest = _synthesize_research_digest(trace=trace, research_context=stage1_user)
+        digest = _synthesize_research_digest(
+            trace=trace, research_context=stage1_user, provider=research_mistral.provider
+        )
     outline = _run_narrative_outline(digest=digest, enumeration=enumeration)
     return digest, enumeration, outline
 
@@ -2426,7 +2783,7 @@ def _run_two_stage_compose(
     research_handlers = {k: v for k, v in tool_handlers.items() if k != "review_draft"}
     research_mistral.chat_with_tools(
         [
-            {"role": "system", "content": system + _RESEARCH_PHASE_GUIDANCE},
+            {"role": "system", "content": system + _research_phase_guidance(trace)},
             {"role": "user", "content": stage1_user},
         ],
         tools=research_schemas,
@@ -2440,6 +2797,8 @@ def _run_two_stage_compose(
         # return value is discarded — never pay for a final
         # article completion on round exhaustion.
         finalize_on_exhaustion=False,
+        on_round=lambda: checkpoint("researching"),
+        show_round_budget=True,
     )
     _run_research_floor(
         research_mistral,
@@ -2450,10 +2809,13 @@ def _run_two_stage_compose(
         trace,
         debug,
         is_special_edition=is_special_edition,
+        checkpoint=checkpoint,
     )
     # Stage 1b — synthesize a structured Research Digest handoff so Stage 2
     # grounds on high-signal facts, not raw tool JSON.
-    digest = _synthesize_research_digest(trace=trace, research_context=stage1_user)
+    digest = _synthesize_research_digest(
+        trace=trace, research_context=stage1_user, provider=research_mistral.provider
+    )
     digest = _run_digest_gap_fill(
         research_mistral,
         system,
@@ -2463,6 +2825,7 @@ def _run_two_stage_compose(
         trace,
         debug,
         digest,
+        checkpoint=checkpoint,
     )
     # Stage 1c/1d — special-edition-only: enumerate every named entity found
     # (surfaces coverage gaps a prose digest's generic 3-item cap can miss),
@@ -2481,8 +2844,9 @@ def _run_two_stage_compose(
             trace,
             debug,
             digest,
+            checkpoint=checkpoint,
         )
-    checkpoint("writing")  # research (+ gap-fill/deepening) done, now generating
+    checkpoint("writing", digest=digest)  # research (+ gap-fill/deepening) done, now generating
     gen_user = _build_stage2_user(
         user=user,
         digest=digest,
@@ -2499,7 +2863,12 @@ def _run_two_stage_compose(
         temperature=MISTRAL_TEMP_WRITE,
     )
     _append_stage2_debug_turn(debug, digest, payload)
-    # Stage 3+4 — deterministic grade, then one revision if weak.
+    # Stage 3+4 — deterministic grade, then one revision if weak. Revision
+    # gets the same tool_schemas/handlers as research (minus review_draft,
+    # same as stage 1) so a flagged issue that needs fresh data (an
+    # unverified claim, a stale figure, a dead link with a findable
+    # replacement) can actually be fixed, not just reworded from what
+    # stage 1 already gathered.
     return _review_and_revise(
         mistral,
         payload,
@@ -2510,6 +2879,8 @@ def _run_two_stage_compose(
         user=user,
         research_user=research_user,
         is_special_edition=is_special_edition,
+        revision_tool_schemas=research_schemas,
+        revision_tool_handlers=research_handlers,
     )
 
 
@@ -2575,6 +2946,15 @@ def _apply_post_compose_gates(
     from app.modules.newspaper.unsourced_specifics_gate import flag_unsourced_specifics
 
     payload = flag_unsourced_specifics(payload, trace, extra_texts=[user, research_user or ""])
+    # Broken-link-claim gate (read-only for now): a body claim that a link/
+    # page/feature is broken/404/doesn't work must be backed by an actual
+    # click_element/play_interactive click attempt somewhere in the trace,
+    # not just a guessed fetch_url — SPA "links" are often JS buttons with
+    # real content behind them (lumirogue.com About/Terms footer, recurred
+    # 2026-08-10 and again 2026-08-12 despite prompt-only guidance).
+    from app.modules.newspaper.broken_link_claim_gate import flag_unverified_broken_link_claims
+
+    payload = flag_unverified_broken_link_claims(payload, trace)
     # Stale-deadline backstop (read-only for now): any lapsed-deadline-framed-
     # as-open sentence the revision loop didn't catch (or that never went
     # through a revision loop at all, e.g. the article-edit path) is recorded
@@ -2627,6 +3007,8 @@ def _record_compose_telemetry(
     created_at: datetime,
     debug: dict,
     usage_so_far: Callable[[], dict[str, int]],
+    session_register: SessionRegister,
+    digest: str = "",
 ) -> None:
     """Best-effort: store investigation findings and tool-insight telemetry for this compose session. Never raises — a telemetry failure must not fail the compose.
 
@@ -2647,7 +3029,6 @@ def _record_compose_telemetry(
         logger.warning("failed to store investigation findings for %s", source_url, exc_info=True)
     try:
         from app.modules.ai.tool_insights_store import (
-            record_compose_session,
             record_tool_usage_from_trace,
             report_tool_errors_from_trace,
         )
@@ -2660,7 +3041,7 @@ def _record_compose_telemetry(
         )
         record_tool_usage_from_trace(trace)
         final_usage = usage_so_far()
-        record_compose_session(
+        session_register.upsert(
             debug=debug,
             trace=trace,
             service_id=source_url,
@@ -2674,6 +3055,7 @@ def _record_compose_telemetry(
             prompt_tokens=final_usage["prompt_tokens"],
             completion_tokens=final_usage["completion_tokens"],
             total_tokens=final_usage["total_tokens"],
+            digest=digest,
         )
     except Exception:
         logger.warning("failed to record tool-insights session", exc_info=True)
@@ -2684,10 +3066,12 @@ def _compose_via_writer_tools_locked(
     system: str,
     user: str,
     source_url: str,
-    mistral: MistralClient,
+    mistral: LLMProvider,
     topic: str = "",
     research_user: str | None = None,
     is_special_edition: bool = False,
+    research_client: LLMProvider | None = None,
+    session_register: SessionRegister | None = None,
 ) -> MistralArticleFields:
     from app.core.config import WRITER_TOOLS_ENABLED
 
@@ -2696,9 +3080,10 @@ def _compose_via_writer_tools_locked(
         {"role": "user", "content": user},
     ]
     if WRITER_TOOLS_ENABLED:
+        playwright_session = None
         try:
             from app.core.config import (
-                MISTRAL_MAX_TOOL_ROUNDS,
+                LLM_MAX_TOOL_ROUNDS,
                 MISTRAL_MODEL_RESEARCH,
                 MISTRAL_TIMEOUT_SECONDS,
                 MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER,
@@ -2706,9 +3091,7 @@ def _compose_via_writer_tools_locked(
             )
             from app.modules.ai.writer_tools import all_tools
 
-            research_max_rounds = (
-                MISTRAL_MAX_TOOL_ROUNDS * 4 if is_special_edition else None
-            )
+            research_max_rounds = LLM_MAX_TOOL_ROUNDS * 4 if is_special_edition else None
             # A special edition's research chat_with_tools loop resends the
             # whole accumulated trace every round; by round 16+ that prompt
             # is large enough that the plain per-attempt timeout isn't
@@ -2719,15 +3102,36 @@ def _compose_via_writer_tools_locked(
                 else None
             )
 
-            research_mistral = get_mistral_research_client(timeout=research_timeout)
+            research_mistral = research_client or get_mistral_research_client(
+                timeout=research_timeout
+            )
+            register = session_register or SessionRegisterCassandra()
+            from app.modules.scraper.core.browser_scrape import maybe_start_session
+
+            # One Chromium instance for the WHOLE compose, reused by every
+            # fetch_url/click_element/type_into_page call -- launching a
+            # fresh browser per call was too expensive to make Playwright
+            # rendering the default for every HTML fetch (2026-08-11).
+            # Closed in the finally below regardless of how this compose ends.
+            playwright_session = maybe_start_session()
             tool_context = {
                 "service_id": source_url,
                 "source_url": source_url,
                 "model": MISTRAL_MODEL_RESEARCH,
+                "_playwright_session": playwright_session,
             }
             tool_schemas, tool_handlers = all_tools(context=tool_context, topic=topic)
             trace: list = []
             debug: dict = {}
+            # Set once at the "writing" checkpoint (the research digest is only
+            # known once stage 1 finishes) and read by EVERY later upsert in
+            # this session, including the terminal one -- a plain per-call
+            # digest="" default would silently overwrite the real value the
+            # moment the next checkpoint fires. Root-caused 2026-08-14: a
+            # Kimi K3 write call timed out right after a real, expensive
+            # research phase completed, and that phase's digest had nowhere
+            # to persist to -- see session_register.py's digest docstring.
+            _digest_holder: dict[str, str] = {"value": ""}
             import time as _time
 
             _t0 = _time.monotonic()
@@ -2735,12 +3139,7 @@ def _compose_via_writer_tools_locked(
             # Progress checkpoints: one stable session row, upserted at each stage,
             # so the admin Sessions view shows live progress (research -> writing
             # -> done) instead of nothing until the very end.
-            from app.modules.ai.tool_insights_store import (
-                new_session_ref,
-                record_compose_session,
-            )
-
-            _sid, _screated = new_session_ref()
+            _sid, _screated = register.new_ref()
 
             def _usage_so_far() -> dict[str, int]:
                 """Combined token usage across both clients used in this session (research_mistral for stage 1, mistral for stage 2/revise) — each is a fresh instance per compose, so its counter is this session's total, not a lifetime one."""
@@ -2751,10 +3150,11 @@ def _compose_via_writer_tools_locked(
                     for key in ("prompt_tokens", "completion_tokens", "total_tokens")
                 }
 
-            def _checkpoint(stage_status: str) -> None:
+            def _checkpoint(stage_status: str, *, detail: str = "", digest: str = "") -> None:
+                _digest_holder["value"] = digest or _digest_holder["value"]
                 with contextlib.suppress(Exception):
                     usage = _usage_so_far()
-                    record_compose_session(
+                    register.upsert(
                         debug=debug,
                         trace=trace,
                         service_id=source_url,
@@ -2764,6 +3164,17 @@ def _compose_via_writer_tools_locked(
                             if stage_status == "researching"
                             else mistral.model
                         ),
+                        # final_output is otherwise always empty on a terminal
+                        # failure status -- reusing it to carry the exception
+                        # text costs no schema change and is the ONLY place
+                        # this ever gets persisted. Root-caused 2026-08-07:
+                        # a MistralError from the API (rate limit, context
+                        # length, etc.) checkpointed status='error' with no
+                        # detail anywhere, Bugsnag had no record of it either,
+                        # and this host has no log access to fall back on --
+                        # the actual failure reason was unrecoverable after
+                        # the fact.
+                        final_output=detail[:2000],
                         status=stage_status,
                         duration_ms=int((_time.monotonic() - _t0) * 1000),
                         session_id=_sid,
@@ -2771,6 +3182,7 @@ def _compose_via_writer_tools_locked(
                         prompt_tokens=usage["prompt_tokens"],
                         completion_tokens=usage["completion_tokens"],
                         total_tokens=usage["total_tokens"],
+                        digest=_digest_holder["value"],
                     )
 
             if WRITER_TWO_STAGE:
@@ -2818,15 +3230,15 @@ def _compose_via_writer_tools_locked(
                 source_url,
                 trace,
                 raw,
-                report_errors_model=(
-                    research_mistral.model if WRITER_TWO_STAGE else mistral.model
-                ),
+                report_errors_model=(research_mistral.model if WRITER_TWO_STAGE else mistral.model),
                 writer_model=mistral.model,
                 duration_ms=_duration_ms,
                 session_id=_sid,
                 created_at=_screated,
                 debug=debug,
                 usage_so_far=_usage_so_far,
+                session_register=register,
+                digest=_digest_holder["value"],
             )
             return _parse_article_fields(payload)
         except StorySpikedError as spike:
@@ -2846,22 +3258,29 @@ def _compose_via_writer_tools_locked(
             with contextlib.suppress(Exception):
                 _checkpoint("aborted_by_writer")
             raise
-        except MistralCreditError:
+        except MistralCreditError as exc:
             # 401/402 — no retry will help (bad key or credit exhausted), so
             # tag it distinctly from a generic API error: the admin Sessions
             # view and the queue's last_reason should say WHY at a glance
             # instead of a plain "error" that looks the same as any other fault.
             with contextlib.suppress(Exception):
-                _checkpoint("credit_insufficient")
+                _checkpoint("credit_insufficient", detail=str(exc))
             raise
-        except MistralError:
-            # A real API error (rate limit, etc.) — already retried with backoff
-            # inside the client. Don't burn another call on a single-shot retry
-            # that will just fail the same way; let the caller fall to template.
-            # Finalize the checkpoint row first, else the Sessions view shows it
-            # frozen at 'researching'/'writing' forever (looks stuck mid-compose).
+        except MistralError as exc:
+            # A real API error (rate limit, context length, etc.) — already
+            # retried with backoff inside the client for the retryable cases.
+            # Don't burn another call on a single-shot retry that will just
+            # fail the same way; let the caller fall to template. Finalize
+            # the checkpoint row first, else the Sessions view shows it
+            # frozen at 'researching'/'writing' forever (looks stuck
+            # mid-compose). logger.exception here mirrors the fallback
+            # branch's own 2026-07-16 fix below (same "exception vanishes
+            # with zero trace" failure mode) -- root-caused live 2026-08-07
+            # when a MistralError from this exact branch left no detail
+            # anywhere (Bugsnag had no record, this host has no log access).
+            logger.exception("compose hit a Mistral/DeepSeek API error for %s", source_url)
             with contextlib.suppress(Exception):
-                _checkpoint("error")
+                _checkpoint("error", detail=str(exc))
             raise
         except Exception:
             # Tool/parse failure (the API worked): fall back to single-shot. Mark
@@ -2878,6 +3297,10 @@ def _compose_via_writer_tools_locked(
             logger.exception("compose fell back to ungrounded single-shot for %s", source_url)
             with contextlib.suppress(Exception):
                 _checkpoint("fallback")
+        finally:
+            if playwright_session is not None:
+                with contextlib.suppress(Exception):
+                    playwright_session.close()
 
     payload = mistral.chat_json_object(messages)
     return _parse_article_fields(payload)
@@ -3157,6 +3580,7 @@ def translate_article_mistral(
         digits_block,
         glossary_block,
     )
+
     mistral = client or get_mistral_translate_client()
 
     lang_name = ARTICLE_TRANSLATION_LANG_NAMES.get(target_language, target_language)
@@ -3185,12 +3609,12 @@ def translate_article_mistral(
         "long sentences, merge short ones, move clauses wherever the target language wants them.\n"
         "- Never calque an English idiom or fixed expression — use the equivalent a native "
         "speaker would actually reach for, even when it shares no words with the original.\n"
-        "- When you NAME an entity via apposition (\"Algorand's native token, ALGO\" / a brand, "
+        '- When you NAME an entity via apposition ("Algorand\'s native token, ALGO" / a brand, '
         "a ticker, a protocol), the named term stays BARE in that slot — do not add an article or "
         "possessive to it there, even if the target language would normally use one. Verified "
-        "against live French crypto press: \"OpenSea reveals $SEA, its native token\" style "
+        'against live French crypto press: "OpenSea reveals $SEA, its native token" style '
         "constructions never article the name in the naming position, only in a later standalone "
-        "reference (\"$SEA then rose 10%\" DOES take the article once it is no longer being "
+        'reference ("$SEA then rose 10%" DOES take the article once it is no longer being '
         "named).\n"
         "- Never state a term in the target language AND then restate the English acronym or "
         "abbreviation in parentheses right after — that is a language-mixing tell, not thoroughness. "

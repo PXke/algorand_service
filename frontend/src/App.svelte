@@ -30,6 +30,7 @@
     | { name: 'contact' }
     | { name: 'suggestions' }
     | { name: 'admin' }
+    | { name: 'shared'; token: string }
     | { name: 'notfound' }
 
   type LazyName =
@@ -45,6 +46,7 @@
     | 'contact'
     | 'suggestions'
     | 'admin'
+    | 'shared'
 
   const loaders: Record<LazyName, () => Promise<{ default: Component<any> }>> = {
     news: () => import('./routes/News.svelte'),
@@ -59,6 +61,7 @@
     contact: () => import('./routes/Contact.svelte'),
     suggestions: () => import('./routes/Suggestions.svelte'),
     admin: () => import('./routes/admin/AdminHub.svelte'),
+    shared: () => import('./routes/SharedArticle.svelte'),
   }
 
   let lazy = $state<Partial<Record<LazyName, Component<any>>>>({})
@@ -67,6 +70,11 @@
     const path = $route.path
     if (path === '/') return { name: 'home' }
     if (path === '/news') return { name: 'news' }
+    // Deliberately matched on the raw path, not run through splitLocalePath
+    // below -- a share link is a one-off token URL, not a canonical,
+    // locale-prefixed SEO route.
+    const shared = matchPath('/shared/:token', path)
+    if (shared) return { name: 'shared', token: shared.token }
     // Locale-prefixed article URLs (/fr/news/articles/x) resolve to the same
     // view — the locale itself is applied via localePreference on boot, so the
     // segment only needs stripping here, not routing on.
@@ -175,6 +183,11 @@
       {#key view.slug}
         {@const C = lazy.glossaryTerm!}
         <C slug={view.slug} />
+      {/key}
+    {:else if view.name === 'shared'}
+      {#key view.token}
+        {@const C = lazy.shared!}
+        <C token={view.token} />
       {/key}
     {:else}
       {@const C = lazy[view.name]!}

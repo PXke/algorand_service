@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -16,14 +18,61 @@ logger = logging.getLogger(__name__)
 _TIMEOUT = 15.0
 
 
-def _algod_get(path: str) -> dict[str, Any]:
-    """GET a path off the operator-configured (trusted) algod node. Returns the parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}."""
+def _redis_client():  # noqa: ANN202 -- lazy-imported redis.Redis, matching every other workers module's private _client()
+    import redis
+
+    from app.core.config import REDIS_URL
+
+    return redis.from_url(REDIS_URL, decode_responses=True)
+
+
+def _cache_key(source: str, path: str, params: dict | None) -> str:
+    """Deterministic Redis key for one (source, path, params) call -- params sorted so dict-insertion order never splits one logical call across two cache entries."""
+    if not params:
+        return f"chain:cache:{source}:{path}"
+    qs = "&".join(f"{k}={params[k]}" for k in sorted(params))
+    return f"chain:cache:{source}:{path}?{qs}"
+
+
+def _cache_get(key: str) -> dict[str, Any] | None:
+    """Fetch and parse a cached JSON value, returning None on any failure (cache miss, Redis down, or corrupt entry) -- fail-soft, matches coingecko_cache.py."""
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        raw = _redis_client().get(key)
+        if raw:
+            return json.loads(raw)
+    return None
+
+
+def _cache_set(key: str, value: dict[str, Any], ttl: int) -> None:
+    """Cache a JSON-serializable value under key for ttl seconds, failing soft."""
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        _redis_client().set(key, json.dumps(value), ex=ttl)
+
+
+def _algod_get(path: str, *, cache_ttl: int = 0) -> dict[str, Any]:
+    """GET a path off the operator-configured (trusted) algod node. Returns the parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}.
+
+    cache_ttl > 0 caches a genuine successful body in Redis for that many
+    seconds -- never the {"error": ...} or {"_status": 404} shapes, so a
+    transient failure or a not-yet-confirmed entity never poisons the cache.
+    See CHAIN_CACHE_TTL_STATIC/SLOW/FAST in app.core.config for the tiers
+    each caller picks from.
+    """
     import httpx
 
     from app.core.config import ALGOD_TOKEN, ALGOD_URL
 
     if not ALGOD_URL:
         return {"error": "algod not configured (ALGOD_URL unset)"}
+    key = _cache_key("algod", path, None) if cache_ttl > 0 else ""
+    if key:
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
     headers = {"X-Algo-API-Token": ALGOD_TOKEN} if ALGOD_TOKEN else {}
     try:
         with httpx.Client(timeout=_TIMEOUT) as http:
@@ -31,7 +80,10 @@ def _algod_get(path: str) -> dict[str, Any]:
         if r.status_code == 404:
             return {"_status": 404}
         r.raise_for_status()
-        return r.json()
+        result = r.json()
+        if key and isinstance(result, dict) and not result.get("error"):
+            _cache_set(key, result, cache_ttl)
+        return result
     except Exception as exc:
         return {"error": str(exc)[:200]}
 
@@ -93,7 +145,10 @@ _INVALID_ADDRESS_ERROR = (
 )
 
 
-def _tool_lookup_account(address: str) -> dict[str, Any]:
+_LOOKUP_ACCOUNT_PAGE = 25
+
+
+def _tool_lookup_account(address: str, created_assets_offset: int = 0) -> dict[str, Any]:
     """Live state of an Algorand account: ALGO balance, ASAs held, the apps it created or opted into, its rekey state, and signature type.
 
     auth_addr (2026-08-05, root-caused live): algod's response carries this
@@ -105,13 +160,25 @@ def _tool_lookup_account(address: str) -> dict[str, Any]:
     signer controls both despite looking unrelated by address alone. None
     when the account has never been rekeyed (auth-addr == the account's own
     address, algod omits the field in that case).
+
+    created_assets_offset (added 2026-08-10, self-reported gap): algod's
+    response already carries the FULL created-assets list -- total_created_
+    assets was always accurate -- but the returned id list silently capped
+    at 25 with no way to see the rest, so a prolific creator's exact roster
+    (e.g. confirming a 310-asset NFT series' full id range) was unreachable.
+    Re-call with a higher offset to page through the rest; the other three
+    lists (held assets, created/opted-in apps) keep the same one-page cap
+    since no investigation has hit their limit yet -- add paging there too
+    if one does.
     """
     addr = (address or "").strip()
     if not addr:
         return {"error": "address required"}
     if not _is_valid_address(addr):
         return {"address": addr, "error": _INVALID_ADDRESS_ERROR}
-    data = _algod_get(f"/v2/accounts/{addr}")
+    from app.core.config import CHAIN_CACHE_TTL_FAST
+
+    data = _algod_get(f"/v2/accounts/{addr}", cache_ttl=CHAIN_CACHE_TTL_FAST)
     if not isinstance(data, dict):
         return {"error": "unexpected algod response"}
     if data.get("error"):
@@ -122,6 +189,8 @@ def _tool_lookup_account(address: str) -> dict[str, Any]:
     created_assets = data.get("created-assets", []) or []
     created_apps = data.get("created-apps", []) or []
     opted_in_apps = data.get("apps-local-state", []) or []
+    offset = max(0, created_assets_offset)
+    page = created_assets[offset : offset + _LOOKUP_ACCOUNT_PAGE]
     return {
         "address": addr,
         "balance_algo": round((data.get("amount", 0) or 0) / 1e6, 6),
@@ -146,15 +215,11 @@ def _tool_lookup_account(address: str) -> dict[str, Any]:
         "total_created_assets": len(created_assets),
         "total_created_apps": len(created_apps),
         "total_apps_opted_in": len(opted_in_apps),
-        "created_assets": [
-            a.get("index") for a in created_assets[:25] if isinstance(a, dict)
-        ],
+        "created_assets": [a.get("index") for a in page if isinstance(a, dict)],
+        "created_assets_offset": offset,
+        "created_assets_has_more": offset + _LOOKUP_ACCOUNT_PAGE < len(created_assets),
         "created_apps": [a.get("id") for a in created_apps[:25] if isinstance(a, dict)],
-        "opted_in_apps": [
-            a.get("id")
-            for a in opted_in_apps[:25]
-            if isinstance(a, dict)
-        ],
+        "opted_in_apps": [a.get("id") for a in opted_in_apps[:25] if isinstance(a, dict)],
     }
 
 
@@ -189,7 +254,9 @@ def _tool_lookup_asset(asset_id: int | str) -> dict[str, Any]:
     aid = str(asset_id).strip()
     if not aid.isdigit():
         return {"error": "asset_id must be a numeric ASA id"}
-    data = _algod_get(f"/v2/assets/{aid}")
+    from app.core.config import CHAIN_CACHE_TTL_STATIC
+
+    data = _algod_get(f"/v2/assets/{aid}", cache_ttl=CHAIN_CACHE_TTL_STATIC)
     if not isinstance(data, dict):
         return {"error": "unexpected algod response"}
     if data.get("error"):
@@ -216,21 +283,33 @@ def _tool_lookup_asset(asset_id: int | str) -> dict[str, Any]:
     }
 
 
-def _mainnet_idx_get(path: str, params: dict | None = None) -> dict[str, Any]:
-    """GET a path off the public MAINNET indexer (name-search capable, unlike algod). Returns parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}."""
+def _mainnet_idx_get(path: str, params: dict | None = None, *, cache_ttl: int = 0) -> dict[str, Any]:
+    """GET a path off the public MAINNET indexer (name-search capable, unlike algod). Returns parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}.
+
+    cache_ttl > 0 caches a genuine successful body -- see _algod_get's
+    docstring for the caching contract, identical here.
+    """
     import httpx
 
     from app.core.config import MAINNET_INDEXER_URL
 
     if not MAINNET_INDEXER_URL:
         return {"error": "mainnet indexer not configured (MAINNET_INDEXER_URL unset)"}
+    key = _cache_key("mainnet_idx", path, params) if cache_ttl > 0 else ""
+    if key:
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
     try:
         with httpx.Client(timeout=_TIMEOUT) as http:
             r = http.get(f"{MAINNET_INDEXER_URL}{path}", params=params)
         if r.status_code == 404:
             return {"_status": 404}
         r.raise_for_status()
-        return r.json()
+        result = r.json()
+        if key and isinstance(result, dict) and not result.get("error"):
+            _cache_set(key, result, cache_ttl)
+        return result
     except Exception as exc:
         return {"error": str(exc)[:200]}
 
@@ -268,14 +347,18 @@ def _tool_lookup_asset_by_name(name: str, limit: int = 5) -> dict[str, Any]:
     if not q:
         return {"error": "name must not be empty"}
     n = max(1, min(int(limit), 20))
-    data = _mainnet_idx_get("/v2/assets", params={"unit": q, "limit": 100})
+    from app.core.config import CHAIN_CACHE_TTL_SLOW
+
+    data = _mainnet_idx_get("/v2/assets", params={"unit": q, "limit": 100}, cache_ttl=CHAIN_CACHE_TTL_SLOW)
     if not isinstance(data, dict):
         return {"error": "unexpected indexer response"}
     if data.get("error"):
         return data
     assets = data.get("assets", []) or []
     if not assets:
-        data = _mainnet_idx_get("/v2/assets", params={"name": q, "limit": n})
+        data = _mainnet_idx_get(
+            "/v2/assets", params={"name": q, "limit": n}, cache_ttl=CHAIN_CACHE_TTL_SLOW
+        )
         if not isinstance(data, dict):
             return {"error": "unexpected indexer response"}
         if data.get("error"):
@@ -341,7 +424,9 @@ def _tool_lookup_first_funding(address: str) -> dict[str, Any]:
     addr = (address or "").strip()
     if not _is_valid_address(addr):
         return {"address": addr, "error": _INVALID_ADDRESS_ERROR}
-    acct = _mainnet_idx_get(f"/v2/accounts/{addr}")
+    from app.core.config import CHAIN_CACHE_TTL_SLOW, CHAIN_CACHE_TTL_STATIC
+
+    acct = _mainnet_idx_get(f"/v2/accounts/{addr}", cache_ttl=CHAIN_CACHE_TTL_SLOW)
     if not isinstance(acct, dict):
         return {"error": "unexpected indexer response"}
     if acct.get("error"):
@@ -351,9 +436,11 @@ def _tool_lookup_first_funding(address: str) -> dict[str, Any]:
     created_round = (acct.get("account") or {}).get("created-at-round")
     if created_round is None:
         return {"address": addr, "found": False, "error": "no created-at-round available"}
+    # A fixed historical round range -- once fetched, this result is permanent.
     txns = _mainnet_idx_get(
         f"/v2/accounts/{addr}/transactions",
         params={"min-round": created_round, "max-round": created_round, "limit": 20},
+        cache_ttl=CHAIN_CACHE_TTL_STATIC,
     )
     if not isinstance(txns, dict):
         return {"error": "unexpected indexer response"}
@@ -409,7 +496,11 @@ def _tool_lookup_account_transactions(address: str, limit: int = 10) -> dict[str
     if not _is_valid_address(addr):
         return {"address": addr, "error": _INVALID_ADDRESS_ERROR}
     n = max(1, min(int(limit), 30))
-    data = _mainnet_idx_get(f"/v2/accounts/{addr}/transactions", params={"limit": n})
+    from app.core.config import CHAIN_CACHE_TTL_FAST
+
+    data = _mainnet_idx_get(
+        f"/v2/accounts/{addr}/transactions", params={"limit": n}, cache_ttl=CHAIN_CACHE_TTL_FAST
+    )
     if not isinstance(data, dict):
         return {"error": "unexpected indexer response"}
     if data.get("error"):
@@ -421,6 +512,142 @@ def _tool_lookup_account_transactions(address: str, limit: int = 10) -> dict[str
         "transaction_count_this_page": len(results),
         "most_recent_round_time": results[0]["round_time"] if results else None,
         "transactions": results,
+    }
+
+
+def _tool_lookup_transaction_note(txid: str) -> dict[str, Any]:
+    """The note field of one specific transaction, by its txid, via the mainnet indexer.
+
+    A transaction's note is where a project puts a memo — an on-chain
+    "message", a payment reference, a governance vote's rationale text. No
+    existing tool exposes it: lookup_account_transactions/lookup_asset_transactions
+    summarize a LIST of transactions and never surface note (mostly empty,
+    would bloat every list). Use this once a specific txid's note actually
+    matters to a claim, instead of guessing what a memo says from a
+    third-party site's paraphrase of it.
+
+    The indexer returns note as base64 bytes; most real memos are UTF-8 text,
+    decoded here automatically. A note that isn't valid UTF-8 (binary data,
+    an encrypted payload) comes back as base64 with is_utf8_text=false, so a
+    real memo is never confused with base64 noise.
+    """
+    tid = (txid or "").strip()
+    if not tid:
+        return {"error": "txid required"}
+    from app.core.config import CHAIN_CACHE_TTL_STATIC
+
+    data = _mainnet_idx_get(f"/v2/transactions/{tid}", cache_ttl=CHAIN_CACHE_TTL_STATIC)
+    if not isinstance(data, dict):
+        return {"error": "unexpected indexer response"}
+    if data.get("_status") == 404:
+        return {"txid": tid, "error": "transaction not found"}
+    if data.get("error"):
+        return data
+    t = data.get("transaction") or {}
+    note_b64 = t.get("note")
+    if not note_b64:
+        return {
+            "txid": tid,
+            "round": t.get("confirmed-round"),
+            "round_time": _iso_round_time(t),
+            "has_note": False,
+            "note": None,
+        }
+    try:
+        note_bytes = base64.b64decode(note_b64)
+    except Exception:
+        return {"txid": tid, "has_note": True, "note_base64": note_b64, "error": "malformed base64"}
+    try:
+        note_text = note_bytes.decode("utf-8")
+        is_utf8_text = True
+    except UnicodeDecodeError:
+        note_text = None
+        is_utf8_text = False
+    return {
+        "txid": tid,
+        "round": t.get("confirmed-round"),
+        "round_time": _iso_round_time(t),
+        "has_note": True,
+        "is_utf8_text": is_utf8_text,
+        "note": note_text,
+        "note_base64": note_b64 if not is_utf8_text else None,
+        "note_byte_length": len(note_bytes),
+    }
+
+
+def _tool_lookup_arc69_metadata(asset_id: int | str) -> dict[str, Any]:
+    """An ASA's ARC-69 attributes (traits, ratings, any structured properties an issuer wrote in), read from the right place.
+
+    Root-caused live 2026-08-11 (Lumi Rogue "gungiELO" incident): the writer
+    called lookup_asset and read its `url` field, got a bit.ly link that
+    resolved to a plain PNG, and reported the NFT's on-chain rating as
+    unverifiable. That was the wrong field for the wrong reason: ARC-69
+    (unlike ARC-19/ARC-3) does NOT put structured attributes behind the
+    asset's url — url is just the artwork. ARC-69 attributes live in the
+    NOTE field of the asset's most recent asset-config (acfg) transaction,
+    as base64-encoded JSON with a "properties" object. This tool reads that
+    field directly instead of making the writer improvise with fetch_url on
+    the wrong target — exactly the tool the writer's own trace asked for via
+    suggest_tool immediately after making this mistake.
+
+    Returns the parsed JSON on success. A same-collection NFT can have
+    per-token distinct metadata (each mint's own acfg note) and a manager
+    can rewrite it later (multiple acfg transactions) — this always reads
+    the MOST RECENT one, since that's the attribute state a marketplace or
+    reader would see today.
+    """
+    try:
+        aid = int(asset_id)
+    except (TypeError, ValueError):
+        return {"error": "asset_id must be numeric"}
+    from app.core.config import CHAIN_CACHE_TTL_SLOW
+
+    # SLOW, not STATIC: a manager CAN rewrite this via a later acfg (see
+    # docstring) -- unlike a plain transaction note, "most recent config" is
+    # not permanent.
+    data = _mainnet_idx_get(
+        f"/v2/assets/{aid}/transactions",
+        params={"tx-type": "acfg", "limit": 10},
+        cache_ttl=CHAIN_CACHE_TTL_SLOW,
+    )
+    if not isinstance(data, dict):
+        return {"error": "unexpected indexer response"}
+    if data.get("_status") == 404 or not data.get("transactions"):
+        return {"asset_id": aid, "error": "no asset-config transactions found for this asset"}
+    if data.get("error"):
+        return data
+    txns = [t for t in data["transactions"] if isinstance(t, dict)]
+    if not txns:
+        return {"asset_id": aid, "error": "no asset-config transactions found for this asset"}
+    # Indexer order for this endpoint is not guaranteed newest-first -- sort
+    # explicitly so a manager's later metadata update always wins over the
+    # original mint's.
+    latest = max(txns, key=lambda t: t.get("confirmed-round") or 0)
+    note_b64 = latest.get("note")
+    if not note_b64:
+        return {
+            "asset_id": aid,
+            "round": latest.get("confirmed-round"),
+            "has_metadata": False,
+            "note": "most recent asset-config transaction carries no note field",
+        }
+    try:
+        note_bytes = base64.b64decode(note_b64)
+        parsed = json.loads(note_bytes)
+    except Exception:
+        return {
+            "asset_id": aid,
+            "round": latest.get("confirmed-round"),
+            "has_metadata": False,
+            "note": "note field is not valid JSON -- not ARC-69 formatted",
+        }
+    return {
+        "asset_id": aid,
+        "round": latest.get("confirmed-round"),
+        "round_time": _iso_round_time(latest),
+        "has_metadata": True,
+        "standard": parsed.get("standard"),
+        "metadata": parsed,
     }
 
 
@@ -470,20 +697,85 @@ def _tool_lookup_asset_transactions(asset_id: int | str, limit: int = 10) -> dic
 
     The indexer returns an asset's transactions oldest-first with no
     server-side reverse-sort option (confirmed 2026-08-06 — unlike account
-    transactions, which ARE newest-first by default), so this fetches one
-    bounded page (up to 1000) and returns the LAST `limit` of those as
-    "most recent". Accurate for any asset with fewer than ~1000 transactions
-    in its entire history — true for virtually every NFT and most tokens.
-    If `page_may_be_incomplete` is true, the asset has more history than
-    this single page covers and the results may reflect early activity
-    rather than truly recent activity.
+    transactions, which ARE newest-first by default). For a HIGH-VOLUME
+    asset (way more transactions in its lifetime than one page can hold),
+    an unbounded page is anchored at the asset's CREATION, not "now" — a
+    real incident (2026-08-06): a stablecoin with millions of lifetime
+    transfers came back "no real transfers since 2022" from this method
+    alone, while the SAME asset had genuine transfers minutes old (found
+    only via lookup_account_transactions on a counterparty). Fixed by
+    checking a recent round-window (via algod's current round) FIRST, and
+    only falling back to the from-genesis oldest page — now explicitly
+    labeled as such via is_recent_window — when the recent window (and one
+    widened retry) both come back empty.
     """
     aid = str(asset_id).strip()
     if not aid.isdigit():
         return {"error": "asset_id must be numeric"}
     n = max(1, min(int(limit), 30))
     page_size = 1000
-    data = _mainnet_idx_get(f"/v2/assets/{aid}/transactions", params={"limit": page_size})
+
+    from app.core.config import CHAIN_CACHE_TTL_FAST, CHAIN_CACHE_TTL_STATIC
+
+    status = _algod_get("/v2/status", cache_ttl=CHAIN_CACHE_TTL_FAST)
+    current_round = status.get("last-round") if isinstance(status, dict) else None
+
+    recent_window_rounds: int | None = None
+    recent_txns: list[dict[str, Any]] = []
+    recent_next_token: str | None = None
+    if isinstance(current_round, int):
+        # Start NARROW: a genuinely high-volume asset (e.g. a widely-used
+        # stablecoin) can produce more than the 1000-row page cap within
+        # even a couple of DAYS (~2 tx/round observed live on HAFN,
+        # 2026-08-06) — a wide first window silently lands back on stale
+        # data, the same trap this fix exists to avoid. Only widen if a
+        # narrower window comes back genuinely empty. Rough round counts at
+        # Algorand's ~2.8s block time: 300 ≈ 14 min, 20,000 ≈ 16 hr,
+        # 500,000 ≈ 16 days.
+        for window in (300, 20_000, 500_000):
+            min_round = max(0, current_round - window)
+            data = _mainnet_idx_get(
+                f"/v2/assets/{aid}/transactions",
+                params={"limit": page_size, "min-round": min_round},
+                cache_ttl=CHAIN_CACHE_TTL_FAST,
+            )
+            if not isinstance(data, dict) or data.get("error"):
+                break  # indexer trouble — fall through to the genesis page below
+            txns = [t for t in (data.get("transactions") or []) if isinstance(t, dict)]
+            if txns:
+                recent_window_rounds = window
+                recent_txns = txns
+                recent_next_token = data.get("next-token")
+                break
+
+    if recent_txns:
+        tail = recent_txns[-n:]
+        results = [_summarize_asset_transaction(t) for t in tail]
+        real_transfers = [r for r in results if r["is_real_transfer"]]
+        return {
+            "asset_id": int(aid),
+            "is_recent_window": True,
+            "recent_window_rounds_checked": recent_window_rounds,
+            "recent_window_truncated": len(recent_txns) >= page_size and bool(recent_next_token),
+            "most_recent_real_transfer_round_time": (
+                real_transfers[-1]["round_time"] if real_transfers else None
+            ),
+            "most_recent_activity_round_time": results[-1]["round_time"],
+            "transaction_count_this_page": len(recent_txns),
+            "transactions": results,
+        }
+
+    # No recent-window data available (algod unconfigured, indexer error, or
+    # the asset genuinely had nothing in the last ~month) — fall back to the
+    # oldest page from genesis. For a high-volume asset this reflects EARLY
+    # history, not "most recent" — is_recent_window: False marks that. This
+    # page is definitionally historical (oldest-first, no min-round), so it's
+    # cached STATIC unlike the recent-window queries above.
+    data = _mainnet_idx_get(
+        f"/v2/assets/{aid}/transactions",
+        params={"limit": page_size},
+        cache_ttl=CHAIN_CACHE_TTL_STATIC,
+    )
     if not isinstance(data, dict):
         return {"error": "unexpected indexer response"}
     if data.get("error"):
@@ -494,6 +786,7 @@ def _tool_lookup_asset_transactions(asset_id: int | str, limit: int = 10) -> dic
     real_transfers = [r for r in results if r["is_real_transfer"]]
     return {
         "asset_id": int(aid),
+        "is_recent_window": False,
         "most_recent_real_transfer_round_time": (
             real_transfers[-1]["round_time"] if real_transfers else None
         ),
@@ -504,11 +797,117 @@ def _tool_lookup_asset_transactions(asset_id: int | str, limit: int = 10) -> dic
     }
 
 
+_ASA_VOLUME_PAGE = 1000
+
+
+def _tool_get_asset_transaction_volume(
+    asset_id: int | str, min_round: int = 0, max_pages: int = 25
+) -> dict[str, Any]:
+    """Aggregate transaction count + total amount moved for an ASA since a given round (default: since creation), via the mainnet indexer.
+
+    lookup_asset_transactions only returns ONE page (<=1000 rows) of an
+    asset's history -- no good for checking a headline claim like "3.5M
+    transactions" or "$10B in volume" (self-reported gap, 2026-08-10:
+    HAFN's "3.5M+ transactions" / "$10B in 2024 volume" claims could only
+    be attributed to the Foundation, not checked, because the indexer has
+    no aggregate-totals endpoint of its own). This pages through up to
+    max_pages * 1000 transactions and sums them -- for a low-volume asset
+    that IS the true lifetime total (complete: true); for a high-volume one
+    it hits the page cap first, in which case complete is false and the
+    counts are an honest LOWER BOUND -- still useful, since "at least
+    25,000 real transfers in this window" can already falsify an inflated
+    claim even without going fully exhaustive. amount is in RAW base
+    units -- combine with lookup_asset's decimals to adjust it, and with
+    round_to_date to scope min_round to a specific calendar date.
+
+    Root-caused 2026-08-11 (self-reported false complete:true on
+    meld.gold): completeness used to be inferred from a short page
+    (fewer rows than requested) as well as a missing next-token, but the
+    indexer can return a short page that still carries a next-token when
+    server-side filtering trims a batch after fetching it. The only safe
+    "no more data" signal is a missing next-token -- a short page alone
+    no longer marks complete.
+    """
+    aid = str(asset_id).strip()
+    if not aid.isdigit():
+        return {"error": "asset_id must be numeric"}
+    pages_cap = max(1, min(int(max_pages), 100))
+    floor_round = max(0, min_round)
+
+    from app.core.config import CHAIN_CACHE_TTL_SLOW
+
+    total_count = 0
+    real_transfer_count = 0
+    total_amount_raw = 0
+    earliest_round: int | None = None
+    latest_round: int | None = None
+    next_token: str | None = None
+    pages_fetched = 0
+    complete = False
+
+    while pages_fetched < pages_cap:
+        params: dict[str, Any] = {"limit": _ASA_VOLUME_PAGE, "min-round": floor_round}
+        if next_token:
+            params["next"] = next_token
+        data = _mainnet_idx_get(
+            f"/v2/assets/{aid}/transactions", params=params, cache_ttl=CHAIN_CACHE_TTL_SLOW
+        )
+        if not isinstance(data, dict) or data.get("error"):
+            if pages_fetched == 0:
+                return data if isinstance(data, dict) else {"error": "unexpected indexer response"}
+            break  # keep the partial aggregate already gathered rather than discarding it
+        pages_fetched += 1
+        txns = [t for t in (data.get("transactions") or []) if isinstance(t, dict)]
+        for t in txns:
+            summary = _summarize_asset_transaction(t)
+            total_count += 1
+            if summary["is_real_transfer"]:
+                real_transfer_count += 1
+                total_amount_raw += summary["amount_raw"]
+            rnd = summary["round"]
+            if rnd is not None:
+                earliest_round = rnd if earliest_round is None else min(earliest_round, rnd)
+                latest_round = rnd if latest_round is None else max(latest_round, rnd)
+        next_token = data.get("next-token")
+        if not next_token:
+            complete = True
+            break
+
+    return {
+        "asset_id": int(aid),
+        "min_round_checked": floor_round,
+        "transaction_count": total_count,
+        "real_transfer_count": real_transfer_count,
+        "total_amount_moved_raw": total_amount_raw,
+        "earliest_round_seen": earliest_round,
+        "latest_round_seen": latest_round,
+        "pages_fetched": pages_fetched,
+        "complete": complete,
+        "note": (
+            "exhaustive -- this IS the true total since min_round_checked"
+            if complete
+            else f"hit the {pages_cap}-page cap; this is a LOWER BOUND, not the true total"
+        ),
+    }
+
+
 def _tool_get_asset_holder_share(asset_id: int | str, address: str) -> dict[str, Any]:
-    """A specific address's share of an ASA's total supply, computed here (not left to the model) — use this instead of manually dividing lookup_asset's total by lookup_account's raw holding, which is exactly how a real fabricated "99.99%" concentration claim happened (2026-07-14): the model got the decimal-shift arithmetic wrong on a 15-digit raw amount."""
+    """A specific address's share of an ASA's total supply, computed here (not left to the model) — use this instead of manually dividing lookup_asset's total by lookup_account's raw holding, which is exactly how a real fabricated "99.99%" concentration claim happened (2026-07-14): the model got the decimal-shift arithmetic wrong on a 15-digit raw amount.
+
+    Root-caused 2026-08-11 (self-reported: lookup_asset_holders showed an
+    address holding 1.9M STEAK, this tool reported 0.0 share for the same
+    address/asset pair): used to read the holding off lookup_account's
+    `assets` list, which -- like created_assets before its 2026-08-10 fix --
+    is silently capped at 25 entries. An address opted into more than 25
+    different ASAs would show 0 for any holding past the cap. Fixed by
+    querying algod's per-asset holding endpoint directly instead, which has
+    no such cap.
+    """
     addr = (address or "").strip()
     if not addr:
         return {"error": "address required"}
+    if not _is_valid_address(addr):
+        return {"address": addr, "error": _INVALID_ADDRESS_ERROR}
     asset = _tool_lookup_asset(asset_id)
     if asset.get("error"):
         return asset
@@ -516,19 +915,18 @@ def _tool_get_asset_holder_share(asset_id: int | str, address: str) -> dict[str,
     decimals = asset.get("decimals")
     if not isinstance(total, int | float) or not total:
         return {"error": "asset has no usable total supply"}
-    account = _tool_lookup_account(addr)
-    if account.get("error"):
-        return account
     target_asset_id = asset.get("asset_id")
-    holding = next(
-        (
-            a.get("amount")
-            for a in account.get("assets", [])
-            if a.get("asset_id") == target_asset_id
-        ),
-        0,
+    from app.core.config import CHAIN_CACHE_TTL_SLOW
+
+    holding_data = _algod_get(
+        f"/v2/accounts/{addr}/assets/{target_asset_id}", cache_ttl=CHAIN_CACHE_TTL_SLOW
     )
-    holding = holding or 0
+    if holding_data.get("_status") == 404:
+        holding = 0
+    elif holding_data.get("error"):
+        return holding_data
+    else:
+        holding = holding_data.get("asset-holding", {}).get("amount") or 0
     holding_adjusted = (
         round(holding / (10**decimals), 6) if isinstance(decimals, int) and decimals >= 0 else None
     )
@@ -570,7 +968,9 @@ def _tool_lookup_asset_holders(asset_id: int | str, limit: int = 10) -> dict[str
             return round(amount / (10**decimals), 6)
         return amount
 
-    creator_account = _tool_lookup_account(creator) if creator else {"error": "no creator on record"}
+    creator_account = (
+        _tool_lookup_account(creator) if creator else {"error": "no creator on record"}
+    )
     creator_lookup_error = creator_account.get("error")
     creator_holding = (
         0
@@ -585,14 +985,20 @@ def _tool_lookup_asset_holders(asset_id: int | str, limit: int = 10) -> dict[str
         )
     )
 
+    from app.core.config import CHAIN_CACHE_TTL_SLOW
+
     data = _mainnet_idx_get(
-        f"/v2/assets/{aid}/balances", params={"currency-greater-than": 0, "limit": 100}
+        f"/v2/assets/{aid}/balances",
+        params={"currency-greater-than": 0, "limit": 100},
+        cache_ttl=CHAIN_CACHE_TTL_SLOW,
     )
     if not isinstance(data, dict):
         return {"error": "unexpected indexer response"}
     if data.get("error"):
         return data
-    balances = sorted(data.get("balances", []) or [], key=lambda b: b.get("amount", 0), reverse=True)
+    balances = sorted(
+        data.get("balances", []) or [], key=lambda b: b.get("amount", 0), reverse=True
+    )
     return {
         "asset_id": asset_id_int,
         "creator": creator,
@@ -608,12 +1014,66 @@ def _tool_lookup_asset_holders(asset_id: int | str, limit: int = 10) -> dict[str
     }
 
 
+def _tool_trace_asset_creator(asset_id: int | str) -> dict[str, Any]:
+    """Resolve an ASA's real-world creator identity -- who actually made it, not just what its name string says.
+
+    Root-caused 2026-08-11 (Lumi Rogue LUMI-token incident): both Mistral
+    and DeepSeek independently called lookup_asset_by_name("LUMI"), took
+    the top name match, and reported it as Lumi Rogue's own token (1B
+    supply, 78.6% concentrated) -- Lumi Rogue has never created a token.
+    Neither ever checked the found asset's CREATOR against anything
+    already established as the entity's (its site's linked wallet, its
+    NFD, its verified socials). Same failure shape as the WAD spam-token
+    incident (2026-07-16): a coincidental name match with an unrelated
+    creator, not a hallucinated number.
+
+    Chains lookup_asset (creator address) -> an NFDomains reverse lookup
+    (the creator's .algo name, if it has one) -> lookup_account (how many
+    OTHER assets that same address has created -- a one-off/spam mint
+    typically has 1; an active project's minting wallet has many) ->
+    top current holders. BEFORE attributing a name-matched asset to a
+    named entity, compare creator_address/creator_nfd_name here against
+    that entity's own established identity. A name match with an
+    unrelated creator is not evidence of ownership -- treat it as
+    "unrelated token with the same name" unless this actually lines up.
+    """
+    asset = _tool_lookup_asset(asset_id)
+    if asset.get("error"):
+        return asset
+    creator = asset.get("creator")
+    if not creator:
+        return {"asset_id": asset.get("asset_id"), "error": "asset has no creator address on record"}
+
+    from app.modules.ai.research_tools import _tool_search_nfd_directory
+
+    identity = _tool_search_nfd_directory(address=creator)
+    creator_account = _tool_lookup_account(creator)
+    holders = _tool_lookup_asset_holders(asset_id, limit=5)
+
+    return {
+        "asset_id": asset.get("asset_id"),
+        "asset_name": asset.get("name"),
+        "unit_name": asset.get("unit_name"),
+        "creator_address": creator,
+        "creator_nfd_name": identity.get("name") if identity.get("found") else None,
+        "creator_total_assets_created": creator_account.get("total_created_assets"),
+        "top_holders": holders.get("top_holders") if not holders.get("error") else None,
+        "hint": (
+            "Compare creator_address/creator_nfd_name against the entity's OWN "
+            "established identity before reporting this as the entity's asset -- "
+            "a matching name string alone is not affiliation."
+        ),
+    }
+
+
 def _tool_lookup_application(app_id: int | str) -> dict[str, Any]:
     """An application's (smart contract's) creator and DECODED global state — the on-chain variables a protocol exposes (e.g. governance proposal/vote tallies, admin addresses, parameters). Point it at a governance app id to verify what actually executed on-chain."""
     aid = str(app_id).strip()
     if not aid.isdigit():
         return {"error": "app_id must be a numeric application id"}
-    data = _algod_get(f"/v2/applications/{aid}")
+    from app.core.config import CHAIN_CACHE_TTL_SLOW
+
+    data = _algod_get(f"/v2/applications/{aid}", cache_ttl=CHAIN_CACHE_TTL_SLOW)
     if not isinstance(data, dict):
         return {"error": "unexpected algod response"}
     if data.get("error"):
@@ -638,9 +1098,124 @@ def _tool_lookup_application(app_id: int | str) -> dict[str, Any]:
     }
 
 
+_BOXES_REQUEST_MAX = 10_000
+# Deliberately far above any real box count this tool will meet in practice —
+# see _boxes_get for why the request always asks for this many regardless of
+# what the caller wants back.
+
+
+def _boxes_get(base_url: str, token: str, app_id: str, *, cache_ttl: int = 0) -> dict[str, Any]:
+    """GET /v2/applications/{id}/boxes, always asking for _BOXES_REQUEST_MAX so the response is reliable either way.
+
+    algod's box-listing endpoint has no truncation flag on a successful
+    response — asking for fewer than the true count just silently returns
+    that many with nothing telling you more exist. It DOES report the true
+    count when the request exceeds either _BOXES_REQUEST_MAX or the node's
+    own configured cap: as an HTTP 400 whose body carries "total-boxes"
+    (found live 2026-08-07 against the ARC-89 registry app on Testnet).
+    Asking for _BOXES_REQUEST_MAX every time means a caller's own max_boxes
+    is purely a client-side "how many names to hand back" cap, never masks
+    the true total.
+
+    Doesn't go through _algod_get (builds its own URL/params shape), so it
+    gets the same cache_ttl contract directly rather than via that chokepoint
+    -- cache_ttl > 0 caches a genuine successful body (both the full-list and
+    the total-only-on-400 shapes), never {"error": ...}/{"_status": 404}.
+    """
+    import httpx
+
+    key = _cache_key("boxes", f"{base_url}/v2/applications/{app_id}/boxes", None) if cache_ttl > 0 else ""
+    if key:
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+    headers = {"X-Algo-API-Token": token} if token else {}
+    try:
+        with httpx.Client(timeout=_TIMEOUT) as http:
+            r = http.get(
+                f"{base_url}/v2/applications/{app_id}/boxes",
+                headers=headers,
+                params={"max": _BOXES_REQUEST_MAX},
+            )
+        if r.status_code == 404:
+            return {"_status": 404}
+        try:
+            data = r.json()
+        except Exception:
+            data = None
+        total = (data.get("data") or {}).get("total-boxes") if r.status_code == 400 and isinstance(data, dict) else None
+        if total is not None:
+            result: dict[str, Any] = {"total_boxes": int(total), "boxes": None}
+        else:
+            r.raise_for_status()
+            if not isinstance(data, dict):
+                return {"error": "unexpected algod response"}
+            boxes = data.get("boxes") or []
+            result = {"total_boxes": len(boxes), "boxes": boxes}
+        if key:
+            _cache_set(key, result, cache_ttl)
+        return result
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+
+
+def _tool_application_boxes(
+    app_id: int | str, network: str = "mainnet", max_boxes: int = 20
+) -> dict[str, Any]:
+    """Count and sample an application's box-storage entries — the concrete adoption signal for any box-based registry/state contract (e.g. ARC-89's ASA metadata registry) beyond download counts or spec status: how many things are ACTUALLY registered on-chain. network: 'mainnet' (the operator's own node) or 'testnet' (public AlgoNode, for a Testnet-only deployment). Box names come back base64-encoded raw bytes — decode them yourself per the contract's own key format (e.g. ARC-89 keys each box by an asset's raw 8-byte id)."""
+    aid = str(app_id).strip()
+    if not aid.isdigit():
+        return {"error": "app_id must be a numeric application id"}
+    net = (network or "mainnet").strip().lower()
+    max_boxes = max(0, min(int(max_boxes), 100))
+    from app.core.config import CHAIN_CACHE_TTL_SLOW
+
+    if net == "testnet":
+        from app.core.config import TESTNET_ALGOD_URL
+
+        if not TESTNET_ALGOD_URL:
+            return {"error": "testnet algod not configured (TESTNET_ALGOD_URL unset)"}
+        data = _boxes_get(TESTNET_ALGOD_URL, "", aid, cache_ttl=CHAIN_CACHE_TTL_SLOW)
+    elif net == "mainnet":
+        from app.core.config import ALGOD_TOKEN, ALGOD_URL
+
+        if not ALGOD_URL:
+            return {"error": "algod not configured (ALGOD_URL unset)"}
+        data = _boxes_get(ALGOD_URL, ALGOD_TOKEN, aid, cache_ttl=CHAIN_CACHE_TTL_SLOW)
+    else:
+        return {"error": "network must be 'mainnet' or 'testnet'"}
+
+    if not isinstance(data, dict):
+        return {"error": "unexpected algod response"}
+    if data.get("error"):
+        return data
+    if data.get("_status") == 404:
+        return {"app_id": int(aid), "network": net, "error": "application not found"}
+
+    total = data.get("total_boxes", 0)
+    boxes = data.get("boxes")
+    result: dict[str, Any] = {"app_id": int(aid), "network": net, "total_boxes": total}
+    if boxes is None:
+        # Exceeded the request cap -- algod gave us the true count but not
+        # the names. Still the headline adoption number; note why names are
+        # missing rather than silently returning an empty list.
+        result["box_names"] = []
+        result["note"] = (
+            f"{total} boxes exceeds what a single request can list names for; "
+            "total_boxes is still accurate"
+        )
+    else:
+        result["box_names"] = [
+            b.get("name") for b in boxes[:max_boxes] if isinstance(b, dict) and b.get("name")
+        ]
+    return result
+
+
 def _tool_get_consensus_stats() -> dict[str, Any]:
     """Algorand consensus participation from algod /v2/ledger/supply: ALGO stake currently ONLINE (securing the network) vs total stake, and the online share. The on-chain measure of participation scale. NOTE: this is online STAKE, not a node count — node count is off-chain telemetry the ledger does not expose."""
-    data = _algod_get("/v2/ledger/supply")
+    from app.core.config import CHAIN_CACHE_TTL_FAST
+
+    data = _algod_get("/v2/ledger/supply", cache_ttl=CHAIN_CACHE_TTL_FAST)
     if not isinstance(data, dict):
         return {"error": "unexpected algod response"}
     if data.get("error"):
@@ -657,10 +1232,139 @@ def _tool_get_consensus_stats() -> dict[str, Any]:
     }
 
 
-def _testnet_idx_get(path: str, params: dict | None = None) -> dict[str, Any]:
+_ROUND_SEARCH_MAX_CALLS = 40
+
+
+def _block_timestamp(round_number: int) -> tuple[int | None, dict[str, Any] | None]:
+    """Fetch one round's block timestamp off the mainnet indexer. Returns (ts, None) on success or (None, error_dict) on failure."""
+    from app.core.config import CHAIN_CACHE_TTL_STATIC
+
+    block = _mainnet_idx_get(f"/v2/blocks/{round_number}", cache_ttl=CHAIN_CACHE_TTL_STATIC)
+    if not isinstance(block, dict) or block.get("error"):
+        err = block if isinstance(block, dict) else {"error": "unexpected indexer response"}
+        return None, err
+    if block.get("_status") == 404:
+        return None, {"error": f"round {round_number} not found (not yet confirmed, or invalid)"}
+    ts = block.get("timestamp")
+    if ts is None:
+        return None, {"error": f"round {round_number}'s block had no timestamp"}
+    return ts, None
+
+
+def _round_to_timestamp(round_number: int) -> dict[str, Any]:
+    ts, err = _block_timestamp(round_number)
+    if err is not None:
+        return {"round": round_number, **err}
+    return {"round": round_number, "timestamp_utc": datetime.fromtimestamp(ts, tz=UTC).isoformat()}
+
+
+def _parse_target_timestamp(date: str) -> tuple[float | None, dict[str, Any] | None]:
+    try:
+        target_dt = datetime.fromisoformat(date.replace("Z", "+00:00"))
+    except ValueError:
+        return None, {
+            "error": (
+                f"could not parse date {date!r} -- use ISO format, "
+                "e.g. '2023-01-15' or '2023-01-15T00:00:00Z'"
+            )
+        }
+    if target_dt.tzinfo is None:
+        target_dt = target_dt.replace(tzinfo=UTC)
+    return target_dt.timestamp(), None
+
+
+def _current_round() -> tuple[int | None, dict[str, Any] | None]:
+    from app.core.config import CHAIN_CACHE_TTL_FAST
+
+    status = _algod_get("/v2/status", cache_ttl=CHAIN_CACHE_TTL_FAST)
+    if not isinstance(status, dict) or status.get("error"):
+        return None, (status if isinstance(status, dict) else {"error": "unexpected algod response"})
+    hi = status.get("last-round", status.get("lastRound"))
+    if not hi:
+        return None, {"error": "could not read current round from algod status"}
+    return hi, None
+
+
+def _date_to_nearest_round(date: str) -> dict[str, Any]:
+    target_ts, err = _parse_target_timestamp(date)
+    if err is not None:
+        return err
+
+    hi, err = _current_round()
+    if err is not None:
+        return err
+
+    lo = 1
+    hi_ts, err = _block_timestamp(hi)
+    if err is not None:
+        return err
+    lo_ts, err = _block_timestamp(lo)
+    if err is not None:
+        return err
+
+    if target_ts >= hi_ts:
+        return _round_date_result(date, hi, hi_ts, "date is at/after the latest confirmed round; clamped to it")
+    if target_ts <= lo_ts:
+        return _round_date_result(date, lo, lo_ts, "date is at/before genesis; clamped to round 1")
+
+    calls = 0
+    while hi - lo > 1 and calls < _ROUND_SEARCH_MAX_CALLS:
+        mid = (lo + hi) // 2
+        mid_ts, err = _block_timestamp(mid)
+        calls += 1
+        if err is not None:
+            return err
+        if mid_ts < target_ts:
+            lo, lo_ts = mid, mid_ts
+        else:
+            hi, hi_ts = mid, mid_ts
+
+    nearest_round, nearest_ts = (
+        (lo, lo_ts) if abs(lo_ts - target_ts) <= abs(hi_ts - target_ts) else (hi, hi_ts)
+    )
+    return _round_date_result(date, nearest_round, nearest_ts)
+
+
+def _round_date_result(date: str, round_number: int, ts: int, note: str = "") -> dict[str, Any]:
+    result = {
+        "date": date,
+        "nearest_round": round_number,
+        "round_timestamp_utc": datetime.fromtimestamp(ts, tz=UTC).isoformat(),
+    }
+    if note:
+        result["note"] = note
+    return result
+
+
+def _tool_round_to_date(round_number: int | None = None, date: str | None = None) -> dict[str, Any]:
+    """Convert between an Algorand round number and a calendar date/time.
+
+    Neither algod nor the indexer expose this conversion directly, so a claim
+    like "created at round 12345678" or "the asset launched in early 2023"
+    could only be reported as-is, not cross-checked against each other or a
+    news date (self-reported gap, 2026-08-10: a "world population tracker"
+    balance's growth curve since asset launch needed a round->date anchor).
+
+    Pass exactly one of round_number (-> its block's UTC timestamp) or date
+    (an ISO date/datetime -> the nearest round, found by binary search
+    against real block timestamps). Binary search, not a fixed average block
+    time, because Algorand's block time has shifted across its history
+    (~4.5s early on, ~2.8s more recently) -- an average would drift by weeks
+    over a multi-year span.
+    """
+    if (round_number is None) == (date is None):
+        return {"error": "pass exactly one of round_number or date"}
+    if round_number is not None:
+        return _round_to_timestamp(round_number)
+    return _date_to_nearest_round(date)
+
+
+def _testnet_idx_get(path: str, params: dict | None = None, *, cache_ttl: int = 0) -> dict[str, Any]:
     """GET a path off the public testnet INDEXER (history-capable, unlike algod).
 
     Returns parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}.
+    cache_ttl > 0 caches a genuine successful body -- see _algod_get's
+    docstring for the caching contract, identical here.
     """
     import httpx
 
@@ -668,19 +1372,29 @@ def _testnet_idx_get(path: str, params: dict | None = None) -> dict[str, Any]:
 
     if not TESTNET_INDEXER_URL:
         return {"error": "testnet indexer not configured (TESTNET_INDEXER_URL unset)"}
+    key = _cache_key("testnet_idx", path, params) if cache_ttl > 0 else ""
+    if key:
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
     try:
         with httpx.Client(timeout=_TIMEOUT) as http:
             r = http.get(f"{TESTNET_INDEXER_URL}{path}", params=params)
         if r.status_code == 404:
             return {"_status": 404}
         r.raise_for_status()
-        return r.json()
+        result = r.json()
+        if key and isinstance(result, dict) and not result.get("error"):
+            _cache_set(key, result, cache_ttl)
+        return result
     except Exception as exc:
         return {"error": str(exc)[:200]}
 
 
 def _testnet_lookup_txid(txid: str) -> dict[str, Any]:
-    data = _testnet_idx_get(f"/v2/transactions/{txid}")
+    from app.core.config import CHAIN_CACHE_TTL_STATIC
+
+    data = _testnet_idx_get(f"/v2/transactions/{txid}", cache_ttl=CHAIN_CACHE_TTL_STATIC)
     if not isinstance(data, dict) or data.get("error"):
         return data if isinstance(data, dict) else {"error": "unexpected indexer response"}
     if data.get("_status") == 404:
@@ -703,7 +1417,9 @@ def _testnet_lookup_txid(txid: str) -> dict[str, Any]:
 def _testnet_lookup_app_id(app_id: str) -> dict[str, Any]:
     if not app_id.isdigit():
         return {"error": "app_id must be a numeric application id"}
-    data = _testnet_idx_get(f"/v2/applications/{app_id}")
+    from app.core.config import CHAIN_CACHE_TTL_SLOW
+
+    data = _testnet_idx_get(f"/v2/applications/{app_id}", cache_ttl=CHAIN_CACHE_TTL_SLOW)
     if not isinstance(data, dict) or data.get("error"):
         return data if isinstance(data, dict) else {"error": "unexpected indexer response"}
     if data.get("_status") == 404:
@@ -722,13 +1438,17 @@ def _testnet_lookup_app_id(app_id: str) -> dict[str, Any]:
 def _testnet_lookup_address(address: str) -> dict[str, Any]:
     if not _is_valid_address(address):
         return {"address": address, "error": _INVALID_ADDRESS_ERROR}
-    acct = _testnet_idx_get(f"/v2/accounts/{address}")
+    from app.core.config import CHAIN_CACHE_TTL_FAST
+
+    acct = _testnet_idx_get(f"/v2/accounts/{address}", cache_ttl=CHAIN_CACHE_TTL_FAST)
     if not isinstance(acct, dict) or acct.get("error"):
         return acct if isinstance(acct, dict) else {"error": "unexpected indexer response"}
     if acct.get("_status") == 404:
         return {"address": address, "found": False, "error": "account not found on testnet"}
     a = acct.get("account", {}) or {}
-    txns = _testnet_idx_get(f"/v2/accounts/{address}/transactions", params={"limit": 10})
+    txns = _testnet_idx_get(
+        f"/v2/accounts/{address}/transactions", params={"limit": 10}, cache_ttl=CHAIN_CACHE_TTL_FAST
+    )
     recent = []
     if isinstance(txns, dict) and not txns.get("error"):
         recent.extend(
@@ -777,28 +1497,32 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "lookup_account",
             "description": (
-                "Live on-chain state of an Algorand account by address: ALGO balance, "
-                "ASAs held, the apps it created or opted into, auth_addr, and sig_type. "
-                "auth_addr is set only if this account was REKEYED — delegated its "
-                "signing authority to a different address — and is real evidence of "
-                "common control even when two accounts have different addresses: if "
-                "two assets' creator addresses differ but both accounts share the SAME "
-                "auth_addr, the same real signer controls both — do not conclude "
-                "'different creator, so unrelated' without checking this first. "
-                "sig_type tells you whether the account is a personal wallet (sig), a "
-                "multisig with shared control (msig), or contract-controlled (lsig). "
-                "Use to verify holdings, treasury balances, or whether an account "
-                "participates in a protocol. The address MUST be one you actually found "
-                "in a fetched page, search result, or another tool's output — never "
-                "construct, guess, or pattern-match a plausible-looking one yourself "
-                "(e.g. 'the project's name as a prefix'). If you don't have a real "
-                "address for this project, say so in the article instead of inventing "
-                "one to check."
+                "Live on-chain state of an Algorand account: ALGO balance, ASAs held, "
+                "apps created/opted into, auth_addr, sig_type. Use to verify holdings, "
+                "treasury balances, or protocol participation. auth_addr is set only "
+                "if the account was REKEYED to a different signer — two accounts "
+                "sharing the same auth_addr are under common control even with "
+                "different addresses/creators. sig_type: sig=personal wallet, "
+                "msig=multisig, lsig=contract-controlled. The address MUST come from "
+                "a fetched page, search result, or another tool's output — never "
+                "guess or pattern-match one (e.g. a project name as prefix); if you "
+                "don't have a real address, say so instead of inventing one. "
+                "created_assets is paginated 25 at a time -- total_created_assets is "
+                "always the true count; if created_assets_has_more is true, call again "
+                "with created_assets_offset to see the rest (e.g. to confirm the exact "
+                "id range of a prolific creator's full NFT series)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "address": {"type": "string", "description": "58-char Algorand address"}
+                    "address": {"type": "string", "description": "58-char Algorand address"},
+                    "created_assets_offset": {
+                        "type": "integer",
+                        "description": (
+                            "Page offset into created_assets, 25 per page. "
+                            "Default 0 (first page)."
+                        ),
+                    },
                 },
                 "required": ["address"],
             },
@@ -854,7 +1578,11 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
                 "creator — you do NOT need a separate lookup_asset call just to report "
                 "a token's supply. Only call lookup_asset afterward if you need fields "
                 "this doesn't return: manager/freeze/clawback/reserve roles, or the "
-                "asset's metadata url."
+                "asset's metadata url. A name match is NOT proof of affiliation — a "
+                "top result can be an unrelated token that happens to share a name. "
+                "Before reporting a result here as a named entity's OWN token, call "
+                "trace_asset_creator on it and compare the creator against that "
+                "entity's own established identity."
             ),
             "parameters": {
                 "type": "object",
@@ -920,20 +1648,67 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "lookup_transaction_note",
+            "description": (
+                "The note field of one specific transaction, by its txid, via "
+                "the mainnet indexer — use once a specific memo's exact "
+                "wording matters to a claim (a payment reference, a "
+                "governance vote rationale, an on-chain message), instead of "
+                "trusting a third party's paraphrase of it. Most real memos "
+                "are UTF-8 text and come back decoded directly; non-text "
+                "notes come back as base64 with is_utf8_text=false."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "txid": {"type": "string", "description": "the transaction's id"},
+                },
+                "required": ["txid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_arc69_metadata",
+            "description": (
+                "An ASA's ARC-69 attributes/traits (e.g. a game rating, rarity "
+                "trait), read from the note field of its most recent "
+                "asset-config transaction — NOT lookup_asset's url field, "
+                "which for ARC-69 is only the artwork, not the attributes. "
+                "Use whenever a claim depends on structured NFT metadata "
+                "(a stat, a rating, a trait) that the standard writes "
+                "on-chain, instead of reporting it as unverifiable."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "integer", "description": "the ASA's numeric id"},
+                },
+                "required": ["asset_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "lookup_asset_transactions",
             "description": (
-                "Recent transaction/transfer history for a specific ASA, via "
-                "the mainnet indexer — marketplace-agnostic on-chain event "
-                "history for one asset (creation, every transfer, to/from "
-                "whom), unlike lookup_asset_holders which only gives a "
-                "current snapshot. Use to check how much something has "
-                "actually traded/moved, independent of any single "
+                "Recent transaction/transfer history for a specific ASA, via the "
+                "mainnet indexer — marketplace-agnostic on-chain event history "
+                "(creation, every transfer, to/from whom), unlike "
+                "lookup_asset_holders which is a current-snapshot only. Use to "
+                "check how much something has actually traded, independent of a "
                 "marketplace's own listing page. amount_raw is unconverted. "
-                "IMPORTANT: a zero-amount transaction is routine opt-in/"
-                "opt-out housekeeping, not a real transfer — use "
-                "most_recent_real_transfer_round_time (not the newest entry "
-                "by itself) for 'when did this last actually change hands'; "
-                "each entry's is_real_transfer flag marks which is which."
+                "A zero-amount entry is routine opt-in/opt-out, not a real "
+                "transfer — is_real_transfer flags which is which; trust "
+                "most_recent_real_transfer_round_time, not the newest entry alone. "
+                "Check is_recent_window: true = genuinely recent data (trustworthy "
+                "for 'is this moving now'); false = no recent activity found, so "
+                "this fell back to the OLDEST page from the asset's creation — for "
+                "a high-volume asset that's early history, not evidence of "
+                "inactivity, so don't report it as 'no transfers since <date>' "
+                "without that caveat."
             ),
             "parameters": {
                 "type": "object",
@@ -942,6 +1717,41 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
                     "limit": {
                         "type": "integer",
                         "description": "1-30 most recent transactions to return, default 10",
+                    },
+                },
+                "required": ["asset_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_asset_transaction_volume",
+            "description": (
+                "Aggregate transaction count + total amount moved for an ASA "
+                "since a given round (default: since creation) — for checking a "
+                "headline claim like '3.5M transactions' or '$10B in volume' "
+                "that lookup_asset_transactions' single page can't verify. Pages "
+                "through the indexer (slow — up to several seconds). complete: "
+                "true means transaction_count/total_amount_moved_raw ARE the "
+                "true lifetime totals; false means it hit the page cap first, "
+                "so the counts are only a LOWER BOUND — still enough to "
+                "falsify an inflated claim ('at least 25,000 transfers'), just "
+                "not to confirm an exact one. total_amount_moved_raw is in RAW "
+                "base units; pair with lookup_asset's decimals to adjust it, "
+                "and with round_to_date to scope min_round to a calendar date."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "integer", "description": "numeric ASA id"},
+                    "min_round": {
+                        "type": "integer",
+                        "description": "only count transactions at/after this round, default 0 (since creation)",
+                    },
+                    "max_pages": {
+                        "type": "integer",
+                        "description": "indexer pages (1000 txns each) to fetch before giving up, 1-100, default 25",
                     },
                 },
                 "required": ["asset_id"],
@@ -1002,6 +1812,31 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "trace_asset_creator",
+            "description": (
+                "Resolve an ASA's REAL creator identity -- its creator address, "
+                "that address's .algo name (if any), how many OTHER assets it has "
+                "created, and current top holders. Use this BEFORE reporting a "
+                "name-matched asset (from lookup_asset_by_name) as belonging to a "
+                "named entity: a matching name string alone is not affiliation — "
+                "compare the returned creator_address/creator_nfd_name against the "
+                "entity's own established identity (its site's linked wallet, its "
+                "NFD, its verified socials) first. A coincidental name match with "
+                "an unrelated creator has produced real fabricated-ownership "
+                "articles before (a spam token wrongly cited as a project's own)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "asset_id": {"type": "integer", "description": "numeric ASA id"},
+                },
+                "required": ["asset_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_consensus_stats",
             "description": (
                 "Algorand network consensus participation: ALGO stake currently ONLINE "
@@ -1034,6 +1869,65 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "application_boxes",
+            "description": (
+                "Count and sample an Algorand application's box-storage entries — the "
+                "concrete adoption number for any box-based registry/state contract "
+                "(e.g. an ARC-89 ASA metadata registry): how many things are ACTUALLY "
+                "registered on-chain, not just download counts or spec status. Box "
+                "names come back base64-encoded raw bytes; decode per the contract's "
+                "own key format if it defines one."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_id": {"type": "integer", "description": "numeric application id"},
+                    "network": {
+                        "type": "string",
+                        "description": "'mainnet' (default) or 'testnet'",
+                    },
+                    "max_boxes": {
+                        "type": "integer",
+                        "description": "how many box names to return, 0-100, default 20 (total_boxes is always the true count regardless)",
+                    },
+                },
+                "required": ["app_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "round_to_date",
+            "description": (
+                "Convert between an Algorand round number and a calendar date/time, "
+                "so a claim like 'created at round 12345678' or 'launched in early "
+                "2023' can be cross-checked against a news date or another round. "
+                "Pass exactly ONE of round_number or date. date -> round uses binary "
+                "search against real block timestamps (not a fixed average block "
+                "time), so it can take several seconds."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "round_number": {
+                        "type": "integer",
+                        "description": "a round number -> its block's UTC timestamp",
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": (
+                            "an ISO date/datetime, e.g. '2023-01-15' or "
+                            "'2023-01-15T00:00:00Z' -> the nearest round"
+                        ),
+                    },
+                },
+            },
+        },
+    },
 ]
 
 CHAIN_HANDLERS: dict[str, Any] = {
@@ -1042,12 +1936,18 @@ CHAIN_HANDLERS: dict[str, Any] = {
     "lookup_asset_by_name": _tool_lookup_asset_by_name,
     "lookup_first_funding": _tool_lookup_first_funding,
     "lookup_account_transactions": _tool_lookup_account_transactions,
+    "lookup_transaction_note": _tool_lookup_transaction_note,
+    "lookup_arc69_metadata": _tool_lookup_arc69_metadata,
     "lookup_asset_transactions": _tool_lookup_asset_transactions,
+    "get_asset_transaction_volume": _tool_get_asset_transaction_volume,
     "lookup_application": _tool_lookup_application,
+    "application_boxes": _tool_application_boxes,
     "get_asset_holder_share": _tool_get_asset_holder_share,
     "lookup_asset_holders": _tool_lookup_asset_holders,
+    "trace_asset_creator": _tool_trace_asset_creator,
     "get_consensus_stats": _tool_get_consensus_stats,
     "testnet_lookup": _tool_testnet_lookup,
+    "round_to_date": _tool_round_to_date,
 }
 
 

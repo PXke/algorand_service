@@ -90,6 +90,7 @@ class AdminCassandraStore:
                 ping_article(
                     article_id,
                     translation_langs=translation_lang_codes(updated.translations),
+                    slug=updated.slug,
                 )
         return updated
 
@@ -125,6 +126,53 @@ class AdminCassandraStore:
                 ),
             )
 
+    def list_article_versions(self, article_id: str) -> list[dict]:
+        """Version history for one article, newest first -- title/editor/reason/date only (no body; that's a separate fetch per version, since bodies can be large and a list view never needs more than one at a time)."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ArticleVersionStmts
+
+        try:
+            aid = UUID(article_id)
+        except ValueError:
+            return []
+        session = get_cassandra_session()
+        rows = session.execute(ArticleVersionStmts.LIST, (aid, 200))
+        items = [
+            {
+                "version": int(row.version),
+                "title": row.title,
+                "edit_reason": row.edit_reason,
+                "editor": row.editor,
+                "edited_at": row.edited_at.isoformat() if row.edited_at else None,
+            }
+            for row in rows
+        ]
+        items.sort(key=lambda it: it["version"], reverse=True)
+        return items
+
+    def get_article_version(self, article_id: str, version: int) -> dict | None:
+        """Full content (title/summary/body) of one prior version, for the admin diff view."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ArticleVersionStmts
+
+        try:
+            aid = UUID(article_id)
+        except ValueError:
+            return None
+        session = get_cassandra_session()
+        row = session.execute(ArticleVersionStmts.GET_ONE, (aid, int(version))).one()
+        if row is None:
+            return None
+        return {
+            "version": int(row.version),
+            "title": row.title,
+            "summary": row.summary,
+            "body": row.body,
+            "edit_reason": row.edit_reason,
+            "editor": row.editor,
+            "edited_at": row.edited_at.isoformat() if row.edited_at else None,
+        }
+
     def _write_article(
         self,
         current: StoredArticle,
@@ -149,7 +197,7 @@ class AdminCassandraStore:
         # duplicate row instead of updating the real one (found live 2026-07-13,
         # two published articles each showing twice in the sitemap after being
         # edited through this exact path). Read the real timestamp fresh instead.
-        pub_row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
+        pub_row = session.execute(ArticleStmts.GET_PUBLISHED_AT_AND_DRAFT, (aid,)).one()
         session.execute(
             ArticleStmts.UPDATE_CONTENT,
             (title, summary, body, tags, aid),
@@ -160,6 +208,19 @@ class AdminCassandraStore:
             # would upsert a phantom at a truncated timestamp.
             logger.warning(
                 "admin edit: no published_at for %s — feed row skipped",
+                current.article_id,
+            )
+            return
+        if getattr(pub_row, "draft", False):
+            # Root-caused live 2026-08-11 (editing the drafted LumiRogue
+            # article to fix a factual error): this used to always re-insert
+            # the articles_feed row whenever published_at existed, with no
+            # awareness of the draft flag at all -- silently un-drafting a
+            # withdrawn article back onto the public feed as a side effect of
+            # fixing a typo in it. Content-only edit; feed membership is
+            # set_article_draft's job exclusively.
+            logger.info(
+                "admin edit: %s is a draft — content updated, feed row left alone",
                 current.article_id,
             )
             return
@@ -245,6 +306,10 @@ class AdminCassandraStore:
             logger.warning("failed to delete version rows for article %s", aid, exc_info=True)
 
         session.execute(ArticleStmts.DELETE, (aid,))
+        with contextlib.suppress(Exception):
+            from app.core.typesense_client import delete_article_document
+
+            delete_article_document(article_id)
         # Bing's guidelines: notify IndexNow on REMOVAL too — the submitted URL
         # gets recrawled, hits the 410 tombstone above, and drops out of the
         # index instead of lingering. Best-effort, never blocks the delete.
@@ -254,8 +319,107 @@ class AdminCassandraStore:
             ping_article(
                 article_id,
                 translation_langs=translation_lang_codes(current.translations),
+                slug=current.slug,
             )
         return True
+
+    def set_article_draft(self, article_id: str, draft: bool) -> StoredArticle | None:
+        """Toggle an article's admin-only draft flag, reversibly. Distinct from delete_article: articles_by_id is never touched except the flag itself, so restoring re-inserts the SAME articles_feed row (published_at unchanged) instead of re-publishing as new. Returns None if the article does not exist."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import ArticleStmts, DraftArticleStmts, FeedStmts
+
+        try:
+            aid = UUID(article_id)
+        except ValueError:
+            return None
+        session = get_cassandra_session()
+        row = session.execute(ArticleStmts.GET_FEED_ROW, (aid,)).one()
+        if row is None:
+            return None
+
+        session.execute(ArticleStmts.SET_DRAFT, (draft, aid))
+        if draft:
+            session.execute(
+                DraftArticleStmts.INSERT,
+                (aid, row.title, row.source_url, datetime.now(tz=UTC)),
+            )
+        else:
+            session.execute(DraftArticleStmts.DELETE, (aid,))
+
+        published_at = row.published_at
+        if published_at is not None:
+            if draft:
+                session.execute(FeedStmts.DELETE, (feed_month(published_at), published_at, aid))
+            else:
+                session.execute(
+                    FeedStmts.INSERT_FULL,
+                    (
+                        feed_month(published_at),
+                        published_at,
+                        aid,
+                        row.service_id,
+                        row.title,
+                        row.summary or "",
+                        list(row.tags or []),
+                        row.image_url,
+                        row.source_url,
+                    ),
+                )
+                if row.slug:
+                    session.execute(
+                        FeedStmts.SET_FEED_SLUG,
+                        (row.slug, feed_month(published_at), published_at, aid),
+                    )
+
+        updated = self.get_article(article_id)
+
+        # Site search must not be able to find (or show a snippet of) a
+        # drafted article either, independent of the direct-URL gate.
+        with contextlib.suppress(Exception):
+            from app.core.typesense_client import delete_article_document, upsert_article_document
+
+            if draft:
+                delete_article_document(article_id)
+            elif updated is not None:
+                upsert_article_document(
+                    article_id=article_id,
+                    title=updated.title,
+                    summary=updated.summary,
+                    body=updated.body,
+                    service_id=updated.service_id,
+                    published_at_epoch=updated.published_at_epoch,
+                )
+
+        with contextlib.suppress(Exception):
+            from app.modules.seo.indexnow import ping_article, translation_lang_codes
+
+            # Draft on: recrawl finds nothing at the URL (404) and drops it.
+            # Draft off: recrawl finds the restored article again.
+            if updated is not None:
+                ping_article(
+                    article_id,
+                    translation_langs=translation_lang_codes(updated.translations),
+                    slug=updated.slug,
+                )
+        return updated
+
+    def list_draft_articles(self) -> list[dict]:
+        """Currently-drafted articles, for the admin UI's restore list -- these are absent from articles_feed by design, so the normal feed listing can never surface them."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import DraftArticleStmts
+
+        rows = get_cassandra_session().execute(DraftArticleStmts.LIST)
+        items = [
+            {
+                "article_id": str(row.article_id),
+                "title": row.title,
+                "source_url": row.source_url,
+                "drafted_at": row.drafted_at.isoformat() if row.drafted_at else None,
+            }
+            for row in rows
+        ]
+        items.sort(key=lambda it: it["drafted_at"] or "", reverse=True)
+        return items
 
     def create_brief(
         self,
@@ -781,7 +945,14 @@ class AdminCassandraStore:
         workers' domain_from_url. Platform/public suffixes keep the subdomain
         (foo.medium.com stays distinct) so unrelated sources don't merge.
         """
-        parsed = urlparse(url.strip())
+        raw = url.strip()
+        # A bare hostname with no scheme reads as a PATH to urlparse, not a
+        # netloc -- .hostname comes back empty. Kept in parity with workers'
+        # domain_from_url (see its comment, 2026-08-07); the "." guard keeps
+        # a genuinely non-URL string like "not-a-url" still returning "".
+        if "://" not in raw and "." in raw:
+            raw = f"https://{raw}"
+        parsed = urlparse(raw)
         host = (parsed.hostname or "").lower().strip(".")
         if not host:
             return ""
@@ -1095,6 +1266,11 @@ class AdminCassandraStore:
                 row.source_url,
             ),
         )
+        if row.slug:
+            session.execute(
+                FeedStmts.SET_FEED_SLUG,
+                (row.slug, feed_month(published_at), published_at, aid),
+            )
         session.execute(ArticleStmts.UPDATE_PUBLISHED_AT, (published_at, aid))
         # Register the service_id match key: the workers only register match
         # keys on their direct-publish path, so review-approved articles were
@@ -1122,7 +1298,7 @@ class AdminCassandraStore:
         with contextlib.suppress(Exception):
             from app.modules.seo.indexnow import ping_article
 
-            ping_article(article_id)
+            ping_article(article_id, slug=row.slug)
         return True
 
     @staticmethod
@@ -1534,6 +1710,7 @@ class AdminCassandraStore:
             "scrape_url": row.scrape_url or "",
             "created_at": row.created_at.isoformat() if row.created_at else "",
             "updated_at": row.updated_at.isoformat() if row.updated_at else "",
+            "human_pick_day": getattr(row, "human_pick_day", None) or "",
         }
 
     def list_publish_queue(self, *, limit: int = 200) -> list[dict]:
@@ -1664,3 +1841,22 @@ class AdminCassandraStore:
             ),
         )
         return {"queue_id": queue_id, "priority": new_priority}
+
+    def set_human_pick_for_today(self, queue_id: str) -> dict | None:
+        """Pin a pending queue row as Lane 1 (human pick) of the day's 3 publish slots — distinct from bump_queue_priority, which only reorders within the automated ranking. drain_standard_publish_queue checks human_pick_day == today's UTC date before falling through to the automated lane selection, so this reserves a specific slot rather than just jumping the line. None when the row is missing or not pending."""
+        from app.core.cassandra import get_cassandra_session
+        from app.core.statements import PublishQueueStmts
+
+        try:
+            qid = UUID(queue_id)
+        except ValueError:
+            return None
+        session = get_cassandra_session()
+        row = session.execute(PublishQueueStmts.GET_ROW, (qid,)).one()
+        if row is None or (row.status or "") != "pending":
+            return None
+
+        today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+        now = datetime.now(tz=UTC)
+        session.execute(PublishQueueStmts.SET_HUMAN_PICK, (today, now, qid))
+        return {"queue_id": queue_id, "human_pick_day": today}

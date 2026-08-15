@@ -533,3 +533,43 @@ file = "backend/schema/migrations/app/058_special_edition_brief.cql"
 tier = "prod"
 status = "active"
 description = "editorial_briefs.is_special_edition: flags a brief for deeper/longer compose treatment and a reader-facing badge"
+
+[[migrations]]
+stream = "app"
+version = "059"
+file = "backend/schema/migrations/app/059_article_draft.cql"
+tier = "prod"
+status = "active"
+description = "articles_by_id.draft: admin-only unpublish/restore toggle that pulls a live article out of the feed/sitemap/direct URL without deleting it"
+
+[[migrations]]
+stream = "app"
+version = "060"
+file = "backend/schema/migrations/app/060_publish_queue_human_lane.cql"
+tier = "prod"
+status = "active"
+description = "publish_queue.human_pick_day: admin pin marking a pending row as today's human-picked publish slot (Lane 1 of the 3-lane priority split)"
+
+[[migrations]]
+stream = "app"
+version = "061"
+file = "backend/schema/migrations/app/061_service_profile_scale.cql"
+tier = "prod"
+status = "active"
+description = "service_profiles.scale_score/scale_source/scale_updated_at: opportunistic real-world scale signal (DeFiLlama TVL or GitHub stars) feeding compute_priority's scale_pts term and Lane 2 (biggest/most significant)"
+
+[[migrations]]
+stream = "app"
+version = "062"
+file = "backend/schema/migrations/app/062_share_links.cql"
+tier = "prod"
+status = "active"
+description = "share_links + share_links_by_article: opaque bearer-token links letting an admin share one draft article with a non-admin reviewer, soft-deletable (revoked flag) for a persistent share history"
+
+[[migrations]]
+stream = "app"
+version = "063"
+file = "backend/schema/migrations/app/063_draft_comments.cql"
+tier = "prod"
+status = "active"
+description = "draft_comments: shared-thread comments on a shared draft, with an optional TextQuoteSelector-style highlight anchor resolved client-side at render time"

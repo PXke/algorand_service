@@ -101,7 +101,7 @@
     <div class="thumb">
       <img
         src={media}
-        alt=""
+        alt={article.title ?? ''}
         width={dense ? 64 : 88}
         height={dense ? 64 : 88}
         loading="lazy"

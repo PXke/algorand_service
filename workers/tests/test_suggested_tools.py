@@ -95,6 +95,26 @@ def test_all_tools_wires_the_full_registry_into_suggest(monkeypatch: pytest.Monk
     assert not recorded
 
 
+def test_all_tools_does_not_nudge_toward_a_schema_less_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The already-have-it check must reflect what's actually OFFERED (schema names), not the full handlers registry -- reddit_api_post_history has a handler (a truthful stub for stale references) but deliberately no schema since 2026-07-16 (Reddit 403s this server). Confirmed live 2026-08-07 on a VibeKit compose: it asked for reddit_search, got told 'already_available: reddit_api_post_history', and that name was never in its own callable tool list."""
+    recorded = []
+    monkeypatch.setattr(
+        "app.modules.ai.tool_insights_store.record_tool_suggestion",
+        lambda *a, **_k: recorded.append(a) or True,
+    )
+    schemas, handlers = wt.all_tools()
+    assert "reddit_api_post_history" in handlers  # the stub is still registered...
+    assert not any(
+        s["function"]["name"] == "reddit_api_post_history" for s in schemas
+    )  # ...but never offered
+    out = handlers["suggest_tool"](capability="reddit_search", reason="want community sentiment")
+    assert "already_available" not in out
+    assert out == {"ok": True, "noted": "reddit_search"}
+    assert len(recorded) == 1
+
+
 # ------------------------------------------------------- discourse_forum search
 
 _ABOUT = {"about": {"title": "Algorand Forum", "description": "d", "stats": {"topic_count": 5}}}

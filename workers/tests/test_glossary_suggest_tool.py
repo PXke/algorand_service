@@ -46,8 +46,66 @@ def test_handler_falls_back_to_model_when_no_service_id(fake_cassandra_session: 
 
     handler(term="Pure Proof-of-Stake", definition="Algorand's consensus mechanism.")
 
-    _slug, _term, _definition, _aliases, _c, _u, created_by = fake_cassandra_session.execute.call_args[0][1]
+    _slug, _term, _definition, _aliases, _c, _u, created_by = (
+        fake_cassandra_session.execute.call_args[0][1]
+    )
     assert created_by == "writer:mistral-large"
+
+
+def _glossary_row(slug: str, aliases: list[str]) -> MagicMock:
+    row = MagicMock()
+    row.slug = slug
+    row.aliases = aliases
+    return row
+
+
+def test_handler_rejects_a_term_matching_an_existing_alias_exactly(
+    fake_cassandra_session: MagicMock,
+) -> None:
+    """Suggesting 'LST' is rejected when 'Liquid Staking' already exists with 'LST' as an alias -- root-caused 2026-08-07: aliases were invisible to the duplicate check entirely, so this sailed through as a new term."""
+    fake_cassandra_session.execute.return_value = [
+        _glossary_row("liquid-staking", ["LST", "Liquid staking token"])
+    ]
+    handler = _make_suggest_glossary_term_handler({})
+
+    result = handler(term="LST", definition="A liquid staking derivative token.")
+
+    assert result["ok"] is False
+    assert result["already_exists"] is True
+    assert result["slug"] == "liquid-staking"  # the CANONICAL slug, not a synthetic alias-slug
+    assert "already in the glossary" in result["hint"]
+
+
+def test_handler_catches_a_near_duplicate_of_an_existing_alias(
+    fake_cassandra_session: MagicMock,
+) -> None:
+    """A reworded near-match of an ALIAS (not the canonical term) is still caught by the fuzzy check."""
+    fake_cassandra_session.execute.return_value = [
+        _glossary_row("liquid-staking", ["Liquid staking token (LST)"])
+    ]
+    handler = _make_suggest_glossary_term_handler({})
+
+    result = handler(term="Liquid staking token", definition="Something.")
+
+    assert result["ok"] is False
+    assert result["already_exists"] is True
+    assert result["slug"] == "liquid-staking"
+    assert "reworded" in result["hint"]
+
+
+def test_handler_still_accepts_a_genuinely_new_term_with_unrelated_aliases(
+    fake_cassandra_session: MagicMock,
+) -> None:
+    """An existing term's aliases must not cause unrelated new terms to be falsely rejected."""
+    fake_cassandra_session.execute.side_effect = [
+        [_glossary_row("liquid-staking", ["LST"])],  # LIST_ALL for the duplicate check
+        MagicMock(was_applied=True),  # the INSERT itself
+    ]
+    handler = _make_suggest_glossary_term_handler({})
+
+    result = handler(term="Pure Proof-of-Stake", definition="Algorand's consensus mechanism.")
+
+    assert result == {"ok": True, "slug": "pure-proof-of-stake", "noted": "Pure Proof-of-Stake"}
 
 
 def test_handler_rejects_a_slug_that_already_exists(fake_cassandra_session: MagicMock) -> None:

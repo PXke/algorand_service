@@ -60,7 +60,12 @@ def test_priority_components_sum_for_updates() -> None:
         timeliness=0.6,
     )
     components = (
-        b.relevance_bonus + b.novelty_bonus + b.timeliness_bonus + b.diff_bonus + b.announce_bonus
+        b.relevance_bonus
+        + b.novelty_bonus
+        + b.timeliness_bonus
+        + b.diff_bonus
+        + b.announce_bonus
+        + b.scale_bonus
     )
     # 3 added lines (<5) + short page_text (<200 chars) both trip the noise
     # penalty here, so it must be nonzero and actually subtracted.
@@ -280,3 +285,109 @@ def test_sdk_topic_base_high() -> None:
         source_kind="web",
     )
     assert breakdown.topic_base == 90
+
+
+def test_scale_signal_ranks_otherwise_identical_candidates_differently() -> None:
+    """The STEAK-regression test.
+
+    Two candidates equal on every other axis rank differently once one is
+    known to be a much bigger project.
+    """
+    kwargs = {
+        "topic": PublishTopic.CONTENT_UPDATE,
+        "publish_kind": PublishKind.CONTENT_UPDATE,
+        "page_title": "Update",
+        "page_text": "Algorand DeFi protocol update with real detail. " * 10,
+        "diff": "+++ a\n" + "\n".join(f"+ line {i}" for i in range(10)),
+        "source_kind": "web",
+        "relevance": 0.7,
+        "novelty": 1.0,
+        "timeliness": 0.5,
+    }
+    small = compute_priority(**kwargs, scale_signal=0.05)
+    large = compute_priority(**kwargs, scale_signal=1.0)
+    assert large.scale_bonus > small.scale_bonus
+    assert large.total > small.total
+
+
+def test_scale_signal_none_defaults_to_unresolved_floor() -> None:
+    """scale_signal=None (never resolved) scores the same as the explicit unresolved floor -- NOT the same as a resolved-tiny 0.0."""
+    from app.modules.newspaper.service_scale import UNRESOLVED_SCALE
+
+    kwargs = {
+        "topic": PublishTopic.CONTENT_UPDATE,
+        "publish_kind": PublishKind.CONTENT_UPDATE,
+        "page_title": "Update",
+        "page_text": "Algorand DeFi protocol update with real detail. " * 10,
+        "diff": "+++ a\n" + "\n".join(f"+ line {i}" for i in range(10)),
+        "source_kind": "web",
+        "relevance": 0.7,
+        "novelty": 1.0,
+        "timeliness": 0.5,
+    }
+    unresolved = compute_priority(**kwargs, scale_signal=None)
+    explicit_floor = compute_priority(**kwargs, scale_signal=UNRESOLVED_SCALE)
+    resolved_tiny = compute_priority(**kwargs, scale_signal=0.0)
+    assert unresolved.scale_bonus == explicit_floor.scale_bonus
+    assert unresolved.scale_bonus > resolved_tiny.scale_bonus
+
+
+def test_scale_signal_stays_relevance_gated() -> None:
+    """An off-topic candidate with a huge scale signal still scores ~0 -- relevance gating held."""
+    offtopic_huge_scale = compute_priority(
+        topic=PublishTopic.NEW_SERVICE,
+        publish_kind=PublishKind.SERVICE_DISCOVERY,
+        page_text="GPU computing leader. Buy our graphics cards. Coming soon.",
+        diff=None,
+        source_kind="web",
+        relevance=0.0,
+        scale_signal=1.0,
+    )
+    assert offtopic_huge_scale.total == 0
+
+
+def test_scale_bonus_applies_to_discovery_too() -> None:
+    """First-ever coverage of a major protocol outranks first-ever coverage of a trivial one, within discovery's own drain queue."""
+    kwargs = {
+        "topic": PublishTopic.NEW_SERVICE,
+        "publish_kind": PublishKind.SERVICE_DISCOVERY,
+        "page_title": "New protocol",
+        "page_text": "Algorand DeFi protocol.",
+        "diff": None,
+        "source_kind": "web",
+        "relevance": 0.6,
+        "novelty": 1.0,
+        "timeliness": 1.0,
+    }
+    small_discovery = compute_priority(**kwargs, scale_signal=0.05)
+    large_discovery = compute_priority(**kwargs, scale_signal=1.0)
+    assert large_discovery.total > small_discovery.total
+
+
+def test_scale_max_total_accounted_in_both_branches() -> None:
+    """A maxed-out scale_signal at max relevance never gets clipped by classifier-adjust's max_total headroom, in either branch."""
+    from app.core.config import CLASSIFIER_PRIORITY_WEIGHT
+
+    for kind, topic in (
+        (PublishKind.SERVICE_DISCOVERY, PublishTopic.NEW_SERVICE),
+        (PublishKind.CONTENT_UPDATE, PublishTopic.CONTENT_UPDATE),
+    ):
+        b = compute_priority(
+            topic=topic,
+            publish_kind=kind,
+            page_title="Major update",
+            page_text="Algorand DeFi protocol update with real detail. " * 10,
+            diff="+++ a\n" + "\n".join(f"+ line {i}" for i in range(40)),
+            source_kind="web",
+            relevance=1.0,
+            novelty=1.0,
+            timeliness=1.0,
+            scale_signal=1.0,
+            classifier_publish=True,
+            classifier_confidence=1.0,
+        )
+        # classifier_adjust can add up to CLASSIFIER_PRIORITY_WEIGHT on top of
+        # max_total -- confirm scale_bonus's full value survived that clip,
+        # i.e. max_total was extended by SCALE_PRIORITY_WEIGHT as designed.
+        assert b.scale_bonus > 0
+        assert b.classifier_adjust <= CLASSIFIER_PRIORITY_WEIGHT

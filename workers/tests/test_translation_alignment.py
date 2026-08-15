@@ -43,7 +43,7 @@ def _client(monkeypatch: pytest.MonkeyPatch, *payloads: dict) -> list[list[dict]
 
     monkeypatch.setattr(
         mc,
-        "get_mistral_client",
+        "get_mistral_translate_client",
         lambda **_kw: SimpleNamespace(chat_json_object=_chat_json_object),
     )
     return seen

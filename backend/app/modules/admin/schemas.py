@@ -1,6 +1,7 @@
 """Re-export shim — definitions live in app/schemas.py (msgspec.Struct)."""
 
 from app.schemas import (  # noqa: F401
+    ArticleDraftRequest,
     ArticlePatchRequest,
     ClassifierFeedbackCreate,
     DomainSetRequest,
@@ -9,5 +10,6 @@ from app.schemas import (  # noqa: F401
     GlossaryUpsertRequest,
     ScraperRunRequest,
     ServiceMergeRequest,
+    ShareLinkCreateRequest,
     SourceUpsertRequest,
 )

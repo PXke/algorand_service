@@ -21,11 +21,16 @@ dependencies = [
   "pypdf>=4.0.0",
   "pillow>=10.0.0",
   "yt-dlp>=2025.1.1",
+  # Agent wallet (Phase 1, 2026-08-11): dedicated Testnet-only Algorand
+  # keypair + WalletConnect LOGIN capability, see workers/app/modules/wallet/.
+  "py-algorand-sdk>=2.11.1",
+  "pyWalletConnect>=1.6.2",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  "pytest-xdist>=3.6",
   "ruff>=0.8.0",
   "vulture>=2.14",
 ]
@@ -67,6 +72,8 @@ ml = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Parallel by default (pytest-xdist). Override with `-n0` for a serial run.
+addopts = ["-n", "auto"]
 # See the note in backend/pyproject.toml: resolve algorand_shared from the repo
 # rather than from the venv .pth that link_shared.sh writes in prod.
 pythonpath = [".", "../shared"]

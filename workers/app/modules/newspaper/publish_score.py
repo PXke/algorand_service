@@ -27,6 +27,7 @@ class PriorityBreakdown:
     timeliness_score: float = 0.5
     diff_bonus: int = 0
     announce_bonus: int = 0
+    scale_bonus: int = 0
     classifier_adjust: int = 0
     seo_spam: bool = False
     novelty_factor: float = 1.0
@@ -44,6 +45,7 @@ def compute_priority(
     published_at: str = "",
     mail_from: str = "",
     stored_service_weight: int = 0,
+    scale_signal: float | None = None,
     relevance: float | None = None,
     novelty: float | None = None,
     timeliness: float | None = None,
@@ -100,7 +102,9 @@ def compute_priority(
         DIFF_PRIORITY_WEIGHT,
         DIFF_SIGNIFICANCE_NORM_LINES,
         DISCOVERY_PRIORITY_WEIGHT,
+        SCALE_PRIORITY_WEIGHT,
     )
+    from app.modules.newspaper.service_scale import UNRESOLVED_SCALE
     from app.modules.search.classifier.score import seo_spam_hits
 
     # Evergreen SEO farms ("price prediction 2024-2030") game freshness stamps,
@@ -112,6 +116,14 @@ def compute_priority(
     novelty_pts = round(rel * nov * NOVELTY_PRIORITY_WEIGHT)
     timeliness_pts = 0 if spam else round(rel * timeliness_score * RECENCY_PRIORITY_WEIGHT)
 
+    # Real-world project scale (DeFiLlama TVL / GitHub stars) — a secondary
+    # modifier, not on par with relevance/novelty. A candidate the resolver
+    # never reached defaults to the same neutral floor resolve_service_scale
+    # itself returns on failure (see service_scale.py) — unresolved must never
+    # score below a genuinely small, resolved project.
+    scale = UNRESOLVED_SCALE if scale_signal is None else max(0.0, min(1.0, scale_signal))
+    scale_pts = round(rel * scale * SCALE_PRIORITY_WEIGHT)
+
     # "Something happened" beats "this page exists": a detected event, urgency
     # phrasing, or an announcement-shaped TITLE earns a relevance-gated bonus
     # (title only — body text mentions "launch" too freely).
@@ -121,10 +133,13 @@ def compute_priority(
     if publish_kind == PublishKind.SERVICE_DISCOVERY:
         # One shot per service ever — precise ordering among discoveries is
         # low-stakes, so a flat relevance-scaled score (junk still lands at ~0)
-        # keeps them below any substantive update.
+        # keeps them below any substantive update. Scale still applies here
+        # (not just content updates) so first-ever coverage of a major new
+        # protocol outranks first-ever coverage of a trivial one within
+        # discovery's own drain queue.
         diff_pts = 0
-        total = round(rel * DISCOVERY_PRIORITY_WEIGHT) + announce_pts
-        max_total = DISCOVERY_PRIORITY_WEIGHT + ANNOUNCE_PRIORITY_BONUS
+        total = round(rel * DISCOVERY_PRIORITY_WEIGHT) + announce_pts + scale_pts
+        max_total = DISCOVERY_PRIORITY_WEIGHT + ANNOUNCE_PRIORITY_BONUS + SCALE_PRIORITY_WEIGHT
     else:
         # For updates the diff IS the event: credit scales with how much of the
         # service's page actually changed, saturating at the norm line count.
@@ -137,13 +152,14 @@ def compute_priority(
             )
             diff_sig = min(1.0, added / max(1, DIFF_SIGNIFICANCE_NORM_LINES))
         diff_pts = round(rel * diff_sig * DIFF_PRIORITY_WEIGHT)
-        total = relevance_pts + novelty_pts + timeliness_pts + diff_pts + announce_pts
+        total = relevance_pts + novelty_pts + timeliness_pts + diff_pts + announce_pts + scale_pts
         max_total = (
             RELEVANCE_PRIORITY_WEIGHT
             + NOVELTY_PRIORITY_WEIGHT
             + RECENCY_PRIORITY_WEIGHT
             + DIFF_PRIORITY_WEIGHT
             + ANNOUNCE_PRIORITY_BONUS
+            + SCALE_PRIORITY_WEIGHT
         )
 
     # Thin-content penalty is LIVE (unlike topic_base/trust/service_weight/
@@ -191,6 +207,7 @@ def compute_priority(
         timeliness_score=round(timeliness_score, 2),
         diff_bonus=diff_pts,
         announce_bonus=announce_pts,
+        scale_bonus=scale_pts,
         classifier_adjust=classifier_adjust,
         seo_spam=spam,
         novelty_factor=round(novelty_factor, 2),

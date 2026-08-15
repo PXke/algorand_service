@@ -80,6 +80,31 @@ def test_curly_quoted_invention_also_dequoted() -> None:
     assert out["body"] == "He called it a revolutionary paradigm shift for everyone involved."
 
 
+def test_chart_block_json_quotes_survive_even_when_ungrounded() -> None:
+    """Regression for the Alpha Arcade incident (2026-08-10): a ```chart block's JSON "title" string lost its quotes to this gate (nothing in a chart's own JSON is ever verbatim-grounded in research), leaving invalid JSON where a bare unquoted phrase sat as a value. Quote characters inside a fenced code block are structural syntax, not a prose attribution claim, and must never be touched."""
+    body = (
+        "Some prose here.\n\n"
+        '```chart\n{"type": "bar", "title": "Top wallets by cumulative volume '
+        'on Alpha Arcade", "x": ["a"], "series": []}\n```\n\n'
+        "More prose after."
+    )
+    out = unquote_ungrounded_quotes({"body": body}, [], extra_texts=[])
+    assert out["body"] == body
+    assert "_quotes_unquoted" not in out
+
+
+def test_prose_quote_outside_a_code_fence_is_still_dequoted_when_ungrounded() -> None:
+    """The code-fence protection must not blanket-disable the gate — an invented quote in ordinary prose (outside any fence) is still caught."""
+    body = (
+        '```chart\n{"type": "bar", "title": "A real chart title"}\n```\n\n'
+        'She called it "a completely fabricated statement nobody said".'
+    )
+    out = unquote_ungrounded_quotes({"body": body}, [], extra_texts=[])
+    assert '"A real chart title"' in out["body"]
+    assert '"a completely fabricated statement nobody said"' not in out["body"]
+    assert out["_quotes_unquoted"] == ["a completely fabricated statement nobody said"]
+
+
 def test_gate_disabled_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     """With QUOTE_GATE_ENABLED off, even an ungrounded quote is left untouched."""
     monkeypatch.setattr("app.core.config.QUOTE_GATE_ENABLED", False, raising=False)

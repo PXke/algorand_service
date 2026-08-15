@@ -43,6 +43,8 @@ def _article_row(aid: UUID) -> MagicMock:
     row.translations = None
     row.tags = ["nft"]
     row.first_published_at = None  # never recomposed before
+    row.slug = "old-title-slug"
+    row.draft = False
     return row
 
 
@@ -64,9 +66,13 @@ def _run_replace(monkeypatch: pytest.MonkeyPatch, row: Any) -> tuple[object, Mag
 
 
 def _calls_matching(session: MagicMock, prefix: str) -> list[tuple]:
+    # auto_link_glossary_terms (called at the top of replace_article_content)
+    # issues its own parameterless session.execute(query) against the shared
+    # mock session, a 1-arg call this helper's (stmt, params) unpacking never
+    # accounted for -- skip anything that isn't a real (statement, params) pair.
     return [
         (stmt, params)
-        for stmt, params in (c.args for c in session.execute.call_args_list)
+        for stmt, params in (c.args for c in session.execute.call_args_list if len(c.args) == 2)
         if isinstance(stmt, str) and stmt.startswith(prefix)
     ]
 
@@ -182,6 +188,28 @@ def test_daily_cap_ignores_recompose_republishes(monkeypatch: pytest.MonkeyPatch
     assert article_store.count_articles_published_on_utc_day(day_start_epoch=day_start) == 1
 
 
+def test_replace_carries_slug_onto_the_new_feed_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Root-caused live 2026-08-10 (GSC 'Page with redirect': 545 pages): the DELETE+INSERT here creates a genuinely new feed row with no prior slug for Cassandra to leave untouched, so every recompose silently dropped the feed-visible slug — the homepage reads slug from THIS projection, not articles_by_id, and fell back to uuid-form links, sending every recomposed article's readers (and Google) through an extra 301. The new row's slug must be carried explicitly."""
+    aid = uuid4()
+    new_published_at, session = _run_replace(monkeypatch, _article_row(aid))
+
+    slug_updates = _calls_matching(session, "UPDATE algorand_platform.articles_feed SET slug")
+    assert len(slug_updates) == 1
+    _, params = slug_updates[0]
+    assert params == ("old-title-slug", new_published_at.strftime("%Y-%m"), new_published_at, aid)
+
+
+def test_replace_skips_slug_carry_when_article_has_no_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An article that never claimed a slug (pre-migration-056 row) issues no slug write — nothing to carry, and no accidental empty-string slug."""
+    aid = uuid4()
+    row = _article_row(aid)
+    row.slug = None
+    _, session = _run_replace(monkeypatch, row)
+
+    slug_updates = _calls_matching(session, "UPDATE algorand_platform.articles_feed SET slug")
+    assert slug_updates == []
+
+
 def test_replace_feed_insert_binds_null_for_empty_source_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -194,3 +222,22 @@ def test_replace_feed_insert_binds_null_for_empty_source_url(
     inserts = _calls_matching(session, "INSERT INTO algorand_platform.articles_feed")
     assert len(inserts) == 1
     assert inserts[0][1][8] is None  # source_url
+
+
+def test_replace_on_a_drafted_article_never_touches_the_feed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Root-caused 2026-08-11 (before it could bite live on Lumi Rogue, held in draft): a recompose approved for a DRAFTED live article must update content but never rewrite the feed row or re-stamp published_at -- doing so would silently un-draft a withdrawn article back onto the public feed, exactly the failure already fixed for the admin content-edit path."""
+    aid = uuid4()
+    row = _article_row(aid)
+    row.draft = True
+    result, session = _run_replace(monkeypatch, row)
+
+    assert result == _OLD_PUBLISHED_AT  # published_at is NOT re-stamped
+    assert _calls_matching(session, "DELETE FROM algorand_platform.articles_feed") == []
+    assert _calls_matching(session, "INSERT INTO algorand_platform.articles_feed") == []
+    content_updates = _calls_matching(
+        session, "UPDATE algorand_platform.articles_by_id SET title"
+    )
+    assert len(content_updates) == 1
+    stmt, params = content_updates[0]
+    assert "published_at" not in stmt  # the timestamp-preserving statement, not the full one
+    assert params[0] == "New title"

@@ -181,3 +181,47 @@ def test_finalize_is_a_noop_for_blank_inputs() -> None:
     """A blank source_url or outcome short-circuits before touching Cassandra at all."""
     assert tis.finalize_compose_session_outcome("", "published") is False
     assert tis.finalize_compose_session_outcome("https://example.com/", "") is False
+
+
+def test_stamp_service_recompose_cooldown_marks_scraped_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful compose stamps the full re-scrape window, regardless of what triggered it.
+
+    Regression for a real gap (found live 2026-08-09): admin "Recompose now" never
+    stamped this cooldown, so the beat could recompose the same service days later.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "app.modules.scraper.core.scrape_cooldown.mark_scraped",
+        lambda service_id, *, ok: calls.append((service_id, ok)),
+    )
+    pt._stamp_service_recompose_cooldown("algoseas-io", ok=True)
+    assert calls == [("algoseas-io", True)]
+
+
+def test_stamp_service_recompose_cooldown_marks_short_backoff_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed compose still stamps a cooldown -- just the short failure backoff.
+
+    Not the full 30-day window, so a transient error doesn't block a legitimate
+    retry for a month.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "app.modules.scraper.core.scrape_cooldown.mark_scraped",
+        lambda service_id, *, ok: calls.append((service_id, ok)),
+    )
+    pt._stamp_service_recompose_cooldown("treefund-io", ok=False)
+    assert calls == [("treefund-io", False)]
+
+
+def test_stamp_service_recompose_cooldown_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redis being unavailable must never break a compose over cooldown bookkeeping."""
+
+    def _boom(*_a: object, **_kw: object) -> None:
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr("app.modules.scraper.core.scrape_cooldown.mark_scraped", _boom)
+    pt._stamp_service_recompose_cooldown("algoseas-io", ok=True)  # must not raise

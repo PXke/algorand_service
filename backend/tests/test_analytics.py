@@ -19,15 +19,90 @@ def _patch_prepare(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_is_bot_detection() -> None:
-    """Flags known crawler/library UAs and blank UAs, passes a real Chrome UA."""
-    assert a.is_bot("Googlebot/2.1 (+http://www.google.com/bot.html)")
-    assert a.is_bot("Mozilla/5.0 (compatible; bingbot/2.0)")
-    assert a.is_bot(None)
-    assert a.is_bot("")
-    assert a.is_bot("python-requests/2.31")
-    assert not a.is_bot(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+@pytest.mark.parametrize(
+    ("ua", "expect_bot"),
+    [
+        ("Googlebot/2.1 (+http://www.google.com/bot.html)", True),
+        ("Mozilla/5.0 (compatible; bingbot/2.0)", True),
+        (None, True),
+        ("", True),
+        ("python-requests/2.31", True),
+        ("MyCustomFetcher/1.0", True),
+        ("Java/17.0.1", True),
+        ("Mozilla/5.0 zgrab/0.x", True),
+        ("Mozilla/5.0 (compatible; pathscan/1.0)", True),
+        ("visionheight.com/scan Mozilla/5.0 (Macintosh) Chrome/120", True),
+        ("Mozilla/5.0 (compatible; CensysInspect/1.1)", True),
+        ("Mozilla/5.0 (compatible; IPScanner/1.0)", True),
+        (
+            "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/150.0.7871.46 Mobile Safari/537.36 (compatible; GoogleOther)",
+            True,
+        ),
+        (
+            "Mozilla/5.0 (compatible; SkyWatch/1.0; +https://github.com/skywatch-bsky/skywatch-automod)",
+            True,
+        ),
+        ("Mozilla/5.0 (compatible; SvelteKit-FYI/1.0; +https://sveltekit.fyi)", True),
+        (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.11; rv:49.0) Gecko/20100101 "
+            "Firefox/49.0 (FlipboardProxy/1.2; +http://flipboard.com/browserproxy)",
+            True,
+        ),
+        (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1",
+            True,
+        ),
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            False,
+        ),
+        (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            False,
+        ),
+    ],
+    ids=[
+        "googlebot",
+        "bingbot",
+        "none",
+        "blank",
+        "requests",
+        "custom-fetcher",
+        "java",
+        "zgrab",
+        "pathscan",
+        "visionheight",
+        "censys",
+        "ipscanner",
+        "google-other",
+        "skywatch",
+        "sveltekit-fyi",
+        "flipboard",
+        "decoy-ios13",
+        "chrome-desktop",
+        "iphone-safari17",
+    ],
+)
+def test_is_bot_matrix(ua: str | None, expect_bot: bool) -> None:
+    """Bot denylist / self-ID / non-browser / scanner heuristics in one matrix."""
+    assert a.is_bot(ua) is expect_bot
+
+
+def test_ua_class_buckets() -> None:
+    """Buckets UAs into no-ua, headless, non-browser, mobile-browser and desktop-browser."""
+    assert a.ua_class(None) == "no-ua"
+    assert a.ua_class("HeadlessChrome/120") == "headless"
+    assert a.ua_class("MyCustomFetcher/1.0") == "non-browser"
+    assert (
+        a.ua_class("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile Safari/604")
+        == "mobile-browser"
+    )
+    assert (
+        a.ua_class("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36")
+        == "desktop-browser"
     )
 
 
@@ -104,45 +179,6 @@ def test_primary_language_parses_accept_language_header() -> None:
     assert a.primary_language("***") is None
 
 
-def test_is_bot_flags_self_identifying_url_convention() -> None:
-    """Flags UAs carrying a "+http(s)://" self-ID link, passes ordinary browser UAs."""
-    # Polite crawlers (but never real browsers) embed a "+https://..." info
-    # link in their UA by convention. Found leaking into "human (direct)"
-    # traffic 2026-07-13: a Bluesky automod bot, and two third-party SEO
-    # preview scrapers — none named in the token denylist.
-    assert a.is_bot(
-        "Mozilla/5.0 (compatible; SkyWatch/1.0; +https://github.com/skywatch-bsky/skywatch-automod)"
-    )
-    assert a.is_bot("Mozilla/5.0 (compatible; SvelteKit-FYI/1.0; +https://sveltekit.fyi)")
-    assert a.is_bot("Mozilla/5.0 (compatible; NuxtFyi/0.1; +https://nuxt.fyi)")
-    assert a.is_bot(
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.11; rv:49.0) Gecko/20100101 "
-        "Firefox/49.0 (FlipboardProxy/1.2; +http://flipboard.com/browserproxy)"
-    )
-    # Ordinary browsers never carry a "+http" self-ID link.
-    assert not a.is_bot(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-    )
-
-
-def test_is_bot_flags_known_decoy_ua() -> None:
-    """Exact-matches the frozen iOS-13.2.3/Safari-13.0.3 decoy UA but not a different iPhone build."""
-    # Exact-match denylist for the specific frozen iOS-13.2.3/Safari-13.0.3
-    # string identified 2026-07-12 as the single biggest offender in
-    # pageview_direct_sample (471 rows/7 days, peak 172/day) — structurally
-    # well-formed and non-self-identifying, so only an exact match catches it
-    # on the first request rather than waiting on is_repeated_ua's threshold.
-    assert a.is_bot(
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 "
-        "(KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"
-    )
-    # A different iPhone build/Safari version is real diverse traffic, not this bot.
-    assert not a.is_bot(
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
-        "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-    )
-
-
 def test_referrer_host_classification() -> None:
     """Classifies missing referrers as direct, own-domain as internal, and others by host."""
     # Missing/blank Referer is true direct (dark social, bookmarks, no header).
@@ -164,33 +200,6 @@ def test_referrer_host_hides_server_ip() -> None:
     # The hosting server's own IP is internal, not a real referral source.
     assert a.referrer_host("http://5.135.131.229/news") == "(internal)"
     assert a.referrer_host("http://5.135.131.229:8080/news") == "(internal)"  # with port
-
-
-def test_is_bot_flags_non_browser_uas() -> None:
-    """Flags any non-empty UA lacking a "Mozilla/" token, passes real browser strings."""
-    # Non-empty UA without a "Mozilla/" token is a library/scraper, not human —
-    # this is what was inflating "human (direct)".
-    assert a.is_bot("MyCustomFetcher/1.0")
-    assert a.is_bot("Java/17.0.1")
-    # Real browser strings still pass through as human.
-    assert not a.is_bot(
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605 Mobile Safari/604"
-    )
-
-
-def test_ua_class_buckets() -> None:
-    """Buckets UAs into no-ua, headless, non-browser, mobile-browser and desktop-browser."""
-    assert a.ua_class(None) == "no-ua"
-    assert a.ua_class("HeadlessChrome/120") == "headless"
-    assert a.ua_class("MyCustomFetcher/1.0") == "non-browser"
-    assert (
-        a.ua_class("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile Safari/604")
-        == "mobile-browser"
-    )
-    assert (
-        a.ua_class("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36")
-        == "desktop-browser"
-    )
 
 
 def test_is_internal_client_filters_self_and_private() -> None:
@@ -431,33 +440,6 @@ def test_record_session_skips_without_ip(monkeypatch: pytest.MonkeyPatch) -> Non
     a.record_session(None, None, "Mozilla/5.0", "2026-06-27")
 
 
-def test_is_bot_flags_internet_scanners() -> None:
-    """Flags known internet-scanner UAs despite their browser-ish Mozilla/ prefix."""
-    # Scanners send a browser-ish Mozilla/ UA + no Referer, so they used to slip
-    # into human "(direct)". They must now classify as bots.
-    assert a.is_bot("Mozilla/5.0 zgrab/0.x")
-    assert a.is_bot("Mozilla/5.0 (compatible; pathscan/1.0)")
-    assert a.is_bot("visionheight.com/scan Mozilla/5.0 (Macintosh) Chrome/120")
-    assert a.is_bot("Mozilla/5.0 (compatible; CensysInspect/1.1)")
-    # A genuine browser is still human.
-    assert not a.is_bot(
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605 Mobile Safari/604"
-    )
-
-
-def test_is_bot_flags_self_identifying_tools_found_in_direct_traffic() -> None:
-    """Flags IPScanner and GoogleOther UAs that self-identify in parens despite a Mozilla/ prefix."""
-    # 2026-07-12: a 500-row sample of "human direct" pageviews was ~35%
-    # IPScanner and ~10% GoogleOther, both sending Mozilla/-prefixed UAs so
-    # they slipped the "mozilla/" fallback check like the internet scanners
-    # above. Both self-identify in parens like the rest of the denylist.
-    assert a.is_bot("Mozilla/5.0 (compatible; IPScanner/1.0)")
-    assert a.is_bot(
-        "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/150.0.7871.46 Mobile Safari/537.36 (compatible; GoogleOther)"
-    )
-
-
 def test_is_repeated_ua_flags_only_past_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only flags an exact-match UA once its per-day hit count crosses the threshold."""
     # 2026-07-12: same sample also had 100/500 byte-identical requests for one
@@ -618,118 +600,86 @@ def test_record_pageview_triggers_purge_exactly_once_at_threshold(
     assert purge_calls == [(ua, a._today())]  # unchanged — no re-trigger
 
 
-def test_is_malformed_ua_flags_real_fake_found_in_prod_sample() -> None:
-    """Flags a UA carrying three independent structural violations found live in prod."""
-    # 2026-07-12: this exact string was in a live pageview_direct_sample pull —
-    # three independent violations in one UA (typo'd "live Gecko", a 3-part
-    # AppleWebKit version, and a Chrome UA whose Safari/ token doesn't match
-    # Chrome's permanently-frozen 537.36). Any one of them alone is enough.
-    assert a.is_malformed_ua(
-        "Mozilla/5.0 (Windows NT 6.2;en-US) AppleWebKit/537.32.36 "
-        "(KHTML, live Gecko) Chrome/55.0.3103.66 Safari/537.32"
-    )
-
-
-def test_is_malformed_ua_flags_bad_khtml_phrase_alone() -> None:
-    """Flags a UA with a misspelled "liek Gecko" KHTML phrase."""
-    assert a.is_malformed_ua("Mozilla/5.0 (X11; Linux x86_64) KHTML, liek Gecko Safari/537.36")
-
-
-def test_is_malformed_ua_flags_chrome_with_wrong_webkit_version() -> None:
-    """Flags Chrome claiming an AppleWebKit version other than the permanently-frozen 537.36."""
-    # Real Chrome has kept AppleWebKit frozen at exactly 537.36 since ~2013,
-    # regardless of actual Chrome version — this is impossible from a real
-    # install no matter how old or new.
-    assert a.is_malformed_ua(
-        "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/601.1 "
-        "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/601.1"
-    )
-
-
-def test_is_malformed_ua_flags_firefox_rv_mismatch() -> None:
-    """Flags a Firefox UA whose rv: token doesn't match its trailing Firefox/ version."""
-    # rv: and the trailing Firefox/ version are always identical by
-    # construction in a real Firefox — a mismatch can't happen organically.
-    assert a.is_malformed_ua("Mozilla/5.0 (Windows NT 10.0; rv:47.0) Gecko/20100101 Firefox/128.0")
-
-
-def test_is_malformed_ua_flags_desktop_firefox_unfrozen_gecko() -> None:
-    """Flags desktop Firefox with an unfrozen Gecko/ token, but not mobile Firefox which never freezes it."""
-    # Desktop Firefox has kept Gecko/ frozen at "20100101" since ~2012 — a
-    # real Gecko/128.0 desktop UA is impossible. Mobile (Android) Firefox is
-    # explicitly NOT held to this, since it genuinely doesn't freeze this token.
-    assert a.is_malformed_ua("Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/128.0 Firefox/128.0")
-    assert not a.is_malformed_ua(
-        "Mozilla/5.0 (Android 15; Mobile; rv:152.0) Gecko/152.0 Firefox/152.0"
-    )
-
-
-def test_is_malformed_ua_flags_dead_ppc_mac_platform() -> None:
-    """Flags a UA claiming the discontinued PowerPC Mac OS X platform."""
-    # PowerPC Macs were discontinued in 2006 — nothing running "PPC Mac OS X"
-    # is browsing the web today. Found 2026-07-20 recurring across every
-    # sampled day of pageview_direct_sample, hiding in human "(direct)".
-    assert a.is_malformed_ua(
-        "Mozilla/5.0 (Macintosh; U; PPC Mac OS X; de-de) AppleWebKit/417.9 "
-        "(KHTML, like Gecko) Safari/417.9.2"
-    )
-
-
-def test_is_malformed_ua_flags_chrome_on_windows_xp() -> None:
-    """Flags a Chrome UA on Windows XP/Server 2003, a platform Chrome dropped in 2016."""
-    # Chrome dropped Windows XP/Server 2003 (NT 5.1/5.2) support at version
-    # 49 (Feb 2016) and never shipped a later build for it.
-    assert a.is_malformed_ua(
-        "Mozilla/5.0 (Windows NT 5.1; WOW64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36"
-    )
-    # A period-accurate Chrome/49 on the same OS is still flagged, but by the
-    # separate stale-version-floor rule below, not this XP-specific one.
-
-
-def test_is_malformed_ua_flags_stale_chrome_and_firefox_versions() -> None:
-    """Flags Chrome/Firefox major versions below the evergreen-browser floor, including stale ChromeOS builds."""
-    # Chrome/Firefox are evergreen, auto-updating browsers on a ~4-week
-    # release cadence; a major version below 100 (shipped ~2022) is
-    # implausible at real volume in current traffic. Also catches ChromeOS
-    # devices claiming years-stale Chrome builds (ChromeOS force-updates).
-    assert a.is_malformed_ua(
-        "Mozilla/5.0 (Windows NT 6.3; WOW64; rv:33.0) Gecko/20100101 Firefox/33.0"
-    )
-    assert a.is_malformed_ua(
-        "Mozilla/5.0 (X11; CrOS i686 3912.101.0) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/27.0.1453.116 Safari/537.36"
-    )
-
-
-def test_is_malformed_ua_allows_genuine_modern_browsers() -> None:
-    """Never flags genuine modern Chrome/Firefox/Safari UAs, including a known-live but syntax-plausible one."""
-    # Real, currently-plausible UAs must never be flagged.
-    assert not a.is_malformed_ua(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
-    )
-    assert not a.is_malformed_ua(
-        "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
-    )
-    assert not a.is_malformed_ua(
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
-        "(KHTML, like Gecko) Version/17.3.1 Safari/605.1.15"
-    )
-    # Real Safari's Version/·Safari/ relationship is deliberately not policed
-    # (less rigidly consistent historically than Chrome's), so this known
-    # live-traffic UA — plausible syntax, just suspicious on repeat volume —
-    # must NOT be flagged by structure alone.
-    assert not a.is_malformed_ua(
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 "
-        "(KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"
-    )
-
-
-def test_is_malformed_ua_ignores_empty() -> None:
-    """Never flags a None or blank UA as malformed."""
-    assert not a.is_malformed_ua(None)
-    assert not a.is_malformed_ua("")
+@pytest.mark.parametrize(
+    ("ua", "expect_malformed"),
+    [
+        (
+            "Mozilla/5.0 (Windows NT 6.2;en-US) AppleWebKit/537.32.36 "
+            "(KHTML, live Gecko) Chrome/55.0.3103.66 Safari/537.32",
+            True,
+        ),
+        ("Mozilla/5.0 (X11; Linux x86_64) KHTML, liek Gecko Safari/537.36", True),
+        (
+            "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/601.1 "
+            "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/601.1",
+            True,
+        ),
+        ("Mozilla/5.0 (Windows NT 10.0; rv:47.0) Gecko/20100101 Firefox/128.0", True),
+        ("Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/128.0 Firefox/128.0", True),
+        (
+            "Mozilla/5.0 (Macintosh; U; PPC Mac OS X; de-de) AppleWebKit/417.9 "
+            "(KHTML, like Gecko) Safari/417.9.2",
+            True,
+        ),
+        (
+            "Mozilla/5.0 (Windows NT 5.1; WOW64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36",
+            True,
+        ),
+        ("Mozilla/5.0 (Windows NT 6.3; WOW64; rv:33.0) Gecko/20100101 Firefox/33.0", True),
+        (
+            "Mozilla/5.0 (X11; CrOS i686 3912.101.0) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/27.0.1453.116 Safari/537.36",
+            True,
+        ),
+        (
+            "Mozilla/5.0 (Android 15; Mobile; rv:152.0) Gecko/152.0 Firefox/152.0",
+            False,
+        ),
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+            False,
+        ),
+        (
+            "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+            False,
+        ),
+        (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.3.1 Safari/605.1.15",
+            False,
+        ),
+        (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1",
+            False,
+        ),
+        (None, False),
+        ("", False),
+    ],
+    ids=[
+        "prod-fake-triple",
+        "bad-khtml",
+        "chrome-wrong-webkit",
+        "firefox-rv-mismatch",
+        "desktop-ff-unfrozen-gecko",
+        "ppc-mac",
+        "chrome-on-xp",
+        "stale-firefox",
+        "stale-chromeos",
+        "mobile-ff-ok",
+        "modern-chrome",
+        "modern-firefox",
+        "modern-safari",
+        "legacy-iphone-structure-ok",
+        "none",
+        "blank",
+    ],
+)
+def test_is_malformed_ua_matrix(ua: str | None, expect_malformed: bool) -> None:
+    """Structural UA forgery heuristics (prod samples + evergreen floors) in one matrix."""
+    assert a.is_malformed_ua(ua) is expect_malformed
 
 
 def test_session_counts_excludes_multipage_from_total() -> None:
@@ -1096,54 +1046,20 @@ class _FakeDocSeenRedis:
         return self.store.get(k)
 
 
-def test_article_document_recently_served_true_after_mark(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A JSON-API view check for the same (article, ip, ua) that just requested the SSR document passes -- the real-reader case."""
+def test_article_document_recently_served(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SSR doc mark confirms same (article, ip, ua); scrapers / other articles fail; Redis errors fail open."""
     fake = _FakeDocSeenRedis()
     monkeypatch.setattr(a, "_uv_redis", lambda: fake)
     a.mark_article_document_served("article-1", "8.8.8.8", "Mozilla/5.0")
     assert a.article_document_recently_served("article-1", "8.8.8.8", "Mozilla/5.0") is True
-
-
-def test_article_document_recently_served_false_for_json_api_only_scraper(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A client that never requested the SSR document (going straight for the JSON API) fails the check -- the scraper case this exists to catch (2026-08-02)."""
-    fake = _FakeDocSeenRedis()
-    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
     assert a.article_document_recently_served("article-1", "1.2.3.4", "curl/8.0") is False
-
-
-def test_article_document_recently_served_scoped_to_the_right_article(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A doc-hit for one article doesn't vouch for a JSON-API view of a DIFFERENT article from the same client -- the exact multi-article-same-fingerprint shape the scraper showed."""
-    fake = _FakeDocSeenRedis()
-    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
-    a.mark_article_document_served("article-1", "1.2.3.4", "Mozilla/5.0")
-    assert a.article_document_recently_served("article-2", "1.2.3.4", "Mozilla/5.0") is False
-
-
-def test_article_document_recently_served_fails_open_on_redis_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A Redis hiccup must never silently zero out real readers' views -- fails open (True)."""
+    assert a.article_document_recently_served("article-2", "8.8.8.8", "Mozilla/5.0") is False
 
     def _boom() -> Never:
         raise RuntimeError("redis down")
 
     monkeypatch.setattr(a, "_uv_redis", _boom)
     assert a.article_document_recently_served("article-1", "8.8.8.8", "Mozilla/5.0") is True
-
-
-def test_mark_article_document_served_skips_without_article_id_or_ip(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Never touches Redis when there's no article id or client IP to key on."""
-
-    def _boom() -> Never:
-        raise AssertionError("must not touch Redis")
 
     monkeypatch.setattr(a, "_uv_redis", _boom)
     a.mark_article_document_served("", "8.8.8.8", "Mozilla/5.0")
@@ -1189,45 +1105,8 @@ class _FakeStageRedis:
         self.zset.pop(member, None)
 
 
-def test_article_document_recently_served_confirms_pending_direct_pageview(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The view-count 'second hand' also confirms any pageview held pending by _stage_direct_pageview for the same (article, ip, ua) -- one real signal, reused for both gates."""
-    fake = _FakeStageRedis()
-    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
-    a._stage_direct_pageview(
-        article_id="art-1",
-        client_ip="1.2.3.4",
-        user_agent="Mozilla/5.0",
-        day="2026-08-02",
-        path="/news/articles/art-1",
-        referer=None,
-        campaign=None,
-        accept_language="en-US",
-    )
-    a.mark_article_document_served("art-1", "1.2.3.4", "Mozilla/5.0")
-    assert a.article_document_recently_served("art-1", "1.2.3.4", "Mozilla/5.0") is True
-
-    token = a._doc_seen_token("art-1", "1.2.3.4", "Mozilla/5.0")
-    assert fake.store.get(f"{a._DIRECT_CONFIRM_PREFIX}{token}") == "1"
-
-
-def test_article_document_recently_served_does_not_confirm_an_unseen_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A client that never requested the SSR document (the scraper case) never gets a confirm flag written."""
-    fake = _FakeStageRedis()
-    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
-    assert a.article_document_recently_served("art-1", "1.2.3.4", "curl/8.0") is False
-
-    token = a._doc_seen_token("art-1", "1.2.3.4", "curl/8.0")
-    assert f"{a._DIRECT_CONFIRM_PREFIX}{token}" not in fake.store
-
-
-def test_write_pageview_counters_stages_direct_article_hit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A direct-referrer article-page hit is held pending confirmation instead of writing Cassandra counters immediately."""
+def test_direct_pageview_staging_and_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Direct article hits stage; SSR confirm sets flag; unseen clients do not."""
     fake = _FakeStageRedis()
     monkeypatch.setattr(a, "_uv_redis", lambda: fake)
 
@@ -1235,7 +1114,6 @@ def test_write_pageview_counters_stages_direct_article_hit(
         raise AssertionError("must not touch Cassandra while a hit is staged")
 
     monkeypatch.setattr("app.core.cassandra.get_cassandra_session", _boom)
-
     a._write_pageview_counters(
         day="2026-08-02",
         path="/news/articles/art-1",
@@ -1247,11 +1125,18 @@ def test_write_pageview_counters_stages_direct_article_hit(
     )
     assert any(k.startswith(a._DIRECT_STAGE_PREFIX) for k in fake.store)
 
+    a.mark_article_document_served("art-1", "1.2.3.4", "Mozilla/5.0")
+    assert a.article_document_recently_served("art-1", "1.2.3.4", "Mozilla/5.0") is True
+    token = a._doc_seen_token("art-1", "1.2.3.4", "Mozilla/5.0")
+    assert fake.store.get(f"{a._DIRECT_CONFIRM_PREFIX}{token}") == "1"
 
-def test_write_pageview_counters_does_not_stage_non_article_direct_hit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Home/topic '(direct)' hits still commit immediately -- staging is scoped to article pages only."""
+    assert a.article_document_recently_served("art-1", "9.9.9.9", "curl/8.0") is False
+    unseen = a._doc_seen_token("art-1", "9.9.9.9", "curl/8.0")
+    assert f"{a._DIRECT_CONFIRM_PREFIX}{unseen}" not in fake.store
+
+
+def test_write_pageview_counters_commits_non_staged_hits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Home direct and referred article hits commit immediately (no staging)."""
     fake = _FakeStageRedis()
     monkeypatch.setattr(a, "_uv_redis", lambda: fake)
     monkeypatch.setattr(a, "record_session", lambda *_args, **_kwargs: None)
@@ -1268,21 +1153,6 @@ def test_write_pageview_counters_does_not_stage_non_article_direct_hit(
         campaign=None,
         accept_language="en-US",
     )
-    assert any(c[1] == AnalyticsStmts.PAGEVIEW_BUMP for c in sess.calls)
-    assert not any(k.startswith(a._DIRECT_STAGE_PREFIX) for k in fake.store)
-
-
-def test_write_pageview_counters_does_not_stage_referred_article_hit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An article hit with a real referrer commits immediately -- staging only applies to '(direct)'."""
-    fake = _FakeStageRedis()
-    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
-    monkeypatch.setattr(a, "record_session", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(a, "record_unique", lambda *_args, **_kwargs: None)
-    sess = _FakeSession()
-    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: sess)
-
     a._write_pageview_counters(
         day="2026-08-02",
         path="/news/articles/art-1",
@@ -1292,12 +1162,12 @@ def test_write_pageview_counters_does_not_stage_referred_article_hit(
         campaign=None,
         accept_language="en-US",
     )
-    assert any(c[1] == AnalyticsStmts.PAGEVIEW_BUMP for c in sess.calls)
+    assert sum(1 for c in sess.calls if c[1] == AnalyticsStmts.PAGEVIEW_BUMP) == 2
     assert not any(k.startswith(a._DIRECT_STAGE_PREFIX) for k in fake.store)
 
 
-def test_reconcile_commits_confirmed_staged_pageview(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A staged direct pageview whose confirm flag was set gets committed once its window elapses."""
+def test_reconcile_direct_pageviews(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reconcile commits confirmed staged hits, drops unconfirmed, leaves in-window pending."""
     fake = _FakeStageRedis()
     monkeypatch.setattr(a, "_uv_redis", lambda: fake)
     clock = [1000.0]
@@ -1314,69 +1184,27 @@ def test_reconcile_commits_confirmed_staged_pageview(monkeypatch: pytest.MonkeyP
         accept_language="en-US",
     )
     a._confirm_direct_pageview("art-1", "1.2.3.4", "Mozilla/5.0")
-
-    clock[0] += a._DIRECT_STAGE_WINDOW_SECONDS + 1  # window elapsed
-
-    committed: list = []
-    monkeypatch.setattr(a, "_write_pageview_counters", lambda **kw: committed.append(kw))
-    a._reconcile_due_direct_pageviews()
-
-    assert len(committed) == 1
-    assert committed[0]["path"] == "/news/articles/art-1"
-    assert committed[0]["_skip_direct_staging"] is True
-    assert committed[0]["client_ip"] is None  # never persisted past the staging key
-
-
-def test_reconcile_drops_unconfirmed_staged_pageview(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A staged direct pageview nobody ever confirmed is dropped, never committed -- the scraper case."""
-    fake = _FakeStageRedis()
-    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
-    clock = [2000.0]
-    monkeypatch.setattr(a.time, "time", lambda: clock[0])
-
     a._stage_direct_pageview(
-        article_id="art-1",
+        article_id="art-2",
         client_ip="9.9.9.9",
         user_agent="Mozilla/4.0 (Windows; MSIE 6.0; Windows NT 6.0)",
         day="2026-08-02",
-        path="/news/articles/art-1",
+        path="/news/articles/art-2",
         referer=None,
         campaign=None,
         accept_language=None,
     )
-    clock[0] += a._DIRECT_STAGE_WINDOW_SECONDS + 1
-
+    # Still inside window: nothing happens.
     committed: list = []
     monkeypatch.setattr(a, "_write_pageview_counters", lambda **kw: committed.append(kw))
     a._reconcile_due_direct_pageviews()
-
     assert committed == []
-    assert fake.zset == {}  # cleaned up either way
+    assert len(fake.zset) == 2
 
-
-def test_reconcile_leaves_entries_still_inside_the_confirmation_window(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A staged pageview younger than the confirmation window is left alone -- it may still be confirmed."""
-    fake = _FakeStageRedis()
-    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
-    clock = [3000.0]
-    monkeypatch.setattr(a.time, "time", lambda: clock[0])
-
-    a._stage_direct_pageview(
-        article_id="art-1",
-        client_ip="1.2.3.4",
-        user_agent="Mozilla/5.0",
-        day="2026-08-02",
-        path="/news/articles/art-1",
-        referer=None,
-        campaign=None,
-        accept_language="en-US",
-    )
-
-    committed: list = []
-    monkeypatch.setattr(a, "_write_pageview_counters", lambda **kw: committed.append(kw))
-    a._reconcile_due_direct_pageviews()  # no time has passed
-
-    assert committed == []
-    assert len(fake.zset) == 1  # still pending, not dropped
+    clock[0] += a._DIRECT_STAGE_WINDOW_SECONDS + 1
+    a._reconcile_due_direct_pageviews()
+    assert len(committed) == 1
+    assert committed[0]["path"] == "/news/articles/art-1"
+    assert committed[0]["_skip_direct_staging"] is True
+    assert committed[0]["client_ip"] is None
+    assert fake.zset == {}

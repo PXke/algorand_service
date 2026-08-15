@@ -145,6 +145,43 @@ def test_review_turns_land_in_debug_transcript(monkeypatch: pytest.MonkeyPatch) 
     assert tool_names.count("review_draft") == 2  # initial grade + recheck
 
 
+def test_review_turns_have_matching_tool_call_id_pairing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Root-caused 2026-08-15: the synthetic review_draft debug turn built its assistant tool_calls entry with no id and its paired tool-role message with no tool_call_id at all -- neither matched the other, and neither got backfilled by the later merge-point fixup (which only ever touched the assistant side). Once this synthetic pair is later merged into a revision-pass request and replayed through a stricter provider, the mismatch surfaces as "messages with role 'tool' must have a 'tool_call_id'" (confirmed live, GPT-5.6-luna). Every debug-transcript review_draft turn must carry a real, matching id on both sides from the moment it's created."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.grade_article_draft",
+        lambda **_kw: {"grade": 8.0, "issues": []},
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_quality_llm.grade_article_quality_llm",
+        lambda **_kw: {"narrative_synthesis": 4, "technical_depth": 4, "issues": []},
+    )
+    debug: dict = {"messages": []}
+    trace: list[dict] = []
+    fake = _FakeMistral({"title": "T2", "body": "revised grounded body"})
+
+    _review_and_revise(
+        fake,
+        {"title": "T", "body": "short"},
+        system="s",
+        gen_user="u",
+        trace=trace,
+        debug=debug,
+    )
+
+    for i, m in enumerate(debug["messages"]):
+        tcs = m.get("tool_calls")
+        if not tcs:
+            continue
+        call_id = tcs[0].get("id")
+        assert call_id, f"message {i}: synthetic tool_calls entry missing id"
+        assert tcs[0].get("type") == "function"
+        tool_msg = debug["messages"][i + 1]
+        assert tool_msg["role"] == "tool"
+        assert tool_msg.get("tool_call_id") == call_id, (
+            f"message {i + 1}: tool_call_id does not match paired assistant tool_calls[0].id"
+        )
+
+
 class _FailingMistral:
     def chat_json_object(self, _messages: list[dict], temperature: float | None = None) -> Never:  # noqa: ARG002 -- name must match the real callee's keyword arg
         raise RuntimeError("Mistral API 429 after 5 attempts")

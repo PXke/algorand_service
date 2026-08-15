@@ -371,6 +371,19 @@ def update_article(
             updated_at,
         ),
     )
+    # INSERT_FULL's own column list has no slug column (kept separate per
+    # migration 056 -- see _claim_slug_for_feed), so without this the feed
+    # row's slug silently stays whatever it was before this write -- fine for
+    # an in-place upsert on an unchanged PK, but root-caused live 2026-08-10
+    # (GSC "Page with redirect": 545 pages) as a real desync source: the
+    # homepage reads slug from THIS projection, not articles_by_id, so any
+    # article edited here shows uuid-form links on the homepage even though
+    # articles_by_id.slug is fine, sending Google through an extra 301 on
+    # every such article. Carry it explicitly.
+    if existing.slug:
+        session.execute(
+            ArticleStmts.SET_FEED_SLUG, (existing.slug, feed_month(published_at), published_at, aid)
+        )
     return True
 
 
@@ -393,6 +406,17 @@ def replace_article_content(
     and a COMPLETE new row inserted. Never a partial feed upsert here — one
     resurrected a deleted row without service_id and the feed API's defensive
     filter silently hid the article (incident 2026-07-15).
+
+    DRAFT GUARD (2026-08-11, root-caused before it could bite live on the
+    Lumi Rogue article): a drafted (admin-withdrawn) article used to get its
+    feed row unconditionally rewritten and published_at re-stamped by this
+    same path — a recompose approved for a withdrawn article would have
+    silently un-drafted it back onto the public feed, the exact bug already
+    fixed for the admin content-edit path (AdminCassandraStore._write_article)
+    but not this one. Content still updates either way (that's the whole
+    point of recomposing a draft to see if it's better); feed/publish
+    timestamps are left untouched when drafted — restoring visibility stays
+    set_article_draft's job exclusively.
     """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
@@ -404,7 +428,7 @@ def replace_article_content(
         return None
     body = auto_link_glossary_terms(body)
     session = get_cassandra_session()
-    row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
+    row = session.execute(ArticleStmts.GET_PUBLISHED_AT_AND_DRAFT, (aid,)).one()
     if row is None or row.published_at is None:
         return None
     old_published_at = row.published_at
@@ -417,6 +441,13 @@ def replace_article_content(
         return None
     now = datetime.now(tz=UTC)
     image = image_url or None
+    if getattr(row, "draft", False):
+        session.execute(
+            ArticleStmts.UPDATE_CONTENT_KEEP_TIMESTAMPS,
+            (title, summary, body, tags, image, now, aid),
+        )
+        session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (aid,))
+        return old_published_at
     session.execute(
         ArticleStmts.UPDATE_CONTENT_FULL,
         (title, summary, body, tags, image, now, first_published_at, now, aid),
@@ -439,6 +470,14 @@ def replace_article_content(
             now,
         ),
     )
+    # This path DELETEs the old feed row and INSERTs a genuinely new one at a
+    # new published_at (the PK moves), so there is no existing row for
+    # Cassandra to leave slug untouched on -- unlike update_article's in-place
+    # upsert, every recompose unconditionally lost the feed-visible slug here
+    # until this line (root-caused live 2026-08-10 alongside update_article's
+    # narrower version of the same gap; see its comment for the GSC evidence).
+    if existing.slug:
+        session.execute(ArticleStmts.SET_FEED_SLUG, (existing.slug, feed_month(now), now, aid))
     return now
 
 

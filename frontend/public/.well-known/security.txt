@@ -1,0 +1,4 @@
+Contact: mailto:px9e@proton.me
+Expires: 2027-08-11T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://algorand.pxke.me/.well-known/security.txt
