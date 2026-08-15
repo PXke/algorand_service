@@ -5,7 +5,6 @@ from __future__ import annotations
 from app.core import serialization
 from app.core.config import settings
 from app.core.http import Request, Response, Router
-from app.core.http_errors import json_error_response
 from app.modules.chain.repository import get_chain_repository
 from app.modules.suggestions.services.suggestion_service import SuggestionService
 from app.modules.suggestions.stores.factory import get_suggestion_store

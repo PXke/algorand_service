@@ -13,6 +13,7 @@ from urllib.parse import unquote, urljoin, urlparse
 import httpx
 
 from app.core.http import Request, Response, Router
+
 if TYPE_CHECKING:
     import redis
 

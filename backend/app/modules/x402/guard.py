@@ -23,7 +23,7 @@ from x402.http.x402_http_server import x402HTTPResourceServerSync
 from app.core import serialization
 from app.core.config import settings
 from app.core.http import Request, Response
-from app.modules.x402.adapter import RobynAdapter
+from app.modules.x402.adapter import PlatformHTTPAdapter
 from app.modules.x402.client import get_resource_server
 
 # The contest's required "x402-global-challenge" tag is injected via a custom
@@ -94,7 +94,7 @@ def require_payment(
     # avoids re-hitting the facilitator's /supported endpoint per request.
     http_server = x402HTTPResourceServerSync(get_resource_server(), route_config)
     context = HTTPRequestContext(
-        adapter=RobynAdapter(request),
+        adapter=PlatformHTTPAdapter(request),
         path=request.url.path,
         method=request.method,
     )

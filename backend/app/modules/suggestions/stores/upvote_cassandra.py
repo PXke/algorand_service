@@ -40,7 +40,7 @@ class CassandraUpvoteStore:
         ids = [sid for sid in suggestion_ids if sid]
         if not ids:
             return {}
-        out: dict[str, int] = {sid: 0 for sid in ids}
+        out: dict[str, int] = dict.fromkeys(ids, 0)
         for sid, (ok, result) in zip(
             ids,
             execute_parallel_with_args(

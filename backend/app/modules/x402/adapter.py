@@ -1,7 +1,11 @@
-"""RobynAdapter: bridges robyn.Request to x402's HTTPAdapter protocol (x402.http.types.HTTPAdapter, structural typing — no base class to inherit).
+"""PlatformHTTPAdapter: bridges this backend's framework-neutral Request (app.core.http) to x402's HTTPAdapter protocol (x402.http.types.HTTPAdapter, structural typing — no base class to inherit).
 
-No official x402 adapter ships for Robyn (only Flask/FastAPI), so this is the
-seam that makes the rest of the x402 package's HTTP-flow code reusable here.
+No official x402 adapter ships for this backend's own request type (only
+Flask/FastAPI), so this is the seam that makes the rest of the x402
+package's HTTP-flow code reusable here. Originally written against the
+Robyn framework (pre-Falcon-migration Request shape) -- renamed 2026-08-15
+since the migration's own app.core.http.Request abstraction is already
+framework-neutral, and "RobynAdapter" had gone stale/misleading.
 """
 
 from __future__ import annotations
@@ -11,17 +15,16 @@ from typing import Any
 from app.core.http import Request
 
 
-class RobynAdapter:
-    """Bridges robyn.Request to x402's HTTPAdapter protocol."""
+class PlatformHTTPAdapter:
+    """Bridges this backend's Request type to x402's HTTPAdapter protocol."""
 
     def __init__(self, request: Request) -> None:
-        """Wrap a Robyn Request for the x402 HTTPAdapter protocol."""
+        """Wrap a platform Request for the x402 HTTPAdapter protocol."""
         self._request = request
 
     def get_header(self, name: str) -> str | None:
         """Return a request header by name, or None if absent."""
-        value = self._request.headers.get(name) or self._request.headers.get(name.lower())
-        return value
+        return self._request.headers.get(name) or self._request.headers.get(name.lower())
 
     def get_method(self) -> str:
         """Return the request's HTTP method."""

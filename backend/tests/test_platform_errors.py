@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from app.core.errors import PlatformError, http_status_for_code
 
 

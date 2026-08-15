@@ -8,8 +8,7 @@ from functools import lru_cache
 from typing import Any
 
 from cassandra.auth import PlainTextAuthProvider
-from cassandra.cluster import EXEC_PROFILE_DEFAULT, Cluster, ExecutionProfile
-from cassandra.cluster import ResponseFuture
+from cassandra.cluster import EXEC_PROFILE_DEFAULT, Cluster, ExecutionProfile, ResponseFuture
 from cassandra.cluster import Session as CassandraSession
 from cassandra.concurrent import execute_concurrent, execute_concurrent_with_args
 from cassandra.io.libevreactor import LibevConnection

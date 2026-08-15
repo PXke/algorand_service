@@ -1,7 +1,8 @@
 """dateModified plumbing: JSON-LD/meta + sitemap lastmod reflect updated_at.
 
-Separate from test_seo.py so it stays runnable in environments without robyn
-(render/sitemap import cleanly; only the routes module needs the web runtime).
+Separate from test_seo.py so it stays runnable in environments without the
+web framework installed (render/sitemap import cleanly; only the routes
+module needs it).
 """
 
 from __future__ import annotations

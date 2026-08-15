@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from app.core import cors
-from app.core.cors import origin_allowed, cors_permissive
+from app.core.cors import cors_permissive, origin_allowed
 
 
 def test_origin_allowed_only_for_configured_origins(monkeypatch: pytest.MonkeyPatch) -> None:

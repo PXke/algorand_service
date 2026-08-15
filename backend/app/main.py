@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from app.falcon_main import app
 
-
 if __name__ == "__main__":
     # Development fallback; production should use gunicorn with gthread workers.
     from wsgiref.simple_server import make_server
