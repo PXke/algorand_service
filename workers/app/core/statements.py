@@ -83,6 +83,14 @@ class ArticleStmts:
     UPDATE_PUBLISHED_AT = _Stmt(
         "UPDATE algorand_platform.articles_by_id SET published_at = ? WHERE article_id = ?"
     )
+    # Stamped right after a burst-selected queue row composes (see
+    # burst_compose_tasks.py) so the resulting article carries the same
+    # sentinel its source queue row does -- the backend approval path reads
+    # this to force a burst article into pending_feed_queue instead of ever
+    # publishing it same-day, no matter what the daily cap/pacing allows.
+    SET_ARTICLE_BURST_DAY = _Stmt(
+        "UPDATE algorand_platform.articles_by_id SET burst_day = ? WHERE article_id = ?"
+    )
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.articles_by_id ("
         "article_id, service_id, title, summary, body, "
@@ -243,12 +251,12 @@ class PublishQueueStmts:
         "FROM algorand_platform.publish_queue_pending WHERE status = ? LIMIT ?"
     )
     GET_DETAIL = _Stmt(
-        "SELECT display_name, scrape_url, payload, created_at, human_pick_day "
+        "SELECT display_name, scrape_url, payload, created_at, human_pick_day, burst_day "
         "FROM algorand_platform.publish_queue WHERE queue_id = ?"
     )
     GET_FULL = _Stmt(
         "SELECT status, priority, topic, publish_kind, service_id, display_name, "
-        "scrape_url, payload, created_at "
+        "scrape_url, payload, created_at, human_pick_day, burst_day "
         "FROM algorand_platform.publish_queue WHERE queue_id = ?"
     )
     COUNT_PENDING = _Stmt(
@@ -276,6 +284,9 @@ class PublishQueueStmts:
     )
     CLEAR_HUMAN_PICK = _Stmt(
         "UPDATE algorand_platform.publish_queue SET human_pick_day = null, updated_at = ? WHERE queue_id = ?"
+    )
+    SET_BURST_DAY = _Stmt(
+        "UPDATE algorand_platform.publish_queue SET burst_day = ?, updated_at = ? WHERE queue_id = ?"
     )
 
 

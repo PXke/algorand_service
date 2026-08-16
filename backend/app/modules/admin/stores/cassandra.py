@@ -1478,20 +1478,32 @@ class AdminCassandraStore:
             logger.warning("failed to record rejected-url cooldown for %s", url, exc_info=True)
 
     def _publish_or_queue_article(self, article_id: str) -> str:
-        """Publish to the feed if under the daily cap; otherwise hold in pending_feed_queue for a worker to release at the configured pace."""
+        """Publish to the feed if under the daily cap; otherwise hold in pending_feed_queue for a worker to release at the configured pace.
+
+        A burst-composed article (workers/burst_compose_tasks.py) is force-
+        queued unconditionally, regardless of what the cap/pacing check
+        below would otherwise allow -- the whole point of the daily batch
+        is that it starts going out on the NEXT day's paced releases, not
+        the same day it happens to get approved.
+        """
         from uuid import UUID
 
         from app.core.cassandra import get_cassandra_session
         from app.core.config import settings
-        from app.core.statements import PendingFeedStmts
+        from app.core.statements import ArticleStmts, PendingFeedStmts
 
         session = get_cassandra_session()
         bucket = getattr(settings, "news_feed_bucket", "main") or "main"
         cap = int(getattr(settings, "news_max_articles_per_day", 3) or 3)
+        try:
+            burst_row = session.execute(ArticleStmts.GET_BURST_DAY, (UUID(article_id),)).one()
+        except ValueError:
+            burst_row = None
+        is_burst = bool(burst_row and burst_row.burst_day)
         # Publish now only if under the daily cap AND the standard-publish
         # interval has elapsed since the last standard release — otherwise
         # queue, so the feed gets a steady drip not a dump.
-        if self._feed_count_today(session, bucket) < cap and self._is_standard_publish_due():
+        if not is_burst and self._feed_count_today(session, bucket) < cap and self._is_standard_publish_due():
             if self._publish_article_to_feed(article_id):
                 self._enqueue_article_translations(article_id)
                 self._trigger_distribution(article_id)
@@ -1508,7 +1520,7 @@ class AdminCassandraStore:
             PendingFeedStmts.INSERT,
             (bucket, score, datetime.now(tz=UTC), aid),
         )
-        return "queued_daily_cap"
+        return "queued_burst" if is_burst else "queued_daily_cap"
 
     def list_classifier_reviews(self, *, limit: int = 50, scan_limit: int = 500) -> list[dict]:
         """List recent classifier reviews (human-corrected verdicts), newest first."""
@@ -1711,6 +1723,7 @@ class AdminCassandraStore:
             "created_at": row.created_at.isoformat() if row.created_at else "",
             "updated_at": row.updated_at.isoformat() if row.updated_at else "",
             "human_pick_day": getattr(row, "human_pick_day", None) or "",
+            "burst_day": getattr(row, "burst_day", None) or "",
         }
 
     def list_publish_queue(self, *, limit: int = 200) -> list[dict]:

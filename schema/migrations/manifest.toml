@@ -573,3 +573,11 @@ file = "backend/schema/migrations/app/063_draft_comments.cql"
 tier = "prod"
 status = "active"
 description = "draft_comments: shared-thread comments on a shared draft, with an optional TextQuoteSelector-style highlight anchor resolved client-side at render time"
+
+[[migrations]]
+stream = "app"
+version = "064"
+file = "backend/schema/migrations/app/064_publish_queue_burst_day.cql"
+tier = "prod"
+status = "active"
+description = "publish_queue.burst_day + articles_by_id.burst_day: one-day-ahead burst compose -- a daily selection step marks today's 3 lane picks, an off-peak task composes them as a batch, and an approved burst article is force-queued (never same-day published) so publishing keeps its existing paced cadence"

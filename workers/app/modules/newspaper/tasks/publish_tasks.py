@@ -1667,22 +1667,34 @@ def _publish_from_queued_row_impl(
     hero_image, image_field = _resolve_hero_and_image(payload, row, composed)
 
     needs_review = clf_decision is not True or gate_enforced_review
-    needs_review, route_to_backlog = _maybe_auto_approve(
-        needs_review=needs_review,
-        tier=tier,
-        composed=composed,
-        page_text_for_clf=page_text_for_clf,
-        row=row,
-        payload=payload,
-        defunct_domains=defunct_domains,
-        unsourced_hold_reason=unsourced_hold_reason,
-        broken_link_hold_reason=broken_link_hold_reason,
-        clf_category=clf_category,
-        clf_confidence=clf_confidence,
-        signals=signals,
-        gate_enforced_review=gate_enforced_review,
-        image_field=image_field,
-    )
+    if row.burst_day:
+        # Burst-selected content (see burst_compose_tasks.py) always waits for
+        # an explicit admin decision -- the whole point of the daily batch is
+        # a human look at all 3 candidates before any of them can go out, so
+        # the autonomous auto-approve bypass (which would otherwise publish
+        # immediately, or silently route to the backlog without ever
+        # creating a visible review row) is suppressed unconditionally here,
+        # regardless of how confidently the classifier/gates would otherwise
+        # have cleared it.
+        needs_review = True
+        route_to_backlog = False
+    else:
+        needs_review, route_to_backlog = _maybe_auto_approve(
+            needs_review=needs_review,
+            tier=tier,
+            composed=composed,
+            page_text_for_clf=page_text_for_clf,
+            row=row,
+            payload=payload,
+            defunct_domains=defunct_domains,
+            unsourced_hold_reason=unsourced_hold_reason,
+            broken_link_hold_reason=broken_link_hold_reason,
+            clf_category=clf_category,
+            clf_confidence=clf_confidence,
+            signals=signals,
+            gate_enforced_review=gate_enforced_review,
+            image_field=image_field,
+        )
 
     if needs_review or route_to_backlog:
         return _hold_for_review(
