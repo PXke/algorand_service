@@ -221,6 +221,29 @@ _DOWNBAD_LISTED_RE = re.compile(r"Listed(\d+)\s*\(([\d.]+)%\)")
 _DOWNBAD_VOL_RE = re.compile(r"Total Vol([\d,.]+[kKmM]?)A?")
 _DOWNBAD_OWNERS_RE = re.compile(r"Owners(\d+)\s*\(([\d.]+)%\)")
 _DOWNBAD_ITEMS_RE = re.compile(r"(\d+) ITEMS")
+_DOWNBAD_SHUFFLE_PRICE_RE = re.compile(r"([\d,.]+)\s*\n?\s*AVAILABLE NOW", re.IGNORECASE)
+_DOWNBAD_SHUFFLE_REMAINING_RE = re.compile(r"(\d+)\s*/\s*(\d+)\s*remaining", re.IGNORECASE)
+_DOWNBAD_SHUFFLE_STARTS_RE = re.compile(r"Starts:\s*([^\n]+)")
+
+
+def _downbad_shuffle_status(slug: str, playwright_session: Any = None) -> dict[str, Any]:  # noqa: ANN401
+    """Downbad's "Shuffle" tab (mystery-box: pay a fixed price, get a random unrevealed item from the creator's own held pool) -- a SEPARATE acquisition channel from the ordinary listings tab _downbad_collection_stats reads, invisible to it entirely. Root-caused live 2026-08-16 on Lumi Rogue Ankhs: a creator-controlled wallet held 970 of 1000 (97%) of the collection -- looking like an alarming concentration/inside-stash finding on its own -- until the shuffle tab showed it was that exact pool (959/970 remaining at the time), actively and publicly on sale the whole time, at a HIGHER price (69 ALGO) than the ordinary-listings floor (59 ALGO). nft_collection_market_stats' "listed_count"/"listed_pct" only ever described the ordinary-listings tab and said nothing about this pool -- for any collection using this feature, "thin sell-side" from listed_count alone is misleading, not just incomplete. active: False (not an error) is the normal case for the (much more common) collection with no shuffle pool at all."""
+    text = _render(f"https://www.downbad.farm/collection/{slug}?tab=shuffle", playwright_session)
+    if text is None:
+        return {"error": f"could not render downbad.farm/collection/{slug}?tab=shuffle"}
+    remaining_m = _DOWNBAD_SHUFFLE_REMAINING_RE.search(text)
+    available = "AVAILABLE NOW" in text.upper()
+    if not available or not remaining_m:
+        return {"active": False}
+    price_m = _DOWNBAD_SHUFFLE_PRICE_RE.search(text)
+    starts_m = _DOWNBAD_SHUFFLE_STARTS_RE.search(text)
+    return {
+        "active": True,
+        "price_algo": _parse_amount(price_m.group(1)) if price_m else None,
+        "remaining": int(remaining_m.group(1)),
+        "pool_size": int(remaining_m.group(2)),
+        "starts": starts_m.group(1).strip() if starts_m else None,
+    }
 
 
 def _downbad_collection_stats(name: str, playwright_session: Any = None) -> dict[str, Any]:  # noqa: ANN401
@@ -252,6 +275,7 @@ def _downbad_collection_stats(name: str, playwright_session: Any = None) -> dict
         "total_volume_algo": _parse_amount(vol_m.group(1)) if vol_m else None,
         "owner_count": int(owners_m.group(1)) if owners_m else None,
         "owner_pct": float(owners_m.group(2)) if owners_m else None,
+        "shuffle": _downbad_shuffle_status(slug, playwright_session),
     }
 
 
@@ -386,8 +410,14 @@ NFT_MARKETPLACE_SCHEMAS: list[dict[str, Any]] = [
                 "a collection-level claim ('sold out', 'X% listed', 'floor of "
                 "Y ALGO') against real current data. A missing marketplace "
                 "section means that site's slug/name match failed, not that "
-                "the collection doesn't exist there. Slow (several seconds, "
-                "renders multiple pages)."
+                "the collection doesn't exist there. Downbad's result also "
+                "includes 'shuffle': a SEPARATE mystery-box sale channel "
+                "(fixed price, random unrevealed item from the creator's own "
+                "held pool) invisible to listed_count/listed_pct -- when "
+                "shuffle.active is true, a low listed_count does NOT mean a "
+                "thin/scarce market; shuffle.remaining is real, currently-"
+                "buyable supply outside the ordinary listings. Slow (several "
+                "seconds, renders multiple pages)."
             ),
             "parameters": {
                 "type": "object",

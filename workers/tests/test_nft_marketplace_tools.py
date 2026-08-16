@@ -183,7 +183,11 @@ def test_downbad_collection_stats_uses_discovered_slug(monkeypatch: pytest.Monke
     result = nft._downbad_collection_stats("Ankh")
     assert result["tried_slug"] == "lumi-rogue-ankhs"
     assert result["floor_algo"] == 60.0
-    assert seen_urls == ["https://www.downbad.farm/collection/lumi-rogue-ankhs"]
+    # Also renders the shuffle tab, same discovered slug -- see the shuffle-specific tests below.
+    assert seen_urls == [
+        "https://www.downbad.farm/collection/lumi-rogue-ankhs",
+        "https://www.downbad.farm/collection/lumi-rogue-ankhs?tab=shuffle",
+    ]
 
 
 def test_downbad_collection_stats_reports_not_found_when_page_matches_nothing(
@@ -198,6 +202,52 @@ def test_downbad_collection_stats_reports_not_found_when_page_matches_nothing(
     )
     result = nft._downbad_collection_stats("Some Collection")
     assert result["found"] is False
+
+
+def test_downbad_shuffle_status_parses_a_real_page_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real shuffle-tab shape captured live 2026-08-16 (downbad.farm/collection/lumi-rogue-ankhs?tab=shuffle) -- the mystery-box pool root-caused as the explanation for a creator-controlled wallet holding 970/1000 of the collection."""
+    sample = (
+        "Lumi rogue ankhs\nwelcome to the Amduat\n69\nAVAILABLE NOW\nConnect\n"
+        "959/970 remaining\nShuffle Schedule\nwelcome to the Amduat\n"
+        "Starts: 7/14/2026, 12:00:00 AM\n69\n"
+    )
+    monkeypatch.setattr(nft, "_render", lambda _url, *_a: sample)
+    result = nft._downbad_shuffle_status("lumi-rogue-ankhs")
+    assert result["active"] is True
+    assert result["price_algo"] == 69.0
+    assert result["remaining"] == 959
+    assert result["pool_size"] == 970
+    assert result["starts"] == "7/14/2026, 12:00:00 AM"
+
+
+def test_downbad_shuffle_status_inactive_when_no_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The common case: a collection with no shuffle feature at all -- reported as active: False, not an error."""
+    monkeypatch.setattr(
+        nft, "_render", lambda _url, *_a: "Pixel City\nBY PIXEL CITY\n246 ITEMS\nFloor25A\nItems\n"
+    )
+    result = nft._downbad_shuffle_status("pixel-city")
+    assert result == {"active": False}
+
+
+def test_downbad_shuffle_status_propagates_render_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed render is reported as an error, not silently treated as active: False."""
+    monkeypatch.setattr(nft, "_render", lambda _url, *_a: None)
+    result = nft._downbad_shuffle_status("lumi-rogue-ankhs")
+    assert "error" in result
+
+
+def test_downbad_collection_stats_includes_inactive_shuffle_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """test_downbad_collection_stats_parses_a_real_page_shape's sample has no shuffle markers -- shuffle.active must be False, not missing."""
+    sample = (
+        "Pixel City\nBY PIXEL CITY\n246 ITEMS\nCREATED JUN 2026\nFloor25A\n"
+        "Listed6 (2.4%)\nTotal Vol2.7KA\nOwners76 (31%)\nItems\n"
+    )
+    monkeypatch.setattr(nft, "_downbad_discover_slug", lambda _name, *_a: None)
+    monkeypatch.setattr(nft, "_render", lambda _url, *_a: sample)
+    result = nft._downbad_collection_stats("Pixel City")
+    assert result["shuffle"] == {"active": False}
 
 
 def test_downbad_discover_slug_matches_by_substring_not_exact_token(
