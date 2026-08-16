@@ -240,6 +240,22 @@ class AdminCassandraStore:
             ),
         )
 
+    def _purge_pending_feed_queue(self, session: CassandraSession, aid: UUID) -> None:
+        """Remove any pending_feed_queue row for this article -- an approved article can still be sitting there, waiting for a publish slot, when it gets hard-deleted (e.g. as a duplicate). Without this it's a phantom row: the paced-release worker eventually pulls it and finds nothing, and the admin "up next to publish" view shows an article that no longer exists. Found live 2026-08-16 (3 of 4 backlog rows pointed at articles deleted hours earlier by an unrelated duplicate-cleanup pass)."""
+        from app.core.config import settings
+        from app.core.statements import PendingFeedStmts
+
+        try:
+            bucket = getattr(settings, "news_feed_bucket", "main") or "main"
+            for row in session.execute(PendingFeedStmts.LIST_ALL, (bucket,)):
+                if row.article_id == aid:
+                    session.execute(
+                        PendingFeedStmts.DELETE,
+                        (row.bucket, row.interest_score, row.approved_at, aid),
+                    )
+        except Exception:
+            logger.warning("failed to purge pending_feed_queue row for article %s", aid, exc_info=True)
+
     def delete_article(self, article_id: str) -> bool:
         """Delete an article and its feed row; returns False if it did not exist."""
         current = self.get_article(article_id)
@@ -304,6 +320,8 @@ class AdminCassandraStore:
                 session.execute(ArticleVersionStmts.DELETE, (aid, row.version))
         except Exception:
             logger.warning("failed to delete version rows for article %s", aid, exc_info=True)
+
+        self._purge_pending_feed_queue(session, aid)
 
         session.execute(ArticleStmts.DELETE, (aid,))
         with contextlib.suppress(Exception):

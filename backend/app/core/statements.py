@@ -595,6 +595,13 @@ class PendingFeedStmts:
         "SELECT bucket, interest_score, approved_at, article_id "
         "FROM algorand_platform.pending_feed_queue WHERE bucket = ?"
     )
+    # Full clustering key required -- (bucket) is only the partition key, see
+    # migration 022. delete_article scans LIST_ALL for a matching article_id
+    # first, then deletes by its own (interest_score, approved_at) pair.
+    DELETE = _Stmt(
+        "DELETE FROM algorand_platform.pending_feed_queue "
+        "WHERE bucket = ? AND interest_score = ? AND approved_at = ? AND article_id = ?"
+    )
 
 
 # --------------------------------------------------------------------------- #
