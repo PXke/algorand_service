@@ -146,6 +146,11 @@ def _recent_articles(limit: int = 60) -> list[_Recent]:
     from app.core.cassandra import execute_parallel_with_args
     from app.core.statements import FeedStmts
 
+    def _epoch(pa: datetime | None) -> float:
+        if pa is None:
+            return 0.0
+        return (pa.replace(tzinfo=UTC) if pa.tzinfo is None else pa).timestamp()
+
     rows: list = []
     # Fan the per-month bucket reads out concurrently rather than serially.
     for ok, page in execute_parallel_with_args(
@@ -153,13 +158,19 @@ def _recent_articles(limit: int = 60) -> list[_Recent]:
     ):
         if ok:
             rows.extend(page)
+    # `buckets` is an unordered set and the per-bucket reads run in parallel,
+    # so `rows` is concatenated in whatever order those calls happen to
+    # complete -- NOT chronological. Without sorting first, truncating to
+    # `limit` below let an older month's bucket "win the race" and crowd a
+    # genuinely recent article out of the comparison set entirely, silently
+    # disabling duplicate detection for that service. Root-caused 2026-08-16:
+    # 24 exact-title duplicates went live undetected at gaps ranging from
+    # under an hour to 23 days -- non-deterministic per call, not
+    # proportional to elapsed time, which only made sense once this ordering
+    # bug was found.
+    rows.sort(key=lambda r: _epoch(getattr(r, "published_at", None)), reverse=True)
     rows = rows[:limit]
     views = get_views_bulk([str(r.article_id) for r in rows]) if rows else {}
-
-    def _epoch(pa: datetime | None) -> float:
-        if pa is None:
-            return 0.0
-        return (pa.replace(tzinfo=UTC) if pa.tzinfo is None else pa).timestamp()
 
     out = [
         _Recent(

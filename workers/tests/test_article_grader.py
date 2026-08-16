@@ -1,15 +1,27 @@
 """Heuristic length/structure scoring bands for the article grader."""
 
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 from app.core.config import LENGTH_OK_MAX_WORDS, LENGTH_OK_MIN_WORDS
+from app.modules.newspaper import article_grader
 from app.modules.newspaper.article_grader import (
     _length_score,
+    _recent_articles,
     _structure_score,
     composed_duplicates_latest_service_article,
     grade_article_schema,
     prior_service_article_summary,
 )
+
+
+class _FeedRow:
+    def __init__(self, article_id: str, service_id: str, title: str, published_at: datetime) -> None:
+        self.article_id = article_id
+        self.service_id = service_id
+        self.title = title
+        self.tags = ()
+        self.published_at = published_at
 
 
 def test_length_band_is_lax() -> None:
@@ -263,3 +275,30 @@ def test_prior_service_article_summary_fails_open_on_store_error() -> None:
         side_effect=RuntimeError("cassandra down"),
     ):
         assert prior_service_article_summary("nf-domains") == ""
+
+
+def test_recent_articles_sorts_by_published_at_despite_bucket_arrival_order() -> None:
+    """Root-caused 2026-08-16: per-month bucket reads run in parallel and buckets are drawn from an unordered set, so results can arrive out of chronological order. Without sorting before truncating to `limit`, an older bucket that happened to complete first could crowd a genuinely more recent article out of the comparison set entirely -- 24 exact-title duplicates went live undetected because of this."""
+    article_grader._RECENT_CACHE["at"] = 0.0
+    article_grader._RECENT_CACHE["rows"] = []
+
+    older = _FeedRow("old-1", "svc-a", "Old Story", datetime(2026, 6, 1, tzinfo=UTC))
+    newer = _FeedRow("new-1", "svc-a", "New Story", datetime(2026, 8, 15, tzinfo=UTC))
+    # Simulate the OLDER bucket's parallel read completing (and being
+    # extended into `rows`) before the NEWER bucket's -- exactly the race
+    # this bug depended on.
+    fake_pages = [(True, [older]), (True, [newer])]
+
+    try:
+        with (
+            patch("app.core.cassandra.prepare_cached", lambda cql: cql),
+            patch("app.core.cassandra.execute_parallel_with_args", return_value=fake_pages),
+            patch("app.modules.newspaper.view_counts.get_views_bulk", return_value={}),
+        ):
+            recent = _recent_articles(limit=1)
+    finally:
+        article_grader._RECENT_CACHE["at"] = 0.0
+        article_grader._RECENT_CACHE["rows"] = []
+
+    assert len(recent) == 1
+    assert recent[0].title == "New Story"
