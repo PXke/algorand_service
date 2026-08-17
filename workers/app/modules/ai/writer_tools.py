@@ -483,6 +483,14 @@ _GENERIC_TOKENS = frozenset(
         "algo",
         "algorand",
         "onchain",
+        # A company-name umbrella spanning many UNRELATED products (Play,
+        # Docs, Search, Maps, Drive, ...) is exactly the same "carries no
+        # real signal" category as api/search/lookup above, not evidence of
+        # functional overlap -- root-caused live 2026-08-17: "Google Play
+        # exact-download-count" false-matched fetch_google_doc on this one
+        # shared token alone, telling the model it already had a Play-
+        # install-count capability it genuinely didn't.
+        "google",
     }
 )
 
