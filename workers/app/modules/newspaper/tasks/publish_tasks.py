@@ -2639,12 +2639,25 @@ def _recompose_published_hero_image(
     soft_time_limit=worker_config.COMPOSE_TASK_SOFT_TIME_LIMIT,
     time_limit=worker_config.COMPOSE_TASK_TIME_LIMIT,
 )
-def recompose_published(self: Task, article_id: str) -> dict[str, str]:
+def recompose_published(
+    self: Task, article_id: str, *, extra_source_material: str = ""
+) -> dict[str, str]:
     """Archive refresh: re-compose a PUBLISHED article into a NEW unlisted draft. When the draft clears the (strict) RECOMPOSE_AUTO_APPLY bar — grade, headline style, gatekeeper — it swaps onto the live article_id immediately (autonomous mode); otherwise it holds in the review queue for a human. Either way apply_recomposed_article does the swap: the URL survives and published_at is re-stamped to the apply time (recompose is a re-publish — owner policy 2026-07-15 — the story returns to the top of the feed).
 
     recompose_review cannot serve this case: it reuses the article_id at
     compose time, which would replace the live page before any approval
     (human or automatic) — and approving it would double-publish the feed row.
+
+    ``extra_source_material`` (2026-08-17, source-URL-dedup cleanup): optional
+    extra text folded into the source material below the live scrape, clearly
+    labeled as retiring/superseded coverage. Added specifically for a batch
+    that consolidates several old per-service articles down to one fresh one
+    and deletes the rest -- without this, the writer only ever sees the
+    CURRENT live page, never the content of the sibling articles about to be
+    deleted, so a fact that existed only in an older article (not reflected
+    on the live page today) would be silently lost the moment its row is
+    deleted. Empty by default -- every other caller (admin "Recompose"
+    click, recompose_session_service, the weekly cadence) is unaffected.
     """
     from app.modules.crawler.classifier_review_store import (
         enqueue_classifier_review,
@@ -2685,6 +2698,16 @@ def recompose_published(self: Task, article_id: str) -> dict[str, str]:
     page_text, page_title, scraped_og = _recompose_published_source_text(
         existing, service_id, source_url
     )
+    if extra_source_material.strip():
+        page_text = (
+            f"{page_text}\n\n"
+            "## RETIRING PRIOR COVERAGE (these older articles about this same "
+            "service are being deleted once this recompose lands -- if any "
+            "carries a genuine fact that is no longer visible on the live page "
+            "above, work it in; do not just restate old headline numbers the "
+            "live page has since superseded):\n\n"
+            f"{extra_source_material.strip()}"
+        )
 
     # Recompose from the ORIGINAL INPUT, not the prior OUTPUT. An editorial-brief
     # article has no page to re-scrape, so the generic path below would hand the

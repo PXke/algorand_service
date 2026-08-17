@@ -288,3 +288,103 @@ def test_recompose_web_article_still_uses_generic_path(monkeypatch: pytest.Monke
         pt.recompose_published.run("22222222-2222-2222-2222-222222222222")
 
     assert captured["publish_topic"] == pt.PublishTopic.GENERIC
+
+
+def test_extra_source_material_is_folded_into_page_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """extra_source_material (source-URL-dedup cleanup, 2026-08-17).
+
+    Retiring sibling-article content must reach the writer as clearly-labeled extra material,
+    not silently be lost the moment those sibling rows get deleted after this recompose lands.
+    """
+    from types import SimpleNamespace
+
+    import pytest
+
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    art = SimpleNamespace(
+        service_id="svc",
+        source_url="https://example.com/x",
+        body="live page body",
+        title="t",
+        tags=[],
+        summary="s",
+    )
+    monkeypatch.setattr("app.modules.newspaper.article_store.get_article", lambda _aid: art)
+    monkeypatch.setattr(
+        pt,
+        "get_scraper_for_url",
+        lambda _url: SimpleNamespace(
+            scrape=lambda **_kw: (_ for _ in ()).throw(RuntimeError("skip"))
+        ),
+    )
+    monkeypatch.setattr("app.core.config.SERVICE_CONTEXT_ENABLED", False)
+
+    captured: dict = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_compose(**kw: object) -> Never:
+        captured.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(pt, "compose_scrape_article", _fake_compose)
+
+    with pytest.raises(_Stop):
+        pt.recompose_published.run(
+            "33333333-3333-3333-3333-333333333333",
+            extra_source_material="A retiring sibling article's own distinct fact.",
+        )
+
+    assert "live page body" in captured["page_text"]
+    assert "A retiring sibling article's own distinct fact." in captured["page_text"]
+    assert "RETIRING PRIOR COVERAGE" in captured["page_text"]
+
+
+def test_blank_extra_source_material_leaves_page_text_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No existing caller (admin Recompose click, weekly cadence, ...) ever passes this kwarg.
+
+    Must be a true no-op, not even an empty appended section.
+    """
+    from types import SimpleNamespace
+
+    import pytest
+
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    art = SimpleNamespace(
+        service_id="svc",
+        source_url="https://example.com/x",
+        body="live page body",
+        title="t",
+        tags=[],
+        summary="s",
+    )
+    monkeypatch.setattr("app.modules.newspaper.article_store.get_article", lambda _aid: art)
+    monkeypatch.setattr(
+        pt,
+        "get_scraper_for_url",
+        lambda _url: SimpleNamespace(
+            scrape=lambda **_kw: (_ for _ in ()).throw(RuntimeError("skip"))
+        ),
+    )
+    monkeypatch.setattr("app.core.config.SERVICE_CONTEXT_ENABLED", False)
+
+    captured: dict = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_compose(**kw: object) -> Never:
+        captured.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(pt, "compose_scrape_article", _fake_compose)
+
+    with pytest.raises(_Stop):
+        pt.recompose_published.run("55555555-5555-5555-5555-555555555555")
+
+    assert captured["page_text"] == "live page body"
