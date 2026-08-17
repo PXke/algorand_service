@@ -58,7 +58,16 @@ def _tool_connect_wallet(
         if not uri:
             return {
                 "error": "no WalletConnect URI found on the current interactive page",
-                "hint": "look for a 'Connect Wallet' button/QR code and click it via play_interactive first",
+                "hint": (
+                    "clicking a generic 'Connect Wallet' button is usually only step "
+                    "one -- most dapps that support several wallets (Pera/Defly/Lute, "
+                    "etc.) then show a PICKER, and the actual QR code/wc: URI only "
+                    "renders after you click one NAMED wallet in that picker. If you've "
+                    "only clicked the generic button so far, use play_interactive to "
+                    "look for and click a specific wallet name/logo next, THEN retry "
+                    "connect_wallet -- don't assume one click was enough just because "
+                    "the page changed."
+                ),
             }
 
     result = wc_session.complete_login(uri)
@@ -90,7 +99,15 @@ CONNECT_WALLET_SCHEMA: dict[str, Any] = {
             "that is possible with this tool.\n\n"
             "If the page shows a WalletConnect QR code/link, this tool discovers the "
             "wc: URI from the page automatically -- pass wc_uri only if you've already "
-            "seen the literal wc:... string in the page's own text."
+            "seen the literal wc:... string in the page's own text.\n\n"
+            "IMPORTANT for multi-wallet dapps: clicking a generic 'Connect Wallet' "
+            "button is usually only step one and just opens a PICKER (Pera/Defly/"
+            "Lute logos or names) -- the QR/wc: URI itself only appears after you "
+            "click one SPECIFIC named wallet in that picker. Calling this tool right "
+            "after the generic click, with no QR/URI actually on screen yet, will "
+            "just fail with 'no WalletConnect URI found' -- click a named wallet "
+            "option first if the page still looks like a picker/menu rather than a "
+            "QR code."
         ),
         "parameters": {
             "type": "object",
