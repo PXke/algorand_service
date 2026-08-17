@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 
 def env_str(name: str, default: str) -> str:
@@ -42,8 +43,31 @@ CASSANDRA_USERNAME = env_str("CASSANDRA_USERNAME", "")
 CASSANDRA_PASSWORD = env_str("CASSANDRA_PASSWORD", "")
 REDIS_URL = env_str("REDIS_URL", "redis://localhost:6379/0")
 ALGOD_URL = env_str("ALGOD_URL", "https://testnet-api.algonode.cloud").rstrip("/")
+
+
+def _algod_token() -> str:
+    """The literal ALGOD_TOKEN env var if set; otherwise read it from ALGOD_TOKEN_FILE.
+
+    prod's local algod writes its token to /var/lib/algorand/algod.token -- workers.env
+    only ever set the FILE var, never the literal token itself, so this was silently
+    resolving to "" and every chain lookup 401'd against the local node -- root-caused
+    live 2026-08-17 mid-recompose-batch via a real "lookup_asset ... 401 Unauthorized"
+    error, not caught by any test since ALGOD_TOKEN_FILE was never exercised locally.
+    """
+    token = env_str("ALGOD_TOKEN", "").strip()
+    if token:
+        return token
+    path = env_str("ALGOD_TOKEN_FILE", "").strip()
+    if not path:
+        return ""
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 # Sent as the X-Algo-API-Token header when set (prod node requires it; algonode does not).
-ALGOD_TOKEN = env_str("ALGOD_TOKEN", "")
+ALGOD_TOKEN = _algod_token()
 # Public AlgoNode testnet INDEXER (history-capable, unlike algod) — backs the
 # writer's testnet_lookup tool for verifying a project's Testnet txns/app deploys.
 TESTNET_INDEXER_URL = env_str("TESTNET_INDEXER_URL", "https://testnet-idx.algonode.cloud").rstrip(
