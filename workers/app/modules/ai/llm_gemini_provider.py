@@ -138,7 +138,7 @@ class GeminiProvider(LLMProvider):
         self._api_base = (api_base if api_base is not None else GEMINI_API_BASE).rstrip("/")
         self._model = model if model is not None else GEMINI_MODEL_WRITER
         self._timeout = float(timeout) if timeout is not None else 120.0
-        self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     def usage_totals(self) -> dict[str, int]:
         """Cumulative {prompt_tokens, completion_tokens, total_tokens} across every request this instance has made."""

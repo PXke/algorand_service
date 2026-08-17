@@ -280,7 +280,7 @@ def test_special_edition_scales_the_research_client_timeout(
             return {"title": "t", "summary": "s", "body": "b"}
 
         def usage_totals(self) -> dict[str, int]:
-            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     writer = _FakeClient("writer", "mistral-medium-latest")
 

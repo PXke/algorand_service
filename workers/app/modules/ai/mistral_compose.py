@@ -3055,6 +3055,7 @@ def _record_compose_telemetry(
             prompt_tokens=final_usage["prompt_tokens"],
             completion_tokens=final_usage["completion_tokens"],
             total_tokens=final_usage["total_tokens"],
+            cached_tokens=final_usage["cached_tokens"],
             digest=digest,
         )
     except Exception:
@@ -3147,7 +3148,7 @@ def _compose_via_writer_tools_locked(
                 write_usage = mistral.usage_totals()
                 return {
                     key: research_usage[key] + write_usage[key]
-                    for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                    for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
                 }
 
             def _checkpoint(stage_status: str, *, detail: str = "", digest: str = "") -> None:
@@ -3182,6 +3183,7 @@ def _compose_via_writer_tools_locked(
                         prompt_tokens=usage["prompt_tokens"],
                         completion_tokens=usage["completion_tokens"],
                         total_tokens=usage["total_tokens"],
+                        cached_tokens=usage["cached_tokens"],
                         digest=_digest_holder["value"],
                     )
 

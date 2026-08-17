@@ -609,8 +609,8 @@ class ToolInsightStmts:
         "INSERT INTO algorand_platform.compose_sessions ("
         "bucket, created_at, session_id, service_id, source_url, model, "
         "status, rounds, tool_calls, duration_ms, messages, final_output, "
-        "prompt_tokens, completion_tokens, total_tokens"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "prompt_tokens, completion_tokens, total_tokens, cached_tokens"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     BUMP_USAGE = _Stmt(
         "UPDATE algorand_platform.tool_usage_stats SET calls = calls + ?, errors = errors + ? "

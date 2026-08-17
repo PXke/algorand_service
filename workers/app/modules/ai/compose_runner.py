@@ -94,7 +94,7 @@ def compose(
     duration_ms = int((time.monotonic() - t0) * 1000)
     usage = {
         key: research.usage_totals()[key] + writer.usage_totals()[key]
-        for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
     }
     return ComposeRunResult(
         fields=fields,

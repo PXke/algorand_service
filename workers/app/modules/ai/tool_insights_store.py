@@ -138,6 +138,7 @@ def record_compose_session(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     total_tokens: int = 0,
+    cached_tokens: int = 0,
 ) -> bool:
     """Persist the agentic transcript of one compose (best-effort). Pass a stable ``session_id``/``created_at`` (from new_session_ref) to UPSERT the same row at each stage so the admin sees progress live (status researching -> writing -> ok), instead of the row only appearing at the very end."""
     try:
@@ -239,6 +240,7 @@ def record_compose_session(
                 int(prompt_tokens),
                 int(completion_tokens),
                 int(total_tokens),
+                int(cached_tokens),
             ),
         )
         return True

@@ -581,3 +581,11 @@ file = "backend/schema/migrations/app/064_publish_queue_burst_day.cql"
 tier = "prod"
 status = "active"
 description = "publish_queue.burst_day + articles_by_id.burst_day: one-day-ahead burst compose -- a daily selection step marks today's 3 lane picks, an off-peak task composes them as a batch, and an approved burst article is force-queued (never same-day published) so publishing keeps its existing paced cadence"
+
+[[migrations]]
+stream = "app"
+version = "065"
+file = "backend/schema/migrations/app/065_compose_session_cached_tokens.cql"
+tier = "prod"
+status = "active"
+description = "compose_sessions.cached_tokens: DeepSeek (and other OpenAI-compatible providers) report prompt-cache hit tokens on every response -- previously parsed and discarded, now persisted so cache-hit rate is visible in our own data instead of only on the provider's billing dashboard"

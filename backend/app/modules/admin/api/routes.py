@@ -1086,6 +1086,7 @@ def admin_list_compose_sessions(request: Request) -> Response:
                 "prompt_tokens": r.prompt_tokens or 0,
                 "completion_tokens": r.completion_tokens or 0,
                 "total_tokens": r.total_tokens or 0,
+                "cached_tokens": r.cached_tokens or 0,
             }
             for r in rows
         ]

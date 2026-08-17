@@ -49,6 +49,7 @@ class SessionRegister(ABC):
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         total_tokens: int = 0,
+        cached_tokens: int = 0,
         digest: str = "",
     ) -> bool:
         """Write (or overwrite) this compose's transcript row. Returns True on success, False on any failure -- never raises, matching record_compose_session's fail-soft contract.
@@ -89,6 +90,7 @@ class SessionRegisterCassandra(SessionRegister):
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         total_tokens: int = 0,
+        cached_tokens: int = 0,
         digest: str = "",  # noqa: ARG002 -- accepted for interface parity, not yet persisted (see class docstring / ABC docstring)
     ) -> bool:
         """Delegate to tool_insights_store.record_compose_session."""
@@ -108,6 +110,7 @@ class SessionRegisterCassandra(SessionRegister):
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
+            cached_tokens=cached_tokens,
         )
 
 
@@ -159,6 +162,8 @@ class SessionRegisterSQLite(SessionRegister):
         existing_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(compose_sessions)")}
         if "digest" not in existing_cols:
             self._conn.execute("ALTER TABLE compose_sessions ADD COLUMN digest TEXT")
+        if "cached_tokens" not in existing_cols:
+            self._conn.execute("ALTER TABLE compose_sessions ADD COLUMN cached_tokens INTEGER")
         self._conn.commit()
 
     def new_ref(self) -> tuple[UUID, datetime]:
@@ -181,6 +186,7 @@ class SessionRegisterSQLite(SessionRegister):
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         total_tokens: int = 0,
+        cached_tokens: int = 0,
         digest: str = "",
     ) -> bool:
         """Insert or, keyed on session_id, update this compose's row with the full untruncated transcript."""
@@ -193,8 +199,8 @@ class SessionRegisterSQLite(SessionRegister):
                 INSERT INTO compose_sessions
                     (session_id, created_at, service_id, source_url, model, status,
                      rounds, tool_calls, duration_ms, messages, trace, final_output,
-                     prompt_tokens, completion_tokens, total_tokens, digest)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     prompt_tokens, completion_tokens, total_tokens, digest, cached_tokens)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     created_at=excluded.created_at, service_id=excluded.service_id,
                     source_url=excluded.source_url, model=excluded.model,
@@ -203,7 +209,7 @@ class SessionRegisterSQLite(SessionRegister):
                     messages=excluded.messages, trace=excluded.trace,
                     final_output=excluded.final_output, prompt_tokens=excluded.prompt_tokens,
                     completion_tokens=excluded.completion_tokens, total_tokens=excluded.total_tokens,
-                    digest=excluded.digest
+                    digest=excluded.digest, cached_tokens=excluded.cached_tokens
                 """,
                 (
                     str(session_id),
@@ -222,6 +228,7 @@ class SessionRegisterSQLite(SessionRegister):
                     int(completion_tokens),
                     int(total_tokens),
                     digest,
+                    int(cached_tokens),
                 ),
             )
             self._conn.commit()
@@ -258,6 +265,7 @@ class SessionRegisterTxt(SessionRegister):
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         total_tokens: int = 0,
+        cached_tokens: int = 0,
         digest: str = "",
     ) -> bool:
         """Append one full-snapshot JSON line -- the last line for a given session_id is that compose's final state."""
@@ -281,6 +289,7 @@ class SessionRegisterTxt(SessionRegister):
                 "prompt_tokens": int(prompt_tokens),
                 "completion_tokens": int(completion_tokens),
                 "total_tokens": int(total_tokens),
+                "cached_tokens": int(cached_tokens),
                 "digest": digest,
             }
             with self._path.open("a", encoding="utf-8") as f:

@@ -20,7 +20,7 @@ class _FakeProvider(LLMProvider):
     def __init__(self, *, model: str | None = None, timeout: float | None = None) -> None:
         del timeout
         self._model = model or "fake-model"
-        self._usage = {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+        self._usage = {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10, "cached_tokens": 2}
 
     def chat_completion(self, messages: list, *, max_tokens=None, temperature=0.3) -> str:  # noqa: ANN001, ARG002
         return ""
@@ -88,7 +88,12 @@ def test_compose_returns_a_result_with_usage_provider_model_and_duration(
     assert result.model == "fake-model"
     # Two _FakeProvider instances (writer + research), each usage_totals()
     # returning the same fixed dict -- compose() sums both.
-    assert result.usage == {"prompt_tokens": 14, "completion_tokens": 6, "total_tokens": 20}
+    assert result.usage == {
+        "prompt_tokens": 14,
+        "completion_tokens": 6,
+        "total_tokens": 20,
+        "cached_tokens": 4,
+    }
     assert result.duration_ms >= 0
 
     # The article_input's fields reached compose_scrape_article_mistral unchanged.

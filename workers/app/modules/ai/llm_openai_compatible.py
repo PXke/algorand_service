@@ -322,7 +322,7 @@ class OpenAICompatibleProvider(LLMProvider):
         self._api_base = api_base.rstrip("/")
         self._model = model
         self._timeout = float(timeout if timeout is not None else MISTRAL_TIMEOUT_SECONDS)
-        self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
         self._metadata = (
             _fetch_model_metadata(
                 api_base=self._api_base,
@@ -450,6 +450,17 @@ class OpenAICompatibleProvider(LLMProvider):
         self._usage["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
         self._usage["completion_tokens"] += int(usage.get("completion_tokens") or 0)
         self._usage["total_tokens"] += int(usage.get("total_tokens") or 0)
+        # Confirmed live 2026-08-17: DeepSeek returns cache-hit token counts on
+        # every response, in two redundant shapes -- the OpenAI-compatible
+        # nested one (prompt_tokens_details.cached_tokens) other providers use
+        # too, and its own top-level prompt_cache_hit_tokens. Prefer the
+        # nested/portable shape; fall back to DeepSeek's own field; 0 (not
+        # reported) for a provider that doesn't send either -- never raises,
+        # this is purely additive telemetry.
+        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+        if cached is None:
+            cached = usage.get("prompt_cache_hit_tokens")
+        self._usage["cached_tokens"] += int(cached or 0)
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         """POST one chat/completions request through the shared rate-limit gate, retrying on 429 with Retry-After / exponential backoff. Returns the parsed JSON body or raises LLMError."""

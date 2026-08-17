@@ -71,14 +71,14 @@ def test_two_stage_compose_forwards_max_rounds_to_stage1(monkeypatch: pytest.Mon
             return ""
 
         def usage_totals(self) -> dict[str, int]:
-            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     class _FakeWriteClient:
         def chat_json_object(self, *_args: object, **_kw: object) -> dict:
             return {"title": "t", "summary": "s", "body": "b"}
 
         def usage_totals(self) -> dict[str, int]:
-            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     mc._run_two_stage_compose(
         research_mistral=_FakeResearchClient(),
@@ -123,14 +123,14 @@ def test_two_stage_compose_forwards_is_special_edition_to_review_and_revise(
             return ""
 
         def usage_totals(self) -> dict[str, int]:
-            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     class _FakeWriteClient:
         def chat_json_object(self, *_args: object, **_kw: object) -> dict:
             return {"title": "t", "summary": "s", "body": "b"}
 
         def usage_totals(self) -> dict[str, int]:
-            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     mc._run_two_stage_compose(
         research_mistral=_FakeResearchClient(),
@@ -389,14 +389,14 @@ def test_two_stage_compose_runs_deepening_only_for_special_editions(
             return ""
 
         def usage_totals(self) -> dict[str, int]:
-            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     class _FakeWriteClient:
         def chat_json_object(self, *_args: object, **_kw: object) -> dict:
             return {"title": "t", "summary": "s", "body": "b"}
 
         def usage_totals(self) -> dict[str, int]:
-            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     mc._run_two_stage_compose(
         research_mistral=_FakeResearchClient(),
@@ -438,14 +438,14 @@ def test_two_stage_compose_skips_deepening_for_standard_articles(
             return ""
 
         def usage_totals(self) -> dict[str, int]:
-            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     class _FakeWriteClient:
         def chat_json_object(self, *_args: object, **_kw: object) -> dict:
             return {"title": "t", "summary": "s", "body": "b"}
 
         def usage_totals(self) -> dict[str, int]:
-            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     mc._run_two_stage_compose(
         research_mistral=_FakeResearchClient(),

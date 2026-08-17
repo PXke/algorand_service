@@ -291,6 +291,128 @@ def test_deepseek_provider_omits_prompt_cache_key_from_the_actual_request(
     assert "prompt_cache_key" not in captured
 
 
+def test_record_usage_prefers_the_nested_openai_compatible_cache_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Confirmed live 2026-08-17: DeepSeek sends cached_tokens nested under prompt_tokens_details -- that's the portable shape other OpenAI-compatible providers use too, so prefer it over DeepSeek's own top-level field when both are present."""
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {
+                "choices": [{"message": {"content": "OK"}}],
+                "usage": {
+                    "prompt_tokens": 358,
+                    "completion_tokens": 10,
+                    "total_tokens": 368,
+                    "prompt_tokens_details": {"cached_tokens": 256},
+                    "prompt_cache_hit_tokens": 999,  # must be ignored -- nested field wins
+                },
+            }
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, *args: object, **kwargs: object) -> Any:  # noqa: ANN401, ARG002
+            return FakeResponse()
+
+    import app.modules.ai.mistral_client as mistral_module
+
+    monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
+
+    provider = DeepSeekProvider(api_key="test-key")
+    provider.chat_completion([{"role": "user", "content": "hi"}])
+
+    assert provider.usage_totals()["cached_tokens"] == 256
+
+
+def test_record_usage_falls_back_to_deepseeks_own_top_level_cache_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older/alternate response shapes may carry ONLY DeepSeek's own prompt_cache_hit_tokens field, with no nested prompt_tokens_details at all -- that must still be picked up."""
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {
+                "choices": [{"message": {"content": "OK"}}],
+                "usage": {
+                    "prompt_tokens": 358,
+                    "completion_tokens": 10,
+                    "total_tokens": 368,
+                    "prompt_cache_hit_tokens": 102,
+                },
+            }
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, *args: object, **kwargs: object) -> Any:  # noqa: ANN401, ARG002
+            return FakeResponse()
+
+    import app.modules.ai.mistral_client as mistral_module
+
+    monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
+
+    provider = DeepSeekProvider(api_key="test-key")
+    provider.chat_completion([{"role": "user", "content": "hi"}])
+
+    assert provider.usage_totals()["cached_tokens"] == 102
+
+
+def test_record_usage_defaults_cached_tokens_to_zero_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider/response that never reports cache stats (e.g. Mistral) must not KeyError or crash -- cached_tokens stays 0."""
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {
+                "choices": [{"message": {"content": "OK"}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+            }
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, *args: object, **kwargs: object) -> Any:  # noqa: ANN401, ARG002
+            return FakeResponse()
+
+    import app.modules.ai.mistral_client as mistral_module
+
+    monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
+
+    provider = MistralProvider(api_key="test-key")
+    provider.chat_completion([{"role": "user", "content": "hi"}])
+
+    assert provider.usage_totals()["cached_tokens"] == 0
+
+
 def test_openai_provider_omits_temperature_from_the_actual_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

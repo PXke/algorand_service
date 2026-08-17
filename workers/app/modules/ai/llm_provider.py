@@ -70,7 +70,7 @@ class LLMProvider(ABC):
 
     @abstractmethod
     def usage_totals(self) -> dict[str, int]:
-        """Cumulative {prompt_tokens, completion_tokens, total_tokens} across every request this instance has made."""
+        """Cumulative {prompt_tokens, completion_tokens, total_tokens, cached_tokens} across every request this instance has made. cached_tokens is 0 for a provider/response that doesn't report prompt-cache hits (confirmed populated for DeepSeek as of 2026-08-17; other providers carry the key for interface safety but don't populate it yet)."""
 
     @property
     @abstractmethod

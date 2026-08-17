@@ -163,6 +163,7 @@ def test_chat_completion_extracts_text_and_records_usage(monkeypatch: pytest.Mon
         "prompt_tokens": 10,
         "completion_tokens": 5,
         "total_tokens": 15,
+        "cached_tokens": 0,
     }
 
 
