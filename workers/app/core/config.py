@@ -466,7 +466,15 @@ MISTRAL_TOOL_RESULT_MAX_CHARS = env_int("MISTRAL_TOOL_RESULT_MAX_CHARS", 24000)
 # Headroom kept below the context limit (response max_tokens is reserved on top)
 # so token-estimate error never tips a request over the edge.
 MISTRAL_CONTEXT_SAFETY_TOKENS = env_int("MISTRAL_CONTEXT_SAFETY_TOKENS", 4000)
-MISTRAL_TIMEOUT_SECONDS = env_int("MISTRAL_TIMEOUT_SECONDS", 480)
+# DeepSeek's own docs: a request that hasn't started inference within 600s
+# (10 minutes) gets closed server-side -- the OLD 480s default sat 2 minutes
+# SHORT of that window, so a request DeepSeek would still have honored could
+# get abandoned client-side first, triggering a retry that piles a duplicate
+# request onto an already-loaded server instead of easing it. 660s clears
+# DeepSeek's own window with a minute of margin (confirmed live 2026-08-17:
+# special editions already had this right via the multiplier below, just
+# never applied to the standard-tier default).
+MISTRAL_TIMEOUT_SECONDS = env_int("MISTRAL_TIMEOUT_SECONDS", 660)
 # Special editions' research client resends the full accumulated tool-call
 # trace every chat_with_tools round; root-caused 2026-08-04 (Humanitarian
 # Network recompose) at round 16 / 49 tool calls, a single round's request
