@@ -288,6 +288,14 @@ def test_recompose_web_article_still_uses_generic_path(monkeypatch: pytest.Monke
         pt.recompose_published.run("22222222-2222-2222-2222-222222222222")
 
     assert captured["publish_topic"] == pt.PublishTopic.GENERIC
+    # Root-caused live 2026-08-17: with no first_coverage AND no real diff, an
+    # archive-refresh recompose got no "give a comprehensive picture" guidance
+    # at all and gravitated toward whatever felt newest in the source material
+    # (a Downbad.farm recompose wrote almost entirely about one newly-
+    # previewed feature despite fetching material on the site's full feature
+    # set). first_coverage=True gives it the same "comprehensive, standalone
+    # picture" instruction a genuinely first-time compose gets.
+    assert captured["first_coverage"] is True
 
 
 def test_extra_source_material_is_folded_into_page_text(monkeypatch: pytest.MonkeyPatch) -> None:

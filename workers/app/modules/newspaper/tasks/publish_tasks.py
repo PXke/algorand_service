@@ -2584,6 +2584,22 @@ def _recompose_published_compose(
                 is_first_snapshot=True,
                 publish_kind=PublishKind.SERVICE_DISCOVERY,
                 publish_topic=PublishTopic.GENERIC,
+                # Root-caused live 2026-08-17: with neither first_coverage nor a
+                # real diff, an archive-refresh recompose gets NEITHER
+                # FIRST_COVERAGE_GUIDANCE's "give a comprehensive picture" nor
+                # EVOLUTION_GUIDANCE's "lead with the change" -- it's an
+                # unaugmented compose that has no explicit instruction to be
+                # comprehensive, so it naturally gravitates toward whatever
+                # feels newest/most-emphasized in the source material (a
+                # Downbad.farm recompose fetched material on the site's full
+                # feature set but wrote almost the entire piece about one
+                # newly-previewed feature). This is exactly the "give a
+                # complete, standalone picture, don't center on one recent
+                # detail" instruction an archive refresh needs -- same as a
+                # genuinely first-time service compose, even though the
+                # service technically has prior coverage (the guidance text
+                # itself no longer claims otherwise, see its own docstring).
+                first_coverage=True,
             )
         return composed, None
     except ComposeBusyError as exc:

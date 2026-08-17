@@ -2086,17 +2086,23 @@ _SERVICE_WATCH_NOTE = (
 # Evolution-story mode: a content update fires because the service's aggregate
 # CHANGED week-over-week. The diff is the news; the aggregate is background.
 _FIRST_COVERAGE_GUIDANCE = (
-    "\n\nFIRST COVERAGE MODE: we have NEVER published anything about this service "
-    "before — readers do not know it exists. Do NOT write a 'what changed' update: "
-    "an update on a service nobody was introduced to is meaningless, and a cosmetic "
+    "\n\nFIRST COVERAGE MODE: readers should come away with a complete, standalone "
+    "picture of this service, not an assumption they already know the basics. Do "
+    "NOT write a 'what changed' update centered on one recent detail: a narrow "
+    "update is meaningless without the fuller context around it, and a cosmetic "
     "change is not a story at all. Write an INTRODUCTION/PROFILE of the service — "
     "what it is, what problem it solves, who is behind it, how it fits the Algorand "
     "ecosystem — in timeless present tense, using your research tools to verify. "
     "Introduce it at the depth the sources actually document: if its docs are "
     "missing or stubs, say so instead of reconstructing how it must work. "
-    "The recent page change may be mentioned as a closing note at most; if the "
-    "change itself is the only material and the service is not worth introducing, "
-    "keep the piece short and factual rather than inflating it."
+    "A single recent change/feature may be mentioned as a closing note at most, "
+    "never as the whole piece's frame — root-caused live 2026-08-17: a Downbad.farm "
+    "recompose fetched material on the marketplace's full feature set (auctions, "
+    "raffles, staking, swaps, listings) yet wrote almost the entire piece about ONE "
+    "newly-previewed feature, because nothing in its prompt told it to synthesize "
+    "everything it found into one comprehensive picture instead of chasing whatever "
+    "felt newest. If the change itself is the only material and the service is not "
+    "worth introducing, keep the piece short and factual rather than inflating it."
 )
 
 _EVOLUTION_GUIDANCE = (
