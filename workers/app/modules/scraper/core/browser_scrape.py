@@ -412,7 +412,20 @@ def _expand_collapsed_content(page: Page) -> None:
 
 
 def _extract_visible_text(page: Page) -> str:
-    """Prefer main landmarks; fall back to full body text."""
+    """Prefer main landmarks; fall back to full body text.
+
+    Root-caused live 2026-08-17: a page whose landmark element carries several
+    of these selectors at once (e.g. a single `<main role="main" id="content">`
+    matches `main`, `[role='main']`, AND `#content`) got that SAME element's
+    text extracted and concatenated once per matching selector -- confirmed on
+    lumirogue.com, where the footer block ("Join the Discord / Follow on
+    Bluesky / ...") appeared six times over in the material handed to compose,
+    bloating the source and diluting the real content with repetition. A
+    chunk that exactly duplicates, or is fully contained within, one already
+    collected is skipped -- covers both the same-element-multiple-selectors
+    case and a narrower selector (#content) nesting inside a wider one
+    (main) that already captured it.
+    """
     selectors = (
         "main",
         "article",
@@ -428,8 +441,9 @@ def _extract_visible_text(page: Page) -> str:
                 chunk = locator.first.inner_text(timeout=2000)
             except Exception:
                 continue
-            if chunk and len(chunk.strip()) > 100:
-                chunks.append(chunk.strip())
+            chunk = (chunk or "").strip()
+            if len(chunk) > 100 and not any(chunk in existing for existing in chunks):
+                chunks.append(chunk)
     if chunks:
         return "\n\n".join(chunks)
     return page.inner_text("body")
