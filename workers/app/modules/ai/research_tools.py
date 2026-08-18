@@ -1610,6 +1610,91 @@ def _tool_get_defi_tvl(protocol: str = "") -> dict[str, Any]:
         return {"protocol": p or "algorand-chain", "error": str(exc)[:200]}
 
 
+# Root-caused live 2026-08-18: a rug.ninja recompose invented a full 10-coin
+# Tinyman-liquidity bar chart plus a vestige.fi volume stat, with zero
+# grounding in any tool call -- there was no tool that could answer a
+# per-token liquidity/volume/TVL question at all (get_defi_tvl only covers
+# protocol-level TVL via DeFiLlama, never a specific ASA). Vestige's own
+# documented "free API" host (free-api.vestige.fi) 530s from both this
+# server and prod; api.vestigelabs.org is the real host the live vestige.fi
+# frontend actually calls (found via its JS bundle) and it works.
+def _tool_lookup_asset_market_data(asset_ids: str) -> dict[str, Any]:
+    """Live price, 24h/7d volume, market cap and total pool liquidity (TVL) for one or more Algorand ASAs, via Vestige's aggregator API. The only source here for a real per-token liquidity/volume/TVL number — get_defi_tvl only covers protocol-level TVL, never a specific coin. Use this for ANY liquidity, volume, or market-cap claim about a named token instead of estimating or inventing a number."""
+    ids = [s.strip() for s in str(asset_ids).split(",") if s.strip()]
+    if not ids:
+        return {"error": "asset_ids required — comma-separated ASA ids, e.g. '2200000000'"}
+    if len(ids) > 25:
+        return {"error": "too many asset_ids — max 25 per call"}
+    try:
+        resp = _guarded_get(
+            "https://api.vestigelabs.org/assets/list",
+            params={"asset_ids": ",".join(ids), "network_id": 0},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return {"asset_ids": ids, "error": str(exc)[:200]}
+    results = data.get("results") if isinstance(data, dict) else None
+    if not results:
+        return {
+            "asset_ids": ids,
+            "assets": [],
+            "error": "no Vestige data for these asset ids — untracked (e.g. never traded on a "
+            "tracked DEX) or invalid",
+        }
+    assets = [
+        {
+            "asset_id": r.get("id"),
+            "name": r.get("name"),
+            "ticker": r.get("ticker"),
+            "price_usd": r.get("price"),
+            "price_change_1d_usd": r.get("price1d"),
+            "volume_1d_usd": r.get("volume1d"),
+            "volume_7d_usd": r.get("volume7d"),
+            "swaps_1d": r.get("swaps1d"),
+            "market_cap_usd": r.get("market_cap"),
+            "tvl_usd": r.get("tvl"),
+            "rank": r.get("rank"),
+        }
+        for r in results
+    ]
+    found_ids = {str(a["asset_id"]) for a in assets}
+    missing = [i for i in ids if i not in found_ids]
+    out: dict[str, Any] = {"assets": assets, "source": "Vestige (api.vestigelabs.org)"}
+    if missing:
+        out["missing_asset_ids"] = missing
+    return out
+
+
+_ASSET_MARKET_DATA_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "lookup_asset_market_data",
+        "description": (
+            "Live price, 24h/7d volume, market cap, and total pool liquidity (TVL) "
+            "for one or more Algorand ASAs, via Vestige's aggregator API. The only "
+            "source here for a real per-token liquidity/volume/TVL number — "
+            "get_defi_tvl only covers protocol-level TVL, never a specific coin. "
+            "Use for ANY liquidity, volume, or market-cap claim about a named "
+            "token instead of estimating or inventing a number."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "asset_ids": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated Algorand ASA ids, e.g. '2200000000' or "
+                        "'2200000000,31566704' (max 25 per call)."
+                    ),
+                },
+            },
+            "required": ["asset_ids"],
+        },
+    },
+}
+
+
 def _downsample_monthly(points: list[dict[str, Any]]) -> list[dict[str, str | float]]:
     """Collapse a daily {date, totalLiquidityUSD} series to one point per calendar month (the last day seen in that month) — DeFiLlama's raw series runs 1,000+ daily points for any protocol tracked more than a few years, far past what a research tool response should return in one call. Keeping the LAST day of each month (not first/average) matches how a reader intuitively reads a monthly chart: "where did it end up that month."."""
     from datetime import UTC, datetime
@@ -3357,8 +3442,9 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     github_repository_search, github_repository_contents, search_token_listings,
     fetch_url, click_element, get_defi_tvl, get_defi_tvl_history, discourse_forum, get_node_stats,
     medium_api_article_list, package_download_stats, search_nfd_directory,
-    app_store_metrics, reddit_api_post_history and xgov_proposal_status hit
-    free public APIs and are always available (GITHUB_TOKEN optional).
+    app_store_metrics, reddit_api_post_history, xgov_proposal_status and
+    lookup_asset_market_data hit free public APIs and are always available
+    (GITHUB_TOKEN optional).
     """
     import os
 
@@ -3440,6 +3526,8 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     handlers["lookup_world_population"] = _tool_lookup_world_population
     schemas.append(_DOMAIN_REGISTRATION_SCHEMA)
     handlers["lookup_domain_registration"] = _tool_lookup_domain_registration
+    schemas.append(_ASSET_MARKET_DATA_SCHEMA)
+    handlers["lookup_asset_market_data"] = _tool_lookup_asset_market_data
     schemas.append(_WAYBACK_SNAPSHOTS_SCHEMA)
     handlers["lookup_wayback_snapshots"] = _tool_lookup_wayback_snapshots
     return schemas, handlers
