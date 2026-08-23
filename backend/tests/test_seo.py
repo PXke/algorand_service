@@ -47,6 +47,23 @@ def _feed(n: int, *, epoch: int = 1_750_000_000) -> list[ArticleFeedItem]:
     ]
 
 
+def _feed_with_reliable_topic(
+    tag: str, count: int, total: int, *, epoch: int = 1_750_000_000
+) -> list[ArticleFeedItem]:
+    """`total` items; the first `count` share `tag` (clears MIN_COUNT without tripping the ubiquity ceiling), the rest each carry a unique singleton tag so they never accumulate."""
+    return [
+        ArticleFeedItem(
+            article_id=f"id{i}",
+            service_id="svc",
+            title=f"Title {i}",
+            summary=f"Summary {i}",
+            published_at_epoch=epoch + i,
+            tags=[tag] if i < count else [f"filler-{i}"],
+        )
+        for i in range(total)
+    ]
+
+
 # --- markdown ----------------------------------------------------------------
 
 
@@ -202,11 +219,11 @@ def test_render_noindex_marks_robots() -> None:
 
 def test_ssr_chrome_lists_popular_topics_in_footer() -> None:
     """Lists reliable topics in the front-page SSR footer."""
-    items = _feed(4)
+    items = _feed_with_reliable_topic("market", 10, 25)
     topics = reliable_tags(items)
-    _, body = render.render_front(_feed(4), [], topic_links=topics)
+    _, body = render.render_front(items, [], topic_links=topics)
     assert 'id="ssr-topics-h"' in body
-    assert 'href="/topic/market"' in body or 'href="/topic/sdk"' in body
+    assert 'href="/topic/market"' in body
 
 
 def test_article_has_breadcrumb_and_image_meta() -> None:
@@ -388,10 +405,10 @@ def test_topic_rss_feed_xml() -> None:
 
 def test_render_topics_lists_per_topic_rss() -> None:
     """Lists a per-topic RSS link on the topics index page."""
-    items = _feed(4)
+    items = _feed_with_reliable_topic("market", 10, 25)
     topics = reliable_tags(items)
     _, body = render.render_topics(topics)
-    assert 'href="/feed/topic/market.xml"' in body or 'href="/feed/topic/sdk.xml"' in body
+    assert 'href="/feed/topic/market.xml"' in body
 
 
 def test_cached_feed_snapshot_reuses_within_ttl(monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ARG001 -- name must match the real callee's keyword arg
@@ -483,16 +500,18 @@ def test_doc_response_dedup_marker_falls_back_to_tracked_path() -> None:
 
 
 def test_reliable_tags_policy_and_section_redirect_map() -> None:
-    # 10 stories: "market" on 5, "sdk" on 5 (both hit the 50% ubiquity
-    # ceiling), "niche" on 2 (kept), "one-off" on 1 (singleton, dropped).
-    """Applies the ubiquity ceiling and singleton drop to reliable_tags and maps every retired section."""
-    items = _feed(10)
-    items[0].tags = [*items[0].tags, "niche"]
-    items[2].tags = [*items[2].tags, "niche"]
-    items[4].tags = [*items[4].tags, "one-off"]
+    # 50 stories: "market" on 25, "sdk" on 25 (both hit the 50% ubiquity
+    # ceiling), "niche" on 10 (clears MIN_COUNT, kept), "borderline" on 9
+    # (one short of MIN_COUNT, dropped).
+    """Applies the ubiquity ceiling and MIN_COUNT floor to reliable_tags and maps every retired section."""
+    items = _feed(50)
+    for i in range(10):
+        items[i].tags = [*items[i].tags, "niche"]
+    for i in range(10, 19):
+        items[i].tags = [*items[i].tags, "borderline"]
     picked = dict(reliable_tags(items))
-    assert picked.get("niche") == 2
-    assert "one-off" not in picked
+    assert picked.get("niche") == 10
+    assert "borderline" not in picked
     assert "market" not in picked
     assert "sdk" not in picked
     # Every retired section slug redirects to a topic.
@@ -551,9 +570,10 @@ def test_robots_news_sitemap_gated_by_flag(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_sitemap_xml_includes_articles_and_topics() -> None:
-    # 4 stories -> "market"/"sdk" each on 2 (ubiquity waived on tiny corpora).
+    # 25 stories -> "market" on 10 (clears MIN_COUNT, under the 50% ubiquity
+    # ceiling), the rest singleton filler tags.
     """Includes article, topic and static page URLs in the sitemap, excluding retired sections."""
-    xml = sitemap.sitemap_xml(_feed(4))
+    xml = sitemap.sitemap_xml(_feed_with_reliable_topic("market", 10, 25))
     assert xml.startswith("<?xml")
     assert "https://algorand.pxke.me/news/articles/id0" in xml
     assert "https://algorand.pxke.me/topics" in xml

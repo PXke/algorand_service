@@ -40,7 +40,7 @@ SECTION_REDIRECTS: dict[str, str] = {
     "ecosystem": "ecosystem",
 }
 
-MIN_COUNT = 2
+MIN_COUNT = 10
 UBIQUITY_CEILING = 0.5  # tags on >=50% of the corpus are boilerplate
 DEFAULT_CAP = 100
 _FEED_CACHE_TTL_SEC = 120
