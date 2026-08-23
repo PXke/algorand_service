@@ -288,7 +288,7 @@ def article_localized(request: Request) -> Response:
 
 
 def article(request: Request) -> Response:
-    """SSR article at the bare (English) path; a legacy ``?lang=`` 301s to the locale path."""
+    """SSR article at the bare (English) path; a legacy ``?lang=`` 301s to the locale path (or strips back to the bare canonical for ``en``/an unrecognized code)."""
     qp = _query_params(request)
     lang = query_param(qp.get("lang")) or None
     if lang and lang != "en" and lang in ARTICLE_TRANSLATION_LANGS:
@@ -300,6 +300,15 @@ def article(request: Request) -> Response:
         detail = news.get_article(article_id, lang=lang) if article_id else None
         slug = detail.slug if detail is not None else None
         return _permanent_redirect(render.article_path(article_id, slug or raw, lang))
+    if lang:
+        # ?lang=en or any unrecognized code: every OTHER ?lang= form already
+        # consolidates via redirect above; this was the one gap left serving
+        # a live 200 duplicate at a query-string URL instead of the bare
+        # canonical (GSC "duplicate, Google chose different canonical" audit,
+        # 2026-08-23). Redirect to the same path with the query dropped; the
+        # normal id->slug 301 below still applies on the next hop if needed.
+        raw = request.path_params.get("article_id", "")
+        return _permanent_redirect(f"/news/articles/{raw}")
     return _article_document(request, None)
 
 

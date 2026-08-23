@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from app.core.http import QueryParams, Request
 from app.modules.news.models.schemas import ArticleDetail, ArticleFeedItem
 from app.modules.seo import feeds, render, shell, sitemap, topics
-from app.modules.seo.api.routes import _doc_response, _is_known_app_path
+from app.modules.seo.api.routes import _doc_response, _is_known_app_path, article
 from app.modules.seo.markdown import md_to_html, md_to_text, truncate
 from app.modules.seo.topics import SECTION_REDIRECTS, reliable_tags
 
@@ -498,6 +499,32 @@ def test_reliable_tags_policy_and_section_redirect_map() -> None:
     assert set(SECTION_REDIRECTS) == {"markets", "security", "developers", "community", "ecosystem"}
 
 
+# --- article route: ?lang= consolidation ---------------------------------------
+
+
+def _get_request(path_params: dict, query: dict) -> Request:
+    return Request(
+        method="GET",
+        headers={},
+        query_params=QueryParams(query),
+        path_params=path_params,
+    )
+
+
+def test_article_lang_en_query_redirects_to_bare_canonical() -> None:
+    """?lang=en used to fall through to a live 200 duplicate; it must 301 to the query-free URL like every other ?lang= form (GSC 'duplicate, Google chose different canonical' audit, 2026-08-23)."""
+    resp = article(_get_request({"article_id": "some-slug"}, {"lang": "en"}))
+    assert resp.status_code == 301
+    assert resp.headers["Location"] == "/news/articles/some-slug"
+
+
+def test_article_lang_unrecognized_query_redirects_to_bare_canonical() -> None:
+    """A garbage/unrecognized ?lang= code must not serve a duplicate 200 either."""
+    resp = article(_get_request({"article_id": "some-slug"}, {"lang": "xx"}))
+    assert resp.status_code == 301
+    assert resp.headers["Location"] == "/news/articles/some-slug"
+
+
 # --- sitemap / robots --------------------------------------------------------
 
 
@@ -913,8 +940,11 @@ def test_section_skips_provenance_tags_for_the_real_subject() -> None:
     sides now read shared/taxonomy.json, so the subject wins on both.
     """
     head, _ = render.render_article(_article(tags=["chain-only", "discovery", "payments"]))
-    assert 'property="article:section" content="payments"' in head
-    assert '"articleSection":"payments"' in head
+    # Display label ("Payments"), not the raw slug — same as every other
+    # section/kicker in the suite (see the SDKs case above); only the
+    # /topic/ URL below stays on the raw slug.
+    assert 'property="article:section" content="Payments">' in head
+    assert '"articleSection":"Payments"' in head
     assert "/topic/payments" in head
 
 
