@@ -2417,54 +2417,6 @@ def translate_glossary_term_task(slug: str, lang: str) -> dict[str, str]:
         return {"status": "error", "reason": str(e)}
 
 
-# Kept registered (not deleted) as a shim: a stale enqueue from before this
-# deploy could still reference "app.tasks.newspaper.translate_article" by
-# name, and dropping the task definition would make that a hard failure
-# instead of a normal (if now-legacy) single-language translation.
-@celery_app.task(
-    name="app.tasks.newspaper.translate_article_batch",
-    # The original 5h50m/6h limits were sized against a 51-minute/41-block
-    # measurement (see local_translate_lock.py's TTL comment) that real
-    # production data has since disproven: a single content-heavy special
-    # edition took 1h41m for 'ps' alone (SeamlessM4T's per-cell beam search)
-    # plus ~1h per MiLMMT language, and got SIGKILLed by the 6h hard limit
-    # mid-'ru' with 5 of 8 languages never attempted (found 2026-08-08).
-    # Widened well past any observed worst case -- on-CPU translation is
-    # explicitly latency-tolerant (this platform's whole design), so there
-    # is no cost to a generous ceiling beyond bounding genuine hangs.
-    # Both engines share this one task's queue (see celery_app.py's
-    # task_routes "translate" entry and the dedicated
-    # algorand-platform-celery-translate systemd unit), so overriding here
-    # rather than the app-wide task_soft_time_limit/task_time_limit leaves
-    # every OTHER task's limits untouched.
-    soft_time_limit=57600,  # 16h
-    time_limit=59400,  # 16h30m hard kill
-    # Root-caused live 2026-08-20/21: with Celery's default early-ack, a
-    # message is removed from the broker the MOMENT a worker picks it up --
-    # before any translation work happens. When the pre-restart worker
-    # (running stale code against the reworked local_translate.py) picked up
-    # a translation batch and simply couldn't execute it, the task vanished
-    # with zero trace: gone from the queue, zero languages persisted, no
-    # failure result anywhere. ~52 articles' translation batches were lost
-    # this way over four days with nothing ever retrying them. The systemd
-    # unit's own comment already assumed this couldn't happen ("a killed
-    # batch loses at most the one language in flight... re-enqueueing skips
-    # everything already stored") -- true for what gets PERSISTED per
-    # language, but that safety net only protects work already in progress
-    # on this specific delivery, not the task's presence in the queue at
-    # all. acks_late=True defers the ack until the task actually returns (or
-    # is confirmed lost), so a worker that dies/hangs/can't-execute mid-task
-    # gets its in-flight message redelivered to the next worker instead of
-    # silently discarding it. Safe here specifically because the task is
-    # already idempotent (re-checks which languages are still missing before
-    # doing any work) -- a redelivered task just skips what a prior attempt
-    # already persisted. reject_on_worker_lost=True makes a hard SIGKILL
-    # (e.g. the 16h30m time_limit firing) explicitly requeue rather than
-    # risk the message sitting unacked in limbo if the connection drop isn't
-    # detected cleanly.
-    acks_late=True,
-    reject_on_worker_lost=True,
-)
 def _translate_one_lang_via_deepseek(
     *, english_title: str, english_summary: str, english_body: str, target_language: str
 ) -> dict[str, str]:
@@ -2518,6 +2470,54 @@ def _run_deepseek_translations(
     return ok, failed
 
 
+# Kept registered (not deleted) as a shim: a stale enqueue from before this
+# deploy could still reference "app.tasks.newspaper.translate_article" by
+# name, and dropping the task definition would make that a hard failure
+# instead of a normal (if now-legacy) single-language translation.
+@celery_app.task(
+    name="app.tasks.newspaper.translate_article_batch",
+    # The original 5h50m/6h limits were sized against a 51-minute/41-block
+    # measurement (see local_translate_lock.py's TTL comment) that real
+    # production data has since disproven: a single content-heavy special
+    # edition took 1h41m for 'ps' alone (SeamlessM4T's per-cell beam search)
+    # plus ~1h per MiLMMT language, and got SIGKILLed by the 6h hard limit
+    # mid-'ru' with 5 of 8 languages never attempted (found 2026-08-08).
+    # Widened well past any observed worst case -- on-CPU translation is
+    # explicitly latency-tolerant (this platform's whole design), so there
+    # is no cost to a generous ceiling beyond bounding genuine hangs.
+    # Both engines share this one task's queue (see celery_app.py's
+    # task_routes "translate" entry and the dedicated
+    # algorand-platform-celery-translate systemd unit), so overriding here
+    # rather than the app-wide task_soft_time_limit/task_time_limit leaves
+    # every OTHER task's limits untouched.
+    soft_time_limit=57600,  # 16h
+    time_limit=59400,  # 16h30m hard kill
+    # Root-caused live 2026-08-20/21: with Celery's default early-ack, a
+    # message is removed from the broker the MOMENT a worker picks it up --
+    # before any translation work happens. When the pre-restart worker
+    # (running stale code against the reworked local_translate.py) picked up
+    # a translation batch and simply couldn't execute it, the task vanished
+    # with zero trace: gone from the queue, zero languages persisted, no
+    # failure result anywhere. ~52 articles' translation batches were lost
+    # this way over four days with nothing ever retrying them. The systemd
+    # unit's own comment already assumed this couldn't happen ("a killed
+    # batch loses at most the one language in flight... re-enqueueing skips
+    # everything already stored") -- true for what gets PERSISTED per
+    # language, but that safety net only protects work already in progress
+    # on this specific delivery, not the task's presence in the queue at
+    # all. acks_late=True defers the ack until the task actually returns (or
+    # is confirmed lost), so a worker that dies/hangs/can't-execute mid-task
+    # gets its in-flight message redelivered to the next worker instead of
+    # silently discarding it. Safe here specifically because the task is
+    # already idempotent (re-checks which languages are still missing before
+    # doing any work) -- a redelivered task just skips what a prior attempt
+    # already persisted. reject_on_worker_lost=True makes a hard SIGKILL
+    # (e.g. the 16h30m time_limit firing) explicitly requeue rather than
+    # risk the message sitting unacked in limbo if the connection drop isn't
+    # detected cleanly.
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
 def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
     """Background task to translate an article into every language in `langs`.
 

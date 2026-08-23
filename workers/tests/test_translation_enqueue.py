@@ -59,6 +59,27 @@ def test_enqueue_missing_skips_task_when_nothing_missing(monkeypatch: pytest.Mon
     assert calls == []
 
 
+def test_translate_article_batch_celery_task_is_bound_to_the_right_function() -> None:
+    """The "app.tasks.newspaper.translate_article_batch" Celery registration must resolve to translate_article_batch_task, not a helper defined near it.
+
+    Regression test: the @celery_app.task(...) decorator once ended up
+    attached to a small helper (_translate_one_lang_via_deepseek) added
+    directly above translate_article_batch_task, because an edit inserted
+    new function definitions between the decorator and its real target
+    without moving the decorator down too. Direct unit tests that call
+    pt.translate_article_batch_task(...) as a plain function passed
+    regardless, since Python callable resolution doesn't care about
+    decoration -- only Celery's name-based task lookup exposed it (real
+    failure: "takes 0 positional arguments but 2 were given" the moment a
+    worker actually dispatched the task by name).
+    """
+    from app.celery_app import celery_app
+
+    task = celery_app.tasks.get("app.tasks.newspaper.translate_article_batch")
+    assert task is not None
+    assert task.run.__name__ == "translate_article_batch_task"
+
+
 def test_translate_batch_task_skips_without_touching_local_translate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
