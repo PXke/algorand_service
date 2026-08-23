@@ -141,6 +141,12 @@ class ArticleStmts:
     CLEAR_TRANSLATIONS = _Stmt(
         "DELETE translations FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
+    # Clears one language only, unlike CLEAR_TRANSLATIONS -- for reclaiming a
+    # single bad translation (e.g. a corrupted local-engine result) without
+    # discarding every other language's already-good work on the same article.
+    DELETE_TRANSLATION_LANG = _Stmt(
+        "DELETE translations[?] FROM algorand_platform.articles_by_id WHERE article_id = ?"
+    )
     UPDATE_IMAGE = _Stmt(
         "UPDATE algorand_platform.articles_by_id SET image_url = ? WHERE article_id = ?"
     )
