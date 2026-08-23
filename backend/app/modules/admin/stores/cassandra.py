@@ -71,15 +71,31 @@ class AdminCassandraStore:
         body: str | None = None,
         editor: str = "admin",
     ) -> StoredArticle | None:
-        """Patch an article's fields and re-publish it, re-stamping published_at."""
+        """Patch an article's fields and re-publish it, re-stamping published_at.
+
+        Clears every stored translation when the content actually changes and
+        re-enqueues all languages fresh -- an admin correction previously left
+        each language's translation exactly as it was BEFORE the correction,
+        silently wrong in every non-English locale with no way to detect it
+        short of a manual audit (found live 2026-08 on more than one article).
+        Mirrors what workers' replace_article_content already does on every
+        recompose; this path just never had the same fix.
+        """
         current = self.get_article(article_id)
         if current is None:
             return None
         new_title = title if title is not None else current.title
         new_summary = summary if summary is not None else current.summary
         new_body = body if body is not None else current.body
+        content_changed = (
+            new_title != current.title
+            or new_summary != current.summary
+            or new_body != current.body
+        )
         self._save_version_snapshot(current, editor=editor)
         self._write_article(current, new_title, new_summary, new_body, tag_extra="updated")
+        if content_changed and current.translations:
+            self._clear_and_reenqueue_translations(article_id)
         updated = self.get_article(article_id)
         if updated is not None:
             # Content changed at its existing URL — notify IndexNow (Bing asks
@@ -93,6 +109,29 @@ class AdminCassandraStore:
                     slug=updated.slug,
                 )
         return updated
+
+    @staticmethod
+    def _clear_and_reenqueue_translations(article_id: str) -> None:
+        """Wipe every stored translation and re-enqueue all languages via the modern batch task (app.tasks.newspaper.translate_article_batch) -- NOT the legacy per-language translate_article shim _enqueue_article_translations uses, which calls a paid LLM directly and skips the local-engine/DeepSeek-per-language routing the batch task has (see workers' DEEPSEEK_TRANSLATE_LANGS)."""
+        try:
+            from celery import Celery
+
+            from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
+            from app.core.cassandra import get_cassandra_session
+            from app.core.config import settings
+            from app.core.statements import ArticleStmts
+
+            session = get_cassandra_session()
+            session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (UUID(article_id),))
+            Celery(broker=settings.celery_broker_url).send_task(
+                "app.tasks.newspaper.translate_article_batch",
+                args=[str(article_id), list(ARTICLE_TRANSLATION_LANGS)],
+                queue="translate",
+            )
+        except Exception:
+            logger.warning(
+                "failed to clear/re-enqueue translations for %s", article_id, exc_info=True
+            )
 
     def _save_version_snapshot(self, article: StoredArticle, *, editor: str) -> None:
         from app.core.cassandra import get_cassandra_session

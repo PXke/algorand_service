@@ -75,6 +75,16 @@ class ArticleStmts:
         "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ? "
         "WHERE article_id = ?"
     )
+    # An admin content correction (update_article) previously left every
+    # existing translation stored verbatim -- translated from the
+    # PRE-correction English text, now silently wrong in every non-English
+    # locale with no way to detect it short of a manual audit (found live
+    # 2026-08 on more than one article). Clearing here mirrors what
+    # workers' replace_article_content already does on every recompose;
+    # the caller re-enqueues fresh translations for all languages after.
+    CLEAR_TRANSLATIONS = _Stmt(
+        "DELETE translations FROM algorand_platform.articles_by_id WHERE article_id = ?"
+    )
     UPDATE_TAGS = _Stmt("UPDATE algorand_platform.articles_by_id SET tags = ? WHERE article_id = ?")
     # Stamp the REAL release moment when a held/review draft first goes live —
     # insert_stored_article stamps published_at at compose time even for
