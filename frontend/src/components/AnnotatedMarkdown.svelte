@@ -31,7 +31,7 @@
     comments?: CommentItem[]
     allowCreate?: boolean
     allowDelete?: boolean
-    onCreateComment?: (anchor: TextQuoteAnchor | null, body: string) => Promise<void>
+    onCreateComment?: (anchor: TextQuoteAnchor | null, body: string) => Promise<CommentItem | void>
     onDeleteComment?: (commentId: string) => Promise<void>
   } = $props()
 
@@ -59,6 +59,12 @@
     tick().then(placeHighlights)
   })
 
+  function focusComposer(node: HTMLTextAreaElement) {
+    $effect(() => {
+      if (composerPos) node.focus()
+    })
+  }
+
   function placeHighlights(): void {
     const container = wrapperEl?.querySelector<HTMLElement>('.md')
     if (!container) return
@@ -81,7 +87,24 @@
     orphanedIds = nextOrphaned
   }
 
+  function inComposer(target: EventTarget | null): boolean {
+    return target instanceof Element && Boolean(target.closest('.comment-composer'))
+  }
+
+  function showCommentAt(mark: Element): void {
+    const id = mark.getAttribute('data-comment-id')
+    if (!id || !wrapperEl) return
+    const rect = mark.getBoundingClientRect()
+    const wrapperRect = wrapperEl.getBoundingClientRect()
+    activeCommentId = id
+    popoverPos = {
+      top: rect.bottom - wrapperRect.top + 6,
+      left: rect.left - wrapperRect.left,
+    }
+  }
+
   function onContainerClick(event: MouseEvent): void {
+    if (inComposer(event.target)) return
     const target = event.target as HTMLElement
     const mark = target.closest('mark[data-comment-id]')
     if (!mark) {
@@ -89,53 +112,73 @@
       popoverPos = null
       return
     }
-    const id = mark.getAttribute('data-comment-id')
-    if (!id) return
-    const rect = mark.getBoundingClientRect()
-    const wrapperRect = wrapperEl?.getBoundingClientRect()
-    activeCommentId = id
-    popoverPos = {
-      top: rect.bottom - (wrapperRect?.top ?? 0) + 6,
-      left: rect.left - (wrapperRect?.left ?? 0),
-    }
+    showCommentAt(mark)
   }
 
-  function onSelectionChange(): void {
+  function onSelectionChange(event: MouseEvent): void {
     if (!allowCreate || !wrapperEl) return
+    // Clicking the composer collapses the article selection. That used to
+    // look like "click away" and unmount the box before the click landed —
+    // so the textarea couldn't be focused, and Comment never submitted.
+    if (inComposer(event.target)) return
+
     const selection = window.getSelection()
     if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
-      composerPos = null
+      if (composerPos) cancelComposer()
       return
     }
     const range = selection.getRangeAt(0)
     const container = wrapperEl.querySelector<HTMLElement>('.md')
     if (!container || !container.contains(range.commonAncestorContainer)) {
-      composerPos = null
+      if (composerPos) cancelComposer()
       return
     }
     const anchor = captureSelectionAnchor(container, range)
     if (!anchor) {
-      composerPos = null
+      if (composerPos) cancelComposer()
       return
     }
     const rect = range.getBoundingClientRect()
     const wrapperRect = wrapperEl.getBoundingClientRect()
     pendingAnchor = anchor
+    composerBody = composerPos ? composerBody : ''
+    composerError = null
     composerPos = { top: rect.bottom - wrapperRect.top + 8, left: rect.left - wrapperRect.left }
   }
 
+  function onComposerMouseDown(event: MouseEvent): void {
+    // Keep the highlight visible when clicking Comment/Cancel.
+    event.preventDefault()
+  }
+
+  function onComposerKeyDown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      cancelComposer()
+    }
+  }
+
   async function submitComment(): Promise<void> {
-    if (!onCreateComment || !composerBody.trim()) return
+    if (!onCreateComment || !composerBody.trim() || !pendingAnchor) return
     submitting = true
     composerError = null
+    const anchor = $state.snapshot(pendingAnchor)
     try {
       // Author name is threaded by the caller's onCreateComment closure
       // (SharedArticle.svelte owns the reviewer-name prompt/persistence).
-      await onCreateComment(pendingAnchor, composerBody.trim())
+      const created = await onCreateComment(anchor, composerBody.trim())
+      const newId = created?.comment_id
       composerBody = ''
       composerPos = null
       pendingAnchor = null
       window.getSelection()?.removeAllRanges()
+      await tick()
+      placeHighlights()
+      await tick()
+      const mark = newId
+        ? wrapperEl?.querySelector(`mark[data-comment-id="${CSS.escape(newId)}"]`)
+        : null
+      if (mark) showCommentAt(mark)
     } catch (e) {
       composerError = e instanceof Error ? e.message : String(e)
     } finally {
@@ -185,21 +228,28 @@
   {/if}
 
   {#if allowCreate && composerPos}
-    <div class="comment-composer" style="top: {composerPos.top}px; left: {composerPos.left}px">
+    <div
+      class="comment-composer"
+      style="top: {composerPos.top}px; left: {composerPos.left}px"
+    >
       <textarea
+        {@attach focusComposer}
         bind:value={composerBody}
         placeholder="Add a comment on this passage…"
+        aria-label="Comment on this passage"
         rows="3"
+        onkeydown={onComposerKeyDown}
       ></textarea>
       {#if composerError}
         <p class="composer-error">{composerError}</p>
       {/if}
       <div class="composer-actions">
-        <button type="button" class="btn compact" onclick={cancelComposer}>Cancel</button>
+        <button type="button" class="btn compact" onmousedown={onComposerMouseDown} onclick={cancelComposer}>Cancel</button>
         <button
           type="button"
           class="btn compact primary"
-          disabled={submitting || !composerBody.trim()}
+          disabled={submitting || !composerBody.trim() || !pendingAnchor}
+          onmousedown={onComposerMouseDown}
           onclick={submitComment}
         >
           {submitting ? 'Posting…' : 'Comment'}

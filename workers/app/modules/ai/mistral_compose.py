@@ -2374,7 +2374,6 @@ def _compose_via_writer_tools(
     user: str,
     source_url: str,
     mistral: LLMProvider,
-    topic: str = "",
     research_user: str | None = None,
     is_special_edition: bool = False,
     research_client: LLMProvider | None = None,
@@ -2401,7 +2400,6 @@ def _compose_via_writer_tools(
             user=user,
             source_url=source_url,
             mistral=mistral,
-            topic=topic,
             research_user=research_user,
             is_special_edition=is_special_edition,
             research_client=research_client,
@@ -3079,7 +3077,6 @@ def _compose_via_writer_tools_locked(
     user: str,
     source_url: str,
     mistral: LLMProvider,
-    topic: str = "",
     research_user: str | None = None,
     is_special_edition: bool = False,
     research_client: LLMProvider | None = None,
@@ -3132,7 +3129,7 @@ def _compose_via_writer_tools_locked(
                 "model": MISTRAL_MODEL_RESEARCH,
                 "_playwright_session": playwright_session,
             }
-            tool_schemas, tool_handlers = all_tools(context=tool_context, topic=topic)
+            tool_schemas, tool_handlers = all_tools(context=tool_context)
             trace: list = []
             debug: dict = {}
             # Set once at the "writing" checkpoint (the research digest is only

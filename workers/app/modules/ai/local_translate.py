@@ -435,7 +435,9 @@ def translate_article_batch(
     english_summary: str,
     english_body: str,
     target_languages: list[str],
+    on_language_start: Callable[[str], None] | None = None,
     on_language_done: Callable[[str, dict[str, str]], None] | None = None,
+    on_language_error: Callable[[str, str], None] | None = None,
 ) -> dict[str, list[str] | dict[str, str]]:
     """Translate one article into every language in ``target_languages``, loading each engine's model at most ONCE for the whole batch.
 
@@ -449,12 +451,14 @@ def translate_article_batch(
     once per language -- see _translate_article_no_lock for why the
     per-language calls inside must not re-acquire it.
 
-    ``on_language_done(lang, result)``, if given, is called synchronously
-    right after each language finishes, while the lock is still held -- this
-    is how a caller persists incrementally (e.g. one Cassandra write per
-    language) instead of buffering every result to the end of a batch that
-    can run for hours. Any exception from it is logged and swallowed: a
-    transient write failure for one language must not skip that engine's
+    ``on_language_start(lang)``, ``on_language_done(lang, result)`` and
+    ``on_language_error(lang, reason)`` -- if given -- fire synchronously
+    right before/after each language, while the lock is still held. This is
+    how a caller tracks progress incrementally (e.g. one Cassandra row per
+    language, marked running -> ok/error) instead of only learning about a
+    hung or crashed language after the whole batch's own multi-hour timeout
+    fires. Any exception from any of them is logged and swallowed: a
+    transient callback failure for one language must not skip that engine's
     unload step or abort translation of the remaining languages.
 
     A single language's translation raising does NOT abort the batch --
@@ -478,33 +482,64 @@ def translate_article_batch(
                 continue
             try:
                 for lang in langs:
-                    try:
-                        result = _translate_article_no_lock(
-                            english_title=english_title,
-                            english_summary=english_summary,
-                            english_body=english_body,
-                            target_language=lang,
-                        )
-                    except Exception:
-                        logger.error(
-                            "local translation failed: lang=%s engine=%s",
-                            lang,
-                            engine,
-                            exc_info=True,
-                        )
-                        failed[lang] = "translation_error"
-                        continue
-                    ok.append(lang)
-                    if on_language_done is not None:
-                        try:
-                            on_language_done(lang, result)
-                        except Exception:
-                            logger.error(
-                                "on_language_done callback failed for lang=%s",
-                                lang,
-                                exc_info=True,
-                            )
+                    _translate_one_language(
+                        lang=lang,
+                        engine=engine,
+                        english_title=english_title,
+                        english_summary=english_summary,
+                        english_body=english_body,
+                        on_language_start=on_language_start,
+                        on_language_done=on_language_done,
+                        on_language_error=on_language_error,
+                        ok=ok,
+                        failed=failed,
+                    )
             finally:
                 unload_engine(engine)
 
     return {"ok": ok, "failed": failed}
+
+
+def _translate_one_language(
+    *,
+    lang: str,
+    engine: str,
+    english_title: str,
+    english_summary: str,
+    english_body: str,
+    on_language_start: Callable[[str], None] | None,
+    on_language_done: Callable[[str, dict[str, str]], None] | None,
+    on_language_error: Callable[[str, str], None] | None,
+    ok: list[str],
+    failed: dict[str, str],
+) -> None:
+    """One language of translate_article_batch's inner loop: start callback, translate, then the done/error callback -- split out purely to keep the batch orchestrator's own cyclomatic complexity down; behavior is identical to having this inlined."""
+    if on_language_start is not None:
+        try:
+            on_language_start(lang)
+        except Exception:
+            logger.error("on_language_start callback failed for lang=%s", lang, exc_info=True)
+    try:
+        result = _translate_article_no_lock(
+            english_title=english_title,
+            english_summary=english_summary,
+            english_body=english_body,
+            target_language=lang,
+        )
+    except Exception:
+        logger.error("local translation failed: lang=%s engine=%s", lang, engine, exc_info=True)
+        failed[lang] = "translation_error"
+        if on_language_error is not None:
+            try:
+                on_language_error(lang, "translation_error")
+            except Exception:
+                logger.error(
+                    "on_language_error callback failed for lang=%s", lang, exc_info=True
+                )
+        return
+    ok.append(lang)
+    if on_language_done is not None:
+        try:
+            on_language_done(lang, result)
+        except Exception:
+            logger.error("on_language_done callback failed for lang=%s", lang, exc_info=True)

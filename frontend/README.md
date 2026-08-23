@@ -19,7 +19,7 @@ Defaults to http://127.0.0.1:5173 with `/api` proxied to `http://127.0.0.1:8080`
 | `VITE_ADMIN_WALLET_ADDRESSES` | (comma-separated) |
 | `VITE_SUGGESTIONS_ENABLED` | `false` |
 | `VITE_EXPLORER_BASE_URL` | Pera TestNet explorer |
-| `VITE_ALGOD_API_URL` | Algonode TestNet |
+| `VITE_ALGOD_API_URL` | empty (`/api/v1/algod` on this API) |
 
 Copy `.env.example` to `.env.local` for local overrides.
 

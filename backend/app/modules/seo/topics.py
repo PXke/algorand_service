@@ -8,9 +8,10 @@ corpus ("web", "discovery") carries no signal. One policy, applied everywhere.
 
 from __future__ import annotations
 
-import time
 from collections import Counter
 from collections.abc import Callable
+
+import msgspec
 
 # display_tag_label and primary_tag are re-exported for callers that import
 # them from this module; the redundant alias is the explicit re-export idiom
@@ -25,6 +26,8 @@ from algorand_shared.taxonomy import (
     primary_tag as primary_tag,
 )
 
+from app.core import serialization
+from app.core.cache import cached_json
 from app.modules.news.models.schemas import ArticleFeedItem
 
 # Slugs of the retired human sections → the closest real writer tag, so the
@@ -40,6 +43,8 @@ SECTION_REDIRECTS: dict[str, str] = {
 MIN_COUNT = 2
 UBIQUITY_CEILING = 0.5  # tags on >=50% of the corpus are boilerplate
 DEFAULT_CAP = 100
+_FEED_CACHE_TTL_SEC = 120
+_FEED_SNAPSHOT_KEY = "seo:feed-snapshot"
 
 # Pipeline-stamped labels with no topical signal; kickers/breadcrumbs skip past
 # them. `primary_tag` and `display_tag_label` now come from shared/taxonomy.json
@@ -95,30 +100,21 @@ def items_for_tag(items: list[ArticleFeedItem], tag: str) -> list[ArticleFeedIte
     return [item for item in items if any(t.strip().lower() == wanted for t in (item.tags or []))]
 
 
-_FEED_CACHE_TTL_SEC = 120
-_feed_cache: dict[str, object] = {"mono": 0.0, "feed": [], "topics": []}
-
-
 def cached_feed_snapshot(
     list_feed: Callable[..., list[ArticleFeedItem]],
     *,
     limit: int = 500,
 ) -> tuple[list[ArticleFeedItem], list[tuple[str, int]]]:
     """Short-lived feed + reliable-tags cache for SSR routes that share a scan."""
-    now = time.monotonic()
-    cached_at = float(_feed_cache["mono"])
-    feed = _feed_cache.get("feed")
-    topics = _feed_cache.get("topics")
-    if (
-        isinstance(feed, list)
-        and feed
-        and isinstance(topics, list)
-        and now - cached_at < _FEED_CACHE_TTL_SEC
-    ):
-        return feed, topics
-    fresh = list_feed(limit=limit)
-    picked = reliable_tags(fresh)
-    _feed_cache["mono"] = now
-    _feed_cache["feed"] = fresh
-    _feed_cache["topics"] = picked
-    return fresh, picked
+    def compute() -> dict[str, object]:
+        fresh = list_feed(limit=limit)
+        return {
+            "feed": serialization.to_builtins(fresh),
+            "topics": reliable_tags(fresh),
+        }
+
+    data = cached_json(_FEED_SNAPSHOT_KEY, _FEED_CACHE_TTL_SEC, compute)
+    feed = msgspec.convert(data["feed"], list[ArticleFeedItem])
+    topics = data["topics"]
+    assert isinstance(topics, list)
+    return feed, topics

@@ -35,6 +35,7 @@
   title={t($messages, 'pageTitleSuggestions')}
   description={t($messages, 'suggestionsSubtitle') || SITE_TAGLINE}
   path="/suggestions"
+  noindex
 />
 
 <div class="page stack">

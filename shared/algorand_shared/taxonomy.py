@@ -36,25 +36,24 @@ def is_meta_tag(tag: str) -> bool:
 
 
 def display_tag_label(tag: str) -> str:
-    """Map an internal tag slug to its reader-facing label, if any."""
-    key = tag.strip().lower()
-    return _display_labels().get(key, tag)
+    """Map an internal tag slug to its reader-facing label.
 
-
-def display_tag_title(tag: str) -> str:
-    """Reader-facing label for headings and <title>, sentence-cased.
-
-    display_tag_label leaves unmapped slugs alone because they also appear
-    inline in body copy. A page title should not read "defi — Algorand news",
-    so anything without an explicit label gets its first letter capitalised and
-    its dashes opened up. Explicit labels win untouched — they are the ones
-    capitalisation would get wrong (DeFi, NFTs, dApps).
+    Explicit ``display_labels`` win. Unmapped slugs are opened into a
+    sentence-style label so a desk directory never prints raw CMS slugs.
     """
     key = tag.strip().lower()
+    if not key:
+        return tag
     mapped = _display_labels().get(key)
     if mapped is not None:
         return mapped
-    return key.replace("-", " ").capitalize() if key else tag
+    opened = key.replace("-", " ").replace("_", " ")
+    return opened[:1].upper() + opened[1:] if opened else tag
+
+
+def display_tag_title(tag: str) -> str:
+    """Reader-facing label for headings and <title>."""
+    return display_tag_label(tag)
 
 
 def primary_tag(tags: list[str] | None) -> str | None:

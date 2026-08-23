@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -306,6 +307,7 @@ def test_render_news_canonicalises_to_the_front_page() -> None:
     assert 'rel="canonical" href="https://algorand.pxke.me/"' in front_head
     assert 'rel="canonical" href="https://algorand.pxke.me/"' in news_head
     assert 'rel="canonical" href="https://algorand.pxke.me/news"' not in news_head
+    assert 'name="robots" content="noindex, follow"' in news_head
     assert '"url":"https://algorand.pxke.me/news"' in news_head
     assert "Latest" in news_body
     assert 'aria-label="Breadcrumb"' in news_body
@@ -396,12 +398,18 @@ def test_cached_feed_snapshot_reuses_within_ttl(monkeypatch: pytest.MonkeyPatch)
     from app.modules.seo import topics as topics_mod
 
     calls = {"n": 0}
+    stored: list[dict[str, object]] = []
 
     def list_feed(*, limit: int = 500) -> list[ArticleFeedItem]:  # noqa: ARG001 -- name must match the real callee's keyword arg
         calls["n"] += 1
         return _feed(2)
 
-    topics_mod._feed_cache["mono"] = 0.0
+    def fake_cached_json(_key: str, _ttl: int, compute: Callable[[], dict[str, object]]) -> dict[str, object]:
+        if not stored:
+            stored.append(compute())
+        return stored[0]
+
+    monkeypatch.setattr(topics_mod, "cached_json", fake_cached_json)
     topics_mod.cached_feed_snapshot(list_feed)
     topics_mod.cached_feed_snapshot(list_feed)
     assert calls["n"] == 1
@@ -500,6 +508,13 @@ def test_robots_txt_points_to_sitemaps() -> None:
     assert "Sitemap: https://algorand.pxke.me/sitemap.xml" in txt
 
 
+def test_robots_txt_blocks_api_but_allows_image_proxy() -> None:
+    """The JSON API is crawl-budget waste (always noindex), but the image proxy behind og:image/hero images must stay fetchable."""
+    txt = sitemap.robots_txt()
+    assert "Disallow: /api/" in txt
+    assert "Allow: /api/v1/img" in txt
+
+
 def test_robots_news_sitemap_gated_by_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """Includes or omits the news sitemap link in robots.txt based on the feature flag."""
     monkeypatch.setattr(sitemap.settings, "seo_news_sitemap_enabled", False)
@@ -515,7 +530,7 @@ def test_sitemap_xml_includes_articles_and_topics() -> None:
     assert xml.startswith("<?xml")
     assert "https://algorand.pxke.me/news/articles/id0" in xml
     assert "https://algorand.pxke.me/topics" in xml
-    assert "https://algorand.pxke.me/news" in xml
+    assert "<loc>https://algorand.pxke.me/news</loc>" not in xml
     assert "https://algorand.pxke.me/hot" in xml
     assert "https://algorand.pxke.me/topic/market" in xml
     assert "/section/" not in xml
@@ -866,14 +881,14 @@ def test_icon_like_vs_real_share_image() -> None:
 
 def test_icon_word_boundary_matching() -> None:
     """Matches icon-like filenames on word boundaries, not as bare substrings."""
-    from app.modules.seo.render import _is_icon_like
+    from app.modules.seo.render import is_icon_like
 
-    assert _is_icon_like("https://x.io/algorand_logo_mark_black-Feb.png")
-    assert _is_icon_like("https://x.io/valar-solutions-full-logo-preview.png")
-    assert _is_icon_like("https://x.io/apple-touch-icon.png")
-    assert _is_icon_like("https://x.io/anything.svg")
-    assert not _is_icon_like("https://x.io/silicon.png")
-    assert not _is_icon_like("https://x.io/features/hero-image.jpg")
+    assert is_icon_like("https://x.io/algorand_logo_mark_black-Feb.png")
+    assert is_icon_like("https://x.io/valar-solutions-full-logo-preview.png")
+    assert is_icon_like("https://x.io/apple-touch-icon.png")
+    assert is_icon_like("https://x.io/anything.svg")
+    assert not is_icon_like("https://x.io/silicon.png")
+    assert not is_icon_like("https://x.io/features/hero-image.jpg")
 
 
 def test_section_skips_provenance_tags_for_the_real_subject() -> None:
@@ -896,7 +911,7 @@ def test_display_label_rewrites_jargon_slugs_without_touching_urls() -> None:
     """Display text only: /topic/<tag> always links the raw slug, both sides."""
     assert topics.display_tag_label("chain-only") == "on-chain"
     assert topics.display_tag_label("CHAIN-ONLY") == "on-chain"
-    assert topics.display_tag_label("payments") == "payments"
+    assert topics.display_tag_label("payments") == "Payments"
 
 
 def test_section_redirect_map_matches_the_spa() -> None:

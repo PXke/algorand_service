@@ -1,0 +1,16 @@
+---
+description: Load Svelte skills, Svelte MCP, and browser visual QA for frontend UI work
+globs: frontend/**/*.{svelte,css,ts,js}
+alwaysApply: false
+---
+
+# Frontend UI stack
+
+When editing Svelte or frontend CSS in this repo:
+
+1. Follow `svelte-core-bestpractices` (runes, snippets, keyed each, CSS variables for theming children, no legacy Svelte APIs).
+2. Follow `svelte-code-writer`: Svelte MCP `list-sections` then `get-documentation` when syntax is uncertain; run `svelte-autofixer` on every new or edited `.svelte` file until it reports no issues. Prefer the `svelte-file-editor` subagent when writing `.svelte` files.
+3. Use Svelte MCP (`plugin-svelte-svelte`) — not guessed Svelte 4 patterns.
+4. After visual UI changes, use `cursor-ide-browser`: navigate to the running app, `browser_snapshot`, then `browser_take_screenshot`. Iterate on what the screenshot shows.
+5. One token system in `frontend/src/app.css`. During a redesign, replace that system as a whole — do not add a second palette beside it. Follow `.cursor/skills/visual-redesign/SKILL.md`.
+6. After visual changes, screenshot in the browser when that MCP is available; iterate on the picture, not only the CSS.

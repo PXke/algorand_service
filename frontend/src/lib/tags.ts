@@ -36,11 +36,18 @@ export function primaryTopic(tags: string[] | null | undefined): string | null {
     the raw slug, so a URL never changes shape based on this table. The SSR
     applies the same map; without it the server said "on-chain" and the SPA
     said "chain-only" on the same chip. */
+/** Open a slug into a sentence-style label when taxonomy.json has no override. */
+function humanizeTag(key: string): string {
+  const opened = key.replace(/[-_]+/g, ' ')
+  return opened ? opened.charAt(0).toUpperCase() + opened.slice(1) : key
+}
+
 export function displayTagLabel(tag: string | null | undefined): string {
   const key = String(tag ?? '')
     .trim()
     .toLowerCase()
-  return DISPLAY_LABELS[key] ?? String(tag ?? '')
+  if (!key) return ''
+  return DISPLAY_LABELS[key] ?? humanizeTag(key)
 }
 
 /* ------------------------------------------------------------------ *
@@ -79,7 +86,9 @@ const TONE_BY_TOPIC: Record<string, Tone> = {
   // Protocol — the chain and the tools on it
   infrastructure: 'protocol',
   api: 'protocol',
+  apis: 'protocol',
   sdk: 'protocol',
+  sdks: 'protocol',
   'developer-tools': 'protocol',
   'smart-contracts': 'protocol',
   testnet: 'protocol',
@@ -105,6 +114,7 @@ const TONE_BY_TOPIC: Record<string, Tone> = {
   avm: 'protocol',
   // Assets — things issued and traded
   nft: 'assets',
+  nfts: 'assets',
   marketplace: 'assets',
   tokenization: 'assets',
   asa: 'assets',
@@ -115,12 +125,15 @@ const TONE_BY_TOPIC: Record<string, Tone> = {
   // People — who is doing it and how they decide
   identity: 'people',
   nfd: 'people',
+  nfdomains: 'people',
   community: 'people',
   recap: 'people',
   wallet: 'people',
+  wallets: 'people',
   social: 'people',
   governance: 'people',
   dao: 'people',
+  daos: 'people',
   voting: 'people',
   foundation: 'people',
   directory: 'people',
@@ -151,7 +164,37 @@ export function topicTone(tag: string | null | undefined): Tone {
   return TONE_BY_TOPIC[key] ?? 'meta'
 }
 
-/** CSS colour for a topic, for inline `style="color: …"`. */
+/** CSS colour for a topic kicker. Desks share stamp ink; only alerts paint. */
 export function topicColor(tag: string | null | undefined): string {
   return `var(--tone-${topicTone(tag)})`
+}
+
+/** Front-page edition columns. Alert and unclassified copy sit in `wire`. */
+export type ReaderDesk = 'markets' | 'protocol' | 'assets' | 'people' | 'wire'
+
+export const READER_DESKS: readonly ReaderDesk[] = [
+  'markets',
+  'protocol',
+  'assets',
+  'people',
+  'wire',
+]
+
+export function readerDesk(tags: string[] | null | undefined): ReaderDesk {
+  for (const tag of orderReaderTags(tags)) {
+    const tone = topicTone(tag)
+    if (tone === 'markets' || tone === 'protocol' || tone === 'assets' || tone === 'people') {
+      return tone
+    }
+  }
+  return 'wire'
+}
+
+/** i18n key for a front-page desk. */
+export function deskMessageKey(desk: ReaderDesk): string {
+  if (desk === 'markets') return 'sectionMarkets'
+  if (desk === 'protocol') return 'deskProtocol'
+  if (desk === 'assets') return 'deskAssets'
+  if (desk === 'people') return 'deskPeople'
+  return 'deskWire'
 }

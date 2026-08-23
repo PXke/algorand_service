@@ -52,10 +52,11 @@
     localStorage.setItem(AUTHOR_NAME_KEY, authorName.trim())
   }
 
-  async function createComment(anchor: TextQuoteAnchor | null, body: string): Promise<void> {
+  async function createComment(anchor: TextQuoteAnchor | null, body: string) {
     saveAuthorName()
     const created = await sharingApi.postSharedComment(token, body, authorName.trim(), anchor)
     comments = [...comments, created]
+    return created
   }
 </script>
 
@@ -126,20 +127,18 @@
 
   .draft-badge {
     display: inline-block;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
     font-weight: 700;
+    letter-spacing: 0.9px;
     text-transform: uppercase;
-    letter-spacing: 0.4px;
-    padding: 3px 10px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--primary) 16%, transparent);
-    color: var(--primary);
+    padding: 0;
+    color: var(--accent);
     margin-bottom: 10px;
   }
 
   .draft-badge.live {
-    background: color-mix(in srgb, #2e7d32 16%, transparent);
-    color: #2e7d32;
+    color: var(--gain);
   }
 
   .shared-header h1 {

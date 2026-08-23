@@ -679,6 +679,16 @@ SPECIAL_EDITION_ENUMERATION_GAP_FILL_MAX_ROUNDS = env_int(
 # the first checkpoint) is the only way a row gets stuck; reap_stale_compose_sessions
 # marks it "stale" so the admin Sessions view stops showing it as in-progress.
 COMPOSE_SESSION_STALE_MINUTES = env_int("COMPOSE_SESSION_STALE_MINUTES", 60)
+# A translation_sessions row stuck 'running' past this long is either a
+# genuinely hung model call or a worker that died mid-language without
+# reaching translate_article_batch's on_language_done/on_language_error
+# callback -- the whole BATCH task's own hard limit (16h30m, see
+# translate_article_batch_task) would eventually catch a fully-wedged
+# worker, but that's far too coarse to flag ONE stuck language promptly.
+# The worst observed single-language time is 1h41m (SeamlessM4T beam search
+# on 'ps', a content-heavy special edition, 2026-08-08); this default gives
+# ~1.75x margin above that.
+TRANSLATION_SESSION_STALE_MINUTES = env_int("TRANSLATION_SESSION_STALE_MINUTES", 180)
 # Public base URL for linking to an article page from generated content (the
 # weekly digest links each highlight here). Hash route into the Flutter SPA.
 PUBLIC_ARTICLE_BASE_URL = env_str(
@@ -729,6 +739,20 @@ MISTRAL_MAX_RETRIES = env_int("MISTRAL_MAX_RETRIES", 4)
 # Retry-After when present. Larger so a rate-limited call waits meaningfully.
 MISTRAL_BACKOFF_BASE_SECONDS = env_float("MISTRAL_BACKOFF_BASE_SECONDS", 15.0)
 MISTRAL_BACKOFF_MAX_SECONDS = env_float("MISTRAL_BACKOFF_MAX_SECONDS", 300.0)
+
+# Rotating raw-HTTP diagnostic log for every LLM provider call (request summary
+# + full raw response body), added 2026-08-21 chasing a reproducible
+# "provider returned non-JSON content" compose failure (hay.app) that left
+# zero trace anywhere -- neither compose_sessions (the failure path never
+# calls record_compose_session) nor application logs (no journal read access
+# on prod). The response body is what actually matters here: an empty/
+# malformed .content can still carry a finish_reason, moderation flag, or
+# error object elsewhere in the same JSON that today's code silently
+# discards. Off by default (empty path) so local/dev runs never try to write
+# to a prod-only directory; prod sets LLM_HTTP_LOG_PATH via workers.env.
+LLM_HTTP_LOG_PATH = env_str("LLM_HTTP_LOG_PATH", "")
+LLM_HTTP_LOG_MAX_BYTES = env_int("LLM_HTTP_LOG_MAX_BYTES", 50 * 1024 * 1024)
+LLM_HTTP_LOG_BACKUP_COUNT = env_int("LLM_HTTP_LOG_BACKUP_COUNT", 10)
 
 
 def mistral_configured() -> bool:
@@ -1235,6 +1259,22 @@ INVESTIGATIVE_TOOLS_ENABLED = env_bool("INVESTIGATIVE_TOOLS_ENABLED", True)
 
 # Free public Bluesky post search for community sentiment (no Twitter/X, no key).
 BLUESKY_SEARCH_ENABLED = env_bool("BLUESKY_SEARCH_ENABLED", True)
+
+# X (Twitter) recent-search, paid per-resource on X's pay-as-you-go API
+# (no subscription/minimum, credits deducted per call -- see
+# https://docs.x.com/x-api/getting-started/pricing). Unlike Bluesky, this is
+# real money per call, so it's opt-in (default off) and kept deliberately
+# small: research_tools.py fixes max_results at 10 (X's own API minimum, and
+# the smallest unit of cost) rather than letting the model request more, and
+# X_SEARCH_DAILY_CAP hard-stops total calls per UTC day via a Redis counter
+# (same INCR+EXPIRE pattern as publish_daily_guard.py) -- refusing outright
+# once hit, not degrading quality. Session-level throttling lives alongside
+# suggest_tool/suggest_glossary_term in llm_openai_compatible.py's
+# _CALL_CAPPED_TOOLS so one article can't burn a large slice of the daily
+# budget alone. Owner decision 2026-08-21: worth it if usage stays capped.
+X_BEARER_TOKEN = env_str("X_BEARER_TOKEN", "")
+X_SEARCH_ENABLED = env_bool("X_SEARCH_ENABLED", False)
+X_SEARCH_DAILY_CAP = env_int("X_SEARCH_DAILY_CAP", 20)
 
 # Self-hosted SearXNG metasearch for general web research (no Google, no key,
 # no per-query cost). Empty = web search tool disabled.

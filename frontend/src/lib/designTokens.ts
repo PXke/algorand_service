@@ -6,24 +6,24 @@
 // or painting into a canvas.
 
 export const designTokens = {
-  /** Brand mark and interaction. The one blue the logo is drawn in. */
+  /** Brand mark foot rule. The one blue the logo is drawn in. */
   'accent': { light: '#4a5bd0' },
-  /** Link ink — accent darkened to clear WCAG AA on --surface. */
+  /** Link ink — indigo darkened to clear WCAG AA on --surface. */
   'primary': { light: '#3a49ad' },
-  /** Warm newsprint page background. */
-  'surface': { light: '#f7f4ee' },
-  /** Raised card / app-bar fill. */
-  'panel': { light: '#fffdf8' },
-  /** Headline ink. */
-  'on-surface': { light: '#171410' },
+  /** Daylight page background. Cool paper, the night surface inverted. */
+  'surface': { light: '#eef0f5' },
+  /** Raised paper / glyph fill on the stamp. */
+  'panel': { light: '#f7f8fc' },
+  /** Headline ink and stamp ground. */
+  'on-surface': { light: '#14161c' },
   /** Secondary text: bylines, timestamps, breadcrumbs. */
-  'muted': { light: '#6a6355' },
+  'muted': { light: '#5a5e6a' },
   /** Tertiary marks: breadcrumb separators, hairline glyphs. */
-  'subtle': { light: '#7d7566' },
+  'subtle': { light: '#767b88' },
   /** Hairline rules. */
-  'border': { light: '#e0d9cb' },
-  /** Browser/OS chrome tint. Light tints to brand; dark matches --app-bar. */
-  'theme-color': { light: '#3a49ad', dark: '#141210' },
+  'border': { light: '#d4d7e0' },
+  /** Browser/OS chrome tint. Matches the page, not an inverted bar. */
+  'theme-color': { light: '#eef0f5', dark: '#0f1117' },
 } as const
 
 export type DesignToken = keyof typeof designTokens

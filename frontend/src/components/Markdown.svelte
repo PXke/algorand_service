@@ -1,28 +1,144 @@
 <script lang="ts">
   import { marked, Renderer } from 'marked'
-  import { looksLikeLogoUrl, proxiedImageUrl } from '../lib/images'
+  import type { Attachment } from 'svelte/attachments'
+  import { looksLikeFaviconUrl, proxiedImageUrl, sameImageUrl } from '../lib/images'
   import { renderChartHtml } from '../lib/chartRender'
 
-  let { source = '' }: { source?: string } = $props()
+  let { source = '', skipHref = '' }: { source?: string; skipHref?: string } = $props()
 
-  /** Drop favicon/logo-only image lines the pipeline sometimes injects as lead art. */
+  function hostOf(url: string): string {
+    try {
+      return new URL(url).hostname.replace(/^www\./, '')
+    } catch {
+      return ''
+    }
+  }
+
+  function esc(s: string): string {
+    return s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+
+  function plateCaption(alt: string, title?: string | null): string {
+    const raw = (title || alt || '').trim()
+    if (!raw) return ''
+    if (/^https?:\/\//i.test(raw)) return ''
+    if (/^(image|img|photo|logo)$/i.test(raw)) return ''
+    if (/\.(png|jpe?g|gif|webp|svg|avif)$/i.test(raw) && !/\s/.test(raw)) return ''
+    return raw
+  }
+
+  function plateHtml(href: string, alt: string, title?: string | null): string {
+    const src = proxiedImageUrl(href)
+    const caption = plateCaption(alt, title)
+    const img = `<img src="${esc(src)}" alt="${esc(alt)}" loading="lazy" decoding="async">`
+    const cap = caption ? `<figcaption>${esc(caption)}</figcaption>` : ''
+    return `<figure class="plate">${img}${cap}</figure>`
+  }
+
+  /* Pipeline articles close with "## Sources" (or "References") and a bullet
+     list of links. Restyle that list as citation rows: host in mono, title
+     after — a wire index, not a stack of underlined URLs. */
+  function restyleSources(html: string): string {
+    /* Heading inner is [^<]* so we cannot backtrack across earlier h2s to
+       the first <ul> in the article and skip the actual Sources list. */
+    return html.replace(
+      /(<h[1-6][^>]*>)([^<]*)(<\/h[1-6]>)\s*<ul>([\s\S]*?)<\/ul>/gi,
+      (full, open: string, inner: string, close: string, items: string) => {
+        const heading = inner.replace(/&nbsp;/g, ' ').trim()
+        if (!/^(sources?|references?)$/i.test(heading)) return full
+        const rewritten = items.replace(/<li>([\s\S]*?)<\/li>/gi, (_li, liInner: string) => {
+          const aMatch = liInner.match(/<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
+          if (!aMatch) return `<li>${liInner}</li>`
+          const href = aMatch[1]
+          const host = hostOf(href)
+          const titleText = aMatch[2].replace(/<[^>]+>/g, '').trim()
+          const showTitle =
+            Boolean(titleText) &&
+            Boolean(host) &&
+            !/^https?:\/\//i.test(titleText) &&
+            !titleText.toLowerCase().includes(host.toLowerCase())
+          const title = showTitle ? `<span class="cite-title">${aMatch[2]}</span>` : ''
+          return `<li class="cite"><a href="${href}" target="_blank" rel="noopener noreferrer"><span class="cite-host">${host || titleText}</span>${title}</a></li>`
+        })
+        return `${open}${inner}${close}<ul class="cite-list">${rewritten}</ul>`
+      },
+    )
+  }
+
+  /* Recreated when `html` changes so newly rendered tables get observed. */
+  function markOverflow(html: string): Attachment {
+    return (node) => {
+      void html
+      const frames = node.querySelectorAll<HTMLElement>('.table-frame')
+      const sync = (frame: HTMLElement) => {
+        const scroller = frame.querySelector<HTMLElement>('.table-scroll')
+        if (!scroller) return
+        const overflow = scroller.scrollWidth > scroller.clientWidth + 8
+        const atEnd =
+          scroller.scrollLeft + scroller.clientWidth >= scroller.scrollWidth - 8
+        frame.classList.toggle('is-overflow', overflow && !atEnd)
+      }
+      const check = () => {
+        for (const frame of frames) sync(frame)
+      }
+      check()
+      const ro = new ResizeObserver(check)
+      ro.observe(node)
+      const onScroll: Array<() => void> = []
+      for (const frame of frames) {
+        const scroller = frame.querySelector<HTMLElement>('.table-scroll')
+        if (!scroller) continue
+        ro.observe(scroller)
+        const handler = () => sync(frame)
+        scroller.addEventListener('scroll', handler, { passive: true })
+        onScroll.push(() => scroller.removeEventListener('scroll', handler))
+      }
+      return () => {
+        ro.disconnect()
+        for (const off of onScroll) off()
+      }
+    }
+  }
+
+  function shouldSkipImage(url: string): boolean {
+    if (!url || looksLikeFaviconUrl(url)) return true
+    return Boolean(skipHref.trim()) && sameImageUrl(url, skipHref)
+  }
+
+  /** Drop favicon-only image lines the pipeline sometimes injects as lead art. */
   function cleanSource(raw: string): string {
     return raw.replace(
       /^!\[[^\]]*\]\((\S+?)(?:\s+"[^"]*")?\)\s*$/gm,
-      (full, url: string) => (looksLikeLogoUrl(url) ? '' : full),
+      (full, url: string) => (shouldSkipImage(url) ? '' : full),
+    )
+  }
+
+  /* marked's GFM `del` tokenizer treats a lone `~text~` pair as
+     strikethrough, not just the spec's `~~text~~`. Writer prose uses `~`
+     for "approximately" (e.g. "~$16"), so two unrelated markers anywhere
+     in the same article silently strike through everything between them.
+     Escape any tilde that isn't part of a genuine `~~` pair so it stays
+     literal. */
+  function escapeLoneTildes(raw: string): string {
+    return raw.replace(/~/g, (_m, offset: number, str: string) =>
+      str[offset - 1] === '~' || str[offset + 1] === '~' ? '~' : '\\~',
     )
   }
 
   const html = $derived.by(() => {
-    const cleaned = cleanSource(source || '').trim()
+    void skipHref
+    const cleaned = escapeLoneTildes(cleanSource(source || '')).trim()
     if (!cleaned) return ''
 
     const renderer = new Renderer()
-    const baseImage = renderer.image.bind(renderer)
     renderer.image = ({ href, title, text }) => {
       const url = href ?? ''
-      if (!url || looksLikeLogoUrl(url)) return ''
-      return baseImage({ href: proxiedImageUrl(url), title, text })
+      if (!url || shouldSkipImage(url)) return ''
+      return plateHtml(url, text ?? '', title)
     }
     /* Mark the opening paragraph at parse time. Doing it after render meant
        the lede's font-size landed a frame late — a layout shift on every
@@ -32,9 +148,14 @@
     const baseParagraph = renderer.paragraph.bind(renderer)
     renderer.paragraph = (token) => {
       const out = baseParagraph(token)
+      const unwrapped = out.replace(
+        /^<p>\s*(<figure class="plate">[\s\S]*?<\/figure>)\s*<\/p>$/i,
+        '$1',
+      )
+      if (unwrapped !== out) return unwrapped
       if (ledeSeen) return out
       const bare = out.replace(/<[^>]*>/g, '').trim()
-      if (!bare || /<img\b/i.test(out)) return out
+      if (!bare || /<img\b/i.test(out) || /<figure\b/i.test(out)) return out
       ledeSeen = true
       return out.replace('<p>', '<p class="lede">')
     }
@@ -44,7 +165,8 @@
        a column on a phone, which is not a table anyone can read. The wrapper
        scrolls, and the cell min-width below is what decides when. */
     const baseTable = renderer.table.bind(renderer)
-    renderer.table = (token) => `<div class="table-scroll">${baseTable(token)}</div>`
+    renderer.table = (token) =>
+      `<div class="table-frame"><div class="table-scroll">${baseTable(token)}</div><span class="table-hint" aria-hidden="true">→</span></div>`
 
     const baseLink = renderer.link.bind(renderer)
     renderer.link = ({ href, title, tokens }) => {
@@ -71,18 +193,19 @@
       return baseCode(token)
     }
 
-    return marked.parse(cleaned, {
+    const parsed = marked.parse(cleaned, {
       async: false,
       gfm: true,
       breaks: false,
       renderer,
     }) as string
+    return restyleSources(parsed)
   })
 
 </script>
 
 {#if html}
-  <div class="md">
+  <div class="md" {@attach markOverflow(html)}>
     {@html html}
   </div>
 {/if}
@@ -95,30 +218,39 @@
     color: var(--md-ink);
     font-family: var(--font-serif);
     font-weight: 400;
-    font-size: 18.5px;
-    line-height: 1.68;
+    font-size: var(--fs-prose);
+    line-height: 1.7;
     overflow-wrap: anywhere;
   }
   @media (min-width: 520px) {
     .md {
-      font-size: 20px;
+      font-size: var(--fs-prose-lg);
       line-height: 1.72;
     }
   }
 
   .md :global(p) {
-    margin: 0 0 18px;
+    margin: 0 0 1.15em;
   }
   .md :global(p:last-child) {
     margin-bottom: 0;
   }
 
-  /* Lede — marked in JS above, since the opening paragraph may sit after a
-     lead image, a heading, or both. */
+  /* Lede — the dispatch's first breath, set apart from the body. Marked in
+     JS above, since the opening paragraph may sit after lead art. */
   .md :global(> p.lede) {
-    font-size: 1.1em;
-    line-height: 1.62;
+    font-size: 1.22em;
+    line-height: 1.48;
     color: var(--on-surface);
+    margin: 0 0 1.35em;
+    padding-bottom: 1.1em;
+    border-bottom: 1px solid var(--border);
+  }
+  @media (min-width: 520px) {
+    .md :global(> p.lede) {
+      font-size: 1.28em;
+      line-height: 1.5;
+    }
   }
 
   .md :global(h1),
@@ -201,33 +333,33 @@
     text-decoration-color: var(--accent);
   }
 
-  /* Pull quote, not a tinted callout box: display serif at reading scale,
-     set off by a heavy tone rule and air. Quotes are the one place the body
-     column is allowed to change voice. */
+  /* Pull quote: italic serif between hairlines — type, not a callout bar. */
   .md :global(blockquote) {
-    margin: 26px 0;
-    padding: 2px 0 2px 22px;
-    border-inline-start: 4px solid var(--tone, var(--accent));
+    margin: 32px 0;
+    padding: 18px 0;
+    border: 0;
+    border-block: 1px solid var(--border);
     border-radius: 0;
     background: transparent;
-    font-family: var(--font-display);
-    font-stretch: 94%;
-    font-style: normal;
+    font-family: var(--font-serif);
+    font-style: italic;
     font-size: 1.16em;
-    line-height: 1.34;
-    letter-spacing: -0.2px;
+    line-height: 1.45;
+    letter-spacing: -0.01em;
     color: var(--on-surface);
-  }
-  @media (min-width: 700px) {
-    .md :global(blockquote) {
-      margin-inline: -22px 0;
-    }
   }
   .md :global(blockquote p) {
     margin-bottom: 10px;
   }
   .md :global(blockquote p:last-child) {
     margin-bottom: 0;
+  }
+  @media (min-width: 520px) {
+    .md :global(blockquote) {
+      margin: 40px 0;
+      padding: 22px 0;
+      font-size: 1.2em;
+    }
   }
 
   .md :global(ul),
@@ -246,6 +378,62 @@
     margin: 8px 0 0;
   }
 
+  /* Sources / References — a citation ledger, not a bulleted URL dump. */
+  .md :global(.cite-list) {
+    list-style: none;
+    padding: 0;
+    margin: 4px 0 0;
+  }
+  .md :global(.cite-list li) {
+    margin: 0;
+    padding: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .md :global(.cite-list li:first-child) {
+    border-top: 1px solid var(--border);
+  }
+  .md :global(.cite-list a) {
+    display: grid;
+    grid-template-columns: minmax(9ch, 16ch) minmax(0, 1fr);
+    gap: 8px 20px;
+    align-items: baseline;
+    padding: 11px 0;
+    text-decoration: none;
+    color: inherit;
+  }
+  .md :global(.cite-list a:hover) {
+    text-decoration: none;
+    color: var(--on-surface);
+  }
+  .md :global(.cite-host) {
+    font-family: var(--font-mono);
+    font-size: 0.68em;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .md :global(.cite-title) {
+    font-family: var(--font-serif);
+    font-size: 0.92em;
+    color: var(--md-ink);
+    min-width: 0;
+  }
+  .md :global(.cite-list a:hover .cite-host),
+  .md :global(.cite-list a:hover .cite-title) {
+    color: var(--accent);
+  }
+  @media (max-width: 519px) {
+    .md :global(.cite-list a) {
+      grid-template-columns: 1fr;
+      gap: 2px;
+      padding: 12px 0;
+    }
+  }
+
   .md :global(hr) {
     border: 0;
     border-top: 1px solid var(--border);
@@ -254,35 +442,52 @@
 
   .md :global(img) {
     display: block;
-    /* Fit within the column without cropping — cover + forced width was
-       slicing portraits and wide screenshots badly. */
     max-width: 100%;
     max-height: 480px;
     width: auto;
     height: auto;
-    margin: 8px auto 18px;
+    margin: 12px auto 22px;
     object-fit: contain;
     object-position: center;
-    border-radius: 12px;
-    background: var(--callout);
+    border-radius: 0;
+    background: var(--thumb-plate);
+    border: 1px solid var(--border);
+    padding: 8px;
+    box-shadow: none;
   }
 
-  /* Lead art: the first image gets to breathe past the reading measure
-     instead of sitting letterboxed inside it. */
-  @media (min-width: 900px) {
-    .md :global(> p:first-child > img:only-child),
-    .md :global(> p:nth-child(2) > img:only-child),
-    .md :global(> img:first-child) {
-      width: calc(100% + 140px);
-      max-width: calc(100% + 140px);
-      margin-inline: -70px;
-      max-height: 420px;
-    }
-  }
   @media (max-width: 519px) {
     .md :global(img) {
       max-height: 280px;
-      border-radius: 8px;
+    }
+  }
+
+  .md :global(figure.plate) {
+    margin: 28px 0;
+  }
+  .md :global(figure.plate img) {
+    width: 100%;
+    max-height: 420px;
+    margin: 0;
+    padding: 12px;
+  }
+  .md :global(figure.plate figcaption) {
+    margin-top: 8px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+  @media (max-width: 519px) {
+    .md :global(figure.plate) {
+      margin: 22px 0;
+    }
+    .md :global(figure.plate img) {
+      max-height: 260px;
+      padding: 10px;
     }
   }
 
@@ -303,7 +508,7 @@
     padding: 16px;
     background: var(--callout);
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: 0;
     font-size: 0.88em;
     line-height: 1.55;
     -webkit-overflow-scrolling: touch;
@@ -319,22 +524,21 @@
 
   /* Data tables: smaller, tabular figures, and allowed to use the full
      column width rather than wrapping every cell to two lines. */
-  /* The wrapper is the scroll container; the table keeps its own layout. */
+  .md :global(.table-frame) {
+    position: relative;
+    margin: 0 0 24px;
+  }
+  /* The wrapper is the scroll container; the table keeps table layout.
+     display:block on the table used to fight this and clip mid-word. */
   .md :global(.table-scroll) {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-x: contain;
-    margin: 0 0 24px;
-    /* Scroll-shadow cue: a wide table (pipeline output runs to 8 columns) has
-       no visible sign it scrolls, so a phone reader sees the last column(s)
-       simply cut off — e.g. a location name truncated mid-word — with no hint
-       there's more to swipe to. Two edge-fixed radial gradients (background-
-       attachment: scroll) sit under two content-fixed opaque fades
-       (background-attachment: local); the opaque fades cover the shadow
-       exactly at each scrollable edge and slide away WITH the content once
-       scrolled past, so a shadow only shows on the side that still has more
-       to reveal. CSS-only — no JS scroll listener needed.
-       https://lea.verou.me/blog/2012/04/background-attachment-local/ */
+    /* Scroll-shadow cue: a wide table has no visible sign it scrolls, so a
+       phone reader sees the last column cut off with no hint there's more
+       to swipe to. Two edge-fixed radial gradients sit under two content-
+       fixed opaque fades; a shadow only shows on the side that still has
+       more to reveal. https://lea.verou.me/blog/2012/04/background-attachment-local/ */
     background:
       linear-gradient(to right, var(--surface) 30%, transparent),
       linear-gradient(to left, var(--surface) 30%, transparent) 100% 0,
@@ -345,23 +549,37 @@
     background-size: 24px 100%, 24px 100%, 10px 100%, 10px 100%;
     background-attachment: local, local, scroll, scroll;
   }
+  .md :global(.table-hint) {
+    position: absolute;
+    top: 8px;
+    inset-inline-end: 4px;
+    z-index: 1;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    padding: 3px 8px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+  .md :global(.table-frame.is-overflow .table-hint) {
+    opacity: 1;
+  }
+  :global([dir='rtl']) .md :global(.table-hint) {
+    transform: scaleX(-1);
+  }
   .md :global(table) {
-    /* max-content + min-width:100%: the table sizes to its content so columns
-       are never squeezed, but still fills the measure when it is narrow, so
-       short tables stay flush with the prose. Cell min-width alone could not do
-       this — an auto-layout table honours the cells' minimums only up to its
-       own width:100%, so an 8-column table still collapsed to 45px columns. */
-    width: max-content;
-    min-width: 100%;
+    /* Fill the measure when it fits; cell min-width below is what forces
+       8-column pipeline tables to overflow the wrapper and scroll. */
+    width: 100%;
     border-collapse: collapse;
     font-family: var(--font-mono);
     font-size: 0.84em;
     line-height: 1.55;
     font-variant-numeric: tabular-nums;
-    overflow-x: auto;
-    display: block;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior-x: contain;
   }
   .md :global(thead) {
     border-bottom: 2px solid var(--on-surface);
@@ -383,15 +601,21 @@
     border-top: 1px solid var(--border);
     color: var(--md-ink);
     vertical-align: top;
+    /* Parent .md uses overflow-wrap:anywhere, which was the mid-word clip
+       on wide tables. Cells wrap at word boundaries only. */
+    overflow-wrap: normal;
+    word-break: normal;
   }
   .md :global(td:last-child),
   .md :global(th:last-child) {
-    padding-inline-end: 0;
+    padding-inline-end: 12px;
   }
   /* A readability floor per column, on top of the content sizing above. */
   .md :global(th),
   .md :global(td) {
     min-width: 7.5ch;
+    overflow-wrap: normal;
+    word-break: normal;
   }
   /* Zebra fought the hairlines; rules alone separate rows more cleanly. */
   .md :global(tr:nth-child(even) td) {
@@ -414,9 +638,9 @@
   .md :global(.chart-figure) {
     margin: 0 0 18px;
     padding: 16px 16px 12px;
-    background: var(--callout);
+    background: var(--panel);
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: 0;
   }
   .md :global(.chart-title) {
     margin: 0 0 10px;
@@ -465,5 +689,10 @@
     width: 9px;
     height: 9px;
     border-radius: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .md :global(.table-hint) {
+      transition: none;
+    }
   }
 </style>

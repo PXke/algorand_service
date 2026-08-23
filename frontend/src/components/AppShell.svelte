@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { messages, t, localePreference, localeOptions, activeLocale, localeTag } from '../lib/i18n'
+  import { messages, t, localePreference, localeOptions, activeLocale } from '../lib/i18n'
   import { themeMode, resolvedTheme, toggleLightDark } from '../lib/theme'
   import { walletAddress, isAdmin, logout } from '../lib/auth/session'
   import { setAnalyticsOptOut } from '../lib/analyticsOptOut'
@@ -10,6 +10,7 @@
   import Icon from './Icon.svelte'
   import MarketsBar from './MarketsBar.svelte'
   import SiteFooter from './SiteFooter.svelte'
+  import { liveClock, formatDateline } from '../lib/liveClock'
   import type { Component } from 'svelte'
 
   let { children }: { children: import('svelte').Snippet } = $props()
@@ -129,16 +130,8 @@
     ] as const,
   )
 
-  const dateline = $derived(
-    new Date().toLocaleDateString(localeTag($activeLocale), {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-    }),
-  )
-
-
+  const dateline = $derived(formatDateline($activeLocale))
+  const datelineShort = $derived(formatDateline($activeLocale, true))
   const onArticle = $derived($pathOnly.startsWith('/news/articles/'))
   const onSearch = $derived($pathOnly === '/search' || $pathOnly.startsWith('/search/'))
   const isDark = $derived($resolvedTheme === 'dark')
@@ -225,7 +218,14 @@
         <span class="titles">
           <span class="name wide">{t($messages, 'appTitle')}</span>
           <span class="name compact">PXke</span>
-          <span class="dateline">{dateline}</span>
+          <span class="dateline">
+            <span class="date-long">{dateline}</span>
+            <span class="date-short">{datelineShort}</span>
+            <span class="clock-pair">
+              <span class="clock-sep" aria-hidden="true">·</span>
+              <span class="clock" {@attach liveClock($activeLocale)}></span>
+            </span>
+          </span>
         </span>
       </a>
 
@@ -234,7 +234,7 @@
            of empty paper between them, then the tabs sat alone on a second thin
            strip below. One row does both jobs. -->
       <nav class="section-nav" aria-label="Primary">
-        {#each sections as item}
+        {#each sections as item (item.href)}
           <a
             class="tab"
             class:active={item.match($pathOnly)}
@@ -253,8 +253,8 @@
       <div class="actions">
         {#if onArticle}
           <button class="back-btn" type="button" onclick={() => go('/news')}>
-            <Icon name="arrow_back" size={16} />
-            {t($messages, 'backToFeed')}
+            <span class="chevron" aria-hidden="true"></span>
+            {t($messages, 'navLatest')}
           </button>
         {/if}
 
@@ -290,7 +290,7 @@
           {#if appsOpen}
             <div class="popover apps-popover" role="menu">
               <p class="popover-hint">{t($messages, 'navProductsMenuHint')}</p>
-              {#each products as product}
+              {#each products as product (product.href)}
                 <button
                   type="button"
                   class="product-row"
@@ -298,14 +298,8 @@
                   role="menuitem"
                   onclick={() => go(product.href)}
                 >
-                  <span class="product-icon">
-                    <Icon name={product.icon} size={20} />
-                  </span>
                   <span class="product-copy">
-                    <span class="product-label">
-                      {product.label}
-                      {#if product.active($pathOnly)}<span class="dot"></span>{/if}
-                    </span>
+                    <span class="product-label">{product.label}</span>
                     <span class="product-tagline">{product.tagline}</span>
                   </span>
                 </button>
@@ -316,18 +310,21 @@
         {/if}
 
         {#if $walletAddress}
-          <button class="btn wallet article-secondary" type="button" onclick={() => logout()}>
-            <Icon name="wallet" size={18} class="wallet-icon" />
-            <span class="wallet-label">{shortAddr($walletAddress)}</span>
+          <button
+            class="wallet-stamp signed article-secondary"
+            type="button"
+            title={t($messages, 'walletConnected')}
+            onclick={() => logout()}
+          >
+            {shortAddr($walletAddress)}
           </button>
         {:else}
           <button
-            class="btn btn-primary wallet article-secondary"
+            class="wallet-stamp article-secondary"
             type="button"
             onclick={() => (walletOpen = true)}
           >
-            <Icon name="wallet" size={18} class="wallet-icon" />
-            <span class="wallet-label">{t($messages, 'navWallet')}</span>
+            {t($messages, 'navWallet')}
           </button>
         {/if}
 
@@ -358,7 +355,7 @@
           </button>
           {#if localeOpen}
             <div class="popover locale-popover" role="menu">
-              {#each localeOptions as opt}
+              {#each localeOptions as opt (opt.value)}
                 <button
                   type="button"
                   class="locale-row"
@@ -371,7 +368,7 @@
                 >
                   {t($messages, opt.labelKey)}
                   {#if $localePreference === opt.value}
-                    <Icon name="check" size={18} />
+                    <span class="tick" aria-hidden="true">·</span>
                   {/if}
                 </button>
               {/each}
@@ -387,8 +384,8 @@
   {#if drawerOpen}
     <div class="drawer-backdrop" onclick={() => (drawerOpen = false)} role="presentation"></div>
     <aside class="drawer" aria-label={t($messages, 'navApps')}>
-      <div class="drawer-header panel">
-        <BrandMark size={36} />
+      <div class="drawer-header">
+        <BrandMark size={30} />
         <div>
           <strong>{t($messages, 'appTitle')}</strong>
           <p class="subtle">{t($messages, 'appTagline')}</p>
@@ -397,28 +394,26 @@
 
       {#if products.length > 1}
         <p class="drawer-label">{t($messages, 'navApps')}</p>
-        {#each products as product}
+        {#each products as product (product.href)}
           <button
             type="button"
             class="drawer-link"
             class:selected={product.active($pathOnly)}
             onclick={() => go(product.href)}
           >
-            <Icon name={product.icon} size={21} />
             {product.label}
           </button>
         {/each}
       {/if}
 
       <p class="drawer-label">{t($messages, 'navNews')}</p>
-      {#each drawerNav as item}
+      {#each drawerNav as item (item.href)}
         <button
           type="button"
           class="drawer-link"
           class:selected={item.match($pathOnly)}
           onclick={() => go(item.href)}
         >
-          <Icon name={item.icon} size={21} />
           {item.label}
         </button>
       {/each}
@@ -426,7 +421,6 @@
       <p class="drawer-label">{t($messages, 'navAppearance')}</p>
       {#if $walletAddress}
         <button type="button" class="drawer-link" onclick={() => logout()}>
-          <Icon name="wallet" size={21} />
           {shortAddr($walletAddress)}
         </button>
       {:else}
@@ -438,7 +432,6 @@
             walletOpen = true
           }}
         >
-          <Icon name="wallet" size={21} />
           {t($messages, 'walletConnect')}
         </button>
       {/if}
@@ -448,9 +441,8 @@
         class:selected={$themeMode === 'light'}
         onclick={() => themeMode.set('light')}
       >
-        <Icon name="light_mode" size={21} />
         {t($messages, 'themeLight')}
-        {#if $themeMode === 'light'}<Icon name="check" size={18} class="trail" />{/if}
+        {#if $themeMode === 'light'}<span class="tick" aria-hidden="true">·</span>{/if}
       </button>
       <button
         type="button"
@@ -458,9 +450,8 @@
         class:selected={$themeMode === 'dark'}
         onclick={() => themeMode.set('dark')}
       >
-        <Icon name="dark_mode" size={21} />
         {t($messages, 'themeDark')}
-        {#if $themeMode === 'dark'}<Icon name="check" size={18} class="trail" />{/if}
+        {#if $themeMode === 'dark'}<span class="tick" aria-hidden="true">·</span>{/if}
       </button>
       <button
         type="button"
@@ -468,13 +459,12 @@
         class:selected={$themeMode === 'system'}
         onclick={() => themeMode.set('system')}
       >
-        <Icon name="brightness_auto" size={21} />
         {t($messages, 'themeSystem')}
-        {#if $themeMode === 'system'}<Icon name="check" size={18} class="trail" />{/if}
+        {#if $themeMode === 'system'}<span class="tick" aria-hidden="true">·</span>{/if}
       </button>
 
       <p class="drawer-label">{t($messages, 'navLanguage')}</p>
-      {#each localeOptions as opt}
+      {#each localeOptions as opt (opt.value)}
         <button
           type="button"
           class="drawer-link"
@@ -485,7 +475,7 @@
           }}
         >
           {t($messages, opt.labelKey)}
-          {#if $localePreference === opt.value}<Icon name="check" size={18} class="trail" />{/if}
+          {#if $localePreference === opt.value}<span class="tick" aria-hidden="true">·</span>{/if}
         </button>
       {/each}
     </aside>
@@ -540,9 +530,16 @@
        through the bar and read as a rendering fault. A masthead is printed
        on the paper, not floated over it — and this drops a backdrop-filter
        that was compositing the whole page on every scroll frame. */
-    background: var(--app-bar);
-    border-top: 3px solid var(--accent);
+    background: var(--masthead);
+    color: var(--masthead-ink);
+    border-top: 0;
     border-bottom: 1px solid var(--border);
+    box-shadow: none;
+  }
+  :global(html[data-theme='dark']) .masthead :global(.mark) {
+    background: transparent;
+    color: var(--masthead-ink);
+    box-shadow: none;
   }
   /* While reading mid-article: drop site chrome so only the title strip remains. */
   .shell.reading-collapsed .masthead,
@@ -605,22 +602,18 @@
     flex-direction: column;
     min-width: 0;
   }
-  /* This IS the nameplate now. The separate full-width one above the bar was
-     cut: between it, the bar and the ticker the page spent 231px of chrome
-     before the first headline, and it duplicated the mark and the name the bar
-     already carried. Set at the narrow end of Archivo's width axis so it reads
-     as a masthead rather than a UI label. */
+  /* Nameplate lives in the bar. Stretch matches headlines, not a condensed masthead. */
   .name {
     font-family: var(--font-display);
-    font-stretch: 82%;
+    font-stretch: 94%;
     font-weight: 800;
     letter-spacing: -0.5px;
-    font-size: 21px;
+    font-size: var(--fs-name);
     line-height: 1.1;
   }
   @media (min-width: 520px) {
     .name {
-      font-size: 27px;
+      font-size: 22px;
     }
   }
   .name.wide {
@@ -637,17 +630,39 @@
       display: none;
     }
   }
+  /* One edition stamp for the whole site — date here, not again on the folio or footer. */
   .dateline {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--masthead-muted);
+    margin-top: 3px;
+  }
+  .date-long,
+  .clock-pair {
     display: none;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.3px;
+  }
+  .date-short {
+    display: inline;
+  }
+  .clock-sep {
+    margin-inline: 6px;
     color: var(--subtle);
-    margin-top: 2px;
+  }
+  .clock {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.4px;
   }
   @media (min-width: 860px) {
-    .dateline {
-      display: block;
+    .date-long,
+    .clock-pair {
+      display: inline;
+    }
+    .date-short {
+      display: none;
     }
   }
   .actions {
@@ -666,7 +681,7 @@
   .icon-btn {
     border: 0;
     background: transparent;
-    color: var(--on-surface);
+    color: var(--masthead-ink);
     border-radius: 50%;
     width: 44px;
     height: 44px;
@@ -675,13 +690,13 @@
     flex-shrink: 0;
   }
   .icon-btn:hover {
-    background: color-mix(in srgb, var(--on-surface) 8%, transparent);
+    background: color-mix(in srgb, var(--masthead-ink) 12%, transparent);
   }
   .icon-btn.muted {
-    color: var(--muted);
+    color: var(--masthead-muted);
   }
   .icon-btn.active {
-    color: var(--primary);
+    color: var(--accent);
   }
   /* After .icon-btn so display:none wins over inline-grid on wide. */
   @media (min-width: 860px) {
@@ -694,44 +709,56 @@
     align-items: center;
     gap: 6px;
     height: 36px;
-    padding: 0 12px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
+    padding: 0 8px;
+    border: 0;
     background: transparent;
-    color: var(--on-surface);
-    font-size: 13px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
     font-weight: 600;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+    color: var(--masthead-muted);
   }
   .back-btn:hover {
-    background: var(--accent-soft);
+    color: var(--accent);
+    background: transparent;
+  }
+  .back-btn .chevron::before {
+    content: '‹';
+    font-size: 16px;
+    line-height: 1;
+    font-weight: 400;
+  }
+  :global([dir='rtl']) .back-btn .chevron::before {
+    content: '›';
   }
   @media (min-width: 860px) {
     .back-btn {
       display: inline-flex;
     }
   }
-  .wallet {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
-    font-size: 13px;
-  }
-  @media (min-width: 520px) {
-    .wallet {
-      padding: 8px 14px;
-    }
-  }
-  .wallet :global(.wallet-icon) {
+  .wallet-stamp {
+    border: 0;
+    background: transparent;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+    color: var(--masthead-muted);
+    min-height: 44px;
+    padding: 0 8px;
     flex-shrink: 0;
   }
-  .wallet-label {
-    display: none;
+  .wallet-stamp.signed {
+    text-transform: none;
+    letter-spacing: 0.2px;
+    font-variant-numeric: tabular-nums;
   }
-  @media (min-width: 520px) {
-    .wallet-label {
-      display: inline;
-    }
+  .wallet-stamp:hover,
+  .wallet-stamp:focus-visible {
+    color: var(--accent);
+    background: transparent;
   }
   .popover-wrap {
     position: relative;
@@ -739,22 +766,22 @@
   }
   .popover {
     position: absolute;
-    top: calc(100% + 8px);
+    top: calc(100% + 1px);
     inset-inline-end: 0;
     z-index: 43;
-    min-width: 280px;
+    min-width: 260px;
     max-width: min(320px, 92vw);
-    padding: 8px;
+    padding: 4px 0;
     border: 1px solid var(--border);
-    border-radius: 14px;
-    background: var(--panel);
-    box-shadow: 0 12px 32px var(--card-hover-shadow);
-    animation: pop-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+    border-radius: 0;
+    background: var(--surface);
+    box-shadow: none;
+    animation: pop-in 0.18s ease both;
   }
   @keyframes pop-in {
     from {
       opacity: 0;
-      transform: translateY(-6px) scale(0.98);
+      transform: translateY(-4px);
     }
     to {
       opacity: 1;
@@ -771,12 +798,22 @@
   }
   .popover-hint {
     margin: 0;
-    padding: 8px 10px 6px;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.8px;
+    padding: 10px 14px 6px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.9px;
     text-transform: uppercase;
-    color: var(--subtle);
+    color: var(--muted);
+  }
+  .popover-hint::before {
+    content: '';
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-inline-end: 9px;
+    background: var(--accent);
+    vertical-align: 6%;
   }
   .product-row {
     display: flex;
@@ -786,27 +823,13 @@
     text-align: start;
     border: 0;
     background: transparent;
-    border-radius: 12px;
-    padding: 10px;
+    border-radius: 0;
+    padding: 10px 14px;
     color: var(--on-surface);
   }
-  .product-row:hover,
-  .product-row.active {
-    background: color-mix(in srgb, var(--primary) 12%, transparent);
-  }
-  .product-icon {
-    width: 38px;
-    height: 38px;
-    border-radius: 10px;
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    background: var(--accent-soft);
+  .product-row:hover {
+    background: transparent;
     color: var(--accent);
-  }
-  .product-row.active .product-icon {
-    color: var(--primary);
-    background: color-mix(in srgb, var(--primary) 22%, transparent);
   }
   .product-copy {
     display: flex;
@@ -817,27 +840,32 @@
   .product-label {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     font-size: 14px;
     font-weight: 700;
   }
   .product-row.active .product-label {
-    color: var(--primary);
+    color: var(--accent);
   }
-  .dot {
+  .product-row.active .product-label::before {
+    content: '';
+    display: inline-block;
     width: 7px;
     height: 7px;
-    border-radius: 50%;
-    background: var(--primary);
+    background: var(--accent);
+    flex-shrink: 0;
   }
   .product-tagline {
     font-size: 12px;
     line-height: 1.35;
     color: var(--muted);
   }
+  .product-row:hover .product-tagline,
+  .product-row.active .product-tagline {
+    color: var(--muted);
+  }
   .locale-popover {
-    min-width: 220px;
-    padding: 6px;
+    min-width: 200px;
   }
   .locale-row {
     display: flex;
@@ -848,15 +876,28 @@
     text-align: start;
     border: 0;
     background: transparent;
-    border-radius: 10px;
-    padding: 10px 12px;
+    border-radius: 0;
+    padding: 10px 14px;
     color: var(--on-surface);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
     font-weight: 500;
+    letter-spacing: 0.2px;
   }
-  .locale-row:hover,
+  .locale-row:hover {
+    color: var(--accent);
+    background: transparent;
+  }
   .locale-row.selected {
-    background: color-mix(in srgb, var(--primary) 14%, transparent);
+    color: var(--accent);
     font-weight: 600;
+    background: transparent;
+  }
+  .tick {
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-weight: 700;
+    margin-inline-start: auto;
   }
   .section-nav {
     display: flex;
@@ -892,7 +933,7 @@
       flex-basis: 100%;
       order: 10;
       height: 40px;
-      border-top: 1px solid var(--border);
+      border-top: 1px solid color-mix(in srgb, var(--masthead-ink) 14%, transparent);
     }
     .shell.on-article .section-nav {
       display: none;
@@ -919,7 +960,7 @@
     align-items: center;
     min-height: 44px;
     padding: 0 13px;
-    color: var(--muted);
+    color: var(--masthead-muted);
     font-size: 13px;
     font-weight: 600;
     letter-spacing: 0.3px;
@@ -927,11 +968,11 @@
     transition: color 0.2s ease;
   }
   .tab:hover {
-    color: var(--on-surface);
+    color: var(--masthead-ink);
     text-decoration: none;
   }
   .tab.active {
-    color: var(--primary);
+    color: var(--masthead-ink);
     font-weight: 700;
   }
   .underline {
@@ -939,9 +980,9 @@
     left: 50%;
     bottom: 0;
     width: 22px;
-    height: 2.5px;
-    border-radius: 2px;
-    background: var(--primary);
+    height: 2px;
+    border-radius: 0;
+    background: var(--accent);
     transform: translateX(-50%) scaleX(0);
     transform-origin: center;
     transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
@@ -963,23 +1004,23 @@
     position: fixed;
     top: 0;
     inset-inline-start: 0;
-    width: min(320px, 92vw);
+    width: min(300px, 88vw);
     height: 100%;
     height: 100dvh;
     z-index: 51;
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: max(8px, env(safe-area-inset-top, 0px)) 8px
-      max(8px, env(safe-area-inset-bottom, 0px));
-    padding-inline-start: max(8px, env(safe-area-inset-left, 0px));
+    gap: 0;
+    padding: max(16px, env(safe-area-inset-top, 0px)) 16px
+      max(16px, env(safe-area-inset-bottom, 0px));
+    padding-inline-start: max(16px, env(safe-area-inset-left, 0px));
     overflow: auto;
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
-    background: var(--panel);
+    background: var(--surface);
     border-inline-end: 1px solid var(--border);
-    box-shadow: 12px 0 40px var(--card-hover-shadow);
-    animation: drawer-in 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+    box-shadow: none;
+    animation: drawer-in 0.28s ease both;
   }
   @keyframes fade-in {
     from {
@@ -999,6 +1040,19 @@
       transform: none;
     }
   }
+  @keyframes drawer-in-rtl {
+    from {
+      opacity: 0.6;
+      transform: translateX(12px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  :global([dir='rtl']) .drawer {
+    animation-name: drawer-in-rtl;
+  }
   @media (prefers-reduced-motion: reduce) {
     .drawer-backdrop,
     .drawer {
@@ -1009,43 +1063,62 @@
     display: flex;
     gap: 12px;
     align-items: center;
-    margin: 4px;
-    border-radius: 14px;
-    background: var(--surface);
+    margin: 0 0 8px;
+    padding: 0 0 16px;
+    border-bottom: 1px solid var(--border);
+    background: transparent;
+  }
+  .drawer-header strong {
+    display: block;
+    font-family: var(--font-display);
+    font-stretch: 94%;
+    font-weight: 800;
+    letter-spacing: -0.4px;
+    font-size: 18px;
   }
   .drawer-header p {
     margin: 4px 0 0;
     font-size: 12px;
   }
   .drawer-label {
-    margin: 12px 0 4px;
-    padding: 0 12px;
-    font-size: 11px;
+    margin: 18px 0 4px;
+    padding: 0;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
     font-weight: 600;
-    letter-spacing: 0.8px;
+    letter-spacing: 0.9px;
     text-transform: uppercase;
-    color: var(--subtle);
+    color: var(--muted);
+  }
+  .drawer-label::before {
+    content: '';
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-inline-end: 9px;
+    background: var(--accent);
+    vertical-align: 6%;
   }
   .drawer-link {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
     text-align: start;
     border: 0;
     background: transparent;
-    padding: 12px;
+    padding: 10px 0;
     min-height: 44px;
-    border-radius: 10px;
+    border-radius: 0;
     color: var(--on-surface);
     font-weight: 500;
   }
-  .drawer-link :global(.trail) {
-    margin-inline-start: auto;
-    color: var(--primary);
+  .drawer-link:hover {
+    color: var(--accent);
+    background: transparent;
   }
-  .drawer-link:hover,
   .drawer-link.selected {
-    background: color-mix(in srgb, var(--primary) 18%, transparent);
-    font-weight: 700;
+    color: var(--accent);
+    font-weight: 600;
+    background: transparent;
   }
 </style>

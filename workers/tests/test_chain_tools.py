@@ -45,6 +45,88 @@ def test_lookup_asset_total_adjusted_none_when_decimals_missing(
     assert result["total_adjusted"] is None
 
 
+def test_lookup_asset_flags_uint64_max_no_cap_sentinel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """lookup_asset itself flags the uint64-max 'no fixed cap' sentinel -- not just get_asset_holder_share -- since the writer can (and did, in the real HesabPay/HAFN incident) combine this tool's raw total_adjusted with another tool's raw balance and do the division by hand, reproducing the exact wrong ~100%-concentration conclusion the dedicated share tool was built to prevent."""
+    monkeypatch.setattr(
+        chain_tools,
+        "_algod_get",
+        lambda _path, **_kwargs: {
+            "params": {
+                "name": "Hesab Afghani",
+                "unit-name": "HAFN",
+                "total": 18_446_744_073_709_551_615,
+                "decimals": 2,
+                "creator": "CREATOR",
+            }
+        },
+    )
+    result = chain_tools._tool_lookup_asset(849191641)
+    assert result["total_is_no_cap_sentinel"] is True
+    assert "no fixed cap" in result["total_supply_warning"]
+
+
+def test_lookup_asset_no_warning_on_a_real_capped_supply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A genuine fixed-supply asset (like CompX's 1e15 raw / 1 billion adjusted) gets no sentinel warning -- the flag must not fire on ordinary large supplies, only the specific uint64-max convention."""
+    monkeypatch.setattr(
+        chain_tools,
+        "_algod_get",
+        lambda _path, **_kwargs: {
+            "params": {"total": 1_000_000_000_000_000, "decimals": 6, "creator": "CREATOR"}
+        },
+    )
+    result = chain_tools._tool_lookup_asset(1732165149)
+    assert "total_is_no_cap_sentinel" not in result
+    assert "total_supply_warning" not in result
+
+
+def test_lookup_asset_holders_propagates_the_no_cap_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lookup_asset_holders exposes creator_holding_adjusted right next to a separately-fetched total -- the exact pairing that let the writer self-compute the wrong percentage after get_asset_holder_share alone was fixed. It must carry the same warning lookup_asset attaches."""
+    monkeypatch.setattr(
+        chain_tools,
+        "_algod_get",
+        lambda _path, **_kwargs: {
+            "params": {
+                "name": "Hesab Afghani",
+                "total": 18_446_744_073_709_551_615,
+                "decimals": 2,
+                "creator": "CREATOR_ADDR",
+            }
+        },
+    )
+    monkeypatch.setattr(chain_tools, "_tool_lookup_account", lambda _addr: {"assets": []})
+    monkeypatch.setattr(
+        chain_tools,
+        "_mainnet_idx_get",
+        lambda _path, params=None, **_kwargs: {"balances": []},  # noqa: ARG005
+    )
+    result = chain_tools._tool_lookup_asset_holders(849191641)
+    assert "total_supply_warning" in result
+    assert "no fixed cap" in result["total_supply_warning"]
+
+
+def test_lookup_asset_holders_no_warning_on_a_real_capped_supply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No warning key at all for an ordinary fixed-supply asset -- the field must stay absent, not just falsy, so a naive `if "total_supply_warning" in result` check downstream works."""
+    monkeypatch.setattr(
+        chain_tools,
+        "_algod_get",
+        lambda _path, **_kwargs: {
+            "params": {"total": 1_000_000_000_000_000, "decimals": 6, "creator": "CREATOR_ADDR"}
+        },
+    )
+    monkeypatch.setattr(chain_tools, "_tool_lookup_account", lambda _addr: {"assets": []})
+    monkeypatch.setattr(
+        chain_tools,
+        "_mainnet_idx_get",
+        lambda _path, params=None, **_kwargs: {"balances": []},  # noqa: ARG005
+    )
+    result = chain_tools._tool_lookup_asset_holders(1732165149)
+    assert "total_supply_warning" not in result
+
+
 def test_get_asset_holder_share_computes_real_percentage(monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression-pin the actual CompX incident numbers: total=1e15 raw (decimals=6 -> 1 billion COMPX), creator holds 112,111,670,453,492 raw -> the real share is ~11.21%, NOT the "99.99%" the writer fabricated by doing the division itself and getting it wrong."""
 
@@ -70,6 +152,34 @@ def test_get_asset_holder_share_computes_real_percentage(monkeypatch: pytest.Mon
     assert result["holder_amount_adjusted"] == 112_111_670.453492
     assert result["share_pct"] == 11.2112
     assert result["share_pct"] != 99.99
+
+
+def test_get_asset_holder_share_refuses_on_uint64_max_no_cap_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression-pin the actual HesabPay/HAFN incident: total registered at the literal uint64 max (a 'no fixed cap' sentinel some ASAs use, not a real economic supply) makes any percentage against it meaningless -- a reserve account holding most of that theoretical max reads as ~100%, while lookup_asset_holders shows real balances spread across tens of thousands of distinct accounts in the same session. Must refuse rather than return a misleading share_pct."""
+
+    def fake_algod_get(path: str, **_kwargs: object) -> dict:
+        if path.startswith("/v2/accounts/") and "/assets/" in path:
+            return {"asset-holding": {"amount": 18_446_742_416_822_750, "asset-id": 849191641}}
+        if path.startswith("/v2/assets/"):
+            return {
+                "params": {
+                    "name": "Hesab Afghani",
+                    "total": 18_446_744_073_709_551_615,
+                    "decimals": 2,
+                    "creator": "CREATOR_ADDR",
+                }
+            }
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr(chain_tools, "_algod_get", fake_algod_get)
+
+    creator_addr = chain_tools._encode_address(b"\x04" * 32)
+    result = chain_tools._tool_get_asset_holder_share(849191641, creator_addr)
+    assert "error" in result
+    assert "share_pct" not in result
+    assert "no fixed cap" in result["error"]
 
 
 def test_get_asset_holder_share_zero_when_address_does_not_hold_asset(

@@ -157,14 +157,36 @@ _COMPATIBLE: dict[str, frozenset[str]] = {
 }
 
 
+def _close(x: float, y: float, tol: float) -> bool:
+    """Whether x and y are within tol relative difference (absolute when both are ~0)."""
+    scale = max(abs(x), abs(y))
+    if scale < 1e-9:
+        return abs(x - y) < 1e-9
+    return abs(x - y) / scale <= tol
+
+
 def _matches(a: Quantity, b: Quantity, tol: float) -> bool:
-    """Two quantities entail each other: compatible unit class (see ``_COMPATIBLE``) and within ``tol`` relative difference (absolute when one side is ~0)."""
+    """Two quantities entail each other: compatible unit class (see ``_COMPATIBLE``) and within ``tol`` relative difference.
+
+    percent<->plain is a special case, not a ``_COMPATIBLE`` entry: DeFi/chain
+    tool responses almost always report a ratio (utilization 0.435), and a
+    writer correctly rendering that as prose percent (43.5%) is completely
+    invisible to a same-magnitude comparison -- confirmed 2026-08-21 as the
+    dominant false-positive source across several well-researched, accurately
+    sourced DeFi articles (CompX, DorkFi) that the entailment score flagged
+    as ~40-70% ungrounded despite verifying correct against live chain/API
+    data. Deliberately one-directional in effect only through the ×100 check
+    below, not a blanket unit merge -- a percent claim still needs a plain
+    anchor at the RIGHT magnitude (0.435, not 435), so this can't be tricked
+    by an unrelated plain trace number at percent-scale coincidentally
+    equalling the claim (the same rare-coincidence tradeoff already accepted
+    for bytes/plain compatibility above).
+    """
+    if a.unit == "percent" and b.unit == "plain":
+        return _close(a.value, b.value * 100, tol)
     if b.unit not in _COMPATIBLE.get(a.unit, frozenset({a.unit})):
         return False
-    scale = max(abs(a.value), abs(b.value))
-    if scale < 1e-9:
-        return abs(a.value - b.value) < 1e-9
-    return abs(a.value - b.value) / scale <= tol
+    return _close(a.value, b.value, tol)
 
 
 @dataclass(frozen=True)

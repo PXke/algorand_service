@@ -268,6 +268,7 @@ class AdminCassandraStore:
             ArticleStmts,
             ArticleVersionStmts,
             DeletedArticleStmts,
+            DraftArticleStmts,
             FeedStmts,
         )
 
@@ -277,6 +278,8 @@ class AdminCassandraStore:
             return False
 
         session = get_cassandra_session()
+        with contextlib.suppress(Exception):
+            session.execute(DraftArticleStmts.DELETE, (aid,))
 
         # Tombstone FIRST (before any row disappears): the SSR route serves
         # 410 Gone for tombstoned ids so search engines drop the URL fast
@@ -425,17 +428,29 @@ class AdminCassandraStore:
         """Currently-drafted articles, for the admin UI's restore list -- these are absent from articles_feed by design, so the normal feed listing can never surface them."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import DraftArticleStmts
+        from app.modules.news.stores.cassandra import CassandraArticleStore
 
-        rows = get_cassandra_session().execute(DraftArticleStmts.LIST)
-        items = [
-            {
-                "article_id": str(row.article_id),
-                "title": row.title,
-                "source_url": row.source_url,
-                "drafted_at": row.drafted_at.isoformat() if row.drafted_at else None,
-            }
-            for row in rows
-        ]
+        session = get_cassandra_session()
+        rows = list(session.execute(DraftArticleStmts.LIST))
+        stored = CassandraArticleStore().get_many([str(row.article_id) for row in rows])
+        items = []
+        for row in rows:
+            aid = str(row.article_id)
+            article = stored.get(aid)
+            # Delete left the index row behind (until 2026-08-17), so most
+            # draft_articles entries are ghosts: click → admin get 404s.
+            if article is None or not article.draft:
+                with contextlib.suppress(Exception):
+                    session.execute(DraftArticleStmts.DELETE, (row.article_id,))
+                continue
+            items.append(
+                {
+                    "article_id": aid,
+                    "title": article.title,
+                    "source_url": article.source_url or row.source_url,
+                    "drafted_at": row.drafted_at.isoformat() if row.drafted_at else None,
+                }
+            )
         items.sort(key=lambda it: it["drafted_at"] or "", reverse=True)
         return items
 

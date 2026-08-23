@@ -31,6 +31,7 @@ export const DISPLAY_LABELS: Readonly<Record<string, string>> = {
   'ai': 'AI',
   'algokit': 'AlgoKit',
   'algorand': 'Algorand',
+  'algorand-foundation': 'Algorand Foundation',
   'api': 'APIs',
   'apis': 'APIs',
   'asa': 'ASAs',
@@ -43,6 +44,8 @@ export const DISPLAY_LABELS: Readonly<Record<string, string>> = {
   'defi': 'DeFi',
   'defi-yield': 'DeFi yield',
   'kyc': 'KYC',
+  'nfd': 'NFD',
+  'nfdomains': 'NFDomains',
   'nft': 'NFTs',
   'nft-marketplace': 'NFT marketplaces',
   'nfts': 'NFTs',
@@ -53,4 +56,5 @@ export const DISPLAY_LABELS: Readonly<Record<string, string>> = {
   'special-edition': 'Special Edition',
   'tvl': 'TVL',
   'x402': 'x402',
+  'xgov': 'xGov',
 }

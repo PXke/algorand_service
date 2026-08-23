@@ -61,7 +61,11 @@
     "tvl": "TVL",
     "kyc": "KYC",
     "x402": "x402",
-    "special-edition": "Special Edition"
+    "special-edition": "Special Edition",
+    "nfd": "NFD",
+    "nfdomains": "NFDomains",
+    "xgov": "xGov",
+    "algorand-foundation": "Algorand Foundation"
   },
   "display_labels_note": "Internal slug -> reader-facing text. DISPLAY ONLY: /topic/<tag> URLs always use the raw slug on both sides, so a link never changes shape based on this table."
 }

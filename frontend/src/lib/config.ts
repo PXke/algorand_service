@@ -3,6 +3,14 @@ function env(key: string, fallback: string): string {
   return typeof v === 'string' && v.length > 0 ? v : fallback
 }
 
+/** Browser algod base. Empty VITE_ALGOD_API_URL means "our API's local-node proxy". */
+function algodApiUrl(): string {
+  const explicit = env('VITE_ALGOD_API_URL', '')
+  if (explicit) return explicit
+  const api = env('VITE_API_BASE_URL', '').replace(/\/$/, '')
+  return api ? `${api}/api/v1/algod` : '/api/v1/algod'
+}
+
 function parseAddressList(raw: string): string[] {
   if (!raw.trim()) return []
   return raw
@@ -14,7 +22,7 @@ function parseAddressList(raw: string): string[] {
 export const config = {
   apiBaseUrl: env('VITE_API_BASE_URL', ''),
   authDomain: env('VITE_AUTH_DOMAIN', 'localhost'),
-  algodApiUrl: env('VITE_ALGOD_API_URL', 'https://testnet-api.algonode.cloud'),
+  algodApiUrl: algodApiUrl(),
   // Pera keeps WalletConnect v1 alive on its bridges; bridge.walletconnect.org is gone.
   walletConnectBridge: env(
     'VITE_WALLET_CONNECT_BRIDGE',

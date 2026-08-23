@@ -386,6 +386,41 @@ class MetricsDashboardResponse(msgspec.Struct, kw_only=True):
     tiles: list[MetricTile]
 
 
+class ChainPulseKind(msgspec.Struct, kw_only=True):
+    """One txn class inside a block (payments, assets, apps, …)."""
+
+    id: str
+    count: int
+
+
+class ChainPulseBlock(msgspec.Struct, kw_only=True):
+    """One committed round in the live chain pulse, with optional txn mix."""
+
+    round: int
+    txns: int
+    ts: int | None = None
+    inners: int = 0
+    kinds: list[ChainPulseKind] = []
+
+
+class ChainPulseResponse(msgspec.Struct, kw_only=True):
+    """Last minute of blocks — one bar per round — for the front-page wire."""
+
+    last_round: int
+    txns_last_minute: int
+    blocks: list[ChainPulseBlock]
+
+
+class ChainPulseMix(msgspec.Struct, kw_only=True):
+    """What composed one committed round — payments, assets, apps."""
+
+    round: int
+    txns: int
+    inners: int = 0
+    ts: int | None = None
+    kinds: list[ChainPulseKind]
+
+
 # ── Placements ────────────────────────────────────────────────────────────────
 class FeedPlacementItem(msgspec.Struct, kw_only=True):
     """One sponsored placement merged into the reader feed."""

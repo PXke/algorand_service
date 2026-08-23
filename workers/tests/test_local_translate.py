@@ -188,6 +188,54 @@ def test_on_language_done_failure_does_not_abort_batch_or_skip_unload(
     assert "unload:milmmt" in state["order"]
 
 
+def test_on_language_start_fires_before_each_translation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """on_language_start fires once per language, in engine-grouped order, before that language's translate call -- lets a caller record a 'running' row before the work begins, not just after it ends."""
+    _stub_lock(monkeypatch)
+    _stub_loaders(monkeypatch)
+    seen = _stub_translate(monkeypatch)
+
+    started: list[str] = []
+    outcome = _batch(["fa", "ps", "ru"], on_language_start=lambda lang: started.append(lang))
+
+    assert started == ["ps", "fa", "ru"]
+    # started must precede translate for every language, not just match its set
+    assert started == seen
+    assert outcome["ok"] == ["ps", "fa", "ru"]
+
+
+def test_on_language_error_fires_only_for_the_failing_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_language_error fires with (lang, reason) for a failed language and is never called for a successful one."""
+    _stub_lock(monkeypatch)
+    _stub_loaders(monkeypatch)
+    _stub_translate(monkeypatch, fail_langs={"fa"})
+
+    errors: list[tuple[str, str]] = []
+    outcome = _batch(["fa", "ru", "ps"], on_language_error=lambda lang, reason: errors.append((lang, reason)))
+
+    assert errors == [("fa", "translation_error")]
+    assert outcome["failed"] == {"fa": "translation_error"}
+
+
+def test_on_language_error_failure_does_not_abort_batch_or_skip_unload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error callback raising for one language must not lose the rest of the batch or leak a loaded model."""
+    _stub_lock(monkeypatch)
+    state = _stub_loaders(monkeypatch)
+    _stub_translate(monkeypatch, fail_langs={"fa"})
+
+    def _flaky(_lang: str, _reason: str) -> None:
+        raise RuntimeError("session store write failed")
+
+    outcome = _batch(["fa", "ru"], on_language_error=_flaky)
+
+    assert outcome["failed"] == {"fa": "translation_error"}
+    assert outcome["ok"] == ["ru"]
+    assert "unload:milmmt" in state["order"]
+
+
 def test_lock_acquired_exactly_once_for_a_multi_language_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

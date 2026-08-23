@@ -96,6 +96,9 @@ class Settings(msgspec.Struct, kw_only=True):
     auth_wallet_connect_chain_id: int = 416002
     algod_url: str = "https://testnet-api.algonode.cloud"
     algod_token: str = ""
+    # If ALGOD_TOKEN is empty, read the node token from this path (world-readable
+    # on a typical package install: /var/lib/algorand/algod.token).
+    algod_token_file: str = ""
 
     redis_url: str = "redis://localhost:6379/0"
     # Wallet login session lifetime in Redis (default ~30 days).
@@ -248,4 +251,18 @@ def _load() -> Settings:
     return Settings(**overrides)
 
 
-settings = _load()
+def _apply_algod_token_file(s: Settings) -> Settings:
+    """Fill algod_token from ALGOD_TOKEN_FILE when the env token is blank."""
+    if s.algod_token.strip() or not s.algod_token_file.strip():
+        return s
+    try:
+        token = Path(s.algod_token_file).read_text(encoding="utf-8").strip()
+    except OSError:
+        return s
+    if not token:
+        return s
+    s.algod_token = token
+    return s
+
+
+settings = _apply_algod_token_file(_load())

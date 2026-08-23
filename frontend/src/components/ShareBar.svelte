@@ -73,7 +73,6 @@
 <div class="share" class:compact bind:this={rootEl}>
   <button
     class="btn share-btn"
-    class:icon-only={compact}
     type="button"
     aria-expanded={open}
     aria-haspopup="menu"
@@ -87,14 +86,19 @@
       }
     }}
   >
-    <Icon name="share" size={compact ? 15 : 16} />
     {#if !compact}
-      {t($messages, 'articleShare')}
+      <Icon name="share" size={16} />
     {/if}
+    {t($messages, 'articleShare')}
   </button>
   {#if open}
-    <div class="menu" role="menu">
-      <button type="button" role="menuitem" onclick={() => void copyLink()}>
+    <div class="menu motion-menu" role="menu">
+      <button
+        type="button"
+        role="menuitem"
+        class:copied
+        onclick={() => void copyLink()}
+      >
         {copied ? t($messages, 'articleLinkCopied') : t($messages, 'articleShareCopyLink')}
       </button>
       <button type="button" role="menuitem" onclick={() => intent('x')}>X</button>
@@ -117,14 +121,26 @@
   .share-btn {
     height: 36px;
     padding: 0 12px;
-    font-size: 12.5px;
-    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    gap: 8px;
+    background: transparent;
+    box-shadow: none;
   }
-  .share.compact .share-btn.icon-only {
-    width: 40px;
-    height: 40px;
+  .share.compact .share-btn {
+    height: 28px;
     padding: 0;
-    border-radius: 10px;
+    border: 0;
+    border-radius: 0;
+    color: var(--muted);
+    background: transparent;
+  }
+  .share.compact .share-btn:hover {
+    color: var(--accent);
+    background: transparent;
   }
   .menu {
     position: absolute;
@@ -132,15 +148,15 @@
     inset-inline-start: 0;
     z-index: 20;
     min-width: 168px;
-    padding: 6px;
+    padding: 4px;
     border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--panel);
-    box-shadow: 0 12px 28px var(--card-hover-shadow);
+    border-radius: 0;
+    background: var(--surface);
+    box-shadow: none;
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    animation: pop 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
+    gap: 0;
+    animation: menu-pop 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
   .share.compact .menu {
     inset-inline-start: auto;
@@ -151,25 +167,22 @@
     background: transparent;
     text-align: start;
     padding: 9px 10px;
-    border-radius: 8px;
+    border-radius: 0;
     color: var(--on-surface);
-    font-size: 13px;
-    font-weight: 600;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.2px;
   }
   .menu button:hover,
   .menu button:focus-visible {
-    background: var(--accent-soft);
-    color: var(--primary);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    color: var(--on-surface);
     outline: none;
   }
-  @keyframes pop {
-    from {
-      opacity: 0;
-      transform: translateY(-4px);
-    }
-    to {
-      opacity: 1;
-      transform: none;
+  @media (prefers-reduced-motion: no-preference) {
+    .menu button.copied {
+      animation: copied-pulse 0.45s ease both;
     }
   }
   @media (prefers-reduced-motion: reduce) {

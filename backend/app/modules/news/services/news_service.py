@@ -177,6 +177,30 @@ class NewsService:
             items.append(item)
         return items
 
+    def rank_engagement(
+        self,
+        items: list[ArticleFeedItem],
+        *,
+        limit: int = 20,
+        rank: str = "hot",
+    ) -> list[ArticleFeedItem]:
+        """Rank pre-loaded feed rows by engagement without re-scanning Cassandra."""
+        import time as _time
+
+        now = _time.time()
+
+        def velocity(item: ArticleFeedItem) -> float:
+            views = item.views or 0
+            born = item.first_published_at_epoch or item.published_at_epoch
+            age_days = max((now - born) / 86400.0, 0.25)
+            return views / age_days
+
+        if rank == "hot":
+            key = lambda item: (velocity(item), item.published_at_epoch)
+        else:
+            key = lambda item: (item.views or 0, item.published_at_epoch)
+        return sorted(items, key=key, reverse=True)[:limit]
+
     def tag_stats(self) -> dict:
         """Per-tag coverage and readership over the recent feed: how often the newsroom tagged a topic, how many reads those stories drew, and when the topic last appeared. Tags are the writer's own labels, so this is the paper's real taxonomy (richer than the fixed sections)."""
         stats: dict[str, dict] = {}

@@ -8,6 +8,7 @@
   import Icon from '../components/Icon.svelte'
   import PageMeta from '../components/PageMeta.svelte'
   import { SITE_TAGLINE } from '../lib/seo'
+  import { staggerMs } from '../lib/motion'
 
   let q = $state($route.query.get('q') ?? '')
   let items: Array<Record<string, unknown>> = $state([])
@@ -36,7 +37,10 @@
 
   function excerptOf(item: Record<string, unknown>): string {
     const sn = String(item.snippet ?? '').trim()
-    return sn || String(item.summary ?? '')
+    const raw = sn || String(item.summary ?? '')
+    /* Typesense sometimes returns markdown still in the snippet. Show the
+       link text, not the raw [label](url) source. */
+    return raw.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
   }
 
   async function run(query = q) {
@@ -111,6 +115,7 @@
   title={t($messages, 'pageTitleSearch')}
   description={t($messages, 'searchSubtitle') || SITE_TAGLINE}
   path="/search"
+  noindex
 />
 
 <div class="page stack search-page">
@@ -120,13 +125,11 @@
     <p class="lead muted">{t($messages, 'searchSubtitle')}</p>
   </header>
 
-  <form class="search-card panel" onsubmit={onSubmit}>
+  <form class="search-card" onsubmit={onSubmit}>
     <label class="query-field">
       <span class="query-label">{t($messages, 'searchQueryLabel')}</span>
       <span class="query-shell">
-        <span class="query-icon" aria-hidden="true">
-          <Icon name="search" size={22} />
-        </span>
+        <span class="query-prompt" aria-hidden="true">›</span>
         <input
           bind:this={inputEl}
           bind:value={q}
@@ -134,6 +137,7 @@
           type="search"
           autocomplete="off"
           enterkeyhint="search"
+          spellcheck="false"
           placeholder={t($messages, 'searchQueryHint')}
         />
         {#if q}
@@ -143,8 +147,7 @@
         {/if}
       </span>
     </label>
-    <button class="btn btn-primary go" type="submit" disabled={loading || !q.trim()}>
-      <Icon name="arrow_forward" size={18} />
+    <button class="btn btn-outlined go" type="submit" disabled={loading || !q.trim()}>
       {t($messages, 'searchAction')}
     </button>
   </form>
@@ -167,10 +170,18 @@
     </div>
   {/if}
 
-  {#each items as item}
+  {#if searched && !loading && !error && items.length}
+    <p class="hit-count motion-results">
+      {items.length}
+      {#if engine}<span class="sep" aria-hidden="true">·</span><span>{engine}</span>{/if}
+    </p>
+  {/if}
+
+  {#each items as item, i (String(item.article_id ?? item.title ?? ''))}
     {@const id = String(item.article_id ?? '')}
     <a
-      class="hit panel"
+      class="hit enter"
+      style="--enter-delay: {staggerMs(i)}ms"
       href={id ? articleHref(id) : undefined}
       onclick={(e) => {
         if (!id) return
@@ -178,17 +189,11 @@
         navigate(articleHref(id))
       }}
     >
-      <span class="hit-icon">
-        <Icon name="article" size={20} />
-      </span>
       <span class="hit-copy">
         <strong class="hit-title">{@html highlightHtml(titleOf(item))}</strong>
         {#if excerptOf(item)}
           <p class="hit-excerpt">{@html highlightHtml(excerptOf(item))}</p>
         {/if}
-      </span>
-      <span class="hit-chevron" aria-hidden="true">
-        <Icon name="chevron_right" size={22} />
       </span>
     </a>
   {/each}
@@ -211,16 +216,11 @@
     flex-wrap: wrap;
     gap: 14px;
     align-items: flex-end;
-    padding: 20px;
-    border-radius: 18px;
-    border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
-    background:
-      linear-gradient(
-        165deg,
-        color-mix(in srgb, var(--accent) 7%, var(--panel)) 0%,
-        var(--panel) 55%
-      );
-    box-shadow: 0 6px 16px var(--card-shadow);
+    padding: 0 0 18px;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    background: transparent;
+    border-radius: 0;
   }
   .query-field {
     flex: 1 1 220px;
@@ -230,29 +230,32 @@
     min-width: 0;
   }
   .query-label {
-    font-size: 12px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
     font-weight: 600;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
     color: var(--muted);
   }
   .query-shell {
     display: flex;
     align-items: center;
-    gap: 4px;
-    min-height: 52px;
-    padding: 0 8px 0 12px;
+    gap: 8px;
+    min-height: 48px;
+    padding: 0 8px 0 14px;
     border: 1px solid var(--border);
-    border-radius: 12px;
+    border-radius: var(--radius-control);
     background: var(--surface);
   }
   .query-shell:focus-within {
-    border-color: var(--primary);
-    border-width: 1.6px;
-    padding: 0 7.4px 0 11.4px;
+    border-color: var(--accent);
   }
-  .query-icon {
-    display: grid;
-    place-items: center;
-    color: var(--primary);
+  .query-prompt {
+    font-family: var(--font-mono);
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--accent);
+    line-height: 1;
     flex-shrink: 0;
   }
   .query-shell input {
@@ -261,8 +264,9 @@
     border: 0;
     background: transparent;
     color: var(--on-surface);
-    font-size: 17px;
-    padding: 14px 8px;
+    font-family: var(--font-mono);
+    font-size: 15px;
+    padding: 12px 4px;
     outline: none;
   }
   .query-shell input::-webkit-search-cancel-button {
@@ -286,8 +290,8 @@
   }
   .go {
     flex: 0 0 auto;
-    height: 52px;
-    padding: 0 20px;
+    height: 48px;
+    padding: 0 18px;
   }
   .go:disabled {
     opacity: 0.55;
@@ -337,43 +341,51 @@
     margin: 0;
     max-width: 28rem;
   }
+  .hit-count {
+    margin: 4px 0 0;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  :global(.motion-results) {
+    animation: rise-in 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .hit-count .sep {
+    margin-inline: 6px;
+    color: var(--subtle);
+  }
   .hit {
-    display: flex;
-    align-items: flex-start;
-    gap: 14px;
-    padding: 18px 18px 18px 22px;
-    border-radius: 16px;
+    display: block;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--border);
     color: inherit;
     text-decoration: none;
-    transition:
-      box-shadow 0.22s ease,
-      border-color 0.22s ease,
-      transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .hit.enter {
+      animation: rise-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+      animation-delay: var(--enter-delay, 0ms);
+    }
   }
   .hit:hover {
     text-decoration: none;
-    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-    box-shadow: 0 8px 18px var(--card-hover-shadow);
-    transform: translateY(-1px);
   }
-  .hit-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: 10px;
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    background: var(--accent-soft);
-    color: var(--accent);
+  .hit:hover .hit-title {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1.5px;
   }
   .hit-copy {
-    flex: 1;
     min-width: 0;
   }
   .hit-title {
     display: block;
     font-family: var(--font-display);
-    font-size: 19px;
+    font-size: 18px;
     font-weight: 700;
     line-height: 1.3;
     letter-spacing: -0.2px;
@@ -403,33 +415,20 @@
     padding: 0 0.1em;
     border-radius: 2px;
   }
-  .hit-chevron {
-    color: var(--subtle);
-    display: grid;
-    place-items: center;
-    align-self: center;
-    flex-shrink: 0;
-  }
   .err {
     color: var(--danger);
   }
   @media (max-width: 519px) {
     .search-card {
-      padding: 14px;
+      padding: 0 0 14px;
       gap: 10px;
-      border-radius: 14px;
     }
     .go {
       flex: 1 1 100%;
       width: 100%;
     }
     .hit {
-      padding: 14px;
-      gap: 10px;
-    }
-    .hit-icon,
-    .hit-chevron {
-      display: none;
+      padding: 14px 0;
     }
     .hit-title {
       font-size: 17px;

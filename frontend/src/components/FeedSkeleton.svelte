@@ -22,14 +22,16 @@
     </div>
     <hr class="hairline" />
   {/if}
-  {#each Array.from({ length: rows }, (_, i) => i) as i}
+  {#each Array.from({ length: rows }, (_, i) => i) as i (i)}
     <div class="row" class:dense={i < 4 && lead}>
       <div class="text">
         <span class="bar meta"></span>
         <span class="bar line"></span>
         <span class="bar line short"></span>
       </div>
-      <div class="thumb"></div>
+      {#if !(i < 4 && lead)}
+        <div class="thumb"></div>
+      {/if}
     </div>
   {/each}
 </div>
@@ -87,21 +89,22 @@
     width: 78%;
   }
   .media {
-    aspect-ratio: 4 / 3;
+    aspect-ratio: 16 / 10;
     max-height: 220px;
-    border-radius: 12px;
+    border-radius: var(--radius-thumb);
     background: var(--callout);
     animation: pulse 1.2s ease-in-out infinite;
   }
   .row {
     display: grid;
-    grid-template-columns: 1fr 88px;
+    grid-template-columns: 1fr 80px;
     gap: 14px;
     padding: 16px 0;
     border-bottom: 1px solid var(--border);
   }
+  /* Dense rows are text-only ledgers — see StoryRow. */
   .row.dense {
-    grid-template-columns: 1fr 64px;
+    grid-template-columns: 1fr;
     padding: 14px 0;
   }
   .text {
@@ -122,8 +125,8 @@
     width: 55%;
   }
   .thumb {
-    width: 88px;
-    height: 88px;
+    width: 80px;
+    height: 80px;
     border-radius: var(--radius-thumb);
     background: var(--callout);
     animation: pulse 1.2s ease-in-out infinite;

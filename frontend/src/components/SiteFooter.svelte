@@ -68,7 +68,9 @@
     </div>
 
     <hr class="rule" />
-    <p class="rights subtle">{t($messages, 'footerRights', { year })}</p>
+    <div class="colophon">
+      <p class="rights">{t($messages, 'footerRights', { year })}</p>
+    </div>
   </div>
 </footer>
 
@@ -76,14 +78,13 @@
   .site-footer {
     margin-top: auto;
     border-top: 1px solid var(--border);
-    /* Warm paper a shade below the page. The old near-white --panel carried a
-       5% accent wash, which read cold and blue against warm newsprint. */
-    background: var(--callout);
+    background: var(--surface);
+    color: var(--on-surface);
   }
   .inner {
-    max-width: var(--max-content);
+    max-width: var(--max-wide);
     margin: 0 auto;
-    padding: 40px 32px 32px;
+    padding: 40px var(--shell-gutter) 32px;
   }
   @media (max-width: 519px) {
     .inner {
@@ -144,6 +145,7 @@
     font-size: 1.25rem;
     font-weight: 700;
     letter-spacing: -0.3px;
+    color: var(--on-surface);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -169,11 +171,21 @@
   }
   .heading {
     margin: 0 0 12px;
-    font-size: 11px;
-    font-weight: 700;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
     letter-spacing: 0.9px;
     text-transform: uppercase;
-    color: var(--subtle);
+    color: var(--muted);
+  }
+  .heading::before {
+    content: '';
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-inline-end: 9px;
+    background: var(--accent);
+    vertical-align: 6%;
   }
   .links {
     display: flex;
@@ -210,6 +222,16 @@
   }
   .rights {
     margin: 0;
+    font-family: var(--font-mono);
     font-size: 11px;
+    letter-spacing: 0.2px;
+    color: var(--muted);
+  }
+  .colophon {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px 24px;
   }
 </style>

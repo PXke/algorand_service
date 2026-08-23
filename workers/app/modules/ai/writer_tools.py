@@ -500,8 +500,14 @@ _GENERIC_TOKENS = frozenset(
 _CAPABILITY_ALIASES = {
     "wayback": "fetch_archive_text",
     "archive": "fetch_archive_text",
-    "twitter": "search_bluesky",
-    "x": "search_bluesky",
+    # Was "search_bluesky" until search_x shipped (2026-08-21) -- redirecting
+    # a genuine X/Twitter-only need to the wrong platform's search tool is
+    # actively worse than reporting it as a gap: it told the model a
+    # capability it didn't have already existed. When search_x isn't
+    # registered (it's opt-in), this alias correctly misses and the
+    # suggestion falls through to a real gap report instead.
+    "twitter": "search_x",
+    "x": "search_x",
     "chart": "chart_data",
     "plot": "chart_data",
     "npm": "package_download_stats",
@@ -845,12 +851,6 @@ TOOL_HANDLERS: dict[str, Any] = {
 }
 
 
-# Story lanes whose subject is a person/company under scrutiny — the only ones
-# where entity-background OSINT (sanctions/registry/dockets/leaks) earns its
-# schema budget. An empty topic (callers that predate lanes) keeps everything.
-_ENTITY_OSINT_TOPICS = ("scam_alert", "editorial_assignment")
-
-
 def _register_toolset(
     schemas: list[dict[str, Any]], handlers: dict[str, Any], module_path: str, func_name: str
 ) -> None:
@@ -868,10 +868,8 @@ def _register_toolset(
 
 def all_tools(
     context: dict[str, Any] | None = None,
-    *,
-    topic: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Writer tools plus, when enabled, the investigative OSINT and external research (web search + Bluesky) toolsets. ``context`` (service_id, source_url, model) tags any suggest_tool calls with the story they came from. ``topic`` (a PublishTopic value) lane-gates entity-background OSINT tools to investigative stories; empty means ungated."""
+    """Writer tools plus, when enabled, the investigative OSINT and external research (web search + Bluesky) toolsets. ``context`` (service_id, source_url, model) tags any suggest_tool calls with the story they came from. Entity-background OSINT tools are available on every story lane (ungated 2026-08-21, previously restricted to scam_alert/editorial_assignment); gating is now purely per-tool by credential presence, e.g. COMPANIES_HOUSE_API_KEY."""
     schemas = list(TOOL_SCHEMAS)
     handlers = dict(TOOL_HANDLERS)
     schemas.append(REPORT_COMPOSE_ISSUE_SCHEMA)
@@ -882,9 +880,7 @@ def all_tools(
         if INVESTIGATIVE_TOOLS_ENABLED:
             from app.modules.ai.investigative_tools import investigative_tools
 
-            inv_schemas, inv_handlers = investigative_tools(
-                include_entity_osint=(not topic or topic in _ENTITY_OSINT_TOPICS)
-            )
+            inv_schemas, inv_handlers = investigative_tools(include_entity_osint=True)
             schemas.extend(inv_schemas)
             handlers.update(inv_handlers)
     except Exception:

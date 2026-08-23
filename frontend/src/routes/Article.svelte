@@ -1,9 +1,10 @@
 <script lang="ts">
   import { newsApi, type ArticleItem } from '../lib/api/news'
-  import { messages, t, tPlural, activeLocale, localeTag } from '../lib/i18n'
+  import { messages, t, tPlural, activeLocale } from '../lib/i18n'
   import { navigate } from '../lib/router'
   import { explorerTxUrl as txUrl, isAlgorandTxid } from '../lib/config'
   import { readingMinutes } from '../lib/reading'
+  import { formatDispatchStamp } from '../lib/liveClock'
   import {
     clearContinue,
     readContinue,
@@ -13,13 +14,19 @@
   } from '../lib/continueReading'
   import { withLang, articleHref } from '../lib/paths'
   import { articleChromeCollapsed } from '../lib/articleChrome'
-  import { displayTagLabel, orderReaderTags, primaryTopic, topicColor } from '../lib/tags'
+  import {
+    displayTagLabel,
+    orderReaderTags,
+    primaryTopic,
+    topicColor,
+    readerDesk,
+    deskMessageKey,
+  } from '../lib/tags'
+  import { articleImageUrl, looksLikeFaviconUrl } from '../lib/images'
   import Markdown from '../components/Markdown.svelte'
-  import StoryRow from '../components/StoryRow.svelte'
   import SectionRule from '../components/SectionRule.svelte'
   import ShareBar from '../components/ShareBar.svelte'
   import BrandMark from '../components/BrandMark.svelte'
-  import Icon from '../components/Icon.svelte'
   import PageMeta from '../components/PageMeta.svelte'
   import FeedSkeleton from '../components/FeedSkeleton.svelte'
   import { ApiException } from '../lib/api/client'
@@ -31,6 +38,7 @@
     ogLocaleFor,
     truncateMeta,
   } from '../lib/seo'
+  import { staggerMs } from '../lib/motion'
 
   let { articleId }: { articleId: string } = $props()
 
@@ -45,6 +53,7 @@
   let stickyOn = $state(false)
   let titleEl: HTMLHeadingElement | undefined = $state()
   let readingEl: HTMLElement | undefined = $state()
+  let heroFailed = $state<string | null>(null)
 
   $effect(() => {
     const id = articleId
@@ -56,6 +65,7 @@
     newer = null
     older = null
     related = []
+    heroFailed = null
     void (async () => {
       try {
         const next = await newsApi.fetchArticle(id, lang, ac.signal)
@@ -177,24 +187,32 @@
   const displayTags = $derived(orderReaderTags(article?.tags))
   const topic = $derived(article ? primaryTopic(article.tags) : null)
   const kicker = $derived(topic ? displayTagLabel(topic) : t($messages, 'pageTitleArticle'))
+  const deskId = $derived(article ? readerDesk(article.tags) : 'wire')
+  const deskLabel = $derived(t($messages, deskMessageKey(deskId)))
   const isSpecialEdition = $derived(
     (article?.tags ?? []).some((tag) => String(tag).toLowerCase() === 'special-edition'),
   )
   const tone = $derived(topicColor(topic))
-  const byline = $derived.by(() => {
-    if (!article || !article.published_at_epoch) return ''
-    return new Date(article.published_at_epoch * 1000).toLocaleDateString(
-      localeTag($activeLocale),
-      {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-      },
-    )
+  const stamp = $derived.by(() => {
+    if (!article?.published_at_epoch) return ''
+    return formatDispatchStamp(article.published_at_epoch, $activeLocale)
   })
   const mins = $derived(readingMinutes(article?.body))
+  const views = $derived(article?.views ?? 0)
+
+  function deskOf(item: ArticleItem): string {
+    const desk = primaryTopic(item.tags)
+    return desk ? displayTagLabel(desk) : t($messages, 'pageTitleArticle')
+  }
 
   const headline = $derived(article?.title?.trim() || t($messages, 'pageTitleArticle'))
+  const heroRaw = $derived.by(() => {
+    const url = article?.image_url?.trim()
+    if (!url || looksLikeFaviconUrl(url)) return ''
+    return url
+  })
+  const heroSrc = $derived(heroRaw ? articleImageUrl({ image_url: heroRaw }) : null)
+  const showHero = $derived(Boolean(heroSrc) && heroSrc !== heroFailed)
   const description = $derived(
     article
       ? truncateMeta(article.summary || article.body || SITE_TAGLINE)
@@ -252,12 +270,8 @@
 
   <div class="sticky-bar" class:on={stickyOn} aria-hidden={!stickyOn}>
     <div class="sticky-inner">
-      <!-- A running head, the way a printed interior page carries the paper's
-           name: while reading, the masthead is hidden, and without this there
-           was no link back to the front page anywhere on screen. -->
-      <!-- Back to the feed, in the collapsed bar too. The page's own "Back to
-           feed" link sits at the top of the article, so once the chrome
-           collapsed mid-read the only way back was to scroll all the way up. -->
+      <!-- Running head: desk + slug, not an app toolbar. The masthead is
+           hidden mid-read, so this strip is the paper's name on the interior. -->
       <a
         class="sticky-back"
         href="/news"
@@ -269,7 +283,8 @@
           navigate('/news')
         }}
       >
-        <Icon name="arrow_back" size={18} />
+        <span class="chevron" aria-hidden="true"></span>
+        {t($messages, 'navLatest')}
       </a>
       <a
         class="sticky-home"
@@ -281,24 +296,16 @@
           navigate('/')
         }}
       >
-        <BrandMark size={24} />
+        <BrandMark size={22} />
       </a>
+      <p class="sticky-desk kicker">{deskLabel}</p>
       <strong class="sticky-title">{headline}</strong>
       <ShareBar url={canonicalPath} title={headline} compact />
     </div>
   </div>
 {/if}
 
-<div class="page">
-  <a
-    href="/news"
-    class="back"
-    onclick={(e) => {
-      e.preventDefault()
-      navigate('/news')
-    }}>{t($messages, 'backToFeed')}</a
-  >
-
+<div class="page page-reading">
   {#if loading}
     <FeedSkeleton rows={4} />
   {:else if removed}
@@ -318,85 +325,119 @@
   {:else if error}
     <p class="err">{error}</p>
   {:else if article}
-    <article class="reading" bind:this={readingEl} style="--tone:{tone}">
+    {#key article.article_id}
+    <article class="reading article-in" bind:this={readingEl} style="--tone:{tone}">
       <span class="accent-slug"></span>
       <div class="kicker-row">
-        <p class="kicker">{kicker}</p>
+        {#if topic}
+          <a
+            class="kicker"
+            href={`/topic/${encodeURIComponent(topic)}`}
+            onclick={(e) => {
+              e.preventDefault()
+              navigate(`/topic/${encodeURIComponent(topic)}`)
+            }}>{kicker}</a
+          >
+        {:else}
+          <p class="kicker">{kicker}</p>
+        {/if}
         {#if isSpecialEdition}
           <span class="special-edition-badge">{t($messages, 'specialEditionBadge')}</span>
         {/if}
       </div>
       <h1 bind:this={titleEl}>{article.title}</h1>
-      <p class="lede-meta muted">
-        <span>{byline}</span>
-        <span aria-hidden="true">·</span>
+      <p class="folio wire-stamp">
+        <span>{deskLabel}</span>
+        {#if stamp}
+          <span class="sep" aria-hidden="true">·</span>
+          <span>{stamp}</span>
+        {/if}
+        <span class="sep" aria-hidden="true">·</span>
         <span>{t($messages, 'articleReadingTime', { count: mins })}</span>
+        {#if views > 0}
+          <span class="sep" aria-hidden="true">·</span>
+          <span>{tPlural($messages, 'readsCount', views)}</span>
+        {/if}
       </p>
 
-      <Markdown source={article.body ?? ''} />
+      {#if showHero}
+        <figure class="hero-plate">
+          <img
+            src={heroSrc}
+            alt=""
+            decoding="async"
+            onerror={() => {
+              heroFailed = heroSrc
+            }}
+          />
+        </figure>
+      {/if}
+
+      <Markdown source={article.body ?? ''} skipHref={heroRaw} />
 
       <footer class="end-matter">
-        <ShareBar url={canonicalPath} title={headline} />
+        <aside class="provenance">
+          <p class="kicker">{t($messages, 'aboutAiHeading')}</p>
+          <p class="note">{t($messages, 'articleProvenanceNote')}</p>
+          {#if article.source_url || isAlgorandTxid(article.trigger_txid)}
+            <p class="cite">
+              {#if article.source_url}
+                <a href={article.source_url} target="_blank" rel="noopener"
+                  >{t($messages, 'articleViewSource')}</a
+                >
+              {/if}
+              {#if isAlgorandTxid(article.trigger_txid)}
+                {#if article.source_url}<span class="sep" aria-hidden="true">·</span>{/if}
+                <a href={txUrl(article.trigger_txid!)} target="_blank" rel="noopener">Tx</a>
+              {/if}
+            </p>
+          {/if}
+        </aside>
         {#if displayTags.length}
           <div class="tags">
-            {#each displayTags as tag}
+            {#each displayTags as tag (tag)}
               <a
                 href={`/topic/${encodeURIComponent(tag)}`}
                 onclick={(e) => {
                   e.preventDefault()
                   navigate(`/topic/${encodeURIComponent(tag)}`)
-                }}>#{displayTagLabel(tag)}</a
+                }}>{displayTagLabel(tag)}</a
               >
             {/each}
           </div>
         {/if}
-        <div class="end-meta muted">
-          {#if (article.views ?? 0) > 0}
-            <span>{tPlural($messages, 'readsCount', article.views ?? 0)}</span>
-          {/if}
-          {#if article.source_url}
-            {#if (article.views ?? 0) > 0}<span aria-hidden="true">·</span>{/if}
-            <a href={article.source_url} target="_blank" rel="noopener"
-              >{t($messages, 'articleViewSource')}</a
-            >
-          {/if}
-          {#if isAlgorandTxid(article.trigger_txid)}
-            <span aria-hidden="true">·</span>
-            <a href={txUrl(article.trigger_txid!)} target="_blank" rel="noopener">Tx</a>
-          {/if}
-        </div>
-        <aside class="provenance muted">
-          <strong>{t($messages, 'aboutAiHeading')}</strong>
-          {t($messages, 'articleProvenanceNote')}
-        </aside>
+        <ShareBar url={canonicalPath} title={headline} compact />
       </footer>
     </article>
+    {/key}
 
     {#if newer || older}
-      <nav class="topic-nav" aria-label={t($messages, 'articleTopicNav')}>
+      <nav class="topic-nav enter" aria-label={t($messages, 'articleTopicNav')}>
         {#if older}
           <a
-            class="nav-card older"
+            class="older"
             href={articleHref(older.article_id, null, older.slug)}
             onclick={(e) => {
               e.preventDefault()
               goArticle(older!)
             }}
           >
-            <span class="nav-label">{t($messages, 'articleOlder')}</span>
+            <span class="nav-dir">{t($messages, 'articleOlder')}</span>
             <strong>{older.title}</strong>
           </a>
+        {:else}
+          <span></span>
         {/if}
         {#if newer}
           <a
-            class="nav-card newer"
+            class="newer"
             href={articleHref(newer.article_id, null, newer.slug)}
             onclick={(e) => {
               e.preventDefault()
               goArticle(newer!)
             }}
           >
-            <span class="nav-label">{t($messages, 'articleNewer')}</span>
+            <span class="nav-dir">{t($messages, 'articleNewer')}</span>
             <strong>{newer.title}</strong>
           </a>
         {/if}
@@ -404,13 +445,24 @@
     {/if}
 
     {#if related.length}
-      <section class="related">
-        <SectionRule label={t($messages, 'articleRelatedTitle')} />
-        <div class="related-grid">
-          {#each related as item}
-            <StoryRow article={item} dense />
+      <section class="related enter">
+        <SectionRule label={t($messages, 'articleOnDesk')} />
+        <ol class="desk-index">
+          {#each related as item, i (item.article_id)}
+            <li class="enter" style="--enter-delay: {staggerMs(i)}ms">
+              <a
+                href={articleHref(item.article_id, null, item.slug)}
+                onclick={(e) => {
+                  e.preventDefault()
+                  goArticle(item)
+                }}
+              >
+                <span class="kicker">{deskOf(item)}</span>
+                <strong>{item.title}</strong>
+              </a>
+            </li>
           {/each}
-        </div>
+        </ol>
       </section>
     {/if}
   {/if}
@@ -444,25 +496,17 @@
     top: 0;
     inset-inline: 0;
     z-index: 45;
-    padding: 0 12px;
-    padding-top: calc(3px + env(safe-area-inset-top, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
     transform: translateY(-110%);
     opacity: 0;
     pointer-events: none;
-    /* Opaque, like the masthead — prose scrolling under a translucent strip
-       reads as a smear, and the blur cost a full-page composite per frame. */
     background: var(--app-bar);
-    border-top: 3px solid var(--accent);
+    color: var(--masthead-ink);
     border-bottom: 1px solid var(--border);
+    box-shadow: none;
     transition:
       transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
       opacity 0.18s ease;
-  }
-  @media (min-width: 860px) {
-    .sticky-bar {
-      padding: 0 20px;
-      padding-top: calc(3px + env(safe-area-inset-top, 0px));
-    }
   }
   .sticky-bar.on {
     transform: translateY(0);
@@ -472,31 +516,58 @@
   .sticky-inner {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     height: 44px;
-    max-width: var(--max-reading);
+    width: 100%;
+    max-width: var(--max-wide);
     margin: 0 auto;
+    padding-inline: var(--shell-gutter);
+    box-sizing: border-box;
   }
   .sticky-back {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
+    gap: 6px;
     flex-shrink: 0;
-    width: 30px;
-    height: 30px;
-    border-radius: 6px;
-    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+    color: var(--masthead-muted);
+    text-decoration: none;
+    min-height: 32px;
   }
   .sticky-back:hover {
-    background: var(--callout);
-    color: var(--on-surface);
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .sticky-back .chevron::before {
+    content: '‹';
+    font-size: 16px;
+    line-height: 1;
+    font-weight: 400;
+  }
+  :global([dir='rtl']) .sticky-back .chevron::before {
+    content: '›';
   }
   .sticky-home {
     display: inline-flex;
     align-items: center;
     flex-shrink: 0;
     line-height: 0;
-    border-radius: 2px;
+  }
+  :global(html[data-theme='dark']) .sticky-home :global(.mark) {
+    background: transparent;
+    color: var(--masthead-ink);
+    box-shadow: none;
+  }
+  .sticky-desk {
+    flex-shrink: 0;
+    max-width: 14ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .sticky-title {
     flex: 1;
@@ -505,30 +576,94 @@
     font-size: 14px;
     font-weight: 700;
     line-height: 1.25;
+    letter-spacing: -0.2px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .back {
-    display: none;
-    margin-bottom: 18px;
-    font-size: 0.9rem;
-    font-weight: 600;
-    transition: color 0.2s ease;
-  }
-  @media (min-width: 860px) {
-    .back {
-      display: inline-block;
+  @media (max-width: 519px) {
+    .sticky-inner {
+      gap: 8px;
+    }
+    .sticky-back {
+      font-size: 0;
+      gap: 0;
+    }
+    .sticky-back .chevron::before {
+      font-size: 22px;
+    }
+    .sticky-desk {
+      display: none;
     }
   }
+  .sticky-inner :global(.share) {
+    flex-shrink: 0;
+  }
   .reading {
-    max-width: var(--max-reading);
+    max-width: none;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 14px;
+    background: transparent;
+    box-shadow: none;
+    border: 0;
+    border-radius: 0;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .reading.article-in > .kicker-row,
+    .reading.article-in > h1,
+    .reading.article-in > .folio,
+    .reading.article-in > .hero-plate,
+    .reading.article-in > :global(.md),
+    .reading.article-in > .end-matter {
+      animation: rise-in 0.48s cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+    .reading.article-in > .kicker-row {
+      animation-delay: 0ms;
+    }
+    .reading.article-in > h1 {
+      animation-delay: 55ms;
+    }
+    .reading.article-in > .folio {
+      animation-delay: 110ms;
+    }
+    .reading.article-in > .hero-plate {
+      animation-delay: 165ms;
+    }
+    .reading.article-in > :global(.md) {
+      animation-delay: 220ms;
+    }
+    .reading.article-in > .end-matter {
+      animation-delay: 300ms;
+    }
+    .topic-nav.enter a {
+      animation: rise-in 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+    .topic-nav.enter .older {
+      animation-delay: 0ms;
+    }
+    .topic-nav.enter .newer {
+      animation-delay: 70ms;
+    }
+    .related.enter :global(.section-rule) {
+      animation: rise-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+  }
+  @media (min-width: 640px) {
+    .page.page-reading {
+      padding-top: 36px;
+      padding-bottom: 72px;
+    }
   }
   .kicker {
     margin: 0;
+  }
+  .kicker-row a.kicker {
+    text-decoration: none;
+  }
+  .kicker-row a.kicker:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
   .kicker-row {
     display: flex;
@@ -543,163 +678,230 @@
     letter-spacing: 0.4px;
     text-transform: uppercase;
     padding: 2px 8px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--primary) 14%, var(--panel));
-    color: var(--primary);
+    border-radius: 0;
+    background: var(--accent);
+    color: var(--surface);
   }
   h1 {
     margin: 0;
-    font-size: 28px;
-    line-height: 1.12;
-    letter-spacing: -0.5px;
+    font-size: var(--fs-article);
+    line-height: 1.06;
+    letter-spacing: -1px;
   }
-  @media (min-width: 520px) {
-    h1 {
-      font-size: 38px;
+  .folio {
+    margin: 2px 0 4px;
+  }
+  .hero-plate {
+    margin: 20px 0 8px;
+  }
+  .hero-plate img {
+    display: block;
+    width: 100%;
+    max-height: 420px;
+    object-fit: contain;
+    object-position: center;
+    background: var(--thumb-plate);
+    border: 1px solid var(--border);
+    padding: 12px;
+  }
+  @media (max-width: 519px) {
+    .hero-plate {
+      margin: 16px 0 8px;
+    }
+    .hero-plate img {
+      max-height: 260px;
+      padding: 10px;
     }
   }
-  .lede-meta {
-    margin: 0 0 6px;
-    font-size: 0.88rem;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.35rem 0.45rem;
-    align-items: baseline;
-  }
-  /* The tail used to be six modules at identical weight, so the article
-     dissolved rather than ended. Now: a firm rule, then share/tags/meta as
-     one group, then the provenance note visibly set apart. */
   .end-matter {
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    margin-top: 40px;
-    padding-top: 24px;
-    border-top: 2px solid var(--on-surface);
+    gap: 20px;
+    margin-top: 48px;
+    padding-top: 28px;
+    border-top: 1px solid var(--border);
   }
-  .end-matter :global(.share .share-btn) {
-    width: 100%;
-    justify-content: center;
+  .end-matter :global(.share) {
+    align-self: flex-start;
   }
-  @media (min-width: 520px) {
-    .end-matter :global(.share .share-btn) {
-      width: auto;
-    }
+  .end-matter :global(.share.compact .menu) {
+    inset-inline-start: 0;
+    inset-inline-end: auto;
   }
-  .end-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.35rem 0.45rem;
-    align-items: baseline;
-    font-size: 0.9rem;
+  .provenance .kicker {
+    color: var(--accent);
   }
-  .end-meta a {
-    font-weight: 600;
+  .provenance .note {
+    margin: 0;
+    max-width: 60ch;
+    font-family: var(--font-serif);
+    font-size: 1.02rem;
+    line-height: 1.55;
+    color: var(--md-ink);
   }
-  .provenance {
-    margin: 6px 0 0;
-    padding: 14px 16px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-control);
-    background: var(--callout);
-    font-size: 0.86rem;
-    line-height: 1.5;
-  }
-  .provenance strong {
-    display: block;
-    margin-bottom: 4px;
-    color: var(--on-surface);
-    font-size: 11px;
-    letter-spacing: 0.6px;
+  .cite {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.5px;
     text-transform: uppercase;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .cite .sep {
+    margin-inline: 6px;
+    color: var(--subtle);
+  }
+  .cite a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .cite a:hover {
+    text-decoration: underline;
   }
   .tags {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    align-items: baseline;
+    gap: 0;
   }
   .tags a {
-    background: color-mix(in srgb, var(--tone, var(--accent)) 10%, transparent);
-    padding: 8px 12px;
-    min-height: 36px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--muted);
+    text-decoration: none;
+    min-height: 32px;
     display: inline-flex;
     align-items: center;
-    border-radius: 8px;
-    font-size: 0.84rem;
-    font-weight: 600;
-    color: var(--tone, var(--primary));
-    text-decoration: none;
-    transition: background 0.2s ease, color 0.2s ease;
+  }
+  .tags a:not(:last-child)::after {
+    content: '·';
+    margin-inline: 8px;
+    color: var(--subtle);
+    font-weight: 500;
   }
   .tags a:hover {
-    background: color-mix(in srgb, var(--tone, var(--accent)) 20%, transparent);
+    color: var(--accent);
     text-decoration: none;
   }
+  /* Prev / next as a wire line, not orphaned cards. A single neighbour
+     sits on its side of the hairline; two neighbours face each other. */
   .topic-nav {
     display: grid;
-    gap: 12px;
-    margin-top: 32px;
-    max-width: var(--max-reading);
+    grid-template-columns: 1fr 1fr;
+    gap: 28px;
+    margin-top: 36px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
   }
-  @media (min-width: 640px) {
-    .topic-nav {
-      grid-template-columns: 1fr 1fr;
-    }
-  }
-  .nav-card {
+  .topic-nav a {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 14px 0;
-    border-top: 1px solid var(--border);
+    gap: 6px;
+    min-width: 0;
     color: inherit;
     text-decoration: none;
-    min-width: 0;
   }
-  .nav-card:hover {
+  .topic-nav a:hover {
     text-decoration: none;
   }
-  .nav-card:hover strong {
-    color: var(--primary);
-  }
-  .nav-card.newer {
+  .topic-nav .newer {
     text-align: end;
+    justify-self: end;
   }
-  @media (max-width: 639px) {
-    .nav-card.newer {
-      text-align: start;
-    }
-  }
-  .nav-label {
-    font-size: 10.5px;
-    font-weight: 700;
-    letter-spacing: 0.7px;
+  .nav-dir {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
     text-transform: uppercase;
-    color: var(--subtle);
+    color: var(--accent);
   }
-  .nav-card strong {
+  .older .nav-dir::before {
+    content: '← ';
+  }
+  .newer .nav-dir::after {
+    content: ' →';
+  }
+  :global([dir='rtl']) .older .nav-dir::before {
+    content: '→ ';
+  }
+  :global([dir='rtl']) .newer .nav-dir::after {
+    content: ' ←';
+  }
+  .topic-nav strong {
     font-family: var(--font-display);
-    font-size: 15px;
+    font-size: 16px;
     line-height: 1.3;
     display: -webkit-box;
     -webkit-line-clamp: 2;
     line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
-    transition: color 0.2s ease;
+  }
+  .topic-nav a:hover strong {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1.5px;
+  }
+  @media (max-width: 639px) {
+    .topic-nav {
+      grid-template-columns: 1fr;
+      gap: 18px;
+    }
+    .topic-nav > span:empty {
+      display: none;
+    }
+    .topic-nav .newer {
+      text-align: start;
+      justify-self: start;
+    }
   }
   .related {
-    margin-top: 36px;
+    margin-top: 40px;
+    padding: 8px 0 12px;
   }
-  .related-grid {
-    display: grid;
-    gap: 0;
+  .desk-index {
+    list-style: none;
+    margin: 4px 0 0;
+    padding: 0;
   }
-  @media (min-width: 700px) {
-    .related-grid {
-      grid-template-columns: 1fr 1fr;
-      column-gap: 28px;
+  .desk-index li {
+    border-bottom: 1px solid var(--border);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .desk-index li.enter {
+      animation: rise-in 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+      animation-delay: var(--enter-delay, 0ms);
     }
+  }
+  .desk-index li:first-child {
+    border-top: 1px solid var(--border);
+  }
+  .desk-index a {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 14px 0;
+    color: inherit;
+    text-decoration: none;
+  }
+  .desk-index a:hover {
+    text-decoration: none;
+  }
+  .desk-index strong {
+    font-family: var(--font-display);
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.28;
+    letter-spacing: -0.3px;
+  }
+  .desk-index a:hover strong {
+    color: var(--accent);
   }
   .err {
     color: var(--danger);
@@ -719,24 +921,6 @@
     gap: 10px;
     margin-top: 8px;
   }
-  /* `.lede` is tagged in Markdown.svelte — the opening paragraph can follow
-     a lead image and/or a heading, which no CSS selector can pin down. */
-  .reading :global(.md > p.lede::first-letter) {
-    float: inline-start;
-    font-family: var(--font-serif);
-    font-size: 3.4em;
-    font-weight: 700;
-    line-height: 0.85;
-    padding-inline-end: 10px;
-    padding-block-end: 4px;
-    color: var(--tone, var(--primary));
-  }
-  @media (max-width: 519px) {
-    .reading :global(.md > p.lede::first-letter) {
-      font-size: 2.6em;
-      padding-inline-end: 8px;
-    }
-  }
   @media (prefers-reduced-motion: reduce) {
     .progress span,
     .sticky-bar {
@@ -744,13 +928,11 @@
     }
   }
   @media print {
-    .back,
     .related,
     .topic-nav,
     .tags,
     .progress,
     .sticky-bar,
-    .byline :global(.share),
     :global(.markets),
     :global(.section-nav),
     :global(.site-footer),
@@ -760,9 +942,6 @@
     .page {
       max-width: none;
       padding: 0;
-    }
-    .reading :global(.md > p:first-of-type::first-letter) {
-      color: #000;
     }
   }
 </style>

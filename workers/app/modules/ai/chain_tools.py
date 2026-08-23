@@ -265,7 +265,7 @@ def _tool_lookup_asset(asset_id: int | str) -> dict[str, Any]:
         return {"asset_id": int(aid), "error": "asset not found"}
     p = data.get("params", {}) or {}
     total, decimals, total_adjusted = _asset_total_adjusted(p)
-    return {
+    result: dict[str, Any] = {
         "asset_id": int(aid),
         "name": p.get("name"),
         "unit_name": p.get("unit-name"),
@@ -281,6 +281,24 @@ def _tool_lookup_asset(asset_id: int | str) -> dict[str, Any]:
         "clawback": p.get("clawback"),
         "reserve": p.get("reserve"),
     }
+    # Root-caused 2026-08-21 (HesabPay/HAFN, twice in one night): some ASAs
+    # register `total` at the literal uint64 max as a "no fixed cap"
+    # sentinel, not a real economic supply. get_asset_holder_share now
+    # refuses to compute a percentage against it -- but this field is also
+    # exposed here and combined manually with lookup_asset_holders'
+    # creator_holding_adjusted, which reproduced the exact same wrong
+    # ~100%-of-supply conclusion after the first fix, in the writer's own
+    # reasoning trace. Flagging it at the source (every caller of
+    # lookup_asset sees this total) closes the gap for every tool built on
+    # top of it, not just the one that already got patched once.
+    if total == _ASA_UINT64_MAX_TOTAL:
+        result["total_is_no_cap_sentinel"] = True
+        result["total_supply_warning"] = (
+            "total/total_adjusted is the uint64-max 'no fixed cap' sentinel, not "
+            "a real economic supply -- do not divide any balance by it or report "
+            "a resulting percentage as this asset's holder concentration."
+        )
+    return result
 
 
 def _mainnet_idx_get(path: str, params: dict | None = None, *, cache_ttl: int = 0) -> dict[str, Any]:
@@ -1015,6 +1033,9 @@ def _tool_nft_collection_distribution_timeline(
     }
 
 
+_ASA_UINT64_MAX_TOTAL = 18446744073709551615  # 2**64 - 1
+
+
 def _tool_get_asset_holder_share(asset_id: int | str, address: str) -> dict[str, Any]:
     """A specific address's share of an ASA's total supply, computed here (not left to the model) — use this instead of manually dividing lookup_asset's total by lookup_account's raw holding, which is exactly how a real fabricated "99.99%" concentration claim happened (2026-07-14): the model got the decimal-shift arithmetic wrong on a 15-digit raw amount.
 
@@ -1026,6 +1047,20 @@ def _tool_get_asset_holder_share(asset_id: int | str, address: str) -> dict[str,
     different ASAs would show 0 for any holding past the cap. Fixed by
     querying algod's per-asset holding endpoint directly instead, which has
     no such cap.
+
+    Root-caused again 2026-08-21 (HesabPay/HAFN): some ASAs register their
+    `total` at the literal uint64 max as a "no fixed cap" sentinel, not a
+    real economic supply figure. A reserve/treasury account holding most of
+    that registered max then divides out to ~100% -- technically correct
+    arithmetic, but the writer read it as "the issuer holds virtually all of
+    HAFN, non-issuer balances are modest" while lookup_asset_holders was
+    showing real, live balances spread across tens of thousands of distinct
+    accounts in the same session. The article shipped the wrong claim
+    despite the model's own trace flagging the contradiction ("that's
+    contradictory") a few lines earlier -- it trusted the clean percentage
+    over the messier real evidence. Refusing outright for this specific,
+    well-documented sentinel value is safer than trying to guess a "real"
+    total.
     """
     addr = (address or "").strip()
     if not addr:
@@ -1039,6 +1074,19 @@ def _tool_get_asset_holder_share(asset_id: int | str, address: str) -> dict[str,
     decimals = asset.get("decimals")
     if not isinstance(total, int | float) or not total:
         return {"error": "asset has no usable total supply"}
+    if total == _ASA_UINT64_MAX_TOTAL:
+        return {
+            "asset_id": asset.get("asset_id"),
+            "address": addr,
+            "error": (
+                "this asset's registered total supply is the uint64-max 'no fixed "
+                "cap' sentinel, not a real economic total -- any percentage "
+                "computed against it is meaningless (a reserve account holding "
+                "billions of raw units can read as ~100% of a cap nothing was ever "
+                "meant to fully mint). Do not report a holder-share percentage for "
+                "this asset. Use lookup_asset_holders for real distribution instead."
+            ),
+        }
     target_asset_id = asset.get("asset_id")
     from app.core.config import CHAIN_CACHE_TTL_SLOW
 
@@ -1129,6 +1177,13 @@ def _tool_lookup_asset_holders(asset_id: int | str, limit: int = 10) -> dict[str
         "creator_still_holds": bool(creator_holding),
         "creator_holding_adjusted": _adj(creator_holding) if creator_holding else 0,
         **({"creator_lookup_error": creator_lookup_error} if creator_lookup_error else {}),
+        # Propagated from lookup_asset (see its own comment): creator_holding
+        # is a raw balance, not a share -- dividing it by a separately-fetched
+        # total_adjusted reproduces the exact wrong-concentration conclusion
+        # get_asset_holder_share now refuses to make, just computed by hand
+        # instead. Surface the same warning here since this is the other tool
+        # that hands out the raw ingredient for that computation.
+        **({"total_supply_warning": asset["total_supply_warning"]} if asset.get("total_is_no_cap_sentinel") else {}),
         "holder_count_this_page": len(balances),
         "holder_count_is_complete": not data.get("next-token"),
         "top_holders": [

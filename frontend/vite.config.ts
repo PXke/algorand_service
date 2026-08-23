@@ -13,8 +13,8 @@ export default defineConfig({
         name: 'PXke Algorand',
         short_name: 'PXke',
         description: 'Independent coverage of the Algorand ecosystem',
-        theme_color: '#3a49ad',
-        background_color: '#F7F4EE',
+        theme_color: '#eef0f5',
+        background_color: '#eef0f5',
         display: 'standalone',
         start_url: '/',
         // Regenerated from public/favicon.svg on 2026-07-27 — the previous PNGs
@@ -126,7 +126,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8080',
+        target: process.env.VITE_PROXY_API || 'http://127.0.0.1:8080',
         changeOrigin: true,
       },
     },

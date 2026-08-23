@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Self
 
 import pytest
@@ -447,3 +448,92 @@ def test_openai_provider_omits_temperature_from_the_actual_request(
     provider.chat_completion([{"role": "user", "content": "hi"}], temperature=0.3)
 
     assert "temperature" not in captured
+
+
+# ------------------------------------------------------- rotating HTTP log
+
+
+@pytest.fixture(autouse=True)
+def _reset_http_logger_cache() -> Any:  # noqa: ANN401 -- pytest yield-fixture typing
+    """_llm_http_logger() caches its logger in a module global on first call, and the underlying named logger (logging.getLogger("llm_http")) is itself a process-wide singleton that keeps whatever file handler got attached to it first -- reset both around every test in this file so one test's LLM_HTTP_LOG_PATH (and its tmp_path-backed handler) never leaks into another test's run, in this file or any other sharing the worker process."""
+    import logging
+
+    import app.modules.ai.llm_openai_compatible as mod
+
+    mod._HTTP_LOG = None
+    logging.getLogger("llm_http").handlers.clear()
+    yield
+    mod._HTTP_LOG = None
+    logging.getLogger("llm_http").handlers.clear()
+
+
+def test_http_log_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With LLM_HTTP_LOG_PATH unset (the default), _post never touches resp.text or the filesystem -- confirmed by a FakeResponse that has no .text attribute at all, which would raise if the logger path were mistakenly active."""
+    monkeypatch.setattr("app.core.config.LLM_HTTP_LOG_PATH", "")
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "OK"}}]}
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, url: str, headers: dict | None = None, json: dict | None = None) -> Any:  # noqa: ANN401, ARG002
+            return FakeResponse()
+
+    import app.modules.ai.mistral_client as mistral_module
+
+    monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
+    provider = OpenAIProvider(api_key="test-key")
+    provider.chat_completion([{"role": "user", "content": "hi"}])  # would raise if logging were active
+
+
+def test_http_log_writes_request_and_response(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When enabled, _post logs one REQUEST line before the call and one RESPONSE line with the FULL raw body after it -- the whole point being to catch fields (finish_reason, moderation, error objects) the normal content-parsing path discards."""
+    log_path = tmp_path / "llm_http.log"
+    monkeypatch.setattr("app.core.config.LLM_HTTP_LOG_PATH", str(log_path))
+    monkeypatch.setattr("app.core.config.LLM_HTTP_LOG_MAX_BYTES", 1_000_000)
+    monkeypatch.setattr("app.core.config.LLM_HTTP_LOG_BACKUP_COUNT", 1)
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"choices": [{"message": {"content": ""}}], "finish_reason": "content_filter"}'
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": ""}}]}
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, url: str, headers: dict | None = None, json: dict | None = None) -> Any:  # noqa: ANN401, ARG002
+            return FakeResponse()
+
+    import app.modules.ai.mistral_client as mistral_module
+
+    monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
+    provider = DeepSeekProvider(api_key="test-key")
+    provider.chat_completion([{"role": "user", "content": "hi"}])
+
+    contents = log_path.read_text()
+    assert "REQUEST" in contents
+    assert "provider=deepseek" in contents
+    assert "RESPONSE" in contents
+    assert "content_filter" in contents  # the full raw body made it through

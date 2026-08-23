@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import pickle
 import random
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -49,6 +50,7 @@ def _model_path() -> Path:
     return Path(PUBLISH_CLASSIFIER_MODEL_PATH)
 
 
+@lru_cache(maxsize=1)
 def _load_model() -> Any | None:  # noqa: ANN401 -- pickled payload shape varies (bare estimator or {"vectorizer","model"} dict)
     path = _model_path()
     if not path.is_file():
@@ -65,6 +67,7 @@ def _save_model(model: Any) -> None:  # noqa: ANN401 -- pickled payload shape va
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as fh:
         pickle.dump(model, fh)
+    _load_model.cache_clear()
 
 
 def _heuristic_publish(text: str, url: str, category: str) -> tuple[bool, float]:

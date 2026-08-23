@@ -292,7 +292,7 @@ def _image_for(image_url: str | None) -> tuple[str, bool]:
 _ICON_NAME_RE = re.compile(r"(^|[-_.])(favicon|icon|logo|apple-touch)s?([-_.]|\d|$)")
 
 
-def _is_icon_like(image_url: str) -> bool:
+def is_icon_like(image_url: str) -> bool:
     from urllib.parse import urlparse
 
     path = (urlparse(image_url).path or "").lower()
@@ -369,7 +369,7 @@ _SSR_STYLE = (
     # background-COLOR, not the `background` shorthand: the shorthand resets
     # background-image, which silently wiped the SPA's masthead wash on
     # every SSR-rendered page (the stylesheet loads after this block).
-    "html,body{background-color:" + token("surface") + "}"
+    "html,body{background-color:var(--surface," + token("surface") + ")}"
     + SSR_CHROME_STYLE
     # The loading notice only exists for humans watching the app boot, so it is
     # hidden from the reading flow's start: JS reveals it, and it dies with the
@@ -572,7 +572,7 @@ def render_article(
     image, is_default = _image_for(article.image_url)
     # A brand-icon fallback (favicon/logo) is tile art, not a share image or
     # banner — skip it for the body hero below same as a missing image.
-    icon_like = bool(article.image_url) and _is_icon_like(image)
+    icon_like = bool(article.image_url) and is_icon_like(image)
     og_card = is_default or icon_like
     if og_card:
         # No real photo at all, or only a source favicon/logo: a generated
@@ -747,14 +747,14 @@ def _lead_index(items: list[ArticleFeedItem]) -> int:
     window = min(5, len(items))
     for i in range(window):
         url = items[i].image_url
-        if url and not _is_icon_like(absolute(url)):
+        if url and not is_icon_like(absolute(url)):
             return i
     return 0
 
 
 def _lead_html(item: ArticleFeedItem) -> str:
     img = ""
-    if item.image_url and not _is_icon_like(absolute(item.image_url)):
+    if item.image_url and not is_icon_like(absolute(item.image_url)):
         src = _attr(_content_img_src(item.image_url))
         img = (
             f'<img src="{src}" alt="{_attr(item.title)}" '
@@ -862,7 +862,7 @@ def render_front(
         description=settings.site_tagline,
         canonical=canonical,
         image=absolute(lead.image_url)
-        if lead.image_url and not _is_icon_like(absolute(lead.image_url))
+        if lead.image_url and not is_icon_like(absolute(lead.image_url))
         else absolute(settings.seo_default_image),
         image_alt=lead.title,
         image_dims=_DEFAULT_IMAGE_DIMS,
@@ -872,7 +872,7 @@ def render_front(
             _feed_list_jsonld(items, canonical, f"{settings.site_name} — Front page"),
         ],
     )
-    if lead.image_url and not _is_icon_like(absolute(lead.image_url)):
+    if lead.image_url and not is_icon_like(absolute(lead.image_url)):
         lcp = _attr(_content_img_src(lead.image_url))
         head = f'{head}\n<link rel="preload" as="image" href="{lcp}" fetchpriority="high">'
     head = f"{head}\n{_ssr_feed_script(items)}"
@@ -915,6 +915,7 @@ def render_news_feed(
         image=absolute(settings.seo_default_image),
         image_alt=settings.site_name,
         image_dims=_DEFAULT_IMAGE_DIMS,
+        robots="noindex, follow",
         json_ld=[
             # self_url: the ItemList describes THIS page's contents,
             # whereas the canonical points at the front page.
@@ -982,6 +983,7 @@ def render_topic(
     *,
     topic_links: list[tuple[str, int]] | None = None,
     total_count: int | None = None,
+    indexable: bool = True,
 ) -> tuple[str, str]:
     """Topic landing page: the feed filtered to one writer tag."""
     canonical = absolute(f"/topic/{tag}")
@@ -1000,6 +1002,7 @@ def render_topic(
         image=absolute(settings.seo_default_image),
         image_alt=settings.site_name,
         image_dims=_DEFAULT_IMAGE_DIMS,
+        robots=None if indexable else "noindex, follow",
         json_ld=[_feed_list_jsonld(items, canonical, title), _breadcrumb(trail)],
     )
     head += (

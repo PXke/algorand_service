@@ -387,7 +387,12 @@ def _gate_enforces_review(
         return False
     from app.modules.gatekeeper.live import gate_draft
 
-    gate = gate_draft(source_text=page_text, article_text=f"{title}\n{body}", service_id=source_url)
+    gate = gate_draft(
+        source_text=page_text,
+        article_text=f"{title}\n{body}",
+        service_id=source_url,
+        source_url=source_url,
+    )
     return gate is not None and not gate.passed
 
 
@@ -499,7 +504,10 @@ def _fresh_auto_approve_passes(
         from app.modules.gatekeeper.live import gate_draft
 
         gate = gate_draft(
-            source_text=page_text, article_text=f"{title}\n{body}", service_id=source_url
+            source_text=page_text,
+            article_text=f"{title}\n{body}",
+            service_id=source_url,
+            source_url=source_url,
         )
         if gate is not None:
             meta.update(gate.as_metadata())
@@ -1116,10 +1124,18 @@ def _grade_and_gate(
             source_text=page_text,
             article_text=f"{title}\n{composed.body}",
             service_id=service_id,
+            source_url=source_url,
         )
         if gate is not None:
             grade_meta.update(gate.as_metadata())
-            gate_ok = gate.factuality_score >= worker_config.GATEKEEPER_FACT_MIN
+            # Completeness is deliberately excluded here (see this function's own
+            # docstring: it over-fired on ~every Tier-2 source, owner confirmed
+            # 2026-07-12) -- but a dead-domain reference is a distinct, always-on
+            # safety check, not a completeness rule, so it hard-fails regardless.
+            gate_ok = (
+                gate.factuality_score >= worker_config.GATEKEEPER_FACT_MIN
+                and not gate.dead_domains
+            )
         else:
             gate_ok = True  # gatekeeper disabled entirely — no signal to fail on
     except Exception:
@@ -2420,6 +2436,31 @@ def translate_glossary_term_task(slug: str, lang: str) -> dict[str, str]:
     # every OTHER task's limits untouched.
     soft_time_limit=57600,  # 16h
     time_limit=59400,  # 16h30m hard kill
+    # Root-caused live 2026-08-20/21: with Celery's default early-ack, a
+    # message is removed from the broker the MOMENT a worker picks it up --
+    # before any translation work happens. When the pre-restart worker
+    # (running stale code against the reworked local_translate.py) picked up
+    # a translation batch and simply couldn't execute it, the task vanished
+    # with zero trace: gone from the queue, zero languages persisted, no
+    # failure result anywhere. ~52 articles' translation batches were lost
+    # this way over four days with nothing ever retrying them. The systemd
+    # unit's own comment already assumed this couldn't happen ("a killed
+    # batch loses at most the one language in flight... re-enqueueing skips
+    # everything already stored") -- true for what gets PERSISTED per
+    # language, but that safety net only protects work already in progress
+    # on this specific delivery, not the task's presence in the queue at
+    # all. acks_late=True defers the ack until the task actually returns (or
+    # is confirmed lost), so a worker that dies/hangs/can't-execute mid-task
+    # gets its in-flight message redelivered to the next worker instead of
+    # silently discarding it. Safe here specifically because the task is
+    # already idempotent (re-checks which languages are still missing before
+    # doing any work) -- a redelivered task just skips what a prior attempt
+    # already persisted. reject_on_worker_lost=True makes a hard SIGKILL
+    # (e.g. the 16h30m time_limit firing) explicitly requeue rather than
+    # risk the message sitting unacked in limbo if the connection drop isn't
+    # detected cleanly.
+    acks_late=True,
+    reject_on_worker_lost=True,
 )
 def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
     """Background task to translate an article into every language in `langs`, batched by engine.
@@ -2435,6 +2476,10 @@ def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
     import json
 
     from app.modules.ai.local_translate import translate_article_batch
+    from app.modules.ai.translation_session_store import (
+        finish_translation_session,
+        start_translation_session,
+    )
     from app.modules.newspaper.article_store import get_article, update_article_translations
 
     try:
@@ -2446,8 +2491,18 @@ def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
         if not pending:
             return {"status": "skipped", "reason": "already_translated", "langs": langs}
 
+        # Keyed by lang rather than passed around explicitly: on_language_start
+        # fires from inside translate_article_batch's own loop, so this is the
+        # only way the later done/error callback for the SAME lang knows which
+        # translation_sessions row to close out.
+        session_refs: dict[str, tuple] = {}
+
+        def _on_start(lang: str) -> None:
+            session_refs[lang] = start_translation_session(article_id, lang)
+
         def _persist(lang: str, result: dict[str, str]) -> None:
             update_article_translations(article_id, {lang: json.dumps(result, ensure_ascii=False)})
+            finish_translation_session(session_refs.get(lang), status="ok")
             try:
                 from app.modules.newspaper.indexnow import ping_translation
 
@@ -2457,12 +2512,17 @@ def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
                     "IndexNow ping failed for translation %s/%s", article_id, lang, exc_info=True
                 )
 
+        def _on_error(lang: str, reason: str) -> None:
+            finish_translation_session(session_refs.get(lang), status="error", error=reason)
+
         outcome = translate_article_batch(
             english_title=article.title or "",
             english_summary=article.summary or "",
             english_body=article.body or "",
             target_languages=pending,
+            on_language_start=_on_start,
             on_language_done=_persist,
+            on_language_error=_on_error,
         )
         status = "ok" if not outcome["failed"] else "partial"
         return {"status": status, "article_id": article_id, **outcome}

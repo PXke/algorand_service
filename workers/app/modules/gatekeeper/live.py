@@ -28,6 +28,7 @@ class DeterministicGate:
     reasons: tuple[str, ...] = ()  # human-readable failure reasons
     ungrounded: tuple[str, ...] = ()
     failed_rules: tuple[str, ...] = ()
+    dead_domains: tuple[str, ...] = ()  # domains named in the article that are confirmed dead
 
     def as_metadata(self) -> dict[str, str]:
         """Compact strings for the review/grade metadata map."""
@@ -36,6 +37,7 @@ class DeterministicGate:
             "gk_completeness": "pass" if self.completeness_passed else "fail",
             "gk_passed": "1" if self.passed else "0",
             "gk_reasons": "; ".join(self.reasons)[:400],
+            "gk_dead_domains": ",".join(self.dead_domains)[:200],
         }
 
 
@@ -122,8 +124,79 @@ def quality_proba(*, title: str, body: str, source_url: str = "") -> float | Non
         return None
 
 
-def gate_draft(*, source_text: str, article_text: str, service_id: str) -> DeterministicGate | None:
-    """Convenience wrapper for the publish task: loads the trace by service_id, reads config, runs the gate. Returns None when disabled or on any error (shadow-safe). The caller enforces only when ``GATEKEEPER_ENFORCE`` and ``not result.passed``."""
+def _suppressed_as_dead(status: dict[str, object]) -> bool:
+    """Whether a domain_tracking row's dead_project_until suppression is still active."""
+    from datetime import UTC, datetime
+
+    until_raw = (status.get("metadata") or {}).get("dead_project_until")  # type: ignore[union-attr]
+    if not until_raw:
+        return False
+    try:
+        until = datetime.fromisoformat(until_raw)
+    except ValueError:
+        return False
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=UTC)
+    return until > datetime.now(tz=UTC)
+
+
+def _dead_domains_referenced(article_text: str, *, source_domain: str = "") -> list[str]:
+    """Domains named ANYWHERE in the FINAL article body (prose, not just markdown links) that are confirmed dead.
+
+    Complements defunct_entity_gate's defunct_linked_domains, which already
+    catches this at compose time for hyperlinked hosts only -- a domain
+    recommended in prose without a link ("compare to old wallet X") slips
+    past it. Two sources of "confirmed dead", both already durable platform
+    state so this never has to guess: domain_tracking already has the domain
+    flagged via ``suppress_dead_project_domain`` (a prior writer's own
+    ``abort_article(dead_project)`` call, whose suppression window hasn't
+    lapsed yet) -- or, for a domain we've never crawled at all, a live DNS
+    check using defunct_entity_gate's own hardened resolver (fail-open on
+    any non-definitive error, so a resolver hiccup never holds an article).
+    Skips ``source_domain`` (the article's own subject, just scraped
+    successfully, so its liveness is self-evident) and only ever resolves
+    the handful of distinct domains the body actually names -- never a
+    whole-page scan.
+    """
+    from app.modules.crawler.domain_tracker import get_domain_status
+    from app.modules.newspaper.defunct_entity_gate import _resolves
+    from app.modules.newspaper.scam_enrichment import extract_domains_and_urls
+
+    _, raw_domains = extract_domains_and_urls(article_text)
+    dead: list[str] = []
+    live_checks = 0
+    seen: set[str] = set()
+    for raw_domain in raw_domains:
+        # extract_domains_and_urls keeps trailing sentence punctuation glued
+        # to a bare URL match ("...at https://deadwallet.io." -> the "." is
+        # part of the netloc) -- strip it so lookups and the reported name
+        # are the real domain, not "deadwallet.io.". It can also list the
+        # same real domain twice (once via the url netloc, once via the bare
+        # regex, which naturally stops before punctuation), so dedup here too.
+        domain = raw_domain.rstrip(".,;:!?)\"'")
+        if not domain or domain == source_domain or domain in seen:
+            continue
+        seen.add(domain)
+        status = get_domain_status(domain)
+        if status:
+            if _suppressed_as_dead(status):
+                dead.append(domain)
+            continue  # tracked (and not currently suppressed as dead)
+        # Never tracked by the crawler -- the only case worth a live check,
+        # bounded like defunct_entity_gate's own linked-domain scan so a
+        # link-farm body can't stall this on dozens of live lookups.
+        if live_checks >= 20:
+            continue
+        live_checks += 1
+        if not _resolves(domain):
+            dead.append(domain)
+    return dead
+
+
+def gate_draft(
+    *, source_text: str, article_text: str, service_id: str, source_url: str = ""
+) -> DeterministicGate | None:
+    """Convenience wrapper for the publish task: loads the trace by service_id, reads config, runs the gate, then folds in the dead-domain check (needs I/O -- domain_tracking lookups and, for never-seen domains, a live DNS resolution -- so it lives here rather than in the pure ``run_deterministic_gate`` core). Returns None when disabled or on any error (shadow-safe). The caller enforces only when ``GATEKEEPER_ENFORCE`` and ``not result.passed``."""
     try:
         from app.core.config import (
             GATEKEEPER_ENABLED,
@@ -136,11 +209,25 @@ def gate_draft(*, source_text: str, article_text: str, service_id: str) -> Deter
         from app.modules.newspaper.investigation_store import load_investigation_trace
 
         trace = load_investigation_trace(service_id)
-        return run_deterministic_gate(
+        gate = run_deterministic_gate(
             source_text,
             trace,
             article_text,
             GateConfig(fact_min=GATEKEEPER_FACT_MIN, enforce=GATEKEEPER_ENFORCE),
+        )
+        from app.modules.crawler.domain_tracker import domain_from_url
+
+        source_domain = domain_from_url(source_url) if source_url else ""
+        dead = _dead_domains_referenced(article_text, source_domain=source_domain)
+        if not dead:
+            return gate
+        from dataclasses import replace
+
+        return replace(
+            gate,
+            passed=False,
+            dead_domains=tuple(dead),
+            reasons=(*gate.reasons, f"references confirmed-dead domain(s): {', '.join(dead)}"),
         )
     except Exception:
         return None

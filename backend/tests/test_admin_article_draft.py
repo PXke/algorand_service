@@ -127,3 +127,53 @@ def test_set_draft_on_missing_article_returns_none(monkeypatch: pytest.MonkeyPat
 
     assert result is None
     assert fake.draft_updates == []
+
+
+def test_list_draft_articles_drops_ghosts_and_prunes_the_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delete used to leave draft_articles rows behind; the admin list must not
+    surface those as clickable 404s, and should delete the stale index row."""
+    live_id = uuid4()
+    ghost_id = uuid4()
+    live_row = SimpleNamespace(
+        article_id=live_id,
+        title="Live draft",
+        source_url="https://example.com/live",
+        drafted_at=datetime(2026, 8, 17, tzinfo=UTC),
+    )
+    ghost_row = SimpleNamespace(
+        article_id=ghost_id,
+        title="Deleted leftover",
+        source_url="https://example.com/gone",
+        drafted_at=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+    fake = _FakeSession(None)
+    orig_execute = fake.execute
+
+    def execute(query: str, params: tuple = ()) -> Any:  # noqa: ANN401
+        q = " ".join(str(query).split())
+        if "FROM algorand_platform.draft_articles LIMIT" in q:
+            return [ghost_row, live_row]
+        return orig_execute(query, params)
+
+    fake.execute = execute  # type: ignore[method-assign]
+    _patch(monkeypatch, fake)
+
+    live_article = SimpleNamespace(
+        article_id=str(live_id),
+        title="Live draft (current title)",
+        source_url="https://example.com/live",
+        draft=True,
+    )
+    monkeypatch.setattr(
+        "app.modules.news.stores.cassandra.CassandraArticleStore.get_many",
+        lambda self, ids: {str(live_id): live_article},  # noqa: ARG005
+    )
+
+    items = AdminCassandraStore().list_draft_articles()
+
+    assert [it["article_id"] for it in items] == [str(live_id)]
+    assert items[0]["title"] == "Live draft (current title)"
+    assert fake.draft_index_deletes == [(ghost_id,)]
+

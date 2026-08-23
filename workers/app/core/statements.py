@@ -629,6 +629,33 @@ class ToolInsightStmts:
 
 
 # --------------------------------------------------------------------------- #
+# translation_sessions
+# --------------------------------------------------------------------------- #
+class TranslationSessionStmts:
+    """Prepared statements for per-language translation lifecycle tracking."""
+
+    INSERT = _Stmt(
+        "INSERT INTO algorand_platform.translation_sessions ("
+        "bucket, started_at, session_id, article_id, lang, status, duration_ms, error"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    # Reaper shares this scan: cheap enough to list without paging --
+    # translation_sessions has a 7-day TTL, so the table never grows large.
+    LIST_ALL_SUMMARY = _Stmt(
+        "SELECT started_at, session_id, status, article_id, lang "
+        "FROM algorand_platform.translation_sessions WHERE bucket = ? LIMIT 1000"
+    )
+    MARK_DONE = _Stmt(
+        "UPDATE algorand_platform.translation_sessions SET status = ?, duration_ms = ?, error = ? "
+        "WHERE bucket = ? AND started_at = ? AND session_id = ?"
+    )
+    MARK_STALE = _Stmt(
+        "UPDATE algorand_platform.translation_sessions SET status = ? "
+        "WHERE bucket = ? AND started_at = ? AND session_id = ?"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # service_profiles
 # --------------------------------------------------------------------------- #
 class ServiceProfileStmts:

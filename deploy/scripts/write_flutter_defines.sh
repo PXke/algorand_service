@@ -16,8 +16,11 @@ data = {
     "API_BASE_URL": os.environ.get("FRONTEND_API_BASE_URL", ""),
     "AUTH_DOMAIN": os.environ.get("FRONTEND_AUTH_DOMAIN", "localhost"),
     "ADMIN_WALLET_ADDRESSES": os.environ.get("FRONTEND_ADMIN_WALLETS", ""),
-    "ALGOD_API_URL": os.environ.get(
-        "FRONTEND_ALGOD_API_URL", "https://testnet-api.algonode.cloud"
+    "ALGOD_API_URL": os.environ.get("FRONTEND_ALGOD_API_URL")
+    or (
+        os.environ.get("FRONTEND_API_BASE_URL", "").rstrip("/") + "/api/v1/algod"
+        if os.environ.get("FRONTEND_API_BASE_URL")
+        else "/api/v1/algod"
     ),
     "WALLET_CONNECT_CHAIN_ID": os.environ.get("FRONTEND_WALLET_CHAIN_ID", "416002"),
     "EXPLORER_BASE_URL": os.environ.get(

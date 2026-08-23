@@ -26,7 +26,7 @@
 
   <hr class="hairline" />
 
-  {#each blocks as block}
+  {#each blocks as block (block.heading)}
     <section class="block">
       <h2>{block.heading}</h2>
       <p>{block.body}</p>
@@ -48,6 +48,7 @@
   }
   .lead {
     margin: 18px 0 0;
+    font-family: var(--font-serif);
     font-size: 19px;
     line-height: 1.6;
     color: var(--muted);
@@ -57,13 +58,27 @@
   }
   h2 {
     margin: 0;
-    font-size: 1.25rem;
-    font-weight: 700;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--on-surface);
+  }
+  h2::before {
+    content: '';
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-inline-end: 9px;
+    background: var(--accent);
+    vertical-align: 6%;
   }
   .block p {
     margin: 10px 0 0;
+    font-family: var(--font-serif);
     font-size: 17px;
-    line-height: 1.6;
+    line-height: 1.65;
     color: var(--body);
   }
 </style>

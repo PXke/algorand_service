@@ -41,8 +41,16 @@ def test_match_covers_the_actual_prod_suggestions() -> None:
     assert match("reddit_api_post_history", _KNOWN) == "reddit_api_post_history"
     assert match("discourse_api", _KNOWN) == "discourse_forum"
     assert match("wayback_machine_full_text", _KNOWN) == "fetch_archive_text"
-    assert match("twitter_x_search", _KNOWN) == "search_bluesky"
     assert match("algo_account_lookup", _KNOWN) == "lookup_account"
+
+
+def test_twitter_x_alias_targets_search_x_not_bluesky() -> None:
+    """The twitter/x alias points at search_x (added 2026-08-21), not search_bluesky -- misdirecting a genuine X-only need to the wrong platform's search tool was worse than reporting a real gap."""
+    match = wt._match_existing_tool
+    # search_x not registered in this session (opt-in, most sessions won't have it) -> honest gap.
+    assert match("twitter_x_search", _KNOWN) is None
+    # search_x registered this session -> resolves to it, not to search_bluesky.
+    assert match("twitter_x_search", _KNOWN | {"search_x"}) == "search_x"
 
 
 def test_match_leaves_genuine_gaps_alone() -> None:

@@ -51,7 +51,7 @@
   <div class="form-wrap">
     {#if sent}
       <div class="sent">
-        <Icon name="mail" size={44} />
+        <p class="kicker">Dispatch</p>
         <p>{t($messages, 'contactSent')}</p>
       </div>
     {:else}
@@ -75,7 +75,7 @@
           ></textarea>
         </label>
         <div class="actions">
-          <button class="btn btn-primary send" type="submit" disabled={busy}>
+          <button class="btn btn-outlined send" type="submit" disabled={busy}>
             {#if busy}
               <span class="spinner" aria-hidden="true"></span>
             {:else}
@@ -114,13 +114,23 @@
     gap: 12px;
   }
   .field span {
-    font-size: 12px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
     font-weight: 600;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
     color: var(--muted);
   }
   .field input,
   .field textarea {
-    background: var(--panel);
+    background: var(--surface);
+    font-family: var(--font-mono);
+    font-size: 14px;
+  }
+  .field textarea {
+    font-family: var(--font-serif);
+    font-size: 16px;
+    line-height: 1.55;
   }
   .actions {
     display: flex;
@@ -138,8 +148,8 @@
   .spinner {
     width: 16px;
     height: 16px;
-    border: 2px solid color-mix(in srgb, #fff 35%, transparent);
-    border-top-color: #fff;
+    border: 2px solid color-mix(in srgb, var(--on-surface) 25%, transparent);
+    border-top-color: var(--on-surface);
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
   }
@@ -151,18 +161,17 @@
   .sent {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    text-align: center;
-    gap: 14px;
-    padding: 24px 8px;
-    color: var(--accent);
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 0 24px;
   }
-  .sent p {
+  .sent p:not(.kicker) {
     margin: 0;
-    max-width: 28rem;
+    max-width: 36rem;
+    font-family: var(--font-serif);
+    font-size: 1.12rem;
+    line-height: 1.55;
     color: var(--on-surface);
-    font-size: 1.05rem;
-    line-height: 1.5;
   }
   .banner {
     margin: 0;

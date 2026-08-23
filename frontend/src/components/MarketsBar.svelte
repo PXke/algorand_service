@@ -1,7 +1,7 @@
 <script lang="ts">
+  import { innerWidth } from 'svelte/reactivity/window'
   import { newsApi } from '../lib/api/news'
   import { pathOnly } from '../lib/router'
-  import Icon from './Icon.svelte'
 
   type Tile = {
     id: string
@@ -11,27 +11,8 @@
     available: boolean
   }
 
-  type MetricIcon =
-    | 'payments'
-    | 'bar_chart'
-    | 'pie_chart'
-    | 'layers'
-    | 'speed'
-    | 'article'
-    | 'swap'
-    | 'insights'
-    | 'hub'
-
-  const iconFor: Record<string, MetricIcon> = {
-    algo_price: 'payments',
-    volume_24h: 'bar_chart',
-    market_cap: 'pie_chart',
-    last_round: 'layers',
-    round_latency: 'speed',
-    validators: 'hub',
-    articles: 'article',
-    dex_volume: 'swap',
-  }
+  /* Phone keeps the chain pulse — price, round, validators — not the full desk. */
+  const WIRE_CORE = new Set(['algo_price', 'last_round', 'validators'])
 
   const showOn = $derived(
     ['/', '/news', '/hot', '/top', '/topics'].includes($pathOnly) ||
@@ -41,6 +22,14 @@
   let tiles: Tile[] = $state([])
 
   const visible = $derived(tiles.filter((t) => t.available))
+  const shown = $derived.by(() => {
+    const w = innerWidth.current
+    if (w !== undefined && w < 640) {
+      const core = visible.filter((t) => WIRE_CORE.has(t.id))
+      return core.length ? core : visible.slice(0, 3)
+    }
+    return visible
+  })
 
   // Fetch + poll only while the bar is on screen — article/about/etc. shouldn't
   // keep hitting /metrics/dashboard every minute in the background.
@@ -56,10 +45,18 @@
       }
     }
     void load()
-    const timer = setInterval(() => void load(), 60_000)
+    const tick = () => {
+      if (document.visibilityState !== 'hidden') void load()
+    }
+    const timer = setInterval(tick, 60_000)
+    const onVis = () => {
+      if (document.visibilityState === 'visible') void load()
+    }
+    document.addEventListener('visibilitychange', onVis)
     return () => {
       ac.abort()
       clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVis)
     }
   })
 
@@ -72,16 +69,14 @@
 </script>
 
 {#if showOn}
-  <div class="markets" aria-label="Markets" class:empty={!visible.length}>
-    {#if visible.length}
+  <div class="markets" aria-label="Markets" class:empty={!shown.length}>
+    {#if shown.length}
+      <span class="live-pixel" aria-hidden="true"></span>
       <div class="scroller">
         <div class="inner">
-          {#each visible as tile, i (tile.id)}
-            {#if i > 0}<span class="divider"></span>{/if}
+          {#each shown as tile, i (tile.id)}
+            {#if i > 0}<span class="sep" aria-hidden="true">·</span>{/if}
             <span class="chip">
-              <span class="ico" aria-hidden="true">
-                <Icon name={iconFor[tile.id] ?? 'insights'} size={13} />
-              </span>
               <span class="label">{tile.label}</span>
               {#key tile.value}
                 <span class="value">{tile.value}</span>
@@ -101,13 +96,12 @@
 <style>
   /* Fixed height (incl. .empty) so async tiles don't shove the page (CLS). */
   .markets {
-    height: 34px;
-    background: color-mix(in srgb, var(--app-bar) 96%, var(--panel));
+    height: 36px;
+    background: var(--surface);
+    color: var(--on-surface);
     border-bottom: 1px solid var(--border);
     position: relative;
   }
-  /* Wider, fully-opaque-at-the-edge fades: the ticker scrolls, and a hard
-     cut mid-word ("CoinGeck|") read as a layout bug rather than an affordance. */
   .markets::before,
   .markets::after {
     content: '';
@@ -122,7 +116,7 @@
     left: 0;
     background: linear-gradient(
       90deg,
-      color-mix(in srgb, var(--app-bar) 96%, var(--panel)) 35%,
+      color-mix(in srgb, var(--surface) 100%, transparent) 35%,
       transparent
     );
   }
@@ -130,7 +124,7 @@
     right: 0;
     background: linear-gradient(
       270deg,
-      color-mix(in srgb, var(--app-bar) 96%, var(--panel)) 35%,
+      color-mix(in srgb, var(--surface) 100%, transparent) 35%,
       transparent
     );
   }
@@ -151,15 +145,17 @@
     height: 100%;
     display: inline-flex;
     align-items: center;
-    /* Every tile stays — the row is centred rather than trimmed. `safe` is the
-       load-bearing word: plain `center` overflows equally into BOTH ends once
-       the tiles outgrow the viewport, and since the scroller starts at
-       scrollLeft 0 the left-hand tiles would be permanently unreachable. `safe`
-       falls back to flex-start exactly in that case, so narrow screens keep all
-       seven and scroll to them. */
     justify-content: safe center;
     padding-inline: var(--shell-gutter);
+    padding-inline-start: max(var(--shell-gutter), 28px);
     box-sizing: border-box;
+  }
+  .markets :global(.live-pixel) {
+    position: absolute;
+    inset-inline-start: 12px;
+    top: 50%;
+    z-index: 2;
+    transform: translateY(-50%);
   }
   .chip {
     display: inline-flex;
@@ -167,44 +163,36 @@
     gap: 6px;
     white-space: nowrap;
   }
-  .ico {
-    display: grid;
-    place-items: center;
+  .sep {
+    margin: 0 12px;
     color: var(--subtle);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1;
   }
   .label {
-    font-size: 10px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
     font-weight: 600;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.7px;
     text-transform: uppercase;
-    color: var(--subtle);
+    color: var(--muted);
   }
   .value {
-    font-size: 12.5px;
-    font-weight: 700;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
     color: var(--on-surface);
     margin-inline-start: 2px;
     font-variant-numeric: tabular-nums;
-    animation: value-tick 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: value-tick 0.35s ease both;
   }
   @keyframes value-tick {
     from {
-      color: var(--accent);
-      opacity: 0.4;
-      transform: translateY(3px) scale(0.96);
-      filter: blur(0.4px);
-    }
-    55% {
-      color: var(--primary);
-      opacity: 1;
-      transform: translateY(-1px) scale(1.02);
-      filter: none;
+      opacity: 0.35;
     }
     to {
-      color: var(--on-surface);
       opacity: 1;
-      transform: none;
-      filter: none;
     }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -213,7 +201,8 @@
     }
   }
   .hint {
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
     font-weight: 600;
     color: var(--muted);
     font-variant-numeric: tabular-nums;
@@ -224,11 +213,13 @@
   .hint.down {
     color: var(--loss);
   }
-  .divider {
-    width: 1px;
-    height: 14px;
-    background: var(--border);
-    margin: 0 14px;
-    flex-shrink: 0;
+  @media (max-width: 639px) {
+    .markets::before,
+    .markets::after {
+      width: 20px;
+    }
+    .sep {
+      margin: 0 8px;
+    }
   }
 </style>

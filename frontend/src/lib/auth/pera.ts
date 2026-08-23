@@ -121,7 +121,11 @@ async function peraSignArc0025Txn(
 ): Promise<string> {
   const pera = await getPera()
   const algosdk = (await import('algosdk')).default
-  const algod = new algosdk.Algodv2('', config.algodApiUrl, '')
+  const server =
+    config.algodApiUrl.startsWith('http://') || config.algodApiUrl.startsWith('https://')
+      ? config.algodApiUrl
+      : `${window.location.origin}${config.algodApiUrl}`
+  const algod = new algosdk.Algodv2('', server, '')
   const suggested = await algod.getTransactionParams().do()
   const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
     sender: walletAddress,

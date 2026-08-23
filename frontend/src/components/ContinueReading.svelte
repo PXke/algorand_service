@@ -3,7 +3,6 @@
   import { messages, t } from '../lib/i18n'
   import { navigate } from '../lib/router'
   import { clearContinue, readContinue, type ContinueReading } from '../lib/continueReading'
-  import Icon from './Icon.svelte'
 
   let entry = $state<ContinueReading | null>(null)
 
@@ -23,58 +22,54 @@
 </script>
 
 {#if entry}
-  <aside class="cont" aria-label={t($messages, 'continueReading')}>
+  <aside class="cont motion-fade-up" aria-label={t($messages, 'continueReading')}>
     <button class="main" type="button" onclick={resume}>
-      <span class="ico" aria-hidden="true"><Icon name="history" size={18} /></span>
       <span class="copy">
         <span class="label">{t($messages, 'continueReading')}</span>
         <strong class="title">{entry.title}</strong>
       </span>
-      <span class="go" aria-hidden="true"><Icon name="arrow_forward" size={18} /></span>
+      <span class="go" aria-hidden="true">›</span>
     </button>
-    <button class="x" type="button" title={t($messages, 'dismiss')} onclick={dismiss}>
-      <Icon name="close" size={16} />
+    <button class="x" type="button" title={t($messages, 'dismiss')} aria-label={t($messages, 'dismiss')} onclick={dismiss}>
+      ×
     </button>
   </aside>
 {/if}
 
 <style>
-  /* A resume prompt, not a story: it sits above the lead, so it has to stay
-     visibly lighter than one. Ruled strip rather than a filled card. */
+  /* Resume slug above the lead — lighter than a story, no card, no glyphs. */
   .cont {
     display: flex;
     align-items: stretch;
     gap: 4px;
-    padding: 0;
-    border: 0;
+    margin: 0 0 4px;
+    padding: 0 0 2px;
     border-bottom: 1px solid var(--border);
-    border-radius: 0;
     background: transparent;
+  }
+  :global(.motion-fade-up) {
+    animation: fade-up-in 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
   .main {
     flex: 1;
     min-width: 0;
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     border: 0;
     background: transparent;
     text-align: start;
-    padding: 6px 2px 10px;
-    border-radius: 8px;
+    padding: 8px 0 10px;
     color: inherit;
   }
-  .main:hover,
-  .main:focus-visible {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-    outline: none;
+  .main:hover .title,
+  .main:focus-visible .title {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1.5px;
   }
-  .ico,
-  .go {
-    color: var(--primary);
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
+  .main:focus-visible {
+    outline: none;
   }
   .copy {
     flex: 1;
@@ -84,22 +79,30 @@
     gap: 2px;
   }
   .label {
+    font-family: var(--font-mono);
     font-size: 10.5px;
-    font-weight: 700;
-    letter-spacing: 0.8px;
+    font-weight: 600;
+    letter-spacing: 0.7px;
     text-transform: uppercase;
-    color: var(--subtle);
+    color: var(--accent);
   }
-  /* Single line: two lines of display serif read as a headline and competed
-     with the lead story directly beneath it. */
   .title {
-    font-family: var(--font-sans);
+    font-family: var(--font-display);
     font-size: 14px;
     font-weight: 600;
+    letter-spacing: -0.15px;
     line-height: 1.3;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .go {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--accent);
+    line-height: 1;
   }
   .x {
     border: 0;
@@ -107,21 +110,16 @@
     color: var(--subtle);
     width: 44px;
     min-height: 44px;
-    border-radius: 10px;
     display: grid;
     place-items: center;
     flex-shrink: 0;
+    font-size: 20px;
+    line-height: 1;
+    font-weight: 400;
   }
   .x:hover,
   .x:focus-visible {
     color: var(--on-surface);
-    background: color-mix(in srgb, var(--on-surface) 8%, transparent);
     outline: none;
-  }
-  @media (max-width: 519px) {
-    .main {
-      padding: 8px 2px 10px;
-      gap: 10px;
-    }
   }
 </style>

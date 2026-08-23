@@ -25,11 +25,11 @@ def test_no_trigger_no_requirement() -> None:
     assert c.check_completeness(src, tool_trace="{}").passed
 
 
-def test_domain_provenance_rule() -> None:
-    """Fails the domain_provenance rule when a source URL's domain is never verified."""
+def test_domain_provenance_trigger_word_rule_removed() -> None:
+    """The old domain_provenance trigger-word rule is gone (removed 2026-08-21): it matched nearly every scraped page's own boilerplate (confirmed live on algorand.foundation, algorand.co, perawallet.app), not just genuinely unverified domains. The real check now lives in gatekeeper/live.py's dead-domain check, which asks a narrower, answerable question against domain_tracking instead of scanning source_text for url-ish words."""
     src = "The team announced it at https://example.io today."
     failed = c.check_completeness(src, "{}").failed_rules
-    assert "domain_provenance" in failed
+    assert "domain_provenance" not in failed
 
 
 def test_named_persons_unscreened() -> None:

@@ -40,6 +40,31 @@ _NEWS_SSR_LIMIT = 30
 _SECTION_LIMIT = 30
 _FEED_FULL_CONTENT_LIMIT = 20  # newest items carry full content:encoded HTML
 _SITEMAP_LIMIT = 5000
+_SITEMAP_CACHE_TTL = 900
+_RSS_CACHE_TTL = 900
+
+
+def _cached_sitemap_build() -> sitemap.SitemapBuild:
+    """Build sitemaps once per TTL — crawlers often fetch index + child files together."""
+    from app.core.cache import cached_json
+
+    def compute() -> dict[str, object]:
+        items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
+        build = sitemap.build_sitemaps(items, translations)
+        return {
+            "is_index": build.is_index,
+            "root_xml": build.root_xml,
+            "parts": build.parts,
+        }
+
+    data = cached_json("seo:sitemap-build", _SITEMAP_CACHE_TTL, compute)
+    parts = data["parts"]
+    assert isinstance(parts, dict)
+    return sitemap.SitemapBuild(
+        is_index=bool(data["is_index"]),
+        root_xml=str(data["root_xml"]),
+        parts=parts,
+    )
 
 
 def _doc_response(
@@ -215,10 +240,9 @@ def home(request: Request) -> Response:
     """SSR front page: latest feed items plus the hot-reads rail."""
     path = "/"
     _record(request, path)
-    items = news.list_feed(limit=_HOME_LIMIT)
-    hot = news.hot_feed(limit=_FRONT_HOT_LIMIT)
     feed, topics = cached_feed_snapshot(news.list_feed)
-    _ = feed
+    items = feed[:_HOME_LIMIT]
+    hot = news.rank_engagement(feed, limit=_FRONT_HOT_LIMIT)
     return _doc_response(
         render.render_front(items, hot, topic_links=topics),
         "public, max-age=120",
@@ -405,8 +429,8 @@ def hot(request: Request) -> Response:
     """SSR hot/top reader-engagement page."""
     path = "/hot"
     _record(request, path)
-    items = news.hot_feed(limit=30)
-    _feed, topics = cached_feed_snapshot(news.list_feed)
+    feed, topics = cached_feed_snapshot(news.list_feed)
+    items = news.rank_engagement(feed, limit=30)
     return _doc_response(
         render.render_hot(items, topic_links=topics),
         "public, max-age=300",
@@ -418,8 +442,8 @@ def top(request: Request) -> Response:
     """SSR all-time-top reader-engagement page (the SPA's /top view; /hot is the recency-weighted one)."""
     path = "/top"
     _record(request, path)
-    items = news.hot_feed(limit=30, rank="top")
-    _feed, topics = cached_feed_snapshot(news.list_feed)
+    feed, topics = cached_feed_snapshot(news.list_feed)
+    items = news.rank_engagement(feed, limit=30, rank="top")
     return _doc_response(
         render.render_hot(items, topic_links=topics, canonical_path=path),
         "public, max-age=300",
@@ -448,10 +472,10 @@ def topic(request: Request) -> Response:
         )
     path = f"/topic/{tag}"
     _record(request, path)
-    head, body = render.render_topic(tag, items, topic_links=topic_list, total_count=len(matching))
-    # Thin topics (single story) stay reachable but out of the index.
-    if not is_reliable_tag(tag, feed):
-        head += '\n<meta name="robots" content="noindex, follow">'
+    head, body = render.render_topic(
+        tag, items, topic_links=topic_list, total_count=len(matching),
+        indexable=is_reliable_tag(tag, feed),
+    )
     return _doc_response((head, body), "public, max-age=120", tracked_path=path)
 
 
@@ -561,22 +585,26 @@ def robots(request: Request) -> Response:
 
 def rss_feed(request: Request) -> Response:
     """Site-wide RSS feed, with full article HTML for the newest items."""
+    from app.core.cache import cached_bytes
+
     _ = request
-    items = news.list_feed(limit=50)
-    # Full article HTML for the newest items only: readers and AI crawlers
-    # get whole pieces, without 50 point-reads on every feed render (the
-    # response is cached 15 min anyway). Fan-out the body fetches.
-    bodies: dict[str, str] = {}
-    ids = [item.article_id for item in items[:_FEED_FULL_CONTENT_LIMIT]]
-    try:
-        details = news.get_articles(ids)
-        for article_id, detail in details.items():
-            if detail.body:
-                bodies[article_id] = md_to_html(detail.body)
-    except Exception:
-        pass
+
+    def compute() -> bytes:
+        items = news.list_feed(limit=50)
+        bodies: dict[str, str] = {}
+        ids = [item.article_id for item in items[:_FEED_FULL_CONTENT_LIMIT]]
+        try:
+            details = news.get_articles(ids)
+            for article_id, detail in details.items():
+                if detail.body:
+                    bodies[article_id] = md_to_html(detail.body)
+        except Exception:
+            pass
+        return feeds.rss_xml(items, bodies=bodies).encode("utf-8")
+
+    xml = cached_bytes("seo:rss-feed", _RSS_CACHE_TTL, compute).decode("utf-8")
     return _text_response(
-        feeds.rss_xml(items, bodies=bodies),
+        xml,
         "application/rss+xml; charset=utf-8",
         "public, max-age=900",
     )
@@ -617,16 +645,14 @@ def llms_txt(request: Request) -> Response:
 def sitemap_root(request: Request) -> Response:
     """Root sitemap index."""
     _ = request
-    items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
-    build = sitemap.build_sitemaps(items, translations)
+    build = _cached_sitemap_build()
     return _text_response(build.root_xml, "application/xml; charset=utf-8", "public, max-age=900")
 
 
 def sitemap_pages(request: Request) -> Response:
     """The static-pages sitemap chunk, or 404 if it doesn't exist."""
     _ = request
-    items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
-    build = sitemap.build_sitemaps(items, translations)
+    build = _cached_sitemap_build()
     xml = build.parts.get("sitemap-pages.xml")
     if xml is None:
         return Response(
@@ -657,8 +683,7 @@ def sitemap_articles_part(request: Request) -> Response:
             headers={"Content-Type": "text/plain; charset=utf-8"},
             description="Not found",
         )
-    items, translations = news.list_feed_for_sitemap(limit=_SITEMAP_LIMIT)
-    build = sitemap.build_sitemaps(items, translations)
+    build = _cached_sitemap_build()
     xml = build.parts.get(f"sitemap-articles-{chunk}.xml")
     if xml is None:
         return Response(

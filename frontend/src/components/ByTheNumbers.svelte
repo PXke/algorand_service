@@ -133,6 +133,7 @@
 {#if priceUsd > 0}
   <section class="numbers" aria-label="ALGO" class:up class:down={!up}>
     <div class="head">
+      <span class="live-pixel" aria-hidden="true"></span>
       <p class="slug">ALGO</p>
       {#if change != null}
         <span class="pill" class:up class:down={!up}>
@@ -148,7 +149,7 @@
       </div>
       {#if figures.length}
         <div class="side wide-only">
-          {#each figures as fig}
+          {#each figures as fig (fig.label)}
             <div class="fig">
               <p class="fig-label">{fig.label}</p>
               <p class="fig-value">{fig.value}</p>
@@ -208,7 +209,7 @@
 
     {#if figures.length}
       <div class="side narrow-only">
-        {#each figures as fig}
+        {#each figures as fig (fig.label)}
           <div class="fig start">
             <p class="fig-label">{fig.label}</p>
             <p class="fig-value">{fig.value}</p>
@@ -222,10 +223,10 @@
 <style>
   .numbers {
     --tone: var(--accent);
-    padding: 26px 0 22px;
+    padding: 22px 0 18px;
+    background: transparent;
+    box-shadow: none;
   }
-  /* The band is unfilled, so the module needs almost nothing from it. The
-     only real difference: markers sit on --surface here, not on a panel. */
   :global(.band) .numbers .mark.end {
     background: var(--surface);
   }
@@ -286,7 +287,7 @@
   }
   .price {
     font-family: var(--font-mono);
-    font-size: clamp(32px, 4.6vw, 41px);
+    font-size: clamp(26px, 3.6vw, 34px);
     font-weight: 600;
     line-height: 1;
     letter-spacing: -1.5px;
@@ -408,8 +409,7 @@
   .mark.end {
     background: var(--panel);
     border: 2px solid var(--tone);
-    opacity: 0;
-    animation: fill-in 0.35s ease 1s forwards;
+    animation: live-pulse 1.8s ease-in-out infinite;
   }
   .mark.tip-dot {
     width: 11px;
@@ -477,12 +477,10 @@
   @media (prefers-reduced-motion: reduce) {
     .price,
     .fill,
-    .mark.end,
     .tip {
       animation: none;
     }
-    .fill,
-    .mark.end {
+    .fill {
       opacity: 1;
     }
   }

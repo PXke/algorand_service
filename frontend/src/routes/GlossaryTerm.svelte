@@ -62,7 +62,7 @@
   {:else if error === 'other'}
     <p class="err">{t($messages, 'errorGeneric')}</p>
   {:else if entry}
-    <nav class="breadcrumb muted">
+    <nav class="breadcrumb">
       <a
         href="/glossary"
         onclick={(e) => {
@@ -77,40 +77,65 @@
     </nav>
     <header>
       <span class="accent-slug"></span>
+      <p class="kicker">Glossary</p>
       <h1>{entry.term}</h1>
     </header>
     <p class="definition">{entry.definition}</p>
     {#if entry.aliases?.length}
-      <p class="aliases muted">Also known as: {entry.aliases.join(', ')}</p>
+      <p class="aliases">
+        <span class="aka">Also known as</span>
+        {entry.aliases.join(' · ')}
+      </p>
     {/if}
   {/if}
 </div>
 
 <style>
   .breadcrumb {
-    font-size: 0.85rem;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    color: var(--muted);
     display: flex;
-    gap: 6px;
-    align-items: center;
+    gap: 8px;
+    align-items: baseline;
   }
   .breadcrumb a {
-    color: inherit;
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .breadcrumb a:hover {
+    text-decoration: underline;
   }
   header h1 {
     margin: 8px 0 0;
     font-size: clamp(26px, 4vw, 32px);
   }
   .definition {
-    font-size: 1.05rem;
-    line-height: 1.6;
+    font-family: var(--font-serif);
+    font-size: 1.12rem;
+    line-height: 1.65;
     max-width: 60ch;
+    color: var(--md-ink);
   }
   .aliases {
-    font-size: 0.85rem;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    align-items: baseline;
+  }
+  .aka {
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--subtle);
   }
   .empty {
-    text-align: center;
-    padding: 48px 16px;
+    text-align: start;
+    padding: 28px 0;
   }
   .empty h1 {
     margin: 0 0 8px;

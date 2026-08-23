@@ -8,6 +8,7 @@
   import FeedSkeleton from '../components/FeedSkeleton.svelte'
   import { ApiException } from '../lib/api/client'
   import { SITE_TAGLINE, ogLocaleFor } from '../lib/seo'
+  import { feedEnterIndex, markFeedEnter, markFeedEnterAll } from '../lib/motion'
 
   let {
     tag = undefined,
@@ -19,8 +20,10 @@
   let loading = $state(true)
   let loadingMore = $state(false)
   let error = $state<string | null>(null)
+  let enterAt = $state<Map<string, number>>(new Map())
 
   async function load(reset: boolean, lang: string) {
+    const prevLen = reset ? 0 : items.length
     if (reset) {
       loading = true
       error = null
@@ -33,6 +36,7 @@
         lang,
       })
       items = reset ? page.items : [...items, ...page.items]
+      enterAt = markFeedEnter(items, reset ? 0 : prevLen)
       cursor = page.next_cursor
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return
@@ -60,6 +64,7 @@
         })
         if (ac.signal.aborted) return
         items = page.items
+        enterAt = markFeedEnterAll(page.items)
         cursor = page.next_cursor
       } catch (e) {
         if (ac.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return
@@ -80,15 +85,17 @@
 <PageMeta
   title={pageTitle}
   description={t($messages, 'homeNewsDescription') || SITE_TAGLINE}
-  path={pagePath}
+  path="/"
+  noindex
   ogLocale={ogLocaleFor($activeLocale)}
 />
 
 <div class="page stack">
   <header>
     <span class="accent-slug"></span>
+    <p class="kicker">{t($messages, 'navNews')}</p>
     <h1>{title ?? t($messages, 'newsFeedTitle')}</h1>
-    <p class="muted">{t($messages, 'newsSubtitleDefault')}</p>
+    <p class="lead muted">{t($messages, 'newsSubtitleDefault')}</p>
   </header>
 
   {#if loading}
@@ -116,8 +123,8 @@
       <SectionRule label={t($messages, 'navLatest')} />
     {/if}
     <div class="feed">
-      {#each items as article}
-        <StoryRow {article} />
+      {#each items as article (article.article_id)}
+        <StoryRow {article} enterIndex={feedEnterIndex(enterAt, article.article_id)} />
       {/each}
     </div>
     {#if cursor}
@@ -143,6 +150,10 @@
     margin: 0;
     font-size: clamp(28px, 4vw, 34px);
     line-height: 1.15;
+  }
+  .lead {
+    margin: 0;
+    max-width: 42rem;
   }
   .empty {
     padding: 28px 0;

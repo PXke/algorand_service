@@ -707,6 +707,16 @@ def reap_stale_compose_sessions() -> dict[str, int]:
     return _reap()
 
 
+@celery_app.task(name="app.tasks.newspaper.reap_stale_translation_sessions")
+def reap_stale_translation_sessions() -> dict[str, int]:
+    """Maintenance beat: mark any translation_sessions row stuck 'running' past the staleness window as "stale" (see translation_session_store for why one can get orphaned there -- a hung or killed language mid-translate)."""
+    from app.modules.ai.translation_session_store import (
+        reap_stale_translation_sessions as _reap,
+    )
+
+    return _reap()
+
+
 def _curated_discovery(scrape_url: str) -> bool:
     """True when the row's domain came from a curated listing (ecosystem directory or case-study sync) — best-effort, False on any failure."""
     try:

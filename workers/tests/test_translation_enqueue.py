@@ -123,6 +123,61 @@ def test_translate_batch_task_persists_and_pings_per_language(
     assert pinged == ["fa", "ru"]
 
 
+def test_translate_batch_task_tracks_session_lifecycle_per_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The task starts a translation_session before each language and finishes it 'ok'/'error' to match -- the session store's stale-reaper depends on every started row eventually being closed by the SAME task that opened it."""
+    from app.modules.ai import local_translate
+
+    def _fake_batch(
+        *,
+        target_languages: list[str],
+        on_language_start: Callable[[str], None],
+        on_language_done: Callable[[str, dict], None],
+        on_language_error: Callable[[str, str], None],
+        **_kw: object,
+    ) -> dict:
+        for lang in target_languages:
+            on_language_start(lang)
+            if lang == "ru":
+                on_language_error(lang, "translation_error")
+            else:
+                on_language_done(lang, {"title": f"t-{lang}", "summary": "s", "body": "b"})
+        return {"ok": [lang for lang in target_languages if lang != "ru"], "failed": {"ru": "translation_error"} if "ru" in target_languages else {}}
+
+    monkeypatch.setattr(local_translate, "translate_article_batch", _fake_batch)
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.get_article",
+        lambda _id: SimpleNamespace(title="T", summary="S", body="B", translations={}),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.update_article_translations", lambda *_a, **_kw: None
+    )
+
+    started: list[str] = []
+    finished: list[tuple[str, str]] = []
+
+    def _fake_start(_article_id: str, lang: str) -> tuple:
+        started.append(lang)
+        return (f"session-{lang}", "ts")
+
+    def _fake_finish(ref: tuple, *, status: str, error: str = "") -> bool:  # noqa: ARG001
+        finished.append((ref[0], status))
+        return True
+
+    monkeypatch.setattr(
+        "app.modules.ai.translation_session_store.start_translation_session", _fake_start
+    )
+    monkeypatch.setattr(
+        "app.modules.ai.translation_session_store.finish_translation_session", _fake_finish
+    )
+
+    pt.translate_article_batch_task("article-1", ["fa", "ru"])
+
+    assert started == ["fa", "ru"]
+    assert finished == [("session-fa", "ok"), ("session-ru", "error")]
+
+
 def test_translate_batch_task_reports_partial_on_any_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

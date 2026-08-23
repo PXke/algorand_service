@@ -40,18 +40,16 @@ export DEPLOY_BROTLI_QUALITY PACKAGE_PRECOMPRESS_JOBS
 # Escape hatch: ignore git diff and deploy everything.
 DEPLOY_FORCE_FULL="${DEPLOY_FORCE_FULL:-0}"
 PACKAGE_OUTPUT="${PACKAGE_OUTPUT:-stage}"
-# Algorand network: mainnet or testnet. Drives the frontend dart-defines
-# (wallet login chain id, algod API, explorer). Backend/workers follow via
-# ALGOD_URL in the shared env files on the host.
+# Algorand network: mainnet or testnet. Drives the frontend wallet chain id
+# and explorer. Server-side algod is ALGOD_URL in the host env files (local
+# node on this host); the SPA reaches it via /api/v1/algod.
 ALGORAND_NETWORK="${ALGORAND_NETWORK:-testnet}"
 case "$ALGORAND_NETWORK" in
   mainnet)
-    _ALGOD_URL_DEFAULT="https://mainnet-api.algonode.cloud"
     _CHAIN_ID_DEFAULT=416001
     _EXPLORER_DEFAULT="https://explorer.perawallet.app"
     ;;
   testnet)
-    _ALGOD_URL_DEFAULT="https://testnet-api.algonode.cloud"
     _CHAIN_ID_DEFAULT=416002
     _EXPLORER_DEFAULT="https://testnet.explorer.perawallet.app"
     ;;
@@ -64,7 +62,9 @@ export FRONTEND_AUTH_DOMAIN="${FRONTEND_AUTH_DOMAIN:-$SITE_DOMAIN}"
 export FRONTEND_ADMIN_WALLETS="${FRONTEND_ADMIN_WALLETS:-}"
 # IndexNow key file is emitted into the web build by package.sh (served static).
 export INDEXNOW_KEY="${INDEXNOW_KEY:-}"
-export FRONTEND_ALGOD_API_URL="${FRONTEND_ALGOD_API_URL:-$_ALGOD_URL_DEFAULT}"
+# Wallet suggested-params go through /api/v1/algod on this API (the local
+# node). Empty means the SPA derives https://$API_DOMAIN/api/v1/algod.
+export FRONTEND_ALGOD_API_URL="${FRONTEND_ALGOD_API_URL:-}"
 export FRONTEND_WALLET_CHAIN_ID="${FRONTEND_WALLET_CHAIN_ID:-$_CHAIN_ID_DEFAULT}"
 export FRONTEND_EXPLORER_BASE_URL="${FRONTEND_EXPLORER_BASE_URL:-$_EXPLORER_DEFAULT}"
 

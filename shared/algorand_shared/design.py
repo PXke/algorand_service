@@ -29,7 +29,7 @@ def _tokens() -> dict[str, dict[str, str]]:
 
 
 def token(name: str, mode: Mode = "light") -> str:
-    """Hex value for a token, e.g. ``token("surface")`` -> ``"#f7f4ee"``.
+    """Hex value for a token, e.g. ``token("surface")`` -> ``"#f3efe6"``.
 
     Falls back to the light value when a token has no separate dark step —
     most don't, because only the browser chrome tint currently differs.

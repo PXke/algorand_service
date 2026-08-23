@@ -7,6 +7,10 @@
 - search_bluesky: free public Bluesky post search for community sentiment.
   Public AppView needs no auth. Bluesky is a public host, so it rides the SSRF
   guard like any other untrusted fetch.
+- search_x: paid X (Twitter) recent-search, opt-in (X_SEARCH_ENABLED +
+  X_BEARER_TOKEN both required to register). Fixed result count + a daily
+  Redis-backed call budget + a per-session cap keep spend predictable -- see
+  config.X_SEARCH_ENABLED's comment for the full picture.
 
 Every handler is failure-tolerant: an error returns {"error": ...} and never
 aborts the article.
@@ -162,6 +166,110 @@ def _tool_search_bluesky(query: str, limit: int = 10) -> dict[str, Any]:
     return {"query": query, "count": len(posts), "posts": posts}
 
 
+_X_SEARCH_BASE = "https://api.x.com/2/tweets/search/recent"
+# X bills per RESULT RETURNED (pay-as-you-go, $0.005/resource quoted
+# 2026-08-21), charged the moment X's API sends it back -- truncating text
+# in the response we hand to the model does NOT reduce cost, only
+# max_results (how many posts we ask for) and the call count do. Fixed at
+# X's own API minimum for recent-search and deliberately not
+# model-adjustable, so per-call cost is small and predictable ($0.05/call at
+# 10 results). See config.X_SEARCH_ENABLED's comment for the full control
+# picture (this cap + the daily call budget below + a per-session call cap
+# in llm_openai_compatible.py's _CALL_CAPPED_TOOLS).
+_X_SEARCH_MAX_RESULTS = 10
+
+
+def _x_daily_cap_reserve() -> tuple[bool, int, int]:
+    """Atomically reserve one call against today's X search budget. Returns (allowed, count_after, cap). Same INCR+EXPIRE pattern as publish_daily_guard.py -- INCR first, decrement back out if that pushed past the cap, so concurrent callers never both slip through under the limit."""
+    import redis
+
+    from app.core.config import REDIS_URL, X_SEARCH_DAILY_CAP
+
+    day = __import__("datetime").datetime.now(tz=__import__("datetime").UTC).strftime("%Y-%m-%d")
+    key = f"news:x_search_count:{day}"
+    client = redis.from_url(REDIS_URL, decode_responses=True)
+    count = int(client.incr(key))
+    client.expire(key, 90_000)  # a bit over 24h, same margin as the publish-slot cap
+    if count > X_SEARCH_DAILY_CAP:
+        client.decr(key)
+        return False, count - 1, X_SEARCH_DAILY_CAP
+    return True, count, X_SEARCH_DAILY_CAP
+
+
+def _tool_search_x(query: str) -> dict[str, Any]:
+    """Search recent public X (Twitter) posts -- many Algorand ecosystem projects announce primarily on X rather than Bluesky. Paid per call (X's pay-as-you-go API), so this is capped hard: a fixed small result count and a daily call budget shared across every article composed today. Treat results as social opinion/announcement, never cited as established fact on its own."""
+    from app.core.config import X_BEARER_TOKEN, X_SEARCH_ENABLED
+    from app.core.net_guard import guarded_get
+
+    q = (query or "").strip()
+    if not q:
+        return {"query": query, "posts": []}
+    if not X_SEARCH_ENABLED or not X_BEARER_TOKEN:
+        return {"query": query, "error": "X search not configured", "posts": []}
+    allowed, count, cap = _x_daily_cap_reserve()
+    if not allowed:
+        return {
+            "query": query,
+            "error": f"X search daily budget reached ({cap} calls) -- try again tomorrow",
+            "posts": [],
+        }
+    try:
+        resp = guarded_get(
+            _X_SEARCH_BASE,
+            params={
+                "query": q,
+                "max_results": _X_SEARCH_MAX_RESULTS,
+                "tweet.fields": "author_id,created_at,public_metrics",
+            },
+            headers={"User-Agent": _UA, "Authorization": f"Bearer {X_BEARER_TOKEN}"},
+            timeout=12.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return {"query": query, "error": str(exc)[:200], "posts": []}
+    posts = []
+    for p in (data.get("data") or [])[:_X_SEARCH_MAX_RESULTS]:
+        metrics = p.get("public_metrics") or {}
+        pid = p.get("id", "")
+        posts.append(
+            {
+                # Full text, untruncated -- we're already billed for this
+                # resource the moment X returned it; truncating here only
+                # loses information for free, it doesn't save anything.
+                "text": p.get("text") or "",
+                "created_at": p.get("created_at"),
+                "likes": metrics.get("like_count", 0),
+                "reposts": metrics.get("retweet_count", 0),
+                "replies": metrics.get("reply_count", 0),
+                "url": f"https://x.com/i/web/status/{pid}" if pid else "",
+            }
+        )
+    result: dict[str, Any] = {
+        "query": query,
+        "count": len(posts),
+        "posts": posts,
+        "daily_calls_used": count,
+        "daily_call_cap": cap,
+    }
+    # Root-caused 2026-08-21 (HesabPay/Movement article): the writer cited a
+    # single reply with 0 likes/0 reposts/0 replies as "Algorand community
+    # members noticed" -- a real post, but the engagement numbers right next
+    # to it never actually got weighed. A data-driven nudge (only fires when
+    # every result genuinely IS low-engagement) is more reliable than a
+    # static schema warning, since it responds to the actual numbers instead
+    # of hoping the model remembers a general instruction.
+    if posts and max((p["likes"] + p["reposts"] + p["replies"]) for p in posts) < 3:
+        result["engagement_note"] = (
+            "Every result has minimal engagement (under 3 combined likes/reposts/"
+            "replies). Cite a specific post only if its CONTENT is genuinely useful "
+            "to the article -- don't cite one just because it exists. If you do cite "
+            "one, attribute it to that one account, not to 'the community' or "
+            "'users' -- near-zero engagement is not evidence of a broader reaction."
+        )
+    return result
+
+
 _WEB_SCHEMA = {
     "type": "function",
     "function": {
@@ -202,6 +310,35 @@ _BLUESKY_SCHEMA = {
             "properties": {
                 "query": {"type": "string"},
                 "limit": {"type": "integer", "description": "1-25, default 10"},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+_X_SEARCH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_x",
+        "description": (
+            "Search recent public X (Twitter) posts for a topic -- many Algorand "
+            "ecosystem projects announce primarily on X rather than Bluesky. Paid "
+            "per call and rationed by a daily budget shared across every article "
+            "composed today, so use it only when the story's value genuinely "
+            "depends on an X-only signal (an announcement, a stated reason, "
+            "community reaction) that search_bluesky and search_web could not "
+            "surface. Always returns exactly 10 most-recent matching posts, each "
+            "with likes/reposts/replies -- cite a specific post only when it is "
+            "genuinely useful to the article, and check its engagement before "
+            "framing it as a reaction: a single reply with 0 likes/0 reposts is "
+            "one account's opinion, not 'the community' or 'users'. Treat results "
+            "as social opinion/announcement, never cited as established fact on "
+            "their own."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
             },
             "required": ["query"],
         },
@@ -3515,6 +3652,11 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if BLUESKY_SEARCH_ENABLED and bsky_ready:
         schemas.append(_BLUESKY_SCHEMA)
         handlers["search_bluesky"] = _tool_search_bluesky
+    from app.core.config import X_BEARER_TOKEN, X_SEARCH_ENABLED
+
+    if X_SEARCH_ENABLED and X_BEARER_TOKEN:
+        schemas.append(_X_SEARCH_SCHEMA)
+        handlers["search_x"] = _tool_search_x
     from app.core.config import TELEGRAM_BOT_TOKEN
 
     if TELEGRAM_BOT_TOKEN:

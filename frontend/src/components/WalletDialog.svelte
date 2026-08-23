@@ -198,32 +198,22 @@
 </script>
 
 <div class="backdrop" role="presentation" bind:this={backdropEl} onclick={() => closeDialog()}>
-  <div
-    class="dialog panel"
-    role="dialog"
-    aria-modal="true"
-    tabindex="-1"
-    aria-labelledby="wallet-title"
-    onclick={(e) => e.stopPropagation()}
-    onkeydown={(e) => e.stopPropagation()}
-  >
     <div
-      class="title-row"
-      onpointerdown={onTitlePointerDown}
-      onpointerup={onTitlePointerUp}
-      onpointerleave={onTitlePointerUp}
-      onpointercancel={onTitlePointerUp}
+      class="dialog"
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      aria-labelledby="wallet-title"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}
     >
-      <div class="title-icon" aria-hidden="true">
-        {#if phase === 'error'}
-          !
-        {:else if phase === 'signing'}
-          ✓
-        {:else}
-          ⌘
-        {/if}
-      </div>
-      <h2 id="wallet-title">
+      <h2
+        id="wallet-title"
+        onpointerdown={onTitlePointerDown}
+        onpointerup={onTitlePointerUp}
+        onpointerleave={onTitlePointerUp}
+        onpointercancel={onTitlePointerUp}
+      >
         {#if mode === 'manual'}
           {t($messages, 'walletSignInTitle')}
         {:else if phase === 'error'}
@@ -234,7 +224,6 @@
           {t($messages, 'walletDialogTitle')}
         {/if}
       </h2>
-    </div>
 
     <div class="modes">
       <button
@@ -264,7 +253,7 @@
           <button class="btn" type="button" onclick={() => closeDialog()}
             >{t($messages, 'walletCancel')}</button
           >
-          <button class="btn btn-primary" type="button" disabled={$authBusy} onclick={() => retryWallet()}
+          <button class="btn btn-outlined" type="button" disabled={$authBusy} onclick={() => retryWallet()}
             >{t($messages, 'walletRetry')}</button
           >
         </div>
@@ -278,7 +267,7 @@
           <button class="btn" type="button" onclick={() => closeDialog()}
             >{t($messages, 'walletCancel')}</button
           >
-          <button class="btn btn-primary" type="button" onclick={() => reopenWalletApp()}
+          <button class="btn btn-outlined" type="button" onclick={() => reopenWalletApp()}
             >{t($messages, 'walletOpenWallet')}</button
           >
         </div>
@@ -298,7 +287,7 @@
 
       {#if $wcDebugEnabled}
         <pre class="wc-debug mono" aria-live="polite"
-          >{#each $wcDebugLog as row}{row.t}ms {row.msg}
+          >{#each $wcDebugLog as row (`${row.t}:${row.msg}`)}{row.t}ms {row.msg}
 {/each}</pre
         >
       {/if}
@@ -312,7 +301,7 @@
           >{t($messages, 'walletCancel')}</button
         >
         <button
-          class="btn btn-primary"
+          class="btn btn-outlined"
           type="button"
           disabled={$authBusy || address.trim().length < 50}
           onclick={() => getChallenge()}>{t($messages, 'walletGetChallenge')}</button
@@ -330,7 +319,7 @@
           >{t($messages, 'walletRetry')}</button
         >
         <button
-          class="btn btn-primary"
+          class="btn btn-outlined"
           type="button"
           disabled={$authBusy || !signature.trim()}
           onclick={() => finishManual()}>{t($messages, 'walletComplete')}</button
@@ -370,6 +359,7 @@
     padding: max(1rem, env(safe-area-inset-top, 0px)) 1rem
       max(1rem, env(safe-area-inset-bottom, 0px));
     box-sizing: border-box;
+    animation: backdrop-in 0.22s ease both;
   }
   .dialog {
     width: min(420px, 100%);
@@ -378,74 +368,83 @@
     overscroll-behavior: contain;
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 14px;
     margin: auto;
     flex-shrink: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    padding: 22px 22px 20px;
+    animation: modal-rise 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
-  .title-row {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    touch-action: manipulation;
-    user-select: none;
-  }
-  .title-icon {
-    width: 36px;
-    height: 36px;
-    border-radius: 10px;
-    display: grid;
-    place-items: center;
-    background: var(--accent-soft);
-    color: var(--primary);
-    font-weight: 700;
-    flex-shrink: 0;
+  @media (prefers-reduced-motion: reduce) {
+    .backdrop,
+    .dialog {
+      animation: none;
+    }
   }
   h2 {
     margin: 0;
-    font-size: 1.05rem;
+    font-size: 1.15rem;
+    letter-spacing: -0.3px;
+    touch-action: manipulation;
+    user-select: none;
   }
   .modes {
     display: flex;
-    gap: 6px;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
   }
   .mode {
     flex: 1;
-    border: 1px solid var(--border);
-    background: var(--panel);
-    border-radius: 10px;
-    padding: 8px 10px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    background: transparent;
+    border-radius: 0;
+    padding: 8px 4px 10px;
+    font-family: var(--font-mono);
     font-weight: 600;
-    font-size: 13px;
+    font-size: 10.5px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--muted);
   }
   .mode.on {
-    border-color: var(--primary);
-    background: var(--accent-soft);
-    color: var(--primary);
+    border-bottom-color: var(--accent);
+    background: transparent;
+    color: var(--accent);
   }
   .hint {
     margin: 0;
-    font-size: 0.92rem;
+    font-family: var(--font-serif);
+    font-size: 1rem;
+    line-height: 1.5;
   }
   .addr {
     margin: 0;
-    font-size: 0.75rem;
+    font-size: 12px;
     word-break: break-all;
-    background: var(--callout);
-    padding: 0.5rem 0.65rem;
-    border-radius: 8px;
+    background: transparent;
+    padding: 8px 0;
+    border: 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
   }
   .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-family: var(--font-mono);
   }
   .wc-debug {
     margin: 0;
     max-height: 140px;
     overflow: auto;
+    font-family: var(--font-mono);
     font-size: 0.65rem;
     line-height: 1.35;
-    background: var(--callout);
+    background: transparent;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 0;
     padding: 0.45rem 0.55rem;
     white-space: pre-wrap;
     word-break: break-word;
@@ -455,12 +454,25 @@
     gap: 0.5rem;
     justify-content: flex-end;
   }
+  .row .btn {
+    border-radius: 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    min-height: 40px;
+    padding: 0 14px;
+  }
   .msg {
     white-space: pre-wrap;
     word-break: break-word;
-    background: var(--callout);
-    padding: 0.75rem;
-    border-radius: 8px;
+    background: transparent;
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    font-family: var(--font-mono);
     font-size: 0.8rem;
     max-height: 160px;
     overflow: auto;
@@ -468,5 +480,19 @@
   .err {
     color: var(--danger);
     margin: 0;
+  }
+  .field span {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .field input,
+  .field textarea {
+    background: var(--surface);
+    font-family: var(--font-mono);
+    font-size: 13px;
   }
 </style>

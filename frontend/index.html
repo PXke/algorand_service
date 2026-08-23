@@ -9,8 +9,19 @@
       name="description"
       content="Independent coverage of the Algorand ecosystem — curated news, topics, and search."
     />
-    <meta name="theme-color" content="#3a49ad" />
+    <meta name="theme-color" content="#eef0f5" />
     <title>PXke Algorand</title>
+    <script>
+      (function () {
+        try {
+          var m = localStorage.getItem('theme_mode')
+          var dark =
+            m === 'dark' ||
+            (m !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+        } catch (e) {}
+      })()
+    </script>
     <!--
       Three voices, and the voice says who is speaking:
         Archivo             - headlines. A sober editorial grotesque; the

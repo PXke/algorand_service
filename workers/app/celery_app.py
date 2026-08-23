@@ -115,20 +115,23 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.newspaper.check_and_publish_mistral_on_diff",
         "schedule": float(os.getenv("MISTRAL_DIFF_POLL_SECONDS", "600")),
     }
-    schedule["weekly-price-analysis"] = {
-        "task": "app.tasks.newspaper.publish_weekly_price_analysis",
-        "schedule": crontab(
-            minute=int(os.getenv("PRICE_ANALYSIS_CRON_MINUTE", "0")),
-            # Default moved off DeepSeek peak hours (2026-08-15): 9 sat inside
-            # the 06:00-10:00 UTC peak window. The compose itself is also
-            # gated by article_composer's off-peak check regardless of this
-            # cron hour (see peak_hours.py) -- this default just avoids
-            # scheduling the one hour-configurable LLM task to immediately
-            # collide with peak on every run.
-            hour=int(os.getenv("PRICE_ANALYSIS_CRON_HOUR", "11")),
-            day_of_week=os.getenv("PRICE_ANALYSIS_CRON_DOW", "mon"),
-        ),
-    }
+    # Weekly digest retired 2026-08-18 (owner call) -- opt back in with
+    # WEEKLY_DIGEST_ENABLED=1 if it's ever wanted again.
+    if os.getenv("WEEKLY_DIGEST_ENABLED", "0") == "1":
+        schedule["weekly-price-analysis"] = {
+            "task": "app.tasks.newspaper.publish_weekly_price_analysis",
+            "schedule": crontab(
+                minute=int(os.getenv("PRICE_ANALYSIS_CRON_MINUTE", "0")),
+                # Default moved off DeepSeek peak hours (2026-08-15): 9 sat inside
+                # the 06:00-10:00 UTC peak window. The compose itself is also
+                # gated by article_composer's off-peak check regardless of this
+                # cron hour (see peak_hours.py) -- this default just avoids
+                # scheduling the one hour-configurable LLM task to immediately
+                # collide with peak on every run.
+                hour=int(os.getenv("PRICE_ANALYSIS_CRON_HOUR", "11")),
+                day_of_week=os.getenv("PRICE_ANALYSIS_CRON_DOW", "mon"),
+            ),
+        }
     if os.getenv("DAILY_BURST_ENABLED", "0") == "1":
         schedule["select-daily-burst"] = {
             "task": "app.tasks.newspaper.select_daily_burst",
@@ -203,6 +206,10 @@ def _build_beat_schedule() -> dict:
     schedule["reap-stale-compose-sessions"] = {
         "task": "app.tasks.newspaper.reap_stale_compose_sessions",
         "schedule": float(os.getenv("COMPOSE_SESSION_REAP_SECONDS", "3600")),
+    }
+    schedule["reap-stale-translation-sessions"] = {
+        "task": "app.tasks.newspaper.reap_stale_translation_sessions",
+        "schedule": float(os.getenv("TRANSLATION_SESSION_REAP_SECONDS", "3600")),
     }
     # Self-heals index_article.delay() misses: that task fires once at publish
     # time with no retry, so a transient Typesense hiccup silently drops an

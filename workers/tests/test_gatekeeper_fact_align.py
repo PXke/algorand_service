@@ -70,6 +70,23 @@ def test_percent_suffixed_trace_value_grounds_matching_claim() -> None:
     assert r.ungrounded == ()
 
 
+def test_percent_grounded_by_raw_fraction_trace_value() -> None:
+    """A DeFi/chain tool response reporting a bare ratio (utilization: 0.435, never suffixed with '%' at all) grounds the article's correct percent conversion -- found 2026-08-21 auditing CompX/DorkFi articles the entailment scorer flagged as 40-70% ungrounded despite verifying accurate against live chain/DeFiLlama data: nearly every flagged figure was exactly this pattern, a ratio the tool returned and the writer correctly rendered as a percentage. Complements test_percent_suffixed_trace_value_grounds_matching_claim (2026-07-14, which fixed a DIFFERENT gap: a percentage the codebase itself computes but forgot to '%'-suffix before storage) -- this covers percentages the codebase never computes at all, only relays as a raw fraction from an upstream API."""
+    trace = '{"market": "USDC", "utilization": 0.435, "supply_apr": 0.0199}'
+    article = "USDC sits at 43.5% utilization with a 1.99% supply APR."
+    r = fa.numeric_entailment_score(trace, article)
+    assert r.score == 1.0
+    assert r.ungrounded == ()
+
+
+def test_percent_from_fraction_still_requires_right_magnitude() -> None:
+    """The raw-fraction grounding only fires at the correct ×100 magnitude -- a plain trace value equal to the percent claim itself (not claim/100) still does not ground it, so this stays additive to unit isolation rather than a blanket percent<->plain merge."""
+    trace = '{"fee": 43.5}'  # plain 43.5, NOT the 0.435 fraction that would ground it
+    article = "fees sit at 43.5% today"
+    r = fa.numeric_entailment_score(trace, article)
+    assert r.score == 0.0
+
+
 def test_fabricated_holder_percentage_not_grounded_by_real_share() -> None:
     """Regression-pin the actual CompX incident: the real, correctly-computed holder share (11.2112%, now percent-suffixed per the Fix 2 storage change) must NOT ground a fabricated, wildly different claim (99.99%) — confirming the gatekeeper correctly flags the fabrication as ungrounded once the real percentage is actually visible as a percent-class anchor, rather than the two both being invisible to entailment (which is what let the fabricated claim score gk_factuality=1.00 in the real incident)."""
     trace = (

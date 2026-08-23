@@ -49,7 +49,7 @@ class SitemapBuild:
 
 
 def robots_txt() -> str:
-    """Render robots.txt, disallowing admin/search/suggestions and pointing at the sitemap(s)."""
+    """Render robots.txt, disallowing admin/api and pointing at the sitemap(s)."""
     lines = [
         "User-agent: *",
         "Allow: /",
@@ -58,6 +58,17 @@ def robots_txt() -> str:
         # noindex, so the URLs could still surface bare. /admin stays blocked —
         # it is gated anyway and there is nothing there to crawl.
         "Disallow: /admin",
+        # The JSON API (news/glossary/admin/metrics/auth/kyc/…) is pure crawl-
+        # budget waste: every response already carries X-Robots-Tag: noindex
+        # (ApiRobotsTagMiddleware), so a bot fetching it can never index it —
+        # it just burns requests that could go to article/topic pages instead.
+        # /api/v1/img is the one exception: og:image and every hero image are
+        # served through it (see render.py's img proxy rewrite), so it has to
+        # stay crawlable or Bing/Google image fetches break. The longer `Allow`
+        # match wins over the shorter `Disallow` per the robots.txt spec both
+        # engines follow.
+        "Disallow: /api/",
+        "Allow: /api/v1/img",
         "",
         f"Sitemap: {site_url()}/sitemap.xml",
     ]
@@ -191,7 +202,7 @@ def _static_entries(items: list[ArticleFeedItem]) -> list[_UrlEntry]:
 
     return [
         _UrlEntry(loc=site_url() + "/", lastmod=lastmod),
-        _UrlEntry(loc=absolute("/news"), lastmod=lastmod),
+        # /news is crawlable (links, RSS) but noindex + canonical → / — omit from sitemap.
         _UrlEntry(loc=absolute("/hot"), lastmod=lastmod),
         _UrlEntry(loc=absolute("/about")),
         _UrlEntry(loc=absolute("/contact")),

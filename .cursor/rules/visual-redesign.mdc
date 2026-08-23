@@ -1,0 +1,15 @@
+---
+description: Visual taste and redesign workflow when the public frontend should feel beautiful
+alwaysApply: true
+---
+
+# Visual redesign is loaded
+
+When the user talks about beauty, enjoyment, restyle, or “I am not a designer”:
+
+1. Read and follow `.cursor/skills/visual-redesign/SKILL.md`.
+2. Follow `.cursor/rules/frontend-ui-stack.mdc` for Svelte/MCP/browser.
+3. You own artistic direction. Do not ask the user to invent the look.
+4. Do not start a full restyle until they say to begin — except loading tools, direction, and token plans.
+
+Public reading UI (`frontend/src` minus admin) is the canvas. Tokens live in `frontend/src/app.css`.

@@ -24,12 +24,18 @@
     place-items: center;
     flex-shrink: 0;
     overflow: hidden;
-    background: #171410;
-    color: #fffdf8;
+    background: #14161c;
+    color: #f7f8fc;
     user-select: none;
     line-height: 0;
   }
   .mark :global(svg) {
     display: block;
+  }
+  /* On night paper the ink square disappears. Knock the ground out so the
+     glyph and accent foot sit on the page — not a boxed halo. */
+  :global(html[data-theme='dark']) .mark {
+    background: transparent;
+    color: var(--on-surface);
   }
 </style>

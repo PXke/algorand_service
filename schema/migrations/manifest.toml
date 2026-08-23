@@ -589,3 +589,11 @@ file = "backend/schema/migrations/app/065_compose_session_cached_tokens.cql"
 tier = "prod"
 status = "active"
 description = "compose_sessions.cached_tokens: DeepSeek (and other OpenAI-compatible providers) report prompt-cache hit tokens on every response -- previously parsed and discarded, now persisted so cache-hit rate is visible in our own data instead of only on the provider's billing dashboard"
+
+[[migrations]]
+stream = "app"
+version = "066"
+file = "backend/schema/migrations/app/066_translation_sessions.cql"
+tier = "prod"
+status = "active"
+description = "translation_sessions: per-language start/finish tracking so a stuck local translation can be reaped as stale, mirroring compose_sessions' own crash-detection gap"

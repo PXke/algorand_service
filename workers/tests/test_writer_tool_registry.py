@@ -62,12 +62,10 @@ def test_fetch_hint_suggests_archive_for_gone_pages_only() -> None:
     assert _fetch_failure_hint("https://example.com", "timeout") == ""
 
 
-def test_entity_osint_tools_gated_to_investigative_lanes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Entity-background OSINT tools are gated to investigative topics (scam_alert), absent from the generic lane."""
+def test_entity_osint_tools_available_unconditionally(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entity-background OSINT tools are no longer topic-gated (ungated 2026-08-21, and the now-pointless ``topic`` kwarg removed from all_tools entirely): most real gaps (Nodely's KRS/NIP, Brale's NMLS) surfaced on ordinary generic-topic composes, not scam_alert/editorial_assignment, so restricting them to those two lanes just made a configured, working tool unreachable."""
     monkeypatch.setenv("OPENCORPORATES_API_TOKEN", "tok")
-    generic, _ = all_tools(topic="generic")
-    scam, _ = all_tools(topic="scam_alert")
-    ungated, _ = all_tools()  # no topic: legacy callers keep everything
+    schemas, _ = all_tools()
 
     osint = {
         "screen_sanctions_and_pep",
@@ -75,17 +73,15 @@ def test_entity_osint_tools_gated_to_investigative_lanes(monkeypatch: pytest.Mon
         "query_court_dockets",
         "search_leak_databases",
     }
-    assert not (osint & _names(generic))
-    assert osint <= _names(scam)
-    assert osint <= _names(ungated)
-    # Archive/infra tools stay available on every lane.
-    assert "fetch_archive_text" in _names(generic)
+    assert osint <= _names(schemas)
+    # Archive/infra tools stay available too.
+    assert "fetch_archive_text" in _names(schemas)
 
 
 def test_corporate_registry_needs_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """query_corporate_registry is only registered when its API token is configured."""
     monkeypatch.delenv("OPENCORPORATES_API_TOKEN", raising=False)
-    schemas, handlers = all_tools(topic="scam_alert")
+    schemas, handlers = all_tools()
     assert "query_corporate_registry" not in _names(schemas)
     assert "query_corporate_registry" not in handlers
     assert "search_leak_databases" in _names(schemas)

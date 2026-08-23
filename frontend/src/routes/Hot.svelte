@@ -7,12 +7,14 @@
   import FeedSkeleton from '../components/FeedSkeleton.svelte'
   import { ApiException } from '../lib/api/client'
   import { ogLocaleFor } from '../lib/seo'
+  import { feedEnterIndex, markFeedEnterAll } from '../lib/motion'
 
   let { rank = 'hot' }: { rank?: 'hot' | 'top' } = $props()
 
   let items: ArticleItem[] = $state([])
   let loading = $state(true)
   let error = $state<string | null>(null)
+  let enterAt = $state<Map<string, number>>(new Map())
 
   $effect(() => {
     const lang = $activeLocale
@@ -25,6 +27,7 @@
         const next = await newsApi.fetchHot(30, r, lang, ac.signal)
         if (ac.signal.aborted) return
         items = next
+        enterAt = markFeedEnterAll(next)
       } catch (e) {
         if (ac.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return
         error = e instanceof ApiException ? e.userMessage : t($messages, 'errorGeneric')
@@ -76,8 +79,13 @@
     </div>
   {:else}
     <div class="ledger">
-      {#each items as article, i}
-        <StoryRow {article} dense rank={i + 1} />
+      {#each items as article, i (article.article_id)}
+        <StoryRow
+          {article}
+          dense
+          rank={i + 1}
+          enterIndex={feedEnterIndex(enterAt, article.article_id)}
+        />
       {/each}
     </div>
   {/if}

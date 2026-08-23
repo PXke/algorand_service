@@ -1,51 +1,51 @@
 :root,
 [data-theme='light'] {
-  /* Accent = interaction only (links, buttons, focus). Topic colour lives
-     in the --tone-* family below; never reuse the accent for meaning. */
+  /* On-chain wire service. Dark is the flagship; daylight is the same
+     design restepped. One electric indigo does all the interaction work,
+     the pipeline's mono voice is the brand, headlines run huge and tight.
+     Topic --tone-* is stamp ink, not a rainbow of desks. Alert is the
+     only kicker that still paints. */
   --seed: #4a5bd0;
   --accent: #4a5bd0;
   --primary: #3a49ad;
-  /* Warm newsprint — the old cool grey-lavender read as a spreadsheet. */
-  --surface: #f7f4ee;
-  --on-surface: #171410;
-  --body: #3b352c;
-  --md-ink: #201c16;
-  --muted: #6a6355;
-  --subtle: #7d7566;
-  --border: #e0d9cb;
-  --panel: #fffdf8;
-  --callout: #efeade;
-  --accent-soft: #e9ebf8;
-  --app-bar: #fffdf8;
-  --danger: #b42318;
-  --gain: #0e7c50;
-  --loss: #c0392b;
+  --pop: #4a5bd0;
+  --surface: #eef0f5;
+  --on-surface: #14161c;
+  --body: #3a3d48;
+  --md-ink: #171922;
+  --muted: #5a5e6a;
+  --subtle: #767b88;
+  --border: #d4d7e0;
+  --panel: #f7f8fc;
+  --callout: #e5e7ee;
+  --accent-soft: #e4e7f8;
+  --app-bar: #eef0f5;
+  --masthead: #eef0f5;
+  --masthead-ink: #14161c;
+  --masthead-muted: #5a5e6a;
+  --danger: #c81e1e;
+  --gain: #0d8a5a;
+  --loss: #c81e1e;
   --chain: #4a5bd0;
   --scheduled: #5b6b4a;
-  --card-shadow: rgba(58, 46, 28, 0.07);
-  --card-hover-shadow: rgba(58, 46, 28, 0.16);
+  --card-shadow: rgba(20, 22, 28, 0.08);
+  --card-hover-shadow: rgba(20, 22, 28, 0.14);
+  /* Wire-photo plate. Story art is mostly logos and screenshots exported on
+     white; a fixed white tile keeps every one legible in both themes — a dark
+     transparent PNG on the dark surface simply vanished. */
+  --thumb-plate: #ffffff;
 
-  /* Section tones — four editorial desks + a neutral for the unclassified.
-     Validated with the dataviz palette validator (light, surface #f7f4ee,
-     all-pairs): lightness band, chroma floor, normal-vision ΔE 22.6 and
-     WCAG text contrast all PASS; CVD ΔE 7.0 sits in the 6–8 band, which is
-     permitted here because the topic name is always printed in the label —
-     colour never carries identity alone.
-
-     An earlier eight-hue set failed hard (rust↔amber ΔE 2.0 deutan): you
-     cannot fit eight equal-lightness hues and keep them separable. */
-  --tone-markets: #0b5cd5;
-  --tone-protocol: #15803d;
-  --tone-assets: #c2410c;
-  --tone-people: #a21caf;
-  --tone-meta: #5f5849;
-  /* Status, not a desk: reserved for breaking/scam/outage, never a 5th
-     category. Reuses --danger so alert colour is defined once. */
+  /* One stamp for every desk. Hue on a kicker used to turn the feed into
+     a dashboard; the label does the sorting now. Alert stays danger. */
+  --tone-markets: var(--muted);
+  --tone-protocol: var(--muted);
+  --tone-assets: var(--muted);
+  --tone-people: var(--muted);
+  --tone-meta: var(--muted);
   --tone-alert: var(--danger);
 
-
-  --radius-card: 16px;
-  --radius-control: 12px;
+  --radius-card: 8px;
+  --radius-control: 8px;
   --radius-thumb: 8px;
   /* Three voices — the face tells the reader who is speaking.
      Headlines shout in the grotesque, the pipeline stamps everything it
@@ -57,8 +57,23 @@
   --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-serif: 'Source Serif 4', Georgia, 'Times New Roman', serif;
   --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --fs-kicker: 11px;
+  --fs-ui: 13px;
+  --fs-name: 21px;
+  /* The lead headline is the front page's one daring act: let it shout —
+     but 50px is the ceiling; past that the split column sets one word a line. */
+  --fs-lead: clamp(28px, 3.8vw, 44px);
+  --fs-article: clamp(30px, 4.2vw, 46px);
+  --fs-story: 17px;
+  --fs-story-dense: 15.5px;
+  --fs-deck: 18px;
+  --fs-prose: 19px;
+  --fs-prose-lg: 20px;
   --max-content: 880px;
-  --max-reading: 660px;
+  /* Feature well. The masthead is 1240; a 660px column looked like a
+     phone stuck in the middle. 960 still leaves gutters on a 1440 screen
+     and keeps 19px serif under ~90 characters. */
+  --max-reading: 960px;
   /* Front page and other grid pages get the wide measure. */
   --max-wide: 1240px;
   --rail: 320px;
@@ -71,40 +86,40 @@
 }
 
 [data-theme='dark'] {
-  /* Warm-neutral charcoal so it reads as the same paper at night. */
-  --seed: #8fa0e8;
-  --accent: #8fa0e8;
-  --primary: #a8b4f0;
-  --surface: #100f0d;
-  --on-surface: #f0ece4;
-  --body: #c9c3b8;
-  --md-ink: #ebe6dd;
-  --muted: #928b7e;
-  --subtle: #776f63;
-  --border: #2b2823;
-  --panel: #191713;
-  --callout: #201d18;
-  --accent-soft: #1c1e2e;
-  --app-bar: #141210;
-  --danger: #f97066;
-  --gain: #7fc0a8;
-  --loss: #f97066;
-  --chain: #a8b4f0;
+  /* The flagship. Cool screen-native ink with a blue cast — a terminal at
+     night, not lamplit paper. The accent goes electric here because dark
+     can carry it. */
+  --seed: #7c8dff;
+  --accent: #7c8dff;
+  --primary: #a3b0ff;
+  --pop: #7c8dff;
+  --surface: #0f1117;
+  --on-surface: #eef1f8;
+  --body: #b9bfce;
+  --md-ink: #e2e6f0;
+  --muted: #8e94a6;
+  --subtle: #626878;
+  --border: #272c3a;
+  --panel: #161923;
+  --callout: #141721;
+  --accent-soft: #222741;
+  --app-bar: #0f1117;
+  --masthead: #0f1117;
+  --masthead-ink: #eef1f8;
+  --masthead-muted: #8e94a6;
+  --danger: #ff7a70;
+  --gain: #37d29c;
+  --loss: #ff7a70;
+  --chain: #7c8dff;
   --scheduled: #a3b58e;
-  --card-shadow: rgba(0, 0, 0, 0.2);
-  --card-hover-shadow: rgba(0, 0, 0, 0.35);
+  --card-shadow: rgba(0, 0, 0, 0.35);
+  --card-hover-shadow: rgba(0, 0, 0, 0.5);
 
-  /* Re-stepped for the dark surface rather than flipped — validated
-     separately (band L 0.48–0.67, chroma, normal-vision ΔE 16.8, WCAG text
-     all PASS). Known miss: protocol↔assets is ΔE 4.7 under deuteranopia,
-     below the 6.0 floor. Green/orange is the classic red-green collision and
-     no re-stepping cleared it at this lightness. Acceptable only because the
-     topic name is always spelled out beside the colour. */
-  --tone-markets: #6a8ee5;
-  --tone-protocol: #46ad63;
-  --tone-assets: #d87540;
-  --tone-people: #c964bc;
-  --tone-meta: #9a9282;
+  --tone-markets: var(--muted);
+  --tone-protocol: var(--muted);
+  --tone-assets: var(--muted);
+  --tone-people: var(--muted);
+  --tone-meta: var(--muted);
   --tone-alert: var(--danger);
   color-scheme: dark;
 }
@@ -121,21 +136,12 @@ body {
   min-height: 100%;
   min-height: 100dvh;
   background-color: var(--surface);
-  /* One warm wash at the masthead, nothing else. The paper-grain noise layer
-     that used to sit under this was simulating print on a screen — the type
-     system carries the paper now, and dropping it also drops three fixed
-     background layers, a blend mode and their @supports fallback. */
-  background-image: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--tone-assets) 4%, var(--surface)) 0%,
-    var(--surface) 30%
-  );
-  background-repeat: no-repeat;
+  background-image: none;
   color: var(--on-surface);
   font-family: var(--font-sans);
   font-size: 16px;
   font-weight: 400;
-  line-height: 1.55;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: color-mix(in srgb, var(--accent) 18%, transparent);
 }
@@ -165,13 +171,15 @@ html {
   }
 }
 
+html[data-theme='light'],
+html[data-theme='light'] body,
 html[data-theme='dark'],
 html[data-theme='dark'] body {
-  background-image: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--accent) 4%, var(--surface)) 0%,
-    var(--surface) 32%
-  );
+  /* More specific than the SSR `html,body{background-color:#…}` literal, which
+     is injected after this sheet and would otherwise pin every theme to cream. */
+  background-color: var(--surface);
+  background-image: none;
+  color: var(--on-surface);
 }
 
 a {
@@ -199,6 +207,13 @@ img {
   height: auto;
 }
 
+/* Selection in brand indigo — the accent should be loud exactly where the
+   reader is acting. */
+::selection {
+  background: var(--accent);
+  color: var(--surface);
+}
+
 h1,
 h2,
 h3 {
@@ -208,7 +223,7 @@ h3 {
   /* Archivo carries a width axis; narrowing headlines slightly is what gives
      the front page its dense, set-by-hand column rhythm. */
   font-stretch: 94%;
-  letter-spacing: -0.2px;
+  letter-spacing: -0.3px;
 }
 
 .btn {
@@ -222,7 +237,7 @@ h3 {
   border-radius: var(--radius-control);
   padding: 15px 22px;
   font-weight: 600;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 @media (max-width: 519px) {
@@ -236,14 +251,16 @@ h3 {
 }
 
 .btn-primary {
-  background: var(--primary);
-  border-color: var(--primary);
-  color: #fff;
+  background: var(--on-surface);
+  border-color: var(--on-surface);
+  color: var(--panel);
 }
 
 .btn-primary:hover {
-  filter: brightness(1.05);
-  background: var(--primary);
+  background: var(--pop);
+  border-color: var(--pop);
+  color: #fff;
+  filter: none;
 }
 
 .btn-outlined {
@@ -356,36 +373,40 @@ button:focus-visible {
 }
 
 /* ---- Editorial grid -------------------------------------------------
-   Below 1080px this is a single column and the rail simply flows after
-   the main content, so mobile inherits the same source order. */
+   Lead and the markets tape sit above this, full measure. This pair is
+   the pack of stories and the most-read column — a ruled page, not a
+   sticky island in empty paper. Below 1080px the rail follows the pack. */
 .editorial {
   display: grid;
   gap: 28px;
-  align-items: start;
 }
 
 @media (min-width: 1080px) {
-  .editorial {
+  .editorial:has(.rail) {
     grid-template-columns: minmax(0, 1fr) var(--rail);
-    column-gap: 44px;
+    column-gap: 0;
+    align-items: stretch;
   }
   .editorial > .rail {
-    position: sticky;
-    top: 116px;
     display: flex;
     flex-direction: column;
     gap: 26px;
+    border-inline-start: 1px solid var(--border);
+    padding-inline-start: 28px;
+    margin-inline-start: 28px;
+    min-height: 0;
+  }
+  .editorial .rail-module {
+    flex: 1 1 auto;
+    height: 100%;
   }
 }
 
-.editorial > .main {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  /* This column spaces its own children; a hairline adding margin on top of
-     the gap cost 73px of page for one pixel of ink. */
-  --hairline-gap: 0px;
+@media (max-width: 1079px) {
+  .editorial > .rail {
+    border-top: 1px solid var(--on-surface);
+    padding-top: 12px;
+  }
 }
 
 /* Rail modules read as marginalia: quieter, ruled, no card chrome. */
@@ -395,16 +416,26 @@ button:focus-visible {
   gap: 2px;
 }
 
-.rail-module > .rail-head {
+.rail-head {
   margin: 0 0 8px;
   padding-bottom: 7px;
-  border-bottom: 2px solid var(--on-surface);
+  border-bottom: 1px solid var(--on-surface);
   font-family: var(--font-mono);
   font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.8px;
+  letter-spacing: 0.9px;
   text-transform: uppercase;
   color: var(--on-surface);
+}
+
+.rail-head::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-inline-end: 9px;
+  background: var(--accent);
+  vertical-align: 6%;
 }
 
 /* ---- Full-bleed band ------------------------------------------------
@@ -430,6 +461,8 @@ button:focus-visible {
 /* The band is unfilled — full-bleed width plus these rules are what mark
    the change of register. It carries no colours of its own. */
 .band {
+  background: transparent;
+  color: var(--on-surface);
   border-block: 1px solid var(--border);
 }
 
@@ -467,6 +500,79 @@ button:focus-visible {
   }
 }
 
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes fade-up-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes menu-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes copied-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  40% {
+    color: var(--accent);
+    opacity: 0.72;
+  }
+}
+
+@keyframes backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes modal-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes value-tick {
+  from {
+    opacity: 0.35;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 #app.spa-revealed {
   /* `backwards`, never `both`: `both` retains the final keyframe, leaving an
      identity transform on #app forever — and ANY transform makes an element
@@ -479,26 +585,138 @@ button:focus-visible {
 }
 
 .accent-slug {
-  width: 34px;
-  height: 3px;
-  background: var(--tone, var(--accent));
-  border-radius: 1px;
+  width: 36px;
+  height: 4px;
+  background: var(--accent);
+  border-radius: 0;
   transform-origin: left center;
   animation: slug-draw 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* The wire is live. One pixel, breathing — same unit as the section-rule
+   mark, so a reader learns it as "this is updating" rather than ornament. */
+.live-pixel {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  background: var(--accent);
+  animation: live-pulse 1.8s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.22;
+  }
+}
+
 /* Machine voice. The desk, the timestamp, the section — everything the
    pipeline stamps rather than writes — is set in mono, so a reader can tell
-   at a glance what was measured from what was written. Colour comes from the
-   topic tone the ancestor sets; --tone-meta is the neutral for untagged items. */
+   at a glance what was measured from what was written. Stamp ink is muted;
+   an ancestor may set --tone for alerts or on-chain provenance. */
 .kicker {
   margin: 0;
   font-family: var(--font-mono);
   font-size: 10.5px;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+  color: var(--tone, var(--muted));
+}
+
+/* Colophon / masthead — the edition stamp lives once, in the nameplate. */
+.wire-stamp {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
   letter-spacing: 0.6px;
   text-transform: uppercase;
-  color: var(--tone, var(--tone-meta));
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.wire-stamp .sep {
+  margin-inline: 2px;
+  color: var(--subtle);
+}
+
+/* Edition folio — the date (or the desk name) as the page's own masthead. */
+.edition-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 4px;
+}
+.edition-date {
+  margin: 0;
+  font-family: var(--font-display);
+  font-stretch: 94%;
+  font-weight: 800;
+  font-size: clamp(17px, 2vw, 22px);
+  line-height: 1.15;
+  letter-spacing: -0.6px;
+}
+
+.desk-head {
+  margin: 0 0 8px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--on-surface);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+  color: var(--on-surface);
+}
+.desk-head::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-inline-end: 9px;
+  background: var(--accent);
+  vertical-align: 6%;
+}
+
+.desks {
+  display: grid;
+  gap: 28px 32px;
+  width: 100%;
+}
+@media (min-width: 700px) {
+  .desks {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1080px) {
+  .desks {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    column-gap: 0;
+  }
+  .desks > .desk:not(:last-child) {
+    border-inline-end: 1px solid var(--border);
+    padding-inline-end: 20px;
+    margin-inline-end: 20px;
+  }
+}
+.desk {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.desk .row {
+  padding: 10px 0;
+}
+.desk .row:last-child {
+  border-bottom: 0;
 }
 
 .section-rule {
@@ -513,10 +731,22 @@ button:focus-visible {
   font-family: var(--font-mono);
   font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.8px;
+  letter-spacing: 0.9px;
   text-transform: uppercase;
   color: var(--on-surface);
   white-space: nowrap;
+}
+
+/* Pixel mark — the logo's foot rule, reduced to a single unit. It bullets
+   every section head, so the brand recurs as structure instead of ornament. */
+.section-rule .label::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-inline-end: 9px;
+  background: var(--accent);
+  vertical-align: 6%;
 }
 
 .section-rule .rule {
@@ -559,8 +789,18 @@ button:focus-visible {
   #app.spa-revealed,
   .accent-slug,
   .section-rule .rule,
-  .page {
+  .page,
+  .live-pixel,
+  :global(.motion-rise),
+  :global(.motion-fade-up),
+  :global(.motion-menu),
+  :global(.motion-backdrop),
+  :global(.motion-modal),
+  :global(.motion-results),
+  :global(.motion-fill),
+  :global(.motion-value-tick) {
     animation: none;
+    transition: none;
   }
 }
 

@@ -1,29 +1,43 @@
 <script lang="ts">
   import type { ArticleItem } from '../lib/api/news'
   import { messages, t, tPlural, activeLocale, localeTag } from '../lib/i18n'
-  import { articleImageUrl } from '../lib/images'
+  import { articleImageUrl, looksLikeFaviconUrl } from '../lib/images'
   import { articleHref } from '../lib/paths'
   import { navigate } from '../lib/router'
   import { displayTagLabel, primaryTopic, topicColor } from '../lib/tags'
+  import { staggerMs } from '../lib/motion'
 
   let {
     article,
     dense = false,
     rank = undefined,
     showReads = undefined,
+    showThumb = undefined,
+    showWhen = true,
+    enterIndex = undefined,
   }: {
     article: ArticleItem
     dense?: boolean
     rank?: number
     showReads?: boolean
+    showThumb?: boolean
+    showWhen?: boolean
+    enterIndex?: number
   } = $props()
+
+  const enterDelay = $derived(enterIndex != null ? `${staggerMs(enterIndex)}ms` : undefined)
 
   const href = $derived(articleHref(article.article_id, null, article.slug))
   const views = $derived(typeof article.views === 'number' ? article.views : 0)
   const displayReads = $derived(
     showReads ?? views > 0,
   )
-  const media = $derived(articleImageUrl(article))
+  const displayThumb = $derived(showThumb ?? !dense)
+  const media = $derived.by(() => {
+    const url = article.image_url?.trim()
+    if (!url || looksLikeFaviconUrl(url)) return null
+    return articleImageUrl(article)
+  })
 
   /* Track the src that failed rather than hiding the <img>: hiding it left the
      wrapper behind as an empty grey box. Keying on the URL means a new article
@@ -42,8 +56,8 @@
     if (kind === 'scheduled') return t($messages, 'sourceKindScheduled')
     return topic ? displayTagLabel(topic) : t($messages, 'kickerNews')
   })
-  /* Provenance kinds keep their own colours; everything else takes the
-     topic tone so the feed's kickers become a navigable colour system. */
+  /* On-chain keeps the brand indigo; scheduled stays the olive stamp.
+     Desks share muted ink — colour on a kicker is reserved for alerts. */
   const tone = $derived.by(() => {
     const kind = article.trigger_kind?.toLowerCase()
     if (kind === 'chain' || kind === 'onchain') return 'var(--chain)'
@@ -69,8 +83,10 @@
 <a
   class="row"
   class:dense
+  class:enter={enterIndex != null}
   {href}
-  style="--tone:{tone}"
+  style:--tone={tone}
+  style:--enter-delay={enterDelay}
   onclick={(e) => {
     e.preventDefault()
     navigate(href)
@@ -79,13 +95,26 @@
   {#if rank != null}
     <span class="rank" class:top={rank <= 3}>{rank}</span>
   {/if}
+  {#if showMedia && displayThumb}
+    <div class="thumb">
+      <img
+        src={media}
+        alt={article.title ?? ''}
+        width="80"
+        height="80"
+        loading="lazy"
+        decoding="async"
+        onerror={() => (failedSrc = media)}
+      />
+    </div>
+  {/if}
   <div class="text">
     <div class="meta-top">
       <p class="kicker">{kicker}</p>
       {#if isSpecialEdition}
         <span class="special-edition-badge">{t($messages, 'specialEditionBadge')}</span>
       {/if}
-      {#if when}
+      {#if showWhen && when}
         <span class="when subtle">{when}</span>
       {/if}
     </div>
@@ -97,31 +126,42 @@
       <p class="reads muted">{tPlural($messages, 'readsCount', views)}</p>
     {/if}
   </div>
-  {#if showMedia}
-    <div class="thumb">
-      <img
-        src={media}
-        alt={article.title ?? ''}
-        width={dense ? 64 : 88}
-        height={dense ? 64 : 88}
-        loading="lazy"
-        decoding="async"
-        onerror={() => (failedSrc = media)}
-      />
-    </div>
-  {/if}
 </a>
 
 <style>
   .row {
+    position: relative;
+    isolation: isolate;
     display: grid;
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: 1fr;
     gap: 14px;
     align-items: start;
-    padding: 16px 0;
+    padding: 18px 0;
     color: inherit;
     text-decoration: none;
     border-bottom: 1px solid var(--border);
+  }
+  /* Wash sits in a paint-only layer so hover never changes the measure —
+     the old padding/margin swap rewrapped titles and shoved the next column. */
+  .row::before {
+    content: "";
+    position: absolute;
+    inset: 2px 0;
+    border-radius: var(--radius-card);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    opacity: 0;
+    pointer-events: none;
+    z-index: -1;
+    transition: opacity 0.12s ease;
+  }
+  .row:has(.rank) {
+    grid-template-columns: auto 1fr;
+  }
+  .row:has(.thumb):not(:has(.rank)) {
+    grid-template-columns: auto 1fr;
+  }
+  .row:has(.rank):has(.thumb) {
+    grid-template-columns: auto auto 1fr;
   }
   .row.dense {
     padding: 14px 0;
@@ -129,16 +169,14 @@
   .row:hover {
     text-decoration: none;
   }
-  /* Underline on hover, not a colour change: recolouring a headline mid-read
-     is jarring, and the tone already labels the desk in the kicker. */
+  .row:hover::before {
+    opacity: 1;
+  }
   .row:hover .title {
-    text-decoration: underline;
-    text-underline-offset: 2px;
-    text-decoration-thickness: 1.5px;
+    text-decoration-color: currentColor;
   }
   .row:hover .thumb img {
-    transform: scale(1.06);
-    filter: saturate(1);
+    transform: scale(1.04);
   }
   .rank {
     width: 34px;
@@ -148,15 +186,17 @@
     line-height: 1;
     color: var(--subtle);
     text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  /* The podium gets the wire's indigo — a chart, not a list. */
+  .rank.top {
+    color: var(--accent);
   }
   @media (max-width: 519px) {
     .rank {
       width: 26px;
       font-size: 18px;
     }
-  }
-  .rank.top {
-    color: var(--tone, var(--accent));
   }
   .text {
     min-width: 0;
@@ -176,7 +216,9 @@
   }
   .when {
     flex-shrink: 0;
-    font-size: 10.5px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
   }
   .special-edition-badge {
     flex-shrink: 0;
@@ -186,21 +228,25 @@
     letter-spacing: 0.3px;
     text-transform: uppercase;
     padding: 1.5px 7px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--primary) 14%, var(--panel));
-    color: var(--primary);
+    border-radius: 2px;
+    background: var(--accent);
+    color: var(--surface);
   }
   .title {
     margin: 0;
     font-family: var(--font-display);
     font-weight: 700;
-    font-size: 18.5px;
-    line-height: 1.3;
+    font-size: var(--fs-story);
+    line-height: 1.32;
     letter-spacing: -0.2px;
-    transition: color 0.25s ease;
+    color: var(--on-surface);
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1.5px;
   }
   .dense .title {
-    font-size: 17px;
+    font-size: var(--fs-story-dense);
   }
   .deck {
     font-family: var(--font-serif);
@@ -217,17 +263,17 @@
     margin: 6px 0 0;
     font-size: 0.85rem;
   }
+  /* Wire-photo plate: art ships on white more often than not, so the tile is
+     white in both themes — dark logos stay legible on the night surface. */
   .thumb {
-    width: 88px;
-    height: 88px;
+    width: 80px;
+    height: 80px;
     border-radius: var(--radius-thumb);
     overflow: hidden;
-    background: var(--callout);
+    background: var(--thumb-plate);
+    border: 1px solid var(--border);
+    padding: 4px;
     flex-shrink: 0;
-  }
-  .dense .thumb {
-    width: 64px;
-    height: 64px;
   }
   /* contain — see LeadStory: cover crops wordmarks and washes out screenshots. */
   .thumb img {
@@ -235,8 +281,7 @@
     height: 100%;
     object-fit: contain;
     object-position: center;
-    filter: saturate(0.96);
-    transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1), filter 0.35s ease;
+    transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
   }
   @media (max-width: 519px) {
     .row {
@@ -246,7 +291,7 @@
     .row:not(.dense) .title {
       font-size: 16.5px;
     }
-    .row:not(.dense) .thumb {
+    .thumb {
       width: 64px;
       height: 64px;
     }
@@ -258,14 +303,20 @@
     .dense .title {
       font-size: 15.5px;
     }
-    .dense .thumb {
-      width: 56px;
-      height: 56px;
+  }
+  .dense .thumb {
+    width: 64px;
+    height: 64px;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .row.enter {
+      animation: rise-in 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+      animation-delay: var(--enter-delay, 0ms);
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    .title,
-    .thumb img {
+    .thumb img,
+    .row::before {
       transition: none;
     }
     .row:hover .thumb img {

@@ -4,7 +4,11 @@
   import PageMeta from '../components/PageMeta.svelte'
 </script>
 
-<PageMeta title={t($messages, 'notFound')} path={typeof window !== 'undefined' ? window.location.pathname : '/'} />
+<PageMeta
+  title={t($messages, 'notFound')}
+  path={typeof window !== 'undefined' ? window.location.pathname : '/'}
+  noindex
+/>
 
 <div class="page stack">
   <span class="accent-slug"></span>

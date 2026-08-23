@@ -80,6 +80,39 @@ class LLMRateLimitError(LLMError):
     """Raised when the API keeps returning 429 after the retry budget."""
 
 
+_HTTP_LOG: logging.Logger | None = None
+
+
+def _llm_http_logger() -> logging.Logger | None:
+    """Lazily-configured rotating file logger for raw LLM request/response bodies, or None when disabled (LLM_HTTP_LOG_PATH unset -- see config.py's own comment on why this is opt-in). Built 2026-08-21 chasing a reproducible "provider returned non-JSON content" failure that left no trace anywhere else."""
+    global _HTTP_LOG
+    if _HTTP_LOG is not None:
+        return _HTTP_LOG
+    from app.core.config import (
+        LLM_HTTP_LOG_BACKUP_COUNT,
+        LLM_HTTP_LOG_MAX_BYTES,
+        LLM_HTTP_LOG_PATH,
+    )
+
+    if not LLM_HTTP_LOG_PATH:
+        return None
+    from logging.handlers import RotatingFileHandler
+
+    log = logging.getLogger("llm_http")
+    log.setLevel(logging.INFO)
+    log.propagate = False  # dedicated file only -- never duplicate into the journal
+    if not log.handlers:
+        handler = RotatingFileHandler(
+            LLM_HTTP_LOG_PATH,
+            maxBytes=LLM_HTTP_LOG_MAX_BYTES,
+            backupCount=LLM_HTTP_LOG_BACKUP_COUNT,
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        log.addHandler(handler)
+    _HTTP_LOG = log
+    return log
+
+
 def _strip_markdown_json_fence(raw: str) -> str:
     """Drop ```json / ``` wrappers the model adds despite json_object mode."""
     s = raw.strip()
@@ -473,6 +506,22 @@ class OpenAICompatibleProvider(LLMProvider):
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
+        http_log = _llm_http_logger()
+        call_id = uuid.uuid4().hex[:12] if http_log else ""
+        if http_log:
+            messages = payload.get("messages") or []
+            http_log.info(
+                "REQUEST call=%s provider=%s model=%s messages=%d chars=%d max_tokens=%s "
+                "json_object=%s task=%s",
+                call_id,
+                self._provider,
+                self._model,
+                len(messages),
+                sum(len(str(m.get("content") or "")) for m in messages),
+                payload.get(self._max_tokens_field_name()),
+                bool(payload.get("response_format")),
+                self._current_task_name(),
+            )
         # Retry transient failures, not just 429: server-side 5xx and network /
         # timeout errors are equally transient and were previously fatal on the
         # first try (e.g. a read timeout on the big two-stage revision call).
@@ -483,9 +532,30 @@ class OpenAICompatibleProvider(LLMProvider):
                 with httpx.Client(timeout=self._timeout) as client:
                     resp = client.post(url, headers=headers, json=payload)
             except httpx.RequestError as exc:
+                if http_log:
+                    http_log.info(
+                        "NETWORK_ERROR call=%s provider=%s attempt=%d error=%s",
+                        call_id,
+                        self._provider,
+                        attempt,
+                        exc,
+                    )
                 self._retry_after_network_error(exc, attempt=attempt, last_attempt=last_attempt)
                 continue
 
+            if http_log:
+                # Full raw body -- this is the point of the log: an empty/
+                # malformed .content can still carry a finish_reason,
+                # moderation flag, or error object elsewhere in the same JSON
+                # that the normal parsing path silently discards.
+                http_log.info(
+                    "RESPONSE call=%s provider=%s attempt=%d status=%d body=%s",
+                    call_id,
+                    self._provider,
+                    attempt,
+                    resp.status_code,
+                    resp.text,
+                )
             if resp.status_code in _RETRYABLE_STATUS:
                 self._retry_after_retryable_status(resp, attempt=attempt, last_attempt=last_attempt)
                 continue
@@ -504,17 +574,24 @@ class OpenAICompatibleProvider(LLMProvider):
             return data
         raise LLMError(f"{self._provider} request retry loop exhausted")  # unreachable
 
-    def _log_task_context(self, op: str) -> None:
-        """Log which Celery task is driving this call, so an unexpected burst of API queries can be traced back to the task that caused it."""
+    @staticmethod
+    def _current_task_name() -> str:
         try:
             from celery import current_task
 
-            name = getattr(current_task, "name", None) or "no-celery-task"
-            logger.info("%s %s | model=%s | celery_task=%s", self._provider, op, self._model, name)
+            return getattr(current_task, "name", None) or "no-celery-task"
         except Exception:
-            logger.debug(
-                "failed to log celery task context for %s %s call", self._provider, op, exc_info=True
-            )
+            return "unknown"
+
+    def _log_task_context(self, op: str) -> None:
+        """Log which Celery task is driving this call, so an unexpected burst of API queries can be traced back to the task that caused it."""
+        logger.info(
+            "%s %s | model=%s | celery_task=%s",
+            self._provider,
+            op,
+            self._model,
+            self._current_task_name(),
+        )
 
     def chat_completion(
         self,
@@ -680,9 +757,20 @@ class OpenAICompatibleProvider(LLMProvider):
     # context to help exhaust the eventual output budget. Capped per
     # session, not banned outright — a handful of genuinely new terms is
     # legitimate, unbounded is not.
+    #
+    # search_x (added 2026-08-21) is capped for a different reason: it's
+    # real per-call money (X's pay-as-you-go API), and a model can just as
+    # easily vary its query text call after call, defeating the exact-repeat
+    # dedup the same way. This session cap is the second of three layers
+    # (the others: research_tools.py fixes max_results at 10 so a single
+    # call's cost is small and predictable, and config.X_SEARCH_DAILY_CAP
+    # hard-stops total calls across ALL articles composed today) — one
+    # article research pass genuinely does not need more than a couple of
+    # X searches.
     _CALL_CAPPED_TOOLS: ClassVar[dict[str, int]] = {
         "suggest_glossary_term": 8,
         "suggest_tool": 6,
+        "search_x": 3,
     }
 
     @staticmethod

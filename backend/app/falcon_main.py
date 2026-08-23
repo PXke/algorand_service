@@ -17,6 +17,7 @@ from app.core.health import run_readiness_checks
 from app.core.observability import init_bugsnag
 from app.modules.admin.api.routes import register_admin_routes
 from app.modules.auth.api.routes import register_auth_routes
+from app.modules.chain.algod_proxy import register_algod_proxy
 from app.modules.contact.api.routes import register_contact_routes
 from app.modules.glossary.api.routes import register_glossary_routes
 from app.modules.ingest.api.routes import register_ingest_routes
@@ -122,6 +123,7 @@ def create_app() -> falcon.App:
 
     router = FalconRouter(app)
     register_auth_routes(router)
+    register_algod_proxy(app)
     register_media_routes(router)
     register_metrics_routes(router)
     register_news_routes(router)

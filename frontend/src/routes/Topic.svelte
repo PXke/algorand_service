@@ -4,11 +4,12 @@
   import { navigate } from '../lib/router'
   import LeadStory from '../components/LeadStory.svelte'
   import StoryRow from '../components/StoryRow.svelte'
-  import SectionRule from '../components/SectionRule.svelte'
   import PageMeta from '../components/PageMeta.svelte'
   import FeedSkeleton from '../components/FeedSkeleton.svelte'
   import { ApiException } from '../lib/api/client'
   import { SITE_TAGLINE, ogLocaleFor } from '../lib/seo'
+  import { displayTagLabel, topicColor, readerDesk, deskMessageKey } from '../lib/tags'
+  import { feedEnterIndex, markFeedEnter, markFeedEnterAll } from '../lib/motion'
 
   let { tag }: { tag: string } = $props()
 
@@ -17,10 +18,12 @@
   let loading = $state(true)
   let loadingMore = $state(false)
   let error = $state<string | null>(null)
+  let enterAt = $state<Map<string, number>>(new Map())
 
   async function loadMore(lang: string) {
     if (!cursor || loadingMore) return
     loadingMore = true
+    const prevLen = items.length
     try {
       const page = await newsApi.fetchFeedPage({
         limit: 30,
@@ -29,6 +32,7 @@
         lang,
       })
       items = [...items, ...page.items]
+      enterAt = markFeedEnter(items, prevLen)
       cursor = page.next_cursor
     } catch (e) {
       error = e instanceof ApiException ? e.userMessage : t($messages, 'errorGeneric')
@@ -54,6 +58,7 @@
         })
         if (ac.signal.aborted) return
         items = page.items
+        enterAt = markFeedEnterAll(page.items)
         cursor = page.next_cursor
       } catch (e) {
         if (ac.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return
@@ -69,9 +74,13 @@
 
   const lead = $derived(items[0])
   const rest = $derived(items.slice(1))
-  const pageTitle = $derived(`#${tag}`)
+  const label = $derived(displayTagLabel(tag))
+  const tone = $derived(topicColor(tag))
+  const deskId = $derived(readerDesk([tag]))
+  const deskLabel = $derived(t($messages, deskMessageKey(deskId)))
+  const pageTitle = $derived(label)
   const pagePath = $derived(`/topic/${encodeURIComponent(tag)}`)
-  const intro = $derived(t($messages, 'topicHubLead', { tag }))
+  const intro = $derived(t($messages, 'topicHubLead', { tag: label }))
 </script>
 
 <PageMeta
@@ -82,11 +91,18 @@
 />
 
 <div class="page stack hub">
-  <header>
-    <span class="accent-slug"></span>
-    <p class="eyebrow subtle">{t($messages, 'navTopics')}</p>
-    <h1>{pageTitle}</h1>
-    <p class="lead muted">{intro}</p>
+  <header class="edition-head" style="--tone:{tone}">
+    <p class="kicker">{deskLabel}</p>
+    <h1 class="edition-date">{label}</h1>
+    <p class="folio wire-stamp">
+      <a
+        href="/topics"
+        onclick={(e) => {
+          e.preventDefault()
+          navigate('/topics')
+        }}>{t($messages, 'navTopics')}</a
+      >
+    </p>
   </header>
 
   {#if loading}
@@ -113,10 +129,14 @@
     <LeadStory article={lead} />
 
     {#if rest.length}
-      <SectionRule label={t($messages, 'navLatest')} />
+      <h2 class="desk-head">{t($messages, 'navLatest')}</h2>
       <div class="feed">
-        {#each rest as article}
-          <StoryRow {article} />
+        {#each rest as article (article.article_id)}
+          <StoryRow
+            {article}
+            dense
+            enterIndex={feedEnterIndex(enterAt, article.article_id)}
+          />
         {/each}
       </div>
       {#if cursor}
@@ -137,28 +157,13 @@
   .hub {
     gap: 20px;
   }
-  header {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+  .folio a {
+    color: var(--accent);
+    text-decoration: none;
   }
-  .eyebrow {
-    margin: 0;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.9px;
-    text-transform: uppercase;
-  }
-  h1 {
-    margin: 0;
-    font-size: clamp(28px, 4vw, 36px);
-    line-height: 1.12;
-  }
-  .lead {
-    margin: 0;
-    max-width: 40rem;
-    font-size: 1.05rem;
-    line-height: 1.55;
+  .folio a:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
   .feed :global(.row:last-child) {
     border-bottom: 0;

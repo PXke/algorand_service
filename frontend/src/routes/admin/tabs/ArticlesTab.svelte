@@ -79,8 +79,13 @@
     try {
       const res = (await admin.listDraftArticles()) as { items: Array<Record<string, unknown>> }
       draftList = res.items ?? []
-      if (draftList[0]) await select(String(draftList[0].article_id))
-      else {
+      if (draftList[0]) {
+        try {
+          await select(String(draftList[0].article_id))
+        } catch (e) {
+          error = e instanceof Error ? e.message : String(e)
+        }
+      } else {
         selectedId = null
         title = ''
         summary = ''

@@ -32,22 +32,15 @@ DEFAULT_RULES: tuple[CompletenessRule, ...] = (
         triggers=("founder", "ceo", "co-founder", "cofounder", "president", "chairman"),
         required_any=("screen_sanctions_and_pep", "query_corporate_registry"),
     ),
-    CompletenessRule(
-        name="domain_provenance",
-        triggers=("http://", "https://", "www.", "website", "domain"),
-        # lookup_domain_registration (a plain WHOIS age/registrar check) added
-        # 2026-08-07: it satisfies the same underlying question -- is this
-        # domain aged/legitimate rather than a fresh scam clone -- as the two
-        # heavier investigative-tier tools, but wasn't recognized, so writers
-        # who reached for the lighter tool always failed this rule even after
-        # doing real diligence (found on a held Polkagold recompose that had
-        # checked polkagold.tech's registration date and got flagged anyway).
-        required_any=(
-            "resolve_domain_infrastructure",
-            "fetch_archive_snapshot",
-            "lookup_domain_registration",
-        ),
-    ),
+    # domain_provenance (trigger-word rule) removed 2026-08-21: the trigger set
+    # ("http://", "https://", "www.", "website", "domain") matched nearly every
+    # scraped page's own boilerplate -- confirmed live against 57 recent
+    # failures including algorand.foundation, algorand.co, and perawallet.app,
+    # the platform's own best-known domains -- because it scanned source_text
+    # for ANY url-ish word rather than asking anything about the actual
+    # article. Replaced by gate_draft's dead-domain check below, which asks a
+    # narrower, answerable question straight from domain_tracking: does the
+    # FINAL ARTICLE name a domain the platform already knows is dead.
     CompletenessRule(
         name="company_backing",
         triggers=("incorporated", "registered company", "ltd", "inc.", "llc", "gmbh"),

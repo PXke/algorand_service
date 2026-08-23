@@ -2,7 +2,7 @@
   "$schema-note": [
     "Cross-boundary design tokens: the palette values that are restated OUTSIDE",
     "frontend/src/app.css, in files that cannot read a CSS custom property — a",
-    "favicon SVG, the pre-CSS offline page, the SSR <style> block Python emits,",
+    "favicon SVG, the pre-CSS offline page, the SSR <style> block Python emits",
     "the PWA manifest, a <meta name=theme-color>.",
     "",
     "app.css remains the design surface and defines the full palette. Only the",
@@ -20,40 +20,40 @@
   "tokens": {
     "accent": {
       "light": "#4a5bd0",
-      "role": "Brand mark and interaction. The one blue the logo is drawn in."
+      "role": "Brand mark foot rule. The one blue the logo is drawn in."
     },
     "primary": {
       "light": "#3a49ad",
-      "role": "Link ink — accent darkened to clear WCAG AA on --surface."
+      "role": "Link ink — indigo darkened to clear WCAG AA on --surface."
     },
     "surface": {
-      "light": "#f7f4ee",
-      "role": "Warm newsprint page background."
+      "light": "#eef0f5",
+      "role": "Daylight page background. Cool paper, the night surface inverted."
     },
     "panel": {
-      "light": "#fffdf8",
-      "role": "Raised card / app-bar fill."
+      "light": "#f7f8fc",
+      "role": "Raised paper / glyph fill on the stamp."
     },
     "on-surface": {
-      "light": "#171410",
-      "role": "Headline ink."
+      "light": "#14161c",
+      "role": "Headline ink and stamp ground."
     },
     "muted": {
-      "light": "#6a6355",
+      "light": "#5a5e6a",
       "role": "Secondary text: bylines, timestamps, breadcrumbs."
     },
     "subtle": {
-      "light": "#7d7566",
+      "light": "#767b88",
       "role": "Tertiary marks: breadcrumb separators, hairline glyphs."
     },
     "border": {
-      "light": "#e0d9cb",
+      "light": "#d4d7e0",
       "role": "Hairline rules."
     },
     "theme-color": {
-      "light": "#3a49ad",
-      "dark": "#141210",
-      "role": "Browser/OS chrome tint. Light tints to brand; dark matches --app-bar."
+      "light": "#eef0f5",
+      "dark": "#0f1117",
+      "role": "Browser/OS chrome tint. Matches the page, not an inverted bar."
     }
   }
 }

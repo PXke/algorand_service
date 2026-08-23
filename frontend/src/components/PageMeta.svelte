@@ -18,6 +18,8 @@
     jsonLd = null as Record<string, unknown> | Record<string, unknown>[] | null,
     /** When false, `title` is used as-is (already formatted). */
     brandTitle = true,
+    /** When true, emit noindex,follow (utility / duplicate / thin pages). */
+    noindex = false,
   }: {
     title: string
     description?: string
@@ -28,6 +30,7 @@
     ogLocale?: string
     jsonLd?: Record<string, unknown> | Record<string, unknown>[] | null
     brandTitle?: boolean
+    noindex?: boolean
   } = $props()
 
   const docTitle = $derived(brandTitle ? formatPageTitle(title) : title)
@@ -54,7 +57,7 @@
     <meta name="description" content={description} />
   {/if}
   <link rel="canonical" href={canonical} />
-  <meta name="robots" content="max-image-preview:large" />
+  <meta name="robots" content={noindex ? 'noindex, follow' : 'max-image-preview:large'} />
 
   <meta property="og:title" content={title || SITE_NAME} />
   {#if description}
