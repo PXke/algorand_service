@@ -11,7 +11,13 @@ from xml.sax.saxutils import escape
 
 from app.core.config import settings
 from app.modules.news.models.schemas import ArticleFeedItem
-from app.modules.seo.render import absolute, article_hreflang_links, article_path, site_url
+from app.modules.seo.render import (
+    absolute,
+    article_hreflang_links,
+    article_path,
+    is_icon_like,
+    site_url,
+)
 from app.modules.seo.topics import reliable_tags
 
 logger = logging.getLogger(__name__)
@@ -27,6 +33,10 @@ MAX_URLS_PER_SITEMAP = 5000
 
 _URLSET_NS = 'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
 _XHTML_NS = 'xmlns:xhtml="http://www.w3.org/1999/xhtml"'
+# Google originated this extension; Bing documents support for the same
+# protocol. Lets image crawlers discover article hero images without
+# depending on them ever being linked from a page a bot happens to visit.
+_IMAGE_NS = 'xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"'
 _INDEX_NS = 'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
 
 _tombstone_cache: dict[str, object] = {"mono": 0.0, "ids": set()}
@@ -37,6 +47,7 @@ class _UrlEntry:
     loc: str
     lastmod: str | None = None
     alternates: list[tuple[str, str]] = field(default_factory=list)
+    image: str | None = None
 
 
 @dataclass(frozen=True)
@@ -125,12 +136,17 @@ def _url_xml(entry: _UrlEntry) -> str:
         parts.append(f"<lastmod>{entry.lastmod}</lastmod>")
     for hreflang, href in entry.alternates:
         parts.append(_hreflang_link(hreflang, href))
+    if entry.image:
+        parts.append(f"<image:image><image:loc>{escape(entry.image)}</image:loc></image:image>")
     return "<url>" + "".join(parts) + "</url>"
 
 
 def _urlset_xml(entries: list[_UrlEntry]) -> str:
     needs_xhtml = any(e.alternates for e in entries)
-    ns = f"{_URLSET_NS} {_XHTML_NS}" if needs_xhtml else _URLSET_NS
+    needs_image = any(e.image for e in entries)
+    ns = " ".join(
+        [_URLSET_NS, *([_XHTML_NS] if needs_xhtml else []), *([_IMAGE_NS] if needs_image else [])]
+    )
     body = "".join(_url_xml(e) for e in entries)
     return f'<?xml version="1.0" encoding="UTF-8"?><urlset {ns}>{body}</urlset>'
 
@@ -233,12 +249,21 @@ def _article_entries(
         lastmod = _iso_date(
             max(item.published_at_epoch, getattr(item, "updated_at_epoch", None) or 0)
         )
+        # Real hero image only — skip the brand-icon/logo fallback the workers
+        # stash in image_url when a source has no real share image, or a bare
+        # sitemap-image entry becomes another vector for the exact "logo as
+        # og:image" bug is_icon_like exists to keep off the article itself.
+        image = None
+        if item.image_url and not is_icon_like(absolute(item.image_url)):
+            image = absolute(item.image_url)
         seen_locs: set[str] = set()
         for _hreflang, loc in alternates:
             if loc in seen_locs:
                 continue
             seen_locs.add(loc)
-            entries.append(_UrlEntry(loc=loc, lastmod=lastmod, alternates=alternates))
+            entries.append(
+                _UrlEntry(loc=loc, lastmod=lastmod, alternates=alternates, image=image)
+            )
     return entries
 
 

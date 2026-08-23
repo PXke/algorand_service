@@ -358,6 +358,21 @@ DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-chat")
 DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-chat")
 DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-chat")
 DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-chat")
+# Per-language override: languages in this list translate via DeepSeek
+# (translate_article_mistral) instead of the local CPU engines, independent
+# of LLM_PROVIDER_TRANSLATE's global mistral/deepseek routing. Multi-article
+# side-by-side testing (2026-08-23) found local quality is a genuine wash
+# against DeepSeek for most languages -- some local wins, some DeepSeek wins,
+# never by much -- except Pashto, where the local seq2seq engine
+# (SeamlessM4T) repeatedly collapsed list/table-heavy blocks into
+# repetition-loop degeneration, once destroying every citation in a source
+# list outright. DeepSeek cost is negligible (this account's entire DeepSeek
+# usage that day totaled 16 cents), so there's no cost reason to keep a
+# language on a confirmed-broken local path. Comma-separated language codes;
+# empty entries ignored.
+DEEPSEEK_TRANSLATE_LANGS = frozenset(
+    lang.strip() for lang in env_str("DEEPSEEK_TRANSLATE_LANGS", "ps").split(",") if lang.strip()
+)
 # The LLM quality rubric (article_quality_llm.py) shares the research-tier
 # Mistral model but gets its OWN provider knob, separate from research's
 # LLM_PROVIDER_RESEARCH — a compose can route its tool-calling research loop

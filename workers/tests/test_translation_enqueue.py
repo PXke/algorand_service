@@ -178,6 +178,63 @@ def test_translate_batch_task_tracks_session_lifecycle_per_language(
     assert finished == [("session-fa", "ok"), ("session-ru", "error")]
 
 
+def test_translate_batch_task_routes_deepseek_langs_away_from_local_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A language in DEEPSEEK_TRANSLATE_LANGS never reaches local_translate.translate_article_batch -- it's translated via _translate_one_lang_via_deepseek and persisted the same way as a local result."""
+    from app.modules.ai import local_translate
+
+    monkeypatch.setattr("app.core.config.DEEPSEEK_TRANSLATE_LANGS", frozenset({"ps"}))
+
+    def _fake_local_batch(*, target_languages: list[str], **_kw: object) -> dict:
+        assert "ps" not in target_languages, "ps must be routed to DeepSeek, not the local engine"
+        return {"ok": list(target_languages), "failed": {}}
+
+    def _fake_deepseek(**_kw: object) -> dict[str, str]:
+        return {"title": "t-ps", "summary": "s", "body": "b"}
+
+    monkeypatch.setattr(local_translate, "translate_article_batch", _fake_local_batch)
+    monkeypatch.setattr(pt, "_translate_one_lang_via_deepseek", _fake_deepseek)
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.get_article",
+        lambda _id: SimpleNamespace(title="T", summary="S", body="B", translations={}),
+    )
+    written: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.update_article_translations",
+        lambda article_id, translations: written.append((article_id, translations)),
+    )
+
+    result = pt.translate_article_batch_task("article-1", ["fa", "ps"])
+    assert result["status"] == "ok"
+    assert set(result["ok"]) == {"fa", "ps"}
+    assert [w[1] for w in written if "ps" in w[1]]
+
+
+def test_translate_batch_task_deepseek_failure_is_isolated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A DeepSeek-routed language raising is caught, recorded in "failed", and doesn't abort the local-engine languages in the same batch."""
+    from app.modules.ai import local_translate
+
+    monkeypatch.setattr("app.core.config.DEEPSEEK_TRANSLATE_LANGS", frozenset({"ps"}))
+    monkeypatch.setattr(
+        local_translate,
+        "translate_article_batch",
+        lambda **_kw: {"ok": ["fa"], "failed": {}},
+    )
+    monkeypatch.setattr(
+        pt, "_translate_one_lang_via_deepseek", lambda **_kw: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.get_article",
+        lambda _id: SimpleNamespace(title="T", summary="S", body="B", translations={}),
+    )
+
+    result = pt.translate_article_batch_task("article-1", ["fa", "ps"])
+    assert result["status"] == "partial"
+    assert result["ok"] == ["fa"]
+    assert result["failed"] == {"ps": "translation_error"}
+
+
 def test_translate_batch_task_reports_partial_on_any_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

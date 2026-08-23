@@ -536,6 +536,17 @@ def test_sitemap_xml_includes_articles_and_topics() -> None:
     assert "/section/" not in xml
 
 
+def test_sitemap_includes_image_extension_for_real_hero_images_only() -> None:
+    """Emits <image:image> for a real hero image but skips the brand-icon/logo fallback."""
+    items = _feed(2)
+    items[0].image_url = "https://img.io/hero-photo.jpg"
+    items[1].image_url = "https://img.io/algorand_logo_mark.png"
+    xml = sitemap.sitemap_xml(items)
+    assert 'xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"' in xml
+    assert "<image:loc>https://img.io/hero-photo.jpg</image:loc>" in xml
+    assert "algorand_logo_mark.png" not in xml
+
+
 def test_sitemap_article_hreflang_and_translations() -> None:
     """Includes hreflang alternates for an article's translations in the sitemap."""
     items = _feed(1)

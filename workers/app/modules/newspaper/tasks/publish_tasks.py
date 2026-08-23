@@ -9,9 +9,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from celery import Task
 
     from app.modules.ai.content_signals import ContentSignals
+    from app.modules.newspaper.article_store import ArticleDetail
     from app.modules.newspaper.editorial_assignment import EditorialBrief
 
 from app.celery_app import celery_app
@@ -2462,19 +2465,77 @@ def translate_glossary_term_task(slug: str, lang: str) -> dict[str, str]:
     acks_late=True,
     reject_on_worker_lost=True,
 )
+def _translate_one_lang_via_deepseek(
+    *, english_title: str, english_summary: str, english_body: str, target_language: str
+) -> dict[str, str]:
+    """One language's translation via DeepSeek instead of the local CPU engines -- see DEEPSEEK_TRANSLATE_LANGS for why some languages route here."""
+    from app.core.config import DEEPSEEK_API_BASE, DEEPSEEK_API_KEY, DEEPSEEK_MODEL_TRANSLATE
+    from app.modules.ai.llm_openai_compatible import DeepSeekProvider
+    from app.modules.ai.mistral_compose import translate_article_mistral
+
+    client = DeepSeekProvider(
+        api_key=DEEPSEEK_API_KEY, api_base=DEEPSEEK_API_BASE, model=DEEPSEEK_MODEL_TRANSLATE
+    )
+    return translate_article_mistral(
+        english_title=english_title,
+        english_summary=english_summary,
+        english_body=english_body,
+        target_language=target_language,
+        client=client,
+    )
+
+
+def _run_deepseek_translations(
+    *,
+    article: ArticleDetail,
+    article_id: str,
+    langs: list[str],
+    on_start: Callable[[str], None],
+    on_done: Callable[[str, dict[str, str]], None],
+    on_error: Callable[[str, str], None],
+) -> tuple[list[str], dict[str, str]]:
+    """Translate every language in `langs` via DeepSeek, one call each (no load/unload cost to batch, unlike the local engines) -- split out purely to keep translate_article_batch_task's own cyclomatic complexity down."""
+    ok: list[str] = []
+    failed: dict[str, str] = {}
+    for lang in langs:
+        on_start(lang)
+        try:
+            result = _translate_one_lang_via_deepseek(
+                english_title=article.title or "",
+                english_summary=article.summary or "",
+                english_body=article.body or "",
+                target_language=lang,
+            )
+        except Exception:
+            logger.error(
+                "deepseek translation failed: lang=%s article=%s", lang, article_id, exc_info=True
+            )
+            failed[lang] = "translation_error"
+            on_error(lang, "translation_error")
+            continue
+        ok.append(lang)
+        on_done(lang, result)
+    return ok, failed
+
+
 def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
-    """Background task to translate an article into every language in `langs`, batched by engine.
+    """Background task to translate an article into every language in `langs`.
 
     Same freshness/idempotency guards as the retired per-language task:
     re-reads the CURRENT article from the store (a recompose between enqueue
     and run must not persist a stale translation) and re-checks each lang
     against what's already stored (time passes in a queue -- a manual
-    backfill run could have filled one in the meantime). See
-    app.modules.ai.local_translate.translate_article_batch for the actual
-    engine grouping / load-once / explicit-unload logic.
+    backfill run could have filled one in the meantime).
+
+    Languages in DEEPSEEK_TRANSLATE_LANGS translate via DeepSeek (one call
+    each, no batching needed -- an API call has none of the local engines'
+    load/unload cost); everything else still goes through
+    app.modules.ai.local_translate.translate_article_batch's engine
+    grouping / load-once / explicit-unload logic.
     """
     import json
 
+    from app.core.config import DEEPSEEK_TRANSLATE_LANGS
     from app.modules.ai.local_translate import translate_article_batch
     from app.modules.ai.translation_session_store import (
         finish_translation_session,
@@ -2515,17 +2576,33 @@ def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
         def _on_error(lang: str, reason: str) -> None:
             finish_translation_session(session_refs.get(lang), status="error", error=reason)
 
-        outcome = translate_article_batch(
-            english_title=article.title or "",
-            english_summary=article.summary or "",
-            english_body=article.body or "",
-            target_languages=pending,
-            on_language_start=_on_start,
-            on_language_done=_persist,
-            on_language_error=_on_error,
+        deepseek_pending = [lang for lang in pending if lang in DEEPSEEK_TRANSLATE_LANGS]
+        local_pending = [lang for lang in pending if lang not in DEEPSEEK_TRANSLATE_LANGS]
+
+        ok, failed = _run_deepseek_translations(
+            article=article,
+            article_id=article_id,
+            langs=deepseek_pending,
+            on_start=_on_start,
+            on_done=_persist,
+            on_error=_on_error,
         )
-        status = "ok" if not outcome["failed"] else "partial"
-        return {"status": status, "article_id": article_id, **outcome}
+
+        if local_pending:
+            outcome = translate_article_batch(
+                english_title=article.title or "",
+                english_summary=article.summary or "",
+                english_body=article.body or "",
+                target_languages=local_pending,
+                on_language_start=_on_start,
+                on_language_done=_persist,
+                on_language_error=_on_error,
+            )
+            ok.extend(outcome["ok"])
+            failed.update(outcome["failed"])
+
+        status = "ok" if not failed else "partial"
+        return {"status": status, "article_id": article_id, "ok": ok, "failed": failed}
     except Exception as e:
         logger.error(f"Failed to batch-translate article {article_id}: {e}", exc_info=True)
         return {"status": "error", "reason": str(e)}
