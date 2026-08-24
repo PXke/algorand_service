@@ -11,10 +11,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from celery import Task
+
     from app.modules.ai.content_signals import ContentSignals
     from app.modules.newspaper.article_store import ArticleDetail
     from app.modules.newspaper.editorial_assignment import EditorialBrief
-    from celery import Task
 
 from app.celery_app import celery_app
 from app.core import config as worker_config
@@ -564,11 +565,13 @@ def _novelty_duplicate_veto(ctx: _ComposeVetoCtx) -> dict | None:
     if not worker_config.NOVELTY_GATE_ENABLED:
         return None
     from app.modules.newspaper.article_grader import (
+        recent_content_similarity,
         recent_same_service_similarity,
         recent_title_similarity,
     )
 
     page_title = str(ctx.row.payload.get("page_title", ""))
+    page_text = str(ctx.row.payload.get("page_text", ""))
     sim, closest = recent_title_similarity(page_title)
     if sim >= worker_config.NOVELTY_MAX_SIMILARITY:
         return {
@@ -577,6 +580,24 @@ def _novelty_duplicate_veto(ctx: _ComposeVetoCtx) -> dict | None:
             "service_id": ctx.row.service_id,
             "closest_title": closest,
             "similarity": round(sim, 2),
+        }
+    # Cross-service body-content check: recent_title_similarity above only
+    # compares headlines, so a genuine CROSS-service duplicate with a
+    # differently-worded title (the "brand-level" pattern -- Tinyman blog vs
+    # app, Pera Wallet variants, Lofty AI, Valar, all found live 2026-08-20)
+    # slips straight past it. queue_drain_tasks.py's _novelty_collapsed
+    # already runs this same check at drain time; running it again here
+    # covers the window between a row entering the drain and this specific
+    # compose actually starting, same reasoning as recent_title_similarity's
+    # own re-check above.
+    content_sim, content_closest = recent_content_similarity(page_title, page_text)
+    if content_sim >= worker_config.NOVELTY_MAX_SIMILARITY:
+        return {
+            "status": "duplicate",
+            "reason": "too_similar_to_recent_content",
+            "service_id": ctx.row.service_id,
+            "closest_title": content_closest,
+            "similarity": round(content_sim, 2),
         }
     # Same-service re-coverage gets a stricter bar: the Alpha Arcade pair
     # ("Goes Live with Daily ... Price Prediction Markets" vs "expands to

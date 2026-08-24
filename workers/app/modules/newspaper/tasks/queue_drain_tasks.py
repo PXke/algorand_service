@@ -6,6 +6,8 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.celery_app import celery_app
 from app.core import config
 from app.core.feed_bucket import feed_month as _feed_month
@@ -34,7 +36,6 @@ from app.modules.newspaper.publish_queue_store import (
 )
 from app.modules.newspaper.publish_schedule import record_standard_publish
 from app.modules.newspaper.tasks.publish_tasks import publish_from_queued_row
-from celery.exceptions import SoftTimeLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -140,11 +141,13 @@ def _service_in_cooldown(row: QueuedPublishRow) -> bool:
 def _novelty_collapsed(row: QueuedPublishRow) -> bool:
     """Fresh novelty at drain time. The enqueue-time novelty is a snapshot; a story on the same subject may have PUBLISHED after this row entered the queue (the Defly case: a newsletter about a wallet we had just covered), so the stored priority silently overstates it. Recompute against articles published NOW and cut the row when novelty has collapsed — one cheap Typesense query beats a six-minute duplicate compose. Fails open (0.0 similarity → not collapsed) when Typesense is unavailable.
 
-    Uses the SAME boundary as the compose-time duplicate check
-    (NOVELTY_MAX_SIMILARITY, publish_tasks.py) rather than the old, more
+    Uses the SAME boundaries as the compose-time duplicate check
+    (publish_tasks.py's _novelty_duplicate_veto) rather than the old, more
     lenient NOVELTY_DUPLICATE_FLOOR — a row in between the two used to survive
     this drain-time check only to be discarded as a duplicate mid-compose,
-    wasting a full Mistral call.
+    wasting a full Mistral call. title_sim and content_sim are both
+    token-Jaccard (see article_grader.recent_content_similarity), so they're
+    on the same scale and combined via max() under one boundary.
     """
     from app.modules.newspaper.article_grader import (
         recent_content_similarity,
@@ -155,8 +158,7 @@ def _novelty_collapsed(row: QueuedPublishRow) -> bool:
     text = str(row.payload.get("page_text", ""))
     title_sim, _ = recent_title_similarity(title)
     content_sim, _ = recent_content_similarity(title, text)
-    closest_sim = max(title_sim, content_sim)
-    return closest_sim >= config.NOVELTY_MAX_SIMILARITY
+    return max(title_sim, content_sim) >= config.NOVELTY_MAX_SIMILARITY
 
 
 def _brief_archived(row: QueuedPublishRow) -> bool:

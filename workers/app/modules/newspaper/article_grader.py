@@ -290,6 +290,12 @@ def composed_duplicates_latest_service_article(
             and result.score >= config.ARTICLE_DUPLICATE_NUMERIC_OVERLAP
         )
 
+        # Bag-of-words token Jaccard, not shingle-set: the NFDomains pair
+        # (2026-08-02) is a genuine REWORD -- almost no shared 5-word runs
+        # (shingle Jaccard scores ~0.00, tried and reverted 2026-08-24) but
+        # substantial shared vocabulary (token Jaccard ~0.24) since a
+        # paraphrase keeps the same nouns/verbs in a different order. See
+        # ARTICLE_DUPLICATE_BODY_SIMILARITY's calibration comment.
         prior_tokens, new_tokens = _tokens(prior_text), _tokens(new_text)
         body_sim = _jaccard(prior_tokens, new_tokens)
         body_is_dup = (
@@ -340,11 +346,20 @@ def prior_service_article_summary(service_id: str) -> str:
 
 
 def recent_content_similarity(title: str, text: str = "") -> tuple[float, str]:
-    """(closest_similarity, that_article_title) of a candidate vs recently published articles, retrieved by CONTENT (title+summary+body) from the Typesense articles index rather than by headline tokens. This catches the same-topic / different-headline dupes that recent_title_similarity misses (e.g. "Pera adds staking" vs "Explore Pera's new feature").
+    """(closest_similarity, that_article_title) of a candidate vs recently published articles, retrieved by CONTENT (title+summary+body) from the Typesense articles index rather than by headline tokens. This catches the same-topic / different-headline dupes that recent_title_similarity misses (e.g. "Pera adds staking" vs "Explore Pera's new feature") -- including CROSS-service duplicates, since the Typesense search isn't scoped to one service.
 
-    The retrieval is semantic-ish (full-text over the body); the raw score is
-    token Jaccard of the candidate's title+summary against the matched article's
-    title+summary. That raw similarity is then AGE-WEIGHTED by how long ago the
+    The retrieval is full-text search over title+summary+body (title carries
+    the topic for query purposes). The SCORE is bag-of-words token Jaccard
+    between the candidate's title+text and each hit's title+summary+body --
+    comparing actual BODY content, not just title+summary tokens (2026-08-24:
+    fixed -- this function searched the body but never actually looked at it
+    when scoring a match). Shingle-set Jaccard was tried in its place the same
+    day and reverted: it scores genuine paraphrased duplicates (e.g. "Pera
+    Wallet rolls out in-app staking" vs "Explore staking with Pera Wallet")
+    near 0, since a reworded sentence rarely shares a 5-word run, which is
+    exactly the case this function exists to catch. Token Jaccard's tradeoff
+    (a noisier floor from shared domain vocabulary) is the safer failure mode
+    here. That raw similarity is then AGE-WEIGHTED by how long ago the
     matched article was published: full weight within NOVELTY_DECAY_FULL_DAYS,
     easing linearly to 0 by NOVELTY_DECAY_ZERO_DAYS — so re-covering a story is
     penalized hard for a week and allowed again after ~10 weeks. The returned
@@ -357,8 +372,8 @@ def recent_content_similarity(title: str, text: str = "") -> tuple[float, str]:
     if window_hours <= 0:
         return 0.0, ""
 
-    cand = _tokens(f"{title}\n{text}")
-    if not cand:
+    cand_text = f"{title}\n{text}"
+    if not cand_text.strip():
         return 0.0, ""
 
     try:
@@ -387,8 +402,8 @@ def recent_content_similarity(title: str, text: str = "") -> tuple[float, str]:
     best_sim, best_title = 0.0, ""
     for hit in result.get("hits", []):
         doc = hit.get("document", {})
-        other = _tokens(f"{doc.get('title', '')}\n{doc.get('summary', '')}")
-        sim = _jaccard(cand, other)
+        other_text = f"{doc.get('title', '')}\n{doc.get('summary', '')}\n{doc.get('body', '')}"
+        sim = _jaccard(_tokens(cand_text), _tokens(other_text))
         if sim <= 0:
             continue
         decayed = sim * _age_decay_weight(doc.get("published_at", 0), now_ts=now_ts)

@@ -932,11 +932,25 @@ NOVELTY_MAX_SIMILARITY = env_float("NOVELTY_MAX_SIMILARITY", 0.6)
 NOVELTY_SAME_SERVICE_MAX_SIMILARITY = env_float("NOVELTY_SAME_SERVICE_MAX_SIMILARITY", 0.4)
 # Content-level novelty: retrieve recently-published articles textually closest to
 # a candidate from the Typesense articles index (title+summary+body), then score
-# overlap against the candidate's title+summary tokens. Catches same-topic /
-# different-headline dupes that the title-only Jaccard misses. Only articles
-# published within this window are considered (0 disables the content check).
-# Default covers the full decay horizon below so age-weighting can taper old
-# matches rather than the window hard-cutting them off.
+# overlap against the candidate's title+summary+body via bag-of-words token
+# Jaccard (see article_grader.recent_content_similarity). Catches same-topic /
+# different-headline dupes that the title-only Jaccard misses -- including
+# CROSS-service duplicates, since the Typesense retrieval isn't scoped to one
+# service. Only articles published within this window are considered (0
+# disables the content check). Default covers the full decay horizon below so
+# age-weighting can taper old matches rather than the window hard-cutting them
+# off.
+#
+# Shingle-set Jaccard was tried here 2026-08-24 and reverted the same day: it
+# gives a much cleaner noise floor (0.00-0.04 among 9 random distinct live
+# articles vs 1.0 for a confirmed exact duplicate, HesabPay) but scores near 0
+# on genuinely paraphrased duplicates -- a reworded sentence rarely shares a
+# 5-word run, and catching exactly that case is the reason this function
+# exists (recent_content_similarity's own regression test: two differently-
+# worded Pera Wallet staking headlines about the same story, token Jaccard
+# 0.31, shingle Jaccard 0.0). Token Jaccard's scale matches NOVELTY_MAX_
+# SIMILARITY (title-token Jaccard) above, so the same threshold is reused
+# directly for the content check rather than a separate constant.
 NOVELTY_CONTENT_WINDOW_HOURS = env_int("NOVELTY_CONTENT_WINDOW_HOURS", 24 * 70)
 # Age-decay of the similarity penalty: a near-duplicate published within
 # NOVELTY_DECAY_FULL_DAYS counts at full weight (novelty can hit 0); the weight
@@ -963,12 +977,21 @@ ARTICLE_DUPLICATE_MIN_CLAIMS = env_int("ARTICLE_DUPLICATE_MIN_CLAIMS", 3)
 # growing mint-count, a fresh headline stat each time) while reusing the same
 # pitch/structure/vocabulary almost verbatim -- title-only and numeric-only
 # checks both missed it (title Jaccard 0.06; too few shared numeric claims).
-# Calibrated against that real pair: whole-body token Jaccard of the actual
-# duplicate scored 0.229-0.232 vs 0.152 for an unrelated control article --
-# a real but modest margin (shared Algorand/crypto vocabulary dilutes the
-# signal even for unrelated stories), so treat this as a starting point to
-# revisit once more real (service, article) pairs exist to calibrate against.
-ARTICLE_DUPLICATE_BODY_SIMILARITY = env_float("ARTICLE_DUPLICATE_BODY_SIMILARITY", 0.22)
+# Token-Jaccard (calibrated against that real pair: whole-title+summary+body
+# token Jaccard scored ~0.24 for the true-positive NFDomains pair). Shingle-
+# set Jaccard was tried in its place 2026-08-24 and reverted the same day --
+# it gives cleaner separation from unrelated-article noise (~0.04 ceiling vs
+# 1.0 for a confirmed exact duplicate) but scores near 0 on this exact
+# NFDomains pair, since a genuine reword rarely shares a 5-word run and this
+# check exists specifically to catch that case (see the docstring above).
+# Token Jaccard's tradeoff is a noisier floor: 9 random distinct live article
+# pairs scored 0.15-0.25, uncomfortably close to the 0.24 true positive --
+# a real but modest margin, since shared Algorand/crypto vocabulary dilutes
+# token overlap even for unrelated stories. 0.20 sits with some margin above
+# the bulk of that noise sample while still catching the true positive.
+# Revisit once more real reworded-not-identical pairs exist to calibrate
+# against.
+ARTICLE_DUPLICATE_BODY_SIMILARITY = env_float("ARTICLE_DUPLICATE_BODY_SIMILARITY", 0.20)
 # Below this many unique tokens per side, Jaccard on short text is noisy
 # (small vocabularies swing to extremes) -- same "not enough evidence either
 # way" floor as ARTICLE_DUPLICATE_MIN_CLAIMS, just for the body-similarity

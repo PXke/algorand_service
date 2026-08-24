@@ -341,6 +341,9 @@ def ingest_publish_signal(
     # Also compare by CONTENT (Typesense full-text retrieval over recent article
     # bodies) so a reworded headline about the same story still reads as low-novelty.
     content_sim, _content_match = recent_content_similarity(page_title, page_text)
+    # title_sim and content_sim are both token-Jaccard (see
+    # article_grader.recent_content_similarity), so they're already on the
+    # same scale and combine directly via max().
     closest_sim = max(title_sim, content_sim)
     novelty = max(0.0, 1.0 - closest_sim)
 
