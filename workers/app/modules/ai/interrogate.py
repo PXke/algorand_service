@@ -102,10 +102,16 @@ def _looks_like_uuid(s: str) -> bool:
 
 
 def _resolve_article_source_url(session: CassandraSession, article_id: str) -> str | None:
-    """Map an article id to the source_url its compose session was keyed on."""
-    from app.core.statements import ArticleStmts
+    """Map an article id to the source_url its compose session was keyed on. 2026-08-24: reads `articles` directly (was `articles_by_id`)."""
+    from uuid import UUID
 
-    row = session.execute(ArticleStmts.GET_IMAGE_META, (article_id,)).one()
+    from algorand_shared.article_statements import ArticlesStmts
+
+    try:
+        aid = UUID(article_id)
+    except ValueError:
+        return None
+    row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
     return getattr(row, "source_url", None) if row else None
 
 

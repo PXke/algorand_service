@@ -114,11 +114,12 @@ class AdminCassandraStore:
     def _clear_and_reenqueue_translations(article_id: str) -> None:
         """Wipe every stored translation and re-enqueue all languages via the modern batch task (app.tasks.newspaper.translate_article_batch) -- NOT the legacy per-language translate_article shim _enqueue_article_translations uses, which calls a paid LLM directly and skips the local-engine/DeepSeek-per-language routing the batch task has (see workers' DEEPSEEK_TRANSLATE_LANGS)."""
         try:
+            from celery import Celery
+
             from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
             from app.core.cassandra import get_cassandra_session
             from app.core.config import settings
             from app.core.statements import ArticleStmts
-            from celery import Celery
 
             session = get_cassandra_session()
             session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (UUID(article_id),))
@@ -876,9 +877,10 @@ class AdminCassandraStore:
         article_text is snapshotted so the anchor is fixed even if the article
         later changes. Returns the anchor id.
         """
+        from cassandra.util import uuid_from_time
+
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import GatekeeperStmts
-        from cassandra.util import uuid_from_time
 
         # If an article_text was not passed in, snapshot it now from the article.
         if not article_text and article_id:
@@ -1335,6 +1337,7 @@ class AdminCassandraStore:
         from datetime import UTC, datetime
 
         from algorand_shared.feed_bucket import months_back
+
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
@@ -1443,9 +1446,10 @@ class AdminCassandraStore:
     def _enqueue_article_translations(article_id: str) -> None:
         """Fan out worker translate_article tasks now that the article is feed- visible. Translation happens at publish time only — held drafts are not translated (see workers publish_tasks.enqueue_article_translations, the other half of this seam). The task fetches current text by id and skips already-stored languages, so this is safe to fire more than once."""
         try:
+            from celery import Celery
+
             from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
             from app.core.config import settings
-            from celery import Celery
 
             app = Celery(broker=settings.celery_broker_url)
             for lang in ARTICLE_TRANSLATION_LANGS:
@@ -1480,8 +1484,9 @@ class AdminCassandraStore:
     @staticmethod
     def _trigger_apply_recompose(draft_article_id: str, live_article_id: str) -> None:
         try:
-            from app.core.config import settings
             from celery import Celery
+
+            from app.core.config import settings
 
             Celery(broker=settings.celery_broker_url).send_task(
                 "app.tasks.newspaper.apply_recomposed_article",
@@ -1495,8 +1500,9 @@ class AdminCassandraStore:
     def _trigger_distribution(article_id: str) -> None:
         """Auto-post to social channels (Bluesky, Telegram, ...) once an admin-approved fresh article actually lands in the feed. Recompose approvals deliberately do NOT trigger this (see apply_recomposed_article) — reposting every refresh of already- published content would look repetitive to followers."""
         try:
-            from app.core.config import settings
             from celery import Celery
+
+            from app.core.config import settings
 
             Celery(broker=settings.celery_broker_url).send_task(
                 "app.tasks.newspaper.distribute_article",
@@ -1509,8 +1515,9 @@ class AdminCassandraStore:
     @staticmethod
     def _trigger_compose_next() -> None:
         try:
-            from app.core.config import settings
             from celery import Celery
+
+            from app.core.config import settings
 
             app = Celery(broker=settings.celery_broker_url)
             # Approving/rejecting frees the review slot — compose the next ONE
@@ -1622,15 +1629,19 @@ class AdminCassandraStore:
         """
         from uuid import UUID
 
+        from algorand_shared.article_statements import ArticlesStmts
+
         from app.core.cassandra import get_cassandra_session
         from app.core.config import settings
-        from app.core.statements import ArticleStmts, PendingFeedStmts
+        from app.core.statements import PendingFeedStmts
 
         session = get_cassandra_session()
         bucket = getattr(settings, "news_feed_bucket", "main") or "main"
         cap = int(getattr(settings, "news_max_articles_per_day", 3) or 3)
+        # 2026-08-24: reads `articles` directly (was `articles_by_id`), now
+        # that burst_day dual-writes to it (see burst_compose_tasks.py).
         try:
-            burst_row = session.execute(ArticleStmts.GET_BURST_DAY, (UUID(article_id),)).one()
+            burst_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (UUID(article_id),)).one()
         except ValueError:
             burst_row = None
         is_burst = bool(burst_row and burst_row.burst_day)
@@ -1658,7 +1669,7 @@ class AdminCassandraStore:
 
     def list_classifier_reviews(self, *, limit: int = 50, scan_limit: int = 500) -> list[dict]:
         """List recent classifier reviews (human-corrected verdicts), newest first."""
-        from app.core.statements import ArticleStmts
+        from algorand_shared.article_statements import ArticlesStmts
 
         details = self._pending_review_details(scan_limit)
         if not details:
@@ -1668,13 +1679,14 @@ class AdminCassandraStore:
         parsed_rows = [self._parse_review_detail(detail) for detail in details]
 
         # Phase 2: batch-fetch the referenced articles concurrently (was a second
-        # sequential SELECT per row).
+        # sequential SELECT per row). 2026-08-24: reads `articles` directly
+        # (was `articles_by_id`'s GET_SUMMARY_CARD).
         uuid_args = []
         for _d, article_id, *_rest in parsed_rows:
             if article_id:
                 with contextlib.suppress(ValueError):
                     uuid_args.append((UUID(article_id),))
-        article_by_id = self._articles_by_id(ArticleStmts.GET_SUMMARY_CARD, uuid_args)
+        article_by_id = self._articles_by_id(ArticlesStmts.GET_FULL_BY_ID, uuid_args)
 
         items = [self._review_item_dict(row, article_by_id.get(row[1])) for row in parsed_rows]
         return _rank_reviews(items, limit=limit)

@@ -2752,17 +2752,18 @@ def _recompose_published_compose(
 def _recompose_published_hero_image(
     scraped_og: str, source_url: str, article_id: str
 ) -> tuple[str, str]:
-    """Hero: fresh og when the re-scrape produced one, else the live article's current art (never downgrade a working hero to nothing)."""
+    """Hero: fresh og when the re-scrape produced one, else the live article's current art (never downgrade a working hero to nothing). 2026-08-24: reads `articles` directly (was `articles_by_id`)."""
     from uuid import UUID
 
+    from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts
 
     og_image = _validated_hero_checked(scraped_og, source_url)
     if og_image:
         return og_image, og_image
     try:
-        row = get_cassandra_session().execute(ArticleStmts.GET_IMAGE, (UUID(article_id),)).one()
+        row = get_cassandra_session().execute(ArticlesStmts.GET_FULL_BY_ID, (UUID(article_id),)).one()
         return og_image, ((row.image_url or "") if row else "")
     except Exception:
         return og_image, ""
@@ -3049,8 +3050,9 @@ def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dic
     import time as _time
     from uuid import UUID as _UUID
 
+    from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts
     from app.modules.newspaper.article_store import get_article, replace_article_content
     from app.modules.newspaper.article_version_store import save_article_version
 
@@ -3059,15 +3061,16 @@ def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dic
     if draft is None or live is None:
         return {"status": "error", "reason": "draft_or_live_missing"}
 
+    # 2026-08-24: reads `articles` directly (was `articles_by_id`) -- "draft"
+    # is now status == 'draft' rather than a separate boolean column.
     session = get_cassandra_session()
-    live_draft_row = session.execute(ArticleStmts.GET_PUBLISHED_AT_AND_DRAFT, (_UUID(live_article_id),)).one()
-    live_is_drafted = bool(getattr(live_draft_row, "draft", False)) if live_draft_row else False
-    tags_row = session.execute(ArticleStmts.GET_TAGS, (_UUID(draft_article_id),)).one()
-    tags = list(tags_row.tags or []) if tags_row else []
+    live_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (_UUID(live_article_id),)).one()
+    live_is_drafted = bool(live_row and live_row.status == "draft")
+    draft_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (_UUID(draft_article_id),)).one()
+    tags = list(draft_row.tags or []) if draft_row else []
     if "updated" not in {t.lower() for t in tags}:
         tags = [*tags, "updated"]
-    image_row = session.execute(ArticleStmts.GET_IMAGE, (_UUID(draft_article_id),)).one()
-    image_url = (image_row.image_url or "") if image_row else ""
+    image_url = (draft_row.image_url or "") if draft_row else ""
 
     save_article_version(
         article_id=live_article_id,

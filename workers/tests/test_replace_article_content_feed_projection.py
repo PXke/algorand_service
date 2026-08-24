@@ -44,7 +44,8 @@ def _article_row(aid: UUID) -> MagicMock:
     row.tags = ["nft"]
     row.first_published_at = None  # never recomposed before
     row.slug = "old-title-slug"
-    row.draft = False
+    row.status = "published"
+    row.year = 2026
     return row
 
 
@@ -228,7 +229,7 @@ def test_replace_on_a_drafted_article_never_touches_the_feed(monkeypatch: pytest
     """Root-caused 2026-08-11 (before it could bite live on Lumi Rogue, held in draft): a recompose approved for a DRAFTED live article must update content but never rewrite the feed row or re-stamp published_at -- doing so would silently un-draft a withdrawn article back onto the public feed, exactly the failure already fixed for the admin content-edit path."""
     aid = uuid4()
     row = _article_row(aid)
-    row.draft = True
+    row.status = "draft"
     result, session = _run_replace(monkeypatch, row)
 
     assert result == _OLD_PUBLISHED_AT  # published_at is NOT re-stamped

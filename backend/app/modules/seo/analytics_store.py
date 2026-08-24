@@ -1908,15 +1908,16 @@ def _distinct_article_ids(by_day: dict[str, dict[str, list]]) -> dict:
 
 
 def _fetch_article_cards(article_ids: dict) -> dict[str, object]:
-    """One concurrent batch fetching title/published_at/tags for every distinct article path in `article_ids`, reused by section bucketing, the editorial scorecard and path-label resolution instead of each querying it again."""
+    """One concurrent batch fetching title/published_at/tags for every distinct article path in `article_ids`, reused by section bucketing, the editorial scorecard and path-label resolution instead of each querying it again. 2026-08-24: reads `articles` directly (was `articles_by_id`'s GET_CARD)."""
+    from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import execute_parallel_with_args
-    from app.core.statements import ArticleStmts
 
     if not article_ids:
         return {}
     paths = list(article_ids)
     results = execute_parallel_with_args(
-        ArticleStmts.GET_CARD,
+        ArticlesStmts.GET_FULL_BY_ID,
         [(article_ids[p],) for p in paths],
         concurrency=48,
         raise_on_error=False,

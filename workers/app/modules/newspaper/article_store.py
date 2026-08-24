@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from algorand_shared.article_transitions import transition_article_status
+
 from app.core.config import NEWS_FEED_BUCKET
 from app.core.feed_bucket import feed_month, months_back
 
@@ -51,16 +52,17 @@ class ArticleDetail:
 
 
 def get_article(article_id: str) -> ArticleDetail | None:
-    """Load the full detail row for a published article, or None if not found."""
+    """Load the full detail row for an article (any status -- callers include draft/recompose flows, not just published), or None if not found. 2026-08-24: reads `articles` directly (was `articles_by_id`), now that dual-write coverage is confirmed complete for every real article (see the article-table-consolidation plan's Phase 1)."""
+    from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts
 
     session = get_cassandra_session()
     try:
         aid = UUID(article_id)
     except ValueError:
         return None
-    row = session.execute(ArticleStmts.GET_BY_ID, (aid,)).one()
+    row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
     if row is None:
         return None
     published_at = row.published_at
@@ -83,16 +85,17 @@ def get_article(article_id: str) -> ArticleDetail | None:
 
 
 def article_exists(article_id: str | UUID) -> bool:
-    """True when an article with this id has been published."""
+    """True when an article with this id exists (any status). 2026-08-24: reads `articles` directly (was `articles_by_id`)."""
+    from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts
 
     try:
         aid = article_id if isinstance(article_id, UUID) else UUID(str(article_id))
     except ValueError:
         return False
     session = get_cassandra_session()
-    row = session.execute(ArticleStmts.EXISTS, (aid,)).one()
+    row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
     return row is not None
 
 
@@ -234,6 +237,7 @@ def insert_stored_article(
     Returns (article_id, feed_published).
     """
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
     from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
@@ -365,12 +369,16 @@ def update_article(
     """Update article in place; refresh feed row at original published_at.
 
     The feed PK's published_at is FULL (ms) precision — read the raw timestamp
-    from articles_by_id and reuse it verbatim (see update_article_image). This
-    function used to reconstruct it from the seconds-truncated epoch, which
-    upserts a phantom feed row with null service_id/title that 500s the feed.
-    Also stamps updated_at so the revision surfaces as dateModified.
+    from `articles` (2026-08-24: was `articles_by_id`, migrated onto the
+    consolidated table now that dual-write coverage is confirmed complete —
+    see the article-table-consolidation plan's Phase 1) and reuse it verbatim
+    (see update_article_image). This function used to reconstruct it from the
+    seconds-truncated epoch, which upserts a phantom feed row with null
+    service_id/title that 500s the feed. Also stamps updated_at so the
+    revision surfaces as dateModified.
     """
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
     from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
 
@@ -387,14 +395,11 @@ def update_article(
     from app.core.statements import ArticleStmts, FeedStmts
 
     session = get_cassandra_session()
-    pub_row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
-    if pub_row is None or pub_row.published_at is None:
+    new_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
+    if new_row is None or new_row.published_at is None:
         return False
-    published_at = pub_row.published_at  # full precision, matches the feed PK
-    tag_list = list(tags) if tags is not None else None
-    if tag_list is None:
-        row = session.execute(ArticleStmts.GET_TAGS, (aid,)).one()
-        tag_list = list(row.tags or []) if row else []
+    published_at = new_row.published_at  # full precision, matches the feed PK
+    tag_list = list(tags) if tags is not None else list(new_row.tags or [])
     if "updated" not in {t.lower() for t in tag_list}:
         tag_list = [*tag_list, "updated"]
 
@@ -404,32 +409,29 @@ def update_article(
     # deleted feed row a partial write resurrects a degraded article (no image/
     # source). Harmless on live rows — Cassandra INSERT leaves unlisted columns
     # untouched, but every listed one must carry the real value.
-    image_row = session.execute(ArticleStmts.GET_IMAGE, (aid,)).one()
-    image = (image_row.image_url or None) if image_row else None
-    # New `articles` table dual-write: in-place edit, published_at (part of
-    # the partition key) doesn't move, so a plain UPDATE suffices -- no
-    # delete+insert needed. Best-effort: the OLD-schema write above is
+    image = new_row.image_url or None
+    # New `articles` table update: in-place edit, published_at (part of the
+    # partition key) doesn't move, so a plain UPDATE suffices -- no
+    # delete+insert needed. Best-effort: the OLD-schema write below is
     # already durable, so a hiccup here must not undo it.
-    new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
-    if new_row is not None:
-        try:
-            session.execute(
-                ArticlesStmts.UPDATE_CONTENT,
-                (
-                    title,
-                    summary,
-                    body,
-                    tag_list,
-                    image,
-                    updated_at,
-                    new_row.status,
-                    new_row.year,
-                    new_row.published_at,
-                    aid,
-                ),
-            )
-        except Exception:
-            logger.warning("articles dual-write update failed for %s", aid, exc_info=True)
+    try:
+        session.execute(
+            ArticlesStmts.UPDATE_CONTENT,
+            (
+                title,
+                summary,
+                body,
+                tag_list,
+                image,
+                updated_at,
+                new_row.status,
+                new_row.year,
+                new_row.published_at,
+                aid,
+            ),
+        )
+    except Exception:
+        logger.warning("articles dual-write update failed for %s", aid, exc_info=True)
     session.execute(
         FeedStmts.INSERT_FULL,
         (
@@ -444,7 +446,7 @@ def update_article(
             existing.source_url or None,
             # Carry the stored value (INSERT with null would tombstone it on
             # an article that was recomposed before this edit).
-            getattr(pub_row, "first_published_at", None),
+            new_row.first_published_at,
             updated_at,
         ),
     )
@@ -495,6 +497,8 @@ def replace_article_content(
     timestamps are left untouched when drafted — restoring visibility stays
     set_article_draft's job exclusively.
     """
+    from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
     from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
@@ -505,20 +509,23 @@ def replace_article_content(
         return None
     body = auto_link_glossary_terms(body)
     session = get_cassandra_session()
-    row = session.execute(ArticleStmts.GET_PUBLISHED_AT_AND_DRAFT, (aid,)).one()
+    # 2026-08-24: reads `articles` directly (was `articles_by_id`'s
+    # GET_PUBLISHED_AT_AND_DRAFT) -- "draft" is now status == 'draft' rather
+    # than a separate boolean column.
+    row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
     if row is None or row.published_at is None:
         return None
     old_published_at = row.published_at
     # Original publication date survives every re-publish: set once on the
     # first recompose, carried verbatim afterwards. Daily caps and hot
     # ranking read this instead of the re-stamped published_at.
-    first_published_at = getattr(row, "first_published_at", None) or old_published_at
+    first_published_at = row.first_published_at or old_published_at
     existing = get_article(article_id)
     if existing is None:
         return None
     now = datetime.now(tz=UTC)
     image = image_url or None
-    if getattr(row, "draft", False):
+    if row.status == "draft":
         session.execute(
             ArticleStmts.UPDATE_CONTENT_KEEP_TIMESTAMPS,
             (title, summary, body, tags, image, now, aid),
@@ -647,6 +654,7 @@ def _claim_slug_for_feed(
     so slug assignment must not be able to fail a publish.
     """
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
 
@@ -677,14 +685,20 @@ def ensure_article_slug(article_id: str | UUID, title: str) -> str | None:
     transaction (IF NOT EXISTS), so two workers racing on the same title cannot
     both take one slug — the loser tries the next suffix.
     """
+    from algorand_shared.article_statements import ArticlesStmts
     from algorand_shared.slugs import slugify, unique_slug
+
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
 
     aid = article_id if isinstance(article_id, UUID) else UUID(str(article_id))
     session = get_cassandra_session()
 
-    existing = session.execute(ArticleStmts.GET_ARTICLE_SLUG, (aid,)).one()
+    # 2026-08-24: reads `articles` directly (was `articles_by_id`). SLUG_TAKEN
+    # / CLAIM_SLUG below hit `articles_by_slug`, a separate reverse-index
+    # table untouched by this migration -- only the "does THIS article
+    # already have a slug" check moved.
+    existing = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
     if existing and existing.slug:
         return existing.slug
 
@@ -712,11 +726,13 @@ def update_article_image(article_id: str, image_url: str) -> bool:
     Used to backfill stories that published without a hero image.
 
     NOTE: the feed PK includes published_at at FULL (ms) precision — we read the
-    raw timestamp from articles_by_id and reuse it verbatim. Reconstructing it
-    from a seconds-truncated epoch would miss the real clustering key and upsert a
-    phantom row with null service_id/title (which then 500s the feed).
+    raw timestamp from `articles` (2026-08-24: was `articles_by_id`) and reuse
+    it verbatim. Reconstructing it from a seconds-truncated epoch would miss
+    the real clustering key and upsert a phantom row with null
+    service_id/title (which then 500s the feed).
     """
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
 
@@ -727,10 +743,10 @@ def update_article_image(article_id: str, image_url: str) -> bool:
     except ValueError:
         return False
     session = get_cassandra_session()
-    row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
-    if row is None or row.published_at is None:
+    new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+    if new_row is None or new_row.published_at is None:
         return False
-    published_at = row.published_at  # full-precision datetime, matches the feed PK
+    published_at = new_row.published_at  # full-precision datetime, matches the feed PK
     session.execute(ArticleStmts.UPDATE_IMAGE, (image_url, aid))
     feed_result = session.execute(
         FeedStmts.UPDATE_IMAGE,
@@ -745,16 +761,14 @@ def update_article_image(article_id: str, image_url: str) -> bool:
             article_id,
             published_at,
         )
-    # New `articles` table dual-write. Best-effort.
-    new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
-    if new_row is not None:
-        try:
-            session.execute(
-                ArticlesStmts.UPDATE_IMAGE,
-                (image_url, new_row.status, new_row.year, new_row.published_at, aid),
-            )
-        except Exception:
-            logger.warning("articles dual-write image update failed for %s", aid, exc_info=True)
+    # New `articles` table update. Best-effort.
+    try:
+        session.execute(
+            ArticlesStmts.UPDATE_IMAGE,
+            (image_url, new_row.status, new_row.year, new_row.published_at, aid),
+        )
+    except Exception:
+        logger.warning("articles dual-write image update failed for %s", aid, exc_info=True)
     return True
 
 
@@ -823,6 +837,7 @@ def update_article_translations(article_id: str, translations: dict[str, str]) -
     from uuid import UUID
 
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
 
@@ -833,11 +848,12 @@ def update_article_translations(article_id: str, translations: dict[str, str]) -
 
     session = get_cassandra_session()
 
-    # We must fetch the exact published_at timestamp to update the feed PK
-    row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
-    if row is None or row.published_at is None:
+    # We must fetch the exact published_at timestamp to update the feed PK.
+    # 2026-08-24: reads `articles` directly (was `articles_by_id`).
+    new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+    if new_row is None or new_row.published_at is None:
         return False
-    published_at = row.published_at
+    published_at = new_row.published_at
 
     detail_result = session.execute(ArticleStmts.UPDATE_TRANSLATIONS, (translations, aid))
     if not detail_result.was_applied:
@@ -861,16 +877,14 @@ def update_article_translations(article_id: str, translations: dict[str, str]) -
             article_id,
             published_at,
         )
-    # New `articles` table dual-write. Best-effort.
-    new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
-    if new_row is not None:
-        try:
-            session.execute(
-                ArticlesStmts.UPDATE_TRANSLATIONS,
-                (translations, new_row.status, new_row.year, new_row.published_at, aid),
-            )
-        except Exception:
-            logger.warning(
-                "articles dual-write translations update failed for %s", aid, exc_info=True
-            )
+    # New `articles` table update. Best-effort.
+    try:
+        session.execute(
+            ArticlesStmts.UPDATE_TRANSLATIONS,
+            (translations, new_row.status, new_row.year, new_row.published_at, aid),
+        )
+    except Exception:
+        logger.warning(
+            "articles dual-write translations update failed for %s", aid, exc_info=True
+        )
     return True

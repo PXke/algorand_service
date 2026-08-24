@@ -43,21 +43,26 @@ def _run_apply(monkeypatch: pytest.MonkeyPatch, *, live_is_drafted: bool) -> dic
     )
     monkeypatch.setattr("app.modules.newspaper.article_version_store.save_article_version", MagicMock())
 
-    # Resolve _Stmt descriptors to their raw CQL so fake_execute's substring
-    # dispatch below can tell the queries apart -- without this, ArticleStmts.X
+    # Resolve _Stmt descriptors to their raw CQL so fake_execute's dispatch
+    # below can tell the queries apart -- without this, ArticlesStmts.X
     # resolves to session.prepare(cql), i.e. an opaque MagicMock, not a string.
     monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
     session = MagicMock()
 
+    # Both the live and draft article reads now go through the SAME
+    # ArticlesStmts.GET_FULL_BY_ID statement (2026-08-24) -- dispatch on
+    # which article_id the call was made for, not on query text.
     def fake_execute(query: str, params: tuple = ()) -> MagicMock:  # noqa: ARG001
         result = MagicMock()
-        if "SELECT tags" in query:
-            result.one.return_value = SimpleNamespace(tags=["nft"])
-        elif "SELECT image_url" in query:
-            result.one.return_value = SimpleNamespace(image_url="https://example.com/hero.png")
-        elif "draft" in query:
+        aid = str(params[0]) if params else ""
+        if aid == _DRAFT_ID:
             result.one.return_value = SimpleNamespace(
-                published_at=datetime.now(tz=UTC), draft=live_is_drafted
+                tags=["nft"], image_url="https://example.com/hero.png"
+            )
+        elif aid == _LIVE_ID:
+            result.one.return_value = SimpleNamespace(
+                published_at=datetime.now(tz=UTC),
+                status="draft" if live_is_drafted else "published",
             )
         else:
             result.one.return_value = None
