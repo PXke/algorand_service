@@ -188,7 +188,11 @@ def test_burst_compose_today_composes_each_selected_row_and_stamps_the_article(
 
     assert result["status"] == "done"
     assert [r["queue_id"] for r in result["results"]] == ["q1", "q2"]
-    # Only the row that actually produced an article gets stamped.
-    assert fake_session.execute.call_count == 1
-    args = fake_session.execute.call_args[0]
-    assert args[1][0] == "2026-08-16"
+    # Only the row that actually produced an article gets stamped: the old-table
+    # write, plus the new `articles` table's GET_BY_ID lookup + UPDATE_BURST_DAY
+    # dual-write (2026-08-24).
+    assert fake_session.execute.call_count == 3
+    old_write_args = fake_session.execute.call_args_list[0][0]
+    assert old_write_args[1][0] == "2026-08-16"
+    dual_write_args = fake_session.execute.call_args_list[2][0]
+    assert dual_write_args[1][0] == "2026-08-16"

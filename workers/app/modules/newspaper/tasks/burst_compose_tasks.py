@@ -45,6 +45,22 @@ from app.core import config
 logger = logging.getLogger(__name__)
 
 
+def _dual_write_burst_day(session: object, aid: UUID, burst_day: str) -> None:
+    """New `articles` table dual-write for the burst_day stamp. 2026-08-24: this column has existed on `articles` since the original schema (migration 067) but had no dual-write at all until this fix -- burst_compose_today's old-table write is what actually gates same-day publishing (see publish_tasks.py's `if row.burst_day:` guard), so the new table was silently stale for every burst-composed article. Best-effort."""
+    from algorand_shared.article_statements import ArticlesStmts
+
+    new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+    if new_row is None:
+        return
+    try:
+        session.execute(
+            ArticlesStmts.UPDATE_BURST_DAY,
+            (burst_day, new_row.status, new_row.year, new_row.published_at, aid),
+        )
+    except Exception:
+        logger.warning("articles dual-write burst_day update failed for %s", aid, exc_info=True)
+
+
 @celery_app.task(name="app.tasks.newspaper.select_daily_burst")
 def select_daily_burst() -> dict[str, object]:
     """Pick today's up-to-3 burst candidates (human pick + top discovery + top scale) and mark them, once per day."""
@@ -133,9 +149,12 @@ def burst_compose_today() -> dict[str, object]:
         article_id = outcome.get("article_id")
         if article_id:
             try:
-                session.execute(ArticleStmts.SET_ARTICLE_BURST_DAY, (today, UUID(article_id)))
+                aid = UUID(article_id)
             except ValueError:
                 logger.warning("burst_compose_today: bad article_id %r from %s", article_id, queue_id)
+            else:
+                session.execute(ArticleStmts.SET_ARTICLE_BURST_DAY, (today, aid))
+                _dual_write_burst_day(session, aid, today)
         results.append({"queue_id": queue_id, **outcome})
         logger.info(
             "burst_compose_today: %s -> %s", queue_id, outcome.get("status", "unknown")

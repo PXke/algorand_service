@@ -199,6 +199,15 @@ class ArticlesStmts:
         "UPDATE algorand_platform.articles SET image_url = ? "
         "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"
     )
+    # 2026-08-24: burst_day existed as a column on `articles` since the
+    # original schema (migration 067) but had NO dual-write at all -- the
+    # old-table-only write (ArticleStmts.SET_ARTICLE_BURST_DAY) was a genuine
+    # gap found auditing call sites before the old-table drop, not just an
+    # unmigrated read.
+    UPDATE_BURST_DAY = _Stmt(
+        "UPDATE algorand_platform.articles SET burst_day = ? "
+        "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"
+    )
     UPDATE_TRANSLATIONS = _Stmt(
         "UPDATE algorand_platform.articles SET translations = translations + ? "
         "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"

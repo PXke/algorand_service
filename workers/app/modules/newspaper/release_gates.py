@@ -87,21 +87,18 @@ def apply_release_gates(article_id: str) -> dict[str, Any]:
             edit_reason="before_edit",
             editor="release_gate",
         )
+        now = datetime.now(tz=UTC)
+        aid = UUID(article_id)
+        session = get_cassandra_session()
         # Raw UPDATE, deliberately NOT update_article(): the article is still
         # unlisted at this instant — update_article would upsert a feed row
         # and publish it out-of-band; the caller inserts the real feed row
         # right after this returns.
-        get_cassandra_session().execute(
+        session.execute(
             ArticleStmts.UPDATE,
-            (
-                art.title,
-                art.summary,
-                new_body,
-                list(art.tags or []),
-                datetime.now(tz=UTC),
-                UUID(article_id),
-            ),
+            (art.title, art.summary, new_body, list(art.tags or []), now, aid),
         )
+        _dual_write_release_gate_body(session, aid, new_body=new_body, tags=list(art.tags or []), now=now)
         save_article_version(
             article_id=article_id,
             title=art.title,
@@ -134,3 +131,22 @@ def apply_release_gates(article_id: str) -> dict[str, Any]:
     except Exception:
         logger.warning("apply_release_gates failed for %s (fail-open)", article_id, exc_info=True)
     return result
+
+
+def _dual_write_release_gate_body(
+    session: object, aid: object, *, new_body: str, tags: list[str], now: object
+) -> None:
+    """New `articles` table dual-write for a release-gate body correction. 2026-08-24: this write had NO dual-write at all until this fix -- found auditing call sites before the old-table drop, not just an unmigrated read. image_url is preserved from the new table's own current row rather than assumed unchanged, same reasoning as article_store.py's update_article dual-write. Best-effort."""
+    from algorand_shared.article_statements import ArticlesStmts
+
+    new_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
+    if new_row is None:
+        return
+    key = (new_row.status, new_row.year, new_row.published_at, aid)
+    try:
+        session.execute(
+            ArticlesStmts.UPDATE_CONTENT,
+            (new_row.title, new_row.summary, new_body, tags, new_row.image_url, now, *key),
+        )
+    except Exception:
+        logger.warning("articles dual-write release-gate body update failed for %s", aid, exc_info=True)
