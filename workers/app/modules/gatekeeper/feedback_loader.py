@@ -1,4 +1,4 @@
-"""Turns admin ``classifier_feedback`` labels into training batches for the gatekeeper's quality head only — factuality/tone still need the gold-run / corruptor corpus (see ``training.py``), which doesn't exist yet. Reuses the same ground truth ``grader_model._training_rows`` used for the now-dead sklearn grader (``row.approved``), redirected to the model that's actually served (``live.py:quality_proba``)."""
+"""Turns admin ``classifier_feedback`` labels into training batches for the gatekeeper's quality head only — factuality/tone still need the gold-run / corruptor corpus (see ``training.py``), which doesn't exist yet. Reuses the same ground truth ``grader_model._training_rows`` used for the now-dead sklearn grader (``row.approved``). Training-only: nothing currently serves this checkpoint at inference time (the old ``live.py:quality_proba`` serving path was dead code, removed 2026-08-24 — see ``inference.py``'s removal)."""
 
 from __future__ import annotations
 
@@ -37,8 +37,9 @@ def _labeled_examples(limit: int) -> list[tuple[str, float]]:
         article_text = str(meta.get("article_text", "") or "")
         if not article_text.strip():
             continue
-        # Best-effort trace, same construction quality_proba() uses at
-        # inference — training and serving inputs must match.
+        # Best-effort trace, same construction the (now-removed) serving
+        # path used to build -- kept matching in case inference is ever
+        # re-wired to actually consume this checkpoint.
         trace = load_investigation_trace(row.url) if row.url else ""
         text = build_input("", trace, article_text)
         examples.append((text, 1.0 if row.approved else 0.0))

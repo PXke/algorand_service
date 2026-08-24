@@ -6,7 +6,6 @@ from app.modules.gatekeeper import live as gk_live
 from app.modules.gatekeeper.live import (
     GateConfig,
     gate_draft,
-    quality_proba,
     run_deterministic_gate,
 )
 
@@ -85,24 +84,6 @@ def test_as_metadata_shape() -> None:
         "gk_reasons",
         "gk_dead_domains",
     }
-
-
-def test_quality_proba_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """quality_proba returns None when GATEKEEPER_QUALITY_LIVE is off, even with a checkpoint present."""
-    # A checkpoint existing must never be enough on its own -- the explicit
-    # live flag is required, so a training run never silently flips grading.
-    monkeypatch.setattr("app.core.config.GATEKEEPER_QUALITY_LIVE", False)
-    monkeypatch.setattr("app.core.config.GATEKEEPER_MODEL_PATH", __file__)  # any existing path
-    assert quality_proba(title="t", body="b") is None
-
-
-def test_quality_proba_none_without_checkpoint_even_when_live(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """quality_proba returns None when the model checkpoint path doesn't exist, even with the live flag on."""
-    monkeypatch.setattr("app.core.config.GATEKEEPER_QUALITY_LIVE", True)
-    monkeypatch.setattr("app.core.config.GATEKEEPER_MODEL_PATH", "/nonexistent/gatekeeper.pt")
-    assert quality_proba(title="t", body="b") is None
 
 
 # ------------------------------------------------------- dead-domain check

@@ -94,36 +94,6 @@ def run_deterministic_gate(
     )
 
 
-_SCORER: dict[str, object] = {}
-
-
-def quality_proba(*, title: str, body: str, source_url: str = "") -> float | None:
-    """P(good article) from the trained ModernBERT quality head, or None when GATEKEEPER_QUALITY_LIVE is off, no trained model exists, or the ML stack is absent (caller falls back to the sklearn grader, then the heuristic floor). The flag is separate from checkpoint existence: a quality-only checkpoint can be trained well before there's a gold-run corpus for factuality/tone, so serving it live is an explicit opt-in, not automatic on file presence. The scorer is cached per path — loading ModernBERT per article would be far too slow."""
-    try:
-        from pathlib import Path
-
-        from app.core.config import GATEKEEPER_MODEL_PATH, GATEKEEPER_QUALITY_LIVE
-
-        if not GATEKEEPER_QUALITY_LIVE:
-            return None
-        if not GATEKEEPER_MODEL_PATH or not Path(GATEKEEPER_MODEL_PATH).exists():
-            return None
-        from app.modules.gatekeeper.inference import GatekeeperScorer, quality_grade
-        from app.modules.gatekeeper.model import build_input
-        from app.modules.newspaper.investigation_store import load_investigation_trace
-
-        scorer = _SCORER.get(GATEKEEPER_MODEL_PATH)
-        if scorer is None:
-            scorer = GatekeeperScorer(GATEKEEPER_MODEL_PATH)
-            _SCORER[GATEKEEPER_MODEL_PATH] = scorer
-        trace = load_investigation_trace(source_url) if source_url else ""
-        text = build_input("", trace, f"{title}\n{body}")
-        logits = scorer.raw_logits(text)  # type: ignore[attr-defined]
-        return quality_grade(logits["quality"])
-    except Exception:
-        return None
-
-
 def _suppressed_as_dead(status: dict[str, object]) -> bool:
     """Whether a domain_tracking row's dead_project_until suppression is still active."""
     from datetime import UTC, datetime
