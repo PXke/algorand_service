@@ -20,8 +20,6 @@ from typing import TYPE_CHECKING
 from algorand_shared.article_statements import (
     ARTICLE_CLEAR_TRANSLATIONS,
     ARTICLE_GET_TAGS,
-    ARTICLE_MATCH_INSERT_KEY,
-    ARTICLE_MATCH_INSERT_KEY_BY_ARTICLE,
     ARTICLE_UPDATE_PUBLISHED_AT,
     ARTICLE_VERSION_INSERT,
     ARTICLE_VERSION_LATEST,
@@ -540,20 +538,6 @@ class ArticleVersionStmts:
         "SELECT version, title, summary, body, edit_reason, editor, edited_at "
         "FROM algorand_platform.article_versions WHERE article_id = ? LIMIT ?"
     )
-
-
-# --------------------------------------------------------------------------- #
-# article_match_keys / article_match_keys_by_article
-# --------------------------------------------------------------------------- #
-class ArticleMatchStmts:
-    """Prepared statements for article match-key lookups (edit-vs-create routing)."""
-
-    FIND_BY_KEY = _Stmt(
-        "SELECT article_id, linked_at, edit_window_closes_at "
-        "FROM algorand_platform.article_match_keys WHERE key_type = ? AND key_value = ?"
-    )
-    INSERT_KEY = ARTICLE_MATCH_INSERT_KEY
-    INSERT_KEY_BY_ARTICLE = ARTICLE_MATCH_INSERT_KEY_BY_ARTICLE
 
 
 # --------------------------------------------------------------------------- #

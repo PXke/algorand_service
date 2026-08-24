@@ -613,3 +613,11 @@ file = "backend/schema/migrations/app/068_remove_session_ttls.cql"
 tier = "prod"
 status = "active"
 description = "article data-model consolidation step 4b: remove default TTL on compose_sessions/translation_sessions/compose_feedback/tool_suggestions/gatekeeper_decisions/gatekeeper_audit, sequenced with the bucket-scheme fix (app-code only, no DDL) on the 4 tables that previously used a single hardcoded bucket='all' partition"
+
+[[migrations]]
+stream = "app"
+version = "069"
+file = "backend/schema/migrations/app/069_drop_article_match_keys.cql"
+tier = "prod"
+status = "active"
+description = "drop article_match_keys / article_match_keys_by_article: crawl-based edit-vs-create follow-up routing removed after prod data showed it fired legitimately twice ever (both >1 month old), against 1,657 total candidates -- explicit-id edits (editorial briefs, admin recompose) never used these tables"

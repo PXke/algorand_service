@@ -405,14 +405,8 @@ def ingest_publish_signal(
     )
 
     mode_info = resolve_publish_mode(
-        service_id=service_id,
-        page_text=page_text,
-        source_url=source_url,
-        topic=intent.topic.value if intent.topic else "",
         requested_mode=publish_mode,
         requested_article_id=linked_article_id,
-        match_kind=match_kind,
-        match_value=match_value,
     )
     dedupe_key = _dedupe_key_for(
         intent, mode_info=mode_info, service_id=service_id, content_hash=content_hash
@@ -445,7 +439,6 @@ def ingest_publish_signal(
             "event_phase": intent.event_phase,
             "publish_mode": mode_info["publish_mode"],
             "linked_article_id": mode_info.get("linked_article_id") or "",
-            "match_keys": [list(pair) for pair in mode_info.get("match_keys", [])],
             "signals": signals.to_payload(),
             "priority_breakdown": intent.priority_breakdown,
         },

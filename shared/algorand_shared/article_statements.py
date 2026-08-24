@@ -1,8 +1,8 @@
 """Prepared CQL shared between backend and workers for article-adjacent tables.
 
 Both deployables read and write the SAME physical Cassandra tables
-(`articles_by_id`, `articles_feed`, `article_versions`, `article_match_keys`
-+`_by_article`, `pending_feed_queue`, `publish_queue`+`_pending`) via
+(`articles_by_id`, `articles_feed`, `article_versions`, `pending_feed_queue`,
+`publish_queue`+`_pending`) via
 independently hand-maintained statement classes in each service's own
 `app/core/statements.py`. That is the exact shape of bug `feed_bucket.py` was
 already extracted to prevent once (see its own docstring) -- a diff of both
@@ -105,20 +105,6 @@ ARTICLE_VERSION_INSERT = _Stmt(
     "INSERT INTO algorand_platform.article_versions ("
     "article_id, version, title, summary, body, edit_reason, editor, edited_at"
     ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-)
-
-# --------------------------------------------------------------------------- #
-# article_match_keys / article_match_keys_by_article
-# --------------------------------------------------------------------------- #
-ARTICLE_MATCH_INSERT_KEY = _Stmt(
-    "INSERT INTO algorand_platform.article_match_keys ("
-    "key_type, key_value, article_id, linked_at, edit_window_closes_at"
-    ") VALUES (?, ?, ?, ?, ?)"
-)
-ARTICLE_MATCH_INSERT_KEY_BY_ARTICLE = _Stmt(
-    "INSERT INTO algorand_platform.article_match_keys_by_article ("
-    "article_id, key_type, key_value, linked_at"
-    ") VALUES (?, ?, ?, ?)"
 )
 
 # --------------------------------------------------------------------------- #

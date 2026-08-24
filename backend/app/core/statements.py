@@ -23,8 +23,6 @@ from typing import TYPE_CHECKING
 from algorand_shared.article_statements import (
     ARTICLE_CLEAR_TRANSLATIONS,
     ARTICLE_GET_TAGS,
-    ARTICLE_MATCH_INSERT_KEY,
-    ARTICLE_MATCH_INSERT_KEY_BY_ARTICLE,
     ARTICLE_UPDATE_PUBLISHED_AT,
     ARTICLE_VERSION_INSERT,
     ARTICLE_VERSION_LATEST,
@@ -265,27 +263,6 @@ class ArticleVersionStmts:
         "DELETE FROM algorand_platform.article_versions WHERE article_id = ? AND version = ?"
     )
 
-
-# --------------------------------------------------------------------------- #
-# article_match_keys / article_match_keys_by_article
-# --------------------------------------------------------------------------- #
-class ArticleMatchStmts:
-    """Prepared statements for article match-key lookups (edit-vs-create routing)."""
-
-    LIST_BY_ARTICLE = _Stmt(
-        "SELECT key_type, key_value FROM algorand_platform.article_match_keys_by_article "
-        "WHERE article_id = ?"
-    )
-    INSERT_KEY = ARTICLE_MATCH_INSERT_KEY
-    INSERT_KEY_BY_ARTICLE = ARTICLE_MATCH_INSERT_KEY_BY_ARTICLE
-    DELETE_KEY = _Stmt(
-        "DELETE FROM algorand_platform.article_match_keys "
-        "WHERE key_type = ? AND key_value = ? AND article_id = ?"
-    )
-    DELETE_KEY_BY_ARTICLE = _Stmt(
-        "DELETE FROM algorand_platform.article_match_keys_by_article "
-        "WHERE article_id = ? AND key_type = ? AND key_value = ?"
-    )
 
 
 # --------------------------------------------------------------------------- #

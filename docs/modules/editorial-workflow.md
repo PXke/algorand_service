@@ -23,15 +23,10 @@ Each ingest signal carries:
 
 ## 2. Matching
 
-On **create** publish:
-- Build **match keys** (domain, keyword, Algorand address, service_id, URL) and store in `article_match_keys` + `article_match_keys_by_article`.
-- Example: `key_type=domain, key_value=algoblow.com` → `article_id=abc123`.
-
-On **edit** ingest:
-- `ingest_signal.py` sets `publish_mode=edit` and `linked_article_id`.
-- If `linked_article_id` is provided and still within the edit window → use it.
-- Otherwise, `article_matching.py` calls `find_article_for_followup` to search by match keys.
-- If no match or window expired → fallback to `create`.
+`resolve_publish_mode` (`article_matching.py`) decides edit vs create:
+- An explicit `publish_mode=edit` + `linked_article_id` (editorial-brief refreshes, admin recompose) wins while the article is still within its edit window.
+- Everything else composes as `create`.
+- 2026-08-24: dropped crawl-based match-key follow-up detection (domain/keyword/Algorand-address/service_id continuity, `article_match_keys` table) — real prod data showed it fired legitimately twice ever against 1,657 total candidates, both over a month old at removal time; lower crawl volume and pervasive per-source cooldowns mean the scenario it existed for essentially doesn't happen anymore.
 
 ## 3. Publish
 
@@ -109,7 +104,6 @@ Flutter **Admin → Articles** tab:
 
 | Table | Purpose |
 |-------|---------|
-| `article_match_keys` | Dedupe keys for edit matching |
 | `article_versions` | Version history (body snapshots) |
 | `editorial_briefs` | Admin suggestion box for writer |
 

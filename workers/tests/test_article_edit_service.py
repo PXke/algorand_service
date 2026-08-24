@@ -1,4 +1,4 @@
-"""In-place article edits skip cleanly when Mistral is off and re-anchor match keys."""
+"""In-place article edits skip cleanly when Mistral is off."""
 
 from __future__ import annotations
 
@@ -60,73 +60,6 @@ def test_article_not_found_retires_queue_row(monkeypatch: pytest.MonkeyPatch) ->
     assert result["status"] == "skipped"
     assert result["reason"] == "article_not_found"
     assert result["queue_status"] == "expired"
-
-
-def test_edit_reregisters_match_keys_anchored_to_publish_time(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Audit 2026-07-17: re-registering match keys with the default closes_at (now + window) meant every edit rolled the article's edit window forward another 24h — and since each edit also adds the editing source's own keys, one stray match could keep an article editable (and accumulating keys) indefinitely. That rolling window is how the runaway loop kept re-opening itself. Keys must re-register anchored to the article's ORIGINAL publish time, converging with is_edit_window_open."""
-    from datetime import UTC, datetime
-
-    import app.modules.newspaper.article_edit_service as svc
-    from app.modules.newspaper.article_matching import edit_window_closes_at
-
-    published_epoch = 1_700_000_000
-    monkeypatch.setattr(
-        svc,
-        "get_article",
-        lambda _article_id: ArticleDetail(
-            article_id="a1",
-            service_id="svc",
-            title="Existing title",
-            summary="Existing summary",
-            body="Existing body",
-            published_at_epoch=published_epoch,
-            trigger_txid="",
-            trigger_round=0,
-            source_url="https://example.com/",
-        ),
-    )
-    monkeypatch.setattr(svc, "mistral_configured", lambda: True)
-    from types import SimpleNamespace
-
-    monkeypatch.setattr(
-        "app.modules.newspaper.article_composer.compose_scrape_article",
-        lambda **_kw: SimpleNamespace(
-            title="T",
-            summary="S",
-            body="B",
-            composer="mistral",
-            extra_tags=(),
-            defunct_domains=(),
-            unsourced_hold_reason="",
-            broken_link_hold_reason="",
-        ),
-    )
-    monkeypatch.setattr(
-        "app.modules.newspaper.article_grader.prior_service_article_summary",
-        lambda _service_id: "",
-    )
-    monkeypatch.setattr(svc, "sanitize_body", lambda b: b)
-    monkeypatch.setattr(svc, "save_article_version", lambda **_kw: 2)
-    monkeypatch.setattr(svc, "derive_article_tags", lambda **_kw: ("algorand",))
-    monkeypatch.setattr(svc, "update_article", lambda **_kw: True)
-    monkeypatch.setattr(svc.index_article, "delay", lambda **_kw: None)
-    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", lambda *_a, **_k: None)
-    registered: dict = {}
-    monkeypatch.setattr(
-        "app.modules.newspaper.article_matching.build_match_keys",
-        lambda **_kw: [("service_id", "svc")],
-    )
-    monkeypatch.setattr(
-        "app.modules.newspaper.article_matching.register_article_match_keys",
-        lambda **kw: registered.update(kw) or 1,
-    )
-
-    result = svc.run_article_edit(_row())
-    assert result["status"] == "edited"
-    expected = edit_window_closes_at(from_time=datetime.fromtimestamp(published_epoch, tz=UTC))
-    assert registered["closes_at"] == expected
 
 
 def test_stale_edit_row_falls_through_to_create_when_window_closed(
@@ -213,14 +146,6 @@ def test_edit_recomposes_fully_without_leaking_the_old_body(
     monkeypatch.setattr(svc.index_article, "delay", lambda **_kw: None)
     monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        "app.modules.newspaper.article_matching.build_match_keys",
-        lambda **_kw: [("service_id", "svc")],
-    )
-    monkeypatch.setattr(
-        "app.modules.newspaper.article_matching.register_article_match_keys",
-        lambda **_kw: 1,
-    )
-    monkeypatch.setattr(
         "app.modules.newspaper.article_grader.prior_service_article_summary",
         lambda _service_id: "PRIOR: we already covered svc's launch.",
     )
@@ -271,14 +196,6 @@ def test_edit_merges_extra_tags_from_the_recompose(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(svc, "derive_article_tags", lambda **_kw: ["algorand"])
     monkeypatch.setattr(svc.index_article, "delay", lambda **_kw: None)
     monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        "app.modules.newspaper.article_matching.build_match_keys",
-        lambda **_kw: [("service_id", "svc")],
-    )
-    monkeypatch.setattr(
-        "app.modules.newspaper.article_matching.register_article_match_keys",
-        lambda **_kw: 1,
-    )
     monkeypatch.setattr(
         "app.modules.newspaper.article_grader.prior_service_article_summary",
         lambda _service_id: "",

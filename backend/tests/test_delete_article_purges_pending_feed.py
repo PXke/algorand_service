@@ -38,8 +38,6 @@ class _FakeSession:
         q = " ".join(str(query).split())
         if q.startswith("SELECT published_at FROM algorand_platform.articles_by_id"):
             return _Result(SimpleNamespace(published_at=self._published_at))
-        if q.startswith("SELECT key_type, key_value FROM algorand_platform.article_match_keys_by_article"):
-            return _Result(rows=[])
         if q.startswith("SELECT version FROM algorand_platform.article_versions"):
             return _Result(rows=[])
         if q.startswith(

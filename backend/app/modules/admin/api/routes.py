@@ -742,8 +742,6 @@ def admin_reset_articles(request: Request) -> Response:
         "articles_by_id",
         "articles_feed",
         "article_versions",
-        "article_match_keys",
-        "article_match_keys_by_article",
         "publish_queue",
         "publish_queue_dedupe",
         "publish_queue_pending",

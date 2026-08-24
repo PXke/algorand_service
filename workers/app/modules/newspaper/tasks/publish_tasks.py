@@ -1381,45 +1381,6 @@ def _reserve_slot_or_backlog(
     return None
 
 
-def _register_publish_match_keys(
-    row: QueuedPublishRow,
-    payload: dict,
-    article_id: str,
-    *,
-    topic: PublishTopic,
-    composed: ArticleComposeResult,
-) -> None:
-    publish_mode = str(payload.get("publish_mode", "create"))
-    if publish_mode != "create":
-        return
-    from app.modules.newspaper.article_matching import (
-        build_match_keys,
-        register_article_match_keys,
-    )
-
-    eff_topic = _effective_alert_topic(topic, composed)
-    keys = payload.get("match_keys")
-    # Keys precomputed at INGEST carry the keyword topic's carve-outs
-    # (body domains/cashtags become edit-routing keys for scam topics).
-    # If the writer didn't confirm the alert, those carve-outs are
-    # exactly what must not register — rebuild under the effective topic.
-    if eff_topic != topic or not isinstance(keys, list) or not keys:
-        keys = build_match_keys(
-            service_id=row.service_id,
-            page_text=str(payload.get("page_text", "")),
-            source_url=row.scrape_url,
-            extra_keywords=("scam",) if eff_topic == PublishTopic.SCAM_ALERT else (),
-            topic=eff_topic.value,
-            match_kind=str(payload.get("match_kind", "")),
-            match_value=str(payload.get("match_value", "")),
-        )
-    else:
-        keys = [
-            (str(k[0]), str(k[1])) for k in keys if isinstance(k, (list, tuple)) and len(k) == 2
-        ]
-    register_article_match_keys(article_id=article_id, keys=keys)
-
-
 def _finalize_publish(
     row: QueuedPublishRow,
     payload: dict,
@@ -1503,7 +1464,6 @@ def _finalize_publish(
             service_id=row.service_id,
         )
     publish_mode = str(payload.get("publish_mode", "create"))
-    _register_publish_match_keys(row, payload, article_id, topic=topic, composed=composed)
 
     # Published straight to the feed is a created article — count it toward the
     # per-website daily cap.

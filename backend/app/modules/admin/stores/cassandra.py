@@ -338,7 +338,6 @@ class AdminCassandraStore:
 
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import (
-            ArticleMatchStmts,
             ArticleStmts,
             ArticleVersionStmts,
             DeletedArticleStmts,
@@ -376,20 +375,6 @@ class AdminCassandraStore:
                 FeedStmts.DELETE,
                 (feed_month(ts_row.published_at), ts_row.published_at, aid),
             )
-
-        try:
-            match_rows = session.execute(ArticleMatchStmts.LIST_BY_ARTICLE, (aid,))
-            for row in match_rows:
-                session.execute(
-                    ArticleMatchStmts.DELETE_KEY,
-                    (row.key_type, row.key_value, aid),
-                )
-                session.execute(
-                    ArticleMatchStmts.DELETE_KEY_BY_ARTICLE,
-                    (aid, row.key_type, row.key_value),
-                )
-        except Exception:
-            logger.warning("failed to delete match rows for article %s", aid, exc_info=True)
 
         try:
             version_rows = session.execute(ArticleVersionStmts.LIST_VERSIONS, (aid,))
