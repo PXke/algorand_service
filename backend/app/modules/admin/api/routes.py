@@ -1010,11 +1010,23 @@ def admin_list_compose_feedback(request: Request) -> Response:
         return denied
 
     def _compute() -> dict:
+        from datetime import UTC, datetime
+
+        from algorand_shared.feed_bucket import months_back
+
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
-        rows = session.execute(ToolInsightStmts.LIST_COMPOSE_FEEDBACK, ("all",))
+        # "all" is the legacy pre-2026-08-24 partition, kept in the scan
+        # permanently -- see tool_insights_store's bucket-cutover comment.
+        buckets = ["all", *months_back(datetime.now(tz=UTC), 3)]
+        rows = [
+            r
+            for bucket in buckets
+            for r in session.execute(ToolInsightStmts.LIST_COMPOSE_FEEDBACK, (bucket,))
+        ]
+        rows.sort(key=lambda r: r.created_at, reverse=True)
         items = [
             {
                 "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -1056,22 +1068,39 @@ def admin_list_compose_sessions(request: Request) -> Response:
         limit = 20
 
     def _compute() -> dict:
-        from datetime import datetime
+        from datetime import UTC, datetime
+
+        from algorand_shared.feed_bucket import months_back
 
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
+        # "all" is the legacy pre-2026-08-24 partition, kept in the scan
+        # permanently -- see tool_insights_store's bucket-cutover comment.
+        # Each bucket can supply at most `limit` of the final merged top-N, so
+        # fetching `limit` per bucket (already sorted created_at DESC within
+        # its own partition) and re-sorting the union is a correct keyset page
+        # across however many partitions the data is spread over.
+        buckets = ["all", *months_back(datetime.now(tz=UTC), 3)]
         if before:
             cursor = datetime.fromisoformat(before)
-            rows = session.execute(
-                ToolInsightStmts.LIST_COMPOSE_SESSIONS_SUMMARY_BEFORE,
-                ("all", cursor, limit),
-            )
+            rows = [
+                r
+                for bucket in buckets
+                for r in session.execute(
+                    ToolInsightStmts.LIST_COMPOSE_SESSIONS_SUMMARY_BEFORE,
+                    (bucket, cursor, limit),
+                )
+            ]
         else:
-            rows = session.execute(
-                ToolInsightStmts.LIST_COMPOSE_SESSIONS_SUMMARY, ("all", limit)
-            )
+            rows = [
+                r
+                for bucket in buckets
+                for r in session.execute(ToolInsightStmts.LIST_COMPOSE_SESSIONS_SUMMARY, (bucket, limit))
+            ]
+        rows.sort(key=lambda r: r.created_at, reverse=True)
+        rows = rows[:limit]
         items = [
             {
                 "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -1122,13 +1151,23 @@ def admin_get_compose_session(request: Request) -> Response:
         return json_error_response(400, "invalid_request", "bad session_id/created_at")
 
     def _compute() -> dict:
+        from algorand_shared.feed_bucket import feed_month
+
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
+        # created_at deterministically identifies the bucket the row was
+        # written under (feed_month at write time) -- try the real bucket
+        # first, falling back to the legacy "all" partition for any row
+        # written before the 2026-08-24 cutover.
         row = session.execute(
-            ToolInsightStmts.GET_COMPOSE_SESSION_DETAIL, ("all", created_at, sid)
+            ToolInsightStmts.GET_COMPOSE_SESSION_DETAIL, (feed_month(created_at), created_at, sid)
         ).one()
+        if row is None:
+            row = session.execute(
+                ToolInsightStmts.GET_COMPOSE_SESSION_DETAIL, ("all", created_at, sid)
+            ).one()
         if row is None:
             return {"messages": [], "final_output": ""}
         try:

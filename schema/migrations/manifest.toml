@@ -597,3 +597,19 @@ file = "backend/schema/migrations/app/066_translation_sessions.cql"
 tier = "prod"
 status = "active"
 description = "translation_sessions: per-language start/finish tracking so a stuck local translation can be reaped as stale, mirroring compose_sessions' own crash-detection gap"
+
+[[migrations]]
+stream = "app"
+version = "067"
+file = "backend/schema/migrations/app/067_articles_consolidated.cql"
+tier = "prod"
+status = "active"
+description = "articles data-model consolidation step 3: new articles table (real status enum, doubles as feed listing, SAI on article_id/service_id/composed_by_model) + article_history, created alongside the 11 legacy article-adjacent tables -- nothing reads from these yet"
+
+[[migrations]]
+stream = "app"
+version = "068"
+file = "backend/schema/migrations/app/068_remove_session_ttls.cql"
+tier = "prod"
+status = "active"
+description = "article data-model consolidation step 4b: remove default TTL on compose_sessions/translation_sessions/compose_feedback/tool_suggestions/gatekeeper_decisions/gatekeeper_audit, sequenced with the bucket-scheme fix (app-code only, no DDL) on the 4 tables that previously used a single hardcoded bucket='all' partition"

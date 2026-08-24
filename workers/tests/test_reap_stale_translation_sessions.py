@@ -27,7 +27,10 @@ def test_reaps_old_non_terminal_rows(fake_cassandra_session: MagicMock) -> None:
         _Row(now - timedelta(minutes=5), "recent-running", "running"),
         _Row(now - timedelta(minutes=200), "old-ok", "ok"),
     ]
-    fake_cassandra_session.execute.side_effect = [rows, None]
+    # _RECENT_MONTHS=2 buckets are scanned: the current month returns `rows`
+    # (MARK_STALE fires inline for the one qualifying row, before the second
+    # bucket's LIST_ALL_SUMMARY call), the previous month has nothing.
+    fake_cassandra_session.execute.side_effect = [rows, None, []]
 
     result = reap_stale_translation_sessions(stale_minutes=180)
 

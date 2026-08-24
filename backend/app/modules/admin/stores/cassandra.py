@@ -114,15 +114,25 @@ class AdminCassandraStore:
     def _clear_and_reenqueue_translations(article_id: str) -> None:
         """Wipe every stored translation and re-enqueue all languages via the modern batch task (app.tasks.newspaper.translate_article_batch) -- NOT the legacy per-language translate_article shim _enqueue_article_translations uses, which calls a paid LLM directly and skips the local-engine/DeepSeek-per-language routing the batch task has (see workers' DEEPSEEK_TRANSLATE_LANGS)."""
         try:
-            from celery import Celery
-
             from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
             from app.core.cassandra import get_cassandra_session
             from app.core.config import settings
             from app.core.statements import ArticleStmts
+            from celery import Celery
 
             session = get_cassandra_session()
             session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (UUID(article_id),))
+            # New `articles` table dual-write. Best-effort.
+            with contextlib.suppress(Exception):
+                from algorand_shared.article_statements import ArticlesStmts
+
+                aid = UUID(article_id)
+                new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+                if new_row is not None:
+                    session.execute(
+                        ArticlesStmts.CLEAR_TRANSLATIONS,
+                        (new_row.status, new_row.year, new_row.published_at, aid),
+                    )
             Celery(broker=settings.celery_broker_url).send_task(
                 "app.tasks.newspaper.translate_article_batch",
                 args=[str(article_id), list(ARTICLE_TRANSLATION_LANGS)],
@@ -241,6 +251,31 @@ class AdminCassandraStore:
             ArticleStmts.UPDATE_CONTENT,
             (title, summary, body, tags, aid),
         )
+        # New `articles` table dual-write: content-only, published_at never
+        # re-stamped by this path regardless of branch below -- mirrors the
+        # old table's own UPDATE_CONTENT exactly, including that it doesn't
+        # touch updated_at either (pre-existing behavior here, not something
+        # to silently fix as part of this dual-write). Best-effort.
+        with contextlib.suppress(Exception):
+            from algorand_shared.article_statements import ArticlesStmts
+
+            old_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
+            if old_row is not None:
+                session.execute(
+                    ArticlesStmts.UPDATE_CONTENT,
+                    (
+                        title,
+                        summary,
+                        body,
+                        tags,
+                        old_row.image_url,
+                        old_row.updated_at,
+                        old_row.status,
+                        old_row.year,
+                        old_row.published_at,
+                        aid,
+                    ),
+                )
         if pub_row is None or pub_row.published_at is None:
             # Unpublished/held article: it has no feed row, and the old
             # fallback (reconstructing published_at from the seconds epoch)
@@ -366,6 +401,14 @@ class AdminCassandraStore:
         self._purge_pending_feed_queue(session, aid)
 
         session.execute(ArticleStmts.DELETE, (aid,))
+        # New `articles` table dual-write: deletion is a status transition
+        # ('deleted', tombstoned + deleted_at set) not a hard row delete --
+        # matches the tombstone-first intent above (410 Gone, not 404).
+        # Best-effort, doesn't affect the delete's success either way.
+        with contextlib.suppress(Exception):
+            from algorand_shared.article_transitions import transition_article_status
+
+            transition_article_status(aid, new_status="deleted", deleted_at=datetime.now(tz=UTC))
         with contextlib.suppress(Exception):
             from app.core.typesense_client import delete_article_document
 
@@ -405,6 +448,14 @@ class AdminCassandraStore:
             )
         else:
             session.execute(DraftArticleStmts.DELETE, (aid,))
+        # New `articles` table dual-write: status flips between 'draft' and
+        # 'published', published_at unchanged (same as the old-schema path
+        # above -- restoring re-inserts the SAME feed row, not a re-publish).
+        # Best-effort.
+        with contextlib.suppress(Exception):
+            from algorand_shared.article_transitions import transition_article_status
+
+            transition_article_status(aid, new_status="draft" if draft else "published")
 
         published_at = row.published_at
         if published_at is not None:
@@ -840,10 +891,9 @@ class AdminCassandraStore:
         article_text is snapshotted so the anchor is fixed even if the article
         later changes. Returns the anchor id.
         """
-        from cassandra.util import uuid_from_time
-
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import GatekeeperStmts
+        from cassandra.util import uuid_from_time
 
         # If an article_text was not passed in, snapshot it now from the article.
         if not article_text and article_id:
@@ -1125,6 +1175,20 @@ class AdminCassandraStore:
         if not updated:
             return
         session.execute(ArticleStmts.UPDATE_TAGS, (tags, aid))
+        self._dual_write_article_tags(session, aid, tags)
+
+    @staticmethod
+    def _dual_write_article_tags(session: CassandraSession, aid: UUID, tags: list[str]) -> None:
+        """New `articles` table dual-write for a tags-only correction. Best-effort."""
+        with contextlib.suppress(Exception):
+            from algorand_shared.article_statements import ArticlesStmts
+
+            new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+            if new_row is not None:
+                session.execute(
+                    ArticlesStmts.UPDATE_TAGS,
+                    (tags, new_row.status, new_row.year, new_row.published_at, aid),
+                )
 
     def _complete_classifier_review(self, review_id: str, *, resolution: str) -> bool:
         from uuid import UUID
@@ -1283,11 +1347,22 @@ class AdminCassandraStore:
 
     def list_tool_suggestions(self, *, include_resolved: bool = False) -> list[dict]:
         """Capabilities the writer model wished it had (via suggest_tool), newest first. Resolved suggestions (tools that have since shipped) are hidden by default so the Tool gaps panel only shows genuine gaps instead of growing forever — see resolve_tool_suggestions."""
+        from datetime import UTC, datetime
+
+        from algorand_shared.feed_bucket import months_back
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
-        rows = session.execute(ToolInsightStmts.LIST_SUGGESTIONS, ("all",))
+        # "all" is the legacy pre-2026-08-24 partition (see tool_insights_store's
+        # bucket-cutover comment) -- new rows land in real month buckets, but
+        # everything written before the cutover still lives there, so it stays
+        # in the scan permanently rather than silently dropping out of the list.
+        buckets = ["all", *months_back(datetime.now(tz=UTC), 3)]
+        rows = [
+            r for bucket in buckets for r in session.execute(ToolInsightStmts.LIST_SUGGESTIONS, (bucket,))
+        ]
+        rows.sort(key=lambda r: r.created_at, reverse=True)
         return [
             {
                 "suggestion_id": str(r.suggestion_id) if r.suggestion_id else "",
@@ -1299,7 +1374,7 @@ class AdminCassandraStore:
                 "model": r.model or "",
                 "resolved": bool(r.resolved),
             }
-            for r in rows
+            for r in rows[:300]
             if include_resolved or not r.resolved
         ]
 
@@ -1344,6 +1419,23 @@ class AdminCassandraStore:
                 (row.slug, feed_month(published_at), published_at, aid),
             )
         session.execute(ArticleStmts.UPDATE_PUBLISHED_AT, (published_at, aid))
+        # New `articles` table dual-write: review-approval is a status
+        # transition to 'published' with published_at re-stamped (same as
+        # workers' backlog-release path). Best-effort.
+        with contextlib.suppress(Exception):
+            from algorand_shared.article_statements import ArticlesStmts
+            from algorand_shared.article_transitions import transition_article_status
+
+            transition_article_status(
+                aid, new_status="published", new_published_at=published_at
+            )
+            if row.slug:
+                new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+                if new_row is not None:
+                    session.execute(
+                        ArticlesStmts.SET_SLUG,
+                        (row.slug, new_row.status, new_row.year, new_row.published_at, aid),
+                    )
         # Register the service_id match key: the workers only register match
         # keys on their direct-publish path, so review-approved articles were
         # invisible to service_has_article() — the first-coverage reframing
@@ -1377,10 +1469,9 @@ class AdminCassandraStore:
     def _enqueue_article_translations(article_id: str) -> None:
         """Fan out worker translate_article tasks now that the article is feed- visible. Translation happens at publish time only — held drafts are not translated (see workers publish_tasks.enqueue_article_translations, the other half of this seam). The task fetches current text by id and skips already-stored languages, so this is safe to fire more than once."""
         try:
-            from celery import Celery
-
             from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
             from app.core.config import settings
+            from celery import Celery
 
             app = Celery(broker=settings.celery_broker_url)
             for lang in ARTICLE_TRANSLATION_LANGS:
@@ -1415,9 +1506,8 @@ class AdminCassandraStore:
     @staticmethod
     def _trigger_apply_recompose(draft_article_id: str, live_article_id: str) -> None:
         try:
-            from celery import Celery
-
             from app.core.config import settings
+            from celery import Celery
 
             Celery(broker=settings.celery_broker_url).send_task(
                 "app.tasks.newspaper.apply_recomposed_article",
@@ -1431,9 +1521,8 @@ class AdminCassandraStore:
     def _trigger_distribution(article_id: str) -> None:
         """Auto-post to social channels (Bluesky, Telegram, ...) once an admin-approved fresh article actually lands in the feed. Recompose approvals deliberately do NOT trigger this (see apply_recomposed_article) — reposting every refresh of already- published content would look repetitive to followers."""
         try:
-            from celery import Celery
-
             from app.core.config import settings
+            from celery import Celery
 
             Celery(broker=settings.celery_broker_url).send_task(
                 "app.tasks.newspaper.distribute_article",
@@ -1446,9 +1535,8 @@ class AdminCassandraStore:
     @staticmethod
     def _trigger_compose_next() -> None:
         try:
-            from celery import Celery
-
             from app.core.config import settings
+            from celery import Celery
 
             app = Celery(broker=settings.celery_broker_url)
             # Approving/rejecting frees the review slot — compose the next ONE

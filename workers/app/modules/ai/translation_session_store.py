@@ -21,8 +21,18 @@ from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
-_BUCKET = "all"
+# Real month buckets (see algorand_shared.feed_bucket) -- this table previously
+# used a single hardcoded bucket="all" partition, only safe because a 7-day
+# TTL kept it bounded; removing the TTL without fixing this trades a
+# tombstone-stream problem for an unbounded-single-partition one (2026-08-24,
+# same fix as tool_insights_store's compose_sessions/tool_suggestions/
+# compose_feedback). Rows written before this cutover stay in the old "all"
+# partition forever -- the backend admin list view still scans it too.
 _NON_TERMINAL_STATUSES = ("running",)
+# reap_stale_translation_sessions only looks for a row still 'running' --
+# 2 months covers any session straddling a month boundary without scanning
+# history.
+_RECENT_MONTHS = 2
 
 SessionRef = tuple[UUID, datetime]
 
@@ -30,6 +40,7 @@ SessionRef = tuple[UUID, datetime]
 def start_translation_session(article_id: str, lang: str) -> SessionRef | None:
     """Record the start of one language's translation. Returns a ref to pass to finish_translation_session, or None on failure (best-effort, never raises)."""
     try:
+        from algorand_shared.feed_bucket import feed_month
         from cassandra.util import uuid_from_time
 
         from app.core.cassandra import get_cassandra_session
@@ -40,7 +51,16 @@ def start_translation_session(article_id: str, lang: str) -> SessionRef | None:
         session_id = uuid_from_time(now)
         session.execute(
             TranslationSessionStmts.INSERT,
-            (_BUCKET, now, session_id, (article_id or "")[:64], (lang or "")[:8], "running", 0, ""),
+            (
+                feed_month(now),
+                now,
+                session_id,
+                (article_id or "")[:64],
+                (lang or "")[:8],
+                "running",
+                0,
+                "",
+            ),
         )
         return session_id, now
     except Exception:
@@ -56,14 +76,18 @@ def finish_translation_session(ref: SessionRef | None, *, status: str, error: st
         return False
     session_id, started_at = ref
     try:
+        from algorand_shared.feed_bucket import feed_month
+
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import TranslationSessionStmts
 
         session = get_cassandra_session()
         duration_ms = int((datetime.now(tz=UTC) - started_at).total_seconds() * 1000)
+        # bucket must match what start_translation_session wrote this row
+        # under -- derived from the SAME started_at, not a fresh now().
         session.execute(
             TranslationSessionStmts.MARK_DONE,
-            (status[:16], duration_ms, error[:500], _BUCKET, started_at, session_id),
+            (status[:16], duration_ms, error[:500], feed_month(started_at), started_at, session_id),
         )
         return True
     except Exception:
@@ -83,27 +107,30 @@ def reap_stale_translation_sessions(*, stale_minutes: int | None = None) -> dict
     cutoff = datetime.now(tz=UTC) - timedelta(minutes=threshold_minutes)
 
     try:
+        from algorand_shared.feed_bucket import months_back
+
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import TranslationSessionStmts
 
         session = get_cassandra_session()
-        rows = session.execute(TranslationSessionStmts.LIST_ALL_SUMMARY, (_BUCKET,))
         checked = 0
         reaped = 0
-        for row in rows:
-            checked += 1
-            if row.status not in _NON_TERMINAL_STATUSES:
-                continue
-            started_at = row.started_at
-            if started_at.tzinfo is None:
-                started_at = started_at.replace(tzinfo=UTC)
-            if started_at >= cutoff:
-                continue
-            session.execute(
-                TranslationSessionStmts.MARK_STALE,
-                ("stale", _BUCKET, row.started_at, row.session_id),
-            )
-            reaped += 1
+        for bucket in months_back(datetime.now(tz=UTC), _RECENT_MONTHS):
+            rows = session.execute(TranslationSessionStmts.LIST_ALL_SUMMARY, (bucket,))
+            for row in rows:
+                checked += 1
+                if row.status not in _NON_TERMINAL_STATUSES:
+                    continue
+                started_at = row.started_at
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=UTC)
+                if started_at >= cutoff:
+                    continue
+                session.execute(
+                    TranslationSessionStmts.MARK_STALE,
+                    ("stale", bucket, row.started_at, row.session_id),
+                )
+                reaped += 1
         return {"checked": checked, "reaped": reaped}
     except Exception:
         logger.warning("failed to reap stale translation sessions", exc_info=True)

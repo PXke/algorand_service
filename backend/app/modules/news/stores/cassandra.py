@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from app.core.feed_bucket import cursor_from_ms, feed_month, months_back, to_ms
+from app.core.feed_bucket import cursor_from_ms, feed_month, to_ms
 from app.modules.news.stores.base import StoredArticle
 
 
@@ -58,6 +58,52 @@ def _full_row_to_stored(row: Any) -> StoredArticle:
         translations=dict(row.translations) if row.translations else None,
         updated_at_epoch=_epoch(getattr(row, "updated_at", None)) or None,
         draft=bool(getattr(row, "draft", False)),
+    )
+
+
+def _articles_row_to_stored(row: Any) -> StoredArticle | None:
+    """Map a new `articles` table row to StoredArticle, or None if it's not a publicly-fetchable row.
+
+    status='deleted' -> None: the OLD articles_by_id path hard-deletes on
+    delete_article, so get() naturally returned None for a deleted id -- the
+    new table instead TRANSITIONS to status='deleted' (row preserved,
+    tombstoned) rather than removing the row, so this filter has to be
+    explicit or a deleted article's full content would become readable again.
+    The separate 410-vs-404 routing (deleted_articles tombstone table, see
+    sitemap.py) is untouched by this and keeps working exactly as before --
+    it never depended on get()'s return value, only on its own table.
+
+    status='draft' -> draft=True: this is exactly what the old schema's
+    separate articles_by_id.draft boolean column meant; the caller's own
+    admin-only draft gate (NewsService._fetch_detail) is unchanged and reads
+    this same flag.
+
+    status in ('on_hold', 'backlog') is still returned (draft=False) --
+    matching the OLD schema's behavior exactly: an unlisted article has
+    always been directly fetchable by id (just not listed/indexed), since
+    articles_by_id never had a separate "is this listed" check inside get()
+    itself.
+    """
+    if row.status == "deleted":
+        return None
+    epoch = _epoch(row.published_at)
+    return StoredArticle(
+        article_id=str(row.article_id),
+        service_id=row.service_id,
+        title=row.title,
+        summary=row.summary,
+        body=row.body,
+        published_at_epoch=epoch,
+        trigger_txid=row.trigger_txid,
+        trigger_round=int(row.trigger_round) if row.trigger_round is not None else None,
+        source_url=row.source_url,
+        tags=list(row.tags or []),
+        image_url=row.image_url,
+        slug=row.slug,
+        translations=dict(row.translations) if row.translations else None,
+        updated_at_epoch=_epoch(row.updated_at) or None,
+        first_published_at_epoch=_epoch(row.first_published_at) or None,
+        draft=row.status == "draft",
     )
 
 
@@ -136,28 +182,38 @@ class CassandraArticleStore:
         cursor_epoch_ms: int | None = None,
         max_months: int = 18,
     ) -> tuple[list[StoredArticle], int | None]:
-        """Keyset-paginated feed across month partitions. Returns (items, next_cursor_ms); next_cursor is None when no more pages.
+        """Keyset-paginated feed across `articles`' (status='published', year) partitions. Returns (items, next_cursor_ms); next_cursor is None when no more pages.
 
-        Prefetches the next month partition while mapping the current page so
+        `articles` doubles as the feed projection (article-table
+        consolidation, step 5 read cutover, 2026-08-24) -- year is the
+        partition granularity here (not month, like the old articles_feed),
+        since per-year partitions comfortably hold this platform's real
+        article volume (~7/day). ``max_months`` is kept as the param name for
+        call-site compatibility but now means "how many years of history, at
+        minimum, to cover" -- max(2, ceil(max_months/12)) so the existing
+        18-month default still reaches back 2 years.
+
+        Prefetches the next year partition while mapping the current page so
         Cassandra round-trips overlap with CPU work.
         """
+        import math
+
+        from algorand_shared.article_statements import ArticlesStmts
         from app.core.cassandra import execute_async
-        from app.core.statements import NewsStmts
 
         cursor_dt = cursor_from_ms(cursor_epoch_ms)
-        months = list(months_back(cursor_dt, max_months))
+        max_years = max(2, math.ceil(max_months / 12))
+        years = [cursor_dt.year - i for i in range(max_years)]
         items: list[StoredArticle] = []
         last_dt = None
-        if not months:
-            return items, None
 
-        fut = execute_async(NewsStmts.FEED_PAGE, (months[0], cursor_dt, limit))
-        for index in range(len(months)):
+        fut = execute_async(ArticlesStmts.LIST_PUBLISHED_PAGE, (years[0], cursor_dt, limit))
+        for index in range(len(years)):
             rows = list(fut.result())
             remaining_after = limit - len(items) - len(rows)
-            if remaining_after > 0 and index + 1 < len(months):
+            if remaining_after > 0 and index + 1 < len(years):
                 fut = execute_async(
-                    NewsStmts.FEED_PAGE, (months[index + 1], cursor_dt, remaining_after)
+                    ArticlesStmts.LIST_PUBLISHED_PAGE, (years[index + 1], cursor_dt, remaining_after)
                 )
             else:
                 fut = None
@@ -193,23 +249,30 @@ class CassandraArticleStore:
 
         ``overlap`` runs after the query is dispatched and before waiting, so
         callers can do unrelated work (Redis, header checks) in parallel.
+
+        Reads from the new consolidated `articles` table via its SAI index on
+        article_id (article-table consolidation, step 5 read cutover,
+        2026-08-24) -- benchmarked against a resolver-table design first (see
+        the plan), a direct SAI point lookup costs ~0.4ms more than knowing
+        the partition key outright, negligible at this platform's real data
+        volume.
         """
+        from algorand_shared.article_statements import ArticlesStmts
         from app.core.cassandra import execute_then
-        from app.core.statements import NewsStmts
 
         try:
             aid = UUID(article_id)
         except ValueError:
             return None
-        row = execute_then(NewsStmts.GET_FULL, (aid,), overlap=overlap).one()
+        row = execute_then(ArticlesStmts.GET_FULL_BY_ID, (aid,), overlap=overlap).one()
         if row is None:
             return None
-        return _full_row_to_stored(row)
+        return _articles_row_to_stored(row)
 
     def get_many(self, article_ids: list[str]) -> dict[str, StoredArticle]:
         """Fetch many articles by id concurrently; missing ids are omitted."""
+        from algorand_shared.article_statements import ArticlesStmts
         from app.core.cassandra import execute_parallel_with_args
-        from app.core.statements import NewsStmts
 
         pairs: list[tuple[str, UUID]] = []
         for raw in article_ids:
@@ -223,7 +286,7 @@ class CassandraArticleStore:
         for (raw, _), (ok, result) in zip(
             pairs,
             execute_parallel_with_args(
-                NewsStmts.GET_FULL, [(aid,) for _, aid in pairs], raise_on_error=False
+                ArticlesStmts.GET_FULL_BY_ID, [(aid,) for _, aid in pairs], raise_on_error=False
             ),
             strict=True,
         ):
@@ -231,5 +294,7 @@ class CassandraArticleStore:
                 continue
             row = result.one() if hasattr(result, "one") else None
             if row is not None:
-                out[raw] = _full_row_to_stored(row)
+                stored = _articles_row_to_stored(row)
+                if stored is not None:
+                    out[raw] = stored
         return out

@@ -17,6 +17,25 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from algorand_shared.article_statements import (
+    ARTICLE_CLEAR_TRANSLATIONS,
+    ARTICLE_GET_TAGS,
+    ARTICLE_MATCH_INSERT_KEY,
+    ARTICLE_MATCH_INSERT_KEY_BY_ARTICLE,
+    ARTICLE_UPDATE_PUBLISHED_AT,
+    ARTICLE_VERSION_INSERT,
+    ARTICLE_VERSION_LATEST,
+    FEED_DELETE,
+    FEED_SET_SLUG,
+    PENDING_FEED_DELETE,
+    PENDING_FEED_INSERT,
+    PENDING_FEED_PEEK_ID,
+    PUBLISH_QUEUE_CLEAR_HUMAN_PICK,
+    PUBLISH_QUEUE_DELETE_PENDING,
+    PUBLISH_QUEUE_INSERT_PENDING,
+    PUBLISH_QUEUE_SET_HUMAN_PICK,
+)
+
 if TYPE_CHECKING:
     from cassandra.query import PreparedStatement
 
@@ -50,7 +69,7 @@ class ArticleStmts:
         "FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
     EXISTS = _Stmt("SELECT article_id FROM algorand_platform.articles_by_id WHERE article_id = ?")
-    GET_TAGS = _Stmt("SELECT tags FROM algorand_platform.articles_by_id WHERE article_id = ?")
+    GET_TAGS = ARTICLE_GET_TAGS
     GET_PUBLISHED_AT = _Stmt(
         "SELECT published_at, first_published_at FROM algorand_platform.articles_by_id "
         "WHERE article_id = ?"
@@ -80,9 +99,7 @@ class ArticleStmts:
     # (root-caused 2026-07-14: a held draft's displayed timestamp reflected
     # when it was drafted, not when it went public, which also let it dodge
     # the daily cap's published_at-windowed count).
-    UPDATE_PUBLISHED_AT = _Stmt(
-        "UPDATE algorand_platform.articles_by_id SET published_at = ? WHERE article_id = ?"
-    )
+    UPDATE_PUBLISHED_AT = ARTICLE_UPDATE_PUBLISHED_AT
     # Stamped right after a burst-selected queue row composes (see
     # burst_compose_tasks.py) so the resulting article carries the same
     # sentinel its source queue row does -- the backend approval path reads
@@ -131,16 +148,11 @@ class ArticleStmts:
     SET_ARTICLE_SLUG = _Stmt(
         "UPDATE algorand_platform.articles_by_id SET slug = ? WHERE article_id = ?"
     )
-    SET_FEED_SLUG = _Stmt(
-        "UPDATE algorand_platform.articles_feed SET slug = ? "
-        "WHERE bucket = ? AND published_at = ? AND article_id = ?"
-    )
+    SET_FEED_SLUG = FEED_SET_SLUG
     GET_ARTICLE_SLUG = _Stmt(
         "SELECT slug FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
-    CLEAR_TRANSLATIONS = _Stmt(
-        "DELETE translations FROM algorand_platform.articles_by_id WHERE article_id = ?"
-    )
+    CLEAR_TRANSLATIONS = ARTICLE_CLEAR_TRANSLATIONS
     # Clears one language only, unlike CLEAR_TRANSLATIONS -- for reclaiming a
     # single bad translation (e.g. a corrupted local-engine result) without
     # discarding every other language's already-good work on the same article.
@@ -211,10 +223,7 @@ class FeedStmts:
         "SELECT bucket, published_at, article_id, "
         "service_id, title FROM algorand_platform.articles_feed"
     )
-    DELETE = _Stmt(
-        "DELETE FROM algorand_platform.articles_feed "
-        "WHERE bucket = ? AND published_at = ? AND article_id = ?"
-    )
+    DELETE = FEED_DELETE
 
 
 class ServiceEventStmts:
@@ -243,11 +252,7 @@ class PublishQueueStmts:
         "payload, created_at, updated_at"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    INSERT_PENDING = _Stmt(
-        "INSERT INTO algorand_platform.publish_queue_pending ("
-        "status, priority, created_at, queue_id, service_id, topic, publish_kind"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
-    )
+    INSERT_PENDING = PUBLISH_QUEUE_INSERT_PENDING
     INSERT_DEDUPE = _Stmt(
         "INSERT INTO algorand_platform.publish_queue_dedupe (dedupe_key, queue_id, created_at) "
         "VALUES (?, ?, ?)"
@@ -280,17 +285,10 @@ class PublishQueueStmts:
         "UPDATE algorand_platform.publish_queue "
         "SET last_reason = ?, updated_at = ? WHERE queue_id = ?"
     )
-    DELETE_PENDING = _Stmt(
-        "DELETE FROM algorand_platform.publish_queue_pending "
-        "WHERE status = ? AND priority = ? AND created_at = ? AND queue_id = ?"
-    )
+    DELETE_PENDING = PUBLISH_QUEUE_DELETE_PENDING
     DELETE_DEDUPE = _Stmt("DELETE FROM algorand_platform.publish_queue_dedupe WHERE dedupe_key = ?")
-    SET_HUMAN_PICK = _Stmt(
-        "UPDATE algorand_platform.publish_queue SET human_pick_day = ?, updated_at = ? WHERE queue_id = ?"
-    )
-    CLEAR_HUMAN_PICK = _Stmt(
-        "UPDATE algorand_platform.publish_queue SET human_pick_day = null, updated_at = ? WHERE queue_id = ?"
-    )
+    SET_HUMAN_PICK = PUBLISH_QUEUE_SET_HUMAN_PICK
+    CLEAR_HUMAN_PICK = PUBLISH_QUEUE_CLEAR_HUMAN_PICK
     SET_BURST_DAY = _Stmt(
         "UPDATE algorand_platform.publish_queue SET burst_day = ?, updated_at = ? WHERE queue_id = ?"
     )
@@ -536,15 +534,8 @@ class SnapshotStmts:
 class ArticleVersionStmts:
     """Prepared statements for article edit-history versions."""
 
-    LATEST = _Stmt(
-        "SELECT version FROM algorand_platform.article_versions "
-        "WHERE article_id = ? ORDER BY version DESC LIMIT 1"
-    )
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.article_versions ("
-        "article_id, version, title, summary, body, edit_reason, editor, edited_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
+    LATEST = ARTICLE_VERSION_LATEST
+    INSERT = ARTICLE_VERSION_INSERT
     LIST = _Stmt(
         "SELECT version, title, summary, body, edit_reason, editor, edited_at "
         "FROM algorand_platform.article_versions WHERE article_id = ? LIMIT ?"
@@ -561,16 +552,8 @@ class ArticleMatchStmts:
         "SELECT article_id, linked_at, edit_window_closes_at "
         "FROM algorand_platform.article_match_keys WHERE key_type = ? AND key_value = ?"
     )
-    INSERT_KEY = _Stmt(
-        "INSERT INTO algorand_platform.article_match_keys ("
-        "key_type, key_value, article_id, linked_at, edit_window_closes_at"
-        ") VALUES (?, ?, ?, ?, ?)"
-    )
-    INSERT_KEY_BY_ARTICLE = _Stmt(
-        "INSERT INTO algorand_platform.article_match_keys_by_article ("
-        "article_id, key_type, key_value, linked_at"
-        ") VALUES (?, ?, ?, ?)"
-    )
+    INSERT_KEY = ARTICLE_MATCH_INSERT_KEY
+    INSERT_KEY_BY_ARTICLE = ARTICLE_MATCH_INSERT_KEY_BY_ARTICLE
 
 
 # --------------------------------------------------------------------------- #
@@ -712,22 +695,13 @@ class InvestigationStmts:
 class PendingFeedStmts:
     """Prepared statements for the pending-feed backlog."""
 
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.pending_feed_queue "
-        "(bucket, interest_score, approved_at, article_id) "
-        "VALUES (?, ?, ?, ?)"
-    )
+    INSERT = PENDING_FEED_INSERT
     PEEK = _Stmt(
         "SELECT bucket, interest_score, approved_at, article_id "
         "FROM algorand_platform.pending_feed_queue WHERE bucket = ? LIMIT 1"
     )
-    DELETE = _Stmt(
-        "DELETE FROM algorand_platform.pending_feed_queue "
-        "WHERE bucket = ? AND interest_score = ? AND approved_at = ? AND article_id = ?"
-    )
-    PEEK_ID = _Stmt(
-        "SELECT article_id FROM algorand_platform.pending_feed_queue WHERE bucket = ? LIMIT 1"
-    )
+    DELETE = PENDING_FEED_DELETE
+    PEEK_ID = PENDING_FEED_PEEK_ID
     LIST_IDS = _Stmt("SELECT article_id FROM algorand_platform.pending_feed_queue WHERE bucket = ?")
 
 

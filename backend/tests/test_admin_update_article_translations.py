@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -125,7 +124,7 @@ def test_clear_and_reenqueue_sends_the_batch_task_for_every_language(
     sent: dict[str, Any] = {}
 
     class _FakeCelery:
-        def __init__(self, broker: str) -> None:  # noqa: ARG002
+        def __init__(self, broker: str) -> None:
             pass
 
         def send_task(self, name: str, *, args: list, queue: str) -> None:
@@ -137,7 +136,10 @@ def test_clear_and_reenqueue_sends_the_batch_task_for_every_language(
 
     AdminCassandraStore._clear_and_reenqueue_translations("11111111-1111-1111-1111-111111111111")
 
-    assert len(fake_session.executed) == 1
+    # 1 old-table DELETE + 1 new-`articles`-table dual-write lookup (best-
+    # effort, swallowed here since the fake session's execute() doesn't
+    # support .one()).
+    assert len(fake_session.executed) == 2
     assert sent["name"] == "app.tasks.newspaper.translate_article_batch"
     assert sent["args"][0] == "11111111-1111-1111-1111-111111111111"
     assert len(sent["args"][1]) >= 6  # every configured language, not one

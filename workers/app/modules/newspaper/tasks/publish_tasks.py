@@ -11,11 +11,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from celery import Task
-
     from app.modules.ai.content_signals import ContentSignals
     from app.modules.newspaper.article_store import ArticleDetail
     from app.modules.newspaper.editorial_assignment import EditorialBrief
+    from celery import Task
 
 from app.celery_app import celery_app
 from app.core import config as worker_config
@@ -275,6 +274,7 @@ def _stash_capped_compose_to_backlog(
         trigger_round=int(payload.get("round_num", 0)),
         source_url=row.scrape_url,
         publish_to_feed=False,
+        status="backlog",
         image_url=image_field,
         tags=tags,
         prompt_version=getattr(composed, "prompt_version", ""),
@@ -1220,6 +1220,7 @@ def _hold_for_review(
         trigger_round=int(payload.get("round_num", 0)),
         source_url=row.scrape_url,
         publish_to_feed=False,
+        status="backlog" if route_to_backlog else "on_hold",
         image_url=image_field,
         tags=held_tags,
         prompt_version=getattr(composed, "prompt_version", ""),
@@ -2265,6 +2266,7 @@ def recompose_review(review_id: str) -> dict[str, str]:
         trigger_round=0,
         source_url=url,
         publish_to_feed=False,
+        status="on_hold",
         article_id=reuse_article_id,
         image_url=image_field,
         tags=tags,

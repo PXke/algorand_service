@@ -21,14 +21,17 @@ def test_publish_path_claims_a_slug() -> None:
     drain = Path(queue_drain_tasks.__file__).read_text(encoding="utf-8")
 
     # insert_stored_article claims only inside the publish_to_feed branch.
-    claim = "_claim_slug_for_feed(article_id, title, published_at)"
+    claim = "_claim_slug_for_feed(article_id, title, published_at, status=status)"
     assert claim in store
     # The claim must come AFTER the publish_to_feed guard, so a held draft
     # never takes a slug it may never use.
     assert store.index("if publish_to_feed:") < store.index(claim)
 
     # The queue drain is how most articles actually go live.
-    assert "_claim_slug_for_feed(art.article_id, art.title, released_at)" in drain
+    assert (
+        '_claim_slug_for_feed(art.article_id, art.title, released_at, status="published")'
+        in drain
+    )
 
 
 def test_slug_claim_never_raises(monkeypatch) -> None:  # noqa: ANN001

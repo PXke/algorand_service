@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
+from algorand_shared.feed_bucket import feed_month
 
 from app.modules.ai import tool_insights_store as tis
 from app.modules.newspaper.tasks import publish_tasks as pt
@@ -163,7 +166,10 @@ def test_finalize_only_touches_the_newest_matching_ok_row(monkeypatch: pytest.Mo
     assert len(fake.updates) == 1
     outcome, bucket, created_at, session_id = fake.updates[0]
     assert outcome == "published"
-    assert bucket == "all"
+    # The fake ignores the bucket param and returns the same fixture rows for
+    # every bucket scanned, so the winning row is found in the FIRST (current
+    # month) bucket -- months_back yields most-recent-first.
+    assert bucket == feed_month(datetime.now(tz=UTC))
     assert created_at == 20
     assert session_id == "new-session"
 

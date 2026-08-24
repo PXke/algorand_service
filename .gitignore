@@ -24,3 +24,7 @@ workers/scripts/eval_compose_output/
 
 # Translation candidate eval harness output (local, not for commit)
 workers/scripts/eval_translate_output/
+
+# Prod DB backups pulled locally (local, not for commit)
+workers/scratch/article_table_backup/
+workers/scratch/full_keyspace_backup/

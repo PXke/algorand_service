@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
+from algorand_shared.article_transitions import transition_article_status
 from app.core.config import NEWS_FEED_BUCKET
 from app.core.feed_bucket import feed_month, months_back
 
@@ -210,6 +211,7 @@ def insert_stored_article(
     trigger_round: int,
     source_url: str,
     publish_to_feed: bool = True,
+    status: str = "published",
     article_id: UUID | None = None,
     tags: list[str] | None = None,
     image_url: str = "",
@@ -217,8 +219,21 @@ def insert_stored_article(
 ) -> tuple[str, bool]:
     """Store article in articles_by_id; optionally publish to articles_feed.
 
+    Also dual-writes into the new consolidated `articles` table (article-table
+    consolidation, step 5) alongside the legacy tables above -- nothing reads
+    from `articles` yet, this just keeps it populated so the eventual read
+    cutover has data to switch onto. ``status`` MUST reflect where this row is
+    actually headed (draft/on_hold/backlog/published) -- unlike
+    ``publish_to_feed`` (which only controls the OLD articles_feed insert),
+    `articles`' status is part of its partition key, so passing the wrong
+    value here silently mislabels the row exactly the way the OLD scattered-
+    presence-across-11-tables design used to. Callers creating an unlisted
+    draft (publish_to_feed=False) MUST pass the real destination status
+    explicitly; there is no safe default to infer it from.
+
     Returns (article_id, feed_published).
     """
+    from algorand_shared.article_statements import ArticlesStmts
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
     from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
@@ -247,6 +262,43 @@ def insert_stored_article(
             prompt_version or None,
         ),
     )
+    # article_id may be REUSED (e.g. recompose-under-review overwriting its
+    # own draft): published_at is part of `articles`' partition key here
+    # (unlike the old articles_by_id, keyed by article_id alone), so inserting
+    # at a fresh published_at without deleting any existing row first would
+    # leave an orphaned duplicate behind at the old partition key.
+    old_row = session.execute(ArticlesStmts.GET_BY_ID, (article_id,)).one()
+    if old_row is not None:
+        session.execute(
+            ArticlesStmts.DELETE,
+            (old_row.status, old_row.year, old_row.published_at, article_id),
+        )
+    session.execute(
+        ArticlesStmts.INSERT,
+        (
+            status,
+            published_at.year,
+            published_at,
+            article_id,
+            service_id,
+            title,
+            summary,
+            body,
+            image,
+            tag_list,
+            source_url,
+            trigger_txid,
+            trigger_round,
+            None,  # slug: claimed separately below (feed path) or left unset
+            None,  # translations: none at creation time
+            None,  # first_published_at: NULL until a recompose re-publish sets it
+            None,  # updated_at: NULL until an edit/recompose
+            None,  # burst_day: set via a separate call when relevant
+            prompt_version or None,
+            None,  # composed_by_model: not yet plumbed through this call, accepted gap
+            None,  # deleted_at: never set at creation
+        ),
+    )
     if publish_to_feed:
         session.execute(
             FeedStmts.INSERT,
@@ -265,7 +317,7 @@ def insert_stored_article(
         # Claim the permanent URL slug at go-live. Held drafts deliberately do
         # NOT claim one: they may never publish, and a draft holding the clean
         # slug would push the real article to -2.
-        _claim_slug_for_feed(article_id, title, published_at)
+        _claim_slug_for_feed(article_id, title, published_at, status=status)
         return str(article_id), True
     return str(article_id), False
 
@@ -318,6 +370,7 @@ def update_article(
     upserts a phantom feed row with null service_id/title that 500s the feed.
     Also stamps updated_at so the revision surfaces as dateModified.
     """
+    from algorand_shared.article_statements import ArticlesStmts
     from app.core.cassandra import get_cassandra_session
     from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
 
@@ -353,6 +406,30 @@ def update_article(
     # untouched, but every listed one must carry the real value.
     image_row = session.execute(ArticleStmts.GET_IMAGE, (aid,)).one()
     image = (image_row.image_url or None) if image_row else None
+    # New `articles` table dual-write: in-place edit, published_at (part of
+    # the partition key) doesn't move, so a plain UPDATE suffices -- no
+    # delete+insert needed. Best-effort: the OLD-schema write above is
+    # already durable, so a hiccup here must not undo it.
+    new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+    if new_row is not None:
+        try:
+            session.execute(
+                ArticlesStmts.UPDATE_CONTENT,
+                (
+                    title,
+                    summary,
+                    body,
+                    tag_list,
+                    image,
+                    updated_at,
+                    new_row.status,
+                    new_row.year,
+                    new_row.published_at,
+                    aid,
+                ),
+            )
+        except Exception:
+            logger.warning("articles dual-write update failed for %s", aid, exc_info=True)
     session.execute(
         FeedStmts.INSERT_FULL,
         (
@@ -447,6 +524,9 @@ def replace_article_content(
             (title, summary, body, tags, image, now, aid),
         )
         session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (aid,))
+        _dual_write_draft_content(
+            session, aid, title=title, summary=summary, body=body, tags=tags, image=image, now=now
+        )
         return old_published_at
     session.execute(
         ArticleStmts.UPDATE_CONTENT_FULL,
@@ -454,6 +534,18 @@ def replace_article_content(
     )
     session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (aid,))
     session.execute(FeedStmts.DELETE, (feed_month(old_published_at), old_published_at, aid))
+    _dual_write_recompose_transition(
+        session,
+        aid,
+        title=title,
+        summary=summary,
+        body=body,
+        tags=tags,
+        image=image,
+        first_published_at=first_published_at,
+        now=now,
+        slug=existing.slug,
+    )
     session.execute(
         FeedStmts.INSERT_FULL,
         (
@@ -481,21 +573,94 @@ def replace_article_content(
     return now
 
 
-def _claim_slug_for_feed(article_id: UUID, title: str, published_at: datetime) -> None:
-    """Assign a slug and mirror it onto the feed row.
+def _dual_write_draft_content(
+    session: object,
+    aid: UUID,
+    *,
+    title: str,
+    summary: str,
+    body: str,
+    tags: list[str],
+    image: str | None,
+    now: datetime,
+) -> None:
+    """New `articles` table dual-write for replace_article_content's draft branch: content-only update on the row's current partition (drafted articles don't re-stamp published_at, status stays untouched -- restoring visibility stays set_article_draft's job). Best-effort."""
+    from algorand_shared.article_statements import ArticlesStmts
+
+    new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+    if new_row is None:
+        return
+    key = (new_row.status, new_row.year, new_row.published_at, aid)
+    try:
+        session.execute(ArticlesStmts.UPDATE_CONTENT, (title, summary, body, tags, image, now, *key))
+        session.execute(ArticlesStmts.CLEAR_TRANSLATIONS, key)
+    except Exception:
+        logger.warning("articles dual-write update failed for %s", aid, exc_info=True)
+
+
+def _dual_write_recompose_transition(
+    session: object,
+    aid: UUID,
+    *,
+    title: str,
+    summary: str,
+    body: str,
+    tags: list[str],
+    image: str | None,
+    first_published_at: datetime,
+    now: datetime,
+    slug: str | None,
+) -> None:
+    """New `articles` table dual-write for replace_article_content's real-recompose branch: a full status-preserving transition, since published_at (part of the partition key) moves. Best-effort."""
+    from algorand_shared.article_statements import ArticlesStmts
+
+    try:
+        transition_article_status(
+            aid,
+            new_published_at=now,
+            title=title,
+            summary=summary,
+            body=body,
+            tags=tags,
+            image_url=image,
+            first_published_at=first_published_at,
+            updated_at=now,
+            translations=None,
+        )
+        if slug:
+            new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+            if new_row is not None:
+                session.execute(
+                    ArticlesStmts.SET_SLUG,
+                    (slug, new_row.status, new_row.year, new_row.published_at, aid),
+                )
+    except Exception:
+        logger.warning("articles dual-write transition failed for %s", aid, exc_info=True)
+
+
+def _claim_slug_for_feed(
+    article_id: UUID, title: str, published_at: datetime, *, status: str = "published"
+) -> None:
+    """Assign a slug and mirror it onto the feed row (and the new `articles` row).
 
     Never raises: a missing slug degrades to a uuid URL, which still resolves,
     so slug assignment must not be able to fail a publish.
     """
+    from algorand_shared.article_statements import ArticlesStmts
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
 
     try:
         slug = ensure_article_slug(article_id, title)
         if slug:
-            get_cassandra_session().execute(
+            session = get_cassandra_session()
+            session.execute(
                 ArticleStmts.SET_FEED_SLUG,
                 (slug, feed_month(published_at), published_at, article_id),
+            )
+            session.execute(
+                ArticlesStmts.SET_SLUG,
+                (slug, status, published_at.year, published_at, article_id),
             )
     except Exception as exc:
         logger.warning("slug claim failed for %s: %s", article_id, exc)
@@ -513,7 +678,6 @@ def ensure_article_slug(article_id: str | UUID, title: str) -> str | None:
     both take one slug — the loser tries the next suffix.
     """
     from algorand_shared.slugs import slugify, unique_slug
-
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
 
@@ -552,6 +716,7 @@ def update_article_image(article_id: str, image_url: str) -> bool:
     from a seconds-truncated epoch would miss the real clustering key and upsert a
     phantom row with null service_id/title (which then 500s the feed).
     """
+    from algorand_shared.article_statements import ArticlesStmts
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
 
@@ -580,6 +745,16 @@ def update_article_image(article_id: str, image_url: str) -> bool:
             article_id,
             published_at,
         )
+    # New `articles` table dual-write. Best-effort.
+    new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+    if new_row is not None:
+        try:
+            session.execute(
+                ArticlesStmts.UPDATE_IMAGE,
+                (image_url, new_row.status, new_row.year, new_row.published_at, aid),
+            )
+        except Exception:
+            logger.warning("articles dual-write image update failed for %s", aid, exc_info=True)
     return True
 
 
@@ -647,6 +822,7 @@ def update_article_translations(article_id: str, translations: dict[str, str]) -
     """Update article translations map; refresh feed row at original published_at."""
     from uuid import UUID
 
+    from algorand_shared.article_statements import ArticlesStmts
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
 
@@ -685,4 +861,16 @@ def update_article_translations(article_id: str, translations: dict[str, str]) -
             article_id,
             published_at,
         )
+    # New `articles` table dual-write. Best-effort.
+    new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+    if new_row is not None:
+        try:
+            session.execute(
+                ArticlesStmts.UPDATE_TRANSLATIONS,
+                (translations, new_row.status, new_row.year, new_row.published_at, aid),
+            )
+        except Exception:
+            logger.warning(
+                "articles dual-write translations update failed for %s", aid, exc_info=True
+            )
     return True

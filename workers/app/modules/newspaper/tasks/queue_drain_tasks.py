@@ -6,8 +6,6 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from celery.exceptions import SoftTimeLimitExceeded
-
 from app.celery_app import celery_app
 from app.core import config
 from app.core.feed_bucket import feed_month as _feed_month
@@ -36,6 +34,7 @@ from app.modules.newspaper.publish_queue_store import (
 )
 from app.modules.newspaper.publish_schedule import record_standard_publish
 from app.modules.newspaper.tasks.publish_tasks import publish_from_queued_row
+from celery.exceptions import SoftTimeLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -882,12 +881,27 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
                     ),
                 )
                 session.execute(ArticleStmts.UPDATE_PUBLISHED_AT, (released_at, art.article_id))
+                # New `articles` table dual-write (article-table consolidation,
+                # step 5): backlog -> published status transition. Best-effort,
+                # wrapped so the OLD-schema release (already durable at this
+                # point) is never undone by a hiccup on the new table.
+                from app.modules.newspaper.article_store import transition_article_status
+
+                try:
+                    transition_article_status(
+                        art.article_id, new_status="published", new_published_at=released_at
+                    )
+                except Exception:
+                    logger.warning(
+                        "articles dual-write transition failed for %s", art.article_id,
+                        exc_info=True,
+                    )
                 # Permanent URL slug, claimed at release rather than at compose:
                 # a held draft that never ships must not hold the clean slug.
                 # Self-contained and non-raising, so it cannot fail the publish.
                 from app.modules.newspaper.article_store import _claim_slug_for_feed
 
-                _claim_slug_for_feed(art.article_id, art.title, released_at)
+                _claim_slug_for_feed(art.article_id, art.title, released_at, status="published")
             except Exception:
                 # The article never became visible — hand the slot back so
                 # the day's budget isn't burned by a failed write.

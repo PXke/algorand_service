@@ -42,10 +42,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_BUCKET = "all"
-# Read the whole partition and filter in python: compose_sessions is a single
-# 'all' bucket clustered by created_at DESC (7-day TTL, never large), so the
-# first row matching a source_url is the newest compose for it.
+# Real month buckets (see algorand_shared.feed_bucket) since the 2026-08-24
+# TTL/bucketing cutover -- "all" is the legacy pre-cutover partition, scanned
+# last/permanently. Read a whole partition at a time and filter in python:
+# each bucket is clustered by created_at DESC, so within one bucket the first
+# row matching is the newest compose for it. _RECENT_MONTHS candidate buckets
+# are visited NEWEST FIRST (current month ... N months back ... "all" last)
+# so the very first match found across the whole scan is guaranteed to be the
+# overall newest, without needing to collect and sort every candidate.
+_RECENT_MONTHS = 3
 _SELECT_ALL = (
     "SELECT created_at, session_id, service_id, source_url, model, status, "
     "rounds, tool_calls, messages, final_output "
@@ -104,6 +109,26 @@ def _resolve_article_source_url(session: CassandraSession, article_id: str) -> s
     return getattr(row, "source_url", None) if row else None
 
 
+def _find_newest_matching_session(
+    session: CassandraSession, *, needle: str, session_id: Any | None  # noqa: ANN401
+) -> Any:  # noqa: ANN401 -- raw Cassandra driver row or None
+    """Scan buckets newest-first ("all" legacy partition last) for the newest row matching session_id (exact) or needle (source_url substring). Each bucket is itself created_at DESC, so the first match found is the overall newest."""
+    from datetime import UTC, datetime
+
+    from algorand_shared.feed_bucket import months_back
+
+    buckets = [*months_back(datetime.now(tz=UTC), _RECENT_MONTHS), "all"]
+    for bucket in buckets:
+        for row in session.execute(_SELECT_ALL, (bucket,)):
+            if session_id is not None:
+                if str(row.session_id) == str(session_id):
+                    return row
+                continue
+            if needle and needle in (row.source_url or "").lower():
+                return row
+    return None
+
+
 def revive_session(
     *,
     source_url: str | None = None,
@@ -124,17 +149,7 @@ def revive_session(
             raise LookupError(f"no article {article_id!r} (or it has no source_url)")
 
     needle = (source_url or "").lower()
-    rows = session.execute(_SELECT_ALL, (_BUCKET,))
-    chosen = None
-    for row in rows:  # newest-first
-        if session_id is not None:
-            if str(row.session_id) == str(session_id):
-                chosen = row
-                break
-            continue
-        if needle and needle in (row.source_url or "").lower():
-            chosen = row  # first (newest) match wins
-            break
+    chosen = _find_newest_matching_session(session, needle=needle, session_id=session_id)
     if chosen is None:
         raise LookupError(f"no compose session matching {source_url or session_id!r}")
 

@@ -19,7 +19,20 @@ from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
-_BUCKET = "all"
+# Real month buckets (see algorand_shared.feed_bucket), same pattern as
+# articles_feed/pending_feed_queue -- these tables previously used a single
+# hardcoded bucket="all" partition, which was only safe because a 7/90-day
+# TTL kept it bounded. Removing the TTL (2026-08-24) without fixing this would
+# trade a tombstone-stream problem for an unbounded-single-partition one, so
+# both land together. Rows written before this cutover stay in the old "all"
+# partition forever (no data-copy migration needed, `bucket` was always a
+# generic text column) -- the backend admin list views still scan that legacy
+# bucket too, so pre-cutover history stays visible there.
+#
+# Reaper/finalize below only ever look for a session created recently (still
+# in-progress, or "the most recent one for this source_url") -- 2 months
+# covers any session straddling a month boundary without scanning history.
+_RECENT_MONTHS = 2
 
 
 def record_tool_suggestion(
@@ -35,6 +48,7 @@ def record_tool_suggestion(
     if not capability:
         return False
     try:
+        from algorand_shared.feed_bucket import feed_month
         from cassandra.util import uuid_from_time
 
         from app.core.cassandra import get_cassandra_session
@@ -45,7 +59,7 @@ def record_tool_suggestion(
         session.execute(
             ToolInsightStmts.INSERT_SUGGESTION,
             (
-                _BUCKET,
+                feed_month(now),
                 now,
                 uuid_from_time(now),
                 capability[:200],
@@ -87,6 +101,7 @@ def record_compose_feedback(
     if sev not in _COMPOSE_FEEDBACK_SEVERITIES:
         sev = "medium"
     try:
+        from algorand_shared.feed_bucket import feed_month
         from cassandra.util import uuid_from_time
 
         from app.core.cassandra import get_cassandra_session
@@ -97,7 +112,7 @@ def record_compose_feedback(
         session.execute(
             ToolInsightStmts.INSERT_COMPOSE_FEEDBACK,
             (
-                _BUCKET,
+                feed_month(now),
                 now,
                 uuid_from_time(now),
                 cat[:32],
@@ -216,16 +231,24 @@ def record_compose_session(
             messages_json = json.dumps(slim)
         messages_json = messages_json[:120_000]
 
+        from algorand_shared.feed_bucket import feed_month
+
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
         if session_id is None or created_at is None:
             session_id, created_at = new_session_ref()
+        # bucket MUST derive from created_at (stable across this session's
+        # lifetime), not a fresh now() -- record_compose_session upserts the
+        # SAME row across multiple progress checkpoints (researching -> writing
+        # -> ok) using the (bucket, created_at, session_id) primary key. Computing
+        # bucket fresh at each call could put a session that straddles a month
+        # boundary into two different partitions instead of one upserted row.
         session.execute(
             ToolInsightStmts.INSERT_COMPOSE_SESSION,
             (
-                _BUCKET,
+                feed_month(created_at),
                 created_at,
                 session_id,
                 (service_id or "")[:256],
@@ -270,23 +293,28 @@ def finalize_compose_session_outcome(source_url: str, outcome: str) -> bool:
     if not source_url or not outcome:
         return False
     try:
+        from algorand_shared.feed_bucket import months_back
+
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
-        rows = session.execute(ToolInsightStmts.LIST_ALL_SUMMARY, (_BUCKET,))
         target = None
-        for row in rows:
-            if (
-                row.status == "ok"
-                and (row.source_url or "") == source_url
-                and (target is None or row.created_at > target.created_at)
-            ):
-                target = row
+        target_bucket = None
+        for bucket in months_back(datetime.now(tz=UTC), _RECENT_MONTHS):
+            for row in session.execute(ToolInsightStmts.LIST_ALL_SUMMARY, (bucket,)):
+                if (
+                    row.status == "ok"
+                    and (row.source_url or "") == source_url
+                    and (target is None or row.created_at > target.created_at)
+                ):
+                    target = row
+                    target_bucket = bucket
         if target is None:
             return False
         session.execute(
-            ToolInsightStmts.MARK_STALE, (outcome[:64], _BUCKET, target.created_at, target.session_id)
+            ToolInsightStmts.MARK_STALE,
+            (outcome[:64], target_bucket, target.created_at, target.session_id),
         )
         return True
     except Exception:
@@ -306,26 +334,29 @@ def reap_stale_compose_sessions(*, stale_minutes: int | None = None) -> dict[str
     cutoff = datetime.now(tz=UTC) - timedelta(minutes=threshold_minutes)
 
     try:
+        from algorand_shared.feed_bucket import months_back
+
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import ToolInsightStmts
 
         session = get_cassandra_session()
-        rows = session.execute(ToolInsightStmts.LIST_ALL_SUMMARY, (_BUCKET,))
         checked = 0
         reaped = 0
-        for row in rows:
-            checked += 1
-            if row.status not in _NON_TERMINAL_STATUSES:
-                continue
-            created_at = row.created_at
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=UTC)
-            if created_at >= cutoff:
-                continue
-            session.execute(
-                ToolInsightStmts.MARK_STALE, ("stale", _BUCKET, row.created_at, row.session_id)
-            )
-            reaped += 1
+        for bucket in months_back(datetime.now(tz=UTC), _RECENT_MONTHS):
+            rows = session.execute(ToolInsightStmts.LIST_ALL_SUMMARY, (bucket,))
+            for row in rows:
+                checked += 1
+                if row.status not in _NON_TERMINAL_STATUSES:
+                    continue
+                created_at = row.created_at
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=UTC)
+                if created_at >= cutoff:
+                    continue
+                session.execute(
+                    ToolInsightStmts.MARK_STALE, ("stale", bucket, row.created_at, row.session_id)
+                )
+                reaped += 1
         return {"checked": checked, "reaped": reaped}
     except Exception:
         logger.warning("failed to reap stale compose sessions", exc_info=True)
