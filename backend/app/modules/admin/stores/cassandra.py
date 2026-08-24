@@ -1436,27 +1436,16 @@ class AdminCassandraStore:
                         ArticlesStmts.SET_SLUG,
                         (row.slug, new_row.status, new_row.year, new_row.published_at, aid),
                     )
-        # Register the service_id match key: the workers only register match
-        # keys on their direct-publish path, so review-approved articles were
-        # invisible to service_has_article() — the first-coverage reframing
-        # then re-introduced already-covered services (the BasketbAlgo
-        # duplicate). 24h edit window, mirroring the workers' semantics.
-        with contextlib.suppress(Exception):
-            from datetime import timedelta
-
-            from app.core.statements import ArticleMatchStmts
-
-            sid = (row.service_id or "").strip().lower()
-            if sid:
-                now = datetime.now(tz=UTC)
-                session.execute(
-                    ArticleMatchStmts.INSERT_KEY,
-                    ("service_id", sid, aid, now, now + timedelta(hours=24)),
-                )
-                session.execute(
-                    ArticleMatchStmts.INSERT_KEY_BY_ARTICLE,
-                    (aid, "service_id", sid, now),
-                )
+        # A service_id match key used to be registered here too, purely to
+        # patch service_has_article()'s blindness to review-approved articles
+        # (workers only registered match keys on their direct-publish path,
+        # so the first-coverage reframing re-introduced already-covered
+        # services — the BasketbAlgo duplicate). 2026-08-24: service_has_article
+        # / find_latest_service_article now read articles.service_id directly
+        # (SAI-indexed) instead of article_match_keys, and the
+        # transition_article_status() call above already carries service_id
+        # onto this row with status='published' — the gap this worked around
+        # no longer exists, so the extra write was removed.
         # The article just became publicly visible — notify IndexNow, same as
         # the workers' direct-publish path does. Best-effort, never blocks.
         with contextlib.suppress(Exception):

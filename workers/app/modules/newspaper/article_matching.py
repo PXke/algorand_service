@@ -118,39 +118,38 @@ def edit_window_closes_at(*, from_time: datetime | None = None) -> datetime:
     return start + timedelta(hours=hours)
 
 
+def _published_rows_for_service(sid: str) -> list:
+    """Raw `articles` rows for this service_id, filtered to status='published' in Python (see ArticlesStmts.FIND_BY_SERVICE_ID's comment for why the filter isn't in the query itself). Shared by service_has_article/find_latest_service_article, which are both really asking the same underlying question at different granularity."""
+    from algorand_shared.article_statements import ArticlesStmts
+    from app.core.cassandra import get_cassandra_session
+
+    rows = get_cassandra_session().execute(ArticlesStmts.FIND_BY_SERVICE_ID, (sid,))
+    return [row for row in rows if row.status == "published"]
+
+
 def service_has_article(service_id: str) -> bool:
-    """Whether this service has EVER had a real published article. Match keys are registered only on the publish and edit paths (never for held/review drafts) and are deleted with the article, so a hit here means readers have genuinely been introduced to the service. Fails open (True) on store errors: the safe default is the normal update framing, not re-introducing a service we may already have covered."""
+    """Whether this service has EVER had a real published article. Queries `articles` directly (2026-08-24, replacing the article_match_keys "service_id" key-type lookup now that service_id lives on `articles` itself), filtered to status='published' to preserve the original "publish and edit paths only, never held/review drafts" semantics. Fails open (True) on store errors: the safe default is the normal update framing, not re-introducing a service we may already have covered."""
     sid = (service_id or "").strip().lower()
     if not sid:
         return True
     try:
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ArticleMatchStmts
-
-        row = (
-            get_cassandra_session()
-            .execute(ArticleMatchStmts.FIND_BY_KEY, ("service_id", sid))
-            .one()
-        )
-        return row is not None
+        return bool(_published_rows_for_service(sid))
     except Exception:
         return True
 
 
 def find_latest_service_article(service_id: str) -> str | None:
-    """The most recently published/edited article for this service, by match-key linked_at, or None. Unlike find_article_for_followup, this ignores the edit window entirely — it answers "what did we last say about this service", not "is it still editable". Fails open (None) on store errors: the safe default is no comparison baseline, not a false duplicate block."""
+    """The most recently published/edited article for this service, by articles.updated_at (falling back to published_at when never edited), or None. Unlike find_article_for_followup, this ignores the edit window entirely — it answers "what did we last say about this service", not "is it still editable". 2026-08-24: queries `articles` directly instead of article_match_keys' "service_id" key-type rows, now that service_id lives on `articles` itself. Fails open (None) on store errors: the safe default is no comparison baseline, not a false duplicate block."""
     sid = (service_id or "").strip().lower()
     if not sid:
         return None
     try:
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ArticleMatchStmts
-
-        rows = get_cassandra_session().execute(ArticleMatchStmts.FIND_BY_KEY, ("service_id", sid))
-        best_id, best_linked_at = None, None
+        rows = _published_rows_for_service(sid)
+        best_id, best_recency = None, None
         for row in rows:
-            if best_linked_at is None or (row.linked_at and row.linked_at > best_linked_at):
-                best_id, best_linked_at = str(row.article_id), row.linked_at
+            recency = row.updated_at or row.published_at
+            if best_recency is None or (recency and recency > best_recency):
+                best_id, best_recency = str(row.article_id), recency
         return best_id
     except Exception:
         return None

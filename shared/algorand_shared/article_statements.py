@@ -237,6 +237,19 @@ class ArticlesStmts:
         "first_published_at, updated_at, burst_day, prompt_version, composed_by_model, deleted_at "
         "FROM algorand_platform.articles WHERE article_id = ?"
     )
+    # Direct SAI point-query on service_id -- replaces the article_match_keys
+    # "service_id" key-type lookup (article_matching.find_latest_service_article
+    # / service_has_article) now that service_id lives on `articles` itself.
+    # Filtering to status='published' happens in application code rather than
+    # here: status is part of the partition key, and combining a partial-
+    # partition-key equality with a SAI predicate needs ALLOW FILTERING --
+    # simpler and consistent with this codebase's existing style to fetch by
+    # the indexed column and filter in Python (same pattern the callers
+    # already used against article_match_keys' unordered result set).
+    FIND_BY_SERVICE_ID = _Stmt(
+        "SELECT article_id, status, published_at, updated_at "
+        "FROM algorand_platform.articles WHERE service_id = ?"
+    )
     # Used when article_id is being REUSED for a fresh insert (e.g. recompose-
     # under-review overwriting its own draft row): since published_at is part
     # of the partition key here (unlike the old articles_by_id, keyed by
