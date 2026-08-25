@@ -85,6 +85,29 @@ def test_md_link_is_escaped_and_nofollow() -> None:
     assert 'rel="noopener nofollow"' in html
 
 
+def test_md_relative_glossary_link_becomes_absolute_anchor() -> None:
+    """Glossary auto-links (`[ASA](/glossary/asa "definition")`, per glossary_linker.py) become a real, absolute <a href> instead of raw bracket text."""
+    html = md_to_html('See the [ASA](/glossary/asa "Algorand Standard Asset, a token type") page.')
+    assert 'href="https://algorand.pxke.me/glossary/asa"' in html
+    assert ">ASA</a>" in html
+    assert "[ASA]" not in html
+    assert '"Algorand Standard Asset' not in html  # title text isn't rendered
+
+
+def test_md_relative_link_without_title() -> None:
+    """Relative links without a title (`[text](/path)`) also resolve to an absolute href."""
+    html = md_to_html("See [glossary](/glossary/asa) for more.")
+    assert 'href="https://algorand.pxke.me/glossary/asa"' in html
+
+
+def test_md_to_text_strips_relative_glossary_links() -> None:
+    """Plain-text rendering (meta descriptions, JSON-LD articleBody) also resolves glossary-style relative links down to their link text."""
+    text = md_to_text('An [ASA](/glossary/asa "Algorand Standard Asset") is a token.')
+    assert "[ASA]" not in text
+    assert "/glossary/asa" not in text
+    assert "ASA is a token." in text
+
+
 def test_md_escapes_html() -> None:
     """Escapes raw HTML embedded in markdown source instead of passing it through."""
     html = md_to_html("a <script>alert(1)</script> b")
@@ -789,6 +812,35 @@ def test_md_table_renders_as_html_table() -> None:
     assert "|" not in re.sub(r"<[^>]+>", "", html)  # no pipe soup in the text
 
 
+def test_md_table_cell_with_glossary_link_renders_as_anchor() -> None:
+    """A table cell carrying a glossary auto-link (real production shape, see glossary_linker.py) becomes a real anchor instead of leaking raw markdown into the cell — the <table> structure itself was always fine."""
+    md = (
+        "| Surface | Covers |\n"
+        "|---|---|\n"
+        '| Public API | Metadata for any [ASA](/glossary/asa "Algorand Standard Asset") |'
+    )
+    html = md_to_html(md)
+    assert "<table>" in html
+    assert "</table>" in html
+    assert '<a href="https://algorand.pxke.me/glossary/asa"' in html
+    assert "[ASA]" not in html
+
+
+def test_md_duplicate_leading_image_collapses_to_one() -> None:
+    """Writer-pipeline artifact: the body sometimes leads with the same hero image markdown twice back-to-back; the converter collapses an image-only paragraph that exactly repeats the previous one."""
+    md = "![Title](https://img.io/hero.png)\n\n![Title](https://img.io/hero.png)\n\nBody text."
+    html = md_to_html(md)
+    assert html.count("<img") == 1
+    assert "Body text." in html
+
+
+def test_md_non_consecutive_repeated_image_is_kept() -> None:
+    """Only an immediately-consecutive duplicate is collapsed — an image that legitimately reappears later in the body is left alone."""
+    md = "![Title](https://img.io/hero.png)\n\nSome text in between.\n\n![Title](https://img.io/hero.png)"
+    html = md_to_html(md)
+    assert html.count("<img") == 2
+
+
 def test_md_chart_fence_becomes_caption_not_json() -> None:
     """Renders a ```chart fence as a plain caption instead of leaking its JSON payload."""
     md = (
@@ -833,6 +885,48 @@ def test_rss_full_content_encoded() -> None:
     assert 'xmlns:content="http://purl.org/rss/1.0/modules/content/"' in xml
     assert "&lt;p&gt;Full body zero&lt;/p&gt;" in xml
     assert xml.count("content:encoded") == 2  # open+close for the one item with a body
+
+
+def test_rss_full_content_image_link_and_table_all_render_correctly() -> None:
+    """End-to-end regression for the three live RSS rendering bugs, using the real article shape confirmed against https://algorand.pxke.me/feed.xml (hero image, plain link, glossary auto-link, and a pipe table with a glossary link in a cell)."""
+    body = (
+        "![Pera Connect SDK](https://docs.perawallet.app/social-preview.png)\n\n"
+        "## Overview\n\n"
+        "See [Pera's site](https://perawallet.app/) and the "
+        '[Algorand Standard Asset](/glossary/algorand-standard-asset "A token type") page.\n\n'
+        "| Surface | Covers |\n"
+        "|---|---|\n"
+        '| Public API | Metadata for any [ASA](/glossary/asa "Algorand Standard Asset") |\n'
+        '| Connect SDK | Wallet [connect](/glossary/connect "Wallet connection flow") calls |'
+    )
+    html = md_to_html(body)
+
+    # 1. Image duplication: exactly one <img>, no leftover raw `![...]` syntax.
+    assert html.count("<img") == 1
+    assert "![" not in html
+
+    # 2. Broken links: both the absolute and the glossary (relative + titled)
+    #    link became real anchors; no raw `[text](url)` bracket syntax remains.
+    assert '<a href="https://perawallet.app/" rel="noopener nofollow">Pera\'s site</a>' in html
+    assert '<a href="https://algorand.pxke.me/glossary/algorand-standard-asset"' in html
+    assert "](" not in html
+
+    # 3. Malformed tables: a real <table> with <thead>/<tbody>, including the
+    #    glossary link inside a cell converting to an anchor rather than
+    #    leaving pipe/bracket soup in the feed text.
+    assert "<table>" in html
+    assert "</table>" in html
+    assert "<th>Surface</th>" in html
+    assert '<a href="https://algorand.pxke.me/glossary/asa"' in html
+    assert "|" not in re.sub(r"<[^>]+>", "", html)
+
+    xml = feeds.rss_xml(_feed(1), bodies={"id0": html})
+    encoded = re.search(r"<content:encoded>(.*?)</content:encoded>", xml, re.S).group(1)
+    # The XML-escaped payload round-trips the same markup (sanity check that
+    # rss_xml doesn't itself mangle the already-correct HTML).
+    assert "&lt;table&gt;" in encoded
+    assert "&lt;img" in encoded
+    assert '&lt;a href="https://perawallet.app/"' in encoded
 
 
 def test_llms_txt_lists_feed_and_topics() -> None:
