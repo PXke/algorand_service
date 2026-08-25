@@ -191,7 +191,6 @@ def _external_corroboration(domain: str) -> tuple[str, str] | None:
     return None
 
 
-@celery_app.task(name="app.tasks.crawler.deep_classify_domain")
 def _deep_crawl_for_relevance(
     *, domain: str, landing_url: str, max_pages: int
 ) -> tuple[tuple[str, object] | None, int, bool, int]:
@@ -267,6 +266,7 @@ def _deep_crawl_for_relevance(
     return found, fetched, not frontier, landing_same_domain_link_count
 
 
+@celery_app.task(name="app.tasks.crawler.deep_classify_domain")
 def deep_classify_domain(
     *, domain: str, seed_url: str = "", max_pages: int = 200
 ) -> dict[str, object]:
@@ -304,8 +304,27 @@ def deep_classify_domain(
     actually gets stored either way), but a budget limit, not proof the rest
     of the site has nothing either; the note field says which, so a human
     reviewing the domain list can tell the two apart.
+
+    The Celery task decorator belongs HERE, not on the ``_deep_crawl_for_
+    relevance`` helper above (root-caused 2026-08-25): it used to sit on that
+    helper under this same task name, so ``_classify_and_store_domain``'s
+    ``send_task("app.tasks.crawler.deep_classify_domain", kwargs={"domain":
+    ..., "seed_url": ..., "max_pages": ...})`` resolved to a function whose
+    signature doesn't even take ``seed_url`` (it takes ``landing_url``) and,
+    worse, never writes the verdict back to Cassandra at all — every real
+    escalation would fail at the worker, leaving the domain's
+    ``deep_classify_queued`` metadata flag permanently "true" and its
+    ``frontier_status`` stuck at "pending" forever, since
+    ``_classify_and_store_domain`` treats that flag as "already in flight"
+    and no-ops on every later pass. The existing tests never caught this
+    because they call ``deep_classify_domain(...)`` directly as a plain
+    function, bypassing the Celery name resolution entirely.
     """
-    from app.modules.crawler.domain_tracker import suggest_full_site, update_domain_status
+    from app.modules.crawler.domain_tracker import (
+        ensure_monitored_service,
+        suggest_full_site,
+        update_domain_status,
+    )
 
     landing_url = seed_url or f"https://{domain}"
     found, fetched, exhaustive, landing_same_domain_link_count = _deep_crawl_for_relevance(
@@ -336,6 +355,14 @@ def deep_classify_domain(
                 "same_domain_link_count": str(landing_same_domain_link_count),
             },
         )
+        # An automated approve is a full approve — mirror the discovery-time
+        # auto-approve in link_extractor.py (_process_external_link) and
+        # register the monitored source too, or this domain gets crawled into
+        # the research corpus forever without ever reaching the publish queue
+        # (exactly the gap ensure_monitored_service's own docstring documents
+        # for the discovery path, reintroduced here since this task was added
+        # after that fix and was never wired to it — root-caused 2026-08-25).
+        ensure_monitored_service(domain, scrape_url=found_url)
         return {
             "status": "ok",
             "domain": domain,
@@ -373,6 +400,12 @@ def deep_classify_domain(
                 "same_domain_link_count": str(landing_same_domain_link_count),
             },
         )
+        # Same as the in-domain approve above: an automated approve must
+        # still register the monitored source. corrob_url is an OUTSIDE page
+        # (a partner's post, a forum thread) that isn't on this domain, so
+        # the service points at the domain's own landing page, not the
+        # corroborating URL.
+        ensure_monitored_service(domain, scrape_url=landing_url)
         return {
             "status": "ok",
             "domain": domain,
@@ -436,7 +469,6 @@ def _mark_unscoreable(
     session.execute(DomainTrackingStmts.UPDATE_METADATA, (new_meta, domain))
 
 
-@celery_app.task(name="app.tasks.crawler.classify_pending_domains")
 def _pending_domains_to_classify(session: CassandraSession, limit: int) -> list[tuple[str, dict]]:
     """Domains with frontier_status=pending, unscored ones first (the LIST scan returns token order, so without this a periodic caller re-scores the same first slice forever and the rest of the pool never gets a content score), capped to limit."""
     from app.core.statements import DomainTrackingStmts
@@ -546,10 +578,23 @@ def _classify_and_store_domain(
     return "pending"
 
 
+@celery_app.task(name="app.tasks.crawler.classify_pending_domains")
 def classify_pending_domains(
     *, limit: int = 40, dry_run: bool = True, auto_reject: bool = False
 ) -> dict[str, object]:
-    """Content-based domain relevance: crawl each pending domain's landing page (plus a same-domain link sample — see _sample_domain_pages and FRONTIER_CLASSIFY_SAMPLE_PAGES), classify the REAL page text (not the <head> preview that wrongly blocked pact.fi etc.), take the best-scoring sampled page as the domain's relevance, store it, and OPTIONALLY auto-reject only the clearly off-topic ones. Safe by default: auto_reject=False so the scores can be validated first; protected domains are never auto-rejected."""
+    """Content-based domain relevance: crawl each pending domain's landing page (plus a same-domain link sample — see _sample_domain_pages and FRONTIER_CLASSIFY_SAMPLE_PAGES), classify the REAL page text (not the <head> preview that wrongly blocked pact.fi etc.), take the best-scoring sampled page as the domain's relevance, store it, and OPTIONALLY auto-reject only the clearly off-topic ones. Safe by default: auto_reject=False so the scores can be validated first; protected domains are never auto-rejected.
+
+    The task decorator belongs on this function, not on the small
+    ``_pending_domains_to_classify`` fetch-helper above — it used to sit
+    there under this same task name (same misplaced-decorator bug as
+    ``deep_classify_domain``, root-caused 2026-08-25), which would have made
+    any future ``send_task("app.tasks.crawler.classify_pending_domains", ...)``
+    call resolve to a two-positional-argument helper instead of the real
+    classify pipeline. Not currently reachable in production (this pipeline
+    is only ever invoked in-process — by ``reevaluate_pending_domains``'s
+    daily beat call, and directly in tests) but a live trap for the next
+    caller that dispatches it by name expecting the documented behavior.
+    """
     from app.core.cassandra import get_cassandra_session
     from app.core.config import FRONTIER_CLASSIFY_SAMPLE_PAGES, FRONTIER_CONTENT_REJECT_SCORE
     from app.modules.crawler.domain_tracker import is_protected_domain
@@ -683,7 +728,7 @@ def reevaluate_pending_domains(*, limit: int = 40) -> dict[str, object]:
         FRONTIER_RETRO_PROMOTE_ENABLED,
     )
     from app.core.statements import DomainTrackingStmts
-    from app.modules.crawler.domain_tracker import update_domain_status
+    from app.modules.crawler.domain_tracker import ensure_monitored_service, update_domain_status
     from app.modules.crawler.url_queue import enqueue_url
 
     if not FRONTIER_RETRO_PROMOTE_ENABLED:
@@ -716,11 +761,16 @@ def reevaluate_pending_domains(*, limit: int = 40) -> dict[str, object]:
         )
         # Approval alone only unblocks future link-follows — queue the site
         # itself so it actually gets harvested now.
-        enqueue_url(
-            meta.get("pending_url") or f"https://{r.domain}",
-            source="retro-promote",
-            priority=40,
-        )
+        seed_url = meta.get("pending_url") or f"https://{r.domain}"
+        enqueue_url(seed_url, source="retro-promote", priority=40)
+        # And register the monitored source, same as every other automated
+        # approve path (discovery-time auto-approve in link_extractor.py,
+        # deep_classify_domain above) — without it this domain gets crawled
+        # into the research corpus by the retro-pass forever but can never
+        # produce a publish candidate (root-caused 2026-08-25: this task was
+        # added after ensure_monitored_service already existed to fix that
+        # exact gap for the discovery path, but was never wired to it).
+        ensure_monitored_service(r.domain, scrape_url=seed_url)
         promoted.append(r.domain)
 
     return {
