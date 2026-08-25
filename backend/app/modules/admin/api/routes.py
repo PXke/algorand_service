@@ -799,10 +799,23 @@ def _recency_epoch(iso: str) -> float:
 def _domain_sort_key(it: dict) -> tuple:
     order = {"pending": 0, "dead_end": 1, "approved": 2}
     content_rel = it.get("content_relevance")
+    recency = -_recency_epoch(it.get("last_crawled_at") or "")
     if content_rel is None:
-        tier, tie_break = 0, -_recency_epoch(it.get("last_crawled_at") or "")
+        # No page-fetch relevance yet (classify_pending_domains hasn't reached
+        # this domain) -- fall back to relevance_score, the cheap keyword-based
+        # signal computed from the discovering link's own preview text at
+        # discovery time (register_pending_domain -> preview_score), so it's
+        # available immediately for every pending domain, not just ones the
+        # periodic classify task has already sampled. Previously this tier sorted
+        # by recency ALONE, so a busy discovery day dumped dozens of low-signal
+        # domains ahead of a high-scoring one purely because it arrived a minute
+        # later -- exactly the "need to go a few pages before finding something
+        # relevant" complaint (owner feedback 2026-08-25). Recency stays as the
+        # tiebreak beneath it so same-score domains still keep the old newest-
+        # first behavior.
+        tier, tie_break = 0, (-float(it.get("relevance_score") or 0.0), recency)
     else:
-        tier, tie_break = 1, -content_rel
+        tier, tie_break = 1, (-content_rel, recency)
     return (order.get(it["frontier_status"], 2), tier, tie_break)
 
 
