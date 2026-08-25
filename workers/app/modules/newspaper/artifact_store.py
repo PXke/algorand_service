@@ -493,6 +493,7 @@ def revert_artifact_to_pending(artifact_id: str) -> bool:
             status_row.created_at,
             aid,
             full.service_id if full else None,
+            full.venue_service_id if full else None,
             full.channel if full else None,
             full.url if full else None,
             full.event_date if full else None,
