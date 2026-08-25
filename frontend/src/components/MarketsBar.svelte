@@ -11,8 +11,8 @@
     available: boolean
   }
 
-  /* Phone keeps the chain pulse — price, round, validators — not the full desk. */
-  const WIRE_CORE = new Set(['algo_price', 'last_round', 'validators'])
+  /* Phone keeps the chain pulse — price, round, nodes — not the full desk. */
+  const WIRE_CORE = new Set(['algo_price', 'last_round', 'nodes'])
 
   const showOn = $derived(
     ['/', '/news', '/hot', '/top', '/topics'].includes($pathOnly) ||
