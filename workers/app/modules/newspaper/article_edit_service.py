@@ -204,7 +204,6 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
         title=title,
         publish_kind=row.publish_kind,
         publish_topic=topic.value,
-        publish_tier=str(payload.get("tier", "standard")),
     )
     tags = _merge_extra_tags(tags, getattr(fields, "extra_tags", ()))
     if not update_article(

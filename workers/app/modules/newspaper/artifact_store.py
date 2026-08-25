@@ -229,11 +229,9 @@ def _concatenate_with_pending(
     eventually read this content directly.
 
     Metadata: `new_metadata`'s own top-level keys win outright (display_name/
-    source_kind/dual_write_queue_id/payload/... all stay readable at the top
-    level exactly where existing readers expect them -- e.g.
-    queue_drain_tasks._resolve_dual_written_queue_row reads
-    content.metadata["dual_write_queue_id"] to mirror the LATEST signal's
-    outcome, which is the correct one to mirror). The old artifact's full
+    source_kind/payload/... all stay readable at the top level exactly
+    where existing readers expect them, reflecting the LATEST signal --
+    the correct one to mirror). The old artifact's full
     metadata (plus its title/url/event_date/created_at, which live outside
     metadata as separate columns) is appended as one entry to a
     metadata["segments"] list -- so nothing from prior cycles is lost, each
