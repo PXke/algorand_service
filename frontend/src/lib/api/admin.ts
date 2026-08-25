@@ -139,7 +139,8 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.getJson(`/api/v1/admin/articles/${articleId}/comments`, h()),
     deleteComment: (articleId: string, commentId: string) =>
       api.deleteJson(`/api/v1/admin/articles/${articleId}/comments/${commentId}`, h()),
-    // Editorial-room artifact system (SHADOW MODE, not wired to live compose).
+    // Editorial-room artifact system — backs the Queue tab's ranked
+    // pending-artifact list and pin-for-tomorrow action.
     artifactsToComposePreview: (day?: string) =>
       api.getJson(
         `/api/v1/admin/artifacts/to-compose-preview${day ? `?day=${encodeURIComponent(day)}` : ''}`,
