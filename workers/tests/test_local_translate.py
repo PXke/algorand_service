@@ -460,6 +460,101 @@ def test_repair_inline_links_skips_retranslation_when_anchor_already_translated(
     assert result == "Voir le [répositoire GitHub](https://github.com/perawallet/connect) pour plus."
 
 
+# --- possessive brand names in plain prose ("Pera's SDK...") -----------------
+#
+# 2026-08-25: the owner raised a related-but-distinct concern to the inline-
+# link defects above -- their theory was that "Pera's X" (a possessive
+# brand-name construct) is grammatically awkward for MiLMMT to restructure
+# into French/Spanish's "de X" prepositional form, and that this trips the
+# model up even in plain prose, outside any markdown link. Investigated
+# against real MiLMMT inference (not assumed): 27 real generations across
+# fr/es/ru covering isolated sentences, a full multi-sentence paragraph, a
+# possessive brand name AS a markdown link anchor, and multiple possessives
+# in one sentence, using real brand names from this platform's coverage
+# (Pera, Nodely, Vestige, HesabPay). Every case restructured correctly and
+# fluently ("Le SDK de Pera", "el panel de Nodely", "SDK Pera" in Russian's
+# genitive-less juxtaposition, even the standalone-pronoun case "is Pera's"
+# -> "est celui de Pera") -- MiLMMT does not actually have the defect the
+# owner's theory predicted. These are real captured strings from that run
+# (not invented), fixed here as regression guards: nothing in this module
+# should start "fixing" an already-correct possessive translation into
+# something worse.
+
+
+def test_translate_block_leaves_correct_possessive_translation_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real MiLMMT output for a plain-prose possessive brand-name sentence, captured live: correctly restructured to "de Pera" with no corruption, and _translate_block must pass it through unchanged -- there is no repair step for this because none was needed."""
+    text = "Pera's SDK now supports ARC-27 signing for third-party wallets."
+    real_output = (
+        "Le SDK de Pera prend désormais en charge la signature ARC-27 pour les "
+        "portefeuilles tiers."
+    )
+    monkeypatch.setattr(lt, "_translate_text_milmmt", lambda _t, _l: real_output)
+    result = lt._translate_block(text, "fr")
+    assert result == real_output
+
+
+def test_translate_block_leaves_correct_possessive_paragraph_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real MiLMMT output for a full paragraph with THREE possessive brand names (Pera's, Nodely's, Vestige's) interleaved with other prose, captured live: all three restructured correctly, block count preserved, nothing garbled."""
+    text = (
+        "Pera's SDK now supports ARC-27 signing for third-party wallets, a change "
+        "that landed in last week's release. The update also improves Nodely's "
+        "public dashboard integration, giving developers a clearer view of "
+        "network health metrics before they ship. Vestige's aggregator API "
+        "remains the recommended source for per-token liquidity figures."
+    )
+    real_output = (
+        "Le SDK de Pera prend désormais en charge la signature ARC-27 pour les "
+        "portefeuilles tiers, une modification intégrée dans la version de la "
+        "semaine dernière. La mise à jour améliore également l'intégration du "
+        "tableau de bord public de Nodely, offrant aux développeurs une vue plus "
+        "claire des indicateurs de santé du réseau avant le lancement. L'API "
+        "d'agrégation de Vestige reste la source recommandée pour les données de "
+        "liquidité par token."
+    )
+    monkeypatch.setattr(lt, "_translate_text_milmmt", lambda _t, _l: real_output)
+    result = lt._translate_block(text, "fr")
+    assert result == real_output
+
+
+def test_translate_block_handles_possessive_brand_inside_link_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real MiLMMT output for a possessive brand name used AS a markdown link anchor ("Pera's SDK migration guide"), captured live: correctly translated inline, no stray space before the paren and no untranslated-anchor defect -- so _repair_inline_links has nothing to fix and must not alter this correct output."""
+    text = (
+        "Developers should read [Pera's SDK migration guide]"
+        "(https://docs.perawallet.app/migrate) before upgrading."
+    )
+    real_output = (
+        "Les développeurs devraient lire le [guide de migration du SDK de Pera]"
+        "(https://docs.perawallet.app/migrate) avant de procéder à la mise à jour."
+    )
+    monkeypatch.setattr(lt, "_translate_text_milmmt", lambda _t, _l: real_output)
+    result = lt._translate_block(text, "fr")
+    assert result == real_output
+
+
+def test_translate_block_leaves_multiple_possessives_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real MiLMMT output for a sentence with THREE different possessive brand names, captured live: all three restructured correctly in one pass."""
+    text = (
+        "HesabPay's remittance corridor and Nodely's dashboard both shipped in "
+        "the same release as Pera's new signing flow."
+    )
+    real_output = (
+        "Le corridor de transfert d'argent de HesabPay et le tableau de bord de "
+        "Nodely ont été déployés dans la même version que le nouveau flux de "
+        "signature de Pera."
+    )
+    monkeypatch.setattr(lt, "_translate_text_milmmt", lambda _t, _l: real_output)
+    result = lt._translate_block(text, "fr")
+    assert result == real_output
+
+
 # --- alignment-findings observability ----------------------------------------
 
 
