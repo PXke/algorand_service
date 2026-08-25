@@ -24,13 +24,9 @@ def _has_pending_classifier_review() -> bool:
 
 
 def _has_pending_feed_release() -> bool:
-    from app.core import config
-    from app.core.cassandra import get_cassandra_session
-    from app.core.statements import PendingFeedStmts
+    from algorand_shared.article_transitions import list_backlog_articles
 
-    bucket = getattr(config, "NEWS_FEED_BUCKET", "main") or "main"
-    row = get_cassandra_session().execute(PendingFeedStmts.PEEK_ID, (bucket,)).one()
-    return row is not None
+    return bool(list_backlog_articles())
 
 
 def run_mistral_diff_check(

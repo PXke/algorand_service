@@ -18,7 +18,7 @@ _ARTICLES_COLUMNS = (
     "status", "year", "published_at", "article_id", "service_id", "title", "summary", "body",
     "image_url", "tags", "source_url", "trigger_txid", "trigger_round", "slug", "translations",
     "first_published_at", "updated_at", "prompt_version", "composed_by_model",
-    "deleted_at", "status_updated_at",
+    "deleted_at", "status_updated_at", "interest_score", "approved_at",
 )  # fmt: skip
 
 
@@ -63,3 +63,23 @@ def transition_article_status(
     values.update(column_overrides)
     session.execute(ArticlesStmts.INSERT, tuple(values[col] for col in _ARTICLES_COLUMNS))
     return True
+
+
+def list_backlog_articles() -> list:
+    """Every status='backlog' article, ordered like pending_feed_queue's (interest_score DESC, approved_at ASC) clustering key -- article-table consolidation Phase 4. `articles` has no clustering column to express that order (status/year is the partition, published_at the clustering column), so this scans the relevant year partitions and sorts in Python. Backlog depth is capped at PENDING_FEED_MAX_DEPTH (default 3), so this is always a tiny scan -- current year plus the previous one, to cover a backlog row sitting across a year boundary."""
+    from app.core.cassandra import get_cassandra_session
+
+    from algorand_shared.article_statements import ArticlesStmts
+
+    session = get_cassandra_session()
+    this_year = datetime.now(tz=UTC).year
+    rows = []
+    for year in (this_year, this_year - 1):
+        rows.extend(session.execute(ArticlesStmts.LIST_BACKLOG, (year,)))
+    rows.sort(
+        key=lambda r: (
+            -(r.interest_score or 0.0),
+            r.approved_at.isoformat() if r.approved_at else "",
+        )
+    )
+    return rows

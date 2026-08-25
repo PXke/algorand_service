@@ -83,15 +83,12 @@ def _pending_for_tier(tier: PublishTier, *, limit: int) -> list:
 
 
 def _pending_feed_backlog_full() -> bool:
-    """True when pending_feed_queue already holds PENDING_FEED_MAX_DEPTH+ approved articles awaiting paced release. Composing further ahead than that only burns Mistral budget to publish staler content later — the auto-approve → backlog path bypasses the 1-slot review throttle, so without this check hourly drains composed all night (2026-07-16: six articles / two days of inventory queued overnight). Fails open: a Cassandra blip must not stop the pipeline."""
+    """True when the backlog (articles.status='backlog') already holds PENDING_FEED_MAX_DEPTH+ approved articles awaiting paced release. Composing further ahead than that only burns budget to publish staler content later — the auto-approve → backlog path bypasses the 1-slot review throttle, so without this check hourly drains composed all night (2026-07-16: six articles / two days of inventory queued overnight). Fails open: a Cassandra blip must not stop the pipeline."""
     from app.core import config as cfg
-    from app.core.cassandra import get_cassandra_session
-    from app.core.statements import PendingFeedStmts
+    from algorand_shared.article_transitions import list_backlog_articles
 
     try:
-        bucket = getattr(cfg, "NEWS_FEED_BUCKET", "main") or "main"
-        rows = list(get_cassandra_session().execute(PendingFeedStmts.LIST_IDS, (bucket,)))
-        return len(rows) >= cfg.PENDING_FEED_MAX_DEPTH
+        return len(list_backlog_articles()) >= cfg.PENDING_FEED_MAX_DEPTH
     except Exception:
         logger.warning("pending-feed depth check failed — treating as not full", exc_info=True)
         return False
@@ -806,6 +803,8 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
     """
     from datetime import UTC, datetime
 
+    from algorand_shared.article_transitions import list_backlog_articles
+
     from app.core import config as cfg
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts, PendingFeedStmts
@@ -814,7 +813,11 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
     bucket = getattr(cfg, "NEWS_FEED_BUCKET", "main") or "main"
     # One per run — the standard-publish interval pacing keeps releases at
     # NEWS_STANDARD_INTERVAL_HOURS apart regardless of which path releases them.
-    rows = list(session.execute(PendingFeedStmts.PEEK, (bucket,)))
+    # Ordering now comes from articles.status='backlog' (article-table
+    # consolidation Phase 4); pending_feed_queue is still consulted below,
+    # per released article, purely to clean up its now-stale old-table row.
+    backlog = list_backlog_articles()
+    rows = backlog[:1]
     published = 0
     for r in rows:
         art = session.execute(ArticleStmts.GET_FOR_FEED, (r.article_id,)).one()
@@ -939,10 +942,16 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
                 logger.warning(
                     "failed to queue distribution for article %s", art.article_id, exc_info=True
                 )
-        session.execute(
-            PendingFeedStmts.DELETE,
-            (r.bucket, r.interest_score, r.approved_at, r.article_id),
-        )
+        # Old-table cleanup: articles.status has already moved off 'backlog'
+        # above (transition_article_status's own delete-old-partition step),
+        # this just keeps pending_feed_queue in sync until Phase 5 drops it.
+        for old_row in session.execute(PendingFeedStmts.LIST_ALL, (bucket,)):
+            if old_row.article_id == r.article_id:
+                session.execute(
+                    PendingFeedStmts.DELETE,
+                    (old_row.bucket, old_row.interest_score, old_row.approved_at, r.article_id),
+                )
+                break
     return {"status": "ok", "published": published, "slots": slots}
 
 

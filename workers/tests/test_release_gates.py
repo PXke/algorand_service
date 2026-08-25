@@ -128,11 +128,21 @@ def test_release_drain_invokes_gates_before_feed_insert(monkeypatch: pytest.Monk
         published_at=None,
     )
 
+    backlog_row = SimpleNamespace(
+        article_id=pending_row.article_id,
+        service_id="svc",
+        title="T",
+        interest_score=pending_row.interest_score,
+        approved_at=pending_row.approved_at,
+    )
+
     class _FakeSession:
         def execute(self, stmt: str, _params: tuple | None = None) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
             text = str(stmt)
-            if "pending_feed_queue" in text and "SELECT" in text.upper():
+            if "status = 'backlog'" in text:
                 order.append("peek")
+                return [backlog_row]
+            if "pending_feed_queue" in text and "SELECT" in text.upper():
                 return [pending_row]
             if "articles_by_id" in text:
                 order.append("get_for_feed")

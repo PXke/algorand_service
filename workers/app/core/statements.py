@@ -676,6 +676,16 @@ class PendingFeedStmts:
     DELETE = PENDING_FEED_DELETE
     PEEK_ID = PENDING_FEED_PEEK_ID
     LIST_IDS = _Stmt("SELECT article_id FROM algorand_platform.pending_feed_queue WHERE bucket = ?")
+    # article-table consolidation Phase 4: articles.status='backlog' is now
+    # the ordering source of truth (see list_backlog_articles); this table is
+    # kept as a dual-write until Phase 5 drops it, and this query exists
+    # purely so the release path can find+delete the specific old-table row
+    # matching whichever article the NEW query picked (mirrors backend's
+    # _purge_pending_feed_queue, same shape).
+    LIST_ALL = _Stmt(
+        "SELECT bucket, interest_score, approved_at, article_id "
+        "FROM algorand_platform.pending_feed_queue WHERE bucket = ?"
+    )
 
 
 # --------------------------------------------------------------------------- #

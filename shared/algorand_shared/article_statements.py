@@ -163,8 +163,8 @@ class ArticlesStmts:
         "status, year, published_at, article_id, service_id, title, summary, body, "
         "image_url, tags, source_url, trigger_txid, trigger_round, slug, translations, "
         "first_published_at, updated_at, prompt_version, composed_by_model, deleted_at, "
-        "status_updated_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "status_updated_at, interest_score, approved_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Feed listing: `articles` doubles as the feed projection for
     # status='published' (see the plan) -- year is the partition granularity
@@ -248,8 +248,19 @@ class ArticlesStmts:
         "SELECT status, year, published_at, article_id, service_id, title, summary, body, "
         "image_url, tags, source_url, trigger_txid, trigger_round, slug, translations, "
         "first_published_at, updated_at, prompt_version, composed_by_model, deleted_at, "
-        "status_updated_at "
+        "status_updated_at, interest_score, approved_at "
         "FROM algorand_platform.articles WHERE article_id = ?"
+    )
+    # article-table consolidation Phase 4: replaces pending_feed_queue's
+    # (interest_score DESC, approved_at ASC) clustering order -- `articles`
+    # has no equivalent clustering key (status/year is the partition,
+    # published_at the clustering column), so callers fetch every
+    # status='backlog' row for the relevant year(s) and sort in application
+    # code. Backlog depth is capped at PENDING_FEED_MAX_DEPTH (default 3),
+    # so this is always a tiny scan.
+    LIST_BACKLOG = _Stmt(
+        "SELECT article_id, service_id, title, interest_score, approved_at "
+        "FROM algorand_platform.articles WHERE status = 'backlog' AND year = ?"
     )
     # Direct SAI point-query on service_id -- replaces the article_match_keys
     # "service_id" key-type lookup (article_matching.find_latest_service_article

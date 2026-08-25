@@ -59,9 +59,19 @@ def test_backlog_release_blocked_when_reserve_fails(monkeypatch: pytest.MonkeyPa
     )
     deleted: list = []
 
+    backlog_row = SimpleNamespace(
+        article_id=pending_row.article_id,
+        service_id="svc",
+        title="T",
+        interest_score=pending_row.interest_score,
+        approved_at=pending_row.approved_at,
+    )
+
     class _FakeSession:
         def execute(self, stmt: str, params: tuple | None = None) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
             text = str(stmt)
+            if "status = 'backlog'" in text:
+                return [backlog_row]
             if "pending_feed_queue" in text and "SELECT" in text.upper():
                 return [pending_row]
             if "pending_feed_queue" in text and "DELETE" in text.upper():
@@ -105,10 +115,19 @@ def test_missing_article_drops_queue_row_but_logs_it(
         approved_at=None,
     )
     deleted: list = []
+    backlog_row = SimpleNamespace(
+        article_id=pending_row.article_id,
+        service_id="",
+        title="",
+        interest_score=pending_row.interest_score,
+        approved_at=pending_row.approved_at,
+    )
 
     class _FakeSession:
         def execute(self, stmt: str, params: tuple | None = None) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
             text = str(stmt)
+            if "status = 'backlog'" in text:
+                return [backlog_row]
             if "pending_feed_queue" in text and "SELECT" in text.upper():
                 return [pending_row]
             if "pending_feed_queue" in text and "DELETE" in text.upper():

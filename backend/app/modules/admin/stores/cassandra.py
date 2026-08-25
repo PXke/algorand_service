@@ -1659,10 +1659,26 @@ class AdminCassandraStore:
         from datetime import UTC, datetime
 
         score = 0.0  # interest unknown here; FIFO within the day is fine
+        approved_at = datetime.now(tz=UTC)
         session.execute(
             PendingFeedStmts.INSERT,
-            (bucket, score, datetime.now(tz=UTC), aid),
+            (bucket, score, approved_at, aid),
         )
+        # New `articles` table dual-write: this is a status transition to
+        # 'backlog' with the same ordering fields as the old-table insert
+        # above (article-table consolidation Phase 4). Best-effort, same
+        # pattern as every other transition_article_status call site here —
+        # the old-table write above is already durable, this must never
+        # undo it on a hiccup. Pre-existing gap: this branch never dual-
+        # wrote a status transition before Phase 4 (only the "published"
+        # branch above did), so a review-approved-but-capped article's
+        # `articles` row stayed on its pre-approval status until now.
+        with contextlib.suppress(Exception):
+            from algorand_shared.article_transitions import transition_article_status
+
+            transition_article_status(
+                aid, new_status="backlog", interest_score=score, approved_at=approved_at
+            )
         return "queued_daily_cap"
 
     def list_classifier_reviews(self, *, limit: int = 50, scan_limit: int = 500) -> list[dict]:
@@ -1911,26 +1927,25 @@ class AdminCassandraStore:
         return pending + resolved[:room]
 
     def list_pending_feed_backlog(self) -> list[dict]:
-        """Articles already approved and composed, waiting in pending_feed_queue for the paced-release worker to publish them (PENDING_FEED_MAX_DEPTH caps this at 3) — distinct from publish_queue above, which is in-flight COMPOSING work. Not surfaced anywhere in admin before 2026-07-17; checking it required a direct DB read."""
-        from app.core.cassandra import get_cassandra_session
-        from app.core.config import settings
-        from app.core.statements import PendingFeedStmts
+        """Articles already approved and composed, waiting (articles.status='backlog') for the paced-release worker to publish them (PENDING_FEED_MAX_DEPTH caps this at 3) — distinct from publish_queue above, which is in-flight COMPOSING work. Not surfaced anywhere in admin before 2026-07-17; checking it required a direct DB read.
 
-        session = get_cassandra_session()
-        rows = list(session.execute(PendingFeedStmts.LIST_ALL, (settings.news_feed_bucket,)))
-        items: list[dict] = []
-        for row in rows:
-            article_id = str(row.article_id)
-            article = self.get_article(article_id)
-            items.append(
-                {
-                    "article_id": article_id,
-                    "title": article.title if article else "",
-                    "service_id": article.service_id if article else "",
-                    "interest_score": float(row.interest_score or 0),
-                    "approved_at": row.approved_at.isoformat() if row.approved_at else "",
-                }
-            )
+        2026-08-25: reads `articles` directly (was pending_feed_queue, article-
+        table consolidation Phase 4) -- title/service_id come straight off the
+        row instead of a per-item get_article() lookup, since LIST_BACKLOG
+        already selects them from the same table.
+        """
+        from algorand_shared.article_transitions import list_backlog_articles
+
+        items: list[dict] = [
+            {
+                "article_id": str(row.article_id),
+                "title": row.title or "",
+                "service_id": row.service_id or "",
+                "interest_score": float(row.interest_score or 0),
+                "approved_at": row.approved_at.isoformat() if row.approved_at else "",
+            }
+            for row in list_backlog_articles()
+        ]
         items.sort(key=lambda it: it["approved_at"])
         return items
 

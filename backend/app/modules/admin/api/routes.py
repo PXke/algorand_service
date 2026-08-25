@@ -1550,9 +1550,11 @@ def admin_compose_next(request: Request) -> Response:
     if denied is not None:
         return denied
 
+    from algorand_shared.article_transitions import list_backlog_articles
+
     from app.core.cassandra import get_cassandra_session
     from app.core.config import settings
-    from app.core.statements import ClassifierReviewStmts, PendingFeedStmts
+    from app.core.statements import ClassifierReviewStmts
 
     session = get_cassandra_session()
     pending_review = session.execute(ClassifierReviewStmts.LIST_PENDING, ("pending", 1))
@@ -1563,14 +1565,12 @@ def admin_compose_next(request: Request) -> Response:
             "message": "A proposal is already waiting in the review queue — "
             "resolve it before pulling a new one.",
         }
-    if settings.pause_intake_on_feed_backlog:
-        pending_feed = session.execute(PendingFeedStmts.PEEK_ID, (settings.news_feed_bucket,), )
-        if pending_feed.one() is not None:
-            return {
-                "triggered": False,
-                "reason": "approved_feed_pending_release",
-                "message": "The approved-feed backlog is paused for new intake until it drains.",
-            }
+    if settings.pause_intake_on_feed_backlog and list_backlog_articles():
+        return {
+            "triggered": False,
+            "reason": "approved_feed_pending_release",
+            "message": "The approved-feed backlog is paused for new intake until it drains.",
+        }
 
     def _fire_and_wait() -> dict:
         import contextlib

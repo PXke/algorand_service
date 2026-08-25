@@ -265,6 +265,7 @@ def _stash_capped_compose_to_backlog(
         ),
         getattr(composed, "extra_tags", ()),
     )
+    approved_at = datetime.now(tz=UTC)
     article_id, _ = insert_stored_article(
         service_id=row.service_id,
         title=title,
@@ -278,13 +279,15 @@ def _stash_capped_compose_to_backlog(
         image_url=image_field,
         tags=tags,
         prompt_version=getattr(composed, "prompt_version", ""),
+        interest_score=0.0,  # interest unknown here; FIFO within the day is fine
+        approved_at=approved_at,
     )
     get_cassandra_session().execute(
         PendingFeedStmts.INSERT,
         (
             worker_config.NEWS_FEED_BUCKET or "main",
             0.0,  # interest unknown here; FIFO within the day is fine
-            datetime.now(tz=UTC),
+            approved_at,
             UUID(article_id),
         ),
     )
@@ -1229,6 +1232,10 @@ def _hold_for_review(
         ),
         getattr(composed, "extra_tags", ()),
     )
+    from datetime import UTC as _held_UTC
+    from datetime import datetime as _held_datetime
+
+    _held_approved_at = _held_datetime.now(tz=_held_UTC) if route_to_backlog else None
     held_article_id, _ = insert_stored_article(
         service_id=row.service_id,
         title=held_title,
@@ -1244,6 +1251,8 @@ def _hold_for_review(
         image_url=image_field,
         tags=held_tags,
         prompt_version=getattr(composed, "prompt_version", ""),
+        interest_score=0.0 if route_to_backlog else None,
+        approved_at=_held_approved_at,
     )
     # Grade the draft so the human reviewer sees a quality score + reasons.
     grade_meta, _grade_value, _gate_ok = _grade_and_gate(
@@ -1298,8 +1307,6 @@ def _hold_for_review(
         # article to pending_feed_queue — _release_pending_feed_backlog
         # ships it later at the standard pace (re-stamping published_at
         # at release, same as the admin approve-when-capped path).
-        from datetime import UTC as _UTC
-        from datetime import datetime as _dt
         from uuid import UUID
 
         from app.core import config as worker_config
@@ -1311,7 +1318,7 @@ def _hold_for_review(
             (
                 worker_config.NEWS_FEED_BUCKET or "main",
                 0.0,  # interest unknown here; FIFO within the day is fine
-                _dt.now(tz=_UTC),
+                _held_approved_at,
                 UUID(held_article_id),
             ),
         )

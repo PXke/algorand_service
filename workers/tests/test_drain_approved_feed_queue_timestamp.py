@@ -43,6 +43,19 @@ class _FakeSession:
 
     def execute(self, query: str, params: tuple = ()) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
         q = " ".join(str(query).split())
+        if q.startswith("SELECT") and "status = 'backlog'" in q:
+            # list_backlog_articles() -- the pending_feed_queue rows re-shaped
+            # as the `articles` status='backlog' rows it now reads instead.
+            return [
+                SimpleNamespace(
+                    article_id=row.article_id,
+                    service_id=getattr(self._article_row, "service_id", ""),
+                    title=getattr(self._article_row, "title", ""),
+                    interest_score=row.interest_score,
+                    approved_at=row.approved_at,
+                )
+                for row in self._pending_rows
+            ]
         if q.startswith("SELECT") and "pending_feed_queue" in q:
             return list(self._pending_rows)
         if q.startswith("SELECT") and "articles_by_id" in q:

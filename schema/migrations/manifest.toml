@@ -637,3 +637,11 @@ file = "backend/schema/migrations/app/071_drop_burst_day.cql"
 tier = "prod"
 status = "active"
 description = "drop burst_day from publish_queue/articles_by_id/articles: burst-compose removed entirely (never ran in prod -- gated behind DAILY_BURST_ENABLED, unset on prod, zero rows ever had it set -- and its dependent admin picks UI was never built)"
+
+[[migrations]]
+stream = "app"
+version = "072"
+file = "backend/schema/migrations/app/072_articles_backlog_ordering.cql"
+tier = "prod"
+status = "active"
+description = "add articles.interest_score/approved_at: article-table consolidation Phase 4, lets a status='backlog' row carry pending_feed_queue's (interest_score DESC, approved_at ASC) ordering directly"
