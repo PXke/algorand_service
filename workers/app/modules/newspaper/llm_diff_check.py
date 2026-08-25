@@ -33,7 +33,7 @@ def _has_pending_feed_release() -> bool:
     return row is not None
 
 
-def run_mistral_diff_check(
+def run_llm_diff_check(
     *,
     publish: PublishFn = run_publish_pipeline,
     load_services: Callable[[], tuple[ServiceEntry, ...]] = load_enabled_services,
@@ -44,7 +44,7 @@ def run_mistral_diff_check(
     is_throttled: Callable[[str], bool] = scrape_throttled,
     record_scrape: Callable[..., None] = mark_scraped,
 ) -> dict[str, object]:
-    """Poll scrape sources, detect snapshot diffs, publish with Mistral when content changed."""
+    """Poll scrape sources, detect snapshot diffs, and publish via the LLM writer when content changed."""
     from app.core import config
 
     if pause_on_feed_backlog is None:

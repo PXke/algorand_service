@@ -182,12 +182,12 @@ def test_grade_failure_falls_back_to_revision_trigger(monkeypatch: pytest.Monkey
 
     class _BadClient:
         def chat_json_object(self, *_a: object, **_kw: object) -> Never:
-            from app.modules.ai.mistral_client import MistralError
+            from app.modules.ai.llm_provider import LLMError
 
-            raise MistralError("Mistral returned non-JSON content")
+            raise LLMError("Mistral returned non-JSON content")
 
     monkeypatch.setattr(
-        "app.modules.ai.mistral_client.get_mistral_digest_client",
+        "app.modules.ai.llm_purpose_router.get_llm_digest_client",
         lambda: _BadClient(),
     )
     monkeypatch.setattr("app.core.config.WRITER_QUALITY_LLM_ENABLED", True, raising=False)

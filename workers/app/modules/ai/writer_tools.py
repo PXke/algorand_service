@@ -340,14 +340,14 @@ def _tool_source_history(source: str, limit: int = 8) -> dict[str, Any]:
 
 def _tool_review_draft(title: str, body: str) -> dict[str, Any]:
     """Self-assessment: schema heuristic + LLM rubric (narrative/depth)."""
-    from app.modules.ai.mistral_client import get_mistral_rubric_client
+    from app.modules.ai.llm_purpose_router import get_llm_rubric_client
     from app.modules.newspaper.article_grader import fuse_quality_into_grade, grade_article_draft
     from app.modules.newspaper.article_quality_llm import grade_article_quality_llm
 
     try:
         review = grade_article_draft(title=title, body=body)
         review["quality"] = grade_article_quality_llm(
-            title=title, body=body, client=get_mistral_rubric_client()
+            title=title, body=body, client=get_llm_rubric_client()
         )
         return fuse_quality_into_grade(review, review["quality"])
     except Exception as exc:

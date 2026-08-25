@@ -54,8 +54,8 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from app.modules.ai.llm_compose import split_markdown_blocks
 from app.modules.ai.local_translate_lock import local_translate_lock
-from app.modules.ai.mistral_compose import split_markdown_blocks
 
 logger = logging.getLogger(__name__)
 

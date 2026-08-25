@@ -42,7 +42,7 @@ def test_compose_lock_releases_on_success(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_compose_via_writer_tools_waits_on_global_lock(monkeypatch: pytest.MonkeyPatch) -> None:
     """Composes normally when the lock is free, then raises ComposeBusyError when it's already held."""
-    from app.modules.ai import mistral_compose as mc
+    from app.modules.ai import llm_compose as mc
 
     held = {"busy": False}
 
@@ -67,7 +67,7 @@ def test_compose_via_writer_tools_waits_on_global_lock(monkeypatch: pytest.Monke
         system="sys",
         user="usr",
         source_url="https://example.com/",
-        mistral=_Client(),
+        llm=_Client(),
     )
     assert fields.title == "T"
 
@@ -80,7 +80,7 @@ def test_compose_via_writer_tools_waits_on_global_lock(monkeypatch: pytest.Monke
             system="sys",
             user="usr",
             source_url="https://example.com/",
-            mistral=_Client(),
+            llm=_Client(),
         )
 
 

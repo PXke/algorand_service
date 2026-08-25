@@ -367,7 +367,7 @@ _FETCH_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 def _fetch_backoff_seconds(attempt: int, resp: httpx.Response | None = None) -> float:
     """Backoff before retrying after `attempt` (0-based) fails. A 429 means the server is actively throttling us, so it honors Retry-After when sent and otherwise backs off harder than the plain exponential schedule used for transient network errors / 5xx."""
     if resp is not None and getattr(resp, "status_code", None) == 429:
-        from app.modules.ai.mistral_client import _retry_after_seconds
+        from app.modules.ai.llm_openai_compatible import _retry_after_seconds
 
         retry_after = _retry_after_seconds(resp)
         if retry_after is not None:

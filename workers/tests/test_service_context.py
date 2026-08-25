@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.modules.ai.mistral_client import _parse_json_object
+from app.modules.ai.llm_openai_compatible import _parse_json_object
 from app.modules.newspaper.service_context import ContextPage, build_service_context
 
 

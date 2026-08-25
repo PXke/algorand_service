@@ -1,6 +1,6 @@
 """Body coercion: a model that emits `body` as nested JSON (object/list) instead of a markdown string must be flattened back to real markdown, not str(dict)'d."""
 
-from app.modules.ai.mistral_compose import _coerce_markdown
+from app.modules.ai.llm_compose import _coerce_markdown
 
 
 def test_plain_string_passthrough() -> None:

@@ -4,7 +4,7 @@ COSTS MONEY (real Mistral API calls) and needs the full worker env (Mistral
 key, and ideally Cassandra/Typesense for the grader's novelty/relevance
 signals, which degrade gracefully to neutral defaults without them). Run it
 by hand before/after editing `_ARTICLE_FORMAT_RULES` or the system prompt in
-`app.modules.ai.mistral_compose` — never in CI.
+`app.modules.ai.llm_compose` — never in CI.
 
 Usage:
 
@@ -40,12 +40,12 @@ logger = logging.getLogger(__name__)
 
 def _run_one(fixture: ComposeFixture) -> str:
     """Compose + grade one fixture; return a Markdown report block."""
-    from app.modules.ai.mistral_client import MistralError
-    from app.modules.ai.mistral_compose import compose_scrape_article_mistral
+    from app.modules.ai.llm_compose import compose_scrape_article
+    from app.modules.ai.llm_provider import LLMError
     from app.modules.newspaper.article_grader import grade_article_draft
 
     try:
-        result = compose_scrape_article_mistral(
+        result = compose_scrape_article(
             service_name=fixture.service_name,
             source_url=fixture.source_url,
             page_title=fixture.page_title,
@@ -55,7 +55,7 @@ def _run_one(fixture: ComposeFixture) -> str:
             diff=fixture.diff,
             is_first_snapshot=fixture.is_first_snapshot,
         )
-    except MistralError as exc:
+    except LLMError as exc:
         return f"# {fixture.name}\n\nCOMPOSE FAILED: {exc}\n"
 
     try:
@@ -108,7 +108,7 @@ def main() -> None:
     args = ap.parse_args()
 
     from app.core.config import mistral_configured
-    from app.modules.ai.mistral_compose import PROMPT_VERSION
+    from app.modules.ai.llm_compose import PROMPT_VERSION
 
     if not mistral_configured():
         logger.error("MISTRAL_ENABLED / MISTRAL_API_KEY not configured — nothing to eval.")

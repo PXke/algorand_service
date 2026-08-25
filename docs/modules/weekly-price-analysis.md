@@ -42,7 +42,7 @@ CoinGecko public API (rate limits, attribution); article body [CommonMark](https
 - `workers/app/modules/newspaper/weekly_digest_publish.py` — publish + dedupe
 - `workers/app/modules/newspaper/price_analysis.py` — CoinGecko fetch
 - `workers/app/modules/newspaper/article_composer.py` — `compose_weekly_digest`
-- `workers/app/modules/ai/mistral_compose.py` — Mistral digest prompt
+- `workers/app/modules/ai/llm_compose.py` — Mistral digest prompt
 - `workers/app/modules/newspaper/tasks/price_analysis_tasks.py`
 
 ## Run manually

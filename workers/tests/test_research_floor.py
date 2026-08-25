@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.modules.ai.mistral_compose import _distinct_research_calls, _run_research_floor
+from app.modules.ai.llm_compose import _distinct_research_calls, _run_research_floor
 
 
 def test_counts_distinct_excluding_review_draft() -> None:

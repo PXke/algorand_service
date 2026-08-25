@@ -175,9 +175,9 @@ _TIER2_SYSTEM = (
 
 def mistral_classifier(*, max_tokens: int = 600) -> ClassifyFn:
     """Production Tier-2 adapter: a ``classify`` callable backed by the Mistral client at temperature 0.0 (diagnostic, not creative). Lazy so importing this module never pulls the client."""
-    from app.modules.ai.mistral_client import get_mistral_client
+    from app.modules.ai.llm_purpose_router import get_llm_writer_client
 
-    client = get_mistral_client()
+    client = get_llm_writer_client()
 
     def classify(source_text: str, trace_text: str, article_text: str) -> dict:
         user = (

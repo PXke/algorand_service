@@ -1,6 +1,6 @@
 """Source-type router: root domains are static profiles, deep paths are news."""
 
-from app.modules.ai.mistral_compose import _recency_rule, is_static_landing_page
+from app.modules.ai.llm_compose import _recency_rule, is_static_landing_page
 
 
 def test_root_domain_is_static() -> None:

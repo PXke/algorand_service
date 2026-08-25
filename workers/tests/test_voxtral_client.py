@@ -7,7 +7,7 @@ from typing import Any, Self
 
 import pytest
 
-from app.modules.ai.mistral_client import MistralError
+from app.modules.ai.llm_provider import LLMError
 from app.modules.ai.voxtral_client import transcribe_audio
 
 
@@ -63,19 +63,19 @@ def test_transcribe_audio_returns_text(monkeypatch: pytest.MonkeyPatch, audio_fi
 def test_transcribe_audio_raises_on_missing_key(
     monkeypatch: pytest.MonkeyPatch, audio_file: str
 ) -> None:
-    """Raises MistralError when MISTRAL_API_KEY is unset instead of calling out."""
+    """Raises LLMError when MISTRAL_API_KEY is unset instead of calling out."""
     import app.modules.ai.voxtral_client as voxtral_module
 
     monkeypatch.setattr(voxtral_module, "MISTRAL_API_KEY", "")
 
-    with pytest.raises(MistralError, match="MISTRAL_API_KEY"):
+    with pytest.raises(LLMError, match="MISTRAL_API_KEY"):
         transcribe_audio(audio_file)
 
 
 def test_transcribe_audio_raises_on_http_error(
     monkeypatch: pytest.MonkeyPatch, audio_file: str
 ) -> None:
-    """Raises MistralError carrying the status code when the API responds with an HTTP error."""
+    """Raises LLMError carrying the status code when the API responds with an HTTP error."""
     import app.modules.ai.voxtral_client as voxtral_module
 
     monkeypatch.setattr(voxtral_module, "MISTRAL_API_KEY", "test-key")
@@ -109,5 +109,5 @@ def test_transcribe_audio_raises_on_http_error(
 
     monkeypatch.setattr(voxtral_module.httpx, "Client", FakeClient)
 
-    with pytest.raises(MistralError, match="500"):
+    with pytest.raises(LLMError, match="500"):
         transcribe_audio(audio_file)

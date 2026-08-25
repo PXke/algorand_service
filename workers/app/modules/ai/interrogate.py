@@ -15,7 +15,7 @@ already in its own transcript) so it must reconcile its output against reality
 instead of confidently re-defending it. That is what ``ground_truth=True`` does.
 
 Strictly read-only against Cassandra: this reads compose_sessions, never writes.
-The only outbound effect is Mistral chat calls (billed like any compose call).
+The only outbound effect is LLM chat calls (billed like any compose call).
 
 The transcript is *flattened* before replay rather than replayed verbatim: the
 stored messages carry the tool-call/tool-result protocol (assistant.tool_calls +
@@ -38,7 +38,7 @@ from app.modules.newspaper import defunct_entity_gate as _dg
 if TYPE_CHECKING:
     from cassandra.cluster import Session as CassandraSession
 
-    from app.modules.ai.mistral_client import MistralClient
+    from app.modules.ai.llm_openai_compatible import MistralProvider
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +273,7 @@ def interrogate(
     *,
     ground_truth: bool = True,
     history: list[dict[str, str]] | None = None,
-    client: MistralClient | None = None,
+    client: MistralProvider | None = None,
 ) -> tuple[str, list[dict[str, str]]]:
     """Ask the revived writer one question and return (answer, updated_history).
 
@@ -287,9 +287,9 @@ def interrogate(
         # the same weights that produced the draft. Fall back to the writer model
         # if the stored session predates model capture.
         from app.core.config import MISTRAL_MODEL_WRITER
-        from app.modules.ai.mistral_client import MistralClient
+        from app.modules.ai.llm_openai_compatible import MistralProvider
 
-        client = MistralClient(model=rev.model or MISTRAL_MODEL_WRITER)
+        client = MistralProvider(model=rev.model or MISTRAL_MODEL_WRITER)
 
     convo: list[dict[str, str]] = [{"role": "system", "content": _SYSTEM_FRAMING}]
     convo.extend(rev.replay)

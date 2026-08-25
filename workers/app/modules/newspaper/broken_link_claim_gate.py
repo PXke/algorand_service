@@ -5,7 +5,7 @@ project" / "Terms of use" footer links broken because the guessed /about and
 /terms URLs genuinely 404. That's not the real user experience — those footer
 items are JS buttons with no real href, opening working in-page modals when
 clicked via click_element/play_interactive. The fix at the time was a prompt
-instruction (see mistral_compose.py's "CLIENT-SIDE ROUTE 404 CHECK") telling
+instruction (see llm_compose.py's "CLIENT-SIDE ROUTE 404 CHECK") telling
 the writer to try click_element before reporting something broken — but that
 did NOT hold: the identical mistake recurred on the same site's Terms-of-use
 link on 2026-08-12, prompt guidance already in place the whole time.

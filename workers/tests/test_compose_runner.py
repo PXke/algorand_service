@@ -9,13 +9,13 @@ import pytest
 
 import app.modules.ai.compose_runner as compose_runner
 from app.modules.ai.compose_runner import ArticleInput, ComposeRunResult, compose
+from app.modules.ai.llm_compose import LLMArticleFields
 from app.modules.ai.llm_provider import LLMProvider
-from app.modules.ai.mistral_compose import MistralArticleFields
 from app.modules.ai.session_register import SessionRegisterSQLite
 
 
 class _FakeProvider(LLMProvider):
-    """A minimal LLMProvider stand-in -- compose() never needs to reach a real API for these tests, since compose_scrape_article_mistral itself is monkeypatched."""
+    """A minimal LLMProvider stand-in -- compose() never needs to reach a real API for these tests, since compose_scrape_article itself is monkeypatched."""
 
     def __init__(self, *, model: str | None = None, timeout: float | None = None) -> None:
         del timeout
@@ -59,20 +59,20 @@ def _article_input() -> ArticleInput:
 def test_compose_returns_a_result_with_usage_provider_model_and_duration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """compose() wires a fresh provider into compose_scrape_article_mistral and reports back combined usage/timing."""
+    """compose() wires a fresh provider into compose_scrape_article and reports back combined usage/timing."""
     captured_kwargs: dict[str, Any] = {}
 
     def _fake_get_provider(name: str, *, model: str | None = None, timeout: float | None = None) -> LLMProvider:
         del name
         return _FakeProvider(model=model, timeout=timeout)
 
-    def _fake_compose_scrape_article_mistral(**kwargs: object) -> MistralArticleFields:
+    def _fake_compose_scrape_article(**kwargs: object) -> LLMArticleFields:
         captured_kwargs.update(kwargs)
-        return MistralArticleFields(title="t", summary="s", body="b")
+        return LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(compose_runner, "get_provider", _fake_get_provider)
     monkeypatch.setattr(
-        compose_runner, "compose_scrape_article_mistral", _fake_compose_scrape_article_mistral
+        compose_runner, "compose_scrape_article", _fake_compose_scrape_article
     )
 
     register = SessionRegisterSQLite(tmp_path / "bench.sqlite")
@@ -96,7 +96,7 @@ def test_compose_returns_a_result_with_usage_provider_model_and_duration(
     }
     assert result.duration_ms >= 0
 
-    # The article_input's fields reached compose_scrape_article_mistral unchanged.
+    # The article_input's fields reached compose_scrape_article unchanged.
     assert captured_kwargs["service_name"] == "lumirogue-com"
     assert captured_kwargs["source_url"] == "https://lumirogue.com"
     assert captured_kwargs["session_register"] is register
@@ -117,8 +117,8 @@ def test_compose_uses_the_same_provider_for_both_tiers(
     monkeypatch.setattr(compose_runner, "get_provider", _fake_get_provider)
     monkeypatch.setattr(
         compose_runner,
-        "compose_scrape_article_mistral",
-        lambda **_kw: MistralArticleFields(title="t", summary="s", body="b"),
+        "compose_scrape_article",
+        lambda **_kw: LLMArticleFields(title="t", summary="s", body="b"),
     )
 
     compose(

@@ -1,4 +1,4 @@
-"""Mistral Voxtral audio transcription — same account as the article writer, a different endpoint (multipart /audio/transcriptions, not JSON chat/completions) so it isn't shoehorned into MistralClient._post."""
+"""Mistral Voxtral audio transcription — same account as the article writer, a different endpoint (multipart /audio/transcriptions, not JSON chat/completions) so it isn't shoehorned into MistralProvider._post."""
 
 from __future__ import annotations
 
@@ -12,13 +12,13 @@ from app.core.config import (
     MISTRAL_VOXTRAL_MODEL,
     MISTRAL_VOXTRAL_TIMEOUT,
 )
-from app.modules.ai.mistral_client import MistralError
+from app.modules.ai.llm_provider import LLMError
 
 
 def transcribe_audio(audio_path: str, *, timeout: float | None = None) -> str:
-    """Upload a local audio file to Mistral's Voxtral transcription endpoint and return the transcript text. Raises MistralError on failure — this is an inner call, not a never-raises boundary; callers that need best-effort behavior (e.g. the YouTube transcript pipeline) must catch it themselves."""
+    """Upload a local audio file to Mistral's Voxtral transcription endpoint and return the transcript text. Raises LLMError on failure — this is an inner call, not a never-raises boundary; callers that need best-effort behavior (e.g. the YouTube transcript pipeline) must catch it themselves."""
     if not MISTRAL_API_KEY:
-        raise MistralError("MISTRAL_API_KEY not configured")
+        raise LLMError("MISTRAL_API_KEY not configured")
 
     with (
         Path(audio_path).open("rb") as f,
@@ -31,5 +31,5 @@ def transcribe_audio(audio_path: str, *, timeout: float | None = None) -> str:
             data={"model": MISTRAL_VOXTRAL_MODEL},
         )
     if resp.status_code >= 400:
-        raise MistralError(f"Voxtral transcription failed: {resp.status_code} {resp.text[:300]}")
+        raise LLMError(f"Voxtral transcription failed: {resp.status_code} {resp.text[:300]}")
     return resp.json().get("text", "").strip()

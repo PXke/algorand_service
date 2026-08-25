@@ -2,7 +2,7 @@ import json
 
 from app.core.config import DEEPSEEK_API_BASE, DEEPSEEK_API_KEY, DEEPSEEK_MODEL_TRANSLATE
 from app.modules.ai.llm_openai_compatible import DeepSeekProvider
-from app.modules.ai.mistral_compose import translate_article_mistral
+from app.modules.ai.llm_compose import translate_article
 
 arts = json.load(open("/home/guillaume/two_more_articles.json"))
 langs = ["fa", "ps", "ar", "ru", "zh", "hi", "es", "fr"]
@@ -17,7 +17,7 @@ for key, a in arts.items():
         client = DeepSeekProvider(
             api_key=DEEPSEEK_API_KEY, api_base=DEEPSEEK_API_BASE, model=DEEPSEEK_MODEL_TRANSLATE
         )
-        result = translate_article_mistral(
+        result = translate_article(
             english_title=a["title"] or "",
             english_summary=a["summary"] or "",
             english_body=a["body"] or "",

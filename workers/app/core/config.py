@@ -346,8 +346,8 @@ MISTRAL_MODEL_TRANSLATE = env_str("MISTRAL_MODEL_TRANSLATE", "mistral-small-late
 MISTRAL_REASONING_EFFORT = env_str("MISTRAL_REASONING_EFFORT", "high")
 
 # DeepSeek: a second provider behind the same OpenAI-compatible connector
-# (mistral_client.MistralClient already speaks plain /chat/completions JSON,
-# nothing Mistral-specific in the wire format) — additive, off by default
+# (llm_openai_compatible.MistralProvider already speaks plain /chat/completions
+# JSON, nothing Mistral-specific in the wire format) — additive, off by default
 # (empty key), never changes Mistral's own behavior. Confirm these model
 # identifiers against DeepSeek's current docs before relying on them; the
 # marketing names (e.g. "DeepSeek-V4-Flash") are not always the literal API
@@ -359,7 +359,7 @@ DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-chat")
 DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-chat")
 DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-chat")
 # Per-language override: languages in this list translate via DeepSeek
-# (translate_article_mistral) instead of the local CPU engines, independent
+# (translate_article) instead of the local CPU engines, independent
 # of LLM_PROVIDER_TRANSLATE's global mistral/deepseek routing. Multi-article
 # side-by-side testing (2026-08-23) found local quality is a genuine wash
 # against DeepSeek for most languages -- some local wins, some DeepSeek wins,
@@ -456,7 +456,7 @@ ANTHROPIC_MODEL_TRANSLATE = env_str("ANTHROPIC_MODEL_TRANSLATE", "claude-sonnet-
 ANTHROPIC_MODEL_RUBRIC = env_str("ANTHROPIC_MODEL_RUBRIC", "claude-sonnet-5")
 
 # "synthesize" (default): Stage 1->2 handoff is an LLM-synthesized Research
-# Digest (mistral_compose._synthesize_research_digest) — the only thing Stage
+# Digest (llm_compose._synthesize_research_digest) — the only thing Stage
 # 2 sees, no raw trace. "raw": skip that synthesis pass entirely and hand
 # Stage 2 the (generously capped, not summarized) raw tool trace directly —
 # an experiment enabled by a large-context provider (DeepSeek's 1M) not
@@ -472,7 +472,7 @@ RESEARCH_DIGEST_MODE = env_str("RESEARCH_DIGEST_MODE", "synthesize").strip().low
 # whichever model actually ran, so a canary is visible after the fact with no
 # extra plumbing. A canary or explicit override that resolves to "deepseek"
 # silently falls back to Mistral if DEEPSEEK_API_KEY is unset (see
-# mistral_client._select_provider).
+# llm_purpose_router._select_provider).
 LLM_PROVIDER_WRITER = env_str("LLM_PROVIDER_WRITER", "mistral").strip().lower()
 LLM_PROVIDER_WRITER_CANARY_PCT = env_int("LLM_PROVIDER_WRITER_CANARY_PCT", 0)
 LLM_PROVIDER_RESEARCH = env_str("LLM_PROVIDER_RESEARCH", "mistral").strip().lower()
@@ -486,25 +486,29 @@ LLM_PROVIDER_RUBRIC_CANARY_PCT = env_int("LLM_PROVIDER_RUBRIC_CANARY_PCT", 0)
 # Output cap per call. A full JSON article (title+summary+long body+tags) can
 # exceed 4096 and get truncated mid-string → JSON parse fails → template junk.
 # 12000 comfortably fits a ~4000-word long-form article once JSON-escaped; the
-# reservation against TPM is trivial on the 375k-TPM pinned model.
-MISTRAL_MAX_TOKENS = env_int("MISTRAL_MAX_TOKENS", 12000)
-# Writer agentic-loop context management — the FALLBACK only. MistralClient
-# now asks Mistral's own GET /v1/models for each model's real
-# max_context_length at construction (mistral_client._fetch_model_metadata,
-# cached per model per process) and uses that instead whenever the live
-# lookup succeeds. This default is what a client falls back to if that lookup
-# fails (network blip, endpoint down) — it stopped mattering for correctness
-# on 2026-07-15, when a hardcoded comment here ("mistral-small ~128k") turned
-# out to be stale: Mistral had silently upgraded the "-latest" aliases to
-# 262144 without changing the model name. A single research/writer constant
-# is enough now since the real number comes from the live model, not this file.
-MISTRAL_CONTEXT_TOKENS = env_int("MISTRAL_CONTEXT_TOKENS", 256000)
+# reservation against TPM is trivial on the 375k-TPM pinned model. Shared
+# across providers (llm_openai_compatible.py's base class, and used directly
+# by llm_anthropic_provider.py too) -- not Mistral-specific, hence the LLM_
+# name despite the env var staying MISTRAL_MAX_TOKENS (renaming that would
+# silently break prod .env files).
+LLM_MAX_TOKENS = env_int("MISTRAL_MAX_TOKENS", 12000)
+# Writer agentic-loop context management — the FALLBACK only. Each provider
+# now asks its own GET /v1/models for each model's real max_context_length at
+# construction (llm_openai_compatible._fetch_model_metadata, cached per model
+# per process) and uses that instead whenever the live lookup succeeds. This
+# default is what a client falls back to if that lookup fails (network blip,
+# endpoint down) — it stopped mattering for correctness on 2026-07-15, when a
+# hardcoded comment here ("mistral-small ~128k") turned out to be stale:
+# Mistral had silently upgraded the "-latest" aliases to 262144 without
+# changing the model name. A single research/writer constant is enough now
+# since the real number comes from the live model, not this file.
+LLM_CONTEXT_TOKENS = env_int("MISTRAL_CONTEXT_TOKENS", 256000)
 # Per-tool-result character cap (structure-preserving — see token_budget). Large
 # enough to carry a full article body; ~24k chars ≈ a long page.
-MISTRAL_TOOL_RESULT_MAX_CHARS = env_int("MISTRAL_TOOL_RESULT_MAX_CHARS", 24000)
+LLM_TOOL_RESULT_MAX_CHARS = env_int("MISTRAL_TOOL_RESULT_MAX_CHARS", 24000)
 # Headroom kept below the context limit (response max_tokens is reserved on top)
 # so token-estimate error never tips a request over the edge.
-MISTRAL_CONTEXT_SAFETY_TOKENS = env_int("MISTRAL_CONTEXT_SAFETY_TOKENS", 4000)
+LLM_CONTEXT_SAFETY_TOKENS = env_int("MISTRAL_CONTEXT_SAFETY_TOKENS", 4000)
 # DeepSeek's own docs: a request that hasn't started inference within 600s
 # (10 minutes) gets closed server-side -- the OLD 480s default sat 2 minutes
 # SHORT of that window, so a request DeepSeek would still have honored could
@@ -513,7 +517,7 @@ MISTRAL_CONTEXT_SAFETY_TOKENS = env_int("MISTRAL_CONTEXT_SAFETY_TOKENS", 4000)
 # DeepSeek's own window with a minute of margin (confirmed live 2026-08-17:
 # special editions already had this right via the multiplier below, just
 # never applied to the standard-tier default).
-MISTRAL_TIMEOUT_SECONDS = env_int("MISTRAL_TIMEOUT_SECONDS", 660)
+LLM_TIMEOUT_SECONDS = env_int("MISTRAL_TIMEOUT_SECONDS", 660)
 # Special editions' research client resends the full accumulated tool-call
 # trace every chat_with_tools round; root-caused 2026-08-04 (Humanitarian
 # Network recompose) at round 16 / 49 tool calls, a single round's request
@@ -525,7 +529,7 @@ MISTRAL_TIMEOUT_SECONDS = env_int("MISTRAL_TIMEOUT_SECONDS", 660)
 # dead API would block every other compose on the platform for the full
 # worst-case retry window -- 2x balances "tolerate a slow big-context round"
 # against "don't let one stuck special edition wedge the whole pipeline."
-MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER = env_int(
+LLM_TIMEOUT_SPECIAL_EDITION_MULTIPLIER = env_int(
     "MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER", 2
 )
 # REQUIRED for article generation — there is no template fallback (owner
@@ -536,14 +540,14 @@ MISTRAL_ENABLED = env_bool("MISTRAL_ENABLED", False)
 # the full service-watch aggregate (SERVICE_CONTEXT_MAX_CHARS), not one page.
 # The original intent was 12k tokens; an earlier reading as 12k CHARS silently
 # quartered the composer's context.
-MISTRAL_MAX_SOURCE_CHARS = env_int("MISTRAL_MAX_SOURCE_CHARS", 48_000)
+LLM_MAX_SOURCE_CHARS = env_int("MISTRAL_MAX_SOURCE_CHARS", 48_000)
 # Stage-1 RESEARCH sees a smaller source clip. The research pass only decides
 # what to look up — it doesn't write from the source — yet its user prompt is
 # re-sent on EVERY tool round (up to LLM_MAX_TOOL_ROUNDS, plus the research
 # floor's extra pass), so full-size source there multiplies input tokens ~14x
 # per article for no research benefit. Stage-2 generation (a single call)
-# always gets the full MISTRAL_MAX_SOURCE_CHARS clip.
-MISTRAL_RESEARCH_SOURCE_CHARS = env_int("MISTRAL_RESEARCH_SOURCE_CHARS", 16_000)
+# always gets the full LLM_MAX_SOURCE_CHARS clip.
+LLM_RESEARCH_SOURCE_CHARS = env_int("MISTRAL_RESEARCH_SOURCE_CHARS", 16_000)
 # Stage-2's single write call has NO context-budget trimming the way the
 # multi-round research loop does (fit_messages_to_budget only runs inside
 # chat_with_tools) -- and unlike the raw-source clip above, the digest +
@@ -556,9 +560,9 @@ MISTRAL_RESEARCH_SOURCE_CHARS = env_int("MISTRAL_RESEARCH_SOURCE_CHARS", 16_000)
 # retry -- the whole 31-minute compose lost with nothing to show for it. This
 # caps the combined digest+enumeration+outline block specifically (the parts
 # with no upstream size limit), leaving plenty of room under
-# MISTRAL_CONTEXT_TOKENS for a genuinely deep special edition while making
+# LLM_CONTEXT_TOKENS for a genuinely deep special edition while making
 # runaway growth a clean truncation instead of a silent empty response.
-MISTRAL_STAGE2_EXTRAS_MAX_CHARS = env_int("MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 160_000)
+LLM_STAGE2_EXTRAS_MAX_CHARS = env_int("MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 160_000)
 # Periodic re-scrape of ALL monitored sources to detect content diffs and compose
 # updates (MISTRAL_DIFF_POLL_SECONDS, default 600s) is read directly via
 # os.getenv in celery_app.py's beat schedule — not duplicated here, since a
@@ -615,9 +619,9 @@ WRITER_TWO_STAGE = env_bool("WRITER_TWO_STAGE", True)
 # launched"). Off = always use the news prompt.
 SOURCE_TYPE_ROUTER_ENABLED = env_bool("SOURCE_TYPE_ROUTER_ENABLED", True)
 # Research-phase temperature: low so tool selection/arguments are deterministic.
-MISTRAL_TEMP_RESEARCH = env_float("MISTRAL_TEMP_RESEARCH", 0.15)
+LLM_TEMP_RESEARCH = env_float("MISTRAL_TEMP_RESEARCH", 0.15)
 # Generation-phase temperature: higher to vary prose structure.
-MISTRAL_TEMP_WRITE = env_float("MISTRAL_TEMP_WRITE", 0.6)
+LLM_TEMP_WRITE = env_float("MISTRAL_TEMP_WRITE", 0.6)
 # Two-stage compose: after generation, the heuristic grader runs deterministically
 # (the warm pass has no tools, so the model can't call review_draft itself). A draft
 # graded below this triggers a revision pass with the issues fed back, up to
@@ -749,11 +753,11 @@ MASTODON_ACCESS_TOKEN = env_str("MASTODON_ACCESS_TOKEN", "")
 # and had never been observed to actually need that much headroom (zero 429s
 # from either provider in 7 days of prod logs at the old value).
 LLM_MIN_REQUEST_INTERVAL_SECONDS = env_float("LLM_MIN_REQUEST_INTERVAL_SECONDS", 5.0)
-MISTRAL_MAX_RETRIES = env_int("MISTRAL_MAX_RETRIES", 4)
+LLM_MAX_RETRIES = env_int("MISTRAL_MAX_RETRIES", 4)
 # Retry backoff on 429 / 5xx / network errors: base * 2**attempt, capped. Honors
 # Retry-After when present. Larger so a rate-limited call waits meaningfully.
-MISTRAL_BACKOFF_BASE_SECONDS = env_float("MISTRAL_BACKOFF_BASE_SECONDS", 15.0)
-MISTRAL_BACKOFF_MAX_SECONDS = env_float("MISTRAL_BACKOFF_MAX_SECONDS", 300.0)
+LLM_BACKOFF_BASE_SECONDS = env_float("MISTRAL_BACKOFF_BASE_SECONDS", 15.0)
+LLM_BACKOFF_MAX_SECONDS = env_float("MISTRAL_BACKOFF_MAX_SECONDS", 300.0)
 
 # Rotating raw-HTTP diagnostic log for every LLM provider call (request summary
 # + full raw response body), added 2026-08-21 chasing a reproducible

@@ -48,8 +48,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.modules.ai import local_translate as lt
+from app.modules.ai.llm_compose import split_markdown_blocks
 from app.modules.ai.local_translate import _MAX_THREADS
-from app.modules.ai.mistral_compose import split_markdown_blocks
 from app.modules.gatekeeper.fact_align import EntailmentResult, numeric_entailment_score
 
 # ---------------------------------------------------------------------------
@@ -158,7 +158,7 @@ class StructuralResult:
 
 
 def structural_alignment(source_body: str, translated_body: str) -> StructuralResult:
-    """Block-count alignment (reuses mistral_compose.split_markdown_blocks) plus per-block list/table row-count drift.
+    """Block-count alignment (reuses llm_compose.split_markdown_blocks) plus per-block list/table row-count drift.
 
     Row-count comparison only runs for blocks that exist on both sides --
     a block-count mismatch is already surfaced via ``block_count_matches``

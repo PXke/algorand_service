@@ -40,8 +40,8 @@ from app.core.config import (
     ANTHROPIC_API_BASE,
     ANTHROPIC_API_KEY,
     ANTHROPIC_MODEL_WRITER,
+    LLM_MAX_TOKENS,
     LLM_MAX_TOOL_ROUNDS,
-    MISTRAL_MAX_TOKENS,
 )
 from app.modules.ai.llm_provider import LLMCreditError, LLMError, LLMProvider
 from app.modules.ai.llm_rate_limit import throttle_llm_call
@@ -225,7 +225,7 @@ class AnthropicProvider(LLMProvider):
 
     def _effective_max_tokens(self, requested: int | None) -> int:
         """Anthropic requires max_tokens on every request -- no default like OpenAI/Gemini."""
-        return requested if requested is not None else MISTRAL_MAX_TOKENS
+        return requested if requested is not None else LLM_MAX_TOKENS
 
     def chat_completion(
         self,

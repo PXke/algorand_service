@@ -192,7 +192,7 @@ def record_compose_session(
                 # ~30 lines of a multi-page SERVICE WATCH aggregate, making a
                 # claim sourced from page 3 of the scrape look unsourced when it
                 # wasn't -- nearly produced a false fabrication call on a piece
-                # that was actually fine. mistral_compose.py's two known opening
+                # that was actually fine. llm_compose.py's two known opening
                 # templates both start with "Write the article now" (the
                 # evolution and standard paths alike), so matching that prefix
                 # covers both without needing to know which one fired.
@@ -323,7 +323,7 @@ def finalize_compose_session_outcome(source_url: str, outcome: str) -> bool:
 
 
 def reap_stale_compose_sessions(*, stale_minutes: int | None = None) -> dict[str, int]:
-    """Mark any compose_sessions row still stuck in a non-terminal status (researching/writing) past the staleness window as "stale". A crash that skips mistral_compose's own try/except checkpoint finalizers (killed process, OOM, or an exception before the first checkpoint call) otherwise leaves the row looking perpetually in-progress in the admin Sessions view until the table's 7-day TTL quietly drops it. Best-effort, never raises."""
+    """Mark any compose_sessions row still stuck in a non-terminal status (researching/writing) past the staleness window as "stale". A crash that skips llm_compose's own try/except checkpoint finalizers (killed process, OOM, or an exception before the first checkpoint call) otherwise leaves the row looking perpetually in-progress in the admin Sessions view until the table's 7-day TTL quietly drops it. Best-effort, never raises."""
     from datetime import UTC, datetime, timedelta
 
     from app.core.config import COMPOSE_SESSION_STALE_MINUTES

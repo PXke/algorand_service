@@ -8,7 +8,7 @@ Official references: [Mistral models overview](https://docs.mistral.ai/models/ov
 
 | Task | Module | Input size | Output | Quality bar | Volume (steady state) |
 |------|--------|------------|--------|-------------|------------------------|
-| **A — Feed articles** | `mistral_compose.compose_scrape_article_mistral` | ~6k chars source + diff | JSON: title, summary, markdown body (~1–2k tokens out) | High (public feed) | ≤7/day standard + ≤2 breaking (if LLM compose enabled) |
+| **A — Feed articles** | `llm_compose.compose_scrape_article` | ~6k chars source + diff | JSON: title, summary, markdown body (~1–2k tokens out) | High (public feed) | ≤7/day standard + ≤2 breaking (if LLM compose enabled) |
 | **B — Weekly digest** | `compose_weekly_digest_article_mistral` | Price brief ~4k + feed titles | ~1.5k char body | High, synthesis | 1/week |
 | **C — Breaking credibility** | `breaking_credibility._assess_with_mistral` | ~6k alert text + links | Tiny JSON `{credible, reason}` | **Critical** (false positive = harm) | ≤2/day |
 | **D — Diff poll (optional)** | `check_and_publish_mistral_on_diff` | Same as A per changed source | Same as A | High | Bounded by registry size × change rate (expensive if all sources) |
@@ -93,6 +93,6 @@ flowchart TD
 ## Code map
 
 - Config: `workers/app/core/config.py`
-- Client: `workers/app/modules/ai/mistral_client.py`
-- Prompts: `workers/app/modules/ai/mistral_compose.py`, `breaking_credibility.py`
+- Client: `workers/app/modules/ai/llm_openai_compatible.py`, `workers/app/modules/ai/llm_purpose_router.py`
+- Prompts: `workers/app/modules/ai/llm_compose.py`, `breaking_credibility.py`
 - Connector doc: [ai-mistral-connector.md](ai-mistral-connector.md)

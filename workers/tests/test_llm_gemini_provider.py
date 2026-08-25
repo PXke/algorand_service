@@ -17,7 +17,7 @@ from app.modules.ai.llm_provider import LLMError, LLMProvider
 
 
 def _fake_client(post_fn: Callable[..., object]) -> type:
-    """Build a fake httpx.Client class whose .post(...) delegates to post_fn -- same pattern test_mistral_client.py uses."""
+    """Build a fake httpx.Client class whose .post(...) delegates to post_fn -- same pattern test_mistral_provider.py uses."""
 
     class FakeClient:
         def __init__(self, *args: object, **kwargs: object) -> None:

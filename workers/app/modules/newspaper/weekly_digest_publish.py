@@ -42,19 +42,16 @@ def run_weekly_digest_publish(
     article_uuid = digest_article_id(week_key)
     txid = weekly_digest_trigger_id(week_key)
 
-    from app.modules.ai.mistral_client import (
-        MistralCreditError,
-        MistralError,
-        PeakHoursBlockedError,
-    )
+    from app.modules.ai.llm_provider import LLMCreditError, LLMError
+    from app.modules.ai.llm_purpose_router import PeakHoursBlockedError
 
     try:
         composed = compose_weekly_digest(context)
-    except MistralError as exc:
+    except LLMError as exc:
         if isinstance(exc, PeakHoursBlockedError):
             logger.info("weekly digest compose deferred for week %s: %s", week_key, exc)
             return {"status": "skipped_peak_hours", "week": week_key, "detail": str(exc)[:200]}
-        credit_issue = isinstance(exc, MistralCreditError)
+        credit_issue = isinstance(exc, LLMCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
         logger.error("Weekly digest compose failed for week %s: %s", week_key, exc)
         return {"status": status, "week": week_key, "detail": str(exc)[:200]}

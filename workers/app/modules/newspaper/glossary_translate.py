@@ -1,26 +1,27 @@
-"""Translate a glossary term's own-language term+definition via Mistral.
+"""Translate a glossary term's own-language term+definition via the translate-tier LLM.
 
 Short, unstructured text (a name and 1-3 sentences) -- unlike article bodies,
 there's no markdown structure to block-align, so this is a plain JSON-object
-call rather than translate_article_mistral's block-aligned machinery.
+call rather than translate_article's block-aligned machinery.
 """
 
 from __future__ import annotations
 
-from app.modules.ai.mistral_client import MistralClient, get_mistral_translate_client
+from app.modules.ai.llm_openai_compatible import MistralProvider
+from app.modules.ai.llm_purpose_router import get_llm_translate_client
 
 
-def translate_glossary_term_mistral(
+def translate_glossary_term(
     *,
     term: str,
     definition: str,
     target_language: str,
-    client: MistralClient | None = None,
+    client: MistralProvider | None = None,
 ) -> dict[str, str]:
     """Translate a glossary term+definition pair to the target language."""
     from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANG_NAMES
 
-    mistral = client or get_mistral_translate_client()
+    llm = client or get_llm_translate_client()
     lang_name = ARTICLE_TRANSLATION_LANG_NAMES.get(target_language, target_language)
 
     system = (
@@ -33,7 +34,7 @@ def translate_glossary_term_mistral(
         f"Term: {term}\nDefinition: {definition}\n\n"
         'Respond as JSON: {"term": "...", "definition": "..."}'
     )
-    parsed = mistral.chat_json_object(
+    parsed = llm.chat_json_object(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=0.2,
         max_tokens=400,

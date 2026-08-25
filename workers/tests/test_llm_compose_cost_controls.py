@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.modules.ai import mistral_compose as mc
-from app.modules.ai.mistral_client import MistralClient
+from app.modules.ai import llm_compose as mc
+from app.modules.ai.llm_openai_compatible import MistralProvider
 
 
 def test_translations_use_small_tier(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -23,11 +23,11 @@ def test_translations_use_small_tier(monkeypatch: pytest.MonkeyPatch) -> None:
             }
         )
 
-    monkeypatch.setattr(mc, "get_mistral_client", _fake_get_client)
+    monkeypatch.setattr(mc, "get_llm_writer_client", _fake_get_client)
     monkeypatch.setattr(
         "app.core.config.MISTRAL_MODEL_TRANSLATE", "mistral-small-latest", raising=False
     )
-    out = mc.translate_article_mistral(
+    out = mc.translate_article(
         english_title="Title",
         english_summary="Summary",
         english_body="Body",
@@ -47,15 +47,15 @@ def test_stale_compose_loop_ignores_unknown_research_user_kwarg(
         system: str,  # noqa: ARG001 -- name must match the real callee's keyword arg
         user: str,  # noqa: ARG001 -- name must match the real callee's keyword arg
         source_url: str,  # noqa: ARG001 -- name must match the real callee's keyword arg
-        mistral: MistralClient,  # noqa: ARG001 -- name must match the real callee's keyword arg
+        llm: MistralProvider,  # noqa: ARG001 -- name must match the real callee's keyword arg
         topic: str = "",  # noqa: ARG001 -- name must match the real callee's keyword arg
-    ) -> mc.MistralArticleFields:
-        return mc.MistralArticleFields(title="t", summary="s", body="b")
+    ) -> mc.LLMArticleFields:
+        return mc.LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _legacy_loop)
-    monkeypatch.setattr("app.core.config.MISTRAL_RESEARCH_SOURCE_CHARS", 1000, raising=False)
+    monkeypatch.setattr("app.core.config.LLM_RESEARCH_SOURCE_CHARS", 1000, raising=False)
 
-    fields = mc.compose_scrape_article_mistral(
+    fields = mc.compose_scrape_article(
         service_name="svc",
         source_url="https://example.com/page",
         page_title="Page",
@@ -73,17 +73,17 @@ def test_research_rounds_get_slimmer_source_than_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The scrape compose passes a research_user with a smaller source clip into the shared writer loop; the full user (48k clip) is reserved for the single stage-2 generation call."""
-    monkeypatch.setattr("app.core.config.MISTRAL_RESEARCH_SOURCE_CHARS", 1000, raising=False)
+    monkeypatch.setattr("app.core.config.LLM_RESEARCH_SOURCE_CHARS", 1000, raising=False)
     captured = {}
 
-    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+    def _fake_via_tools(**kwargs: object) -> mc.LLMArticleFields:
         captured.update(kwargs)
-        return mc.MistralArticleFields(title="t", summary="s", body="b")
+        return mc.LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
     big_source = "Algorand update paragraph. " * 400  # ~10k chars
 
-    mc.compose_scrape_article_mistral(
+    mc.compose_scrape_article(
         service_name="svc",
         source_url="https://example.com/page",
         page_title="Page",
@@ -102,15 +102,15 @@ def test_research_rounds_get_slimmer_source_than_generation(
 
 def test_small_source_reuses_full_prompt_for_research(monkeypatch: pytest.MonkeyPatch) -> None:
     """No pointless second prompt when the source already fits the research clip — research_user must be the SAME object as user."""
-    monkeypatch.setattr("app.core.config.MISTRAL_RESEARCH_SOURCE_CHARS", 16_000, raising=False)
+    monkeypatch.setattr("app.core.config.LLM_RESEARCH_SOURCE_CHARS", 16_000, raising=False)
     captured = {}
 
-    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+    def _fake_via_tools(**kwargs: object) -> mc.LLMArticleFields:
         captured.update(kwargs)
-        return mc.MistralArticleFields(title="t", summary="s", body="b")
+        return mc.LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
-    mc.compose_scrape_article_mistral(
+    mc.compose_scrape_article(
         service_name="svc",
         source_url="https://example.com/page",
         page_title="Page",
@@ -128,12 +128,12 @@ def test_first_coverage_forces_introduction_framing(monkeypatch: pytest.MonkeyPa
     """A diff-driven update on a never-published service must compose as an introduction (FIRST COVERAGE MODE), not an evolution/what-changed story."""
     captured = {}
 
-    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+    def _fake_via_tools(**kwargs: object) -> mc.LLMArticleFields:
         captured.update(kwargs)
-        return mc.MistralArticleFields(title="t", summary="s", body="b")
+        return mc.LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
-    mc.compose_scrape_article_mistral(
+    mc.compose_scrape_article(
         service_name="Blockshake",
         source_url="http://blockshake.io/",
         page_title="blockshake.io",
@@ -154,12 +154,12 @@ def test_known_service_keeps_evolution_framing(monkeypatch: pytest.MonkeyPatch) 
     """A non-first-coverage service keeps the "WHAT CHANGED" evolution framing instead of first-coverage mode."""
     captured = {}
 
-    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+    def _fake_via_tools(**kwargs: object) -> mc.LLMArticleFields:
         captured.update(kwargs)
-        return mc.MistralArticleFields(title="t", summary="s", body="b")
+        return mc.LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
-    mc.compose_scrape_article_mistral(
+    mc.compose_scrape_article(
         service_name="Tinyman",
         source_url="https://tinyman.org/",
         page_title="tinyman",
@@ -181,12 +181,12 @@ def test_prior_coverage_block_reaches_the_evolution_prompt(
     """NFDomains regression pin (2026-08-02): when the caller supplies a prior-coverage note (this service's own last article), it must actually reach the writer's prompt -- the whole point is giving the writer what abort_article(duplicate_coverage) needs to be usable."""
     captured = {}
 
-    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+    def _fake_via_tools(**kwargs: object) -> mc.LLMArticleFields:
         captured.update(kwargs)
-        return mc.MistralArticleFields(title="t", summary="s", body="b")
+        return mc.LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
-    mc.compose_scrape_article_mistral(
+    mc.compose_scrape_article(
         service_name="NFDomains",
         source_url="https://nf.domains/",
         page_title="NFD | nf.domains",
@@ -211,12 +211,12 @@ def test_no_prior_coverage_block_omits_the_note(monkeypatch: pytest.MonkeyPatch)
     """No prior article (first coverage, or lookup failure) -- the note is simply absent, never a placeholder or error text."""
     captured = {}
 
-    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+    def _fake_via_tools(**kwargs: object) -> mc.LLMArticleFields:
         captured.update(kwargs)
-        return mc.MistralArticleFields(title="t", summary="s", body="b")
+        return mc.LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
-    mc.compose_scrape_article_mistral(
+    mc.compose_scrape_article(
         service_name="Tinyman",
         source_url="https://tinyman.org/",
         page_title="tinyman",
@@ -239,26 +239,26 @@ def test_model_tier_split_large_writes_small_does_mechanics() -> None:
         MISTRAL_MODEL_TRANSLATE,
         MISTRAL_MODEL_WRITER,
     )
-    from app.modules.ai.mistral_client import (
-        get_mistral_digest_client,
-        get_mistral_research_client,
+    from app.modules.ai.llm_purpose_router import (
+        get_llm_digest_client,
+        get_llm_research_client,
     )
 
     assert "small" in MISTRAL_MODEL_RESEARCH
     assert "small" in MISTRAL_MODEL_TRANSLATE
     assert "large" in MISTRAL_MODEL_WRITER
     assert "large" in MISTRAL_MODEL_DIGEST
-    assert get_mistral_research_client()._model == MISTRAL_MODEL_RESEARCH
-    assert get_mistral_digest_client()._model == MISTRAL_MODEL_DIGEST
+    assert get_llm_research_client()._model == MISTRAL_MODEL_RESEARCH
+    assert get_llm_digest_client()._model == MISTRAL_MODEL_DIGEST
 
 
 def test_special_edition_scales_the_research_client_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Root-caused 2026-08-04 (Humanitarian Network recompose): a special edition's research chat_with_tools loop resends the whole accumulated trace every round, and by round 16 / 49 tool calls a single round exceeded the plain MISTRAL_TIMEOUT_SECONDS on 5 straight attempts, losing a 21-minute compose. is_special_edition=True must build the research client with MISTRAL_TIMEOUT_SECONDS * MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER; a standard compose keeps the client's own default (timeout=None passed through)."""
-    monkeypatch.setattr("app.core.config.MISTRAL_TIMEOUT_SECONDS", 120, raising=False)
+    monkeypatch.setattr("app.core.config.LLM_TIMEOUT_SECONDS", 120, raising=False)
     monkeypatch.setattr(
-        "app.core.config.MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER", 2, raising=False
+        "app.core.config.LLM_TIMEOUT_SPECIAL_EDITION_MULTIPLIER", 2, raising=False
     )
     monkeypatch.setattr("app.core.config.RESEARCH_FLOOR_ENABLED", False, raising=False)
     monkeypatch.setattr("app.core.config.WRITER_REVIEW_ENABLED", False, raising=False)
@@ -284,7 +284,7 @@ def test_special_edition_scales_the_research_client_timeout(
 
     writer = _FakeClient("writer", "mistral-medium-latest")
 
-    monkeypatch.setattr(mc, "get_mistral_research_client", _fake_get_research_client)
+    monkeypatch.setattr(mc, "get_llm_research_client", _fake_get_research_client)
     monkeypatch.setattr(mc, "_format_research_digest", lambda _t: "")
     monkeypatch.setattr(
         "app.modules.ai.writer_tools.all_tools",
@@ -300,13 +300,13 @@ def test_special_edition_scales_the_research_client_timeout(
     )
 
     mc._compose_via_writer_tools(
-        system="sys", user="user prompt", source_url="https://example.com/", mistral=writer
+        system="sys", user="user prompt", source_url="https://example.com/", llm=writer
     )
     mc._compose_via_writer_tools(
         system="sys",
         user="user prompt",
         source_url="https://example.com/2",
-        mistral=writer,
+        llm=writer,
         is_special_edition=True,
     )
 
@@ -337,8 +337,8 @@ def test_two_stage_compose_routes_research_to_small_tier(monkeypatch: pytest.Mon
     writer = _FakeClient("writer", "mistral-medium-latest")
     research = _FakeClient("research", "mistral-small-latest")
 
-    monkeypatch.setattr(mc, "get_mistral_research_client", lambda **_kw: research)
-    monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: research)
+    monkeypatch.setattr(mc, "get_llm_research_client", lambda **_kw: research)
+    monkeypatch.setattr(mc, "get_llm_digest_client", lambda: research)
     monkeypatch.setattr("app.core.config.WRITER_TOOLS_ENABLED", True, raising=False)
     monkeypatch.setattr("app.core.config.WRITER_TWO_STAGE", True, raising=False)
     monkeypatch.setattr("app.core.config.RESEARCH_FLOOR_ENABLED", False, raising=False)
@@ -362,7 +362,7 @@ def test_two_stage_compose_routes_research_to_small_tier(monkeypatch: pytest.Mon
         system="sys",
         user="user prompt",
         source_url="https://example.com/",
-        mistral=writer,
+        llm=writer,
     )
 
     assert ("tools", "research") in calls
@@ -403,8 +403,8 @@ def test_digest_gap_triggers_one_bounded_research_pass(monkeypatch: pytest.Monke
     writer = _FakeClient("writer", "mistral-medium-latest")
     research = _FakeClient("research", "mistral-small-latest")
 
-    monkeypatch.setattr(mc, "get_mistral_research_client", lambda **_kw: research)
-    monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: research)
+    monkeypatch.setattr(mc, "get_llm_research_client", lambda **_kw: research)
+    monkeypatch.setattr(mc, "get_llm_digest_client", lambda: research)
     monkeypatch.setattr("app.core.config.WRITER_TOOLS_ENABLED", True, raising=False)
     monkeypatch.setattr("app.core.config.WRITER_TWO_STAGE", True, raising=False)
     monkeypatch.setattr("app.core.config.RESEARCH_FLOOR_ENABLED", False, raising=False)
@@ -429,7 +429,7 @@ def test_digest_gap_triggers_one_bounded_research_pass(monkeypatch: pytest.Monke
         system="sys",
         user="user prompt",
         source_url="https://example.com/",
-        mistral=writer,
+        llm=writer,
     )
 
     tool_calls = [c for c in calls if c[0] == "tools"]
@@ -466,8 +466,8 @@ def test_digest_with_no_gaps_skips_extra_research_pass(monkeypatch: pytest.Monke
     writer = _FakeClient("writer")
     research = _FakeClient("research")
 
-    monkeypatch.setattr(mc, "get_mistral_research_client", lambda **_kw: research)
-    monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: research)
+    monkeypatch.setattr(mc, "get_llm_research_client", lambda **_kw: research)
+    monkeypatch.setattr(mc, "get_llm_digest_client", lambda: research)
     monkeypatch.setattr("app.core.config.WRITER_TOOLS_ENABLED", True, raising=False)
     monkeypatch.setattr("app.core.config.WRITER_TWO_STAGE", True, raising=False)
     monkeypatch.setattr("app.core.config.RESEARCH_FLOOR_ENABLED", False, raising=False)
@@ -491,7 +491,7 @@ def test_digest_with_no_gaps_skips_extra_research_pass(monkeypatch: pytest.Monke
         system="sys",
         user="user prompt",
         source_url="https://example.com/",
-        mistral=writer,
+        llm=writer,
     )
 
     assert len([c for c in calls if c[0] == "tools"]) == 1

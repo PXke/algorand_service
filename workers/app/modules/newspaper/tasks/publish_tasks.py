@@ -816,12 +816,9 @@ def _compose_or_error(
     enrichment_block: str,
     first_coverage: bool,
 ) -> tuple[ArticleComposeResult | None, dict[str, str] | None]:
-    """Compose the article via Mistral. Returns (composed_result, None) on success, or (None, error_response) on a busy-lock, writer-spike, or Mistral failure."""
-    from app.modules.ai.mistral_client import (
-        MistralCreditError,
-        MistralError,
-        PeakHoursBlockedError,
-    )
+    """Compose the article via the writer LLM. Returns (composed_result, None) on success, or (None, error_response) on a busy-lock, writer-spike, or LLM failure."""
+    from app.modules.ai.llm_provider import LLMCreditError, LLMError
+    from app.modules.ai.llm_purpose_router import PeakHoursBlockedError
     from app.modules.ai.story_spike import StorySpikedError
 
     prior_coverage_block = ""
@@ -872,14 +869,14 @@ def _compose_or_error(
             "service_id": row.service_id,
             "reason": f"{spike.category}: {spike.reason}",
         }
-    except MistralError as exc:
+    except LLMError as exc:
         if isinstance(exc, PeakHoursBlockedError):
             logger.info("compose deferred for %s (%s): %s", row.service_id, row.scrape_url, exc)
             return None, {"status": "skipped_peak_hours", "detail": str(exc)[:200]}
-        credit_issue = isinstance(exc, MistralCreditError)
+        credit_issue = isinstance(exc, LLMCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
         logger.error(
-            "Mistral compose failed for %s (%s): %s",
+            "LLM compose failed for %s (%s): %s",
             row.service_id,
             row.scrape_url,
             exc,
@@ -1545,7 +1542,7 @@ def publish_from_queued_row(
 
 
 def _stamp_service_recompose_cooldown(service_id: str, *, ok: bool) -> None:
-    """Stamp the SAME re-scrape cooldown run_mistral_diff_check's own loop checks (scrape_throttled/mark_scraped, SERVICE_RESCRAPE_DAYS) -- for ANY compose attempt on this service, not just ones the beat itself triggered.
+    """Stamp the SAME re-scrape cooldown run_llm_diff_check's own loop checks (scrape_throttled/mark_scraped, SERVICE_RESCRAPE_DAYS) -- for ANY compose attempt on this service, not just ones the beat itself triggered.
 
     Without this, an admin "Recompose now" (which deliberately bypasses the
     pacing CHECK, by design) never stamped the cooldown either, so the beat
@@ -2017,12 +2014,9 @@ def _recompose_via_writer(
     kind: str | None,
     old_article_id: str,
 ) -> tuple[ArticleComposeResult | None, dict[str, str] | None]:
-    """Compose a fresh proposal for a recompose. Returns (composed, None) on success, or (None, error_response) on a busy-lock, writer-spike, or Mistral failure — restoring/re-enqueuing the review on failure so it isn't lost."""
-    from app.modules.ai.mistral_client import (
-        MistralCreditError,
-        MistralError,
-        PeakHoursBlockedError,
-    )
+    """Compose a fresh proposal for a recompose. Returns (composed, None) on success, or (None, error_response) on a busy-lock, writer-spike, or LLM failure — restoring/re-enqueuing the review on failure so it isn't lost."""
+    from app.modules.ai.llm_provider import LLMCreditError, LLMError
+    from app.modules.ai.llm_purpose_router import PeakHoursBlockedError
     from app.modules.ai.story_spike import StorySpikedError
     from app.modules.crawler.classifier_review_store import enqueue_classifier_review
 
@@ -2067,9 +2061,9 @@ def _recompose_via_writer(
             "status": "aborted_by_writer",
             "reason": f"{spike.category}: {spike.reason}",
         }
-    except MistralError as exc:
+    except LLMError as exc:
         peak_hours = isinstance(exc, PeakHoursBlockedError)
-        credit_issue = isinstance(exc, MistralCreditError)
+        credit_issue = isinstance(exc, LLMCreditError)
         status = (
             "skipped_peak_hours"
             if peak_hours
@@ -2079,7 +2073,7 @@ def _recompose_via_writer(
             logger.info("recompose of review %s (%s) deferred: %s", review_id, url, exc)
         else:
             logger.error(
-                "Mistral recompose failed for review %s (%s): %s",
+                "LLM recompose failed for review %s (%s): %s",
                 review_id,
                 url,
                 exc,
@@ -2315,7 +2309,7 @@ def translate_article_task(
     """
     import json
 
-    from app.modules.ai.mistral_compose import translate_article_mistral
+    from app.modules.ai.llm_compose import translate_article
     from app.modules.newspaper.article_store import get_article, update_article_translations
 
     try:
@@ -2325,7 +2319,7 @@ def translate_article_task(
         if lang in (article.translations or {}):
             return {"status": "skipped", "reason": "already_translated", "lang": lang}
 
-        translated = translate_article_mistral(
+        translated = translate_article(
             english_title=article.title or "",
             english_summary=article.summary or "",
             english_body=article.body or "",
@@ -2363,7 +2357,7 @@ def translate_glossary_term_task(slug: str, lang: str) -> dict[str, str]:
 
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import GlossaryStmts
-    from app.modules.newspaper.glossary_translate import translate_glossary_term_mistral
+    from app.modules.newspaper.glossary_translate import translate_glossary_term
 
     try:
         session = get_cassandra_session()
@@ -2374,7 +2368,7 @@ def translate_glossary_term_task(slug: str, lang: str) -> dict[str, str]:
         if lang in existing:
             return {"status": "skipped", "reason": "already_translated", "lang": lang}
 
-        translated = translate_glossary_term_mistral(
+        translated = translate_glossary_term(
             term=row.term or "",
             definition=row.definition or "",
             target_language=lang,
@@ -2392,13 +2386,13 @@ def _translate_one_lang_via_deepseek(
 ) -> dict[str, str]:
     """One language's translation via DeepSeek instead of the local CPU engines -- see DEEPSEEK_TRANSLATE_LANGS for why some languages route here."""
     from app.core.config import DEEPSEEK_API_BASE, DEEPSEEK_API_KEY, DEEPSEEK_MODEL_TRANSLATE
+    from app.modules.ai.llm_compose import translate_article
     from app.modules.ai.llm_openai_compatible import DeepSeekProvider
-    from app.modules.ai.mistral_compose import translate_article_mistral
 
     client = DeepSeekProvider(
         api_key=DEEPSEEK_API_KEY, api_base=DEEPSEEK_API_BASE, model=DEEPSEEK_MODEL_TRANSLATE
     )
-    return translate_article_mistral(
+    return translate_article(
         english_title=english_title,
         english_summary=english_summary,
         english_body=english_body,
@@ -2654,12 +2648,9 @@ def _recompose_published_compose(
     page_title: str,
     brief_for_recompose: EditorialBrief | None,
 ) -> tuple[ArticleComposeResult | None, dict[str, str] | None]:
-    """Compose the archive-refresh draft. Recomposes from the ORIGINAL INPUT (the brief body, when this article came from an editorial brief) rather than the prior article's own OUTPUT — handing the writer its own previous body as "source material" just re-launders whatever was in it, including a wrong premise (Pera Wallet incident 2026-07-20: two recomposes kept declaring Pera defunct because the prior draft said so, never re-checking). Returns (composed, None) on success, or (None, error_response) on a writer spike or Mistral failure; raises via self.retry on a busy compose lock."""
-    from app.modules.ai.mistral_client import (
-        MistralCreditError,
-        MistralError,
-        PeakHoursBlockedError,
-    )
+    """Compose the archive-refresh draft. Recomposes from the ORIGINAL INPUT (the brief body, when this article came from an editorial brief) rather than the prior article's own OUTPUT — handing the writer its own previous body as "source material" just re-launders whatever was in it, including a wrong premise (Pera Wallet incident 2026-07-20: two recomposes kept declaring Pera defunct because the prior draft said so, never re-checking). Returns (composed, None) on success, or (None, error_response) on a writer spike or LLM failure; raises via self.retry on a busy compose lock."""
+    from app.modules.ai.llm_provider import LLMCreditError, LLMError
+    from app.modules.ai.llm_purpose_router import PeakHoursBlockedError
     from app.modules.ai.story_spike import StorySpikedError
 
     try:
@@ -2726,11 +2717,11 @@ def _recompose_published_compose(
             "status": "aborted_by_writer",
             "reason": f"{spike.category}: {spike.reason}",
         }
-    except MistralError as exc:
+    except LLMError as exc:
         if isinstance(exc, PeakHoursBlockedError):
             logger.info("recompose_published deferred for %s: %s", article_id, exc)
             return None, {"status": "skipped_peak_hours", "detail": str(exc)[:200]}
-        credit_issue = isinstance(exc, MistralCreditError)
+        credit_issue = isinstance(exc, LLMCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
         logger.error("recompose_published failed for %s: %s", article_id, exc, exc_info=True)
         return None, {"status": status, "detail": str(exc)[:200]}

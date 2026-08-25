@@ -1,8 +1,8 @@
 """Abstract interface every LLM provider backing the writer/research loop must implement.
 
-Mirrors MistralClient's existing public surface exactly (chat_completion,
+Mirrors MistralProvider's existing public surface exactly (chat_completion,
 chat_json_object, chat_with_tools, usage_totals, .model, .provider) so
-mistral_compose.py's orchestration can depend on this interface alone rather
+llm_compose.py's orchestration can depend on this interface alone rather
 than a concrete client -- any provider (Mistral, DeepSeek, OpenAI, Kimi, GLM,
 Gemini, ...) that implements it is a legal, interchangeable research/writer
 client. Loaded by name through llm_registry.get_provider(), not constructed

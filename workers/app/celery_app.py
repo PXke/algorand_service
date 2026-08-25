@@ -111,7 +111,15 @@ def _build_beat_schedule() -> dict:
             hour=int(os.getenv("CLASSIFIER_RETRAIN_CRON_HOUR", "3")),
         ),
     }
-    schedule["mistral-diff-publish"] = {
+    schedule["llm-diff-publish"] = {
+        # NOTE: this registered task name is deliberately NOT renamed to
+        # match check_and_publish_llm_on_diff's new Python name below --
+        # backend/app/modules/admin/api/routes.py's admin_compose_next()
+        # triggers this exact task by string via a cross-service
+        # `Celery(...).send_task("app.tasks.newspaper.check_and_publish_
+        # mistral_on_diff", ...)` call. Renaming the wire-level task name
+        # here without updating backend (out of scope for this pass) would
+        # silently break that admin "compose next" button in prod.
         "task": "app.tasks.newspaper.check_and_publish_mistral_on_diff",
         "schedule": float(os.getenv("MISTRAL_DIFF_POLL_SECONDS", "600")),
     }

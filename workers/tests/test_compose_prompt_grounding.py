@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import app.modules.ai.mistral_compose as mc
+import app.modules.ai.llm_compose as mc
 
 
 def test_tools_guidance_has_cross_product_and_gap_rules() -> None:
@@ -61,12 +61,12 @@ def test_stakes_rule_allows_algorand_expert_knowledge(monkeypatch: pytest.Monkey
     """Thin sources must not block layer-1 explanation — use protocol expertise, not invented partnerships or quotes."""
     captured = {}
 
-    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+    def _fake_via_tools(**kwargs: object) -> mc.LLMArticleFields:
         captured.update(kwargs)
-        return mc.MistralArticleFields(title="t", summary="s", body="b")
+        return mc.LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
-    mc.compose_scrape_article_mistral(
+    mc.compose_scrape_article(
         service_name="Example",
         source_url="https://example.com/",
         page_title="example",
@@ -87,12 +87,12 @@ def test_first_coverage_allows_honest_doc_gaps(monkeypatch: pytest.MonkeyPatch) 
     """First-coverage introductions must be told to report missing docs as missing, not reconstruct the product's mechanics."""
     captured = {}
 
-    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+    def _fake_via_tools(**kwargs: object) -> mc.LLMArticleFields:
         captured.update(kwargs)
-        return mc.MistralArticleFields(title="t", summary="s", body="b")
+        return mc.LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
-    mc.compose_scrape_article_mistral(
+    mc.compose_scrape_article(
         service_name="Example",
         source_url="https://example.com/",
         page_title="example",
@@ -112,12 +112,12 @@ def test_writer_prompt_bans_pr_fluff_and_narrative_bullets(monkeypatch: pytest.M
     """The system prompt bans marketing-speak, bulleted narrative sections, and unsafe JSON formatting."""
     captured = {}
 
-    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+    def _fake_via_tools(**kwargs: object) -> mc.LLMArticleFields:
         captured.update(kwargs)
-        return mc.MistralArticleFields(title="t", summary="s", body="b")
+        return mc.LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
-    mc.compose_scrape_article_mistral(
+    mc.compose_scrape_article(
         service_name="Example",
         source_url="https://example.com/",
         page_title="example",
@@ -264,7 +264,7 @@ def test_stage2_special_edition_override_survives_the_no_digest_branch() -> None
 
 def test_stage2_extras_under_budget_are_not_touched(monkeypatch: pytest.MonkeyPatch) -> None:
     """A normal-sized digest+extras well under the cap passes through unchanged."""
-    monkeypatch.setattr("app.core.config.MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 1000)
+    monkeypatch.setattr("app.core.config.LLM_STAGE2_EXTRAS_MAX_CHARS", 1000)
     digest = "## Verified Facts\n- fact"
     user = mc._build_stage2_user(
         user="base", digest=digest, is_special_edition=True, enumeration="## Named Entities\n- x"
@@ -278,7 +278,7 @@ def test_stage2_oversized_extras_get_truncated_not_sent_whole(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A digest+enumeration/outline combo that exceeds the cap is trimmed instead of sent whole -- root-caused live 2026-08-07: an uncapped special-edition Stage-2 prompt grew large enough that the write call came back with an empty completion on both the original attempt and its own built-in corrective retry, losing the whole compose."""
-    monkeypatch.setattr("app.core.config.MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 100)
+    monkeypatch.setattr("app.core.config.LLM_STAGE2_EXTRAS_MAX_CHARS", 100)
     digest = "F" * 80
     enumeration = "E" * 80
     user = mc._build_stage2_user(
@@ -293,7 +293,7 @@ def test_stage2_extras_trims_enumeration_before_touching_the_digest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """extra_blocks (enumeration/outline) is the first thing trimmed -- it's additive detail on top of an intact digest, so a special edition that must shed content loses the least essential part first."""
-    monkeypatch.setattr("app.core.config.MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 100)
+    monkeypatch.setattr("app.core.config.LLM_STAGE2_EXTRAS_MAX_CHARS", 100)
     digest = "D" * 50
     extra_blocks = "X" * 200
     trimmed_digest, trimmed_extras = mc._cap_stage2_extras(digest, extra_blocks)

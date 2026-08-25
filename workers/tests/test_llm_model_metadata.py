@@ -1,12 +1,12 @@
-"""Live model metadata (context length, reasoning_effort support) from Mistral's own GET /v1/models, root-caused 2026-07-15: a hardcoded comment ("mistral-small ~128k") went stale when Mistral silently upgraded the "-latest" aliases to 262144 without changing the model name, and every Large-tier request was paying for two API calls (send reasoning_effort, get rejected, retry without it) because nothing checked the model's actual advertised capabilities.
+"""Live model metadata (context length, reasoning_effort support) from a provider's own GET /v1/models, root-caused 2026-07-15: a hardcoded comment ("mistral-small ~128k") went stale when Mistral silently upgraded the "-latest" aliases to 262144 without changing the model name, and every Large-tier request was paying for two API calls (send reasoning_effort, get rejected, retry without it) because nothing checked the model's actual advertised capabilities.
 
 conftest.py's autouse _no_live_mistral_model_metadata fixture blanks
 _fetch_model_metadata to {} for every other test in the suite — these tests
 import the REAL function before that patch applies, so they can still
-exercise its actual behavior directly. The real implementation lives in
-llm_openai_compatible.py (2026-08-15 rename) -- mc (mistral_client) is kept
-around only for MistralClient itself, since that's still the name every
-production caller and most other tests construct it under.
+exercise its actual behavior directly. The implementation lives in
+llm_openai_compatible.py; these tests exercise it against Mistral-shaped
+model ids/URLs since that's the provider the mechanism was root-caused on,
+but the function itself is shared by every OpenAI-compatible provider.
 """
 
 from __future__ import annotations
@@ -18,12 +18,11 @@ import httpx
 import pytest
 
 import app.modules.ai.llm_openai_compatible as loc
-import app.modules.ai.mistral_client as mc
+from app.modules.ai.llm_openai_compatible import (
+    MistralProvider,
+)
 from app.modules.ai.llm_openai_compatible import (
     _fetch_model_metadata as _real_fetch_model_metadata,
-)
-from app.modules.ai.mistral_client import (
-    MistralClient,
 )
 
 
@@ -56,9 +55,9 @@ class _FakeModelsClient:
 
 @pytest.fixture(autouse=True)
 def _clear_cache() -> Iterator[None]:
-    mc._model_metadata_cache.clear()
+    loc._model_metadata_cache.clear()
     yield
-    mc._model_metadata_cache.clear()
+    loc._model_metadata_cache.clear()
 
 
 def test_fetch_model_metadata_extracts_context_length_and_reasoning(
@@ -79,7 +78,7 @@ def test_fetch_model_metadata_extracts_context_length_and_reasoning(
             },
         ]
     }
-    monkeypatch.setattr(mc.httpx, "Client", lambda **_kw: _FakeModelsClient(payload))
+    monkeypatch.setattr(loc.httpx, "Client", lambda **_kw: _FakeModelsClient(payload))
 
     large = _real_fetch_model_metadata(
         api_base="https://api.mistral.ai/v1", api_key="k", model="mistral-large-latest"
@@ -110,7 +109,7 @@ def test_fetch_model_metadata_caches_per_model(monkeypatch: pytest.MonkeyPatch) 
             }
         ]
     }
-    monkeypatch.setattr(mc.httpx, "Client", lambda **_kw: _CountingClient(payload))
+    monkeypatch.setattr(loc.httpx, "Client", lambda **_kw: _CountingClient(payload))
 
     for _ in range(3):
         _real_fetch_model_metadata(
@@ -128,7 +127,7 @@ def test_fetch_model_metadata_returns_empty_on_network_failure(
     def _boom(**_kw: object) -> Never:
         raise httpx.ConnectError("no network")
 
-    monkeypatch.setattr(mc.httpx, "Client", _boom)
+    monkeypatch.setattr(loc.httpx, "Client", _boom)
 
     result = _real_fetch_model_metadata(
         api_base="https://api.mistral.ai/v1", api_key="k", model="mistral-large-latest"
@@ -138,7 +137,7 @@ def test_fetch_model_metadata_returns_empty_on_network_failure(
 
 
 def test_fetch_model_metadata_failure_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A transient failure must not poison the cache forever — the next MistralClient constructed (e.g. after the network recovers) should get a real answer, not a permanently-cached {}."""
+    """A transient failure must not poison the cache forever — the next MistralProvider constructed (e.g. after the network recovers) should get a real answer, not a permanently-cached {}."""
     attempt = {"n": 0}
 
     def _flaky(**_kw: object) -> _FakeModelsClient:
@@ -156,7 +155,7 @@ def test_fetch_model_metadata_failure_is_not_cached(monkeypatch: pytest.MonkeyPa
         }
         return _FakeModelsClient(payload)
 
-    monkeypatch.setattr(mc.httpx, "Client", _flaky)
+    monkeypatch.setattr(loc.httpx, "Client", _flaky)
 
     first = _real_fetch_model_metadata(
         api_base="https://api.mistral.ai/v1", api_key="k", model="mistral-large-latest"
@@ -179,7 +178,7 @@ def test_client_seeds_reasoning_unsupported_from_live_metadata(
         lambda **_kw: {"max_context_length": 262144, "reasoning": False},
     )
 
-    client = MistralClient(api_key="test-key", model="mistral-large-latest")
+    client = MistralProvider(api_key="test-key", model="mistral-large-latest")
 
     assert client._reasoning_effort_unsupported is True
 
@@ -194,7 +193,7 @@ def test_client_keeps_reasoning_supported_when_metadata_says_so(
         lambda **_kw: {"max_context_length": 262144, "reasoning": True},
     )
 
-    client = MistralClient(api_key="test-key", model="mistral-small-latest")
+    client = MistralProvider(api_key="test-key", model="mistral-small-latest")
 
     assert client._reasoning_effort_unsupported is False
 
@@ -207,6 +206,6 @@ def test_client_defaults_to_reasoning_supported_when_metadata_fetch_fails(
     # actual fallback semantics explicitly rather than relying on it.
     monkeypatch.setattr(loc, "_fetch_model_metadata", lambda **_kw: {})
 
-    client = MistralClient(api_key="test-key", model="mistral-large-latest")
+    client = MistralProvider(api_key="test-key", model="mistral-large-latest")
 
     assert client._reasoning_effort_unsupported is False  # unknown -> assume supported

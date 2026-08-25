@@ -9,11 +9,11 @@ quirk hooks (`_reasoning_payload_extra`, `_effective_max_tokens`,
 reimplementing retry/backoff, the credit-exhaustion breaker, context-window
 trimming, and the agentic tool-calling round loop once per provider,
 `OpenAICompatibleProvider` is that one shared implementation (physically
-relocated here 2026-08-15 from mistral_client.py, part of the mistral_* ->
-llm_* rename -- see mistral_client.py's own docstring for the thin backward-
-compat shim kept there so none of the 30+ existing importers needed to
-change) and each provider below is a ~20-line subclass supplying its own
-config-sourced defaults. Each subclass still independently implements
+relocated here 2026-08-15 from the now-deleted mistral_client.py, part of the
+mistral_* -> llm_* rename -- its purpose-based routing moved on 2026-08-25 to
+llm_purpose_router.py) and each provider below is a ~20-line subclass
+supplying its own config-sourced defaults. Each subclass still independently
+implements
 LLMProvider (satisfies "each model gets its own class"), just via
 inheritance instead of duplication.
 
@@ -46,19 +46,19 @@ from app.core.config import (
     KIMI_API_KEY,
     KIMI_MAX_TOKENS,
     KIMI_MODEL_WRITER,
+    LLM_BACKOFF_BASE_SECONDS,
+    LLM_BACKOFF_MAX_SECONDS,
+    LLM_CONTEXT_SAFETY_TOKENS,
+    LLM_CONTEXT_TOKENS,
+    LLM_MAX_RETRIES,
+    LLM_MAX_TOKENS,
     LLM_MAX_TOOL_ROUNDS,
+    LLM_TIMEOUT_SECONDS,
+    LLM_TOOL_RESULT_MAX_CHARS,
     MISTRAL_API_BASE,
     MISTRAL_API_KEY,
-    MISTRAL_BACKOFF_BASE_SECONDS,
-    MISTRAL_BACKOFF_MAX_SECONDS,
-    MISTRAL_CONTEXT_SAFETY_TOKENS,
-    MISTRAL_CONTEXT_TOKENS,
-    MISTRAL_MAX_RETRIES,
-    MISTRAL_MAX_TOKENS,
     MISTRAL_MODEL,
     MISTRAL_REASONING_EFFORT,
-    MISTRAL_TIMEOUT_SECONDS,
-    MISTRAL_TOOL_RESULT_MAX_CHARS,
     OPENAI_API_BASE,
     OPENAI_API_KEY,
     OPENAI_MODEL_WRITER,
@@ -354,7 +354,7 @@ class OpenAICompatibleProvider(LLMProvider):
         self._api_key = api_key.strip()
         self._api_base = api_base.rstrip("/")
         self._model = model
-        self._timeout = float(timeout if timeout is not None else MISTRAL_TIMEOUT_SECONDS)
+        self._timeout = float(timeout if timeout is not None else LLM_TIMEOUT_SECONDS)
         self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
         self._metadata = (
             _fetch_model_metadata(
@@ -384,8 +384,8 @@ class OpenAICompatibleProvider(LLMProvider):
         return {}
 
     def _effective_max_tokens(self, requested: int | None) -> int:
-        """The max_tokens to actually send: `requested`, or MISTRAL_MAX_TOKENS when the caller didn't pass one. Subclasses whose provider spends real, sometimes-large token counts on reasoning out of this SAME budget (DeepSeek, Kimi) override this to floor it higher — see their own docstrings for the root-caused incidents that motivated it."""
-        return requested if requested is not None else MISTRAL_MAX_TOKENS
+        """The max_tokens to actually send: `requested`, or LLM_MAX_TOKENS when the caller didn't pass one. Subclasses whose provider spends real, sometimes-large token counts on reasoning out of this SAME budget (DeepSeek, Kimi) override this to floor it higher — see their own docstrings for the root-caused incidents that motivated it."""
+        return requested if requested is not None else LLM_MAX_TOKENS
 
     def _max_tokens_field_name(self) -> str:
         """Which request field carries the output-token cap. "max_tokens" for every provider this class has served historically (Mistral, DeepSeek, Kimi, GLM) -- confirmed live 2026-08-14 that OpenAI's GPT-5.6 family rejects that field outright ("Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead", 400 unsupported_parameter), so OpenAIProvider overrides this to "max_completion_tokens" instead of hardcoding a payload key here."""
@@ -421,12 +421,12 @@ class OpenAICompatibleProvider(LLMProvider):
             raise LLMError(
                 f"{self._provider} request failed after {attempt + 1} attempts: {exc}"
             ) from exc
-        wait = min(MISTRAL_BACKOFF_MAX_SECONDS, MISTRAL_BACKOFF_BASE_SECONDS * (2**attempt))
+        wait = min(LLM_BACKOFF_MAX_SECONDS, LLM_BACKOFF_BASE_SECONDS * (2**attempt))
         logger.warning(
             "%s network error (attempt %d/%d): %s; backing off %.1fs",
             self._provider,
             attempt + 1,
-            MISTRAL_MAX_RETRIES + 1,
+            LLM_MAX_RETRIES + 1,
             exc,
             wait,
         )
@@ -446,14 +446,14 @@ class OpenAICompatibleProvider(LLMProvider):
                 f"{resp.text[:300]}"
             )
         wait = _retry_after_seconds(resp) or min(
-            MISTRAL_BACKOFF_MAX_SECONDS, MISTRAL_BACKOFF_BASE_SECONDS * (2**attempt)
+            LLM_BACKOFF_MAX_SECONDS, LLM_BACKOFF_BASE_SECONDS * (2**attempt)
         )
         logger.warning(
             "%s %d (attempt %d/%d); backing off %.1fs",
             self._provider,
             resp.status_code,
             attempt + 1,
-            MISTRAL_MAX_RETRIES + 1,
+            LLM_MAX_RETRIES + 1,
             wait,
         )
         time.sleep(wait)
@@ -525,9 +525,9 @@ class OpenAICompatibleProvider(LLMProvider):
         # Retry transient failures, not just 429: server-side 5xx and network /
         # timeout errors are equally transient and were previously fatal on the
         # first try (e.g. a read timeout on the big two-stage revision call).
-        for attempt in range(MISTRAL_MAX_RETRIES + 1):
+        for attempt in range(LLM_MAX_RETRIES + 1):
             throttle_llm_call()
-            last_attempt = attempt >= MISTRAL_MAX_RETRIES
+            last_attempt = attempt >= LLM_MAX_RETRIES
             try:
                 with httpx.Client(timeout=self._timeout) as client:
                     resp = client.post(url, headers=headers, json=payload)
@@ -703,7 +703,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 _ensure_tool_call_ids(tcs)
                 # A tool-role message's own tool_call_id is a SEPARATE field
                 # on a SEPARATE message, set once at generation time
-                # (this module's _run_tool_call / mistral_compose's synthetic
+                # (this module's _run_tool_call / llm_compose's synthetic
                 # _debug_tool_turn) and never revisited by the backfill
                 # above, which only touches the assistant side. Root-caused
                 # 2026-08-15: a synthetic debug-transcript entry (the
@@ -876,7 +876,7 @@ class OpenAICompatibleProvider(LLMProvider):
             # Structure-preserving cap: trims only the biggest string field
             # (e.g. page text) so links/url/title still survive, unlike the
             # old blind json.dumps(result)[:4000].
-            "content": serialize_tool_result(result, MISTRAL_TOOL_RESULT_MAX_CHARS),
+            "content": serialize_tool_result(result, LLM_TOOL_RESULT_MAX_CHARS),
         }
         return message, satisfied_require_tool
 
@@ -1094,9 +1094,9 @@ class OpenAICompatibleProvider(LLMProvider):
         window = (
             context_tokens
             if context_tokens is not None
-            else (self._metadata.get("max_context_length") or MISTRAL_CONTEXT_TOKENS)
+            else (self._metadata.get("max_context_length") or LLM_CONTEXT_TOKENS)
         )
-        convo_budget = window - response_reserve - MISTRAL_CONTEXT_SAFETY_TOKENS
+        convo_budget = window - response_reserve - LLM_CONTEXT_SAFETY_TOKENS
         for round_idx in range(rounds):
             # Token-aware trim: keep tool results generous, but if many rounds have
             # accumulated and the conversation nears the context window, elide the
@@ -1262,7 +1262,7 @@ class DeepSeekProvider(OpenAICompatibleProvider):
 
     def _effective_max_tokens(self, requested: int | None) -> int:
         """Floor at DEEPSEEK_MAX_TOKENS -- not a replacement, a FLOOR. Several real callers pass a small EXPLICIT cap tuned for Mistral's assumption that max_tokens is pure answer content (e.g. the LLM quality rubric's max_tokens=800: a short JSON scorecard, no reasoning overhead expected). DeepSeek's thinking mode spends real, sometimes-large token counts on reasoning_content out of that SAME budget -- root-caused 2026-08-06: the rubric silently failed on every real DeepSeek session with a generic fallback score (2/5, boilerplate issues) because 800 tokens was entirely consumed by reasoning before any JSON could be written. Raising the cap costs nothing by itself (billing is on tokens actually used, not the ceiling) so there's no downside to flooring every DeepSeek call at the same generous ceiling as the article-write call."""
-        base = requested if requested is not None else MISTRAL_MAX_TOKENS
+        base = requested if requested is not None else LLM_MAX_TOKENS
         return max(base, DEEPSEEK_MAX_TOKENS)
 
 
@@ -1325,7 +1325,7 @@ class KimiProvider(OpenAICompatibleProvider):
 
     def _effective_max_tokens(self, requested: int | None) -> int:
         """Floor at KIMI_MAX_TOKENS -- confirmed live 2026-08-14 that a small budget (e.g. 10) comes back with EMPTY content because K3's mandatory reasoning consumes it first, same failure shape as the 2026-08-06 DeepSeek incident this exact pattern was built to prevent."""
-        base = requested if requested is not None else MISTRAL_MAX_TOKENS
+        base = requested if requested is not None else LLM_MAX_TOKENS
         return max(base, KIMI_MAX_TOKENS)
 
 

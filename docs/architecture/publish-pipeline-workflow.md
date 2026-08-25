@@ -9,7 +9,7 @@ before relying on them if this doc gets old.
 | Trigger | Where |
 |---|---|
 | Chain event (service txn seen) | `chain_tail/tasks/watch_blocks.py:66` → `publish_from_chain_event` (`publish_tasks.py:1065`) |
-| Crawler/diff discovery | `newspaper/mistral_diff_check.py:38` |
+| Crawler/diff discovery | `newspaper/llm_diff_check.py:36` |
 | Service-watch pollers (YouTube, forum, Bluesky, mail) | `scraper/tasks/{youtube,forum,bluesky}_poll_tasks.py`, `newspaper/tasks/mail_poll_tasks.py` — enqueue straight onto the publish queue, skipping the scrape step |
 | Manual recompose (admin) | `recompose_review` (`publish_tasks.py:1107`) |
 | Auto-refresh of a published article | `recompose_published` (`publish_tasks.py:1427`) |
@@ -53,9 +53,9 @@ flowchart TD
 ## Ordered steps (full compose path)
 
 1. **Compose** — `compose_scrape_article` (`publish_tasks.py:543`) → Mistral path
-   `compose_scrape_article_mistral` (`mistral_compose.py:1161`); the
+   `compose_scrape_article` (`llm_compose.py:2214`); the
    research → gap-fill → write → grade → revise loop is `_review_and_revise`
-   (`mistral_compose.py:629`).
+   (`llm_compose.py:617`).
 2. **Gate** — `gate_draft` (`gatekeeper/live.py`) is called from up to 5 sites
    in `publish_tasks.py` (lines ~196, 277, 728, 1295, 1586) depending on which
    path the draft takes. **`GATEKEEPER_ENFORCE` defaults off** — the
@@ -80,7 +80,7 @@ flowchart TD
    distribution doesn't consume translations). Fans out one fire-and-forget
    Celery task per language in `ARTICLE_TRANSLATION_LANGS` (`fa, ps, ar, ru,
    zh, hi, es, fr` — all 8 non-English UI locales) via `translate_article`
-   (`publish_tasks.py:1357` → `mistral_compose.py:1936`,
+   (`publish_tasks.py:1357` → `llm_compose.py:1936`,
    `MISTRAL_MODEL_TRANSLATE=mistral-small-latest`).
 
 ## Recompose behavior (published-article auto-refresh)

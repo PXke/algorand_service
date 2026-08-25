@@ -7,13 +7,16 @@ from dataclasses import dataclass
 
 from app.core import config
 from app.core.config import mistral_configured
-from app.modules.ai.mistral_client import MistralError, PeakHoursBlockedError
-from app.modules.ai.mistral_compose import (
-    compose_assignment_article_mistral,
-    compose_recap_from_transcript_mistral,
-    compose_scrape_article_mistral,
-    compose_weekly_digest_article_mistral,
+from app.modules.ai.llm_compose import (
+    compose_assignment_article,
+    compose_recap_from_transcript,
+    compose_weekly_digest_article,
 )
+from app.modules.ai.llm_compose import (
+    compose_scrape_article as _llm_compose_scrape_article,
+)
+from app.modules.ai.llm_provider import LLMError
+from app.modules.ai.llm_purpose_router import PeakHoursBlockedError
 from app.modules.newspaper.peak_hours import is_off_peak_now, next_off_peak_at
 from app.modules.newspaper.publish_policy import PublishKind, PublishTopic, trim_text_to_chars
 from app.modules.newspaper.weekly_digest import WeeklyDigestContext
@@ -35,8 +38,8 @@ class ArticleComposeResult:
     heuristic_grade: dict | None = None
     breaking_reason: str | None = None
     confirmed_alert: str | None = None
-    # Hard-divert signals from mistral_compose's post-hoc gates (chain_entity_gate,
-    # unsourced_specifics_gate) — MUST be forwarded from MistralArticleFields on
+    # Hard-divert signals from llm_compose's post-hoc gates (chain_entity_gate,
+    # unsourced_specifics_gate) — MUST be forwarded from LLMArticleFields on
     # every branch below. Silently dropping these makes publish_tasks.py's
     # getattr(composed, ..., default) fall back to the all-clear default, which
     # is exactly what happened 2026-07-17..07-20: both hard-diverts (MyAlgo
@@ -48,16 +51,16 @@ class ArticleComposeResult:
 
 
 def _require_mistral() -> None:
-    """No template fallback exists (owner decision 2026-07-14: a lesser, robotic article is worse than no article) — Mistral or nothing. Callers must handle the resulting MistralError as "no article this cycle"; see publish_from_queued_row/recompose_review/recompose_published for the established skip-cleanly pattern (all three already catch MistralError and return a {"status": ...} dict before any DB write happens)."""
+    """No template fallback exists (owner decision 2026-07-14: a lesser, robotic article is worse than no article) — Mistral or nothing. Callers must handle the resulting LLMError as "no article this cycle"; see publish_from_queued_row/recompose_review/recompose_published for the established skip-cleanly pattern (all three already catch LLMError and return a {"status": ...} dict before any DB write happens)."""
     if not mistral_configured():
-        raise MistralError("MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback")
+        raise LLMError("MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback")
 
 
 def _require_off_peak() -> None:
     """DeepSeek peak/off-peak billing (owner decision 2026-08-15): confine ALL compose, no exceptions (including breaking news), to off-peak hours -- checked here, the single shared funnel every one of the 9 real compose-triggering task paths (beat-scheduled AND on-demand) already goes through, for the exact reason AUTO_COMPOSE_PAUSED is checked at every entry point instead of each task's own schedule (see that flag's own docstring: a gate checked only at celery-beat entries missed an on-demand trigger path entirely, 2026-08-09).
 
-    Raises PeakHoursBlockedError (a MistralError subclass) so every existing
-    `except MistralError` call site catches this with zero changes there --
+    Raises PeakHoursBlockedError (an LLMError subclass) so every existing
+    `except LLMError` call site catches this with zero changes there --
     but each of those sites MUST check isinstance(exc, PeakHoursBlockedError)
     before logging/reporting, since this is an intentional, routine skip, not
     a real failure.
@@ -97,13 +100,13 @@ def compose_scrape_article(
     prior_coverage_block: str = "",
     is_special_edition: bool = False,
 ) -> ArticleComposeResult:
-    """Compose by publish kind (discovery vs update) via Mistral."""
+    """Compose by publish kind (discovery vs update) via the writer LLM."""
     del mistral_only  # see docstring above
     topic = publish_topic or PublishTopic.GENERIC
     _require_mistral()
     _require_off_peak()
 
-    # COMMUNITY_RECAP gets the full transcript via compose_recap_from_transcript_mistral
+    # COMMUNITY_RECAP gets the full transcript via compose_recap_from_transcript
     # below; every other topic previously dropped transcript_text entirely. Fold it into
     # page_text so the existing writer prompt (which already treats page_text as raw
     # source material) picks it up without a dispatch-logic rewrite.
@@ -114,7 +117,7 @@ def compose_scrape_article(
         )
 
     if topic == PublishTopic.EDITORIAL_ASSIGNMENT:
-        fields = compose_assignment_article_mistral(
+        fields = compose_assignment_article(
             brief_title=page_title,
             brief_body=page_text,
             keywords=keywords,
@@ -139,7 +142,7 @@ def compose_scrape_article(
         )
 
     if topic == PublishTopic.COMMUNITY_RECAP and transcript_text:
-        fields = compose_recap_from_transcript_mistral(
+        fields = compose_recap_from_transcript(
             service_name=service_name,
             source_url=source_url,
             page_title=page_title,
@@ -156,7 +159,7 @@ def compose_scrape_article(
             heuristic_grade=getattr(fields, "heuristic_grade", None),
         )
 
-    fields = compose_scrape_article_mistral(
+    fields = _llm_compose_scrape_article(
         service_name=service_name,
         source_url=source_url,
         page_title=page_title,
@@ -192,11 +195,11 @@ def compose_weekly_digest(
     *,
     mistral_only: bool = False,  # vestigial, see compose_scrape_article
 ) -> ArticleComposeResult:
-    """Weekly digest: CoinGecko snapshot + recent feed articles, via Mistral."""
+    """Weekly digest: CoinGecko snapshot + recent feed articles, via the digest-tier LLM."""
     del mistral_only  # see compose_scrape_article
     _require_mistral()
     _require_off_peak()
-    fields = compose_weekly_digest_article_mistral(context)
+    fields = compose_weekly_digest_article(context)
     body = trim_text_to_chars(fields.body, config.WEEKLY_DIGEST_MAX_BODY_CHARS)
     return ArticleComposeResult(
         title=fields.title,

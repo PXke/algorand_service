@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import app.modules.ai.mistral_compose as mc
+import app.modules.ai.llm_compose as mc
 import app.modules.newspaper.article_composer as ac
 from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
 
@@ -16,12 +16,12 @@ def test_special_edition_appends_depth_instructions(monkeypatch: pytest.MonkeyPa
     """is_special_edition=True appends the depth-instructions block to the user prompt."""
     captured = {}
 
-    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+    def _fake_via_tools(**kwargs: object) -> mc.LLMArticleFields:
         captured.update(kwargs)
-        return mc.MistralArticleFields(title="t", summary="s", body="b")
+        return mc.LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
-    mc.compose_assignment_article_mistral(
+    mc.compose_assignment_article(
         brief_title="State of Algorand DeFi",
         brief_body="Cover TVL trends, top protocols.",
         keywords="defi, tvl",
@@ -39,12 +39,12 @@ def test_standard_brief_has_no_depth_instructions(monkeypatch: pytest.MonkeyPatc
     """is_special_edition=False (the default) leaves the standard prompt untouched."""
     captured = {}
 
-    def _fake_via_tools(**kwargs: object) -> mc.MistralArticleFields:
+    def _fake_via_tools(**kwargs: object) -> mc.LLMArticleFields:
         captured.update(kwargs)
-        return mc.MistralArticleFields(title="t", summary="s", body="b")
+        return mc.LLMArticleFields(title="t", summary="s", body="b")
 
     monkeypatch.setattr(mc, "_compose_via_writer_tools", _fake_via_tools)
-    mc.compose_assignment_article_mistral(
+    mc.compose_assignment_article(
         brief_title="Wallet roundup",
         brief_body="Cover download links.",
         keywords="wallet",
@@ -81,8 +81,8 @@ def test_two_stage_compose_forwards_max_rounds_to_stage1(monkeypatch: pytest.Mon
             return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     mc._run_two_stage_compose(
-        research_mistral=_FakeResearchClient(),
-        mistral=_FakeWriteClient(),
+        research_llm=_FakeResearchClient(),
+        llm=_FakeWriteClient(),
         system="sys",
         user="usr",
         research_user=None,
@@ -133,8 +133,8 @@ def test_two_stage_compose_forwards_is_special_edition_to_review_and_revise(
             return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     mc._run_two_stage_compose(
-        research_mistral=_FakeResearchClient(),
-        mistral=_FakeWriteClient(),
+        research_llm=_FakeResearchClient(),
+        llm=_FakeWriteClient(),
         system="sys",
         user="usr",
         research_user=None,
@@ -153,8 +153,8 @@ def test_compose_scrape_article_tags_special_edition(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(ac, "mistral_configured", lambda: True)
     monkeypatch.setattr(
         ac,
-        "compose_assignment_article_mistral",
-        lambda **_kw: mc.MistralArticleFields(
+        "compose_assignment_article",
+        lambda **_kw: mc.LLMArticleFields(
             title="t", summary="s", body="b", tags=("defi", "tvl")
         ),
     )
@@ -177,7 +177,7 @@ def test_compose_scrape_article_tags_special_edition(monkeypatch: pytest.MonkeyP
 def test_run_entity_enumeration_empty_trace_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """No formatted trace means nothing to enumerate from -- returns "" without calling the digest client at all."""
     calls = []
-    monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: calls.append("called"))
+    monkeypatch.setattr(mc, "get_llm_digest_client", lambda: calls.append("called"))
     monkeypatch.setattr(mc, "_format_research_digest", lambda _t: "")
 
     result = mc._run_entity_enumeration(trace=[], digest="")
@@ -194,7 +194,7 @@ def test_run_entity_enumeration_returns_synthesized_text(monkeypatch: pytest.Mon
         def chat_completion(self, *_a: object, **_kw: object) -> str:
             return "  ## Entity Enumeration\n\n### People\n- Jane Doe  \n"
 
-    monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: _FakeDigestClient())
+    monkeypatch.setattr(mc, "get_llm_digest_client", lambda: _FakeDigestClient())
 
     result = mc._run_entity_enumeration(trace=[{"tool": "fetch_url"}], digest="digest text")
 
@@ -209,7 +209,7 @@ def test_run_entity_enumeration_swallows_client_failure(monkeypatch: pytest.Monk
         def chat_completion(self, *_a: object, **_kw: object) -> str:
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: _BrokenDigestClient())
+    monkeypatch.setattr(mc, "get_llm_digest_client", lambda: _BrokenDigestClient())
 
     result = mc._run_entity_enumeration(trace=[{"tool": "fetch_url"}], digest="digest text")
 
@@ -228,7 +228,7 @@ def test_run_narrative_outline_returns_synthesized_text(monkeypatch: pytest.Monk
         def chat_completion(self, *_a: object, **_kw: object) -> str:
             return "  ## Narrative Outline\n\n### Throughline\n- the piece is about X  \n"
 
-    monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: _FakeDigestClient())
+    monkeypatch.setattr(mc, "get_llm_digest_client", lambda: _FakeDigestClient())
 
     result = mc._run_narrative_outline(digest="digest text", enumeration="## Entity Enumeration")
 
@@ -242,7 +242,7 @@ def test_run_narrative_outline_swallows_client_failure(monkeypatch: pytest.Monke
         def chat_completion(self, *_a: object, **_kw: object) -> str:
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(mc, "get_mistral_digest_client", lambda: _BrokenDigestClient())
+    monkeypatch.setattr(mc, "get_llm_digest_client", lambda: _BrokenDigestClient())
 
     result = mc._run_narrative_outline(digest="digest text", enumeration="")
 
@@ -399,8 +399,8 @@ def test_two_stage_compose_runs_deepening_only_for_special_editions(
             return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     mc._run_two_stage_compose(
-        research_mistral=_FakeResearchClient(),
-        mistral=_FakeWriteClient(),
+        research_llm=_FakeResearchClient(),
+        llm=_FakeWriteClient(),
         system="sys",
         user="usr",
         research_user=None,
@@ -448,8 +448,8 @@ def test_two_stage_compose_skips_deepening_for_standard_articles(
             return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
 
     mc._run_two_stage_compose(
-        research_mistral=_FakeResearchClient(),
-        mistral=_FakeWriteClient(),
+        research_llm=_FakeResearchClient(),
+        llm=_FakeWriteClient(),
         system="sys",
         user="usr",
         research_user=None,
@@ -468,8 +468,8 @@ def test_compose_scrape_article_no_tag_for_standard_brief(monkeypatch: pytest.Mo
     monkeypatch.setattr(ac, "mistral_configured", lambda: True)
     monkeypatch.setattr(
         ac,
-        "compose_assignment_article_mistral",
-        lambda **_kw: mc.MistralArticleFields(title="t", summary="s", body="b", tags=("wallet",)),
+        "compose_assignment_article",
+        lambda **_kw: mc.LLMArticleFields(title="t", summary="s", body="b", tags=("wallet",)),
     )
     result = ac.compose_scrape_article(
         service_name="editorial",
