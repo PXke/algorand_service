@@ -12,19 +12,6 @@ export function looksLikeFaviconUrl(url: string): boolean {
   return /favicon|apple-touch-icon/.test(path)
 }
 
-export function looksLikeLogoUrl(url: string): boolean {
-  const path = (() => {
-    try {
-      return new URL(url).pathname.toLowerCase()
-    } catch {
-      return url.toLowerCase()
-    }
-  })()
-  if (looksLikeFaviconUrl(url)) return true
-  if (path.endsWith('.svg')) return true
-  return /\/icons?[/. _-]|[/. _-]icons?[._-]|logo|\/og(\/|$)|opengraph/.test(path)
-}
-
 /** An article's editorial art, proxied — or null when it has none.
  *
  * The one place that answers "what is this story's picture". There is no
