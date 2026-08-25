@@ -52,6 +52,16 @@
   let humanPicked = $state(false)
   let platformSlotsFilled = $state(0)
   let platformSlotsAvailable = $state(0)
+
+  // Platform-forecast picks pulled out of the ranked pool so they're
+  // immediately visible on their own, rather than needing to be spotted
+  // inline while scanning the (now potentially very long) full list.
+  let platformPicks: PreviewItem[] = $derived(
+    items.filter((item) => item.selected_lane === 'platform')
+  )
+  let otherItems: PreviewItem[] = $derived(
+    items.filter((item) => item.selected_lane !== 'platform')
+  )
   let pinningId = $state<string | null>(null)
   let pinError = $state<string | null>(null)
 
@@ -178,80 +188,103 @@
       {/if}
     </section>
 
-    <!-- Section 2: the ranked candidate pool a selection run draws from. -->
+    {#snippet artifactRow(item: PreviewItem)}
+      <div class="admin-panel artifact-row" class:selected={Boolean(item.selected_lane)}>
+        <div class="row-head">
+          {#if item.selected_lane}
+            <span class="lane-badge lane-{item.selected_lane}">{laneLabel(item.selected_lane)}</span>
+          {/if}
+          <strong class="display-name">{item.title || item.service_id || item.artifact_id}</strong>
+          <span class="priority admin-muted">priority {item.priority.toFixed(2)}</span>
+          {#if item.is_pinned_for_day}
+            <span class="pinned-badge" title="Pinned as the human pick for {day}">
+              pinned for {day}
+            </span>
+          {/if}
+        </div>
+        <p class="admin-muted small meta">
+          {[item.channel, item.service_id, item.url].filter(Boolean).join(' · ')}
+        </p>
+        <p class="admin-muted small">
+          created {formatTs(item.created_at)}
+          {#if item.event_date} · event {formatTs(item.event_date)}{/if}
+        </p>
+        <div class="breakdown-block">
+          <strong>Priority breakdown</strong>
+          <div class="breakdown-grid mono">
+            <span>word count</span><span>{item.priority_breakdown.word_count.toFixed(2)}</span>
+            <span>timeliness</span><span>{item.priority_breakdown.timeliness.toFixed(2)}</span>
+            <span>ecosystem listed</span><span
+              >{item.priority_breakdown.ecosystem_listed.toFixed(2)}</span
+            >
+          </div>
+        </div>
+        <div class="row-actions">
+          <button
+            class="btn compact"
+            type="button"
+            disabled={pinningId === item.artifact_id || item.is_pinned_for_day}
+            onclick={() => pinForTomorrow(item.artifact_id)}
+          >
+            {#if pinningId === item.artifact_id}
+              Pinning…
+            {:else if item.is_pinned_for_day}
+              Pinned ✓
+            {:else}
+              Pin for tomorrow
+            {/if}
+          </button>
+        </div>
+      </div>
+    {/snippet}
+
+    {#if pinError}
+      <p class="admin-err">{pinError}</p>
+    {/if}
+
+    <!-- Section 2a: platform picks pulled out on their own, isolated from
+         the full ranked pool below -- these are what would currently fill
+         the non-human platform slot(s) for {day}. -->
+    <section class="stack">
+      <div class="section-head">
+        <h3>Platform pick{platformPicks.length === 1 ? '' : 's'} for {day} ({platformPicks.length})</h3>
+      </div>
+      <p class="admin-muted small">
+        Forecast only, recomputed live — the top-priority artifact(s) that would currently fill
+        {platformSlotsAvailable} platform slot(s) ({platformSlotsFilled} filled) if selection ran right
+        now. {humanPicked ? 'A human pick is currently pinned.' : 'No human pick is pinned yet.'}
+      </p>
+      {#if platformPicks.length === 0}
+        <div class="admin-panel empty">
+          <strong>No platform pick yet</strong>
+          <p class="admin-muted">Nothing in the pool currently ranks high enough to fill a slot.</p>
+        </div>
+      {:else}
+        {#each platformPicks as item (item.artifact_id)}
+          {@render artifactRow(item)}
+        {/each}
+      {/if}
+    </section>
+
+    <!-- Section 2b: the full ranked candidate pool a selection run draws from. -->
     <section class="stack">
       <div class="section-head">
         <h3>Pending, ranked by priority</h3>
       </div>
       <p class="admin-muted small">
-        Forecast only, recomputed live — what a selection run would currently pick for {day}, not
-        what's actually been locked in above.
-        {humanPicked ? 'A human pick is currently pinned.' : 'No human pick is pinned yet.'}
-        {platformSlotsFilled} of {platformSlotsAvailable} platform slot(s) would currently be filled
-        by top-priority pending artifacts. Pin one below as tomorrow's human pick, or let the
-        top-ranked artifacts fill the remaining slots on their own.
+        Every other candidate in the pool, same forecast ranking as above — not what's actually
+        been locked in at the top of this page. Pin one as tomorrow's human pick, or let the
+        top-ranked artifacts fill the remaining platform slots on their own.
       </p>
 
-      {#if pinError}
-        <p class="admin-err">{pinError}</p>
-      {/if}
-
-      {#if items.length === 0}
+      {#if otherItems.length === 0}
         <div class="admin-panel empty">
-          <strong>No pending artifacts</strong>
-          <p class="admin-muted">Nothing is waiting in the artifact pool right now.</p>
+          <strong>No other pending artifacts</strong>
+          <p class="admin-muted">Nothing else is waiting in the artifact pool right now.</p>
         </div>
       {:else}
-        {#each items as item (item.artifact_id)}
-          <div class="admin-panel artifact-row" class:selected={Boolean(item.selected_lane)}>
-            <div class="row-head">
-              {#if item.selected_lane}
-                <span class="lane-badge lane-{item.selected_lane}"
-                  >{laneLabel(item.selected_lane)}</span
-                >
-              {/if}
-              <strong class="display-name">{item.title || item.service_id || item.artifact_id}</strong>
-              <span class="priority admin-muted">priority {item.priority.toFixed(2)}</span>
-              {#if item.is_pinned_for_day}
-                <span class="pinned-badge" title="Pinned as the human pick for {day}">
-                  pinned for {day}
-                </span>
-              {/if}
-            </div>
-            <p class="admin-muted small meta">
-              {[item.channel, item.service_id, item.url].filter(Boolean).join(' · ')}
-            </p>
-            <p class="admin-muted small">
-              created {formatTs(item.created_at)}
-              {#if item.event_date} · event {formatTs(item.event_date)}{/if}
-            </p>
-            <div class="breakdown-block">
-              <strong>Priority breakdown</strong>
-              <div class="breakdown-grid mono">
-                <span>word count</span><span>{item.priority_breakdown.word_count.toFixed(2)}</span>
-                <span>timeliness</span><span>{item.priority_breakdown.timeliness.toFixed(2)}</span>
-                <span>ecosystem listed</span><span
-                  >{item.priority_breakdown.ecosystem_listed.toFixed(2)}</span
-                >
-              </div>
-            </div>
-            <div class="row-actions">
-              <button
-                class="btn compact"
-                type="button"
-                disabled={pinningId === item.artifact_id || item.is_pinned_for_day}
-                onclick={() => pinForTomorrow(item.artifact_id)}
-              >
-                {#if pinningId === item.artifact_id}
-                  Pinning…
-                {:else if item.is_pinned_for_day}
-                  Pinned ✓
-                {:else}
-                  Pin for tomorrow
-                {/if}
-              </button>
-            </div>
-          </div>
+        {#each otherItems as item (item.artifact_id)}
+          {@render artifactRow(item)}
         {/each}
       {/if}
     </section>
