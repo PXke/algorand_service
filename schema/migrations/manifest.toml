@@ -693,3 +693,11 @@ file = "backend/schema/migrations/app/078_drop_gatekeeper_anchors.cql"
 tier = "prod"
 status = "active"
 description = "drop gatekeeper_anchors / gatekeeper_validation_report (migration 032): retires the LLM-annotator validation harness -- zero downstream consumers of trusted_types (confirmed via grep) and the anchor pool was never populated (0/40 tagged); owner call 2026-08-25 to trust the existing article_grader.py rubric instead; the deterministic pre-publish gate (gatekeeper/live.py) and grader support modules (fact_align.py/completeness.py/structure.py) are unaffected"
+
+[[migrations]]
+stream = "app"
+version = "079"
+file = "backend/schema/migrations/app/079_drop_publish_queue.cql"
+tier = "prod"
+status = "active"
+description = "drop publish_queue / publish_queue_pending / publish_queue_dedupe (migration 010): retires the 3-lane selection system replaced by artifacts/to_compose (migration 077, cut over 2026-08-25); publish_queue was kept dual-write for one deploy cycle as a rollback safety net, owner call one day later ('we don't need them in a closed feature') to drop it now -- priority values between the two systems are not comparable and do not need reconciling, artifacts is the live system going forward; the dual-write itself (enqueue_publish call sites, dual_write_queue_id metadata, _resolve_dual_written_queue_row) was removed from the compose pipeline in the same change that adds this migration"

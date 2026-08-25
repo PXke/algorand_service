@@ -1,19 +1,20 @@
 """Cassandra-backed store for the editorial-room `artifacts` table.
 
-This is the LIVE replacement for `publish_queue` as the compose/publish
-selection mechanism (cut over 2026-08-25 -- see
+This replaced `publish_queue` as the compose/publish selection mechanism
+(cut over 2026-08-25 -- see
 `app.modules.newspaper.tasks.queue_drain_tasks.drain_to_compose`).
-`publish_queue`/`publish_queue_store` stay live-fed too (a deliberate
-rollback-safety dual-write from ingest_signal.py/editorial_assignment.py),
-but nothing reads FROM publish_queue for selection/compose purposes anymore.
-This module mirrors that module's own shape closely on purpose:
+`publish_queue`/`publish_queue_pending`/`publish_queue_dedupe` were dropped
+a day later, once this path proved stable in prod (their one-deploy-cycle
+rollback-safety dual-write from ingest_signal.py/editorial_assignment.py was
+removed in the same change). This module mirrored that (now-gone) module's
+own shape closely on purpose, and still does structurally:
 
   - `artifacts` (thin, frequently scanned) + `artifacts_pending` (a
-    status-partitioned pending index) mirrors `publish_queue` +
+    status-partitioned pending index) mirrored `publish_queue` +
     `publish_queue_pending`.
   - `artifact_content` (raw diff/tweet/transcript/mail body, one row per
     artifact) mirrors the `articles` / `article_history` content split.
-  - The "at most one PENDING artifact per service_id" dedup mirrors
+  - The "at most one PENDING artifact per service_id" dedup mirrored
     `publish_queue_store.enqueue_publish`'s own scan-and-replace mechanism
     for the ROW: a new artifact for a service_id that already has a pending
     artifact deletes the old row (both from `artifacts` and its pending
@@ -459,7 +460,7 @@ def pin_artifact_for_day(artifact_id: str, day: str) -> bool:
 
 
 def clear_artifact_pin(artifact_id: str) -> None:
-    """Clear a spent (or superseded) human pin, mirroring publish_queue_store.clear_human_pick."""
+    """Clear a spent (or superseded) human pin."""
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArtifactStmts
 

@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -127,37 +124,29 @@ def _channel_for_brief(brief: EditorialBrief) -> str:
 
 
 def _insert_artifact_for_brief(
-    brief: EditorialBrief, *, scrape_url: str, payload: dict[str, Any], queue_id: str
-) -> str | None:
-    """Dual-write (see ingest_signal.py's own dual-write for the full reasoning): create/replace this brief's editorial-room artifact alongside its publish_queue row. Best-effort -- never blocks the (already-committed) enqueue above. Returns the new artifact_id, or None on failure."""
-    try:
-        from app.modules.newspaper.artifact_store import insert_artifact
+    brief: EditorialBrief, *, scrape_url: str, payload: dict[str, Any]
+) -> str:
+    """Create/replace this brief's editorial-room artifact -- the sole write for an editorial assignment (publish_queue's dual-write was dropped once the artifact path proved stable in prod). Left unguarded (no try/except): a failure here must propagate, not be silently swallowed. Returns the new artifact_id."""
+    from app.modules.newspaper.artifact_store import insert_artifact
 
-        artifact_id, _created = insert_artifact(
-            service_id=f"editorial-brief:{brief.brief_id}",
-            url=scrape_url,
-            channel=_channel_for_brief(brief),
-            content=brief.body_markdown,
-            title=brief.title,
-            metadata={
-                "display_name": brief.title,
-                "source_kind": "editorial_assignment",
-                "dual_write_queue_id": queue_id,
-                "payload": payload,
-            },
-        )
-        return artifact_id
-    except Exception:
-        logger.warning("insert_artifact failed for brief %s", brief.brief_id, exc_info=True)
-        return None
+    artifact_id, _created = insert_artifact(
+        service_id=f"editorial-brief:{brief.brief_id}",
+        url=scrape_url,
+        channel=_channel_for_brief(brief),
+        content=brief.body_markdown,
+        title=brief.title,
+        metadata={
+            "display_name": brief.title,
+            "source_kind": "editorial_assignment",
+            "payload": payload,
+        },
+    )
+    return artifact_id
 
 
 def assign_editorial_brief(brief_id: str) -> dict[str, Any]:
     """First-run: enqueue a brand-new article for this brief's topic. Relevance is forced to 1.0 — an editor already decided this is worth covering, so the content-relevance classifier shouldn't gate it (novelty/timeliness still apply normally: an editor-picked topic that duplicates something just published shouldn't rank artificially high)."""
     from app.core.config import WRITER_EDITORIAL_BRIEFS_ENABLED
-    from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
-    from app.modules.newspaper.publish_queue_store import enqueue_publish
-    from app.modules.newspaper.publish_score import compute_priority
 
     if not WRITER_EDITORIAL_BRIEFS_ENABLED:
         return {"status": "disabled", "brief_id": brief_id}
@@ -170,46 +159,21 @@ def assign_editorial_brief(brief_id: str) -> dict[str, Any]:
     payload = _build_assignment_payload(brief)
     payload["publish_mode"] = "create"
 
-    priority = compute_priority(
-        topic=PublishTopic.EDITORIAL_ASSIGNMENT,
-        publish_kind=PublishKind.EDITORIAL_ASSIGNMENT,
-        page_text=brief.body_markdown,
-        diff=None,
-        source_kind="editorial_assignment",
-        source_url=scrape_url,
-        page_title=brief.title,
-        relevance=1.0,
-    ).total
+    artifact_id = _insert_artifact_for_brief(brief, scrape_url=scrape_url, payload=payload)
+    # An assignment is a deliberate, one-off admin action — unlike the
+    # passive scrape/mail pipeline, it should compose right away rather
+    # than wait for the next compose-trigger beat. Targets THIS artifact
+    # specifically (compose_artifact_now bypasses pacing, same as the old
+    # drain_standard_publish_queue.delay() trigger it replaces) rather
+    # than a general drain, since the general to_compose selection only
+    # runs once a day and would otherwise leave this assignment waiting
+    # until tomorrow's slate.
+    from app.modules.newspaper.tasks.queue_drain_tasks import compose_artifact_now
 
-    queue_id, created = enqueue_publish(
-        service_id=f"editorial-brief:{brief.brief_id}",
-        display_name=brief.title,
-        scrape_url=scrape_url,
-        publish_kind=PublishKind.EDITORIAL_ASSIGNMENT,
-        topic=PublishTopic.EDITORIAL_ASSIGNMENT,
-        priority=priority,
-        dedupe_key=f"editorial-assignment:{brief.brief_id}:initial",
-        payload=payload,
-    )
-    artifact_id = _insert_artifact_for_brief(
-        brief, scrape_url=scrape_url, payload=payload, queue_id=queue_id
-    )
-    if created and artifact_id:
-        # An assignment is a deliberate, one-off admin action — unlike the
-        # passive scrape/mail pipeline, it should compose right away rather
-        # than wait for the next compose-trigger beat. Targets THIS artifact
-        # specifically (compose_artifact_now bypasses pacing, same as the old
-        # drain_standard_publish_queue.delay() trigger it replaces) rather
-        # than a general drain, since the general to_compose selection only
-        # runs once a day and would otherwise leave this assignment waiting
-        # until tomorrow's slate.
-        from app.modules.newspaper.tasks.queue_drain_tasks import compose_artifact_now
-
-        compose_artifact_now.delay(artifact_id)
+    compose_artifact_now.delay(artifact_id)
     return {
-        "status": "enqueued" if created else "duplicate",
+        "status": "enqueued",
         "brief_id": brief.brief_id,
-        "queue_id": queue_id,
         "artifact_id": artifact_id,
     }
 
@@ -227,52 +191,22 @@ def refresh_editorial_brief(brief_id: str) -> dict[str, Any]:
     if not brief.linked_article_id:
         return assign_editorial_brief(brief_id)
 
-    from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
-    from app.modules.newspaper.publish_queue_store import enqueue_publish
-    from app.modules.newspaper.publish_score import compute_priority
-
     scrape_url = f"editorial://brief/{brief.brief_id}"
     payload = _build_assignment_payload(brief)
     payload["publish_mode"] = "edit"
     payload["linked_article_id"] = brief.linked_article_id
 
-    priority = compute_priority(
-        topic=PublishTopic.EDITORIAL_ASSIGNMENT,
-        publish_kind=PublishKind.EDITORIAL_ASSIGNMENT,
-        page_text=brief.body_markdown,
-        diff=None,
-        source_kind="editorial_assignment",
-        source_url=scrape_url,
-        page_title=brief.title,
-        relevance=1.0,
-    ).total
-
-    run_marker = datetime.now(tz=UTC).date().isoformat()
-    queue_id, created = enqueue_publish(
-        service_id=f"editorial-brief:{brief.brief_id}",
-        display_name=brief.title,
-        scrape_url=scrape_url,
-        publish_kind=PublishKind.EDITORIAL_ASSIGNMENT,
-        topic=PublishTopic.EDITORIAL_ASSIGNMENT,
-        priority=priority,
-        dedupe_key=f"editorial-assignment:{brief.brief_id}:{run_marker}",
-        payload=payload,
-    )
-    artifact_id = _insert_artifact_for_brief(
-        brief, scrape_url=scrape_url, payload=payload, queue_id=queue_id
-    )
+    artifact_id = _insert_artifact_for_brief(brief, scrape_url=scrape_url, payload=payload)
     # Bump last_run_at at enqueue time (not compose completion) — a failed
     # compose just delays the next attempt by one cadence period, which is
     # simpler than threading a completion callback back through the drain.
     mark_brief_run(brief_id=brief.brief_id)
-    if created and artifact_id:
-        from app.modules.newspaper.tasks.queue_drain_tasks import compose_artifact_now
+    from app.modules.newspaper.tasks.queue_drain_tasks import compose_artifact_now
 
-        compose_artifact_now.delay(artifact_id)
+    compose_artifact_now.delay(artifact_id)
     return {
-        "status": "enqueued" if created else "duplicate",
+        "status": "enqueued",
         "brief_id": brief.brief_id,
-        "queue_id": queue_id,
         "artifact_id": artifact_id,
     }
 

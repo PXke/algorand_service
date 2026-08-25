@@ -178,52 +178,6 @@ def test_sync_case_studies_ingests_subject_orgs(monkeypatch: pytest.MonkeyPatch)
         assert kw["metadata"]["ecosystem_source"].startswith(f"{index}/")
 
 
-def test_curated_discovery_rows_survive_stale_parking(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A chain-silent curated org's discovery row scores ~27 (0.45 anchor × discovery weight 60) — below PUBLISH_DEFER_PRIORITY_THRESHOLD=45. The maintenance beat must leave it pending, not park it indexed_only."""
-    import app.modules.newspaper.tasks.queue_drain_tasks as qd
-    from app.modules.newspaper.publish_queue_store import QueuedPublishRow
-
-    monkeypatch.setattr(
-        "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains",
-        lambda: frozenset({"wholechain.com"}),
-    )
-    marked = []
-    monkeypatch.setattr(
-        qd,
-        "mark_queue_status",
-        lambda qid, status, reason="": marked.append((qid, status)),  # noqa: ARG005 -- name must match the real callee's keyword arg
-    )
-
-    def _row(qid: str, url: str, kind: str) -> QueuedPublishRow:
-        return QueuedPublishRow(
-            queue_id=qid,
-            priority=27,
-            topic="generic",
-            publish_kind=kind,
-            service_id="svc",
-            display_name="svc",
-            scrape_url=url,
-            payload={"page_text": "some text"},
-            created_at_epoch=0,  # ancient
-        )
-
-    monkeypatch.setattr(
-        qd,
-        "list_pending_queue",
-        lambda limit: [  # noqa: ARG005 -- name must match the real callee's keyword arg
-            _row("curated", "https://wholechain.com/", "service_discovery"),
-            _row("uncurated", "https://randomsite.io/", "service_discovery"),
-        ],
-    )
-    monkeypatch.setattr(
-        "app.modules.search.tasks.index_tasks.index_crawled_page.delay",
-        lambda **_kw: None,
-    )
-    stats = qd.expire_stale_queue_items()
-    assert [qid for qid, _ in marked] == ["uncurated"]
-    assert stats["indexed_only"] == 1
-
-
 def test_score_page_survives_lookup_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Scores a page as zero relevance, without raising, when the ecosystem-domains lookup itself fails."""
 

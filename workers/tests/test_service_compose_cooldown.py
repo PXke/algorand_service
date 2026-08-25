@@ -77,7 +77,6 @@ def test_drain_skips_row_when_service_in_cooldown(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(q, "_service_in_cooldown", lambda _r: True)  # in cooldown
     monkeypatch.setattr(q, "_row_needs_review", lambda _r: True)  # would go to review
     monkeypatch.setattr(q, "mark_artifact_status", lambda *_a, **_k: None)
-    monkeypatch.setattr(q, "_resolve_dual_written_queue_row", lambda *_a, **_k: None)
 
     def _spy_review(*_a: object, **_k: object) -> Never:
         raise AssertionError("cooldown row must not be composed")

@@ -23,10 +23,6 @@ from typing import TYPE_CHECKING
 from algorand_shared.article_statements import (
     ARTICLE_VERSION_INSERT,
     ARTICLE_VERSION_LATEST,
-    PUBLISH_QUEUE_CLEAR_HUMAN_PICK,
-    PUBLISH_QUEUE_DELETE_PENDING,
-    PUBLISH_QUEUE_INSERT_PENDING,
-    PUBLISH_QUEUE_SET_HUMAN_PICK,
 )
 from algorand_shared.chain_statements import CHAIN_CONDUIT_HEAD, CHAIN_TXNS_BY_ROUND
 from algorand_shared.platform_statements import (
@@ -356,53 +352,6 @@ class ClassifierReviewStmts:
         "DELETE FROM algorand_platform.classifier_review_pending "
         "WHERE status = ? AND created_at = ? AND review_id = ?"
     )
-
-
-# --------------------------------------------------------------------------- #
-# publish_queue (admin observability — the workers own the write path)
-# --------------------------------------------------------------------------- #
-class PublishQueueStmts:
-    """Prepared statements for the publish queue."""
-
-    # Pending rows come from the SAME single-partition index the drain reads
-    # (publish_queue_pending), so the admin view is complete and exact for
-    # pending. The unfiltered token-order scan below only fills in resolved
-    # history — it is a sample, not "most recent", since queue_id is the sole
-    # partition key and there is no status/time index to page by. Both exclude
-    # payload — it carries the full page text (up to ~48k chars per row).
-    LIST_PENDING_IDS = _Stmt(
-        "SELECT queue_id FROM algorand_platform.publish_queue_pending WHERE status = ? LIMIT ?"
-    )
-    GET_ROW = _Stmt(
-        "SELECT queue_id, status, last_reason, priority, topic, publish_kind, "
-        "service_id, display_name, scrape_url, created_at, updated_at, human_pick_day "
-        "FROM algorand_platform.publish_queue WHERE queue_id = ?"
-    )
-    LIST_RECENT = _Stmt(
-        "SELECT queue_id, status, last_reason, priority, topic, publish_kind, "
-        "service_id, display_name, scrape_url, created_at, updated_at, human_pick_day "
-        "FROM algorand_platform.publish_queue LIMIT ?"
-    )
-    GET_PAYLOAD = _Stmt("SELECT payload FROM algorand_platform.publish_queue WHERE queue_id = ?")
-    # "Compose next": publish_queue_pending is clustered by (priority DESC,
-    # created_at ASC), so a single-row read of the top of that clustering
-    # gives the current max pending priority for free — no aggregation query
-    # needed. Bumping a row above it means it wins the drain's next priority
-    # scan without touching the pacing clock/daily cap that gate WHEN the
-    # drain runs at all.
-    MAX_PENDING_PRIORITY = _Stmt(
-        "SELECT priority FROM algorand_platform.publish_queue_pending WHERE status = ? LIMIT 1"
-    )
-    UPDATE_PRIORITY = _Stmt(
-        "UPDATE algorand_platform.publish_queue SET priority = ?, updated_at = ? WHERE queue_id = ?"
-    )
-    # publish_queue_pending's clustering key includes priority, so bumping it
-    # is a DELETE-at-old-position + INSERT-at-new-position, not an UPDATE.
-    DELETE_PENDING = PUBLISH_QUEUE_DELETE_PENDING
-    INSERT_PENDING = PUBLISH_QUEUE_INSERT_PENDING
-    SET_HUMAN_PICK = PUBLISH_QUEUE_SET_HUMAN_PICK
-    CLEAR_HUMAN_PICK = PUBLISH_QUEUE_CLEAR_HUMAN_PICK
-
 
 
 # --------------------------------------------------------------------------- #

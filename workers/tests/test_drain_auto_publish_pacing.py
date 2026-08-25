@@ -88,7 +88,6 @@ def drain_env(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(qdt, "get_artifact", lambda aid: _artifact(aid))
     monkeypatch.setattr(qdt, "get_artifact_content", lambda aid: _content(aid))
     monkeypatch.setattr(qdt, "mark_artifact_status", lambda *_a, **_k: None)
-    monkeypatch.setattr(qdt, "_resolve_dual_written_queue_row", lambda *_a, **_k: None)
 
     recorded: list[str] = []
     monkeypatch.setattr(qdt, "record_standard_publish", lambda **_kw: recorded.append("tick"))

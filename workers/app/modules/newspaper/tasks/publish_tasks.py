@@ -1761,51 +1761,6 @@ def _publish_from_queued_row_impl(
     )
 
 
-@celery_app.task(
-    name="app.tasks.newspaper.compose_queue_row_now",
-    soft_time_limit=worker_config.COMPOSE_TASK_SOFT_TIME_LIMIT,
-    time_limit=worker_config.COMPOSE_TASK_TIME_LIMIT,
-)
-def compose_queue_row_now(queue_id: str) -> dict[str, str]:
-    """Admin-triggered immediate compose of one publish_queue row, bypassing is_standard_publish_due — the pacing gate that normally decides whether drain_standard_publish_queue is even allowed to run at all, checked inside the drain task itself rather than inside publish_from_queued_row. This is a deliberate manual override ("compose this NOW, I want to see the pipeline behave") added 2026-08-05 after repeatedly needing a one-off script to bypass the gate by hand during pipeline testing. The automatic drain's own pacing is untouched — only this admin-triggered path skips it.
-
-    Same "still pending" guard shape as recompose_review, for the same
-    reason: a stale/duplicate trigger (an unrefreshed admin tab, a double
-    click, an old queue_id from before an earlier resolve) must not re-run
-    compose on top of a row that already resolved.
-    """
-    from uuid import UUID
-
-    from app.core.cassandra import get_cassandra_session
-    from app.core.statements import PublishQueueStmts
-    from app.modules.newspaper.publish_queue_store import get_queued_row
-
-    try:
-        qid = UUID(str(queue_id))
-    except ValueError:
-        return {"status": "error", "reason": "bad_queue_id"}
-
-    status_row = get_cassandra_session().execute(PublishQueueStmts.GET_STATUS_ROW, (qid,)).one()
-    if status_row is None:
-        return {"status": "error", "reason": "queue_row_not_found"}
-    if (status_row.status or "").strip().lower() != "pending":
-        return {
-            "status": "error",
-            "reason": f"row not pending (status={status_row.status!r}) — refused",
-        }
-
-    row = get_queued_row(queue_id)
-    if row is None:
-        return {"status": "error", "reason": "queue_row_not_found"}
-
-    outcome = publish_from_queued_row(row)
-
-    from app.modules.newspaper.tasks.queue_drain_tasks import _resolve
-
-    _resolve(row, outcome)
-    return outcome
-
-
 def _publish_pipeline_precheck(
     service_id: str, scrape_url: str, txid: str
 ) -> dict[str, str] | None:
@@ -3020,9 +2975,10 @@ def recompose_session_service(source_url: str) -> dict[str, str]:
       find_latest_service_article already serve elsewhere).
     A compose session has no article_id of its own (compose_sessions and
     articles_by_id are separate tables) and, by the time someone is reading
-    it in the Sessions tab, its originating publish_queue row has almost
-    always already resolved -- recompose_session_service (unlike
-    compose_queue_row_now) never touches the queue at all.
+    it in the Sessions tab, its originating artifact has almost always
+    already resolved (composed/discarded) -- recompose_session_service
+    never touches the artifact/queue system at all, it works entirely off
+    the live article's own source_url.
     """
     source_url = (source_url or "").strip()
     if not source_url:

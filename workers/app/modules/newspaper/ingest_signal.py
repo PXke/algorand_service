@@ -3,20 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 import re
 
 from app.core import config
 from app.modules.newspaper.article_matching import resolve_publish_mode
-from app.modules.newspaper.event_lifecycle import EventPhase, build_event_dedupe_key
-from app.modules.newspaper.publish_policy import (
-    PublishIntent,
-    PublishKind,
-    build_dedupe_key,
-    build_publish_intent,
-    evaluate_enqueue,
-)
-from app.modules.newspaper.publish_queue_store import enqueue_publish
+from app.modules.newspaper.publish_policy import build_publish_intent, evaluate_enqueue
 from app.modules.newspaper.service_profile_store import (
     get_stored_scale_signal,
     get_stored_service_weight,
@@ -29,8 +20,6 @@ from app.modules.newspaper.snapshot_store import (
     source_id_for_service,
 )
 from app.modules.pipeline.core.diffing import build_text_diff
-
-logger = logging.getLogger(__name__)
 
 # Volatile tokens that change on a page without the story changing: numbers,
 # money amounts, percentages, clock times, "N minutes/hours ago" phrasing, and
@@ -172,34 +161,6 @@ def _strip_repeating_row_blocks(text: str) -> str:
     _blank_repeating_cycles(shapes, out)
     _blank_short_shape_runs(shapes, out)
     return "\n".join(out)
-
-
-def _dedupe_key_for(
-    intent: PublishIntent, *, mode_info: dict, service_id: str, content_hash: str
-) -> str:
-    """The queue dedupe key for this publish intent: an edit re-uses the target article's id, a first-ever discovery is keyed on service alone (never content), an event gets its phase-aware key, everything else the standard topic/content/tier key."""
-    if mode_info["publish_mode"] == "edit" and mode_info.get("linked_article_id"):
-        return f"edit:{mode_info['linked_article_id']}:{content_hash[:16]}"
-    if intent.kind == PublishKind.SERVICE_DISCOVERY:
-        # No content hash: ONE discovery candidate per service, ever. A hashed
-        # key let every homepage churn mint a "new" discovery row (the ~700-row
-        # queue flood). After this row resolves, a snapshot exists, so the kind
-        # can never be SERVICE_DISCOVERY again — the dedupe row being cleaned up
-        # on resolve does not reopen the door.
-        return f"discovery:{service_id}"
-    if intent.event_id and intent.event_phase:
-        return build_event_dedupe_key(
-            service_id=service_id,
-            event_id=intent.event_id,
-            phase=EventPhase(intent.event_phase),
-            content_hash=content_hash,
-        )
-    return build_dedupe_key(
-        service_id=service_id,
-        topic=intent.topic.value,
-        content_hash=content_hash,
-        tier=intent.tier.value,
-    )
 
 
 def _stable_content_hash(text: str) -> str:
@@ -409,14 +370,10 @@ def ingest_publish_signal(
         requested_mode=publish_mode,
         requested_article_id=linked_article_id,
     )
-    dedupe_key = _dedupe_key_for(
-        intent, mode_info=mode_info, service_id=service_id, content_hash=content_hash
-    )
 
-    # Built once, shared verbatim by both writes below: publish_queue's
-    # `payload` JSON blob and artifact_content.metadata["payload"] (the
-    # editorial-room artifact system's equivalent input, read back by
-    # queue_drain_tasks._artifact_to_queued_row when this artifact composes).
+    # This becomes artifact_content.metadata["payload"] -- the editorial-room
+    # artifact system's compose input, read back by
+    # queue_drain_tasks._artifact_to_queued_row when this artifact composes.
     queue_payload = {
         "page_text": page_text,
         "page_title": page_title,
@@ -444,62 +401,31 @@ def ingest_publish_signal(
         "priority_breakdown": intent.priority_breakdown,
     }
 
-    queue_id, created = enqueue_publish(
-        service_id=service_id,
-        display_name=display_name,
-        scrape_url=source_url,
-        payload=queue_payload,
-        priority=intent.priority,
-        publish_kind=intent.kind,
-        topic=intent.topic,
-        dedupe_key=dedupe_key,
-    )
     _record_event()
 
-    # Dual-write into the editorial-room artifact system (2026-08-25): the
-    # live compose trigger now reads exclusively from `artifacts`/
-    # `to_compose` (see queue_drain_tasks.drain_to_compose), so this is the
-    # real, load-bearing write from this point on -- NOT shadow-mode
-    # anymore. publish_queue is still ALSO written (enqueue_publish above)
-    # deliberately: publish_queue/publish_queue_pending stay live-fed data
-    # rather than a snapshot that goes stale the moment this deploys, so a
-    # fast rollback to the old drain tasks (git-reverted, not re-migrated)
-    # would have real, current rows to work with instead of an empty or
-    # weeks-stale queue. This is a deliberate, temporary safety margin for
-    # this one deploy cycle (owner's call) -- drop the dual-write once the
-    # new path is confirmed stable in prod.
-    #
-    # insert_artifact runs regardless of `created` (a publish_queue dedupe
-    # hit): its own dedup (one PENDING artifact per service_id, see
-    # artifact_store.py) is coarser than publish_queue's per-content-hash
-    # dedupe_key, and replace-not-accumulate makes a redundant call here
-    # harmless -- the newest content for a service always wins either way.
-    try:
-        _insert_artifact_for_signal(
-            service_id=service_id,
-            source_url=source_url,
-            page_title=page_title,
-            page_text=page_text,
-            source_kind=source_kind,
-            display_name=display_name,
-            match_kind=match_kind,
-            match_value=match_value,
-            published_at=published_at,
-            queue_payload=queue_payload,
-            queue_id=queue_id,
-        )
-    except Exception:
-        # The artifact write must never take down the (already-committed)
-        # publish_queue enqueue above -- best-effort, logged for visibility.
-        logger.warning(
-            "insert_artifact failed for service_id=%s url=%s", service_id, source_url,
-            exc_info=True,
-        )
+    # The editorial-room artifact system (2026-08-25 cutover): the live
+    # compose trigger reads exclusively from `artifacts`/`to_compose` (see
+    # queue_drain_tasks.drain_to_compose), so this is THE write for this
+    # signal -- publish_queue's dual-write (a one-deploy-cycle rollback
+    # safety net) was dropped once the artifact path proved stable in prod.
+    # Left unguarded (no try/except): this is the only write left, so a
+    # failure here must propagate to the caller the same way an enqueue_publish
+    # failure always did pre-cutover -- callers (e.g. mail_poll_tasks) rely on
+    # the raise to leave the source item unseen/unacked for retry.
+    _insert_artifact_for_signal(
+        service_id=service_id,
+        source_url=source_url,
+        page_title=page_title,
+        page_text=page_text,
+        source_kind=source_kind,
+        display_name=display_name,
+        match_kind=match_kind,
+        match_value=match_value,
+        published_at=published_at,
+        queue_payload=queue_payload,
+    )
 
-    if not created:
-        return {"status": "duplicate", "queue_id": queue_id, "txid": txid}
-
-    return {"status": "enqueued", "queue_id": queue_id, "txid": txid}
+    return {"status": "enqueued", "txid": txid}
 
 
 # Maps ingest_publish_signal's `source_kind` to the artifacts table's
@@ -542,9 +468,8 @@ def _insert_artifact_for_signal(
     match_value: str,
     published_at: str,
     queue_payload: dict,
-    queue_id: str,
 ) -> None:
-    """Create (or replace-for-this-service) the editorial-room artifact for one publish signal, mirroring the exact content just enqueued to publish_queue."""
+    """Create (or replace-for-this-service) the editorial-room artifact for one publish signal."""
     from datetime import UTC, datetime
 
     from app.modules.gatekeeper.fact_align import event_anchor_date
@@ -566,12 +491,6 @@ def _insert_artifact_for_signal(
             "source_kind": source_kind or "",
             "match_kind": match_kind,
             "match_value": match_value,
-            # Best-effort cross-reference so the compose-trigger's resolve
-            # step can mirror the real outcome onto this dual-written
-            # publish_queue row too (see drain_to_compose._resolve_artifact)
-            # -- keeps that shadow copy's pending set from growing forever
-            # now that nothing else drains it.
-            "dual_write_queue_id": queue_id,
             "payload": queue_payload,
         },
         event_date=event_date,

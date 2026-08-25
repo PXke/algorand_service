@@ -1,8 +1,8 @@
 """Prepared CQL shared between backend and workers for article-adjacent tables.
 
 Both deployables read and write the SAME physical Cassandra tables
-(`article_versions`, `publish_queue`+`_pending`, and the consolidated
-`articles` table below) via independently hand-maintained statement
+(`article_versions` and the consolidated `articles` table below) via
+independently hand-maintained statement
 classes in each service's own
 `app/core/statements.py`. That is the exact shape of bug `feed_bucket.py` was
 already extracted to prevent once (see its own docstring) -- a diff of both
@@ -83,28 +83,6 @@ ARTICLE_VERSION_INSERT = _Stmt(
     "article_id, version, title, summary, body, edit_reason, editor, edited_at"
     ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
 )
-
-# --------------------------------------------------------------------------- #
-# publish_queue / publish_queue_pending
-# --------------------------------------------------------------------------- #
-PUBLISH_QUEUE_INSERT_PENDING = _Stmt(
-    "INSERT INTO algorand_platform.publish_queue_pending ("
-    "status, priority, created_at, queue_id, service_id, topic, publish_kind"
-    ") VALUES (?, ?, ?, ?, ?, ?, ?)"
-)
-PUBLISH_QUEUE_DELETE_PENDING = _Stmt(
-    "DELETE FROM algorand_platform.publish_queue_pending "
-    "WHERE status = ? AND priority = ? AND created_at = ? AND queue_id = ?"
-)
-PUBLISH_QUEUE_SET_HUMAN_PICK = _Stmt(
-    "UPDATE algorand_platform.publish_queue SET human_pick_day = ?, updated_at = ? "
-    "WHERE queue_id = ?"
-)
-PUBLISH_QUEUE_CLEAR_HUMAN_PICK = _Stmt(
-    "UPDATE algorand_platform.publish_queue SET human_pick_day = null, updated_at = ? "
-    "WHERE queue_id = ?"
-)
-
 
 # --------------------------------------------------------------------------- #
 # articles / article_history -- the NEW consolidated schema (migration 067).

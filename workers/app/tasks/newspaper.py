@@ -10,7 +10,6 @@ from app.modules.newspaper.tasks.price_analysis_tasks import (
 )
 from app.modules.newspaper.tasks.publish_tasks import (
     apply_recomposed_article,
-    compose_queue_row_now,
     publish_from_chain_event,
     recompose_published,
     recompose_review,
@@ -19,7 +18,6 @@ from app.modules.newspaper.tasks.publish_tasks import (
 from app.modules.newspaper.tasks.queue_drain_tasks import (
     compose_artifact_now,
     drain_to_compose,
-    expire_stale_queue_items,
     select_to_compose_for_today_task,
 )
 from app.modules.newspaper.tasks.view_count_tasks import flush_pending_views_task
@@ -29,10 +27,8 @@ __all__ = [
     "apply_recomposed_article",
     "check_and_publish_llm_on_diff",
     "compose_artifact_now",
-    "compose_queue_row_now",
     "distribute_article",
     "drain_to_compose",
-    "expire_stale_queue_items",
     "flush_pending_analytics_task",
     "flush_pending_views_task",
     "interrogate_compose_session_task",
