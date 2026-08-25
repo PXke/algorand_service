@@ -60,6 +60,7 @@ celery_app.conf.task_routes = {
 }
 celery_app.conf.imports = (
     "app.modules.newspaper.tasks.mail_poll_tasks",
+    "app.modules.newspaper.tasks.artifact_tasks",
     "app.modules.crawler.tasks.url_queue_tasks",
     "app.tasks.scrape",
     "app.tasks.crawler",
@@ -209,6 +210,16 @@ def _build_beat_schedule() -> dict:
     schedule["reap-stale-translation-sessions"] = {
         "task": "app.tasks.newspaper.reap_stale_translation_sessions",
         "schedule": float(os.getenv("TRANSLATION_SESSION_REAP_SECONDS", "3600")),
+    }
+    # Editorial-room artifacts (2026-08-25, SHADOW MODE): recomputes priority
+    # for every PENDING artifact once a day. Only touches the new
+    # artifacts/artifacts_pending tables -- zero interaction with the live
+    # publish_queue drain/selection tasks above, so this runs unconditionally
+    # (no AUTO_COMPOSE_PAUSED-style gate) to actually populate the shadow
+    # system for real, per the phase's design.
+    schedule["sweep-artifact-priorities"] = {
+        "task": "app.tasks.newspaper.sweep_artifact_priorities",
+        "schedule": float(os.getenv("ARTIFACT_PRIORITY_SWEEP_SECONDS", "86400")),
     }
     # Drains backend's Redis-buffered per-article view increments into the
     # article_view_counts Cassandra counter (2026-08-25, replacing a direct
