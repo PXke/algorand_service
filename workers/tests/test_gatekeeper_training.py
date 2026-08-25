@@ -1,4 +1,4 @@
-"""train_gatekeeper must train from a batch carrying only soft_label_quality (no factuality/tone) -- the path feedback_loader relies on, since there's no gold-run/corruptor corpus yet to supply the other two heads."""
+"""train_gatekeeper must train from a batch carrying only soft_label_quality -- the factuality/tone heads were removed as dead code (no training corpus ever existed for them), leaving quality/relevance as the only heads left on the model."""
 
 from pathlib import Path
 from typing import Any
@@ -17,16 +17,12 @@ class _FakeMultiTaskModel(nn.Module):
 
     def __init__(self, _name: str) -> None:
         super().__init__()
-        self.factuality_head = nn.Linear(4, 1)
-        self.tone_head = nn.Linear(4, 1)
         self.quality_head = nn.Linear(4, 1)
         self.relevance_head = nn.Linear(4, 1)
 
     def forward(self, input_ids: Any, _attention_mask: Any) -> dict:  # noqa: ANN401 -- torch tensor stand-in
         x = input_ids.float().mean(dim=1, keepdim=True).expand(-1, 4)
         return {
-            "factuality": self.factuality_head(x).squeeze(-1),
-            "tone": self.tone_head(x).squeeze(-1),
             "quality": self.quality_head(x).squeeze(-1),
             "relevance": self.relevance_head(x).squeeze(-1),
         }

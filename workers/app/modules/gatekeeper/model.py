@@ -1,14 +1,21 @@
-"""ModernBERT multi-task grader (long-context encoder, two single-logit heads).
+"""ModernBERT multi-task grader (long-context encoder, single-logit heads).
 
 Design decisions locked in during spec review:
 - ModernBERT-base (native 8192 ctx) so [source | trace] [SEP] [article] is not
   truncated the way deberta-v3-small (512) silently was.
 - Tool-completeness is NOT a head here — it's a deterministic rule check
-  (see ``completeness``). Only Factuality and Tone are learned.
+  (see ``completeness``).
 - Single-logit heads (``Linear(h, 1)``), not 2-logit softmax: the binary
   log-odds prior correction at inference only makes sense for one logit.
 - Mean pooling over the attention mask, not [CLS]: ModernBERT has no pretrained
   pooler, so [CLS] is not load-bearing.
+
+The factuality and tone heads that used to live here were removed 2026-08-25:
+they never had a training corpus (blocked on a gold-run/corruptor corpus that
+was itself deleted as dead code in 3abc546) and had no serving path — the
+deterministic factuality/completeness check in ``live.py`` is what actually
+runs today. ``quality_head``/``relevance_head`` remain defined below but are
+currently untrained and unserved (see ``docs/modules/gatekeeper.md``).
 
 torch/transformers are imported lazily so importing this module (and the wider
 worker package) costs nothing when the ML extra isn't installed.
@@ -26,7 +33,7 @@ TRACE_ARTICLE_SEP = " ⟦ARTICLE⟧ "
 
 
 def build_input(source_text: str, tool_trace: str, article_json: str) -> str:
-    """The single concatenated input string. Source first so the long-context window keeps the agent's environment visible to the factuality head."""
+    """The single concatenated input string. Source first so the long-context window keeps the agent's environment visible to the model."""
     return f"{source_text}{SRC_TRACE_SEP}{tool_trace}{TRACE_ARTICLE_SEP}{article_json}"
 
 
@@ -42,7 +49,7 @@ def _require_torch() -> tuple[Any, Any]:
 
 
 def build_model(model_name: str = DEFAULT_MODEL_NAME) -> Any:  # noqa: ANN401 -- torch tensor/model, lazily imported to keep this module torch-free by default
-    """Construct the multi-task grader. Returns an ``nn.Module`` with a ``forward(input_ids, attention_mask) -> {'factuality', 'tone'}`` (raw logits, shape ``[B]``). Lazy so the import graph stays torch-free."""
+    """Construct the multi-task grader. Returns an ``nn.Module`` with a ``forward(input_ids, attention_mask) -> {'quality', 'relevance'}`` (raw logits, shape ``[B]``). Lazy so the import graph stays torch-free."""
     _torch, nn = _require_torch()
     from transformers import AutoModel
 
@@ -51,8 +58,6 @@ def build_model(model_name: str = DEFAULT_MODEL_NAME) -> Any:  # noqa: ANN401 --
             super().__init__()
             self.encoder = AutoModel.from_pretrained(name)
             h = self.encoder.config.hidden_size
-            self.factuality_head = nn.Linear(h, 1)
-            self.tone_head = nn.Linear(h, 1)
             # Quality head: P(good article), trained on the human grade labels.
             # Replaces the sklearn TF-IDF grader once trained; shares this encoder.
             self.quality_head = nn.Linear(h, 1)
@@ -70,8 +75,6 @@ def build_model(model_name: str = DEFAULT_MODEL_NAME) -> Any:  # noqa: ANN401 --
             out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
             pooled = self._mean_pool(out.last_hidden_state, attention_mask)
             return {
-                "factuality": self.factuality_head(pooled).squeeze(-1),
-                "tone": self.tone_head(pooled).squeeze(-1),
                 "quality": self.quality_head(pooled).squeeze(-1),
                 "relevance": self.relevance_head(pooled).squeeze(-1),
             }

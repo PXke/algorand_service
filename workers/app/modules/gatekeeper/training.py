@@ -1,9 +1,8 @@
 """CPU training loop for the ModernBERT multi-task grader.
 
-Deliberately dumb training, smart inference (see ``inference``):
+Deliberately dumb training:
 - Loss is plain ``BCEWithLogitsLoss`` on count-balanced batches. NO class-prior
-  term in the loss — that would cancel the inference-time shift and redeploy the
-  balanced model. The prior lives only in ``inference.logit_adjustment``.
+  term in the loss.
 - Targets are soft (annotator probabilities in [0,1]); BCEWithLogits accepts
   them directly, preserving the annotator's uncertainty instead of rounding.
 - Heads are single-logit; the binary log-odds correction depends on it.
@@ -13,7 +12,12 @@ CPU optimization: thread pinning env (must be set before torch imports), then
 plain torch so this runs anywhere. torch is lazy-imported so the module is free
 to import without the ``ml`` extra.
 
-Blocked on data: needs the gold runs + corruptor corpus to populate the loader.
+The factuality/tone heads this loop used to train were removed 2026-08-25
+(no training corpus ever existed for them — see ``model.py``). ``quality`` and
+``relevance`` are the two labels this loop can currently train, each optional
+per batch (only trains when the batch carries that key), but as of the same
+cleanup nothing in the codebase actually produces training batches for either
+label — this module currently has no production caller, only its own test.
 """
 
 from __future__ import annotations
@@ -62,7 +66,7 @@ def _maybe_ipex(model: Any, optimizer: Any, dtype: Any) -> tuple[Any, Any, bool]
 
 
 def train_gatekeeper(train_loader: Any, cfg: TrainConfig | None = None) -> dict:  # noqa: ANN401 -- torch DataLoader-like iterable, lazily imported to keep this module torch-free by default
-    """Train the grader on a loader yielding batches with keys ``input_ids``, ``attention_mask``, ``soft_label_factuality``, ``soft_label_tone`` (soft targets in [0,1]). Saves a state_dict to ``cfg.out_path``. Returns a summary dict."""
+    """Train the grader on a loader yielding batches with keys ``input_ids``, ``attention_mask``, and optionally ``soft_label_quality`` and/or ``soft_label_relevance`` (soft targets in [0,1]). Saves a state_dict to ``cfg.out_path``. Returns a summary dict."""
     configure_cpu_threads()
     cfg = cfg or TrainConfig()
 
@@ -90,13 +94,10 @@ def train_gatekeeper(train_loader: Any, cfg: TrainConfig | None = None) -> dict:
             optimizer.zero_grad()
             with torch.autocast(device_type="cpu", dtype=dtype, enabled=cfg.use_bf16):
                 out = model(batch["input_ids"], batch["attention_mask"])
-                # Every head trains only when the batch carries its label — gold/
-                # corrupted runs supply factuality+tone, feedback-derived batches
-                # (no corruptor corpus yet) supply quality only. Optional per head.
+                # Each head trains only when the batch carries its label. Optional
+                # per head.
                 loss = None
                 for head, key in (
-                    ("factuality", "soft_label_factuality"),
-                    ("tone", "soft_label_tone"),
                     ("quality", "soft_label_quality"),
                     ("relevance", "soft_label_relevance"),
                 ):

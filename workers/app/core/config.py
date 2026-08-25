@@ -1366,18 +1366,10 @@ RECOMPOSE_AUTO_APPLY_GRADE_FLOOR = env_float("RECOMPOSE_AUTO_APPLY_GRADE_FLOOR",
 FRESH_AUTO_APPROVE_ENABLED = env_bool("FRESH_AUTO_APPROVE_ENABLED", True)
 FRESH_AUTO_APPROVE_GRADE_FLOOR = env_float("FRESH_AUTO_APPROVE_GRADE_FLOOR", 8.0)
 # Article is flagged when the grounded fraction of its numeric claims falls below
-# this (too many figures with no anchor in the tool trace).
+# this (too many figures with no anchor in the tool trace). This deterministic
+# check (gatekeeper/live.py) is the only factuality gate that actually runs in
+# production; the ModernBERT quality/relevance heads (gatekeeper/model.py) have
+# no training or serving wiring left (removed as dead code 2026-08-25 — the
+# quality-head checkpoint they used to produce had no reader, see
+# docs/modules/gatekeeper.md).
 GATEKEEPER_FACT_MIN = env_float("GATEKEEPER_FACT_MIN", 0.80)
-# Trained MTTH model (state_dict from gatekeeper.training). When this file is
-# absent the model heads are dormant: the deterministic gate still runs, and the
-# article grader falls back to the sklearn grader, then the heuristic floor.
-GATEKEEPER_MODEL_PATH = env_str("GATEKEEPER_MODEL_PATH", "data/models/gatekeeper_mtth.pt")
-# The quality head can be trained (from classifier_feedback labels) well before
-# there's a gold-run/corruptor corpus for factuality+tone. A checkpoint existing
-# is therefore NOT enough to serve it live — this must also be true, so a
-# training run never silently flips live grading. Flip deliberately once vetted.
-GATEKEEPER_QUALITY_LIVE = env_bool("GATEKEEPER_QUALITY_LIVE", False)
-# Floor for training the quality head: higher than the sklearn grader's
-# GRADER_MIN_SAMPLES (40) since a bad BERT fine-tune is far more expensive to
-# redo and harder to eyeball than a logistic regression.
-GATEKEEPER_QUALITY_MIN_SAMPLES = env_int("GATEKEEPER_QUALITY_MIN_SAMPLES", 150)

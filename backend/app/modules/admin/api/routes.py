@@ -373,7 +373,7 @@ def admin_training_stats(request: Request) -> Response:
 
 
 def admin_retrain(request: Request) -> Response:
-    """Trigger a retrain of the publish classifier + gatekeeper quality head now."""
+    """Trigger a retrain of the publish classifier now."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
@@ -384,9 +384,6 @@ def admin_retrain(request: Request) -> Response:
 
         client = Celery(broker=settings.celery_broker_url)
         client.send_task("app.tasks.crawler.retrain_publish_classifier", queue="scrape")
-        # Separate queue: a BERT fine-tune is a much heavier CPU job than the
-        # RandomForest retrain above, and gatekeeper tasks already route here.
-        client.send_task("app.tasks.gatekeeper.train_quality_head", queue="pipeline")
         return {"status": "queued"}
     except Exception as exc:
         return json_error_response(500, "retrain_failed", str(exc))
