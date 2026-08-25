@@ -26,7 +26,11 @@ def _article(**overrides: Any) -> StoredArticle:  # noqa: ANN401
 
 
 def _store_with_fakes(
-    monkeypatch: pytest.MonkeyPatch, *, current: StoredArticle, updated: StoredArticle
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    current: StoredArticle,
+    updated: StoredArticle,
+    typesense_calls: list[dict] | None = None,
 ) -> tuple[AdminCassandraStore, list[str]]:
     store = AdminCassandraStore()
     calls: list[str] = []
@@ -41,6 +45,10 @@ def _store_with_fakes(
         staticmethod(lambda article_id: calls.append(article_id)),
     )
     monkeypatch.setattr("app.modules.seo.indexnow.ping_article", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        "app.core.typesense_client.upsert_article_document",
+        lambda **kw: (typesense_calls.append(kw) if typesense_calls is not None else None),
+    )
     return store, calls
 
 
@@ -52,6 +60,30 @@ def test_body_change_clears_and_reenqueues_translations(monkeypatch: pytest.Monk
     store.update_article(current.article_id, body="Corrected body")
 
     assert calls == [current.article_id]
+
+
+def test_update_article_reindexes_typesense_with_the_new_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An admin edit must re-index Typesense with the corrected title/summary/body immediately, not wait on the once-daily reindex_articles safety net."""
+    current = _article()
+    updated = _article(title="Corrected title", body="Corrected body")
+    typesense_calls: list[dict] = []
+    store, _calls = _store_with_fakes(
+        monkeypatch, current=current, updated=updated, typesense_calls=typesense_calls
+    )
+
+    store.update_article(current.article_id, title="Corrected title", body="Corrected body")
+
+    assert len(typesense_calls) == 1
+    assert typesense_calls[0] == {
+        "article_id": updated.article_id,
+        "title": "Corrected title",
+        "summary": updated.summary,
+        "body": "Corrected body",
+        "service_id": updated.service_id,
+        "published_at_epoch": updated.published_at_epoch,
+    }
 
 
 def test_title_only_change_also_clears_translations(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -97,6 +97,21 @@ class AdminCassandraStore:
             self._clear_and_reenqueue_translations(article_id)
         updated = self.get_article(article_id)
         if updated is not None:
+            # Re-index the edited content so search reflects the new
+            # title/summary/body immediately, instead of waiting on the
+            # once-daily reindex_articles safety net. Best-effort, never
+            # blocks the admin edit.
+            with contextlib.suppress(Exception):
+                from app.core.typesense_client import upsert_article_document
+
+                upsert_article_document(
+                    article_id=article_id,
+                    title=updated.title,
+                    summary=updated.summary,
+                    body=updated.body,
+                    service_id=updated.service_id,
+                    published_at_epoch=updated.published_at_epoch,
+                )
             # Content changed at its existing URL — notify IndexNow (Bing asks
             # for update pings, not just adds). Best-effort, never blocks.
             with contextlib.suppress(Exception):
@@ -1314,6 +1329,23 @@ class AdminCassandraStore:
         # transition_article_status() call above already carries service_id
         # onto this row with status='published' — the gap this worked around
         # no longer exists, so the extra write was removed.
+        # The article just went live on the public feed — index it so it's
+        # findable in site search immediately, instead of waiting on the
+        # once-daily reindex_articles safety net. Best-effort, never blocks
+        # the publish.
+        with contextlib.suppress(Exception):
+            from app.core.typesense_client import upsert_article_document
+
+            published = self.get_article(article_id)
+            if published is not None:
+                upsert_article_document(
+                    article_id=article_id,
+                    title=published.title,
+                    summary=published.summary,
+                    body=published.body,
+                    service_id=published.service_id,
+                    published_at_epoch=published.published_at_epoch,
+                )
         # The article just became publicly visible — notify IndexNow, same as
         # the workers' direct-publish path does. Best-effort, never blocks.
         with contextlib.suppress(Exception):
