@@ -12,7 +12,7 @@ USE algorand_platform;
 -- account) is well covered and has published articles under its own
 -- service_id. venue_service_id is the STABLE service_id for the item's
 -- underlying venue, set at insert time by the four lanes above (see
--- ingest_signal.ingest_publish_signal's venue_service_id kwarg); nullable --
+-- ingest_signal.ingest_publish_signal's venue_service_id kwarg) -- nullable,
 -- most artifacts (a plain web crawl diff, a brief, a mail message) have no
 -- venue distinct from their own service_id and leave this null.
 -- _artifact_pool checks service_has_article(artifact.venue_service_id or
