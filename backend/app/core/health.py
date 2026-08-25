@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.core.config import settings
@@ -92,12 +93,22 @@ def check_celery_queues() -> CheckResult:
         return CheckResult("celery_queues", False, str(exc))
 
 
+CHECKS: dict[str, Callable[[], CheckResult]] = {
+    "redis": check_redis,
+    "cassandra": check_cassandra,
+    "typesense": check_typesense,
+    "conduit_index": check_conduit_index,
+    "celery_queues": check_celery_queues,
+}
+
+
 def run_readiness_checks() -> list[CheckResult]:
-    """Run all dependency checks and collect their results."""
-    return [
-        check_redis(),
-        check_cassandra(),
-        check_typesense(),
-        check_conduit_index(),
-        check_celery_queues(),
-    ]
+    """Run all dependency checks and collect their results.
+
+    Used by `/health/ready` (the deploy pipeline's gate), which needs one
+    combined pass/fail payload. The admin System tab instead calls each of
+    `CHECKS` individually (`/api/v1/admin/health-checks/:name`) so a single
+    slow dependency — Typesense or the Conduit chain-index query are the
+    usual suspects — can't hold up the others in the UI.
+    """
+    return [check() for check in CHECKS.values()]

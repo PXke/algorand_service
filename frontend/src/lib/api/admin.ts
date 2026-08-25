@@ -47,6 +47,8 @@ export function createAdminApi(wallet: string, token: string | null) {
     runScraper: (action: string) =>
       api.postJson('/api/v1/admin/scrapers/run', { action }, h()),
     celeryWorkers: () => api.getJson('/api/v1/admin/celery', h()),
+    healthCheck: (name: string) =>
+      api.getJson(`/api/v1/admin/health-checks/${encodeURIComponent(name)}`, h()),
     listClassifierReviews: () =>
       api.getJson('/api/v1/admin/classifier-reviews', h()),
     submitClassifierFeedback: (body: Record<string, unknown>) =>
@@ -127,7 +129,6 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.postJson('/api/v1/admin/translations/backfill', { limit }, h()),
     clearDomains: () => api.postJson('/api/v1/admin/domains/clear', {}, h()),
     resetPipeline: () => api.postJson('/api/v1/admin/articles/reset', {}, h()),
-    healthReady: () => api.getJson('/health/ready'),
     listGlossary: () => api.getJson('/api/v1/admin/glossary', h()),
     upsertGlossaryTerm: (body: Record<string, unknown>) =>
       api.postJson('/api/v1/admin/glossary', body, h()),
