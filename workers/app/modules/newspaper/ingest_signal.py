@@ -229,6 +229,7 @@ def ingest_publish_signal(
     published_at: str = "",
     inner_links: list[dict[str, str]] | None = None,
     is_first_override: bool | None = None,
+    venue_service_id: str | None = None,
 ) -> dict[str, str]:
     """Shared enqueue path for crawl, mail, and other lanes after content is fetched.
 
@@ -241,6 +242,19 @@ def ingest_publish_signal(
     callers already know the underlying account is an established, already-
     monitored service (never a genuine discovery) and pass ``False`` here to
     say so.
+
+    ``venue_service_id``: the SAME per-item-key problem, but for the
+    editorial-room artifact system's own new-service-vs-update pool split
+    (``to_compose_selection._artifact_pool``), which is a separate signal
+    from ``is_first_override``/``is_first`` above and reads straight off
+    ``articles.service_id`` rather than the snapshot-store's "have we ever
+    seen this key" check. A per-item lane (forum/xgov/youtube/bluesky) whose
+    own venue is an established, already-monitored service passes that
+    venue's stable service_id here so an artifact for a brand-new item under
+    a well-covered venue is correctly pool-classified as UPDATE_POOL rather
+    than permanently occupying the guaranteed NEW_SERVICE_POOL floor. None
+    (the default) for every other lane, whose own ``service_id`` already IS
+    its venue.
     """
     from app.modules.ai.content_signals import compute_content_signals
     from app.modules.crawler.domain_tracker import url_recently_rejected
@@ -423,6 +437,7 @@ def ingest_publish_signal(
         match_value=match_value,
         published_at=published_at,
         queue_payload=queue_payload,
+        venue_service_id=venue_service_id,
     )
 
     return {"status": "enqueued", "txid": txid}
@@ -468,6 +483,7 @@ def _insert_artifact_for_signal(
     match_value: str,
     published_at: str,
     queue_payload: dict,
+    venue_service_id: str | None = None,
 ) -> None:
     """Create (or replace-for-this-service) the editorial-room artifact for one publish signal."""
     from datetime import UTC, datetime
@@ -482,6 +498,7 @@ def _insert_artifact_for_signal(
 
     insert_artifact(
         service_id=service_id or None,
+        venue_service_id=venue_service_id or None,
         url=source_url or None,
         channel=_channel_for_source_kind(source_kind),
         content=page_text,

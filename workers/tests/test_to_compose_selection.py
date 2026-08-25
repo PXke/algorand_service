@@ -409,6 +409,85 @@ def test_new_service_detection_reflects_service_has_article(
 
 
 @pytest.mark.usefixtures("fake_artifact_session")
+def test_pool_detection_prefers_venue_service_id_over_literal_service_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bug-class-2 fix: a per-item lane artifact (forum-topic:<id>, one per hot thread) whose literal service_id has never itself been published must still read as 'update' when its VENUE (the forum) has -- otherwise every single item from that lane would permanently occupy the guaranteed new-service floor even though the venue is well covered."""
+    _mock_coverage(monkeypatch, covered={"algorand-forum"})
+    from app.modules.newspaper.artifact_store import insert_artifact
+    from app.modules.newspaper.to_compose_selection import preview_to_compose_for_day
+
+    insert_artifact(
+        service_id="forum-topic:15288",
+        url=None,
+        channel="forum",
+        content="hot topic",
+        venue_service_id="algorand-forum",
+    )
+
+    preview = preview_to_compose_for_day("2026-08-26")
+    (item,) = preview["items"]
+
+    assert item["service_id"] == "forum-topic:15288"
+    assert item["pool"] == "update"
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_pool_detection_falls_back_to_service_id_when_no_venue_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An artifact with no venue_service_id (a plain web crawl diff) is unaffected by the fix -- pool classification still keys on its own literal service_id, exactly as before."""
+    _mock_coverage(monkeypatch, covered={"svc-covered"})
+    from app.modules.newspaper.artifact_store import insert_artifact
+    from app.modules.newspaper.to_compose_selection import preview_to_compose_for_day
+
+    insert_artifact(service_id="svc-covered", url=None, channel="crawler", content="update diff")
+    insert_artifact(service_id="svc-fresh", url=None, channel="crawler", content="first ever diff")
+
+    preview = preview_to_compose_for_day("2026-08-26")
+    pools = {item["service_id"]: item["pool"] for item in preview["items"]}
+
+    assert pools["svc-covered"] == "update"
+    assert pools["svc-fresh"] == "new_service"
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_rank_platform_picks_dedup_still_keys_on_literal_service_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit non-goal: the venue fix changes POOL classification only, never the 1-pending-per-service dedup in _rank_platform_picks, which must stay keyed on the literal per-item service_id -- two different forum threads sharing the same venue are still two distinct dedup candidates, both eligible for a slot."""
+    _mock_coverage(monkeypatch, covered={"algorand-forum"})
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
+    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # platform_n = 2
+
+    id_a, _ = insert_artifact(
+        service_id="forum-topic:1",
+        url=None,
+        channel="forum",
+        content="topic one",
+        venue_service_id="algorand-forum",
+    )
+    id_b, _ = insert_artifact(
+        service_id="forum-topic:2",
+        url=None,
+        channel="forum",
+        content="topic two",
+        venue_service_id="algorand-forum",
+    )
+    update_artifact_priority(id_a, 5.0)
+    update_artifact_priority(id_b, 4.0)
+
+    result = select_to_compose_for_day("2026-08-26")
+
+    assert result["platform_slots_filled"] == 2
+    chosen = {sel["artifact_id"] for sel in result["selections"]}
+    assert chosen == {id_a, id_b}
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
 def test_new_service_pool_gets_its_guaranteed_floor_even_at_lower_priority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

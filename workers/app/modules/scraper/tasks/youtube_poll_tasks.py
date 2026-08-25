@@ -78,6 +78,15 @@ def poll_youtube_sources() -> dict[str, object]:
                 txid=f"youtube-{video.video_id}",
                 transcript_text=transcript,
                 og_image=video.thumbnail,
+                # Each video mints its own per-item service_id ("<channel>:
+                # <videoId>"), which can never literal-match a prior
+                # published article's service_id even though the channel
+                # itself (entry.service_id, the channel's own service_registry
+                # row) is a well-covered venue — pass it through so the
+                # editorial-room artifact pool correctly reads a new video on
+                # an established channel as routine coverage (UPDATE_POOL),
+                # not a new-service discovery.
+                venue_service_id=entry.service_id,
             )
             if outcome.get("status") == "enqueued":
                 new_videos += 1

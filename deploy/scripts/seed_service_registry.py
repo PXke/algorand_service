@@ -79,11 +79,47 @@ def main() -> int:
         )
         logger.info("upserted service_id=%s", entry["service_id"])
         scrape_url = entry.get("scrape_url") or ""
+        _maybe_seed_web_source(entry)
         if scrape_url.startswith(("http://", "https://")):
             _maybe_enqueue_seed_url(scrape_url, entry["service_id"])
 
     logger.info("Done (%d services).", len(services))
     return 0
+
+
+def _maybe_seed_web_source(entry: dict) -> None:
+    """Best-effort: populate the service_sources by-domain reverse index for a freshly-seeded ``match_kind == "domain"`` entry.
+
+    This closes the exact gap that caused the literal domain-registry
+    duplicate bug: this script inserts service_registry rows via raw CQL and
+    historically never called add_web_source (the same claim-the-domain step
+    domain_tracker.ensure_monitored_service and the backend admin's
+    admin_upsert_source both already perform), so a seeded/legacy service
+    was permanently invisible to service_sources.service_for_domain — the
+    NEXT time the platform met that domain on its own (e.g. via
+    ensure_monitored_service), it found no owner and spawned a second,
+    duplicate service_registry row for the same real-world domain instead
+    of recognizing the seeded one. Only fires for domain-kind entries — a
+    reddit/subreddit/address-matched entry has no registrable domain to
+    claim. Never raises: a seed run must still finish (and the other
+    entries still get inserted) even if Cassandra or the workers import
+    path isn't reachable from wherever this script is invoked.
+    """
+    if (entry.get("match_kind") or "") != "domain":
+        return
+    domain = (entry.get("match_value") or "").strip().lower()
+    if not domain:
+        return
+    service_id = entry["service_id"]
+    url = entry.get("scrape_url") or f"https://{domain}"
+    try:
+        sys.path.insert(0, str(REPO_ROOT / "workers"))
+        from app.modules.newspaper.service_sources import add_web_source
+
+        add_web_source(service_id, domain=domain, url=url)
+        logger.info("indexed web source domain=%s service_id=%s", domain, service_id)
+    except Exception as exc:
+        logger.warning("add_web_source failed for %s (domain=%s): %s", service_id, domain, exc)
 
 
 def _maybe_enqueue_seed_url(url: str, service_id: str) -> None:

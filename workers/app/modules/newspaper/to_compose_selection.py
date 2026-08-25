@@ -45,7 +45,7 @@ def pin_for_tomorrow(artifact_id: str, *, today: date | None = None) -> bool:
 
 
 def _artifact_pool(artifact: Artifact, *, cache: dict[str, str]) -> str:
-    """Which selection pool this artifact's own service belongs to: NEW_SERVICE_POOL when the platform has never composed/published an article for artifact.service_id before, else UPDATE_POOL.
+    """Which selection pool this artifact's own service (or VENUE) belongs to: NEW_SERVICE_POOL when the platform has never composed/published an article for that id before, else UPDATE_POOL.
 
     Reuses `article_matching.service_has_article` -- the existing "has this
     service ever had a real published article" signal (a direct query
@@ -55,15 +55,30 @@ def _artifact_pool(artifact: Artifact, *, cache: dict[str, str]) -> str:
     falls out of service_has_article's own fails-open rule for an empty id
     (returns True/"already covered" immediately, no query).
 
-    `cache` memoizes by service_id within one selection/preview pass -- the
-    per-service pending dedup means each service_id appears at most once in
-    a `pending` list anyway, but a preview pass calls this once per pending
-    item AND once more inside _rank_platform_picks, so the cache avoids a
-    second Cassandra round-trip for the same service.
+    Checks `artifact.venue_service_id or artifact.service_id`, NOT
+    `service_id` alone (2026-08-2x fix): several ingest lanes (forum hot-
+    topics, xGov proposal phases, YouTube videos, Bluesky posts) mint a
+    synthetic service_id PER ITEM (e.g. "forum-topic:15288"), which can
+    never literal-match a prior published article's service_id even when
+    the underlying VENUE (the forum, the xGov program, the channel, the
+    account) is well covered -- every item from those lanes would otherwise
+    permanently occupy the guaranteed NEW_SERVICE_POOL floor instead of
+    competing in UPDATE_POOL like the routine coverage it actually is. This
+    intentionally does NOT touch `_rank_platform_picks`'s own per-service
+    dedup/exclusion, which stays keyed on the literal `service_id` -- two
+    artifacts about the SAME venue (e.g. two different forum threads) must
+    still be treated as two distinct dedup candidates, only their POOL
+    classification should follow the venue.
+
+    `cache` memoizes by this same key within one selection/preview pass --
+    the per-service pending dedup means each service_id appears at most once
+    in a `pending` list anyway, but a preview pass calls this once per
+    pending item AND once more inside _rank_platform_picks, so the cache
+    avoids a second Cassandra round-trip for the same service/venue.
     """
     from app.modules.newspaper.article_matching import service_has_article
 
-    key = artifact.service_id or ""
+    key = artifact.venue_service_id or artifact.service_id or ""
     if key in cache:
         return cache[key]
     pool = UPDATE_POOL if service_has_article(key) else NEW_SERVICE_POOL

@@ -1179,6 +1179,14 @@ FORUM_POLL_ENABLED = env_bool("FORUM_POLL_ENABLED", True)
 FORUM_BASE_URL = env_str("FORUM_BASE_URL", "https://forum.algorand.co")
 FORUM_MIN_POSTS = env_int("FORUM_MIN_POSTS", 8)
 FORUM_MIN_LIKES = env_int("FORUM_MIN_LIKES", 10)
+# The forum's own stable service_id (deploy/seeds/prod_services.toml), passed
+# as ingest_publish_signal's venue_service_id: every hot topic gets its own
+# per-item service_id ("forum-topic:<id>"), but the VENUE is always this one
+# forum — reusing its real registry id (rather than inventing a new one) lets
+# to_compose_selection._artifact_pool correctly read a hot-topic artifact as
+# UPDATE_POOL once the forum itself has ever published, instead of every
+# thread permanently occupying the guaranteed NEW_SERVICE_POOL floor.
+FORUM_VENUE_SERVICE_ID = env_str("FORUM_VENUE_SERVICE_ID", "algorand-forum")
 
 # xGov proposal watch: proposals are apps created by the registry's escrow
 # account (registry id from algorandfoundation/xgov-beta-sc README), one
@@ -1189,6 +1197,13 @@ XGOV_REGISTRY_APP_ID = env_int("XGOV_REGISTRY_APP_ID", 3147789458)
 # Phases older than this never signal — prevents the first poll from
 # backfilling every historical proposal as "news".
 XGOV_MAX_PHASE_AGE_DAYS = env_int("XGOV_MAX_PHASE_AGE_DAYS", 14)
+# xGov's own stable venue service_id, same purpose as FORUM_VENUE_SERVICE_ID
+# above — every proposal phase gets its own per-item service_id
+# ("xgov-proposal:<id>:<phase>"), but the VENUE is always the xGov program
+# itself. No pre-existing service_registry row for xgov.algorand.co was found
+# (unlike the forum's), so this follows the same domain-based convention
+# ensure_monitored_service uses (domain with "." replaced by "-").
+XGOV_VENUE_SERVICE_ID = env_str("XGOV_VENUE_SERVICE_ID", "xgov-algorand-co")
 
 # Pending-pool retro-pass: refresh content scores for pending frontier domains
 # and PROMOTE those whose crawled-content relevance clears the bar. Promotion

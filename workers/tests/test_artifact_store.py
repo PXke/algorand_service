@@ -394,3 +394,102 @@ def test_no_service_id_artifacts_never_concatenate(
     assert content_b is not None
     assert content_a.content == "brief one"
     assert content_b.content == "brief two"
+
+
+# --------------------------------------------------------------------------- #
+# venue_service_id (bug-class-2 fix: per-item lanes carry a stable venue id
+# distinct from their own per-item service_id)
+# --------------------------------------------------------------------------- #
+
+
+def test_insert_artifact_stores_venue_service_id(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """venue_service_id round-trips through both the artifacts row and its pending-index row -- both list_pending_artifacts and get_artifact must be able to read it back."""
+    from app.modules.newspaper.artifact_store import get_artifact, insert_artifact, list_pending_artifacts
+
+    artifact_id, _ = insert_artifact(
+        service_id="forum-topic:15288",
+        url="https://forum.algorand.co/t/wormhole-ntt/15288",
+        channel="forum",
+        content="hot topic",
+        venue_service_id="algorand-forum",
+    )
+
+    assert fake_artifact_session.artifacts[artifact_id]["venue_service_id"] == "algorand-forum"
+    (pending_row,) = fake_artifact_session.pending.values()
+    assert pending_row["venue_service_id"] == "algorand-forum"
+
+    fetched = get_artifact(artifact_id)
+    assert fetched is not None
+    assert fetched.venue_service_id == "algorand-forum"
+
+    (listed,) = list_pending_artifacts()
+    assert listed.venue_service_id == "algorand-forum"
+
+
+def test_insert_artifact_venue_service_id_defaults_to_none(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """A plain web crawl diff (no venue distinct from its own service_id) leaves venue_service_id unset."""
+    from app.modules.newspaper.artifact_store import insert_artifact, list_pending_artifacts
+
+    insert_artifact(service_id="svc-1", url=None, channel="crawler", content="x")
+
+    (listed,) = list_pending_artifacts()
+    assert listed.venue_service_id is None
+
+
+def test_update_artifact_priority_preserves_venue_service_id_on_reindex(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """Re-scoring an artifact deletes+reinserts its pending-index row (priority is part of that index's clustering key) -- venue_service_id must survive that round trip, not silently drop."""
+    from app.modules.newspaper.artifact_store import (
+        insert_artifact,
+        list_pending_artifacts,
+        update_artifact_priority,
+    )
+
+    artifact_id, _ = insert_artifact(
+        service_id="youtube-chan:vid1",
+        url=None,
+        channel="youtube",
+        content="video",
+        venue_service_id="youtube-chan",
+    )
+    update_artifact_priority(artifact_id, 4.2)
+
+    (listed,) = list_pending_artifacts()
+    assert listed.venue_service_id == "youtube-chan"
+    assert listed.priority == 4.2
+
+
+def test_set_artifact_venue_service_id_backfills_existing_pending_artifact(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """The reconciliation safety net's write path: backfilling venue_service_id on an artifact that landed without one updates both the artifacts row and, while still pending, its pending-index row."""
+    from app.modules.newspaper.artifact_store import (
+        insert_artifact,
+        list_pending_artifacts,
+        set_artifact_venue_service_id,
+    )
+
+    artifact_id, _ = insert_artifact(
+        service_id="xgov-proposal:101:voting", url=None, channel="crawler", content="proposal"
+    )
+
+    ok = set_artifact_venue_service_id(artifact_id, "xgov-algorand-co")
+
+    assert ok is True
+    assert fake_artifact_session.artifacts[artifact_id]["venue_service_id"] == "xgov-algorand-co"
+    (listed,) = list_pending_artifacts()
+    assert listed.venue_service_id == "xgov-algorand-co"
+
+
+def test_set_artifact_venue_service_id_unknown_id_returns_false(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """An unknown/malformed artifact_id is a no-op, not an exception."""
+    from app.modules.newspaper.artifact_store import set_artifact_venue_service_id
+
+    assert set_artifact_venue_service_id("not-a-real-uuid", "algorand-forum") is False
