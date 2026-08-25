@@ -2,6 +2,9 @@ import { writable, derived, get } from 'svelte/store'
 import { ApiException } from '../api/client'
 import { authApi } from '../api/auth'
 import { isAdminWallet } from '../config'
+import type { LoginChallenge, WalletId } from './walletProviders'
+
+export type { WalletId } from './walletProviders'
 
 const TOKEN_KEY = 'wallet_auth_session_token'
 
@@ -118,6 +121,7 @@ export async function completeSignIn(opts: {
   signatureB64?: string
   signedTxnB64?: string
   proofMethod?: string
+  arc0060?: Record<string, unknown>
 }): Promise<void> {
   authBusy.set(true)
   authError.set(null)
@@ -128,6 +132,7 @@ export async function completeSignIn(opts: {
       signatureB64: opts.signatureB64,
       signedTxnB64: opts.signedTxnB64,
       proofMethod: opts.proofMethod ?? 'signed_bytes',
+      arc0060: opts.arc0060,
     })
     const token = String(res.session_token ?? '')
     const addr = String(res.wallet_address ?? opts.walletAddress)
@@ -162,26 +167,37 @@ function resetWalletFlow() {
   walletFlow.set({ phase: 'idle', walletAddress: null, error: null })
 }
 
+// Tracks which wallet the current/last sign-in attempt used, so
+// cancel/wake/logout disconnect the right one. Defaults to 'pera' —
+// same wallet every caller used before wallet choice existed, so a
+// disconnect/wake called before any pick still behaves as before.
+let activeWalletId: WalletId = 'pera'
+
 /**
- * Pera sign-in: connect (Pera's own modal handles QR/deep-link/Firefox
- * quirks) → nonce → sign → verify. Pera-only — see pera.ts for why the
- * generic WalletConnect v1 client this used to wrap was dropped
- * (2026-08-02: it had drifted out of sync with Pera's own, actively
- * maintained client, and QR pairing silently stopped completing).
+ * Wallet sign-in: connect (the wallet's own modal handles QR/deep-link/
+ * Firefox quirks) → nonce → sign → verify. Each provider (Pera/Defly/Lute)
+ * lands on this same flow via `loadWalletAdapter` (see walletProviders.ts)
+ * — Pera keeps calling its own unmodified peraConnect/peraSignLoginProof/
+ * peraDisconnect functions through that adapter, so its behavior is
+ * unchanged from when this only supported Pera.
+ *
+ * (2026-08-02: this used to wrap a generic WalletConnect v1 client, dropped
+ * because it drifted out of sync with Pera's own, actively maintained
+ * client and QR pairing silently stopped completing — see pera.ts.)
  */
-export async function signInWithWalletConnect(): Promise<void> {
+export async function signInWithWalletConnect(walletId: WalletId = 'pera'): Promise<void> {
   cancelSignIn = false
+  activeWalletId = walletId
   authBusy.set(true)
   authError.set(null)
   walletFlow.set({ phase: 'pairing', walletAddress: null, error: null })
 
-  const { peraConnect, peraSignLoginProof, peraDisconnect } = await import('./pera')
-  const { isMobileWalletClient, openWalletDeepLink, walletAppLaunchLink } = await import(
-    './walletconnect'
-  )
+  const { loadWalletAdapter } = await import('./walletProviders')
+  const { isMobileWalletClient, openWalletDeepLink } = await import('./walletconnect')
+  const adapter = await loadWalletAdapter(walletId)
 
   try {
-    const address = await peraConnect()
+    const address = await adapter.connect()
     if (cancelSignIn) throw new Error('Wallet connection cancelled')
 
     walletFlow.set({
@@ -190,17 +206,23 @@ export async function signInWithWalletConnect(): Promise<void> {
       error: null,
     })
 
-    const challenge = await authApi.requestNonce(address)
-    const nonce = String(challenge.nonce ?? '')
-    const signingMessage = String(challenge.signing_message ?? '')
+    const challengeRes = await authApi.requestNonce(address)
+    const nonce = String(challengeRes.nonce ?? '')
+    const signingMessage = String(challengeRes.signing_message ?? '')
     if (!nonce || !signingMessage) throw new Error('Invalid auth challenge')
+    const challenge: LoginChallenge = {
+      nonce,
+      signingMessage,
+      caip122: (challengeRes.caip122 as Record<string, unknown> | undefined) ?? {},
+    }
 
     // Open the wallet only AFTER the sign request is on the bridge — opening
     // earlier races the socket wake and drops the reply on Firefox.
-    const proofPromise = peraSignLoginProof(address, signingMessage)
-    if (isMobileWalletClient()) {
+    const proofPromise = adapter.signLoginProof(address, challenge)
+    const appLink = adapter.appLaunchLink()
+    if (appLink && isMobileWalletClient()) {
       window.setTimeout(() => {
-        openWalletDeepLink(walletAppLaunchLink())
+        openWalletDeepLink(appLink)
       }, 200)
     }
     const proof = await proofPromise
@@ -211,17 +233,18 @@ export async function signInWithWalletConnect(): Promise<void> {
       nonce,
       signatureB64: proof.proofMethod === 'signed_bytes' ? proof.signatureB64 : undefined,
       signedTxnB64: proof.proofMethod === 'arc0025_txn' ? proof.signedTxnB64 : undefined,
+      arc0060: proof.proofMethod === 'arc0060' ? proof.arc0060 : undefined,
       proofMethod: proof.proofMethod,
     })
     try {
-      await peraDisconnect()
+      await adapter.disconnect()
     } catch {
       /* ignore */
     }
     resetWalletFlow()
   } catch (e) {
     try {
-      await peraDisconnect()
+      await adapter.disconnect()
     } catch {
       /* ignore */
     }
@@ -248,12 +271,15 @@ export async function cancelWalletSignIn(): Promise<void> {
   authBusy.set(false)
   authError.set(null)
   resetWalletFlow()
-  const { peraDisconnect } = await import('./pera')
-  await peraDisconnect()
+  const { loadWalletAdapter } = await import('./walletProviders')
+  const adapter = await loadWalletAdapter(activeWalletId)
+  await adapter.disconnect()
 }
 
 export function wakeWalletTransport(): void {
-  void import('./pera').then((m) => m.peraWakeTransportBurst())
+  void import('./walletProviders').then(({ loadWalletAdapter }) =>
+    loadWalletAdapter(activeWalletId).then((adapter) => adapter.wakeTransport()),
+  )
 }
 
 export async function logout(): Promise<void> {
@@ -277,8 +303,9 @@ export async function logout(): Promise<void> {
     /* ignore */
   }
   try {
-    const { peraDisconnect } = await import('./pera')
-    await peraDisconnect()
+    const { loadWalletAdapter } = await import('./walletProviders')
+    const adapter = await loadWalletAdapter(activeWalletId)
+    await adapter.disconnect()
   } catch {
     /* ignore */
   }

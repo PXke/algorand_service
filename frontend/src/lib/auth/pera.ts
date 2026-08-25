@@ -1,5 +1,6 @@
 import type { PeraWalletConnect } from '@perawallet/connect'
 import { config } from '../config'
+import { buildAuthPaymentTxn } from './arc0025'
 import {
   openWalletDeepLink,
   walletDeepLink,
@@ -120,24 +121,7 @@ async function peraSignArc0025Txn(
   signingMessage: string,
 ): Promise<string> {
   const pera = await getPera()
-  const algosdk = (await import('algosdk')).default
-  const server =
-    config.algodApiUrl.startsWith('http://') || config.algodApiUrl.startsWith('https://')
-      ? config.algodApiUrl
-      : `${window.location.origin}${config.algodApiUrl}`
-  const algod = new algosdk.Algodv2('', server, '')
-  const suggested = await algod.getTransactionParams().do()
-  const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
-    sender: walletAddress,
-    receiver: walletAddress,
-    amount: 0,
-    note: new TextEncoder().encode(signingMessage),
-    suggestedParams: {
-      ...suggested,
-      fee: 0,
-      flatFee: true,
-    },
-  })
+  const txn = await buildAuthPaymentTxn(walletAddress, signingMessage)
   const signed = await pera.signTransaction([
     [{ txn, signers: [walletAddress] }],
   ])
