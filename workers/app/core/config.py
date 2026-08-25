@@ -1407,6 +1407,37 @@ RECOMPOSE_AUTO_APPLY_GRADE_FLOOR = env_float("RECOMPOSE_AUTO_APPLY_GRADE_FLOOR",
 # identically here (same floor value, same formula).
 FRESH_AUTO_APPROVE_ENABLED = env_bool("FRESH_AUTO_APPROVE_ENABLED", True)
 FRESH_AUTO_APPROVE_GRADE_FLOOR = env_float("FRESH_AUTO_APPROVE_GRADE_FLOOR", 8.0)
+
+# --------------------------------------------------------------------------- #
+# Editorial-room artifacts (2026-08-25, SHADOW MODE) -- see artifact_store.py
+# / artifact_priority.py / to_compose_selection.py. These knobs govern only
+# the new artifacts/to_compose tables; they have zero effect on the live
+# publish_queue selection path (compute_priority / _select_lane_for_today).
+# --------------------------------------------------------------------------- #
+# Priority sweep: how often the daily beat recomputes every PENDING
+# artifact's priority (see tasks/artifact_tasks.py:sweep_artifact_priorities).
+ARTIFACT_PRIORITY_SWEEP_SECONDS = env_int("ARTIFACT_PRIORITY_SWEEP_SECONDS", 86400)
+# Word-count score component: diminishing returns past this many words (a
+# sqrt curve, not a hard cap -- see artifact_priority.word_count_score).
+ARTIFACT_WORD_COUNT_CAP = env_int("ARTIFACT_WORD_COUNT_CAP", 1200)
+ARTIFACT_WORD_COUNT_MAX_SCORE = env_float("ARTIFACT_WORD_COUNT_MAX_SCORE", 10.0)
+# Timeliness score component: exponential half-life decay from event_date
+# (falls back to created_at), asymptotically approaching (never reaching)
+# ARTIFACT_TIMELINESS_FLOOR -- an explicit owner decision that old-but-real
+# content must stay theoretically reachable "except when we have nothing
+# else to report". Shape mirrors gatekeeper/fact_align.py's
+# source_timeliness_score/_timeliness_from_anchor age-based decay used by
+# the LIVE publish_score.py priority (that function's linear decay hard-cuts
+# to 0 at PAGE_STALE_MAX_AGE_DAYS -- this one deliberately never does).
+ARTIFACT_TIMELINESS_MAX_SCORE = env_float("ARTIFACT_TIMELINESS_MAX_SCORE", 10.0)
+ARTIFACT_TIMELINESS_FLOOR = env_float("ARTIFACT_TIMELINESS_FLOOR", 1.0)
+ARTIFACT_TIMELINESS_HALF_LIFE_DAYS = env_float("ARTIFACT_TIMELINESS_HALF_LIFE_DAYS", 21.0)
+# Known-important-service boost: flat bonus for an artifact whose URL domain
+# is in the SAME ecosystem_listed directory registry the crawler-discovery
+# scorer already uses for chain-silent-but-important services (see
+# ecosystem_sync.ecosystem_listed_domains) -- deliberately not a second
+# registry.
+ARTIFACT_ECOSYSTEM_LISTED_BOOST = env_float("ARTIFACT_ECOSYSTEM_LISTED_BOOST", 5.0)
 # Article is flagged when the grounded fraction of its numeric claims falls below
 # this (too many figures with no anchor in the tool trace). This deterministic
 # check (gatekeeper/live.py) is the only factuality gate that actually runs in

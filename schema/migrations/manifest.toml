@@ -677,3 +677,11 @@ file = "backend/schema/migrations/app/076_pageview_referred_sample.cql"
 tier = "prod"
 status = "active"
 description = "add pageview_referred_sample: extends the '(direct)'-only retroactive-purge raw-request log (pageview_direct_sample) to '(internal)'/external-referred hits too, so a repeat-offender UA farming hits via in-app navigation or an external referrer can be clawed back the same way a direct-bucket one already is -- kept as a separate table (not merged into pageview_direct_sample) so the admin 'recent direct requests' panel, which reads that table straight through, isn't polluted with non-direct rows"
+
+[[migrations]]
+stream = "app"
+version = "077"
+file = "backend/schema/migrations/app/077_artifacts.cql"
+tier = "prod"
+status = "active"
+description = "add artifacts / artifacts_pending / artifact_content / to_compose: SHADOW-MODE editorial-room schema (owner design discussion 2026-08-25) replacing publish_queue's real-time 3-lane selection with a unified artifact model, a periodic priority sweep, and a day-ahead to_compose selection table -- purely additive, not read by the live compose/publish path in this phase (publish_queue/_select_lane_for_today untouched); artifacts/artifacts_pending mirror publish_queue/publish_queue_pending's thin-table-plus-pending-index shape, artifact_content mirrors the articles/article_history content split"

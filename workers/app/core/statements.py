@@ -742,3 +742,86 @@ class GlossaryStmts:
         ") VALUES (?, ?, ?, ?, 'draft', ?, ?, ?) IF NOT EXISTS"
     )
     UPDATE_TRANSLATIONS = GLOSSARY_UPDATE_TRANSLATIONS
+
+
+# --------------------------------------------------------------------------- #
+# artifacts / artifacts_pending / artifact_content / to_compose (2026-08-25
+# editorial-room redesign, SHADOW MODE -- see artifact_store.py /
+# artifact_priority.py / to_compose_selection.py. Not read by the live
+# compose/publish path; publish_queue's own statements above are untouched.)
+# --------------------------------------------------------------------------- #
+class ArtifactStmts:
+    """Prepared statements for the artifacts / artifacts_pending / artifact_content tables."""
+
+    INSERT = _Stmt(
+        "INSERT INTO algorand_platform.artifacts ("
+        "artifact_id, service_id, url, channel, created_at, event_date, "
+        "priority, priority_computed_at, status, human_pick_day"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    INSERT_PENDING = _Stmt(
+        "INSERT INTO algorand_platform.artifacts_pending ("
+        "status, priority, created_at, artifact_id, service_id, channel, url, event_date, "
+        "human_pick_day"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    DELETE_PENDING = _Stmt(
+        "DELETE FROM algorand_platform.artifacts_pending "
+        "WHERE status = ? AND priority = ? AND created_at = ? AND artifact_id = ?"
+    )
+    LIST_PENDING = _Stmt(
+        "SELECT status, priority, created_at, artifact_id, service_id, channel, url, event_date, "
+        "human_pick_day "
+        "FROM algorand_platform.artifacts_pending WHERE status = ? LIMIT ?"
+    )
+    SET_PENDING_HUMAN_PICK = _Stmt(
+        "UPDATE algorand_platform.artifacts_pending SET human_pick_day = ? "
+        "WHERE status = ? AND priority = ? AND created_at = ? AND artifact_id = ?"
+    )
+    GET = _Stmt(
+        "SELECT artifact_id, service_id, url, channel, created_at, event_date, "
+        "priority, priority_computed_at, status, human_pick_day "
+        "FROM algorand_platform.artifacts WHERE artifact_id = ?"
+    )
+    GET_STATUS_ROW = _Stmt(
+        "SELECT status, priority, created_at FROM algorand_platform.artifacts WHERE artifact_id = ?"
+    )
+    UPDATE_STATUS = _Stmt(
+        "UPDATE algorand_platform.artifacts SET status = ? WHERE artifact_id = ?"
+    )
+    UPDATE_PRIORITY = _Stmt(
+        "UPDATE algorand_platform.artifacts SET priority = ?, priority_computed_at = ? "
+        "WHERE artifact_id = ?"
+    )
+    SET_HUMAN_PICK = _Stmt(
+        "UPDATE algorand_platform.artifacts SET human_pick_day = ? WHERE artifact_id = ?"
+    )
+    CLEAR_HUMAN_PICK = _Stmt(
+        "UPDATE algorand_platform.artifacts SET human_pick_day = null WHERE artifact_id = ?"
+    )
+    INSERT_CONTENT = _Stmt(
+        "INSERT INTO algorand_platform.artifact_content (artifact_id, title, content, metadata) "
+        "VALUES (?, ?, ?, ?)"
+    )
+    GET_CONTENT = _Stmt(
+        "SELECT artifact_id, title, content, metadata "
+        "FROM algorand_platform.artifact_content WHERE artifact_id = ?"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# to_compose (day-ahead compose selection -- see to_compose_selection.py)
+# --------------------------------------------------------------------------- #
+class ToComposeStmts:
+    """Prepared statements for the to_compose day-ahead selection table."""
+
+    INSERT = _Stmt(
+        "INSERT INTO algorand_platform.to_compose ("
+        "compose_day, slot, artifact_id, lane, service_id, picked_at"
+        ") VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    LIST_FOR_DAY = _Stmt(
+        "SELECT compose_day, slot, artifact_id, lane, service_id, picked_at "
+        "FROM algorand_platform.to_compose WHERE compose_day = ?"
+    )
+    DELETE_FOR_DAY = _Stmt("DELETE FROM algorand_platform.to_compose WHERE compose_day = ?")

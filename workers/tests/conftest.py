@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 from typing import Any, Never
 from unittest.mock import MagicMock
 
@@ -145,6 +146,225 @@ def _no_live_mistral_model_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(loc, "_fetch_model_metadata", lambda **_kw: {})
     loc._model_metadata_cache.clear()
+
+
+def _artifact_cql(cls: type, name: str) -> str:
+    """Read a `_Stmt`'s raw CQL text via the class `__dict__` (bypasses the descriptor's `__get__`, which calls `prepare_cached` and needs a live session)."""
+    return cls.__dict__[name].cql
+
+
+class _ArtifactRows(list):
+    """A list of rows that ALSO supports `.one()` -- artifact_store.py sometimes chains `.one()` on a point query and sometimes iterates a multi-row result directly over the same `session.execute(...)` return value."""
+
+    def one(self) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row
+        """Return the first row, or None when empty."""
+        return self[0] if self else None
+
+
+def _artifact_rows(rows: list) -> _ArtifactRows:
+    return _ArtifactRows(rows)
+
+
+class FakeArtifactSession:
+    """In-memory artifacts/artifacts_pending/artifact_content/to_compose tables (2026-08-25 editorial-room shadow schema), keyed by the exact CQL text of `app.core.statements.ArtifactStmts`/`ToComposeStmts` so it exercises the real store/priority/selection code against its real prepared-statement call sites, not just a call-capturing mock. Shared across test_artifact_store.py, test_artifact_priority.py, and test_to_compose_selection.py via the `fake_artifact_session` fixture below — genuinely identical needs across all three, unlike the bespoke-per-file fakes elsewhere in this suite."""
+
+    def __init__(self) -> None:
+        """Start with all four tables empty and the CQL-text dispatch table wired."""
+        from app.core.statements import ArtifactStmts, ToComposeStmts
+
+        self.artifacts: dict[str, dict] = {}
+        self.pending: dict[tuple, dict] = {}
+        self.content: dict[str, dict] = {}
+        self.to_compose: dict[tuple, dict] = {}
+        self._handlers = {
+            _artifact_cql(ArtifactStmts, "INSERT"): self._insert_artifact,
+            _artifact_cql(ArtifactStmts, "INSERT_PENDING"): self._insert_pending,
+            _artifact_cql(ArtifactStmts, "DELETE_PENDING"): self._delete_pending,
+            _artifact_cql(ArtifactStmts, "LIST_PENDING"): self._list_pending,
+            _artifact_cql(ArtifactStmts, "SET_PENDING_HUMAN_PICK"): self._set_pending_human_pick,
+            _artifact_cql(ArtifactStmts, "GET"): self._get_artifact,
+            _artifact_cql(ArtifactStmts, "GET_STATUS_ROW"): self._get_status_row,
+            _artifact_cql(ArtifactStmts, "UPDATE_STATUS"): self._update_status,
+            _artifact_cql(ArtifactStmts, "UPDATE_PRIORITY"): self._update_priority,
+            _artifact_cql(ArtifactStmts, "SET_HUMAN_PICK"): self._set_human_pick,
+            _artifact_cql(ArtifactStmts, "CLEAR_HUMAN_PICK"): self._clear_human_pick,
+            _artifact_cql(ArtifactStmts, "INSERT_CONTENT"): self._insert_content,
+            _artifact_cql(ArtifactStmts, "GET_CONTENT"): self._get_content,
+            _artifact_cql(ToComposeStmts, "INSERT"): self._insert_to_compose,
+            _artifact_cql(ToComposeStmts, "LIST_FOR_DAY"): self._list_to_compose,
+            _artifact_cql(ToComposeStmts, "DELETE_FOR_DAY"): self._delete_to_compose_day,
+        }
+
+    def prepare(self, cql: str) -> str:
+        """Identity prepare -- lets `execute()` dispatch on the raw CQL text itself."""
+        return cql
+
+    def execute(self, cql: str, params: tuple = ()) -> Any:  # noqa: ANN401 -- duck-typed Cassandra ResultSet
+        """Dispatch to the in-memory handler matching this exact CQL string."""
+        handler = self._handlers.get(cql)
+        if handler is None:
+            raise AssertionError(f"FakeArtifactSession: no handler wired for CQL: {cql!r}")
+        return handler(tuple(params))
+
+    # -- artifacts -----------------------------------------------------
+    def _insert_artifact(self, p: tuple) -> None:
+        (
+            artifact_id,
+            service_id,
+            url,
+            channel,
+            created_at,
+            event_date,
+            priority,
+            priority_computed_at,
+            status,
+            human_pick_day,
+        ) = p
+        self.artifacts[str(artifact_id)] = {
+            "artifact_id": artifact_id,
+            "service_id": service_id,
+            "url": url,
+            "channel": channel,
+            "created_at": created_at,
+            "event_date": event_date,
+            "priority": priority,
+            "priority_computed_at": priority_computed_at,
+            "status": status,
+            "human_pick_day": human_pick_day,
+        }
+
+    def _get_artifact(self, p: tuple) -> _ArtifactRows:
+        (artifact_id,) = p
+        row = self.artifacts.get(str(artifact_id))
+        return _artifact_rows([SimpleNamespace(**row)] if row else [])
+
+    def _get_status_row(self, p: tuple) -> _ArtifactRows:
+        (artifact_id,) = p
+        row = self.artifacts.get(str(artifact_id))
+        if not row:
+            return _artifact_rows([])
+        return _artifact_rows(
+            [SimpleNamespace(status=row["status"], priority=row["priority"], created_at=row["created_at"])]
+        )
+
+    def _update_status(self, p: tuple) -> None:
+        status, artifact_id = p
+        row = self.artifacts.get(str(artifact_id))
+        if row:
+            row["status"] = status
+
+    def _update_priority(self, p: tuple) -> None:
+        priority, computed_at, artifact_id = p
+        row = self.artifacts.get(str(artifact_id))
+        if row:
+            row["priority"] = priority
+            row["priority_computed_at"] = computed_at
+
+    def _set_human_pick(self, p: tuple) -> None:
+        day, artifact_id = p
+        row = self.artifacts.get(str(artifact_id))
+        if row:
+            row["human_pick_day"] = day
+
+    def _clear_human_pick(self, p: tuple) -> None:
+        (artifact_id,) = p
+        row = self.artifacts.get(str(artifact_id))
+        if row:
+            row["human_pick_day"] = None
+
+    # -- artifacts_pending ----------------------------------------------
+    @staticmethod
+    def _pending_key(status: str, priority: float, created_at: object, artifact_id: object) -> tuple:
+        return (status, priority, created_at, str(artifact_id))
+
+    def _insert_pending(self, p: tuple) -> None:
+        (
+            status,
+            priority,
+            created_at,
+            artifact_id,
+            service_id,
+            channel,
+            url,
+            event_date,
+            human_pick_day,
+        ) = p
+        key = self._pending_key(status, priority, created_at, artifact_id)
+        self.pending[key] = {
+            "status": status,
+            "priority": priority,
+            "created_at": created_at,
+            "artifact_id": artifact_id,
+            "service_id": service_id,
+            "channel": channel,
+            "url": url,
+            "event_date": event_date,
+            "human_pick_day": human_pick_day,
+        }
+
+    def _delete_pending(self, p: tuple) -> None:
+        status, priority, created_at, artifact_id = p
+        self.pending.pop(self._pending_key(status, priority, created_at, artifact_id), None)
+
+    def _list_pending(self, p: tuple) -> _ArtifactRows:
+        status, limit = p
+        rows = [r for r in self.pending.values() if r["status"] == status]
+        rows.sort(key=lambda r: (-r["priority"], r["created_at"]))
+        return _artifact_rows([SimpleNamespace(**r) for r in rows[:limit]])
+
+    def _set_pending_human_pick(self, p: tuple) -> None:
+        human_pick_day, status, priority, created_at, artifact_id = p
+        row = self.pending.get(self._pending_key(status, priority, created_at, artifact_id))
+        if row:
+            row["human_pick_day"] = human_pick_day
+
+    # -- artifact_content -------------------------------------------------
+    def _insert_content(self, p: tuple) -> None:
+        artifact_id, title, content, metadata = p
+        self.content[str(artifact_id)] = {
+            "artifact_id": artifact_id,
+            "title": title,
+            "content": content,
+            "metadata": metadata,
+        }
+
+    def _get_content(self, p: tuple) -> _ArtifactRows:
+        (artifact_id,) = p
+        row = self.content.get(str(artifact_id))
+        return _artifact_rows([SimpleNamespace(**row)] if row else [])
+
+    # -- to_compose -------------------------------------------------------
+    def _insert_to_compose(self, p: tuple) -> None:
+        compose_day, slot, artifact_id, lane, service_id, picked_at = p
+        self.to_compose[(compose_day, slot)] = {
+            "compose_day": compose_day,
+            "slot": slot,
+            "artifact_id": artifact_id,
+            "lane": lane,
+            "service_id": service_id,
+            "picked_at": picked_at,
+        }
+
+    def _list_to_compose(self, p: tuple) -> _ArtifactRows:
+        (compose_day,) = p
+        rows = [r for r in self.to_compose.values() if r["compose_day"] == compose_day]
+        return _artifact_rows([SimpleNamespace(**r) for r in rows])
+
+    def _delete_to_compose_day(self, p: tuple) -> None:
+        (compose_day,) = p
+        for key in [k for k in self.to_compose if k[0] == compose_day]:
+            del self.to_compose[key]
+
+
+@pytest.fixture
+def fake_artifact_session(monkeypatch: pytest.MonkeyPatch) -> FakeArtifactSession:
+    """Install a fresh FakeArtifactSession and clear the process-wide prepared-statement cache (prepare_cached caches by CQL string across the whole test process, so a stale prepared statement from an earlier real-session test must not leak in)."""
+    import app.core.cassandra as c
+
+    session = FakeArtifactSession()
+    monkeypatch.setattr(c, "get_cassandra_session", lambda: session)
+    c.prepare_cached.cache_clear()
+    return session
 
 
 @pytest.fixture(autouse=True)

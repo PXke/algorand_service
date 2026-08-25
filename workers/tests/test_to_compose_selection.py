@@ -1,0 +1,223 @@
+"""Day-ahead `to_compose` selection (2026-08-25, SHADOW MODE): human-slot-stays-empty-if-unpicked, N-1 platform fill, and per-service dedup excluding the human's own pick.
+
+Uses the shared `fake_artifact_session` fixture (conftest.py) -- via
+`@pytest.mark.usefixtures` for tests that only need its monkeypatching side
+effect, or as a plain parameter for tests that inspect its in-memory tables
+directly.
+
+NONE of this touches publish_queue / _select_lane_for_today / any live
+compose trigger -- select_to_compose_for_day is a plain function, not wired
+to any beat in this phase.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+
+import pytest
+from conftest import FakeArtifactSession
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_human_slot_stays_empty_when_no_pin_by_cutoff() -> None:
+    """Explicit owner decision: if nobody pinned an artifact for the day, slot 0 stays UNFILLED -- the platform must never backfill it to avoid overcomposing."""
+    from app.modules.newspaper.artifact_store import insert_artifact
+    from app.modules.newspaper.to_compose_selection import (
+        list_to_compose_for_day,
+        select_to_compose_for_day,
+    )
+
+    insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    insert_artifact(service_id="svc-b", url=None, channel="brief", content="b")
+
+    result = select_to_compose_for_day("2026-08-26")
+
+    assert result["human_picked"] is False
+    lanes = [row["lane"] for row in list_to_compose_for_day("2026-08-26")]
+    assert "human" not in lanes
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_human_pin_fills_slot_zero() -> None:
+    """A pinned artifact takes slot 0 with lane='human'."""
+    from app.modules.newspaper.artifact_store import insert_artifact, pin_artifact_for_day
+    from app.modules.newspaper.to_compose_selection import (
+        list_to_compose_for_day,
+        select_to_compose_for_day,
+    )
+
+    picked_id, _ = insert_artifact(
+        service_id="svc-picked", url=None, channel="brief", content="picked"
+    )
+    pin_artifact_for_day(picked_id, "2026-08-26")
+
+    result = select_to_compose_for_day("2026-08-26")
+
+    assert result["human_picked"] is True
+    rows = list_to_compose_for_day("2026-08-26")
+    assert rows[0]["slot"] == 0
+    assert rows[0]["lane"] == "human"
+    assert rows[0]["artifact_id"] == picked_id
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_a_pin_for_a_different_day_is_not_used() -> None:
+    """A pin set for some OTHER day must not accidentally fill today's/tomorrow's human slot."""
+    from app.modules.newspaper.artifact_store import insert_artifact, pin_artifact_for_day
+    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
+
+    picked_id, _ = insert_artifact(
+        service_id="svc-picked", url=None, channel="brief", content="picked"
+    )
+    pin_artifact_for_day(picked_id, "2026-09-01")
+
+    result = select_to_compose_for_day("2026-08-26")
+    assert result["human_picked"] is False
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_platform_fills_n_minus_1_slots_by_priority(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no human pick, N-1 platform slots go to the top-priority pending artifacts."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
+    from app.modules.newspaper.to_compose_selection import (
+        list_to_compose_for_day,
+        select_to_compose_for_day,
+    )
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # N=3 -> 2 platform slots
+
+    ids = []
+    for i, prio in enumerate([1.0, 9.0, 5.0, 7.0]):
+        aid, _ = insert_artifact(
+            service_id=f"svc-{i}", url=None, channel="brief", content=f"content {i}"
+        )
+        update_artifact_priority(aid, prio)
+        ids.append(aid)
+    # priorities: svc-0=1.0, svc-1=9.0, svc-2=5.0, svc-3=7.0
+    # top-2 by priority: svc-1 (9.0), svc-3 (7.0)
+
+    result = select_to_compose_for_day("2026-08-26")
+
+    assert result["human_picked"] is False
+    assert result["platform_slots_available"] == 2
+    assert result["platform_slots_filled"] == 2
+    rows = list_to_compose_for_day("2026-08-26")
+    assert [r["lane"] for r in rows] == ["platform", "platform"]
+    assert [r["artifact_id"] for r in rows] == [ids[1], ids[3]]
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_platform_fill_respects_one_pending_per_service_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two DIFFERENT artifacts can never coexist pending for the same service_id (insert_artifact's own dedup already guarantees this), so the platform fill naturally never double-picks one service -- this pins that guarantee end to end through selection."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
+    from app.modules.newspaper.to_compose_selection import (
+        list_to_compose_for_day,
+        select_to_compose_for_day,
+    )
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 4)  # N=4 -> 3 platform slots
+
+    # Same service_id twice: insert_artifact's dedup means only the SECOND
+    # survives as pending for "svc-same".
+    insert_artifact(service_id="svc-same", url=None, channel="crawler", content="old diff")
+    newest_id, _ = insert_artifact(
+        service_id="svc-same", url=None, channel="crawler", content="new diff"
+    )
+    update_artifact_priority(newest_id, 8.0)
+    other_id, _ = insert_artifact(service_id="svc-other", url=None, channel="crawler", content="other")
+    update_artifact_priority(other_id, 6.0)
+
+    result = select_to_compose_for_day("2026-08-26")
+
+    assert result["platform_slots_filled"] == 2  # only 2 pending artifacts exist at all
+    rows = list_to_compose_for_day("2026-08-26")
+    service_ids = {r["service_id"] for r in rows}
+    assert service_ids == {"svc-same", "svc-other"}
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_platform_fill_excludes_the_human_picks_own_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """'N-1 platform slots ... excluding whatever the human already picked' -- a second pending artifact for the SAME service_id as the human pick must not also take a platform slot."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import (
+        insert_artifact,
+        pin_artifact_for_day,
+        update_artifact_priority,
+    )
+    from app.modules.newspaper.to_compose_selection import (
+        list_to_compose_for_day,
+        select_to_compose_for_day,
+    )
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)
+
+    human_id, _ = insert_artifact(service_id="svc-human", url=None, channel="brief", content="pinned")
+    pin_artifact_for_day(human_id, "2026-08-26")
+    update_artifact_priority(human_id, 10.0)
+
+    platform_id, _ = insert_artifact(
+        service_id="svc-platform", url=None, channel="crawler", content="p"
+    )
+    update_artifact_priority(platform_id, 5.0)
+
+    result = select_to_compose_for_day("2026-08-26")
+
+    assert result["human_picked"] is True
+    assert result["platform_slots_filled"] == 1
+    rows = list_to_compose_for_day("2026-08-26")
+    assert [r["artifact_id"] for r in rows] == [human_id, platform_id]
+
+
+def test_selected_artifacts_leave_the_pending_lane(
+    fake_artifact_session: FakeArtifactSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both the human pick and every platform pick transition pending -> selected and drop out of the pending index."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import SELECTED, insert_artifact, pin_artifact_for_day
+    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)
+
+    human_id, _ = insert_artifact(service_id="svc-human", url=None, channel="brief", content="pinned")
+    pin_artifact_for_day(human_id, "2026-08-26")
+    platform_id, _ = insert_artifact(service_id="svc-p", url=None, channel="crawler", content="p")
+
+    select_to_compose_for_day("2026-08-26")
+
+    assert fake_artifact_session.artifacts[human_id]["status"] == SELECTED
+    assert fake_artifact_session.artifacts[platform_id]["status"] == SELECTED
+    assert len(fake_artifact_session.pending) == 0
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_platform_slots_available_floors_at_zero_when_cap_is_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """N=1 (the minimum allowed cap) leaves zero platform slots -- must not go negative or (an earlier bug caught by this test) admit one extra artifact via an off-by-one in the fill loop's break check."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import insert_artifact
+    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 1)
+    insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+
+    result = select_to_compose_for_day("2026-08-26")
+    assert result["platform_slots_available"] == 0
+    assert result["platform_slots_filled"] == 0
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_pin_for_tomorrow_uses_day_after_today() -> None:
+    """pin_for_tomorrow resolves "tomorrow" relative to the given `today` and pins for that exact compose day."""
+    from app.modules.newspaper.artifact_store import insert_artifact
+    from app.modules.newspaper.to_compose_selection import (
+        pin_for_tomorrow,
+        select_to_compose_for_day,
+    )
+
+    artifact_id, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    ok = pin_for_tomorrow(artifact_id, today=dt.date(2026, 8, 25))
+
+    assert ok is True
+    result = select_to_compose_for_day("2026-08-26")
+    assert result["human_picked"] is True
