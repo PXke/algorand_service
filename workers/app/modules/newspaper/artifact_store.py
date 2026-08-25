@@ -61,6 +61,16 @@ class Artifact:
     priority_computed_at: datetime | None
     status: str
     human_pick_day: str | None = None
+    # Stable service_id for this artifact's underlying VENUE (the forum, the
+    # xGov program, a YouTube channel, a Bluesky account) when `service_id`
+    # itself is a synthetic per-item key (forum-topic:<id>,
+    # xgov-proposal:<id>:<phase>, <channel>:<videoId>, <account>:<rkey>) that
+    # can never literal-match a prior published article's service_id even
+    # though the venue itself may already be well covered. None for any
+    # artifact whose service_id IS its own venue (a plain web crawl diff, a
+    # brief, an unlinked mail message). See _artifact_pool in
+    # to_compose_selection.py, the only reader of this field.
+    venue_service_id: str | None = None
 
     @property
     def effective_event_date(self) -> datetime:
@@ -88,8 +98,17 @@ def insert_artifact(
     metadata: dict[str, Any] | None = None,
     event_date: datetime | None = None,
     now: datetime | None = None,
+    venue_service_id: str | None = None,
 ) -> tuple[str, bool]:
     """Insert a new pending artifact plus its content row. Returns (artifact_id, created).
+
+    `venue_service_id`: for a per-item ingest lane (forum/xgov/youtube/
+    bluesky -- see the `Artifact.venue_service_id` field docstring), the
+    stable id of the underlying venue, distinct from this artifact's own
+    per-item `service_id`. None for everything else. Purely a read signal
+    for `to_compose_selection._artifact_pool`; never part of the dedup match
+    below, which stays keyed on the literal per-item `service_id` exactly as
+    before.
 
     Dedup invariant: at most one PENDING artifact per service_id. When
     `service_id` is truthy and an existing pending artifact for it is found,
@@ -160,6 +179,7 @@ def insert_artifact(
         (
             artifact_id,
             service_id,
+            venue_service_id,
             url,
             channel,
             now,
@@ -172,7 +192,18 @@ def insert_artifact(
     )
     session.execute(
         ArtifactStmts.INSERT_PENDING,
-        (PENDING, priority, now, artifact_id, service_id, channel, url, event_date, None),
+        (
+            PENDING,
+            priority,
+            now,
+            artifact_id,
+            service_id,
+            venue_service_id,
+            channel,
+            url,
+            event_date,
+            None,
+        ),
     )
     session.execute(
         ArtifactStmts.INSERT_CONTENT,
@@ -289,6 +320,7 @@ def _row_to_artifact(row: object) -> Artifact:
         priority_computed_at=row.priority_computed_at,
         status=row.status or "",
         human_pick_day=row.human_pick_day or None,
+        venue_service_id=getattr(row, "venue_service_id", None) or None,
     )
 
 
@@ -310,6 +342,7 @@ def list_pending_artifacts(*, limit: int = 2000) -> list[Artifact]:
             priority_computed_at=None,
             status=row.status or PENDING,
             human_pick_day=row.human_pick_day or None,
+            venue_service_id=getattr(row, "venue_service_id", None) or None,
         )
         for row in session.execute(ArtifactStmts.LIST_PENDING, (PENDING, limit))
     ]
@@ -391,6 +424,7 @@ def update_artifact_priority(artifact_id: str, priority: float, *, now: datetime
                 status_row.created_at,
                 aid,
                 full.service_id if full else None,
+                getattr(full, "venue_service_id", None) if full else None,
                 full.channel if full else None,
                 full.url if full else None,
                 full.event_date if full else None,
@@ -513,3 +547,25 @@ def clear_artifact_pin(artifact_id: str) -> None:
     session.execute(ArtifactStmts.CLEAR_HUMAN_PICK, (aid,))
     if status_row is not None:
         _set_pending_index_pin(session, aid, status_row, None)
+
+
+def set_artifact_venue_service_id(artifact_id: str, venue_service_id: str) -> bool:
+    """Backfill `venue_service_id` on an existing artifact -- the write side of the ongoing bug-class-2 reconciliation sweep (see `service_reconciliation.backfill_missing_venue_service_ids`), a safety net for a per-item artifact that landed without one (inserted before the lane fix deployed, or by a future lane that forgets to pass it). Mirrors pin_artifact_for_day's shape: update `artifacts`, then mirror onto the pending-index row when still pending (not part of that table's key, so a plain UPDATE). Returns False for an unknown id."""
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArtifactStmts
+
+    try:
+        aid = uuid.UUID(str(artifact_id))
+    except ValueError:
+        return False
+    session = get_cassandra_session()
+    status_row = session.execute(ArtifactStmts.GET_STATUS_ROW, (aid,)).one()
+    if status_row is None:
+        return False
+    session.execute(ArtifactStmts.SET_VENUE_SERVICE_ID, (venue_service_id, aid))
+    if status_row.status == PENDING and status_row.created_at is not None:
+        session.execute(
+            ArtifactStmts.SET_PENDING_VENUE_SERVICE_ID,
+            (venue_service_id, PENDING, status_row.priority, status_row.created_at, aid),
+        )
+    return True

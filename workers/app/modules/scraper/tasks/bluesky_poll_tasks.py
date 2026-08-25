@@ -85,6 +85,15 @@ def poll_bluesky_sources() -> dict[str, object]:
                 # discovery. Without this override every post misclassifies
                 # as SERVICE_DISCOVERY/new_service.
                 is_first_override=False,
+                # Same per-item shape, but for the editorial-room artifact
+                # pool: every post mints its own per-item service_id ("
+                # <account>:<rkey>"), which can never literal-match a prior
+                # published article's service_id even though the account
+                # itself (entry.service_id) is a well-covered venue — pass
+                # it through so a new post on an established account reads
+                # as routine coverage (UPDATE_POOL), not a new-service
+                # discovery.
+                venue_service_id=entry.service_id,
             )
             if outcome.get("status") == "enqueued":
                 new_posts += 1

@@ -182,6 +182,10 @@ class FakeArtifactSession:
             _artifact_cql(ArtifactStmts, "DELETE_PENDING"): self._delete_pending,
             _artifact_cql(ArtifactStmts, "LIST_PENDING"): self._list_pending,
             _artifact_cql(ArtifactStmts, "SET_PENDING_HUMAN_PICK"): self._set_pending_human_pick,
+            _artifact_cql(ArtifactStmts, "SET_VENUE_SERVICE_ID"): self._set_venue_service_id,
+            _artifact_cql(
+                ArtifactStmts, "SET_PENDING_VENUE_SERVICE_ID"
+            ): self._set_pending_venue_service_id,
             _artifact_cql(ArtifactStmts, "GET"): self._get_artifact,
             _artifact_cql(ArtifactStmts, "GET_STATUS_ROW"): self._get_status_row,
             _artifact_cql(ArtifactStmts, "UPDATE_STATUS"): self._update_status,
@@ -211,6 +215,7 @@ class FakeArtifactSession:
         (
             artifact_id,
             service_id,
+            venue_service_id,
             url,
             channel,
             created_at,
@@ -223,6 +228,7 @@ class FakeArtifactSession:
         self.artifacts[str(artifact_id)] = {
             "artifact_id": artifact_id,
             "service_id": service_id,
+            "venue_service_id": venue_service_id,
             "url": url,
             "channel": channel,
             "created_at": created_at,
@@ -272,6 +278,12 @@ class FakeArtifactSession:
         if row:
             row["human_pick_day"] = None
 
+    def _set_venue_service_id(self, p: tuple) -> None:
+        venue_service_id, artifact_id = p
+        row = self.artifacts.get(str(artifact_id))
+        if row:
+            row["venue_service_id"] = venue_service_id
+
     # -- artifacts_pending ----------------------------------------------
     @staticmethod
     def _pending_key(status: str, priority: float, created_at: object, artifact_id: object) -> tuple:
@@ -284,6 +296,7 @@ class FakeArtifactSession:
             created_at,
             artifact_id,
             service_id,
+            venue_service_id,
             channel,
             url,
             event_date,
@@ -296,6 +309,7 @@ class FakeArtifactSession:
             "created_at": created_at,
             "artifact_id": artifact_id,
             "service_id": service_id,
+            "venue_service_id": venue_service_id,
             "channel": channel,
             "url": url,
             "event_date": event_date,
@@ -317,6 +331,12 @@ class FakeArtifactSession:
         row = self.pending.get(self._pending_key(status, priority, created_at, artifact_id))
         if row:
             row["human_pick_day"] = human_pick_day
+
+    def _set_pending_venue_service_id(self, p: tuple) -> None:
+        venue_service_id, status, priority, created_at, artifact_id = p
+        row = self.pending.get(self._pending_key(status, priority, created_at, artifact_id))
+        if row:
+            row["venue_service_id"] = venue_service_id
 
     # -- artifact_content -------------------------------------------------
     def _insert_content(self, p: tuple) -> None:

@@ -701,3 +701,11 @@ file = "backend/schema/migrations/app/079_drop_publish_queue.cql"
 tier = "prod"
 status = "active"
 description = "drop publish_queue / publish_queue_pending / publish_queue_dedupe (migration 010): retires the 3-lane selection system replaced by artifacts/to_compose (migration 077, cut over 2026-08-25); publish_queue was kept dual-write for one deploy cycle as a rollback safety net, owner call one day later ('we don't need them in a closed feature') to drop it now -- priority values between the two systems are not comparable and do not need reconciling, artifacts is the live system going forward; the dual-write itself (enqueue_publish call sites, dual_write_queue_id metadata, _resolve_dual_written_queue_row) was removed from the compose pipeline in the same change that adds this migration"
+
+[[migrations]]
+stream = "app"
+version = "080"
+file = "backend/schema/migrations/app/080_artifact_venue_service_id.cql"
+tier = "prod"
+status = "active"
+description = "add artifacts.venue_service_id / artifacts_pending.venue_service_id: nullable stable venue id for per-item ingest lanes (forum hot-topics, xGov proposal phases, YouTube videos, Bluesky posts) that mint a synthetic service_id per item and so can never literal-match a prior published article's service_id even when the underlying venue is well covered -- root-caused in the new-service-lane audit alongside the domain-registry duplicate bug (service_sources reverse-index gap in seed_service_registry.py, fixed the same change); set at insert time by the four lanes via ingest_signal.ingest_publish_signal's venue_service_id kwarg, read by to_compose_selection._artifact_pool as service_has_article(artifact.venue_service_id or artifact.service_id)"

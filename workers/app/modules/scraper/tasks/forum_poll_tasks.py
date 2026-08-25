@@ -109,6 +109,13 @@ def poll_forum_topics() -> dict[str, object]:
             # The forum is a known venue; a hot thread is a content event,
             # never the discovery of a new service.
             is_first_override=False,
+            # Every topic mints its own per-item service_id ("forum-topic:
+            # <id>"), which can never literal-match a prior published
+            # article's service_id even though forum.algorand.co itself is a
+            # well-covered venue — pass its real registry service_id so the
+            # editorial-room artifact pool correctly reads this as routine
+            # coverage (UPDATE_POOL), not a new-service discovery.
+            venue_service_id=config.FORUM_VENUE_SERVICE_ID,
         )
         if outcome.get("status") == "enqueued":
             new_signals += 1

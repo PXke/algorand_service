@@ -199,6 +199,14 @@ def poll_xgov_proposals() -> dict[str, Any]:
             # without the override every phase signal would misclassify as
             # SERVICE_DISCOVERY of a brand-new service.
             is_first_override=False,
+            # Every (proposal, phase) mints its own per-item service_id
+            # ("xgov-proposal:<id>:<phase>"), which can never literal-match a
+            # prior published article's service_id even though the xGov
+            # program itself is a well-covered venue — pass its stable venue
+            # service_id so the editorial-room artifact pool correctly reads
+            # this as routine coverage (UPDATE_POOL), not a new-service
+            # discovery.
+            venue_service_id=config.XGOV_VENUE_SERVICE_ID,
         )
         if outcome.get("status") == "enqueued":
             new_signals += 1

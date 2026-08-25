@@ -87,6 +87,14 @@ def test_poll_signals_new_phases_and_skips_drafts_and_seen(monkeypatch: pytest.M
     assert [s["service_id"] for s in signals] == ["xgov-proposal:101:voting"]
     assert signals[0]["source_kind"] == "xgov"
     assert signals[0]["is_first_override"] is False
+    # Bug-class-2 fix: every proposal phase mints its own per-item
+    # service_id, which can never literal-match a prior published article
+    # even though the xGov program itself is a well-covered venue -- the
+    # lane must pass the stable venue id through so the editorial-room
+    # artifact pool reads this as routine coverage, not a new discovery.
+    from app.core import config
+
+    assert signals[0]["venue_service_id"] == config.XGOV_VENUE_SERVICE_ID
 
 
 def test_topic_is_hot_thresholds_and_pinned() -> None:

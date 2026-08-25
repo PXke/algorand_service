@@ -562,7 +562,7 @@ class ServiceRegistryStmts:
     """Prepared statements for the service registry."""
 
     LIST_ALL = _Stmt(
-        "SELECT service_id, display_name, match_kind, match_value, scrape_url, enabled "
+        "SELECT service_id, display_name, match_kind, match_value, scrape_url, enabled, origin "
         "FROM algorand_platform.service_registry"
     )
     GET_ID = _Stmt("SELECT service_id FROM algorand_platform.service_registry WHERE service_id = ?")
@@ -678,31 +678,42 @@ class ArtifactStmts:
 
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.artifacts ("
-        "artifact_id, service_id, url, channel, created_at, event_date, "
+        "artifact_id, service_id, venue_service_id, url, channel, created_at, event_date, "
         "priority, priority_computed_at, status, human_pick_day"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     INSERT_PENDING = _Stmt(
         "INSERT INTO algorand_platform.artifacts_pending ("
-        "status, priority, created_at, artifact_id, service_id, channel, url, event_date, "
-        "human_pick_day"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "status, priority, created_at, artifact_id, service_id, venue_service_id, channel, url, "
+        "event_date, human_pick_day"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     DELETE_PENDING = _Stmt(
         "DELETE FROM algorand_platform.artifacts_pending "
         "WHERE status = ? AND priority = ? AND created_at = ? AND artifact_id = ?"
     )
     LIST_PENDING = _Stmt(
-        "SELECT status, priority, created_at, artifact_id, service_id, channel, url, event_date, "
-        "human_pick_day "
+        "SELECT status, priority, created_at, artifact_id, service_id, venue_service_id, channel, "
+        "url, event_date, human_pick_day "
         "FROM algorand_platform.artifacts_pending WHERE status = ? LIMIT ?"
     )
     SET_PENDING_HUMAN_PICK = _Stmt(
         "UPDATE algorand_platform.artifacts_pending SET human_pick_day = ? "
         "WHERE status = ? AND priority = ? AND created_at = ? AND artifact_id = ?"
     )
+    # Ongoing bug-class-2 reconciliation (service_reconciliation.py) backfills
+    # venue_service_id on a pending artifact that plausibly should have one but
+    # doesn't -- see set_artifact_venue_service_id in artifact_store.py. Not part
+    # of either table's primary/clustering key, so both are plain UPDATEs.
+    SET_VENUE_SERVICE_ID = _Stmt(
+        "UPDATE algorand_platform.artifacts SET venue_service_id = ? WHERE artifact_id = ?"
+    )
+    SET_PENDING_VENUE_SERVICE_ID = _Stmt(
+        "UPDATE algorand_platform.artifacts_pending SET venue_service_id = ? "
+        "WHERE status = ? AND priority = ? AND created_at = ? AND artifact_id = ?"
+    )
     GET = _Stmt(
-        "SELECT artifact_id, service_id, url, channel, created_at, event_date, "
+        "SELECT artifact_id, service_id, venue_service_id, url, channel, created_at, event_date, "
         "priority, priority_computed_at, status, human_pick_day "
         "FROM algorand_platform.artifacts WHERE artifact_id = ?"
     )

@@ -60,6 +60,7 @@ celery_app.conf.task_routes = {
 celery_app.conf.imports = (
     "app.modules.newspaper.tasks.mail_poll_tasks",
     "app.modules.newspaper.tasks.artifact_tasks",
+    "app.modules.newspaper.tasks.service_reconciliation_tasks",
     "app.modules.crawler.tasks.url_queue_tasks",
     "app.tasks.scrape",
     "app.tasks.crawler",
@@ -231,6 +232,21 @@ def _build_beat_schedule() -> dict:
     schedule["sweep-artifact-priorities"] = {
         "task": "app.tasks.newspaper.sweep_artifact_priorities",
         "schedule": float(os.getenv("ARTIFACT_PRIORITY_SWEEP_SECONDS", "86400")),
+    }
+    # Ongoing automated detection for the two service-duplication bug
+    # classes found in the 2026-08-2x new-service-lane audit (see
+    # service_reconciliation.py's own docstring): literal domain-registry
+    # duplicates (bug class 1 -- a legacy/seeded service_registry row never
+    # indexed into service_sources) and per-item ingest lanes with no venue
+    # concept (bug class 2 -- an artifact missing venue_service_id). Same
+    # daily cadence as sweep-artifact-priorities -- cheap, mostly-read scan;
+    # only fires deterministic/conservative auto-actions (index an unclaimed
+    # domain, merge a clear-cut duplicate, backfill an unambiguous
+    # venue_service_id), everything else is flagged via a warning log for
+    # manual review, never auto-merged/auto-backfilled.
+    schedule["reconcile-service-duplicates"] = {
+        "task": "app.tasks.newspaper.reconcile_service_duplicates",
+        "schedule": float(os.getenv("SERVICE_RECONCILE_SWEEP_SECONDS", "86400")),
     }
     # Drains backend's Redis-buffered per-article view increments into the
     # article_view_counts Cassandra counter (2026-08-25, replacing a direct
