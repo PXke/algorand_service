@@ -10,6 +10,14 @@
     entry = readContinue()
   })
 
+  // A floor below which "X% left" is just restating "you haven't started" —
+  // not worth the extra copy.
+  const remainingPct = $derived.by(() => {
+    const p = entry?.progress
+    if (p == null || p < 0.05) return null
+    return Math.round((1 - p) * 100)
+  })
+
   function resume() {
     if (!entry) return
     navigate(entry.path)
@@ -25,7 +33,12 @@
   <aside class="cont motion-fade-up" aria-label={t($messages, 'continueReading')}>
     <button class="main" type="button" onclick={resume}>
       <span class="copy">
-        <span class="label">{t($messages, 'continueReading')}</span>
+        <span class="label">
+          {t($messages, 'continueReading')}
+          {#if remainingPct != null}
+            <span class="pct">· {t($messages, 'articleRemainingLabel', { pct: remainingPct })}</span>
+          {/if}
+        </span>
         <strong class="title">{entry.title}</strong>
       </span>
       <span class="go" aria-hidden="true">›</span>
@@ -85,6 +98,10 @@
     letter-spacing: 0.7px;
     text-transform: uppercase;
     color: var(--accent);
+  }
+  .pct {
+    color: var(--muted);
+    font-weight: 500;
   }
   .title {
     font-family: var(--font-display);

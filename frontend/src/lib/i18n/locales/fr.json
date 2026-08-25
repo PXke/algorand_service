@@ -216,6 +216,7 @@
   "articleRelatedTitle": "Articles connexes",
   "articleOnDesk": "Sur ce pupitre",
   "articleReadingProgress": "Progression de lecture",
+  "articleRemainingLabel": "~{pct} % restants",
   "articleProvenanceNote": "Cet article a été rédigé avec l'IA à partir d'événements on-chain, de données de marché et de sources surveillées, puis soumis à une relecture éditoriale automatisée. Suivez le lien source ci-dessous, lorsqu'il est disponible, pour vérifier les affirmations.",
   "articleTopicNav": "Plus sur ce sujet",
   "articleOlder": "Plus ancien dans ce sujet",

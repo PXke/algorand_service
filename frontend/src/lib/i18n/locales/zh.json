@@ -216,6 +216,7 @@
   "articleRelatedTitle": "相关故事",
   "articleOnDesk": "本编辑部",
   "articleReadingProgress": "阅读进度",
+  "articleRemainingLabel": "还剩 ~{pct}%",
   "articleProvenanceNote": "本文由 AI 依据链上事件、市场数据和受监控的信息源起草，并经过自动化编辑审核。如下方提供来源链接，请点击以核实文中说法。",
   "articleTopicNav": "更多相关话题",
   "articleOlder": "该话题较早内容",

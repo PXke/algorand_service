@@ -216,6 +216,7 @@
   "articleRelatedTitle": "اړوندې کیسې",
   "articleOnDesk": "په دې میز",
   "articleReadingProgress": "د لوستلو پرمختګ",
+  "articleRemainingLabel": "~{pct}% پاتې",
   "articleProvenanceNote": "دا لیکنه د مصنوعي ځیرکتیا په مرسته د زنځیر پر مټ پېښو، د بازار معلوماتو او څارل شویو سرچینو پر بنسټ چمتو شوې، بیا یې خپلکاره ادیټوریل کتنه شوې. د ادعاوو د تاییدولو لپاره، که شتون ولري، لاندې د سرچینې لینک وګورئ.",
   "articleTopicNav": "پدې موضوع کې نور",
   "articleOlder": "په موضوع کې زوړ",

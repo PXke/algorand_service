@@ -216,6 +216,7 @@
   "articleRelatedTitle": "Related stories",
   "articleOnDesk": "On this desk",
   "articleReadingProgress": "Reading progress",
+  "articleRemainingLabel": "~{pct}% left",
   "articleProvenanceNote": "This story was drafted with AI from on-chain events, market data, and monitored sources, then filed under automated editorial review. Follow the source link below when available to verify claims.",
   "articleTopicNav": "More in this topic",
   "articleOlder": "Older in topic",
