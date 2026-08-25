@@ -348,3 +348,231 @@ def test_preview_flags_the_pin_for_the_requested_day_only(monkeypatch: pytest.Mo
 
     assert flags[picked_id] is True
     assert flags[other_id] is False
+
+
+# --------------------------------------------------------------------------- #
+# Guaranteed new-service platform lane (2026-08-26) -- _rank_platform_picks
+# splits eligible platform candidates into NEW_SERVICE_POOL (never-covered
+# services) and UPDATE_POOL (already-covered services), each with a
+# guaranteed minimum floor, backfilling from the other pool when one is thin,
+# with any surplus (uneven floor rounding, or leftover after both floors are
+# met) going to the next-highest-priority remaining candidate from EITHER
+# pool.
+# --------------------------------------------------------------------------- #
+
+
+def _mock_coverage(monkeypatch: pytest.MonkeyPatch, covered: set[str]) -> None:
+    """Make service_has_article return True only for service_ids in `covered` -- everything else reads as a never-covered (new_service pool) service."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_matching.service_has_article",
+        lambda sid: sid in covered,
+    )
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_new_service_detection_reflects_service_has_article(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pool label itself: an artifact whose service_id has a prior published article is 'update', one that doesn't is 'new_service' -- the exact signal preview surfaces per item."""
+    _mock_coverage(monkeypatch, covered={"svc-covered"})
+    from app.modules.newspaper.artifact_store import insert_artifact
+    from app.modules.newspaper.to_compose_selection import preview_to_compose_for_day
+
+    insert_artifact(service_id="svc-covered", url=None, channel="crawler", content="update diff")
+    insert_artifact(service_id="svc-fresh", url=None, channel="crawler", content="first ever diff")
+
+    preview = preview_to_compose_for_day("2026-08-26")
+    pools = {item["service_id"]: item["pool"] for item in preview["items"]}
+
+    assert pools["svc-covered"] == "update"
+    assert pools["svc-fresh"] == "new_service"
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_new_service_pool_gets_its_guaranteed_floor_even_at_lower_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The core guarantee: with plenty of candidates in both pools, the new-service pool still gets its floor share of platform slots even when every new-service candidate is lower priority than every update candidate -- otherwise a saturating established service would starve new-service coverage entirely."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
+    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # platform_n = 4
+    monkeypatch.setattr(cfg, "ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)  # floor 2 / 2
+
+    covered = {f"svc-old-{i}" for i in range(4)}
+    _mock_coverage(monkeypatch, covered=covered)
+
+    new_ids = []
+    for i, prio in enumerate([1.0, 2.0]):  # LOW priority, never-covered services
+        aid, _ = insert_artifact(
+            service_id=f"svc-new-{i}", url=None, channel="crawler", content=f"new {i}"
+        )
+        update_artifact_priority(aid, prio)
+        new_ids.append(aid)
+
+    update_ids = []
+    for i, prio in enumerate([9.0, 8.0, 7.0, 6.0]):  # HIGH priority, already-covered services
+        aid, _ = insert_artifact(
+            service_id=f"svc-old-{i}", url=None, channel="crawler", content=f"old {i}"
+        )
+        update_artifact_priority(aid, prio)
+        update_ids.append(aid)
+
+    result = select_to_compose_for_day("2026-08-26")
+
+    assert result["platform_slots_filled"] == 4
+    assert result["platform_pool_counts"] == {"new_service": 2, "update": 2}
+    chosen = {sel["artifact_id"] for sel in result["selections"]}
+    # Both new-service artifacts made it in despite being lower priority than
+    # every update candidate.
+    assert set(new_ids) <= chosen
+    # Only the TOP 2 update candidates (by priority) made it in -- the floor
+    # protects new-service slots from being crowded out.
+    assert update_ids[0] in chosen  # 9.0
+    assert update_ids[1] in chosen  # 8.0
+    assert update_ids[2] not in chosen  # 7.0
+    assert update_ids[3] not in chosen  # 6.0
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_thin_new_service_pool_is_backfilled_from_update_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the new-service pool doesn't have enough eligible candidates to fill its own floor, the leftover slot(s) backfill from the update pool rather than leaving a platform slot empty."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
+    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # platform_n = 4
+    monkeypatch.setattr(cfg, "ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)  # floor 2 / 2
+
+    covered = {f"svc-old-{i}" for i in range(5)}
+    _mock_coverage(monkeypatch, covered=covered)
+
+    # Only ONE new-service candidate exists -- the pool is thin relative to
+    # its floor of 2.
+    only_new_id, _ = insert_artifact(
+        service_id="svc-new-0", url=None, channel="crawler", content="the only new one"
+    )
+    update_artifact_priority(only_new_id, 1.0)
+
+    update_ids = []
+    for i, prio in enumerate([9.0, 8.0, 7.0, 6.0, 5.0]):
+        aid, _ = insert_artifact(
+            service_id=f"svc-old-{i}", url=None, channel="crawler", content=f"old {i}"
+        )
+        update_artifact_priority(aid, prio)
+        update_ids.append(aid)
+
+    result = select_to_compose_for_day("2026-08-26")
+
+    # All 4 platform slots filled despite the new-service pool only having 1
+    # candidate -- no slot left empty for lack of new-service candidates.
+    assert result["platform_slots_filled"] == 4
+    assert result["platform_pool_counts"] == {"new_service": 1, "update": 3}
+    chosen = {sel["artifact_id"] for sel in result["selections"]}
+    assert only_new_id in chosen
+    # The top 3 update candidates fill the rest (1 floor slot + 2 backfilled).
+    assert set(update_ids[:3]) <= chosen
+    assert update_ids[3] not in chosen
+    assert update_ids[4] not in chosen
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_thin_update_pool_is_backfilled_from_new_service_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Symmetric to the new-service-pool-thin case: when the UPDATE pool is what's thin, its shortfall backfills from the new-service pool instead."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
+    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # platform_n = 4
+    monkeypatch.setattr(cfg, "ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)  # floor 2 / 2
+    _mock_coverage(monkeypatch, covered=set())  # nothing is covered -> update pool is EMPTY
+
+    new_ids = []
+    for i, prio in enumerate([9.0, 8.0, 7.0, 6.0]):
+        aid, _ = insert_artifact(
+            service_id=f"svc-new-{i}", url=None, channel="crawler", content=f"new {i}"
+        )
+        update_artifact_priority(aid, prio)
+        new_ids.append(aid)
+
+    result = select_to_compose_for_day("2026-08-26")
+
+    assert result["platform_slots_filled"] == 4
+    assert result["platform_pool_counts"] == {"new_service": 4, "update": 0}
+    chosen = {sel["artifact_id"] for sel in result["selections"]}
+    assert set(new_ids) == chosen
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_surplus_slot_beyond_the_floor_goes_to_next_highest_priority_regardless_of_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Floors are a MINIMUM, not a partition: once both pools' floors are satisfied, a leftover slot (here, from odd platform_n not dividing evenly) goes to whichever pool has the next-highest-priority remaining candidate -- an already-covered service's second-best update can still win it over a weak new-service candidate. This is the explicit owner carve-out: "if some project did a big rework, the big rework would probably [earn] priority"."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
+    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 4)  # platform_n = 3 (odd -> 1 surplus)
+    monkeypatch.setattr(cfg, "ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)  # floor 1 / 1
+    _mock_coverage(monkeypatch, covered={"svc-old-a", "svc-old-b"})
+
+    # A single, LOW-priority new-service candidate -- it still claims the
+    # guaranteed floor slot.
+    new_id, _ = insert_artifact(
+        service_id="svc-new-only", url=None, channel="crawler", content="new"
+    )
+    update_artifact_priority(new_id, 1.0)
+
+    # Two HIGH-priority update candidates -- the top one claims the update
+    # floor; the second one should win the surplus slot over nothing else
+    # being available in the new pool.
+    old_a_id, _ = insert_artifact(service_id="svc-old-a", url=None, channel="crawler", content="a")
+    update_artifact_priority(old_a_id, 10.0)
+    old_b_id, _ = insert_artifact(service_id="svc-old-b", url=None, channel="crawler", content="b")
+    update_artifact_priority(old_b_id, 9.0)
+
+    result = select_to_compose_for_day("2026-08-26")
+
+    assert result["platform_slots_filled"] == 3
+    # The floor guarantees exactly 1 new-service slot; the surplus slot goes
+    # to the update pool's SECOND artifact (next-highest priority overall),
+    # not forced into the (exhausted) new-service pool.
+    assert result["platform_pool_counts"] == {"new_service": 1, "update": 2}
+    chosen = {sel["artifact_id"] for sel in result["selections"]}
+    assert chosen == {new_id, old_a_id, old_b_id}
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_preview_pool_field_present_for_every_pending_item_not_just_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """preview_to_compose_for_day tags EVERY pending item with its pool, not only the ones it would select -- an admin dashboard wants to see why a low-priority new-service artifact is waiting, not just what won."""
+    monkeypatch.setattr(
+        "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
+    )
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
+    from app.modules.newspaper.to_compose_selection import preview_to_compose_for_day
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)  # platform_n = 1
+    _mock_coverage(monkeypatch, covered={"svc-covered"})
+
+    covered_id, _ = insert_artifact(service_id="svc-covered", url=None, channel="crawler", content="a")
+    update_artifact_priority(covered_id, 5.0)
+    unselected_id, _ = insert_artifact(
+        service_id="svc-fresh", url=None, channel="crawler", content="b"
+    )
+    update_artifact_priority(unselected_id, 0.0)  # lower priority -> loses the single platform slot
+
+    preview = preview_to_compose_for_day("2026-08-26")
+    by_service = {item["service_id"]: item for item in preview["items"]}
+
+    assert by_service["svc-covered"]["pool"] == "update"
+    assert by_service["svc-fresh"]["pool"] == "new_service"
+    # Even the artifact this preview would NOT select still carries its pool.
+    assert by_service["svc-fresh"]["selected_lane"] is None

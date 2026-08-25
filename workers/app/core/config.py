@@ -1429,6 +1429,29 @@ ARTIFACT_TIMELINESS_HALF_LIFE_DAYS = env_float("ARTIFACT_TIMELINESS_HALF_LIFE_DA
 # ecosystem_sync.ecosystem_listed_domains) -- deliberately not a second
 # registry.
 ARTIFACT_ECOSYSTEM_LISTED_BOOST = env_float("ARTIFACT_ECOSYSTEM_LISTED_BOOST", 5.0)
+# Guaranteed-new-service platform lane (2026-08-26, see to_compose_selection.py
+# ARTIFACT_NEW_SERVICE_MIN_SHARE / _rank_platform_picks): minimum SHARE of
+# platform_n slots reserved for services this platform has never composed/
+# published before, so a large, frequently-updating service can't saturate
+# every platform slot with routine small updates and crowd out first-ever
+# coverage of smaller/newer ones. Explicit owner example: "fifty percent need
+# to go to new services composition". A MINIMUM guarantee, not a rigid
+# partition -- see that module for the backfill-when-a-pool-is-thin and
+# surplus-goes-to-highest-priority-remaining-candidate rules.
+ARTIFACT_NEW_SERVICE_MIN_SHARE = env_float("ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)
+# Per-service artifact concatenation cap (2026-08-26, see
+# artifact_store.insert_artifact): a new artifact for a service_id that
+# already has a pending artifact CONCATENATES onto it (old content + new
+# content) rather than replacing it outright, so a chronically-small-priority
+# service's unaddressed changes compound instead of being silently discarded
+# each cycle. This bounds how large the ACCUMULATED OLD portion of that
+# concatenation can grow before older material starts getting trimmed from
+# the front (newest content is never trimmed) -- a defensive ceiling against
+# a service updating constantly while never getting composed, not a tuned
+# knob: at this platform's volume (~7 articles/day, ~114 articles total as of
+# 2026-08-25) a realistic accumulation is a handful of updates long before
+# this is ever reached.
+ARTIFACT_CONCAT_MAX_OLD_CHARS = env_int("ARTIFACT_CONCAT_MAX_OLD_CHARS", 20000)
 # Article is flagged when the grounded fraction of its numeric claims falls below
 # this (too many figures with no anchor in the tool trace). This deterministic
 # check (gatekeeper/live.py) is the only factuality gate that actually runs in

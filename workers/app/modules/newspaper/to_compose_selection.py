@@ -7,6 +7,16 @@ composes from its output. `preview_to_compose_for_day` remains the read-only
 admin-dashboard forecast, called directly (not on a beat). See
 artifact_store.py for the human-pin mechanism and artifact_priority.py for
 the priority this reads.
+
+2026-08-26: platform slots are no longer filled from one undifferentiated
+priority-ranked pool. They're split into a NEW_SERVICE_POOL (services this
+platform has never composed/published before) and an UPDATE_POOL (services
+already covered at least once), each with a guaranteed minimum floor -- see
+ARTIFACT_NEW_SERVICE_MIN_SHARE and _rank_platform_picks. This protects
+against a large, frequently-updating service saturating every platform slot
+with routine small updates and crowding out first-ever coverage of smaller/
+newer services, while still letting a genuinely big update from an
+established service win purely on priority when there's surplus capacity.
 """
 
 from __future__ import annotations
@@ -22,6 +32,10 @@ from app.modules.newspaper.artifact_store import (
     pin_artifact_for_day,
 )
 
+# Platform-pick pool labels -- see _artifact_pool / _rank_platform_picks.
+NEW_SERVICE_POOL = "new_service"
+UPDATE_POOL = "update"
+
 
 def pin_for_tomorrow(artifact_id: str, *, today: date | None = None) -> bool:
     """Admin-facing convenience: pin an artifact as the human pick for the compose day immediately after `today` (default: the real today). Thin wrapper around artifact_store.pin_artifact_for_day with the day-ahead date math applied -- the hook a future "pin this for tomorrow" admin action would call."""
@@ -30,28 +44,112 @@ def pin_for_tomorrow(artifact_id: str, *, today: date | None = None) -> bool:
     return pin_artifact_for_day(artifact_id, tomorrow.isoformat())
 
 
+def _artifact_pool(artifact: Artifact, *, cache: dict[str, str]) -> str:
+    """Which selection pool this artifact's own service belongs to: NEW_SERVICE_POOL when the platform has never composed/published an article for artifact.service_id before, else UPDATE_POOL.
+
+    Reuses `article_matching.service_has_article` -- the existing "has this
+    service ever had a real published article" signal (a direct query
+    against `articles`, not a new registry) -- rather than inventing a
+    second one. An artifact with no service_id (a brief/mail with nothing to
+    protect against big-actor saturation from) is always UPDATE_POOL, which
+    falls out of service_has_article's own fails-open rule for an empty id
+    (returns True/"already covered" immediately, no query).
+
+    `cache` memoizes by service_id within one selection/preview pass -- the
+    per-service pending dedup means each service_id appears at most once in
+    a `pending` list anyway, but a preview pass calls this once per pending
+    item AND once more inside _rank_platform_picks, so the cache avoids a
+    second Cassandra round-trip for the same service.
+    """
+    from app.modules.newspaper.article_matching import service_has_article
+
+    key = artifact.service_id or ""
+    if key in cache:
+        return cache[key]
+    pool = UPDATE_POOL if service_has_article(key) else NEW_SERVICE_POOL
+    cache[key] = pool
+    return pool
+
+
 def _rank_platform_picks(
-    pending: list[Artifact], *, human_pick: Artifact | None, platform_n: int
+    pending: list[Artifact],
+    *,
+    human_pick: Artifact | None,
+    platform_n: int,
+    pool_cache: dict[str, str] | None = None,
 ) -> list[Artifact]:
-    """Shared platform-fill ranking: top-priority PENDING artifacts (in `pending`'s own order), deduped by service_id, excluding the human pick's own artifact/service. Pure -- no Cassandra writes, no status mutation -- shared by select_to_compose_for_day (which then persists it) and preview_to_compose_for_day (which doesn't)."""
+    """Shared platform-fill ranking: top-priority PENDING artifacts (in `pending`'s own order), deduped by service_id, excluding the human pick's own artifact/service.
+
+    2026-08-26: no longer one undifferentiated priority-ranked pool. Eligible
+    candidates (post dedup/exclusion) split into NEW_SERVICE_POOL and
+    UPDATE_POOL (see _artifact_pool), each with its own guaranteed MINIMUM
+    floor of platform_n slots:
+
+        new_floor    = floor(platform_n * ARTIFACT_NEW_SERVICE_MIN_SHARE)
+        update_floor = floor(platform_n * (1 - ARTIFACT_NEW_SERVICE_MIN_SHARE))
+
+    Floors are a MINIMUM guarantee, not a rigid partition. Whatever's left
+    after both floors are filled -- because platform_n doesn't divide evenly
+    (floors are floored, so up to 1 slot is always left over), or because one
+    pool didn't have enough eligible candidates to fill its own floor -- goes
+    to the next-highest-priority remaining candidate from EITHER pool,
+    pooled together. This means: (a) a platform slot is never left empty for
+    lack of candidates in one pool (a thin pool gets backfilled from the
+    other), and (b) a single exceptionally strong artifact from either pool
+    can still win a slot beyond its own pool's floor once both floors are
+    already met -- an explicit owner requirement that a genuinely big update
+    from an established (already-covered) service should still be able to
+    win on priority alone.
+
+    The final returned order is priority order (matching `pending`'s own
+    order) regardless of which pool a pick came from -- pool membership only
+    affects WHICH artifacts get a slot, never the slot ordering of the ones
+    that do.
+
+    Pure -- no Cassandra writes, no status mutation (though _artifact_pool
+    does read `articles` per distinct service_id) -- shared by
+    select_to_compose_for_day (which then persists it) and
+    preview_to_compose_for_day (which doesn't).
+    """
+    from app.core import config as cfg
+
     excluded_service = human_pick.service_id if human_pick and human_pick.service_id else None
     seen_services: set[str] = set()
-    platform_picks: list[Artifact] = []
+    eligible: list[Artifact] = []
     for artifact in pending:
-        if len(platform_picks) >= platform_n:
-            break
         if human_pick is not None and artifact.artifact_id == human_pick.artifact_id:
             continue
         if artifact.service_id:
             if artifact.service_id == excluded_service or artifact.service_id in seen_services:
                 continue
             seen_services.add(artifact.service_id)
-        platform_picks.append(artifact)
-    return platform_picks
+        eligible.append(artifact)
+
+    cache = pool_cache if pool_cache is not None else {}
+    new_pool = [a for a in eligible if _artifact_pool(a, cache=cache) == NEW_SERVICE_POOL]
+    update_pool = [a for a in eligible if _artifact_pool(a, cache=cache) == UPDATE_POOL]
+
+    share = cfg.ARTIFACT_NEW_SERVICE_MIN_SHARE
+    # +1e-9 guards against a floor computation landing just under an exact
+    # integer boundary from float error (e.g. platform_n=4, share=0.5 must
+    # floor to 2, never 1.999999999 -> 1).
+    new_floor = int(platform_n * share + 1e-9)
+    update_floor = int(platform_n * (1 - share) + 1e-9)
+
+    new_take = new_pool[:new_floor]
+    update_take = update_pool[:update_floor]
+    chosen_ids = {a.artifact_id for a in new_take} | {a.artifact_id for a in update_take}
+
+    remaining_needed = platform_n - len(chosen_ids)
+    if remaining_needed > 0:
+        leftover = [a for a in eligible if a.artifact_id not in chosen_ids]
+        chosen_ids |= {a.artifact_id for a in leftover[:remaining_needed]}
+
+    return [a for a in eligible if a.artifact_id in chosen_ids][:platform_n]
 
 
 def select_to_compose_for_day(day: str, *, now: datetime | None = None) -> dict[str, object]:
-    """Select `day`'s compose lineup: one human slot (only when pinned -- otherwise left EMPTY, no platform backfill, an explicit owner decision against overcomposing to compensate) plus N-1 platform slots (N = NEWS_MAX_ARTICLES_PER_DAY) filled by the top-priority PENDING artifacts, respecting the 1-pending-per-service dedup and excluding whatever the human already picked.
+    """Select `day`'s compose lineup: one human slot (only when pinned -- otherwise left EMPTY, no platform backfill, an explicit owner decision against overcomposing to compensate) plus N-1 platform slots (N = NEWS_MAX_ARTICLES_PER_DAY) filled by the top-priority PENDING artifacts, respecting the 1-pending-per-service dedup, excluding whatever the human already picked, and the new-service-vs-update pool floors (see _rank_platform_picks).
 
     Idempotency note: re-running this for a `day` that already has rows
     clears the to_compose rows first, but an artifact this function already
@@ -79,22 +177,28 @@ def select_to_compose_for_day(day: str, *, now: datetime | None = None) -> dict[
     human_pick = next((a for a in pending if a.human_pick_day == day), None)
 
     platform_n = max(0, cfg.NEWS_MAX_ARTICLES_PER_DAY - 1)
-    platform_picks = _rank_platform_picks(pending, human_pick=human_pick, platform_n=platform_n)
+    pool_cache: dict[str, str] = {}
+    platform_picks = _rank_platform_picks(
+        pending, human_pick=human_pick, platform_n=platform_n, pool_cache=pool_cache
+    )
 
     slot = 0
     selections: list[dict[str, object]] = []
+    pool_counts = {NEW_SERVICE_POOL: 0, UPDATE_POOL: 0}
 
     if human_pick is not None:
         _insert_slot(session, day=day, slot=slot, artifact=human_pick, lane="human", now=now)
         selections.append(
-            {"slot": slot, "lane": "human", "artifact_id": human_pick.artifact_id}
+            {"slot": slot, "lane": "human", "artifact_id": human_pick.artifact_id, "pool": None}
         )
         slot += 1
 
     for artifact in platform_picks:
         _insert_slot(session, day=day, slot=slot, artifact=artifact, lane="platform", now=now)
+        pool = _artifact_pool(artifact, cache=pool_cache)
+        pool_counts[pool] += 1
         selections.append(
-            {"slot": slot, "lane": "platform", "artifact_id": artifact.artifact_id}
+            {"slot": slot, "lane": "platform", "artifact_id": artifact.artifact_id, "pool": pool}
         )
         slot += 1
 
@@ -104,6 +208,7 @@ def select_to_compose_for_day(day: str, *, now: datetime | None = None) -> dict[
         "human_picked": human_pick is not None,
         "platform_slots_filled": len(platform_picks),
         "platform_slots_available": platform_n,
+        "platform_pool_counts": pool_counts,
         "selections": selections,
     }
 
@@ -150,12 +255,14 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
 
     Returns every PENDING artifact (not just the selected ones), each with
     a freshly recomputed priority breakdown (word_count/timeliness/
-    ecosystem_listed -- the same pure functions the daily sweep uses) and
-    which lane (if any) this preview would put it in. The recomputed total
-    can drift slightly above/below the artifact's stored `priority` between
-    sweeps (the sweep runs roughly every 24h; timeliness decays continuously)
-    -- that's intentional, showing the score as of right now rather than as
-    of the last sweep. Ordering, however, follows list_pending_artifacts()'s
+    ecosystem_listed -- the same pure functions the daily sweep uses), which
+    lane (if any) this preview would put it in, and which pool (new_service
+    vs update -- see _artifact_pool) its own service belongs to, independent
+    of whether it was actually selected. The recomputed total can drift
+    slightly above/below the artifact's stored `priority` between sweeps
+    (the sweep runs roughly every 24h; timeliness decays continuously) --
+    that's intentional, showing the score as of right now rather than as of
+    the last sweep. Ordering, however, follows list_pending_artifacts()'s
     stored-priority order, matching what a real (unmutated) selection run
     would actually pick, not this preview's own live recompute.
     """
@@ -171,8 +278,14 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
     human_pick = next((a for a in pending if a.human_pick_day == day), None)
 
     platform_n = max(0, cfg.NEWS_MAX_ARTICLES_PER_DAY - 1)
-    platform_picks = _rank_platform_picks(pending, human_pick=human_pick, platform_n=platform_n)
+    pool_cache: dict[str, str] = {}
+    platform_picks = _rank_platform_picks(
+        pending, human_pick=human_pick, platform_n=platform_n, pool_cache=pool_cache
+    )
     platform_ids = {a.artifact_id for a in platform_picks}
+    pool_counts = {NEW_SERVICE_POOL: 0, UPDATE_POOL: 0}
+    for artifact in platform_picks:
+        pool_counts[_artifact_pool(artifact, cache=pool_cache)] += 1
 
     items: list[dict[str, object]] = []
     for artifact in pending:
@@ -202,6 +315,7 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
                 "human_pick_day": artifact.human_pick_day,
                 "is_pinned_for_day": artifact.human_pick_day == day,
                 "selected_lane": lane,
+                "pool": _artifact_pool(artifact, cache=pool_cache),
             }
         )
 
@@ -211,5 +325,6 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
         "human_picked": human_pick is not None,
         "platform_slots_filled": len(platform_picks),
         "platform_slots_available": platform_n,
+        "platform_pool_counts": pool_counts,
         "items": items,
     }

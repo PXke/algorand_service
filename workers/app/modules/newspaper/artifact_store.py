@@ -15,9 +15,14 @@ This module mirrors that module's own shape closely on purpose:
     artifact) mirrors the `articles` / `article_history` content split.
   - The "at most one PENDING artifact per service_id" dedup mirrors
     `publish_queue_store.enqueue_publish`'s own scan-and-replace mechanism
-    exactly: a new artifact for a service_id that already has a pending
-    artifact deletes the old one (both from `artifacts` and its pending
-    index row) and inserts the new one, rather than accumulating.
+    for the ROW: a new artifact for a service_id that already has a pending
+    artifact deletes the old row (both from `artifacts` and its pending
+    index row) and inserts a new one. 2026-08-26: unlike publish_queue's
+    version, the CONTENT is no longer replaced outright -- the new artifact's
+    content is the old content plus the new content, concatenated (see
+    insert_artifact's own docstring), so a service's unaddressed changes
+    compound across cycles instead of the earlier ones being silently
+    discarded.
 
 See `app.modules.newspaper.artifact_priority` for the priority sweep that
 updates `priority`/`priority_computed_at` on these rows, and
@@ -87,11 +92,30 @@ def insert_artifact(
 
     Dedup invariant: at most one PENDING artifact per service_id. When
     `service_id` is truthy and an existing pending artifact for it is found,
-    that old artifact (and its content row) is replaced -- deleted, then the
-    new one inserted -- rather than accumulated, mirroring
-    publish_queue_store.enqueue_publish's identical rule. `service_id` is
+    that old artifact's ROW is superseded -- deleted from the pending index,
+    marked DISCARDED -- but its CONTENT is never silently dropped: the new
+    artifact's content is the old content plus this new content, concatenated
+    (see `_concatenate_with_pending`), not the new content alone. This is a
+    2026-08-26 change from the original replace-outright rule (mirroring
+    publish_queue_store.enqueue_publish's identical rule): a service that
+    gets small updates nobody's composed about yet should have its
+    accumulated changes compound over successive ignored cycles -- 3 small
+    unaddressed updates should read as more substantial (and score higher via
+    word_count_score, which already scales with content length) than just the
+    latest one, an organic pressure-release so a chronically-small-priority
+    service isn't permanently stuck at a low score. `service_id` is
     frequently None (a brief, a mail message with no linked service) --
-    those never dedup against each other or anything else.
+    those never dedup (and so never concatenate) against each other or
+    anything else.
+
+    `event_date`/`created_at` on the merged row are simply this call's own
+    `now`/`event_date` (the NEWEST event) -- deliberately not widened into a
+    range, so timeliness_score reflects how fresh the most recent activity
+    is, while word_count_score (over the concatenated content) is what
+    reflects the accumulation. `title` likewise stays the latest update's own
+    title -- the concatenated body's own "Latest update" section still names
+    the newest development, but the headline anchor a compose step would use
+    should be about what's newest, not a merge of every accumulated title.
     """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArtifactStmts
@@ -99,9 +123,25 @@ def insert_artifact(
     session = get_cassandra_session()
     now = now or datetime.now(tz=UTC)
 
+    final_content = content
+    final_metadata = dict(metadata or {})
+
     if service_id:
         for row in session.execute(ArtifactStmts.LIST_PENDING, (PENDING, 2000)):
             if row.service_id == service_id:
+                old_content_row = session.execute(ArtifactStmts.GET_CONTENT, (row.artifact_id,)).one()
+                if old_content_row is not None:
+                    final_content, final_metadata = _concatenate_with_pending(
+                        old_title=old_content_row.title or "",
+                        old_content=old_content_row.content or "",
+                        old_metadata_raw=old_content_row.metadata,
+                        old_url=row.url,
+                        old_event_date=row.event_date,
+                        old_created_at=row.created_at,
+                        new_title=title,
+                        new_content=content,
+                        new_metadata=metadata or {},
+                    )
                 _delete_pending_row(
                     session,
                     status=row.status,
@@ -135,9 +175,96 @@ def insert_artifact(
     )
     session.execute(
         ArtifactStmts.INSERT_CONTENT,
-        (artifact_id, title, content, json.dumps(metadata or {}, separators=(",", ":"))),
+        (artifact_id, title, final_content, json.dumps(final_metadata, separators=(",", ":"))),
     )
     return str(artifact_id), True
+
+
+# --------------------------------------------------------------------------- #
+# Per-service artifact concatenation (2026-08-26) -- see insert_artifact's own
+# docstring for the "why". Pure string/dict building, no I/O; kept separate so
+# the concatenation shape can be unit-tested directly without a fake session.
+# --------------------------------------------------------------------------- #
+
+# Between the accumulated-old section and the new section. Deliberately
+# legible as real prose structure (not a log-style delimiter): the writer/
+# compose step downstream will eventually read this content directly, so a
+# concatenated artifact needs to survive being handed straight to an LLM
+# without looking like garbled runon text.
+ARTIFACT_CONCAT_SEPARATOR = "\n\n---\n\n"
+
+
+def _cap_old_content(old_content: str, max_chars: int) -> str:
+    """Bound the ACCUMULATED-OLD portion of a concatenation to `max_chars` (ARTIFACT_CONCAT_MAX_OLD_CHARS), trimming from the FRONT (oldest material first) when it's exceeded -- the newest content handed to insert_artifact is never trimmed by this. See ARTIFACT_CONCAT_MAX_OLD_CHARS's own config comment for why this is a defensive ceiling, not a tuned knob, at this platform's volume."""
+    if len(old_content) <= max_chars:
+        return old_content
+    truncated = old_content[-max_chars:]
+    # Prefer cutting on a paragraph boundary near the start of what survives,
+    # so the kept text doesn't open mid-sentence.
+    idx = truncated.find("\n\n")
+    if 0 <= idx < max_chars * 0.3:
+        truncated = truncated[idx + 2 :]
+    return "[earlier history truncated]\n\n" + truncated
+
+
+def _concatenate_with_pending(
+    *,
+    old_title: str,
+    old_content: str,
+    old_metadata_raw: str | None,
+    old_url: str | None,
+    old_event_date: datetime | None,
+    old_created_at: datetime | None,
+    new_title: str,
+    new_content: str,
+    new_metadata: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Build the (content, metadata) for a new artifact superseding an existing pending one for the same service_id -- concatenation, not replacement.
+
+    Content: the old artifact's content (capped -- see _cap_old_content) under
+    an "Earlier update (not yet covered)" heading, then a "---" divider, then
+    the new content under a "Latest update" heading. Framed as clearly-labeled
+    prose sections (not a diff/log format) since a downstream compose step may
+    eventually read this content directly.
+
+    Metadata: `new_metadata`'s own top-level keys win outright (display_name/
+    source_kind/dual_write_queue_id/payload/... all stay readable at the top
+    level exactly where existing readers expect them -- e.g.
+    queue_drain_tasks._resolve_dual_written_queue_row reads
+    content.metadata["dual_write_queue_id"] to mirror the LATEST signal's
+    outcome, which is the correct one to mirror). The old artifact's full
+    metadata (plus its title/url/event_date/created_at, which live outside
+    metadata as separate columns) is appended as one entry to a
+    metadata["segments"] list -- so nothing from prior cycles is lost, each
+    concatenation just adds one more entry, and a service concatenated
+    multiple times without composing builds a full provenance trail.
+    """
+    from app.core.config import ARTIFACT_CONCAT_MAX_OLD_CHARS
+
+    capped_old_content = _cap_old_content(old_content, ARTIFACT_CONCAT_MAX_OLD_CHARS)
+    old_label = old_title.strip() or "(untitled)"
+    new_label = new_title.strip() or "(untitled)"
+    merged_content = (
+        f"### Earlier update (not yet covered): {old_label}\n\n{capped_old_content}"
+        f"{ARTIFACT_CONCAT_SEPARATOR}"
+        f"### Latest update: {new_label}\n\n{new_content}"
+    )
+
+    try:
+        old_metadata = json.loads(old_metadata_raw or "{}")
+    except json.JSONDecodeError:
+        old_metadata = {}
+    old_segments = list(old_metadata.pop("segments", None) or [])
+    old_snapshot = {
+        **old_metadata,
+        "_title": old_title,
+        "_url": old_url,
+        "_event_date": old_event_date.isoformat() if old_event_date else None,
+        "_created_at": old_created_at.isoformat() if old_created_at else None,
+    }
+    merged_metadata = dict(new_metadata)
+    merged_metadata["segments"] = [*old_segments, old_snapshot]
+    return merged_content, merged_metadata
 
 
 def _delete_pending_row(
