@@ -12,6 +12,7 @@ to end.
 
 from __future__ import annotations
 
+import pytest
 from conftest import FakeArtifactSession
 
 # --------------------------------------------------------------------------- #
@@ -38,11 +39,16 @@ def test_insert_artifact_creates_pending_row_and_content(
     assert fake_artifact_session.content[artifact_id]["title"] == "A diff"
 
 
-def test_second_diff_for_same_service_replaces_pending_artifact(
+def test_second_diff_for_same_service_replaces_pending_row_but_concatenates_content(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
-    """Dedup invariant: at most one PENDING artifact per service_id. A new diff for a service_id that already has one pending REPLACES it (delete-old + insert-new), mirroring publish_queue_store.enqueue_publish's identical rule -- it does not accumulate a second pending row."""
-    from app.modules.newspaper.artifact_store import DISCARDED, PENDING, insert_artifact
+    """Dedup invariant: at most one PENDING artifact ROW per service_id -- a new diff for a service_id that already has one pending still REPLACES the row (delete-old + insert-new), mirroring publish_queue_store.enqueue_publish's identical rule for the row. 2026-08-26: unlike that rule, the CONTENT is no longer replaced outright -- it's concatenated (old + new), so the second insert's stored content contains BOTH versions, not just the latest."""
+    from app.modules.newspaper.artifact_store import (
+        DISCARDED,
+        PENDING,
+        get_artifact_content,
+        insert_artifact,
+    )
 
     first_id, _ = insert_artifact(
         service_id="svc-dup", url="https://x.io/", channel="crawler", content="first version"
@@ -52,7 +58,7 @@ def test_second_diff_for_same_service_replaces_pending_artifact(
     )
 
     assert first_id != second_id
-    # Only ONE pending row for the service, and it's the new one.
+    # Only ONE pending ROW for the service, and it's the new one.
     pending_for_service = [
         r for r in fake_artifact_session.pending.values() if r["service_id"] == "svc-dup"
     ]
@@ -61,6 +67,16 @@ def test_second_diff_for_same_service_replaces_pending_artifact(
     # The old artifact row still exists but is discarded, not deleted outright.
     assert fake_artifact_session.artifacts[first_id]["status"] == DISCARDED
     assert fake_artifact_session.artifacts[second_id]["status"] == PENDING
+    # But the CONTENT is concatenated, not replaced -- both versions survive
+    # in the new pending row's content.
+    merged = get_artifact_content(second_id)
+    assert merged is not None
+    assert "first version" in merged.content
+    assert "second version" in merged.content
+    # The new content comes after the old content (old = "earlier", new =
+    # "latest"), and the two are clearly separated, not run together.
+    assert merged.content.index("first version") < merged.content.index("second version")
+    assert "---" in merged.content
 
 
 def test_artifacts_with_no_service_id_never_dedup_against_each_other(
@@ -212,3 +228,169 @@ def test_clear_artifact_pin_clears_both_rows(fake_artifact_session: FakeArtifact
     assert fake_artifact_session.artifacts[artifact_id]["human_pick_day"] is None
     (row,) = fake_artifact_session.pending.values()
     assert row["human_pick_day"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Per-service concatenation (2026-08-26) -- see insert_artifact's own
+# docstring: a new artifact for a service_id that already has a pending
+# artifact no longer replaces its content outright, it concatenates onto it.
+# --------------------------------------------------------------------------- #
+
+
+def test_concatenation_title_stays_the_latest_updates_own_title(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """Design decision: `title` is NOT merged/concatenated -- it stays the newest update's own title (the simplest option, and the right one for a compose step's headline anchor). The old title is still preserved inside the concatenated BODY's "Earlier update" heading, just not in the `title` field itself."""
+    from app.modules.newspaper.artifact_store import get_artifact_content, insert_artifact
+
+    insert_artifact(
+        service_id="svc-t", url=None, channel="crawler", content="old body", title="Old Headline"
+    )
+    second_id, _ = insert_artifact(
+        service_id="svc-t", url=None, channel="crawler", content="new body", title="New Headline"
+    )
+
+    merged = get_artifact_content(second_id)
+    assert merged is not None
+    assert merged.title == "New Headline"
+    assert "Old Headline" in merged.content
+    assert "New Headline" in merged.content
+
+
+def test_concatenation_merges_metadata_into_a_segments_trail(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """The new artifact's OWN top-level metadata wins (so existing readers of e.g. metadata["dual_write_queue_id"] keep reading the LATEST signal's value), and the old artifact's full metadata is preserved verbatim as one entry in metadata["segments"] rather than being dropped."""
+    from app.modules.newspaper.artifact_store import get_artifact_content, insert_artifact
+
+    insert_artifact(
+        service_id="svc-m",
+        url="https://old.example/",
+        channel="crawler",
+        content="old body",
+        title="old title",
+        metadata={"dual_write_queue_id": "queue-old", "source_kind": "forum"},
+    )
+    second_id, _ = insert_artifact(
+        service_id="svc-m",
+        url="https://new.example/",
+        channel="crawler",
+        content="new body",
+        title="new title",
+        metadata={"dual_write_queue_id": "queue-new", "source_kind": "forum"},
+    )
+
+    merged = get_artifact_content(second_id)
+    assert merged is not None
+    # Top-level metadata is the NEW signal's own -- e.g. the dual-write
+    # resolve step must mirror the latest, not a stale, queue_id.
+    assert merged.metadata["dual_write_queue_id"] == "queue-new"
+    # The old artifact's metadata (plus its own title/url, which live outside
+    # the metadata blob as separate columns) is preserved in "segments".
+    segments = merged.metadata["segments"]
+    assert len(segments) == 1
+    assert segments[0]["dual_write_queue_id"] == "queue-old"
+    assert segments[0]["_title"] == "old title"
+    assert segments[0]["_url"] == "https://old.example/"
+
+
+def test_concatenation_chains_across_three_unaddressed_updates(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """A service updated three times with nobody composing in between accumulates ALL THREE versions in the final pending row's content, and the segments trail grows by one each cycle -- the owner's explicit "3 small unaddressed updates should read as more substantial" pressure-release."""
+    from app.modules.newspaper.artifact_store import get_artifact_content, insert_artifact
+
+    insert_artifact(service_id="svc-chain", url=None, channel="crawler", content="update one")
+    insert_artifact(service_id="svc-chain", url=None, channel="crawler", content="update two")
+    third_id, _ = insert_artifact(
+        service_id="svc-chain", url=None, channel="crawler", content="update three"
+    )
+
+    merged = get_artifact_content(third_id)
+    assert merged is not None
+    assert "update one" in merged.content
+    assert "update two" in merged.content
+    assert "update three" in merged.content
+    assert len(merged.metadata["segments"]) == 2
+    # Only ONE pending row survives for the service at any point.
+    pending_for_service = [
+        r for r in fake_artifact_session.pending.values() if r["service_id"] == "svc-chain"
+    ]
+    assert len(pending_for_service) == 1
+
+
+def test_concatenation_caps_accumulated_old_content_and_keeps_newest_intact(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ARTIFACT_CONCAT_MAX_OLD_CHARS bounds the ACCUMULATED-OLD portion so a service updating constantly without ever composing can't grow the row without bound. The cap trims from the FRONT (oldest first) -- the newest content passed to insert_artifact is never trimmed."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import get_artifact_content, insert_artifact
+
+    monkeypatch.setattr(cfg, "ARTIFACT_CONCAT_MAX_OLD_CHARS", 50)
+
+    old_content = "x" * 500  # far past the 50-char cap
+    insert_artifact(service_id="svc-cap", url=None, channel="crawler", content=old_content)
+    new_id, _ = insert_artifact(
+        service_id="svc-cap", url=None, channel="crawler", content="brand new content intact"
+    )
+
+    merged = get_artifact_content(new_id)
+    assert merged is not None
+    assert "brand new content intact" in merged.content
+    # Old content was capped, not carried in full.
+    assert merged.content.count("x") < 500
+    assert "truncated" in merged.content
+
+
+def test_concatenation_new_event_date_and_created_at_track_the_newest_update(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """Design decision: event_date/created_at are NOT widened into a range across concatenated segments -- the merged row simply carries THIS call's own (newest) event_date/created_at, so timeliness_score reflects how fresh the most recent activity is. word_count_score (over the now-longer concatenated content) is what reflects the accumulation instead."""
+    import datetime as dt
+
+    from app.modules.newspaper.artifact_store import get_artifact, insert_artifact
+
+    old_event = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    new_event = dt.datetime(2026, 8, 20, tzinfo=dt.UTC)
+    old_now = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
+    new_now = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.UTC)
+
+    insert_artifact(
+        service_id="svc-date",
+        url=None,
+        channel="crawler",
+        content="old",
+        event_date=old_event,
+        now=old_now,
+    )
+    second_id, _ = insert_artifact(
+        service_id="svc-date",
+        url=None,
+        channel="crawler",
+        content="new",
+        event_date=new_event,
+        now=new_now,
+    )
+
+    artifact = get_artifact(second_id)
+    assert artifact is not None
+    assert artifact.event_date == new_event
+    assert artifact.created_at == new_now
+
+
+def test_no_service_id_artifacts_never_concatenate(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """service_id-less artifacts (a brief, an unlinked mail message) never dedup against each other (existing invariant), so they never trigger concatenation either -- each keeps its own standalone content untouched."""
+    from app.modules.newspaper.artifact_store import get_artifact_content, insert_artifact
+
+    id_a, _ = insert_artifact(service_id=None, url=None, channel="brief", content="brief one")
+    id_b, _ = insert_artifact(service_id=None, url=None, channel="brief", content="brief two")
+
+    content_a = get_artifact_content(id_a)
+    content_b = get_artifact_content(id_b)
+    assert content_a is not None
+    assert content_b is not None
+    assert content_a.content == "brief one"
+    assert content_b.content == "brief two"
