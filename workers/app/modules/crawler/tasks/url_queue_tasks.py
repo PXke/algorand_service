@@ -620,10 +620,12 @@ def classify_pending_domains(
 @celery_app.task(name="app.tasks.crawler.retrain_publish_classifier")
 def retrain_publish_classifier_task() -> dict[str, object]:
     """Celery task: retrain the sklearn publish classifier on latest labeled data."""
-    # The sklearn "learned grader" (grader_model.train_grader) used to run here
-    # too, but its output has no live reader — the gatekeeper quality head
-    # replaces it (see app.tasks.gatekeeper.train_quality_head, queued
-    # separately by admin_retrain since it's a much heavier CPU job).
+    # A second sklearn "learned grader" (grader_model.train_grader) used to run
+    # here too, but its output had no live reader and was removed. The would-be
+    # ModernBERT gatekeeper quality-head replacement (app.tasks.gatekeeper.
+    # train_quality_head) was itself confirmed dead the same way — its checkpoint
+    # had no serving path either — and was removed 2026-08-25. This task is the
+    # sole retrain path admin_retrain queues today.
     from app.modules.ai.publish_classifier import retrain_publish_classifier
 
     classifier = retrain_publish_classifier()

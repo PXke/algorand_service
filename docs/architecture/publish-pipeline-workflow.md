@@ -59,12 +59,12 @@ flowchart TD
 2. **Gate** — `gate_draft` (`gatekeeper/live.py`) is called from up to 5 sites
    in `publish_tasks.py` (lines ~196, 277, 728, 1295, 1586) depending on which
    path the draft takes. **`GATEKEEPER_ENFORCE` defaults off** — the
-   deterministic gate runs and logs but does not block; the ModernBERT MTTH
-   quality head is trained but has no caller in this path at all (see
+   deterministic gate runs and logs but does not block; the ModernBERT
+   quality/relevance heads have no training or serving wiring at all (see
    [gatekeeper.md](../modules/gatekeeper.md)). The thing that actually
    diverts low-quality drafts today is `_quality_floor_fails`
    (`publish_tasks.py:224`, `WRITER_QUALITY_GATE_ENABLED`, default on) — the
-   older sklearn grader, not the gatekeeper.
+   writer's own heuristic grade, not the gatekeeper.
 3. **Persist** — `insert_article` (`publish_tasks.py:804` → `article_store.py:226`)
    writes `ArticleStmts.INSERT` then, since `publish_to_feed=True`,
    `FeedStmts.INSERT`. Presence in `articles_feed` **is** the published state
