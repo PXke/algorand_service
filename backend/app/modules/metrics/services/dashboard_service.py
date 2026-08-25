@@ -106,7 +106,7 @@ class MetricsDashboardService:
             )
         )
 
-        # Algod status + Nodely validators are independent; overlap the cold path.
+        # Algod status + Nodely node count are independent; overlap the cold path.
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -137,14 +137,26 @@ class MetricsDashboardService:
                 )
             )
 
-        # Validators before round time: node count is the headline
-        # decentralisation number, and the markets bar shows this list in order.
+        # Node count before round time: it's the headline decentralisation
+        # number, and the markets bar shows this list in order.
+        #
+        # Labelled "Nodes", not "Validators": Algorand's PPoS design has no
+        # distinct validator role to count separately from other node types.
+        # This figure is Nodely's full-time-node-equivalent estimate (Chao-1
+        # over unique IPs seen at their relays) and explicitly does not
+        # discriminate node type — participation/voting nodes, API nodes, and
+        # bot connections all count. It's the same source and number the
+        # Algorand Foundation's own metrics.algorand.co portal publishes,
+        # there labelled "Node count". A relay-only count (Foundation-run,
+        # ~140) or a literal per-block voting-committee size would be smaller
+        # and answer a different question; averaging them in would blend
+        # unrelated metrics rather than clarify this one.
         node_count = node_stats.get("node_count")
         if isinstance(node_count, int) and node_count > 0:
             tiles.append(
                 MetricTile(
-                    id="validators",
-                    label="Validators",
+                    id="nodes",
+                    label="Nodes",
                     value=_fmt_int(node_count) or str(node_count),
                     hint=str(node_stats.get("hint") or "Nodely"),
                     available=True,
@@ -153,8 +165,8 @@ class MetricsDashboardService:
         else:
             tiles.append(
                 MetricTile(
-                    id="validators",
-                    label="Validators",
+                    id="nodes",
+                    label="Nodes",
                     value="—",
                     hint="Nodely unavailable",
                     available=False,

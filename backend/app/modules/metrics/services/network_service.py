@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 _NODELY_DS_QUERY = "https://g.nodely.io/api/ds/query"
 _NODELY_CH_UID = "fc25640e-50ee-4e04-aad6-2a5336c09eaf"
 # Shared Redis TTL — at most one Nodely pull per hour across all workers.
-_NODELY_CACHE_KEY = "metrics:nodely-validators"
+_NODELY_CACHE_KEY = "metrics:nodely-node-count"
 _NODELY_CACHE_TTL = 3600
 
 
@@ -393,8 +393,15 @@ def _fetch_nodely_node_stats_uncached(*, timeout: float = 8.0) -> dict[str, Any]
 def fetch_nodely_node_stats(*, timeout: float = 8.0) -> dict[str, Any]:
     """Latest daily full-time mainnet node estimate from Nodely (Chao-1).
 
-    Off-chain telemetry — the ledger does not expose a validator/node count.
-    Cached in Redis for one hour so every backend worker shares a single fetch.
+    Off-chain telemetry — the ledger does not expose a node count of any kind
+    (Algorand's PPoS has no on-chain validator registry to query). This is
+    Nodely's estimated *total* full-time node population — participation
+    nodes, API nodes, and bot connections all counted without discrimination
+    by node type — not a relay-only count (Foundation-run relays number in
+    the low hundreds) and not a per-round voting-committee size. It is the
+    same figure the Algorand Foundation's own algorand.co/metrics portal
+    republishes under "Node count". Cached in Redis for one hour so every
+    backend worker shares a single fetch.
     """
     try:
         return cached_json(

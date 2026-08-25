@@ -47,7 +47,7 @@ def test_dashboard_includes_articles_tile(monkeypatch: pytest.MonkeyPatch) -> No
     ids = {tile.id for tile in result.tiles}
     assert "articles" in ids
     assert "last_round" in ids
-    assert "validators" in ids
+    assert "nodes" in ids
     articles_tile = next(t for t in result.tiles if t.id == "articles")
     assert articles_tile.value == "1"
     last_round_tile = next(t for t in result.tiles if t.id == "last_round")
@@ -56,7 +56,8 @@ def test_dashboard_includes_articles_tile(monkeypatch: pytest.MonkeyPatch) -> No
     round_latency_tile = next(t for t in result.tiles if t.id == "round_latency")
     assert round_latency_tile.value == "3.0s"
     assert round_latency_tile.available is True
-    validators_tile = next(t for t in result.tiles if t.id == "validators")
-    assert validators_tile.value == "1,842"
-    assert validators_tile.available is True
-    assert validators_tile.hint == "Nodely"
+    nodes_tile = next(t for t in result.tiles if t.id == "nodes")
+    assert nodes_tile.value == "1,842"
+    assert nodes_tile.label == "Nodes"
+    assert nodes_tile.available is True
+    assert nodes_tile.hint == "Nodely"
