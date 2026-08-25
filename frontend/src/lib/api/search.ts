@@ -1,9 +1,10 @@
 import { api } from './client'
 
 export const searchApi = {
-  async search(q: string, limit = 20, serviceId?: string) {
+  async search(q: string, limit = 20, serviceId?: string, lang?: string) {
     const params = new URLSearchParams({ q, limit: String(limit) })
     if (serviceId) params.set('service_id', serviceId)
+    if (lang) params.set('lang', lang)
     const body = await api.getJson(`/api/v1/search?${params}`)
     const items = Array.isArray(body.items) ? body.items : []
     return {

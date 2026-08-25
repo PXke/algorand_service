@@ -24,9 +24,11 @@ def index_article(
 ) -> dict[str, str]:
     """Celery task: upsert an article's document into the Typesense search index."""
     tags: list[str] | None = None
+    translations: dict[str, str] | None = None
     detail = get_article(article_id)
     if detail is not None:
         tags = list(detail.tags or [])
+        translations = detail.translations
     return upsert_article_document(
         article_id=article_id,
         title=title,
@@ -35,6 +37,7 @@ def index_article(
         service_id=service_id,
         published_at_epoch=published_at_epoch,
         tags=tags,
+        translations=translations,
     )
 
 
@@ -115,6 +118,7 @@ def reindex_articles(*, limit: int = 200) -> dict[str, object]:
             service_id=detail.service_id,
             published_at_epoch=detail.published_at_epoch,
             tags=list(detail.tags or []),
+            translations=detail.translations,
         )
         status = outcome.get("status", "")
         if status == "indexed":

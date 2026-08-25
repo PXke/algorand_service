@@ -83,6 +83,7 @@ def test_update_article_reindexes_typesense_with_the_new_content(
         "body": "Corrected body",
         "service_id": updated.service_id,
         "published_at_epoch": updated.published_at_epoch,
+        "translations": updated.translations,
     }
 
 

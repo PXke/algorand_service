@@ -26,9 +26,10 @@ def register_search_routes(app: Router) -> None:
             return json_error_response(400, "invalid_request", "q query param required")
         limit_param = query_param(request.query_params.get("limit", str(_DEFAULT_LIMIT)))
         service_id = query_param(request.query_params.get("service_id", "")) or None
+        lang = query_param(request.query_params.get("lang", "")) or None
         limit = int(limit_param) if limit_param.isdigit() else _DEFAULT_LIMIT
         limit = min(max(1, limit), _MAX_LIMIT)
-        result = search_service.search(query, limit=limit, service_id=service_id)
+        result = search_service.search(query, limit=limit, service_id=service_id, lang=lang)
         # Record the term for editorial demand analytics (bots skipped inside).
         ua = request.headers.get("user-agent") or request.headers.get("User-Agent")
         analytics_store.record_search(query, len(result.items), user_agent=ua)

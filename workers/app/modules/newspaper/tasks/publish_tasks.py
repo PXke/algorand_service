@@ -2553,6 +2553,25 @@ def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
         def _persist(lang: str, result: dict[str, str]) -> None:
             update_article_translations(article_id, {lang: json.dumps(result, ensure_ascii=False)})
             finish_translation_session(session_refs.get(lang), status="ok")
+            # Push the newly-landed language into Typesense so site search
+            # can actually find it. Before this, a translation only ever
+            # reached Cassandra + IndexNow -- Typesense's articles collection
+            # had no per-language fields at all, so a reader searching in
+            # French only ever matched (and only ever saw) English content.
+            try:
+                from app.modules.search.core.indexer import upsert_article_translation
+
+                upsert_article_translation(
+                    article_id=article_id,
+                    lang=lang,
+                    title=result.get("title", ""),
+                    summary=result.get("summary", ""),
+                    body=result.get("body", ""),
+                )
+            except Exception:
+                logger.warning(
+                    "Typesense translation index failed for %s/%s", article_id, lang, exc_info=True
+                )
             try:
                 from app.modules.newspaper.indexnow import ping_translation
 

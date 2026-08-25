@@ -144,6 +144,7 @@ def test_publish_article_to_feed_indexes_the_article_in_typesense(
         body="",
         service_id="svc",
         published_at_epoch=1234,
+        translations=None,
     )
     monkeypatch.setattr(AdminCassandraStore, "get_article", lambda self, aid: published_article)  # noqa: ARG005
 
@@ -157,6 +158,7 @@ def test_publish_article_to_feed_indexes_the_article_in_typesense(
         "body": "",
         "service_id": "svc",
         "published_at_epoch": 1234,
+        "translations": None,
     }
 
 
