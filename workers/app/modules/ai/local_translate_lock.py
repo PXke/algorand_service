@@ -2,10 +2,11 @@
 
 Only one local-model translation may run at a time, across all workers.
 Unlike ``compose_lock`` (the Mistral writer's equivalent), this guards CPU and
-RAM, not an external API: SeamlessM4T and MiLMMT are loaded once per process
-and run on shared CPU cores with no GPU, so two concurrent inferences would
-both slow down, fight for the same threads, and roughly double peak memory
-for no throughput gain.
+RAM, not an external API: MiLMMT (the only local engine -- SeamlessM4T was
+removed 2026-08-25, see local_translate.py's module docstring) is loaded once
+per process and runs on shared CPU cores with no GPU, so two concurrent
+inferences would both slow down, fight for the same threads, and roughly
+double peak memory for no throughput gain.
 
 Dead-holder reclaim mirrors ``compose_lock``'s (ported 2026-08-08): a worker
 killed mid-batch -- e.g. a deploy's `systemctl restart`, whose 30s

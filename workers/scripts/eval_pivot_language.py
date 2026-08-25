@@ -1,5 +1,15 @@
 """One-off: does pivoting through another language beat translating directly from English?
 
+NOTE (2026-08-25): this script is no longer runnable as-is -- it calls
+local_translate's SeamlessM4T loader/language map directly (``lt._load_seamless``,
+FLORES codes passed straight to the model), and both were removed from
+local_translate.py along with SeamlessM4T support (see that module's
+docstring: broken on markdown-heavy content, confirmed 2026-08-23; Pashto
+now translates via DeepSeek). The investigation itself already concluded
+(RESOLVED 2026-08-03: neither pivot route beat direct en->X; production
+stays on direct translation) -- this file is kept as a record of the method
+and findings below, not as a script anyone should try to run again.
+
 The owner's question: "We always did en -> X but maybe zh -> ps or zh -> fa
 was better." Not wired into eval_translate_candidates.py's CANDIDATES
 registry (that harness compares MODELS for a fixed en->X direction) -- this

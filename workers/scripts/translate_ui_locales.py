@@ -41,10 +41,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # workers/ -> "app
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "shared"))
 
 from app.modules.ai.local_translate import (  # noqa: E402
+    _MILMMT_LANG_NAME,
     _translate_text_milmmt,
-    _translate_text_seamless,
-    engine_for,
-    unload_engine,
+    unload_milmmt,
 )
 
 LOCALES_DIR = (
@@ -79,12 +78,7 @@ _ICU_BUCKET = re.compile(r"(=\d+|other)\{((?:[^{}]|\{[^{}]*\})*)\}")
 _STASH_RE = re.compile(r"XPHXPH\s*(\d+)\s*XPHXPH")
 
 
-def _translate_one(text: str, engine: str, target_language: str) -> str:
-    fn = _translate_text_seamless if engine == "seq2seq" else _translate_text_milmmt
-    return fn(text, target_language)
-
-
-def _translate_protected(text: str, engine: str, target_language: str) -> str | None:
+def _translate_protected(text: str, target_language: str) -> str | None:
     """Translate one plain-text span with {placeholder} tokens protected.
 
     Returns None (caller should fall back to the English original) if any
@@ -99,7 +93,7 @@ def _translate_protected(text: str, engine: str, target_language: str) -> str | 
         return f"XPHXPH{len(placeholders) - 1}XPHXPH"
 
     protected = _PLACEHOLDER.sub(_stash, text)
-    translated = _translate_one(protected, engine, target_language)
+    translated = _translate_text_milmmt(protected, target_language)
 
     def _restore(m: re.Match[str]) -> str:
         idx = int(m.group(1))
@@ -112,7 +106,7 @@ def _translate_protected(text: str, engine: str, target_language: str) -> str | 
     return restored
 
 
-def _translate_icu_plural(text: str, engine: str, target_language: str) -> str | None:
+def _translate_icu_plural(text: str, target_language: str) -> str | None:
     m = _ICU_PLURAL.match(text)
     if not m:
         return None
@@ -122,18 +116,18 @@ def _translate_icu_plural(text: str, engine: str, target_language: str) -> str |
     out_parts = []
     for bm in _ICU_BUCKET.finditer(body):
         selector, content = bm.group(1), bm.group(2)
-        translated_content = _translate_protected(content, engine, target_language)
+        translated_content = _translate_protected(content, target_language)
         if translated_content is None:
             return None
         out_parts.append(f"{selector}{{{translated_content}}}")
     return "{" + var + ", plural, " + " ".join(out_parts) + "}"
 
 
-def translate_ui_string(text: str, engine: str, target_language: str) -> str | None:
+def translate_ui_string(text: str, target_language: str) -> str | None:
     """Translate one locale value, routing ICU plurals through the bucket-aware path."""
     if _ICU_PLURAL.match(text):
-        return _translate_icu_plural(text, engine, target_language)
-    return _translate_protected(text, engine, target_language)
+        return _translate_icu_plural(text, target_language)
+    return _translate_protected(text, target_language)
 
 
 def main() -> None:
@@ -146,12 +140,20 @@ def main() -> None:
     all_langs = sorted(p.stem for p in LOCALES_DIR.glob("*.json") if p.stem != "en")
     langs = [lang.strip() for lang in args.langs.split(",") if lang.strip()] or all_langs
 
-    jobs: dict[str, list[tuple[str, str]]] = {}
+    jobs: list[tuple[str, str]] = []
     locale_data: dict[str, dict[str, object]] = {}
     for lang in langs:
         path = LOCALES_DIR / f"{lang}.json"
         data = json.loads(path.read_text(encoding="utf-8"))
         locale_data[lang] = data
+        # MiLMMT (this script's only translation engine since SeamlessM4T was
+        # removed 2026-08-25, see local_translate.py's module docstring)
+        # doesn't cover Pashto -- production routes "ps" article translation
+        # to DeepSeek instead (DEEPSEEK_TRANSLATE_LANGS), which this one-off
+        # UI-locale script has no path to. Skip rather than KeyError.
+        if lang not in _MILMMT_LANG_NAME:
+            print(f"[{lang}] skipping -- not covered by the local translation engine (MiLMMT)")
+            continue
         for key, en_value in en.items():
             if not isinstance(en_value, str) or key in ENDONYMS:
                 continue
@@ -161,28 +163,26 @@ def main() -> None:
                     data[key] = BRAND_KEYS[key]
                 continue
             if data.get(key) == en_value or (lang, key) in FORCE_RETRANSLATE:
-                jobs.setdefault(engine_for(lang), []).append((lang, key))
+                jobs.append((lang, key))
 
-    total = sum(len(v) for v in jobs.values())
+    total = len(jobs)
     print(f"{total} strings to translate across {len(langs)} locale(s)")
-    for engine, pairs in jobs.items():
-        print(f"  engine={engine}: {len(pairs)}")
     if args.dry_run:
         return
 
     done = 0
-    for engine, pairs in jobs.items():
-        print(f"=== engine={engine}, {len(pairs)} jobs ===", flush=True)
-        for lang, key in pairs:
+    try:
+        for lang, key in jobs:
             source = en[key]
-            result = translate_ui_string(source, engine, lang)
+            result = translate_ui_string(source, lang)
             done += 1
             if result is None:
                 print(f"[{done}/{total}] SKIP (placeholder loss) {lang}.{key}", flush=True)
                 continue
             locale_data[lang][key] = result
             print(f"[{done}/{total}] {lang}.{key}: {result[:70]!r}", flush=True)
-        unload_engine(engine)
+    finally:
+        unload_milmmt()
 
     for lang, data in locale_data.items():
         path = LOCALES_DIR / f"{lang}.json"
