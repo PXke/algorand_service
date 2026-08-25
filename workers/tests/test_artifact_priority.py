@@ -8,6 +8,7 @@ the pure scoring functions.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 
 import pytest
 from conftest import FakeArtifactSession
@@ -185,6 +186,53 @@ def test_ecosystem_listed_score_fails_open_to_zero_on_lookup_error(
 
 
 # --------------------------------------------------------------------------- #
+# skip_count_score
+# --------------------------------------------------------------------------- #
+
+
+def test_skip_count_score_zero_with_no_segments() -> None:
+    """A fresh artifact (never concatenated) has no metadata["segments"] entry at all -- scores zero, same as an explicit empty list or None metadata."""
+    from app.modules.newspaper.artifact_priority import skip_count_score
+
+    assert skip_count_score(None) == 0.0
+    assert skip_count_score({}) == 0.0
+    assert skip_count_score({"segments": []}) == 0.0
+
+
+def test_skip_count_score_increases_linearly_with_segment_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike word_count_score's sqrt curve, this component is linear -- each additional ignored cycle buys the SAME increment, not a shrinking one, so it keeps differentiating "ignored a lot" from "ignored a whole lot" instead of flattening out."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_priority import skip_count_score
+
+    monkeypatch.setattr(cfg, "ARTIFACT_SKIP_COUNT_CAP", 10)
+    monkeypatch.setattr(cfg, "ARTIFACT_SKIP_COUNT_MAX_SCORE", 10.0)
+
+    scores = [skip_count_score({"segments": [{}] * n}) for n in (0, 2, 4, 6, 8, 10)]
+    gains = [round(b - a, 4) for a, b in pairwise(scores)]
+    assert scores == sorted(scores)
+    # Every 2-segment step buys the identical amount -- no diminishing returns.
+    assert len(set(gains)) == 1
+
+
+def test_skip_count_score_caps_past_configured_segment_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service concatenated far more times than the cap doesn't keep buying unbounded priority purely on neglect count."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_priority import skip_count_score
+
+    monkeypatch.setattr(cfg, "ARTIFACT_SKIP_COUNT_CAP", 5)
+    monkeypatch.setattr(cfg, "ARTIFACT_SKIP_COUNT_MAX_SCORE", 6.0)
+
+    at_cap = skip_count_score({"segments": [{}] * 5})
+    way_over = skip_count_score({"segments": [{}] * 500})
+    assert at_cap == 6.0
+    assert way_over == 6.0
+
+
+# --------------------------------------------------------------------------- #
 # compute_artifact_priority / SCORE_COMPONENTS architecture
 # --------------------------------------------------------------------------- #
 
@@ -227,6 +275,95 @@ def test_sweep_updates_priority_for_every_pending_artifact(
     # More substantial content must outscore a near-empty artifact once both
     # share the same timeliness/ecosystem terms (both fresh, neither listed).
     assert fake_artifact_session.artifacts[id_a]["priority"] > fake_artifact_session.artifacts[id_b]["priority"]
+
+
+def test_priority_keeps_rising_after_word_count_score_plateaus_via_skip_count(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Demonstrates the bug this session fixed and proves the fix.
+
+    word_count_score saturates at ARTIFACT_WORD_COUNT_CAP words, which a
+    chronically-ignored service (repeated concatenation via insert_artifact,
+    see artifact_store.py) reaches after only a handful of cycles -- well
+    before ARTIFACT_CONCAT_MAX_OLD_CHARS, concatenation's own much larger
+    ceiling, is reached (this mirrors the real proportions: default
+    ARTIFACT_WORD_COUNT_CAP=1200 words vs ARTIFACT_CONCAT_MAX_OLD_CHARS=20000
+    chars, roughly 3300 words at a 6-char average). Once word_count_score
+    saturates, it stops moving entirely -- BEFORE this fix, an artifact
+    ignored 4 times and one ignored 14 times scored identically on the sum of
+    word_count_score + timeliness_score + ecosystem_listed_score, even though
+    the second is the far stronger case for finally getting composed. This
+    silently broke the explicit "chronically-ignored services keep climbing"
+    design intent behind the concatenation mechanism (see
+    ARTIFACT_CONCAT_MAX_OLD_CHARS's own config comment and
+    insert_artifact's docstring).
+
+    AFTER the fix (skip_count_score reading metadata["segments"] directly),
+    total priority keeps climbing for every additional ignored cycle even
+    once word_count_score alone has gone flat.
+    """
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_priority import (
+        compute_artifact_priority,
+        word_count_score,
+    )
+    from app.modules.newspaper.artifact_store import (
+        get_artifact,
+        get_artifact_content,
+        insert_artifact,
+    )
+
+    monkeypatch.setattr(
+        "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
+    )
+    # Small word-count cap, reachable in a handful of ~100-word cycles --
+    # mirrors the real-world proportion where word count saturates well
+    # before the concatenation mechanism's own (much larger) char cap.
+    monkeypatch.setattr(cfg, "ARTIFACT_WORD_COUNT_CAP", 500)
+    monkeypatch.setattr(cfg, "ARTIFACT_WORD_COUNT_MAX_SCORE", 10.0)
+    monkeypatch.setattr(cfg, "ARTIFACT_SKIP_COUNT_CAP", 12)
+    monkeypatch.setattr(cfg, "ARTIFACT_SKIP_COUNT_MAX_SCORE", 6.0)
+    # Concatenation's own cap stays comfortably above anything this test
+    # accumulates, so it never interferes.
+    monkeypatch.setattr(cfg, "ARTIFACT_CONCAT_MAX_OLD_CHARS", 200_000)
+
+    total_priorities: list[float] = []
+    word_count_only: list[float] = []
+    artifact_id = ""
+    for cycle in range(12):
+        update_text = " ".join([f"word{cycle}-{i}" for i in range(100)])  # ~100 words/cycle
+        artifact_id, _ = insert_artifact(
+            service_id="svc-neglected", url=None, channel="crawler", content=update_text
+        )
+        artifact = get_artifact(artifact_id)
+        content = get_artifact_content(artifact_id)
+        assert artifact is not None
+        assert content is not None
+        total_priorities.append(compute_artifact_priority(artifact, content))
+        word_count_only.append(word_count_score(content.content))
+
+    # Sanity: word_count_score genuinely saturates well before the 12th
+    # cycle (~1200 accumulated words against a 500-word cap).
+    assert word_count_only[-1] == 10.0
+    plateau_start = next(i for i, s in enumerate(word_count_only) if s == 10.0)
+    assert plateau_start < len(word_count_only) - 1, "word_count_score never actually plateaus in this test"
+    assert word_count_only[plateau_start:] == [10.0] * (len(word_count_only) - plateau_start)
+
+    # The bug being fixed: without skip_count_score, total priority would be
+    # flat across that same plateau window (word_count_score contributes
+    # nothing further, and timeliness/ecosystem are ~constant across cycles
+    # run back-to-back). With the fix, total priority keeps rising because
+    # skip_count_score is still climbing (segments keeps growing every cycle,
+    # cap is 12).
+    plateau_priorities = total_priorities[plateau_start:]
+    assert plateau_priorities == sorted(plateau_priorities), (
+        "priority should keep climbing through the word_count_score plateau"
+    )
+    assert plateau_priorities[-1] > plateau_priorities[0], (
+        "skip_count_score must keep differentiating a chronically-ignored "
+        "service even after word_count_score has flatlined"
+    )
 
 
 def test_sweep_never_touches_non_pending_artifacts(
