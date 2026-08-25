@@ -94,6 +94,95 @@ def test_index_article_reads_tags_from_article_detail(monkeypatch: pytest.Monkey
     assert captured["tags"] == ["defi", "payments"]
 
 
+def test_upsert_article_document_computes_glossary_slugs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The document written to Typesense carries glossary_slugs extracted from the English body AND every translated body, unioned."""
+    import json
+
+    from app.modules.search.core import indexer
+
+    captured: dict = {}
+
+    class _FakeDocuments:
+        def upsert(self, document: dict) -> None:
+            captured.update(document)
+
+    class _FakeCollection:
+        documents = _FakeDocuments()
+
+    class _FakeCollections:
+        def __getitem__(self, _name: str) -> _FakeCollection:
+            return _FakeCollection()
+
+    class _FakeClient:
+        collections = _FakeCollections()
+
+    monkeypatch.setattr(indexer, "is_typesense_configured", lambda: True)
+    monkeypatch.setattr(indexer, "build_typesense_client", lambda: _FakeClient())
+    monkeypatch.setattr(indexer, "_ensure_collection", lambda *_a, **_k: None)
+
+    outcome = indexer.upsert_article_document(
+        article_id="a1",
+        title="Title",
+        summary="Summary",
+        body='See [ARC-27](/glossary/arc-27 "A wallet interop standard") for details.',
+        service_id="svc",
+        published_at_epoch=1,
+        translations={
+            "fr": json.dumps(
+                {
+                    "title": "Titre",
+                    "summary": "Résumé",
+                    "body": 'Voir [ARC-27](/glossary/arc-27 "Norme") et [jalonnement](/glossary/staking).',
+                }
+            )
+        },
+    )
+    assert outcome["status"] == "indexed"
+    assert captured["glossary_slugs"] == ["arc-27", "staking"]
+
+
+def test_upsert_article_translation_merges_glossary_slugs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A later-landing translation's new glossary slugs are UNIONED into the existing document, not overwriting the ones already found in English (Typesense .update() replaces string[] fields wholesale)."""
+    from app.modules.search.core import indexer
+
+    updated: dict = {}
+
+    class _FakeDocument:
+        def retrieve(self) -> dict:
+            return {"glossary_slugs": ["arc-27"]}
+
+        def update(self, fields: dict) -> None:
+            updated.update(fields)
+
+    class _FakeDocumentsIndex:
+        def __getitem__(self, _article_id: str) -> _FakeDocument:
+            return _FakeDocument()
+
+    class _FakeCollection:
+        documents = _FakeDocumentsIndex()
+
+    class _FakeCollections:
+        def __getitem__(self, _name: str) -> _FakeCollection:
+            return _FakeCollection()
+
+    class _FakeClient:
+        collections = _FakeCollections()
+
+    monkeypatch.setattr(indexer, "is_typesense_configured", lambda: True)
+    monkeypatch.setattr(indexer, "build_typesense_client", lambda: _FakeClient())
+    monkeypatch.setattr(indexer, "_ensure_collection", lambda *_a, **_k: None)
+
+    outcome = indexer.upsert_article_translation(
+        article_id="a1",
+        lang="fr",
+        title="Titre",
+        summary="Résumé",
+        body="Voir [jalonnement](/glossary/staking).",
+    )
+    assert outcome["status"] == "indexed"
+    assert updated["glossary_slugs"] == ["arc-27", "staking"]
+
+
 def test_classifier_anchors_chain_silent_ecosystem_domains() -> None:
     """HesabPay/Sealed: real Algorand-ecosystem services whose own sites never say 'Algorand' (hesab.com has zero chain mentions). Without a KNOWN_DOMAINS anchor they score 0 relevance, so their discovery rows drained at priority ~0 and every future diff would fail CONTENT_UPDATE_RELEVANCE_FLOOR (0.35)."""
     hesab = score_page(
