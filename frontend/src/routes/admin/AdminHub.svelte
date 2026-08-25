@@ -14,7 +14,7 @@
     { id: 'Writer Briefs', label: 'Briefs', slug: 'briefs', group: 'Content' },
     { id: 'Inbox', label: 'Inbox', slug: 'inbox', group: 'Content' },
     { id: 'Glossary', label: 'Glossary', slug: 'glossary', group: 'Content' },
-    { id: 'Queue', label: 'Queue', slug: 'queue', group: 'Pipeline' },
+    { id: 'Queue', label: 'Artifacts', slug: 'artifacts', group: 'Pipeline' },
     { id: 'Classifier', label: 'Classifier', slug: 'classifier', group: 'Pipeline' },
     { id: 'Training', label: 'Training', slug: 'training', group: 'Pipeline' },
     { id: 'Domains', label: 'Domains', slug: 'domains', group: 'Sources' },
