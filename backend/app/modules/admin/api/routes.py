@@ -1778,6 +1778,50 @@ def admin_pin_artifact_for_tomorrow(request: Request) -> Response | dict:
     return result
 
 
+def admin_get_artifact_content(request: Request) -> Response | dict:
+    """Full title/content/url/metadata for one editorial-room artifact -- the raw text that would actually get fed to the writer/composer, plus its source URL. Fetched on demand when an admin expands a Queue-tab row to inspect it, never on the list/preview poll (which stays title-only, to keep that response small).
+
+    Same cross-service dispatch shape as the other artifact routes above
+    (backend has no direct import of the workers codebase): send_task +
+    a short synchronous .get() on app.tasks.newspaper.get_artifact_detail,
+    which is a single-partition point read against `artifacts` +
+    `artifact_content` by primary key -- a short timeout is plenty.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    artifact_id = request.path_params.get("artifact_id", "")
+    if not artifact_id:
+        return json_error_response(400, "invalid_request", "artifact_id is required")
+
+    try:
+        from celery import Celery
+        from celery.exceptions import TimeoutError as CeleryTimeoutError
+
+        from app.core.config import settings
+
+        async_result = Celery(
+            broker=settings.celery_broker_url, backend=settings.redis_result_url
+        ).send_task(
+            "app.tasks.newspaper.get_artifact_detail",
+            args=[artifact_id],
+            queue="pipeline",
+        )
+        try:
+            result = async_result.get(timeout=10)
+        except CeleryTimeoutError:
+            return json_error_response(
+                504, "timeout", "the artifact content lookup took too long"
+            )
+    except Exception as exc:
+        return json_error_response(502, "broker_unavailable", str(exc))
+
+    if result is None:
+        return json_error_response(404, "not_found", "unknown artifact_id")
+    return result
+
+
 def register_admin_routes(app: Router) -> None:
     """Register all admin API endpoints on the given Robyn app."""
     app.get("/api/v1/admin/analytics")(admin_analytics)
@@ -1840,3 +1884,4 @@ def register_admin_routes(app: Router) -> None:
     app.post("/api/v1/admin/artifacts/:artifact_id/pin-for-tomorrow")(
         admin_pin_artifact_for_tomorrow
     )
+    app.get("/api/v1/admin/artifacts/:artifact_id/content")(admin_get_artifact_content)

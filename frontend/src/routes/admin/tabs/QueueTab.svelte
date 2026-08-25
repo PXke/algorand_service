@@ -35,6 +35,20 @@
     picked_at: string | null
   }
 
+  // Full detail for one artifact (admin.getArtifactContent) — the raw
+  // text that would actually get fed to the writer/composer, fetched only
+  // when a row is expanded, never as part of the list/preview poll above.
+  type ArtifactDetail = {
+    artifact_id: string
+    title: string
+    content: string
+    metadata: Record<string, unknown>
+    service_id: string | null
+    url: string | null
+    channel: string
+    status: string
+  }
+
   function tomorrowIso(): string {
     const d = new Date()
     d.setDate(d.getDate() + 1)
@@ -65,6 +79,41 @@
   )
   let pinningId = $state<string | null>(null)
   let pinError = $state<string | null>(null)
+
+  // Row expand-in-place: which artifact's content panel is currently open
+  // (at most one at a time), a per-id cache of already-fetched detail so
+  // re-expanding a row doesn't refetch, and the in-flight/error state for
+  // whichever fetch is currently running.
+  let expandedId = $state<string | null>(null)
+  let detailCache: Record<string, ArtifactDetail> = $state({})
+  let detailLoadingId = $state<string | null>(null)
+  let detailError = $state<string | null>(null)
+
+  async function toggleExpand(artifactId: string) {
+    if (expandedId === artifactId) {
+      expandedId = null
+      return
+    }
+    expandedId = artifactId
+    detailError = null
+    if (detailCache[artifactId]) return
+    detailLoadingId = artifactId
+    try {
+      const res = (await admin.getArtifactContent(artifactId)) as ArtifactDetail
+      detailCache = { ...detailCache, [artifactId]: res }
+    } catch (e) {
+      detailError = e instanceof Error ? e.message : String(e)
+    } finally {
+      detailLoadingId = null
+    }
+  }
+
+  function onRowKeydown(e: KeyboardEvent, artifactId: string) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      void toggleExpand(artifactId)
+    }
+  }
 
   // Section 3: approved & awaiting paced release — still a live, distinct
   // concept (not part of the old lane/status system).
@@ -171,6 +220,29 @@
   {:else if error}
     <p class="admin-err">{error}</p>
   {:else}
+    {#snippet artifactDetail(artifactId: string)}
+      {#if expandedId === artifactId}
+        <div class="artifact-detail" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="presentation">
+          {#if detailLoadingId === artifactId}
+            <p class="admin-muted small">Loading content…</p>
+          {:else if detailError}
+            <p class="admin-err small">{detailError}</p>
+          {:else if detailCache[artifactId]}
+            {@const d = detailCache[artifactId]}
+            <p class="admin-muted small meta">
+              {[d.channel, d.service_id, d.status].filter(Boolean).join(' · ')}
+            </p>
+            {#if d.url}
+              <p class="small detail-url">
+                <a href={d.url} target="_blank" rel="noopener noreferrer">{d.url}</a>
+              </p>
+            {/if}
+            <pre class="artifact-content">{d.content || '(no content)'}</pre>
+          {/if}
+        </div>
+      {/if}
+    {/snippet}
+
     <!-- Section 1: what has actually been selected (real to_compose rows). -->
     <section class="admin-panel stack">
       <div class="section-head">
@@ -187,19 +259,43 @@
         </p>
       {:else}
         {#each selected as sel (sel.artifact_id)}
-          <div class="selected-row">
-            <span class="lane-badge lane-{sel.lane}">{laneLabel(sel.lane)}</span>
-            <span class="selected-service">{sel.service_id || sel.artifact_id}</span>
-            <span class="admin-muted small">slot {sel.slot}</span>
-            <span class="admin-muted small selected-time">{formatTs(sel.picked_at)}</span>
+          <div
+            class="selected-row"
+            class:expanded={expandedId === sel.artifact_id}
+            role="button"
+            tabindex="0"
+            aria-expanded={expandedId === sel.artifact_id}
+            onclick={() => toggleExpand(sel.artifact_id)}
+            onkeydown={(e) => onRowKeydown(e, sel.artifact_id)}
+          >
+            <div class="selected-row-head">
+              <span class="expand-caret" aria-hidden="true"
+                >{expandedId === sel.artifact_id ? '▾' : '▸'}</span
+              >
+              <span class="lane-badge lane-{sel.lane}">{laneLabel(sel.lane)}</span>
+              <span class="selected-service">{sel.service_id || sel.artifact_id}</span>
+              <span class="admin-muted small">slot {sel.slot}</span>
+              <span class="admin-muted small selected-time">{formatTs(sel.picked_at)}</span>
+            </div>
+            {@render artifactDetail(sel.artifact_id)}
           </div>
         {/each}
       {/if}
     </section>
 
     {#snippet artifactRow(item: PreviewItem)}
-      <div class="admin-panel artifact-row" class:selected={Boolean(item.selected_lane)}>
+      <div
+        class="admin-panel artifact-row"
+        class:selected={Boolean(item.selected_lane)}
+        class:expanded={expandedId === item.artifact_id}
+        role="button"
+        tabindex="0"
+        aria-expanded={expandedId === item.artifact_id}
+        onclick={() => toggleExpand(item.artifact_id)}
+        onkeydown={(e) => onRowKeydown(e, item.artifact_id)}
+      >
         <div class="row-head">
+          <span class="expand-caret" aria-hidden="true">{expandedId === item.artifact_id ? '▾' : '▸'}</span>
           {#if item.selected_lane}
             <span class="lane-badge lane-{item.selected_lane}">{laneLabel(item.selected_lane)}</span>
           {/if}
@@ -229,12 +325,16 @@
             >
           </div>
         </div>
+        {@render artifactDetail(item.artifact_id)}
         <div class="row-actions">
           <button
             class="btn compact"
             type="button"
             disabled={pinningId === item.artifact_id || item.is_pinned_for_day}
-            onclick={() => pinForTomorrow(item.artifact_id)}
+            onclick={(e) => {
+              e.stopPropagation()
+              pinForTomorrow(item.artifact_id)
+            }}
           >
             {#if pinningId === item.artifact_id}
               Pinning…
@@ -372,11 +472,51 @@
   .artifact-row.selected {
     border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
   }
+  .artifact-row {
+    cursor: pointer;
+  }
+  .artifact-row.expanded {
+    border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+  }
   .row-head {
     display: flex;
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
+  }
+  .expand-caret {
+    font-size: 0.8rem;
+    color: var(--muted);
+    width: 0.9em;
+    flex: 0 0 auto;
+  }
+  .artifact-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--surface);
+    /* Prevent the row's own click-to-toggle from swallowing text selection
+       clicks inside the expanded panel (e.g. selecting/copying content). */
+    cursor: text;
+  }
+  .detail-url a {
+    word-break: break-all;
+  }
+  .artifact-content {
+    margin: 0;
+    max-height: 420px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    padding: 10px;
+    border-radius: 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
   }
   .display-name {
     flex: 1;
@@ -481,12 +621,27 @@
 
   .selected-row {
     display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
+    flex-direction: column;
+    gap: 8px;
     padding: 8px 10px;
     border-radius: 8px;
     background: var(--surface);
+    cursor: pointer;
+  }
+
+  .selected-row.expanded {
+    outline: 1px solid color-mix(in srgb, var(--primary) 45%, var(--border));
+  }
+
+  .selected-row-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .selected-row .artifact-detail {
+    background: var(--panel);
   }
 
   .selected-service {

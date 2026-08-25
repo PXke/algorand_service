@@ -142,5 +142,7 @@ export function createAdminApi(wallet: string, token: string | null) {
       ),
     pinArtifactForTomorrow: (artifactId: string) =>
       api.postJson(`/api/v1/admin/artifacts/${encodeURIComponent(artifactId)}/pin-for-tomorrow`, {}, h()),
+    getArtifactContent: (artifactId: string) =>
+      api.getJson(`/api/v1/admin/artifacts/${encodeURIComponent(artifactId)}/content`, h()),
   }
 }

@@ -1,11 +1,11 @@
-"""The three on-demand Celery task wrappers artifact_tasks.py adds for the admin dashboard: preview_to_compose_for_day (live forecast), list_to_compose_for_day (the real persisted selection), and pin_artifact_for_tomorrow (writes a human pin).
+"""The four on-demand Celery task wrappers artifact_tasks.py adds for the admin dashboard: preview_to_compose_for_day (live forecast), list_to_compose_for_day (the real persisted selection), pin_artifact_for_tomorrow (writes a human pin), and get_artifact_detail (full title/content/url for one artifact, on expand).
 
 Confirms each task body is a thin delegation to its already-tested
-to_compose_selection function (preview_to_compose_for_day / list_to_compose_for_day /
-pin_for_tomorrow, covered directly in test_to_compose_selection.py) and that
-all three are reachable under their registered task names -- the backend
-admin routes dispatch by name via Celery.send_task, so a drifted name would
-404 silently at runtime with no import-time signal.
+to_compose_selection / artifact_store function (preview_to_compose_for_day /
+list_to_compose_for_day / pin_for_tomorrow / get_artifact+get_artifact_content)
+and that all four are reachable under their registered task names -- the
+backend admin routes dispatch by name via Celery.send_task, so a drifted name
+would 404 silently at runtime with no import-time signal.
 """
 
 from __future__ import annotations
@@ -98,6 +98,66 @@ def test_pin_task_reports_false_for_an_unknown_artifact(monkeypatch: pytest.Monk
     assert result == {"ok": False, "artifact_id": "nope"}
 
 
+def test_get_artifact_detail_merges_artifact_and_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The task body merges artifact_store.get_artifact (service_id/url/channel/status) with get_artifact_content (title/content/metadata) into one dict, keyed by the same artifact_id passed in."""
+    from datetime import UTC, datetime
+
+    from app.modules.newspaper.artifact_store import Artifact, ArtifactContent
+    from app.modules.newspaper.tasks import artifact_tasks
+
+    artifact = Artifact(
+        artifact_id="abc-123",
+        service_id="svc-a",
+        url="https://example.com/post",
+        channel="crawler",
+        created_at=datetime.now(tz=UTC),
+        event_date=None,
+        priority=1.5,
+        priority_computed_at=None,
+        status="pending",
+        human_pick_day=None,
+    )
+    content = ArtifactContent(
+        artifact_id="abc-123",
+        title="Big protocol update",
+        content="Full raw body text goes here.",
+        metadata={"display_name": "Some Service"},
+    )
+    monkeypatch.setattr("app.modules.newspaper.artifact_store.get_artifact", lambda _id: artifact)
+    monkeypatch.setattr(
+        "app.modules.newspaper.artifact_store.get_artifact_content", lambda _id: content
+    )
+
+    result = artifact_tasks.get_artifact_detail.run("abc-123")
+
+    assert result == {
+        "artifact_id": "abc-123",
+        "title": "Big protocol update",
+        "content": "Full raw body text goes here.",
+        "metadata": {"display_name": "Some Service"},
+        "service_id": "svc-a",
+        "url": "https://example.com/post",
+        "channel": "crawler",
+        "status": "pending",
+    }
+
+
+def test_get_artifact_detail_returns_none_for_unknown_or_malformed_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both get_artifact and get_artifact_content already fail closed to None for an unknown OR malformed id -- the task surfaces that as a plain None, which the admin route turns into a 404."""
+    from app.modules.newspaper.tasks import artifact_tasks
+
+    monkeypatch.setattr("app.modules.newspaper.artifact_store.get_artifact", lambda _id: None)
+    monkeypatch.setattr(
+        "app.modules.newspaper.artifact_store.get_artifact_content", lambda _id: None
+    )
+
+    result = artifact_tasks.get_artifact_detail.run("not-a-uuid")
+
+    assert result is None
+
+
 def test_all_admin_tasks_registered_under_their_own_names() -> None:
     """Pins the exact task names the backend admin routes dispatch by -- a drifted name here would 404 silently at runtime with no import-time signal."""
     from app.modules.newspaper.tasks import artifact_tasks
@@ -111,6 +171,7 @@ def test_all_admin_tasks_registered_under_their_own_names() -> None:
     assert artifact_tasks.pin_artifact_for_tomorrow.name == (
         "app.tasks.newspaper.pin_artifact_for_tomorrow"
     )
+    assert artifact_tasks.get_artifact_detail.name == ("app.tasks.newspaper.get_artifact_detail")
 
 
 def test_artifact_tasks_module_is_imported_by_celery_app() -> None:
