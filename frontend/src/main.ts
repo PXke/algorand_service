@@ -3,9 +3,14 @@ import './app.css'
 import './lib/theme'
 import './lib/i18n'
 import App from './App.svelte'
+import { initBugsnag } from './lib/bugsnag'
 import { restoreSession } from './lib/auth/session'
 import { startPageviewTracking } from './lib/router'
 import { applyLangFromUrl, startLocaleUrlSync } from './lib/localeUrl'
+
+// First thing on the page: catch as much of the bootstrap sequence as
+// possible under passive error monitoring.
+initBugsnag()
 
 applyLangFromUrl()
 startLocaleUrlSync()

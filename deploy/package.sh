@@ -30,6 +30,7 @@ FRONTEND_ALGOD_API_URL="${FRONTEND_ALGOD_API_URL:-}"
 FRONTEND_WALLET_CHAIN_ID="${FRONTEND_WALLET_CHAIN_ID:-416002}"
 FRONTEND_EXPLORER_BASE_URL="${FRONTEND_EXPLORER_BASE_URL:-https://testnet.explorer.perawallet.app}"
 FRONTEND_WALLET_CONNECT_BRIDGE="${FRONTEND_WALLET_CONNECT_BRIDGE:-https://wallet-connect-a.perawallet.app}"
+FRONTEND_BUGSNAG_API_KEY="${FRONTEND_BUGSNAG_API_KEY:-}"
 
 STAMP=$(date -u +%Y%m%d-%H%M%S)
 GIT_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -47,6 +48,8 @@ _frontend_build_hash() {
     printf 'VITE_WALLET_CHAIN_ID=%s\n' "$FRONTEND_WALLET_CHAIN_ID"
     printf 'VITE_EXPLORER_BASE_URL=%s\n' "$FRONTEND_EXPLORER_BASE_URL"
     printf 'VITE_SUGGESTIONS_ENABLED=%s\n' "${FRONTEND_SUGGESTIONS_ENABLED:-false}"
+    printf 'VITE_BUGSNAG_API_KEY=%s\n' "$FRONTEND_BUGSNAG_API_KEY"
+    printf 'VITE_APP_VERSION=%s\n' "$GIT_SHA"
     find "$REPO_ROOT/frontend/src" "$REPO_ROOT/frontend/public" -type f 2>/dev/null | sort | xargs -r sha256sum
     sha256sum "$REPO_ROOT/frontend/index.html" "$REPO_ROOT/frontend/vite.config.ts" \
       "$REPO_ROOT/frontend/package.json" "$REPO_ROOT/frontend/package-lock.json"
@@ -55,7 +58,10 @@ _frontend_build_hash() {
 }
 
 _write_vite_env() {
-  bash "$SCRIPT_DIR/scripts/write_vite_env.sh" "$REPO_ROOT/frontend/.env.production.local"
+  # GIT_SHA isn't exported (only FRONTEND_* build-input vars are); pass it
+  # through explicitly so write_vite_env.sh can stamp VITE_APP_VERSION for
+  # correlating Bugsnag events with a deploy.
+  GIT_SHA="$GIT_SHA" bash "$SCRIPT_DIR/scripts/write_vite_env.sh" "$REPO_ROOT/frontend/.env.production.local"
 }
 
 _maybe_build_frontend() {

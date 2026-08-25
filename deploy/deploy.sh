@@ -67,6 +67,8 @@ export INDEXNOW_KEY="${INDEXNOW_KEY:-}"
 export FRONTEND_ALGOD_API_URL="${FRONTEND_ALGOD_API_URL:-}"
 export FRONTEND_WALLET_CHAIN_ID="${FRONTEND_WALLET_CHAIN_ID:-$_CHAIN_ID_DEFAULT}"
 export FRONTEND_EXPLORER_BASE_URL="${FRONTEND_EXPLORER_BASE_URL:-$_EXPLORER_DEFAULT}"
+# Browser-side Bugsnag notifier key (empty = disabled). See deploy.conf.
+export FRONTEND_BUGSNAG_API_KEY="${FRONTEND_BUGSNAG_API_KEY:-}"
 
 UNITS=(algorand-platform-backend algorand-platform-celery algorand-platform-celery-beat algorand-platform-celery-translate)
 

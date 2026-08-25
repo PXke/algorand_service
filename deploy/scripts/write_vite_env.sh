@@ -13,4 +13,8 @@ VITE_ALGOD_API_URL=${FRONTEND_ALGOD_API_URL:-}
 VITE_WALLET_CONNECT_CHAIN_ID=${FRONTEND_WALLET_CHAIN_ID:-416002}
 VITE_EXPLORER_BASE_URL=${FRONTEND_EXPLORER_BASE_URL:-https://testnet.explorer.perawallet.app}
 VITE_SUGGESTIONS_ENABLED=${FRONTEND_SUGGESTIONS_ENABLED:-false}
+# Browser Bugsnag notifier key — empty disables client-side error reporting.
+VITE_BUGSNAG_API_KEY=${FRONTEND_BUGSNAG_API_KEY:-}
+# Git short SHA, correlates Bugsnag events with a specific deploy.
+VITE_APP_VERSION=${GIT_SHA:-unknown}
 EOF
