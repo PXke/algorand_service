@@ -83,14 +83,6 @@ export function createAdminApi(wallet: string, token: string | null) {
         { source_url: sourceUrl },
         h(),
       ),
-    listGatekeeperAnchors: () =>
-      api.getJson('/api/v1/admin/gatekeeper/anchors', h()),
-    getGatekeeperValidationReport: () =>
-      api.getJson('/api/v1/admin/gatekeeper/validation-report', h()),
-    runGatekeeperValidation: () =>
-      api.postJson('/api/v1/admin/gatekeeper/validate', {}, h()),
-    addGatekeeperAnchor: (body: Record<string, unknown>) =>
-      api.postJson('/api/v1/admin/gatekeeper/anchor', body, h()),
     listSources: () =>
       api.getJson('/api/v1/registry/services?seeds_only=1', h()),
     upsertSource: (body: Record<string, unknown>) =>

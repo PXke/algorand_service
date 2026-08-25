@@ -654,10 +654,6 @@ class AdminCassandraStore:
         categories: list | None = None,
         training_only: bool = False,
         corrected_scores: dict | None = None,
-        anchor: bool = False,
-        factuality_fail: bool = False,
-        tone_fail: bool = False,
-        error_types: list | None = None,
     ) -> dict:
         """Record a human correction to a classifier verdict for later retraining."""
         from app.core.cassandra import get_cassandra_session
@@ -673,21 +669,6 @@ class AdminCassandraStore:
         feedback_meta = self._classifier_feedback_meta(
             review_id=review_id, corrected_scores=corrected_scores, article_id=article_id
         )
-        # Gatekeeper validation anchor: the human ground truth the annotator is
-        # checked against. Written to the dedicated gatekeeper_anchors table (the
-        # single source of truth), isolated from all model training.
-        if anchor:
-            with contextlib.suppress(Exception):
-                self.record_gatekeeper_anchor(
-                    article_id=article_id or "",
-                    url=url,
-                    source_text=text_sample,
-                    article_text=feedback_meta.get("article_text", ""),
-                    factuality_fail=bool(factuality_fail),
-                    tone_fail=bool(tone_fail),
-                    error_types=[str(t) for t in (error_types or [])],
-                    admin_wallet=admin_wallet,
-                )
 
         session = get_cassandra_session()
         session.execute(
@@ -789,107 +770,6 @@ class AdminCassandraStore:
         # A review slot just freed — generate the next-highest-interest
         # candidate now instead of waiting for the next scheduled drain.
         self._trigger_compose_next()
-
-    def record_gatekeeper_anchor(
-        self,
-        *,
-        article_id: str,
-        url: str,
-        source_text: str,
-        article_text: str,
-        factuality_fail: bool,
-        tone_fail: bool,
-        error_types: list,
-        admin_wallet: str,
-    ) -> str:
-        """Write a validation anchor (immutable ground truth for the annotator).
-
-        article_text is snapshotted so the anchor is fixed even if the article
-        later changes. Returns the anchor id.
-        """
-        from cassandra.util import uuid_from_time
-
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import GatekeeperStmts
-
-        # If an article_text was not passed in, snapshot it now from the article.
-        if not article_text and article_id:
-            try:
-                art = self.get_article(article_id)
-                if art is not None and getattr(art, "body", ""):
-                    article_text = f"{getattr(art, 'title', '')}\n{art.body}"[:8000]
-            except Exception:
-                logger.warning(
-                    "failed to snapshot article text for anchor on %s",
-                    article_id,
-                    exc_info=True,
-                )
-        now = datetime.now(tz=UTC)
-        anchor_id = uuid_from_time(now)
-        get_cassandra_session().execute(
-            GatekeeperStmts.INSERT_ANCHOR,
-            (
-                now,
-                anchor_id,
-                article_id or "",
-                url[:512],
-                (source_text or "")[:8000],
-                (article_text or "")[:8000],
-                bool(factuality_fail),
-                bool(tone_fail),
-                [str(t) for t in (error_types or [])],
-                admin_wallet,
-            ),
-        )
-        return str(anchor_id)
-
-    def list_gatekeeper_anchors(self, *, limit: int = 200) -> dict:
-        """List anchors (newest-first, deduped to the latest tag per article).
-
-        Returns {count, target, items}.
-        """
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import GatekeeperStmts
-
-        rows = get_cassandra_session().execute(GatekeeperStmts.LIST_ANCHORS, (limit,))
-        seen: set[str] = set()
-        items: list[dict] = []
-        for r in rows:
-            key = r.article_id or str(r.anchor_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            items.append(
-                {
-                    "anchor_id": str(r.anchor_id),
-                    "article_id": r.article_id or "",
-                    "url": r.url or "",
-                    "factuality_fail": bool(r.factuality_fail),
-                    "tone_fail": bool(r.tone_fail),
-                    "error_types": list(r.error_types or []),
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
-                }
-            )
-        return {"count": len(items), "target": 40, "items": items}
-
-    def get_gatekeeper_validation_report(self) -> dict | None:
-        """Latest annotator-validation report, or None if never run."""
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import GatekeeperStmts
-
-        row = get_cassandra_session().execute(GatekeeperStmts.GET_REPORT).one()
-        if row is None or not row.report_json:
-            return None
-        try:
-            report = serialization.loads(row.report_json)
-        except Exception:
-            report = {}
-        return {
-            "computed_at": row.computed_at.isoformat() if row.computed_at else None,
-            "n_anchors": row.n_anchors,
-            "trusted_count": row.trusted_count,
-            "report": report,
-        }
 
     # Multi-label public suffixes where eTLD+1 needs three labels (foo.co.uk).
     # Mirrors workers' domain_tracker._MULTI_LABEL_SUFFIXES — keep in sync.

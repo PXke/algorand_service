@@ -16,7 +16,6 @@ from app.modules.admin.schemas import (
     ClassifierFeedbackCreate,
     DomainSetRequest,
     EditorialBriefCreate,
-    GatekeeperAnchorCreate,
     GlossaryUpsertRequest,
     ScraperRunRequest,
     ServiceMergeRequest,
@@ -400,69 +399,13 @@ def admin_classifier_feedback(request: Request) -> Response:
         return json_error_response(400, "invalid_request", str(exc))
     wallet = verified_admin_wallet(request)
 
-    result = store.record_classifier_feedback(url=payload.url, text_sample=payload.text_sample, category=payload.category, predicted_category=payload.predicted_category, quality=payload.quality, predicted_publish=payload.predicted_publish, approved=payload.approved, admin_wallet=wallet, review_id=payload.review_id, article_id=payload.article_id, source_relevant=payload.source_relevant, categories=payload.categories, training_only=payload.training_only, corrected_scores=payload.corrected_scores, anchor=payload.anchor, factuality_fail=payload.factuality_fail, tone_fail=payload.tone_fail, error_types=payload.error_types, )
+    result = store.record_classifier_feedback(url=payload.url, text_sample=payload.text_sample, category=payload.category, predicted_category=payload.predicted_category, quality=payload.quality, predicted_publish=payload.predicted_publish, approved=payload.approved, admin_wallet=wallet, review_id=payload.review_id, article_id=payload.article_id, source_relevant=payload.source_relevant, categories=payload.categories, training_only=payload.training_only, corrected_scores=payload.corrected_scores, )
     # Labeling changes the Training-tab aggregate — drop its cache so the
     # next load reflects this decision immediately (don't wait for the TTL).
     from app.core.cache import invalidate
 
     invalidate("admin:training_stats")
     return result
-
-
-def admin_list_gatekeeper_anchors(request: Request) -> Response:
-    """Validation anchor set: count + list (for the X/40 progress view)."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-
-    return store.list_gatekeeper_anchors()
-
-
-def admin_add_gatekeeper_anchor(request: Request) -> Response:
-    """Tag an already-published article into the anchor set (curate diverse anchors without waiting for the review queue)."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-    try:
-        payload = serialization.decode(request.body, GatekeeperAnchorCreate)
-    except Exception as exc:
-        return json_error_response(400, "invalid_request", str(exc))
-    wallet = verified_admin_wallet(request)
-
-    try:
-        anchor_id = store.record_gatekeeper_anchor(article_id=payload.article_id, url="", source_text="", article_text="", # store snapshots it from the article
-            factuality_fail=payload.factuality_fail, tone_fail=payload.tone_fail, error_types=payload.error_types, admin_wallet=wallet, )
-        return {"status": "ok", "anchor_id": anchor_id}
-    except Exception as exc:
-        return json_error_response(500, "anchor_failed", str(exc))
-
-
-def admin_run_gatekeeper_validation(request: Request) -> Response:
-    """Trigger the annotator-validation task (runs in a worker)."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-    try:
-        from celery import Celery
-
-        from app.core.config import settings
-
-        Celery(broker=settings.celery_broker_url).send_task(
-            "app.tasks.gatekeeper.run_annotator_validation", queue="pipeline"
-        )
-        return {"status": "queued"}
-    except Exception as exc:
-        return json_error_response(500, "validate_failed", str(exc))
-
-
-def admin_gatekeeper_validation_report(request: Request) -> Response:
-    """Latest annotator-validation report (trusted types + precision/recall)."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-
-    report = store.get_gatekeeper_validation_report()
-    return report if report is not None else {"report": None}
 
 
 def admin_upsert_source(request: Request) -> Response:
@@ -1886,10 +1829,6 @@ def register_admin_routes(app: Router) -> None:
     app.get("/api/v1/admin/training-stats")(admin_training_stats)
     app.post("/api/v1/admin/retrain")(admin_retrain)
     app.post("/api/v1/admin/classifier-feedback")(admin_classifier_feedback)
-    app.get("/api/v1/admin/gatekeeper/anchors")(admin_list_gatekeeper_anchors)
-    app.post("/api/v1/admin/gatekeeper/anchor")(admin_add_gatekeeper_anchor)
-    app.post("/api/v1/admin/gatekeeper/validate")(admin_run_gatekeeper_validation)
-    app.get("/api/v1/admin/gatekeeper/validation-report")(admin_gatekeeper_validation_report)
     app.post("/api/v1/admin/sources")(admin_upsert_source)
     app.post("/api/v1/admin/sources/merge")(admin_merge_services)
     app.delete("/api/v1/admin/sources/:service_id")(admin_delete_source)

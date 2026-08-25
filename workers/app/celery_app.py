@@ -46,7 +46,6 @@ celery_app.conf.task_routes = {
     "app.tasks.crawler.*": {"queue": "scrape"},
     "app.tasks.search.*": {"queue": "pipeline"},
     "app.tasks.metrics.*": {"queue": "pipeline"},
-    "app.tasks.gatekeeper.*": {"queue": "pipeline"},
     # Exact-name entry, checked by Celery's router BEFORE the
     # "app.tasks.newspaper.*" glob above regardless of dict order (an exact
     # match always wins over a pattern match) -- pulled off the shared
@@ -70,7 +69,6 @@ celery_app.conf.imports = (
     "app.tasks.newspaper",
     "app.tasks.search",
     "app.tasks.metrics",
-    "app.tasks.gatekeeper",
 )
 
 

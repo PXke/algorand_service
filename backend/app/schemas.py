@@ -499,11 +499,6 @@ class ClassifierFeedbackCreate(msgspec.Struct, kw_only=True):
     training_only: bool = False
     # Human-corrected per-dimension scores (0-10), only the disputed ones.
     corrected_scores: dict[str, float] = field(default_factory=dict)
-    # Gatekeeper validation anchor flags.
-    anchor: bool = False
-    factuality_fail: bool = False
-    tone_fail: bool = False
-    error_types: list[str] = field(default_factory=list)
     review_id: Annotated[str, Meta(max_length=64)] | None = None
     article_id: Annotated[str, Meta(max_length=64)] | None = None
 
@@ -527,17 +522,6 @@ class ClassifierFeedbackCreate(msgspec.Struct, kw_only=True):
         if quality not in QUALITY_LEVELS:
             raise ValueError(f"quality must be one of: {', '.join(QUALITY_LEVELS)}")
         self.quality = quality
-
-
-class GatekeeperAnchorCreate(msgspec.Struct, kw_only=True):
-    """Request body for adding a gatekeeper anchor-pool sample."""
-
-    """Tag an already-published article into the gatekeeper validation anchor set."""
-
-    article_id: Annotated[str, Meta(min_length=1, max_length=64)]
-    factuality_fail: bool = False
-    tone_fail: bool = False
-    error_types: list[str] = field(default_factory=list)
 
 
 class SourceUpsertRequest(msgspec.Struct, kw_only=True):
