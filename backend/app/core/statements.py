@@ -74,12 +74,6 @@ class ArticleStmts:
     GET_PUBLISHED_AT_AND_DRAFT = _Stmt(
         "SELECT published_at, draft FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
-    # A burst-composed article (see workers/burst_compose_tasks.py) must
-    # never publish same-day just because the daily cap/pacing happened to
-    # have room -- _publish_or_queue_article checks this before deciding.
-    GET_BURST_DAY = _Stmt(
-        "SELECT burst_day FROM algorand_platform.articles_by_id WHERE article_id = ?"
-    )
     GET_FEED_ROW = _Stmt(
         "SELECT article_id, service_id, title, summary, published_at, tags, "
         "image_url, source_url, slug FROM algorand_platform.articles_by_id WHERE article_id = ?"
@@ -520,12 +514,12 @@ class PublishQueueStmts:
     )
     GET_ROW = _Stmt(
         "SELECT queue_id, status, last_reason, priority, topic, publish_kind, "
-        "service_id, display_name, scrape_url, created_at, updated_at, human_pick_day, burst_day "
+        "service_id, display_name, scrape_url, created_at, updated_at, human_pick_day "
         "FROM algorand_platform.publish_queue WHERE queue_id = ?"
     )
     LIST_RECENT = _Stmt(
         "SELECT queue_id, status, last_reason, priority, topic, publish_kind, "
-        "service_id, display_name, scrape_url, created_at, updated_at, human_pick_day, burst_day "
+        "service_id, display_name, scrape_url, created_at, updated_at, human_pick_day "
         "FROM algorand_platform.publish_queue LIMIT ?"
     )
     GET_PAYLOAD = _Stmt("SELECT payload FROM algorand_platform.publish_queue WHERE queue_id = ?")

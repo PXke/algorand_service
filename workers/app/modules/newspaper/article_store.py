@@ -9,7 +9,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from algorand_shared.article_transitions import transition_article_status
-
 from app.core.config import NEWS_FEED_BUCKET
 from app.core.feed_bucket import feed_month
 
@@ -54,7 +53,6 @@ class ArticleDetail:
 def get_article(article_id: str) -> ArticleDetail | None:
     """Load the full detail row for an article (any status -- callers include draft/recompose flows, not just published), or None if not found. 2026-08-24: reads `articles` directly (was `articles_by_id`), now that dual-write coverage is confirmed complete for every real article (see the article-table-consolidation plan's Phase 1)."""
     from algorand_shared.article_statements import ArticlesStmts
-
     from app.core.cassandra import get_cassandra_session
 
     session = get_cassandra_session()
@@ -87,7 +85,6 @@ def get_article(article_id: str) -> ArticleDetail | None:
 def article_exists(article_id: str | UUID) -> bool:
     """True when an article with this id exists (any status). 2026-08-24: reads `articles` directly (was `articles_by_id`)."""
     from algorand_shared.article_statements import ArticlesStmts
-
     from app.core.cassandra import get_cassandra_session
 
     try:
@@ -126,7 +123,6 @@ def count_feed_articles_with_tag_on_day(
 ) -> int:
     """Count that UTC day's published articles that include a given tag (e.g. breaking). 2026-08-24: reads `articles` directly (was `articles_feed`'s BY_BUCKET_TAGS, one query per month bucket)."""
     from algorand_shared.article_statements import ArticlesStmts
-
     from app.core.cassandra import get_cassandra_session
 
     day_start = datetime.fromtimestamp(day_start_epoch, tz=UTC)
@@ -155,7 +151,6 @@ def list_feed_articles(
 ) -> list[FeedArticleRow]:
     """Return the most recent `limit` published articles. 2026-08-24: reads `articles` directly (was `articles_feed`'s BY_BUCKET, one query per month bucket up to 18) -- same year-partition keyset pattern backend's CassandraArticleStore.list_feed_page already uses, almost always just the current year's partition at this platform's ~7/day volume, falling back to prior years only when the current year doesn't have `limit` rows yet."""
     from algorand_shared.article_statements import ArticlesStmts
-
     from app.core.cassandra import get_cassandra_session
 
     session = get_cassandra_session()
@@ -225,7 +220,6 @@ def insert_stored_article(
     Returns (article_id, feed_published).
     """
     from algorand_shared.article_statements import ArticlesStmts
-
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
     from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
@@ -285,7 +279,6 @@ def insert_stored_article(
             None,  # translations: none at creation time
             None,  # first_published_at: NULL until a recompose re-publish sets it
             None,  # updated_at: NULL until an edit/recompose
-            None,  # burst_day: set via a separate call when relevant
             prompt_version or None,
             None,  # composed_by_model: not yet plumbed through this call, accepted gap
             None,  # deleted_at: never set at creation
@@ -367,7 +360,6 @@ def update_article(
     revision surfaces as dateModified.
     """
     from algorand_shared.article_statements import ArticlesStmts
-
     from app.core.cassandra import get_cassandra_session
     from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
 
@@ -487,7 +479,6 @@ def replace_article_content(
     set_article_draft's job exclusively.
     """
     from algorand_shared.article_statements import ArticlesStmts
-
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
     from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
@@ -643,7 +634,6 @@ def _claim_slug_for_feed(
     so slug assignment must not be able to fail a publish.
     """
     from algorand_shared.article_statements import ArticlesStmts
-
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
 
@@ -676,7 +666,6 @@ def ensure_article_slug(article_id: str | UUID, title: str) -> str | None:
     """
     from algorand_shared.article_statements import ArticlesStmts
     from algorand_shared.slugs import slugify, unique_slug
-
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
 
@@ -721,7 +710,6 @@ def update_article_image(article_id: str, image_url: str) -> bool:
     service_id/title (which then 500s the feed).
     """
     from algorand_shared.article_statements import ArticlesStmts
-
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
 
@@ -826,7 +814,6 @@ def update_article_translations(article_id: str, translations: dict[str, str]) -
     from uuid import UUID
 
     from algorand_shared.article_statements import ArticlesStmts
-
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts, FeedStmts
 

@@ -629,3 +629,11 @@ file = "backend/schema/migrations/app/070_articles_status_updated_at.cql"
 tier = "prod"
 status = "active"
 description = "add articles.status_updated_at: generic 'when did status last change' timestamp, closing the gap found migrating list_draft_articles() off draft_articles.drafted_at (deleted_at already covers the 'deleted' transition specifically; this covers every other one)"
+
+[[migrations]]
+stream = "app"
+version = "071"
+file = "backend/schema/migrations/app/071_drop_burst_day.cql"
+tier = "prod"
+status = "active"
+description = "drop burst_day from publish_queue/articles_by_id/articles: burst-compose removed entirely (never ran in prod -- gated behind DAILY_BURST_ENABLED, unset on prod, zero rows ever had it set -- and its dependent admin picks UI was never built)"

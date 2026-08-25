@@ -11,11 +11,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from celery import Task
-
     from app.modules.ai.content_signals import ContentSignals
     from app.modules.newspaper.article_store import ArticleDetail
     from app.modules.newspaper.editorial_assignment import EditorialBrief
+    from celery import Task
 
 from app.celery_app import celery_app
 from app.core import config as worker_config
@@ -1668,34 +1667,22 @@ def _publish_from_queued_row_impl(
     hero_image, image_field = _resolve_hero_and_image(payload, row, composed)
 
     needs_review = clf_decision is not True or gate_enforced_review
-    if row.burst_day:
-        # Burst-selected content (see burst_compose_tasks.py) always waits for
-        # an explicit admin decision -- the whole point of the daily batch is
-        # a human look at all 3 candidates before any of them can go out, so
-        # the autonomous auto-approve bypass (which would otherwise publish
-        # immediately, or silently route to the backlog without ever
-        # creating a visible review row) is suppressed unconditionally here,
-        # regardless of how confidently the classifier/gates would otherwise
-        # have cleared it.
-        needs_review = True
-        route_to_backlog = False
-    else:
-        needs_review, route_to_backlog = _maybe_auto_approve(
-            needs_review=needs_review,
-            tier=tier,
-            composed=composed,
-            page_text_for_clf=page_text_for_clf,
-            row=row,
-            payload=payload,
-            defunct_domains=defunct_domains,
-            unsourced_hold_reason=unsourced_hold_reason,
-            broken_link_hold_reason=broken_link_hold_reason,
-            clf_category=clf_category,
-            clf_confidence=clf_confidence,
-            signals=signals,
-            gate_enforced_review=gate_enforced_review,
-            image_field=image_field,
-        )
+    needs_review, route_to_backlog = _maybe_auto_approve(
+        needs_review=needs_review,
+        tier=tier,
+        composed=composed,
+        page_text_for_clf=page_text_for_clf,
+        row=row,
+        payload=payload,
+        defunct_domains=defunct_domains,
+        unsourced_hold_reason=unsourced_hold_reason,
+        broken_link_hold_reason=broken_link_hold_reason,
+        clf_category=clf_category,
+        clf_confidence=clf_confidence,
+        signals=signals,
+        gate_enforced_review=gate_enforced_review,
+        image_field=image_field,
+    )
 
     if needs_review or route_to_backlog:
         return _hold_for_review(
@@ -2756,7 +2743,6 @@ def _recompose_published_hero_image(
     from uuid import UUID
 
     from algorand_shared.article_statements import ArticlesStmts
-
     from app.core.cassandra import get_cassandra_session
 
     og_image = _validated_hero_checked(scraped_og, source_url)
@@ -3051,7 +3037,6 @@ def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dic
     from uuid import UUID as _UUID
 
     from algorand_shared.article_statements import ArticlesStmts
-
     from app.core.cassandra import get_cassandra_session
     from app.modules.newspaper.article_store import get_article, replace_article_content
     from app.modules.newspaper.article_version_store import save_article_version

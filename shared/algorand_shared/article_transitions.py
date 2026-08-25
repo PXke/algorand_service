@@ -17,7 +17,7 @@ from uuid import UUID
 _ARTICLES_COLUMNS = (
     "status", "year", "published_at", "article_id", "service_id", "title", "summary", "body",
     "image_url", "tags", "source_url", "trigger_txid", "trigger_round", "slug", "translations",
-    "first_published_at", "updated_at", "burst_day", "prompt_version", "composed_by_model",
+    "first_published_at", "updated_at", "prompt_version", "composed_by_model",
     "deleted_at", "status_updated_at",
 )  # fmt: skip
 

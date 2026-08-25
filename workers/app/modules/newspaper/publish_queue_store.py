@@ -81,7 +81,6 @@ class QueuedPublishRow:
     payload: dict[str, Any]
     created_at_epoch: int
     human_pick_day: str | None = None
-    burst_day: str | None = None
 
 
 def enqueue_publish(
@@ -187,7 +186,6 @@ def list_pending_queue(*, limit: int = 50) -> list[QueuedPublishRow]:
                 payload=payload,
                 created_at_epoch=epoch,
                 human_pick_day=detail.human_pick_day or None,
-                burst_day=getattr(detail, "burst_day", None) or None,
             )
         )
     return order_for_drain(out)
@@ -223,7 +221,6 @@ def get_queued_row(queue_id: str) -> QueuedPublishRow | None:
         payload=payload,
         created_at_epoch=epoch,
         human_pick_day=getattr(row, "human_pick_day", None) or None,
-        burst_day=getattr(row, "burst_day", None) or None,
     )
 
 

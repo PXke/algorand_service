@@ -6,7 +6,6 @@ import logging
 from datetime import UTC, datetime
 
 import redis
-
 from app.core import config
 from app.modules.newspaper.publish_policy import PublishTier
 
@@ -173,42 +172,3 @@ def record_lane_used(lane: str) -> None:
         client.expire(key, 90_000)
     except Exception:
         logger.warning("record_lane_used(%s): Redis unavailable, lane not recorded", lane, exc_info=True)
-
-
-# --------------------------------------------------------------------------- #
-# One-day-ahead burst compose (2026-08-16): a daily selection step picks
-# today's 3 lane candidates (human pick + top discovery + top scale) up
-# front and records their queue_ids here, so a separate off-peak task knows
-# exactly which rows to compose as one batch -- decoupling WHEN the
-# (relatively expensive) DeepSeek calls happen from WHEN the resulting
-# articles actually go out, which keeps its existing paced cadence.
-# --------------------------------------------------------------------------- #
-def _burst_key(day: str) -> str:
-    return f"news:publish_burst_selected:{day}"
-
-
-def burst_selection_today() -> list[str]:
-    """queue_ids selected for today's burst, or [] if selection hasn't run yet (or a Redis blip) -- fails toward "nothing to compose", not toward re-selecting or double-composing."""
-    try:
-        client = _client()
-        raw = client.smembers(_burst_key(_day_key()))
-        return sorted(raw)
-    except Exception:
-        logger.warning(
-            "burst_selection_today: Redis unavailable, treating as not yet selected", exc_info=True
-        )
-        return []
-
-
-def record_burst_selection(queue_ids: list[str]) -> None:
-    """Record today's burst selection so it only ever runs once per day (select_daily_burst checks burst_selection_today() first) and so burst_compose_today() knows what to compose without a full-table scan. Same TTL convention as the lane/counter keys."""
-    if not queue_ids:
-        return
-    try:
-        day = _day_key()
-        key = _burst_key(day)
-        client = _client()
-        client.sadd(key, *queue_ids)
-        client.expire(key, 90_000)
-    except Exception:
-        logger.warning("record_burst_selection: Redis unavailable, selection not recorded", exc_info=True)

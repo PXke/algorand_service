@@ -29,32 +29,6 @@
     filter === 'all' ? queue : queue.filter((x) => String(x.status ?? '') === filter),
   )
 
-  // Same UTC "YYYY-MM-DD" convention the backend stamps burst_day with
-  // (workers' publish_daily_guard._day_key) -- toISOString() is always UTC
-  // regardless of the admin's local timezone, so this lines up exactly.
-  const todayUtc = new Date().toISOString().slice(0, 10)
-  const todaysBurst = $derived(queue.filter((x) => String(x.burst_day ?? '') === todayUtc))
-
-  type BurstStage = { label: string; tone: 'pending' | 'review' | 'done' | 'skipped' }
-
-  function burstStage(item: Record<string, unknown>): BurstStage {
-    const status = String(item.status ?? '')
-    const reason = String(item.last_reason ?? '')
-    if (status === 'pending') {
-      return { label: 'Selected — waiting for the off-peak compose run', tone: 'pending' }
-    }
-    if (reason === 'review') {
-      return { label: 'Composed — awaiting your review', tone: 'review' }
-    }
-    if (reason.startsWith('duplicate')) {
-      return { label: 'Skipped — a review for this source is already pending', tone: 'skipped' }
-    }
-    if (status === 'done') {
-      return { label: `Composed — ${reason || 'resolved'}`, tone: 'done' }
-    }
-    return { label: reason || status || 'unresolved', tone: 'skipped' }
-  }
-
   function goToReview() {
     navigate('/admin?tab=classifier', true, false)
   }
@@ -216,38 +190,10 @@
   </div>
 
   <p class="admin-muted pipeline-legend">
-    Pipeline: queued candidates below → today's picks (batch-composed off-peak) → your review on
+    Pipeline: queued candidates below → your review on
     the <button type="button" class="link-inline" onclick={goToReview}>Classifier tab</button> →
     approved &amp; up next, at the bottom of this page.
   </p>
-
-  <section class="admin-panel stack">
-    <div class="section-head">
-      <h3>Today's picks ({todaysBurst.length})</h3>
-    </div>
-    <p class="admin-muted small">
-      The human pick plus the system's top discovery + scale candidates for {todayUtc}. Not yet
-      approved — nothing here publishes until you review it.
-    </p>
-    {#if todaysBurst.length === 0}
-      <p class="admin-muted small">
-        Nothing selected for today yet — the daily burst selection hasn't run, or is disabled.
-      </p>
-    {:else}
-      {#each todaysBurst as item (String(item.queue_id))}
-        {@const stage = burstStage(item)}
-        <div class="burst-row">
-          <span class="burst-title">{String(item.display_name ?? item.service_id ?? '—')}</span>
-          <span class="burst-stage" class:review={stage.tone === 'review'} class:skipped={stage.tone === 'skipped'}>
-            {stage.label}
-          </span>
-          {#if stage.tone === 'review'}
-            <button type="button" class="btn compact" onclick={goToReview}>Review now</button>
-          {/if}
-        </div>
-      {/each}
-    {/if}
-  </section>
 
   {#if backlog.length}
     <section class="admin-panel stack">
@@ -475,49 +421,6 @@
     font-weight: 600;
     text-decoration: underline;
     cursor: pointer;
-  }
-
-  .burst-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px 12px;
-    padding: 6px 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .burst-row:last-child {
-    border-bottom: 0;
-  }
-
-  .burst-title {
-    flex: 1;
-    min-width: 160px;
-    font-size: 0.92rem;
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .burst-stage {
-    font-size: 12px;
-    font-weight: 600;
-    padding: 3px 10px;
-    border-radius: 999px;
-    background: var(--accent-soft);
-    color: var(--muted);
-    white-space: nowrap;
-  }
-
-  .burst-stage.review {
-    background: color-mix(in srgb, var(--primary) 18%, transparent);
-    color: var(--primary);
-  }
-
-  .burst-stage.skipped {
-    background: color-mix(in srgb, var(--danger) 14%, transparent);
-    color: var(--danger);
   }
 
   .backlog-row {

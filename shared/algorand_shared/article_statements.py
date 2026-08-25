@@ -162,9 +162,9 @@ class ArticlesStmts:
         "INSERT INTO algorand_platform.articles ("
         "status, year, published_at, article_id, service_id, title, summary, body, "
         "image_url, tags, source_url, trigger_txid, trigger_round, slug, translations, "
-        "first_published_at, updated_at, burst_day, prompt_version, composed_by_model, deleted_at, "
+        "first_published_at, updated_at, prompt_version, composed_by_model, deleted_at, "
         "status_updated_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Feed listing: `articles` doubles as the feed projection for
     # status='published' (see the plan) -- year is the partition granularity
@@ -226,15 +226,6 @@ class ArticlesStmts:
         "UPDATE algorand_platform.articles SET image_url = ? "
         "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"
     )
-    # 2026-08-24: burst_day existed as a column on `articles` since the
-    # original schema (migration 067) but had NO dual-write at all -- the
-    # old-table-only write (ArticleStmts.SET_ARTICLE_BURST_DAY) was a genuine
-    # gap found auditing call sites before the old-table drop, not just an
-    # unmigrated read.
-    UPDATE_BURST_DAY = _Stmt(
-        "UPDATE algorand_platform.articles SET burst_day = ? "
-        "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"
-    )
     UPDATE_TRANSLATIONS = _Stmt(
         "UPDATE algorand_platform.articles SET translations = translations + ? "
         "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"
@@ -256,7 +247,7 @@ class ArticlesStmts:
     GET_FULL_BY_ID = _Stmt(
         "SELECT status, year, published_at, article_id, service_id, title, summary, body, "
         "image_url, tags, source_url, trigger_txid, trigger_round, slug, translations, "
-        "first_published_at, updated_at, burst_day, prompt_version, composed_by_model, deleted_at, "
+        "first_published_at, updated_at, prompt_version, composed_by_model, deleted_at, "
         "status_updated_at "
         "FROM algorand_platform.articles WHERE article_id = ?"
     )

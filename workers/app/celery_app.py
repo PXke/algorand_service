@@ -132,31 +132,6 @@ def _build_beat_schedule() -> dict:
                 day_of_week=os.getenv("PRICE_ANALYSIS_CRON_DOW", "mon"),
             ),
         }
-    if os.getenv("DAILY_BURST_ENABLED", "0") == "1":
-        schedule["select-daily-burst"] = {
-            "task": "app.tasks.newspaper.select_daily_burst",
-            "schedule": crontab(
-                minute=int(os.getenv("BURST_SELECT_CRON_MINUTE", "30")),
-                # Early in the day, well before compose -- picking is cheap
-                # (no LLM call), and the point is giving the admin as much
-                # of the day as possible to see today's 3 picks before
-                # burst_compose_today turns them into drafts.
-                hour=int(os.getenv("BURST_SELECT_CRON_HOUR", "0")),
-            ),
-        }
-        schedule["burst-compose-today"] = {
-            "task": "app.tasks.newspaper.burst_compose_today",
-            "schedule": crontab(
-                minute=int(os.getenv("BURST_COMPOSE_CRON_MINUTE", "0")),
-                # 11:00 UTC sits inside the big 10:00-01:00 off-peak window
-                # (DeepSeek peak hours are 01:00-04:00 and 06:00-10:00 UTC)
-                # with plenty of runway for 3 sequential composes -- the
-                # per-compose off-peak guard (peak_hours.py) is still the
-                # real enforcement, this default just avoids relying on it
-                # to defer every single run.
-                hour=int(os.getenv("BURST_COMPOSE_CRON_HOUR", "11")),
-            ),
-        }
     if is_crawler_enabled(CrawlerType.METRICS):
         schedule["collect-price-metrics"] = {
             "task": "app.tasks.metrics.collect_price_metrics",

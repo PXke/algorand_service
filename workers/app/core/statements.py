@@ -98,14 +98,6 @@ class ArticleStmts:
     # when it was drafted, not when it went public, which also let it dodge
     # the daily cap's published_at-windowed count).
     UPDATE_PUBLISHED_AT = ARTICLE_UPDATE_PUBLISHED_AT
-    # Stamped right after a burst-selected queue row composes (see
-    # burst_compose_tasks.py) so the resulting article carries the same
-    # sentinel its source queue row does -- the backend approval path reads
-    # this to force a burst article into pending_feed_queue instead of ever
-    # publishing it same-day, no matter what the daily cap/pacing allows.
-    SET_ARTICLE_BURST_DAY = _Stmt(
-        "UPDATE algorand_platform.articles_by_id SET burst_day = ? WHERE article_id = ?"
-    )
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.articles_by_id ("
         "article_id, service_id, title, summary, body, "
@@ -260,12 +252,12 @@ class PublishQueueStmts:
         "FROM algorand_platform.publish_queue_pending WHERE status = ? LIMIT ?"
     )
     GET_DETAIL = _Stmt(
-        "SELECT display_name, scrape_url, payload, created_at, human_pick_day, burst_day "
+        "SELECT display_name, scrape_url, payload, created_at, human_pick_day "
         "FROM algorand_platform.publish_queue WHERE queue_id = ?"
     )
     GET_FULL = _Stmt(
         "SELECT status, priority, topic, publish_kind, service_id, display_name, "
-        "scrape_url, payload, created_at, human_pick_day, burst_day "
+        "scrape_url, payload, created_at, human_pick_day "
         "FROM algorand_platform.publish_queue WHERE queue_id = ?"
     )
     COUNT_PENDING = _Stmt(
@@ -287,9 +279,6 @@ class PublishQueueStmts:
     DELETE_DEDUPE = _Stmt("DELETE FROM algorand_platform.publish_queue_dedupe WHERE dedupe_key = ?")
     SET_HUMAN_PICK = PUBLISH_QUEUE_SET_HUMAN_PICK
     CLEAR_HUMAN_PICK = PUBLISH_QUEUE_CLEAR_HUMAN_PICK
-    SET_BURST_DAY = _Stmt(
-        "UPDATE algorand_platform.publish_queue SET burst_day = ?, updated_at = ? WHERE queue_id = ?"
-    )
 
 
 # --------------------------------------------------------------------------- #
