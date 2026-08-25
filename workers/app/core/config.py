@@ -1354,6 +1354,31 @@ WRITER_QUALITY_FLOOR = env_float("WRITER_QUALITY_FLOOR", 6.0)
 # and would have auto-applied; the 5th (a 93-char headline, 3 over the cap)
 # correctly failed the headline check and would have stayed in review — the
 # gate catching exactly the one article that needed a human look.
+#
+# 2026-08-25: this floor (and FRESH_AUTO_APPROVE_GRADE_FLOOR below) now
+# compares against the FUSED grade (article_grader.fuse_quality_into_grade:
+# 0.75*quality_rubric + 0.15*structure + 0.10*length), same scale as
+# WRITER_QUALITY_FLOOR above and the compose-time revision loop. Previously
+# both compared against the schema-only grade (structure*0.55 + length*0.45)
+# — a well-formatted-but-shallow draft could clear the bar with ZERO weight
+# on the LLM rubric's narrative-quality judgment, the exact gap
+# fuse_quality_into_grade's 2026-08-06 fix closed everywhere except these two
+# publish-time gates (root-caused and fixed 2026-08-25).
+#
+# Kept at 8.0 on the new scale, not recalibrated blind: for a
+# structurally-clean draft (structure=length=1.0, the normal case for
+# anything that would reach this gate at all), clearing 8.0 requires
+# quality_rubric >= (0.8 - 0.15 - 0.10) / 0.75 = 0.733, i.e. an average rubric
+# score of ~3.9/5 across narrative_synthesis/technical_depth/critical_distance/
+# repetition — a solid-to-strong bar, and still clearly stricter than
+# WRITER_QUALITY_FLOOR=6.0 (~2.9/5 average required at the same structure/
+# length), preserving the "stricter AND-gate than the base quality floor"
+# relationship both floors were designed around. The 2026-07-12 backtest
+# above no longer directly applies (schema-only scale), but the drafts it
+# covered all had clean structure, so under the new formula they'd need
+# rubric averages in the high-3s/low-4s to still clear it — consistent with
+# "all 5 were hand-approved" (approved drafts should read as solid-to-strong,
+# not merely well-formatted).
 RECOMPOSE_AUTO_APPLY_ENABLED = env_bool("RECOMPOSE_AUTO_APPLY_ENABLED", True)
 RECOMPOSE_AUTO_APPLY_GRADE_FLOOR = env_float("RECOMPOSE_AUTO_APPLY_GRADE_FLOOR", 8.0)
 # Same strict AND-gate design as recompose, applied to BRAND NEW content the
@@ -1362,7 +1387,9 @@ RECOMPOSE_AUTO_APPLY_GRADE_FLOOR = env_float("RECOMPOSE_AUTO_APPLY_GRADE_FLOOR",
 # floor used elsewhere (WRITER_QUALITY_FLOOR) — fresh content has zero prior
 # human vetting at all, unlike recompose which only touches content a human
 # already approved once, so there's no argument for a looser bar here
-# (owner decision 2026-07-12).
+# (owner decision 2026-07-12). Also fused-grade scale as of 2026-08-25 — see
+# the reasoning above RECOMPOSE_AUTO_APPLY_GRADE_FLOOR, which applies
+# identically here (same floor value, same formula).
 FRESH_AUTO_APPROVE_ENABLED = env_bool("FRESH_AUTO_APPROVE_ENABLED", True)
 FRESH_AUTO_APPROVE_GRADE_FLOOR = env_float("FRESH_AUTO_APPROVE_GRADE_FLOOR", 8.0)
 # Article is flagged when the grounded fraction of its numeric claims falls below
