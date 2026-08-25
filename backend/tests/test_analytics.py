@@ -1251,6 +1251,202 @@ def test_write_pageview_counters_commits_non_staged_hits(monkeypatch: pytest.Mon
     assert not any(k.startswith(a._DIRECT_STAGE_PREFIX) for k in fake.store)
 
 
+def test_write_pageview_counters_buffers_deferred_dimensions_to_redis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """geo/campaign/hour/language/referrer_path/referrer_url are buffered as pending Redis increments (2026-08-25 write-behind) instead of hitting Cassandra directly, while everything the UA-clawback purge reads/corrects (PAGEVIEW_BUMP, PATH_KIND_BUMP, DEVICE_BUMP, BROWSER_BUMP, REFERRER_BUMP, and the raw sample insert) stays synchronous."""
+    fake = _FakeRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    monkeypatch.setattr(a, "record_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(a, "record_unique", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(a, "country_for_ip", lambda _ip: "FR")
+    sess = _FakeSession()
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: sess)
+
+    a._write_pageview_counters(
+        day="2026-08-25",
+        path="/news/articles/x",
+        referer="https://reddit.com/r/algorand",
+        user_agent="Mozilla/5.0 (X11; Linux x86_64) Chrome/128.0.0.0 Safari/537.36",
+        client_ip="8.8.8.8",
+        campaign="twitter / launch",
+        accept_language="fr-FR,fr;q=0.9",
+    )
+
+    written_stmts = {c[1] for c in sess.calls}
+    # Purge-reachable dimensions stay synchronous, unchanged.
+    assert AnalyticsStmts.PAGEVIEW_BUMP in written_stmts
+    assert AnalyticsStmts.PATH_KIND_BUMP in written_stmts
+    assert AnalyticsStmts.DEVICE_BUMP in written_stmts
+    assert AnalyticsStmts.BROWSER_BUMP in written_stmts
+    assert AnalyticsStmts.REFERRER_BUMP in written_stmts
+    assert AnalyticsStmts.REFERRED_SAMPLE_INSERT in written_stmts
+    # The six deferred dimensions never touch Cassandra directly anymore.
+    assert AnalyticsStmts.GEO_BUMP not in written_stmts
+    assert AnalyticsStmts.CAMPAIGN_BUMP not in written_stmts
+    assert AnalyticsStmts.HOUR_BUMP not in written_stmts
+    assert AnalyticsStmts.LANGUAGE_BUMP not in written_stmts
+    assert AnalyticsStmts.REFERRER_PATH_BUMP not in written_stmts
+    assert AnalyticsStmts.REFERRER_URL_BUMP not in written_stmts
+
+    # Each deferred dimension gets its own pending Redis increment instead,
+    # keyed exactly as workers' flush_pending_analytics expects to decode it.
+    assert fake.store[a._pending_analytics_key("geo", "2026-08-25", "FR")] == 1
+    assert (
+        fake.store[a._pending_analytics_key("campaign", "2026-08-25", "twitter / launch")] == 1
+    )
+    assert fake.store[a._pending_analytics_key("language", "2026-08-25", "fr")] == 1
+    assert (
+        fake.store[
+            a._pending_analytics_key(
+                "referrer_path", "2026-08-25", "reddit.com", "/news/articles/x"
+            )
+        ]
+        == 1
+    )
+    assert (
+        fake.store[
+            a._pending_analytics_key("referrer_url", "2026-08-25", "reddit.com/r/algorand")
+        ]
+        == 1
+    )
+    hour_keys = [k for k in fake.store if k.startswith(a._ANALYTICS_PENDING_PREFIX + "hour:")]
+    assert len(hour_keys) == 1
+
+
+def test_buffer_pending_analytics_fails_open_on_redis_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Redis outage on the deferred-dimension buffer must never break page serving -- the rest of _write_pageview_counters still commits normally."""
+
+    def _boom() -> Never:
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(a, "_uv_redis", _boom)
+    monkeypatch.setattr(a, "record_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(a, "record_unique", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(a, "country_for_ip", lambda _ip: "US")
+    sess = _FakeSession()
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: sess)
+
+    a._write_pageview_counters(
+        day="2026-08-25",
+        path="/about",
+        referer=None,
+        user_agent="Mozilla/5.0 (X11; Linux x86_64) Chrome/128.0.0.0 Safari/537.36",
+        client_ip="8.8.8.8",
+        campaign="twitter",
+        accept_language="en-US",
+    )
+
+    written_stmts = {c[1] for c in sess.calls}
+    assert AnalyticsStmts.PAGEVIEW_BUMP in written_stmts
+    assert AnalyticsStmts.PATH_KIND_BUMP in written_stmts
+    assert AnalyticsStmts.DIRECT_SAMPLE_INSERT in written_stmts
+
+
+class _StatefulDirectSampleSession:
+    """Fake Cassandra session that actually stores/retrieves pageview_direct_sample rows (unlike _FakeSession's static canned rows), so the UA-clawback purge can be exercised end to end against real insert/scan/delete state -- proving the 2026-08-25 write-behind change for the OTHER six dimensions didn't disturb the timing this mechanism depends on."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, list] = {}
+        self._ts_counter = 0
+        self.calls: list = []
+
+    def prepare(self, cql: str) -> str:
+        return cql
+
+    def execute(self, stmt: object, params: tuple) -> list:
+        self.calls.append(("execute", stmt, params))
+        if stmt == AnalyticsStmts.DIRECT_SAMPLE_ALL_BY_DAY:
+            (day,) = params
+            return list(self.rows.get(day, []))
+        if stmt == AnalyticsStmts.REFERRED_SAMPLE_ALL_BY_DAY:
+            return []
+        return []
+
+    def execute_async(self, stmt: object, params: tuple) -> None:
+        self.calls.append(("execute_async", stmt, params))
+        if stmt == AnalyticsStmts.DIRECT_SAMPLE_INSERT:
+            day, path, referer, user_agent, ua_class = params
+            self._ts_counter += 1
+            ts = f"ts{self._ts_counter}"
+            self.rows.setdefault(day, []).append(
+                SimpleNamespace(
+                    ts=ts, path=path, referer=referer, user_agent=user_agent, ua_class=ua_class
+                )
+            )
+        elif stmt == AnalyticsStmts.DIRECT_SAMPLE_DELETE:
+            day, ts = params
+            self.rows[day] = [r for r in self.rows.get(day, []) if r.ts != ts]
+
+
+def test_ua_clawback_still_works_end_to_end_with_write_behind_buffering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for the 2026-08-25 write-behind change: a repeat-offender UA is still correctly detected and clawed back through record_pageview's real code path, proving deferring geo/campaign/hour/language/referrer_path/referrer_url to Redis did not disturb the purge's dependency on the raw pageview_direct_sample rows and the counters it corrects still being written SYNCHRONOUSLY.
+
+    Sequence: the UA's first _UA_FREQ_THRESHOLD (15) hits are each recorded
+    normally (each inserting a real pageview_direct_sample row, immediately,
+    not buffered). The 16th hit tips is_repeated_ua over the threshold, which
+    triggers _purge_direct_sample_ua to scan today's real rows for this UA --
+    if the write-behind change had accidentally deferred the sample insert or
+    any of the counters the purge corrects, this scan would find fewer than
+    15 rows (or the corrections would target a stale/buffered value), and the
+    assertions below would catch it.
+    """
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake_redis)
+    sess = _StatefulDirectSampleSession()
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: sess)
+    monkeypatch.setattr(a, "record_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(a, "record_unique", lambda *_args, **_kwargs: None)
+
+    ua = "Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0.0.0 Safari/537.36"
+    day = a._today()
+
+    # Requests 1..15: under threshold, each commits its own pageview_direct_sample
+    # row synchronously (path "/about" is never staged -- staging only applies to
+    # direct-referrer ARTICLE paths).
+    for _ in range(a._UA_FREQ_THRESHOLD):
+        a.record_pageview(
+            path="/about",
+            referer=None,
+            user_agent=ua,
+            client_ip="8.8.8.8",
+            sec_fetch_mode="navigate",
+            accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            accept_language="en-US,en;q=0.9",
+        )
+    assert len(sess.rows.get(day, [])) == a._UA_FREQ_THRESHOLD
+    assert not any(c[1] == AnalyticsStmts.PAGEVIEW_BUMP_DECR for c in sess.calls)
+
+    # Request 16 tips the UA over the threshold: this hit itself is dropped
+    # (not counted -- it's the one whose earlier hits get clawed back), and
+    # the purge fires against the 15 real rows committed above.
+    a.record_pageview(path="/about", referer=None, user_agent=ua, client_ip="8.8.8.8")
+
+    # All 15 matching rows were found and deleted -- proves the rows were
+    # really there (not stuck in an unflushed Redis buffer) when the purge ran.
+    assert sess.rows.get(day, []) == []
+
+    decr = next(c for c in sess.calls if c[1] == AnalyticsStmts.PAGEVIEW_BUMP_DECR)
+    assert decr[2] == (a._UA_FREQ_THRESHOLD, "human", day)
+    path_decr = next(c for c in sess.calls if c[1] == AnalyticsStmts.PATH_KIND_BUMP_DECR)
+    assert path_decr[2] == (a._UA_FREQ_THRESHOLD, day, "/about", "human")
+    referrer_decr = next(c for c in sess.calls if c[1] == AnalyticsStmts.REFERRER_BUMP_DECR)
+    assert referrer_decr[2] == (a._UA_FREQ_THRESHOLD, day, "(direct)")
+    uaclass_decr = next(c for c in sess.calls if c[1] == AnalyticsStmts.DIRECT_UACLASS_BUMP_DECR)
+    assert uaclass_decr[2] == (a._UA_FREQ_THRESHOLD, day, a.ua_class(ua))
+    device_decr = next(c for c in sess.calls if c[1] == AnalyticsStmts.DEVICE_BUMP_DECR)
+    assert device_decr[2] == (a._UA_FREQ_THRESHOLD, day, a.ua_class(ua))
+
+    # The 17th+ hit is simply dropped -- no re-trigger, no further writes at all.
+    calls_before = len(sess.calls)
+    a.record_pageview(path="/about", referer=None, user_agent=ua, client_ip="8.8.8.8")
+    assert len(sess.calls) == calls_before
+
+
 def test_write_pageview_counters_samples_internal_and_external_not_direct_table(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

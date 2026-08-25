@@ -221,6 +221,17 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.newspaper.flush_pending_views",
         "schedule": float(os.getenv("VIEW_COUNT_FLUSH_SECONDS", "600")),
     }
+    # Drains backend's Redis-buffered pageview-analytics deltas (geo/campaign/
+    # hour/language/referrer_path/referrer_url only -- everything the
+    # UA-repeat-offender clawback reads stays synchronous, see
+    # backend/app/modules/seo/analytics_store.py's note above
+    # _write_pageview_counters) into their Cassandra counters (2026-08-25).
+    # Same 10-minute cadence as flush-pending-view-counts: these feed an
+    # admin-only breakdown dashboard, not anything real-time.
+    schedule["flush-pending-analytics"] = {
+        "task": "app.tasks.newspaper.flush_pending_analytics",
+        "schedule": float(os.getenv("ANALYTICS_FLUSH_SECONDS", "600")),
+    }
     # Self-heals index_article.delay() misses: that task fires once at publish
     # time with no retry, so a transient Typesense hiccup silently drops an
     # article from search forever (found 2026-08-02: a live, feed-listed
