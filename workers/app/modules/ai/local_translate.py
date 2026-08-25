@@ -146,11 +146,19 @@ def engine_for(target_language: str) -> str:
 def _load_seamless() -> tuple[Any, Any]:
     with _load_lock:
         if not _seamless:
+            import torch
             from transformers import AutoProcessor, SeamlessM4Tv2ForTextToText
 
             logger.info("loading %s (first use this process)", _SEAMLESS_MODEL_ID)
             _seamless["processor"] = AutoProcessor.from_pretrained(_SEAMLESS_MODEL_ID)
-            _seamless["model"] = SeamlessM4Tv2ForTextToText.from_pretrained(_SEAMLESS_MODEL_ID)
+            # bf16, matching MiLMMT below -- this had no dtype= at all before
+            # (silent fp32 default), the one free win found by a 2026-08-25
+            # CPU-perf investigation: no quantization lib is installed here
+            # and IPEX was tried and dropped (no wheel for this box's
+            # free-threaded python3.15t), so bf16 is what's actually available.
+            _seamless["model"] = SeamlessM4Tv2ForTextToText.from_pretrained(
+                _SEAMLESS_MODEL_ID, dtype=torch.bfloat16
+            )
         return _seamless["processor"], _seamless["model"]
 
 
