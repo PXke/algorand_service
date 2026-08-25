@@ -11,7 +11,7 @@ This is a deliberately separate, simpler formula from
 publish_queue's own dual-written rows for rollback-safety observability, but
 no longer drives any live selection decision) -- same general shape (a
 handful of additive components, one of them an age-decay curve) but its own
-scale and its own three v1 components:
+scale and its own four components:
 
   1. word_count_score      -- substantial content scores higher, diminishing
                                returns past ARTIFACT_WORD_COUNT_CAP words.
@@ -21,12 +21,28 @@ scale and its own three v1 components:
   3. ecosystem_listed_score -- flat bonus for a URL whose domain is in the
                                SAME ecosystem_listed directory registry the
                                crawler-discovery scorer already uses.
+  4. skip_count_score       -- (2026-08-27) direct linear reward for how many
+                               times this service's pending artifact has been
+                               superseded-by-concatenation without ever being
+                               composed, read straight from
+                               metadata["segments"]. Added because
+                               word_count_score -- the only channel through
+                               which the concatenation mechanism was meant to
+                               "compound" priority for a chronically-ignored
+                               service (see artifact_store.insert_artifact's
+                               docstring) -- saturates at ARTIFACT_WORD_COUNT_CAP
+                               words well before ARTIFACT_CONCAT_MAX_OLD_CHARS
+                               (concatenation's own, much larger, ceiling) is
+                               reached, silently stalling that compounding for
+                               exactly the services ignored longest. See
+                               skip_count_score's own docstring for the numbers.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from app.modules.newspaper.artifact_store import Artifact, ArtifactContent
 
@@ -105,6 +121,41 @@ def ecosystem_listed_score(url: str | None) -> float:
     return 0.0
 
 
+def skip_count_score(metadata: dict[str, Any] | None) -> float:
+    """0..ARTIFACT_SKIP_COUNT_MAX_SCORE, a LINEAR (not sqrt) reward for how many times this artifact has been superseded-by-concatenation, read directly from metadata["segments"].
+
+    `_concatenate_with_pending` (artifact_store.py) appends one entry to
+    `metadata["segments"]` every time a service_id that already has a
+    pending artifact gets another ignored update concatenated onto it -- so
+    `len(segments)` is a direct, unambiguous "times superseded" counter, not
+    a proxy.
+
+    Why this needs to exist alongside word_count_score rather than relying on
+    it: word_count_score saturates at ARTIFACT_WORD_COUNT_CAP words (1200 by
+    default), which a chronically-ignored service can reach in a handful of
+    concatenation cycles -- well before ARTIFACT_CONCAT_MAX_OLD_CHARS (the
+    concatenation mechanism's own ceiling, ~3x larger in word terms) ever
+    kicks in. Past that point word_count_score is flat: a service ignored 4
+    times and one ignored 14 times can score IDENTICALLY on word count alone,
+    even though the second is a much stronger case for finally getting
+    composed. This component reads the provenance trail directly so priority
+    keeps rising for every additional ignored cycle, independent of whatever
+    word_count_score happens to be doing. Deliberately linear (not sqrt) --
+    word_count_score already supplies the diminishing-returns curve for raw
+    text volume; this component's job is to keep differentiating repeat
+    neglect specifically, so it should not itself flatten out early.
+    """
+    from app.core.config import ARTIFACT_SKIP_COUNT_CAP, ARTIFACT_SKIP_COUNT_MAX_SCORE
+
+    segments = (metadata or {}).get("segments") or []
+    count = len(segments)
+    if count <= 0:
+        return 0.0
+    cap = max(1, ARTIFACT_SKIP_COUNT_CAP)
+    ratio = min(1.0, count / cap)
+    return round(ratio * ARTIFACT_SKIP_COUNT_MAX_SCORE, 4)
+
+
 def _word_count_component(_artifact: Artifact, content: ArtifactContent | None) -> float:
     return word_count_score(content.content if content else "")
 
@@ -117,6 +168,10 @@ def _ecosystem_component(artifact: Artifact, _content: ArtifactContent | None) -
     return ecosystem_listed_score(artifact.url)
 
 
+def _skip_count_component(_artifact: Artifact, content: ArtifactContent | None) -> float:
+    return skip_count_score(content.metadata if content else None)
+
+
 # Pluggable score components -- the sweep sums these. Add a new signal
 # (sentiment, on-chain activity, authority) by appending one more
 # `(artifact, content) -> float` function here; nothing else needs to change.
@@ -124,6 +179,7 @@ SCORE_COMPONENTS: tuple[Callable[[Artifact, ArtifactContent | None], float], ...
     _word_count_component,
     _timeliness_component,
     _ecosystem_component,
+    _skip_count_component,
 )
 
 

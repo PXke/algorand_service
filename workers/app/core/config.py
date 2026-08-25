@@ -1420,6 +1420,25 @@ ARTIFACT_NEW_SERVICE_MIN_SHARE = env_float("ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5
 # 2026-08-25) a realistic accumulation is a handful of updates long before
 # this is ever reached.
 ARTIFACT_CONCAT_MAX_OLD_CHARS = env_int("ARTIFACT_CONCAT_MAX_OLD_CHARS", 20000)
+# Skip-count score component (2026-08-27, see artifact_priority.skip_count_score):
+# a direct "how many times has this service's pending artifact been
+# superseded by a newer ignored update" signal, read straight from
+# metadata["segments"] (the provenance trail _concatenate_with_pending builds,
+# one entry per concatenation cycle) rather than inferred indirectly from
+# word_count_score's growth. Needed because word_count_score saturates at
+# ARTIFACT_WORD_COUNT_CAP words (1200 -- roughly 7200 chars at a ~6-char
+# average word), which a service can reach in just a handful of
+# concatenation cycles, well before ARTIFACT_CONCAT_MAX_OLD_CHARS above (the
+# concatenation mechanism's own, ~3x larger, ceiling) is ever reached. Past
+# that point word_count_score stops moving at all, silently stalling the
+# "chronically-ignored services keep climbing" compounding the concatenation
+# mechanism was explicitly built to deliver (see that constant's own comment
+# and insert_artifact's docstring) for exactly the services ignored longest.
+# Linear (not sqrt) and capped independently of word count, so this keeps
+# differentiating "ignored 3 times" from "ignored 10 times" even once
+# word_count_score has flatlined for both.
+ARTIFACT_SKIP_COUNT_CAP = env_int("ARTIFACT_SKIP_COUNT_CAP", 10)
+ARTIFACT_SKIP_COUNT_MAX_SCORE = env_float("ARTIFACT_SKIP_COUNT_MAX_SCORE", 6.0)
 # Article is flagged when the grounded fraction of its numeric claims falls below
 # this (too many figures with no anchor in the tool trace). This deterministic
 # check (gatekeeper/live.py) is the only factuality gate that actually runs in
