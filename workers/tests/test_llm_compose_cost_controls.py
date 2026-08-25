@@ -9,21 +9,32 @@ from app.modules.ai.llm_openai_compatible import MistralProvider
 
 
 def test_translations_use_small_tier(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Article translation requests the Small Mistral model, not the larger writer tier."""
-    captured = {}
+    """Article translation requests the Small Mistral model, not the larger writer tier.
 
-    def _fake_get_client(*, model: str | None = None) -> SimpleNamespace:
-        captured["model"] = model
-        return SimpleNamespace(
+    get_llm_translate_client() (a dedicated purpose-router factory, see
+    llm_purpose_router.py) replaced the old get_llm_writer_client(model=...)
+    call pattern -- translate_article() now calls the former, not the
+    latter. This test previously patched get_llm_writer_client, which
+    translate_article no longer calls at all, so the real
+    get_llm_translate_client() ran unpatched and attempted a live network
+    request.
+    """
+    writer_called = {"yes": False}
+    monkeypatch.setattr(
+        mc, "get_llm_writer_client", lambda **_kw: writer_called.__setitem__("yes", True)
+    )
+    monkeypatch.setattr(
+        mc,
+        "get_llm_translate_client",
+        lambda: SimpleNamespace(
             chat_json_object=lambda *_a, **_kw: {
                 "title": "t",
                 "summary": "s",
                 # One source block ("Body") -> one translated block.
                 "blocks": ["b"],
             }
-        )
-
-    monkeypatch.setattr(mc, "get_llm_writer_client", _fake_get_client)
+        ),
+    )
     monkeypatch.setattr(
         "app.core.config.MISTRAL_MODEL_TRANSLATE", "mistral-small-latest", raising=False
     )
@@ -33,8 +44,31 @@ def test_translations_use_small_tier(monkeypatch: pytest.MonkeyPatch) -> None:
         english_body="Body",
         target_language="fr",
     )
-    assert captured["model"] == "mistral-small-latest"
+    assert writer_called["yes"] is False
     assert out["title"] == "t"
+
+    # The translate lane's own model resolution (not translate_article's
+    # concern anymore) still pins to the Small tier, not the writer's Large
+    # tier: get_llm_translate_client() -> _client_for_purpose("translate",
+    # mistral_model=MISTRAL_MODEL_TRANSLATE).
+    captured_model = {}
+
+    class _CapturingMistralProvider:
+        def __init__(
+            self,
+            *,
+            model: str,
+            timeout: float | None = None,  # noqa: ARG002 -- name must match the real callee's keyword arg
+        ) -> None:
+            captured_model["model"] = model
+
+    monkeypatch.setattr(
+        "app.modules.ai.llm_purpose_router.MistralProvider", _CapturingMistralProvider
+    )
+    from app.modules.ai.llm_purpose_router import get_llm_translate_client
+
+    get_llm_translate_client()
+    assert captured_model["model"] == "mistral-small-latest"
 
 
 def test_stale_compose_loop_ignores_unknown_research_user_kwarg(
@@ -269,6 +303,8 @@ def test_special_edition_scales_the_research_client_timeout(
         return _FakeClient("research", "mistral-small-latest")
 
     class _FakeClient:
+        provider = "mistral"
+
         def __init__(self, tier: str, model: str) -> None:
             self._tier = tier
             self._model = model
@@ -318,6 +354,8 @@ def test_two_stage_compose_routes_research_to_small_tier(monkeypatch: pytest.Mon
     calls: list[tuple[str, str]] = []
 
     class _FakeClient:
+        provider = "mistral"
+
         def __init__(self, tier: str, model: str) -> None:
             self._tier = tier
             self._model = model
@@ -377,6 +415,8 @@ def test_digest_gap_triggers_one_bounded_research_pass(monkeypatch: pytest.Monke
     digest_calls = {"n": 0}
 
     class _FakeClient:
+        provider = "mistral"
+
         def __init__(self, tier: str, model: str) -> None:
             self._tier = tier
             self._model = model
@@ -446,6 +486,8 @@ def test_digest_with_no_gaps_skips_extra_research_pass(monkeypatch: pytest.Monke
     calls: list[tuple[str, str]] = []
 
     class _FakeClient:
+        provider = "mistral"
+
         def __init__(self, tier: str) -> None:
             self._tier = tier
 

@@ -66,6 +66,8 @@ def test_two_stage_compose_forwards_max_rounds_to_stage1(monkeypatch: pytest.Mon
     captured = {}
 
     class _FakeResearchClient:
+        provider = "mistral"
+
         def chat_with_tools(self, *_args: object, **kwargs: object) -> str:
             captured.update(kwargs)
             return ""
@@ -90,7 +92,7 @@ def test_two_stage_compose_forwards_max_rounds_to_stage1(monkeypatch: pytest.Mon
         tool_handlers={},
         trace=[],
         debug={},
-        checkpoint=lambda _stage: None,
+        checkpoint=lambda *_a, **_kw: None,
         max_rounds=96,
     )
     assert captured["max_rounds"] == 96
@@ -119,6 +121,8 @@ def test_two_stage_compose_forwards_is_special_edition_to_review_and_revise(
     monkeypatch.setattr(mc, "_review_and_revise", _fake_review_and_revise)
 
     class _FakeResearchClient:
+        provider = "mistral"
+
         def chat_with_tools(self, *_args: object, **_kwargs: object) -> str:
             return ""
 
@@ -142,7 +146,7 @@ def test_two_stage_compose_forwards_is_special_edition_to_review_and_revise(
         tool_handlers={},
         trace=[],
         debug={},
-        checkpoint=lambda _stage: None,
+        checkpoint=lambda *_a, **_kw: None,
         is_special_edition=True,
     )
     assert captured["is_special_edition"] is True
@@ -385,6 +389,8 @@ def test_two_stage_compose_runs_deepening_only_for_special_editions(
     monkeypatch.setattr(mc, "_build_stage2_user", _spy_build_stage2_user)
 
     class _FakeResearchClient:
+        provider = "mistral"
+
         def chat_with_tools(self, *_args: object, **_kwargs: object) -> str:
             return ""
 
@@ -408,7 +414,7 @@ def test_two_stage_compose_runs_deepening_only_for_special_editions(
         tool_handlers={},
         trace=[],
         debug={},
-        checkpoint=lambda _stage: None,
+        checkpoint=lambda *_a, **_kw: None,
         is_special_edition=True,
     )
 
@@ -434,6 +440,8 @@ def test_two_stage_compose_skips_deepening_for_standard_articles(
     )
 
     class _FakeResearchClient:
+        provider = "mistral"
+
         def chat_with_tools(self, *_args: object, **_kwargs: object) -> str:
             return ""
 
@@ -457,7 +465,7 @@ def test_two_stage_compose_skips_deepening_for_standard_articles(
         tool_handlers={},
         trace=[],
         debug={},
-        checkpoint=lambda _stage: None,
+        checkpoint=lambda *_a, **_kw: None,
     )
 
     assert deepening_calls == []
