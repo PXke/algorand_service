@@ -37,6 +37,8 @@ export const config = {
   ),
   adminWalletAddresses: parseAddressList(env('VITE_ADMIN_WALLET_ADDRESSES', '')),
   suggestionsEnabled: env('VITE_SUGGESTIONS_ENABLED', 'false') === 'true',
+  bugsnagApiKey: env('VITE_BUGSNAG_API_KEY', ''),
+  appVersion: env('VITE_APP_VERSION', ''),
 }
 
 export function explorerTxUrl(txid: string): string {
