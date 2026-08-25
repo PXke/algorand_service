@@ -24,16 +24,15 @@ def is_article_tombstoned(article_id: str) -> bool:
     Fails OPEN (False): a Cassandra hiccup must degrade to a plain 404, never
     break the article route or wrongly claim a live article is gone.
 
-    2026-08-24: checks `articles` first (status='deleted' is dual-written on
-    every delete since the article-table consolidation), falling back to the
-    legacy `deleted_articles` table for tombstones predating it. Live count
-    comparison found 171 of 309 `deleted_articles` rows have NO matching
-    `articles` row at all -- their `articles_by_id` row was already
-    hard-deleted by the time the original data migration ran, so there was
-    nothing to carry forward. `deleted_articles` stays authoritative for
-    that historical set until/unless it's explicitly backfilled -- treating
-    `articles` as the sole source here would have silently turned 171 real
-    410s into 404s.
+    2026-08-24: reads `articles` directly (status='deleted' is dual-written
+    on every delete). Briefly needed a fallback to the legacy
+    `deleted_articles` table for 171 tombstones predating the article-table
+    consolidation (their `articles_by_id` row was already hard-deleted by
+    the time the migration ran, so there was nothing to carry forward) --
+    those 171 rows were pruned from `deleted_articles` (owner decision: a
+    handful of old dead URLs serving 404 instead of 410 was an acceptable
+    trade for not permanently carrying a legacy-table fallback), so
+    `articles` is now the sole, always-sufficient source.
     """
     try:
         from algorand_shared.article_statements import ArticlesStmts
@@ -41,15 +40,8 @@ def is_article_tombstoned(article_id: str) -> bool:
         from app.core.cassandra import get_cassandra_session
 
         aid = UUID(article_id)
-        session = get_cassandra_session()
-        row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
-        if row is not None:
-            return row.status == "deleted"
-
-        from app.core.statements import DeletedArticleStmts
-
-        legacy_row = session.execute(DeletedArticleStmts.GET, (aid,)).one()
-        return legacy_row is not None
+        row = get_cassandra_session().execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+        return row is not None and row.status == "deleted"
     except Exception:
         logger.debug("tombstone lookup failed for %s — treating as not deleted", article_id)
         return False
