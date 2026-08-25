@@ -1,58 +1,122 @@
 <script lang="ts">
   import type { AdminApi } from '../../../lib/api/admin'
-  import { navigate } from '../../../lib/router'
 
-  let { admin }: { admin: AdminApi } = $props()
+  let {
+    admin,
+    onmessage = undefined,
+  }: {
+    admin: AdminApi
+    onmessage?: (msg: string) => void
+  } = $props()
 
-  const STATUS_FILTERS = ['all', 'pending', 'done', 'deferred', 'expired'] as const
-
-  let queue: Array<Record<string, unknown>> = $state([])
-  let backlog: Array<Record<string, unknown>> = $state([])
-  let filter = $state<(typeof STATUS_FILTERS)[number]>('all')
-  let loading = $state(true)
-  let error = $state<string | null>(null)
-  let expanded = $state<Set<string>>(new Set())
-  let breakdowns = $state<Record<string, Record<string, unknown>>>({})
-  let breakdownLoading = $state<Set<string>>(new Set())
-  let bumpingId = $state<string | null>(null)
-  let bumpError = $state<string | null>(null)
-  let recomposingNowId = $state<string | null>(null)
-  let recomposeNowError = $state<string | null>(null)
-  let recomposedNowIds = $state<Set<string>>(new Set())
-  let pickingId = $state<string | null>(null)
-  let pickError = $state<string | null>(null)
-  let deadEndingId = $state<string | null>(null)
-  let deadEndError = $state<string | null>(null)
-  let deadEndedDomains = $state<Record<string, string>>({})
-
-  const filtered = $derived(
-    filter === 'all' ? queue : queue.filter((x) => String(x.status ?? '') === filter),
-  )
-
-  function goToReview() {
-    navigate('/admin?tab=classifier', true, false)
+  type PreviewItem = {
+    artifact_id: string
+    service_id: string | null
+    url: string | null
+    channel: string
+    title: string
+    created_at: string | null
+    event_date: string | null
+    priority: number
+    priority_breakdown: { word_count: number; timeliness: number; ecosystem_listed: number }
+    human_pick_day: string | null
+    is_pinned_for_day: boolean
+    selected_lane: 'human' | 'platform' | null
   }
 
-  function statusColor(status: string): string {
-    switch (status) {
-      case 'pending':
-        return '#f59e0b'
-      case 'done':
-        return '#2e7d32'
-      case 'expired':
-      case 'deferred':
-        return 'var(--muted)'
-      default:
-        return 'var(--primary)'
+  function tomorrowIso(): string {
+    const d = new Date()
+    d.setDate(d.getDate() + 1)
+    return d.toISOString().slice(0, 10)
+  }
+
+  // Ranked pending artifacts (the queue's primary view).
+  let day = $state(tomorrowIso())
+  let items: PreviewItem[] = $state([])
+  let humanPicked = $state(false)
+  let platformSlotsFilled = $state(0)
+  let platformSlotsAvailable = $state(0)
+  let loading = $state(true)
+  let error = $state<string | null>(null)
+  let pinningId = $state<string | null>(null)
+  let pinError = $state<string | null>(null)
+
+  // Approved & awaiting paced release — still a live, distinct concept (not
+  // part of the old lane/status system), kept as secondary context.
+  let backlog: Array<Record<string, unknown>> = $state([])
+
+  // Legacy publish-queue rows — read-only history, collapsed by default.
+  // The old all/pending/done/deferred/expired lane system is retired; this
+  // is kept only as a reference trail during the cutover to the artifact
+  // pipeline, not as an actionable view.
+  let historyOpen = $state(false)
+  let historyLoaded = $state(false)
+  let historyLoading = $state(false)
+  let historyError = $state<string | null>(null)
+  let history: Array<Record<string, unknown>> = $state([])
+
+  async function load() {
+    loading = true
+    error = null
+    try {
+      const [res, b] = await Promise.all([
+        admin.artifactsToComposePreview(day) as Promise<Record<string, unknown>>,
+        admin.listPendingFeedBacklog().catch(() => ({ items: [] })),
+      ])
+      items = Array.isArray(res.items) ? (res.items as PreviewItem[]) : []
+      humanPicked = Boolean(res.human_picked)
+      platformSlotsFilled = Number(res.platform_slots_filled ?? 0)
+      platformSlotsAvailable = Number(res.platform_slots_available ?? 0)
+      backlog = Array.isArray(b.items) ? (b.items as Array<Record<string, unknown>>) : []
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e)
+    } finally {
+      loading = false
+    }
+  }
+
+  async function pinForTomorrow(artifactId: string) {
+    pinningId = artifactId
+    pinError = null
+    try {
+      await admin.pinArtifactForTomorrow(artifactId)
+      onmessage?.('Pinned as tomorrow’s human pick')
+      await load()
+    } catch (e) {
+      pinError = e instanceof Error ? e.message : String(e)
+    } finally {
+      pinningId = null
+    }
+  }
+
+  async function loadHistory() {
+    if (historyLoaded || historyLoading) return
+    historyLoading = true
+    historyError = null
+    try {
+      const res = await admin.listPublishQueue()
+      history = Array.isArray(res.items) ? (res.items as Array<Record<string, unknown>>) : []
+      historyLoaded = true
+    } catch (e) {
+      historyError = e instanceof Error ? e.message : String(e)
+    } finally {
+      historyLoading = false
     }
   }
 
   function formatTs(raw: unknown): string {
-    const s = String(raw ?? '').replace('T', ' ')
+    if (!raw) return '—'
+    const s = String(raw).replace('T', ' ')
     return s.length > 16 ? s.slice(0, 16) : s
   }
 
-  function rowMeta(item: Record<string, unknown>): string {
+  function laneLabel(lane: PreviewItem['selected_lane']): string {
+    if (lane === 'human') return 'human pick'
+    if (lane === 'platform') return 'platform pick'
+    return ''
+  }
+
+  function historyMeta(item: Record<string, unknown>): string {
     return [
       String(item.publish_kind ?? ''),
       String(item.topic ?? ''),
@@ -62,146 +126,120 @@
       .join(' · ')
   }
 
-  async function load() {
-    loading = true
-    error = null
-    try {
-      const [q, b] = await Promise.all([
-        admin.listPublishQueue(),
-        admin.listPendingFeedBacklog().catch(() => ({ items: [] })),
-      ])
-      queue = Array.isArray(q.items) ? (q.items as Array<Record<string, unknown>>) : []
-      backlog = Array.isArray(b.items) ? (b.items as Array<Record<string, unknown>>) : []
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e)
-    } finally {
-      loading = false
-    }
-  }
-
-  async function toggleExpand(queueId: string) {
-    if (expanded.has(queueId)) {
-      const nextExpanded = new Set(expanded)
-      nextExpanded.delete(queueId)
-      expanded = nextExpanded
-      return
-    }
-
-    expanded = new Set(expanded).add(queueId)
-
-    if (breakdowns[queueId] || breakdownLoading.has(queueId)) return
-
-    breakdownLoading = new Set(breakdownLoading).add(queueId)
-    try {
-      const detail = await admin.publishQueueBreakdown(queueId)
-      breakdowns = { ...breakdowns, [queueId]: detail as Record<string, unknown> }
-    } catch {
-      breakdowns = { ...breakdowns, [queueId]: {} }
-    } finally {
-      const nextLoading = new Set(breakdownLoading)
-      nextLoading.delete(queueId)
-      breakdownLoading = nextLoading
-    }
-  }
-
-  async function composeNext(queueId: string) {
-    bumpingId = queueId
-    bumpError = null
-    try {
-      await admin.composeQueueItemNext(queueId)
-      await load()
-    } catch (e) {
-      bumpError = e instanceof Error ? e.message : String(e)
-    } finally {
-      bumpingId = null
-    }
-  }
-
-  async function recomposeNow(queueId: string) {
-    if (
-      !confirm(
-        'Compose this row immediately, bypassing the standard pacing gate? ' +
-          'This spends real Mistral usage and can take several minutes ' +
-          '(longer for a special edition) — watch the Sessions tab for progress.',
-      )
-    ) {
-      return
-    }
-    recomposingNowId = queueId
-    recomposeNowError = null
-    try {
-      await admin.recomposeQueueItemNow(queueId)
-      recomposedNowIds = new Set(recomposedNowIds).add(queueId)
-    } catch (e) {
-      recomposeNowError = e instanceof Error ? e.message : String(e)
-    } finally {
-      recomposingNowId = null
-    }
-  }
-
-  async function pickForToday(queueId: string) {
-    pickingId = queueId
-    pickError = null
-    try {
-      await admin.pickQueueItemForToday(queueId)
-      await load()
-    } catch (e) {
-      pickError = e instanceof Error ? e.message : String(e)
-    } finally {
-      pickingId = null
-    }
-  }
-
-  async function deadEndDomain(queueId: string) {
-    if (!confirm('Permanently reject this row\'s source domain? It will never be re-crawled or re-composed.')) return
-    deadEndingId = queueId
-    deadEndError = null
-    try {
-      const result = await admin.deadEndQueueItemDomain(queueId)
-      deadEndedDomains = { ...deadEndedDomains, [queueId]: String(result.domain ?? '') }
-    } catch (e) {
-      deadEndError = e instanceof Error ? e.message : String(e)
-    } finally {
-      deadEndingId = null
-    }
-  }
-
-  function signalsText(signals: unknown): string {
-    if (!signals || typeof signals !== 'object' || Array.isArray(signals)) return ''
-    return Object.entries(signals as Record<string, unknown>)
-      .map(([k, v]) => `${k}=${v}`)
-      .join('  ')
-  }
+  $effect(() => {
+    void day
+    void load()
+  })
 
   $effect(() => {
-    void load()
+    if (historyOpen) void loadHistory()
   })
 </script>
 
 <div class="admin-stack">
   <div class="admin-toolbar">
-    <p class="admin-muted intro">
-      Publish-queue rows with the last drain/compose decision each one received — newest activity
-      first.
-    </p>
+    <div>
+      <h2>Queue</h2>
+      <p class="admin-muted intro">
+        Pending artifacts ranked by priority — what's coming up to compose next. Pin one as
+        tomorrow's human pick, or let the top platform-ranked artifacts fill the remaining slots.
+        Once an artifact is composed it becomes an article, visible in the
+        <a href="/admin?tab=articles">Articles</a> tab — it no longer lingers here.
+      </p>
+    </div>
     <button class="btn compact" type="button" disabled={loading} onclick={() => load()}>
       Refresh
     </button>
   </div>
 
-  <p class="admin-muted pipeline-legend">
-    Pipeline: queued candidates below → your review on
-    the <button type="button" class="link-inline" onclick={goToReview}>Classifier tab</button> →
-    approved &amp; up next, at the bottom of this page.
-  </p>
+  <div class="admin-panel toolbar-row">
+    <label class="field">
+      <span>Day</span>
+      <input type="date" bind:value={day} class="admin-select" />
+    </label>
+    <p class="admin-muted small">
+      Showing what would currently be selected for this day —
+      {humanPicked ? 'a human pick is pinned' : 'no human pick is pinned yet'}, plus
+      {platformSlotsFilled} of {platformSlotsAvailable} platform slot(s) filled by top-priority
+      pending artifacts.
+    </p>
+    <p class="admin-muted small">
+      "Pin for tomorrow" always pins the real tomorrow's human slot, regardless of which day you're
+      viewing above.
+    </p>
+  </div>
+
+  {#if pinError}
+    <p class="admin-err">{pinError}</p>
+  {/if}
+
+  {#if loading}
+    <p class="admin-muted">Loading…</p>
+  {:else if error}
+    <p class="admin-err">{error}</p>
+  {:else if items.length === 0}
+    <section class="admin-panel empty">
+      <strong>No pending artifacts</strong>
+      <p class="admin-muted">Nothing is waiting in the artifact pool right now.</p>
+    </section>
+  {:else}
+    {#each items as item (item.artifact_id)}
+      <div class="admin-panel artifact-row" class:selected={Boolean(item.selected_lane)}>
+        <div class="row-head">
+          {#if item.selected_lane}
+            <span class="lane-badge lane-{item.selected_lane}">{laneLabel(item.selected_lane)}</span>
+          {/if}
+          <strong class="display-name">{item.title || item.service_id || item.artifact_id}</strong>
+          <span class="priority admin-muted">priority {item.priority.toFixed(2)}</span>
+          {#if item.is_pinned_for_day}
+            <span class="pinned-badge" title="Pinned as the human pick for {day}">
+              pinned for {day}
+            </span>
+          {/if}
+        </div>
+        <p class="admin-muted small meta">
+          {[item.channel, item.service_id, item.url].filter(Boolean).join(' · ')}
+        </p>
+        <p class="admin-muted small">
+          created {formatTs(item.created_at)}
+          {#if item.event_date} · event {formatTs(item.event_date)}{/if}
+        </p>
+        <div class="breakdown-block">
+          <strong>Priority breakdown</strong>
+          <div class="breakdown-grid mono">
+            <span>word count</span><span>{item.priority_breakdown.word_count.toFixed(2)}</span>
+            <span>timeliness</span><span>{item.priority_breakdown.timeliness.toFixed(2)}</span>
+            <span>ecosystem listed</span><span>{item.priority_breakdown.ecosystem_listed.toFixed(2)}</span>
+          </div>
+        </div>
+        <div class="row-actions">
+          <button
+            class="btn compact"
+            type="button"
+            disabled={pinningId === item.artifact_id || item.is_pinned_for_day}
+            onclick={() => pinForTomorrow(item.artifact_id)}
+          >
+            {#if pinningId === item.artifact_id}
+              Pinning…
+            {:else if item.is_pinned_for_day}
+              Pinned ✓
+            {:else}
+              Pin for tomorrow
+            {/if}
+          </button>
+        </div>
+      </div>
+    {/each}
+  {/if}
 
   {#if backlog.length}
     <section class="admin-panel stack">
       <div class="section-head">
-        <h3>Approved — up next to publish ({backlog.length})</h3>
+        <h3>Approved — awaiting paced release ({backlog.length})</h3>
       </div>
       <p class="admin-muted small">
-        Source of truth for publish order: released one at a time on the standard pacing clock.
+        Already-composed articles waiting their turn on the standard release pace — distinct from
+        the pending-artifact ranking above.
       </p>
       {#each backlog as item (String(item.service_id ?? item.title))}
         <div class="backlog-row">
@@ -217,210 +255,164 @@
     </section>
   {/if}
 
-  <div class="filter-chips">
-    {#each STATUS_FILTERS as status (status)}
-      <button
-        type="button"
-        class="filter-chip"
-        class:active={filter === status}
-        onclick={() => (filter = status)}
-      >
-        {status}
-      </button>
-    {/each}
-  </div>
-
-  {#if bumpError}
-    <p class="admin-err">{bumpError}</p>
-  {/if}
-  {#if recomposeNowError}
-    <p class="admin-err">{recomposeNowError}</p>
-  {/if}
-  {#if pickError}
-    <p class="admin-err">{pickError}</p>
-  {/if}
-  {#if deadEndError}
-    <p class="admin-err">{deadEndError}</p>
-  {/if}
-
-  {#if loading}
-    <p class="admin-muted">Loading…</p>
-  {:else if error}
-    <p class="admin-err">{error}</p>
-  {:else if filtered.length === 0}
-    <section class="admin-panel empty">
-      <strong>Queue is empty</strong>
-      <p class="admin-muted">No publish-queue rows match this filter.</p>
-    </section>
-  {:else}
-    {#each filtered as item (String(item.queue_id))}
-      {@const queueId = String(item.queue_id ?? '')}
-      {@const status = String(item.status ?? '')}
-      {@const isOpen = expanded.has(queueId)}
-      {@const detail = breakdowns[queueId]}
-      {@const isLoadingDetail = breakdownLoading.has(queueId)}
-      <div class="admin-panel queue-row" class:open={isOpen}>
-        <button
-          type="button"
-          class="row-toggle"
-          onclick={() => toggleExpand(queueId)}
-        >
-          <div class="row-head">
-            <span class="status-dot" style="background: {statusColor(status)}"></span>
-            <span class="status-label">{status}</span>
+  <details class="admin-panel history" bind:open={historyOpen}>
+    <summary>Legacy queue history (reference only, being retired)</summary>
+    <p class="admin-muted small history-note">
+      Read-only rows from the old publish-queue lane system, kept for reference while the artifact
+      pipeline takes over. No actions here — composing now happens through the ranked list above.
+    </p>
+    {#if historyLoading}
+      <p class="admin-muted">Loading…</p>
+    {:else if historyError}
+      <p class="admin-err">{historyError}</p>
+    {:else if historyLoaded && history.length === 0}
+      <p class="admin-muted">No legacy queue rows.</p>
+    {:else if historyLoaded}
+      {#each history as item (String(item.queue_id))}
+        <div class="history-row">
+          <div class="history-head">
+            <span class="history-status">{String(item.status ?? '')}</span>
             <strong class="display-name">
-              {String(item.display_name ?? item.service_id ?? queueId)}
+              {String(item.display_name ?? item.service_id ?? item.queue_id)}
             </strong>
-            <span class="priority admin-muted">prio {Number(item.priority ?? 0)}</span>
-            {#if item.human_pick_day}
-              <span class="human-pick-badge" title="Pinned as Lane 1 (human pick)">
-                picked for {String(item.human_pick_day)}
-              </span>
-            {/if}
+            <span class="admin-muted small">prio {Number(item.priority ?? 0)}</span>
           </div>
-
           {#if item.last_reason}
-            <p class="last-reason">last decision: {String(item.last_reason)}</p>
+            <p class="admin-muted small history-reason">{String(item.last_reason)}</p>
           {/if}
-
-          {#if rowMeta(item)}
-            <p class="admin-muted small meta">{rowMeta(item)}</p>
+          {#if historyMeta(item)}
+            <p class="admin-muted small meta">{historyMeta(item)}</p>
           {/if}
-
-          {#if item.updated_at}
-            <p class="admin-muted small">{formatTs(item.updated_at)}</p>
-          {/if}
-        </button>
-
-        {#if status === 'pending' || item.scrape_url}
-          <div class="row-actions">
-            {#if status === 'pending'}
-              <button
-                class="btn compact"
-                type="button"
-                disabled={bumpingId === queueId}
-                onclick={() => composeNext(queueId)}
-              >
-                {bumpingId === queueId ? 'Pinning…' : 'Compose next'}
-              </button>
-              <button
-                class="btn compact"
-                type="button"
-                disabled={pickingId === queueId || Boolean(item.human_pick_day)}
-                onclick={() => pickForToday(queueId)}
-                title="Reserve one of today's 3 publish slots (Lane 1) for this row"
-              >
-                {#if pickingId === queueId}
-                  Picking…
-                {:else if item.human_pick_day}
-                  Picked ✓
-                {:else}
-                  Pick for today
-                {/if}
-              </button>
-              <button
-                class="btn compact btn-danger"
-                type="button"
-                disabled={recomposingNowId === queueId || recomposedNowIds.has(queueId)}
-                onclick={() => recomposeNow(queueId)}
-              >
-                {#if recomposingNowId === queueId}
-                  Triggering…
-                {:else if recomposedNowIds.has(queueId)}
-                  Triggered ✓
-                {:else}
-                  Recompose now
-                {/if}
-              </button>
-            {/if}
-            {#if item.scrape_url}
-              {#if deadEndedDomains[queueId]}
-                <span class="admin-muted small">domain rejected: {deadEndedDomains[queueId]}</span>
-              {:else}
-                <button
-                  class="btn compact btn-danger"
-                  type="button"
-                  disabled={deadEndingId === queueId}
-                  onclick={() => deadEndDomain(queueId)}
-                >
-                  {deadEndingId === queueId ? 'Rejecting…' : 'Dead-end domain'}
-                </button>
-              {/if}
-            {/if}
-          </div>
-        {/if}
-
-        {#if isOpen}
-          <div class="breakdown">
-            {#if isLoadingDetail}
-              <div class="breakdown-loading" aria-hidden="true"></div>
-              <p class="admin-muted">Loading breakdown…</p>
-            {:else if detail && Object.keys(detail).length}
-              {#if detail.priority_breakdown}
-                <div class="breakdown-block">
-                  <strong>Priority breakdown</strong>
-                  <pre class="mono">{String(detail.priority_breakdown)}</pre>
-                </div>
-              {/if}
-              {#if detail.signals && signalsText(detail.signals)}
-                <div class="breakdown-block">
-                  <strong>Content signals</strong>
-                  <pre class="mono">{signalsText(detail.signals)}</pre>
-                </div>
-              {/if}
-              {#if detail.diff_preview}
-                <div class="breakdown-block">
-                  <strong>Diff preview</strong>
-                  <pre class="mono diff">{String(detail.diff_preview)}</pre>
-                </div>
-              {/if}
-            {:else}
-              <p class="admin-muted">No breakdown available for this row.</p>
-            {/if}
-          </div>
-        {/if}
-      </div>
-    {/each}
-  {/if}
+          <p class="admin-muted small">{formatTs(item.updated_at)}</p>
+        </div>
+      {/each}
+    {/if}
+  </details>
 </div>
 
 <style>
-  .intro {
-    flex: 1;
-    min-width: 200px;
+  h2 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: 1.35rem;
+    font-weight: 700;
   }
-
+  .intro {
+    margin: 6px 0 0;
+    max-width: 72ch;
+  }
+  .toolbar-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .field input {
+    width: auto;
+  }
   .compact {
     padding: 8px 14px;
     font-size: 13px;
+  }
+  .small {
+    margin: 0;
+    font-size: 0.88rem;
+  }
+  .artifact-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .artifact-row.selected {
+    border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
+  }
+  .row-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .display-name {
+    flex: 1;
+    min-width: 160px;
+  }
+  .priority {
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .meta {
+    word-break: break-word;
+  }
+  .lane-badge {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+  .lane-human {
+    background: color-mix(in srgb, var(--primary) 14%, var(--panel));
+    color: var(--primary);
+  }
+  .lane-platform {
+    background: color-mix(in srgb, var(--gain) 12%, var(--panel));
+    color: var(--gain);
+  }
+  .pinned-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: var(--accent-soft);
+    color: var(--primary);
+  }
+  .breakdown-block {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--surface);
+  }
+  .breakdown-block strong {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: var(--subtle);
+  }
+  .breakdown-grid {
+    display: grid;
+    grid-template-columns: auto auto;
+    gap: 2px 12px;
+    font-size: 0.85rem;
+    justify-content: start;
+  }
+  .breakdown-grid span:nth-child(odd) {
+    color: var(--muted);
+  }
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .row-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+  .empty {
+    text-align: center;
+    padding: 24px;
   }
 
   .section-head h3 {
     margin: 0;
     font-size: 1rem;
     font-weight: 700;
-  }
-
-  .small {
-    margin: 0;
-    font-size: 0.92rem;
-  }
-
-  .pipeline-legend {
-    margin: 0;
-    font-size: 0.88rem;
-  }
-
-  .link-inline {
-    background: none;
-    border: 0;
-    padding: 0;
-    margin: 0;
-    color: var(--primary);
-    font: inherit;
-    font-weight: 600;
-    text-decoration: underline;
-    cursor: pointer;
   }
 
   .backlog-row {
@@ -451,173 +443,45 @@
     white-space: nowrap;
   }
 
-  .filter-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
+  .history {
+    padding: 14px 18px;
   }
 
-  .filter-chip {
-    border: 1px solid var(--border);
-    background: var(--surface);
+  .history summary {
+    cursor: pointer;
+    font-weight: 700;
+    font-size: 0.92rem;
     color: var(--muted);
-    border-radius: 999px;
-    padding: 6px 14px;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    text-transform: capitalize;
   }
 
-  .filter-chip.active {
-    background: var(--accent-soft);
-    color: var(--primary);
-    border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
+  .history-note {
+    margin: 8px 0 12px;
   }
 
-  .empty {
-    text-align: center;
-    padding: 24px;
+  .history-row {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
   }
 
-  .queue-row {
-    transition: border-color 0.15s ease;
+  .history-row:last-child {
+    border-bottom: 0;
   }
 
-  .queue-row.open {
-    border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
-  }
-
-  .row-toggle {
-    display: block;
-    width: 100%;
-    text-align: start;
-    cursor: pointer;
-    background: none;
-    border: 0;
-    padding: 0;
-    color: inherit;
-    font: inherit;
-  }
-
-  .row-actions {
+  .history-head {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
     gap: 8px;
-    margin-top: 8px;
-  }
-
-  .btn-danger {
-    background: var(--danger);
-    color: #fff;
-    border-color: var(--danger);
-  }
-
-  .row-head {
-    display: flex;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
   }
 
-  .status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .status-label {
-    font-size: 12px;
+  .history-status {
+    font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
+    color: var(--subtle);
   }
 
-  .display-name {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 0.95rem;
-  }
-
-  .priority {
-    font-size: 11px;
-    font-weight: 600;
-  }
-
-  .human-pick-badge {
-    font-size: 11px;
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--primary) 16%, transparent);
-    color: var(--primary);
-    white-space: nowrap;
-  }
-
-  .last-reason {
-    margin: 6px 0 0;
+  .history-reason {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.92rem;
-    color: var(--primary);
-  }
-
-  .meta {
-    margin: 4px 0 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .breakdown {
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .breakdown-loading {
-    height: 2px;
-    background: linear-gradient(90deg, var(--primary), transparent);
-    animation: pulse 1.2s ease-in-out infinite;
-  }
-
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 0.4;
-    }
-    50% {
-      opacity: 1;
-    }
-  }
-
-  .breakdown-block strong {
-    display: block;
-    font-size: 12px;
-    margin-bottom: 4px;
-  }
-
-  .mono {
-    margin: 0;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 11px;
-    line-height: 1.4;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-
-  .diff {
-    padding: 10px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    max-height: 360px;
-    overflow: auto;
   }
 </style>
