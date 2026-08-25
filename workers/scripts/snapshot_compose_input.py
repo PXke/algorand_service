@@ -1,4 +1,4 @@
-"""One-time, read-only snapshot of a real article's compose_scrape_article_mistral inputs.
+"""One-time, read-only snapshot of a real article's compose_scrape_article inputs.
 
 Freezes exactly what a real archive-refresh recompose would compose from
 (the same _recompose_published_source_text prod uses -- a live re-scrape of

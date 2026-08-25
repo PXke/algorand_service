@@ -1,6 +1,6 @@
 """Abstract session-transcript persistence for one compose run.
 
-Lets the SAME compose orchestration (mistral_compose.py's checkpoint/telemetry
+Lets the SAME compose orchestration (llm_compose.py's checkpoint/telemetry
 calls) write its transcript to prod Cassandra (SessionRegisterCassandra,
 delegating verbatim to tool_insights_store) or to a local file
 (SessionRegisterSQLite/SessionRegisterTxt) for offline multi-provider

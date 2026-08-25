@@ -1,4 +1,4 @@
-"""Circuit breaker for Mistral credit exhaustion (2026-07-24): a dead API key (401/402) used to make drain_standard_publish_queue re-walk and re-hit the entire compose queue every beat (observed: hourly, 17+ hours straight) since mistral_credit_insufficient is deliberately non-terminal for transient failures — but a wiped monthly credit balance isn't transient. These tests pin the flag's fail-open behavior and TTL math; the wiring into MistralClient._post/_fetch_model_metadata is covered by test_mistral_client.py."""
+"""Circuit breaker for Mistral credit exhaustion (2026-07-24): a dead API key (401/402) used to make drain_standard_publish_queue re-walk and re-hit the entire compose queue every beat (observed: hourly, 17+ hours straight) since mistral_credit_insufficient is deliberately non-terminal for transient failures — but a wiped monthly credit balance isn't transient. These tests pin the flag's fail-open behavior and TTL math; the wiring into MistralProvider._post/_fetch_model_metadata is covered by test_mistral_provider.py."""
 
 from __future__ import annotations
 

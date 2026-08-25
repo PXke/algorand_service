@@ -19,7 +19,7 @@ delinking) is deliberate: the prose recommendation, not just the hyperlink, is
 the defect a human must judge.
 
 False-hold guardrails:
-- Runs BEFORE the link gate's delinker (see mistral_compose), so it sees the
+- Runs BEFORE the link gate's delinker (see llm_compose), so it sees the
   writer's original links, but its verdict is a fresh live DNS lookup, not the
   trace — a link the research flagged dead that has since come back will resolve
   and won't hold.

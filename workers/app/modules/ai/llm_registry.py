@@ -4,7 +4,7 @@ The "loading into the agent is based on a string and it uses the class
 related" requirement: get_provider("kimi") returns a fresh KimiProvider
 instance, get_provider("gemini") a fresh GeminiProvider, etc. This is the
 direct-selection path a benchmark caller (compose_runner.py) uses -- it's
-orthogonal to, and doesn't replace, mistral_client.py's existing
+orthogonal to, and doesn't replace, llm_purpose_router.py's existing
 LLM_PROVIDER_<PURPOSE> + canary-pct purpose-based routing (_client_for_purpose),
 which stays exactly as-is for production's writer/research/digest/translate/
 rubric tiers.

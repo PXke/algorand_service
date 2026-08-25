@@ -21,7 +21,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from app.modules.ai.mistral_client import MistralClient
+    from app.modules.ai.llm_openai_compatible import MistralProvider
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ _SYSTEM = (
 )
 
 
-def _extract_terms(title: str, body: str, client: MistralClient) -> list[dict[str, str]]:
+def _extract_terms(title: str, body: str, client: MistralProvider) -> list[dict[str, str]]:
     messages = [
         {"role": "system", "content": _SYSTEM},
         {
@@ -64,12 +64,12 @@ def _extract_terms(title: str, body: str, client: MistralClient) -> list[dict[st
 
 
 def suggest_glossary_terms(
-    payload: dict[str, Any], *, client: MistralClient, service_id: str = ""
+    payload: dict[str, Any], *, client: MistralProvider, service_id: str = ""
 ) -> dict[str, Any]:
     """Best-effort: queue draft glossary suggestions for genuinely complex terms in the finished body.
 
     Takes an already-resolved client rather than fetching its own — same
-    reason _grade_current_draft takes `quality_mistral` as a parameter
+    reason _grade_current_draft takes `quality_llm` as a parameter
     instead of importing a client internally: callers (and their tests) mock
     the client they already hold, not a second one a callee reaches for on
     its own. Side-effect only -- never mutates payload's article fields, so a

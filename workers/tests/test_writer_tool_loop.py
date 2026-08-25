@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.modules.ai.mistral_client import MistralClient
+from app.modules.ai.llm_openai_compatible import MistralProvider
 
 
 def _msg(content: str = "", tool_calls: list[dict] | None = None) -> dict:
@@ -18,7 +18,7 @@ def _review_call() -> list[dict]:
 
 def test_require_tool_forces_review_before_finishing(monkeypatch: pytest.MonkeyPatch) -> None:
     """The compose loop nudges the model to call review_draft before accepting its final output."""
-    client = MistralClient(api_key="test-key")
+    client = MistralProvider(api_key="test-key")
     seq = [
         _msg(content='{"title":"t","body":"b"}'),  # tries to finish, no review
         _msg(tool_calls=_review_call()),  # after nudge: calls review_draft
@@ -48,7 +48,7 @@ def test_require_tool_nudges_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
     # If the model keeps refusing, we nudge once then accept its output (no
     # infinite loop).
     """A model that keeps refusing the required tool is nudged only once, then its output is accepted."""
-    client = MistralClient(api_key="test-key")
+    client = MistralProvider(api_key="test-key")
     calls = {"n": 0}
 
     def fake_post(_payload: dict) -> dict:
@@ -70,7 +70,7 @@ def test_debug_transcript_accumulates_across_multiple_chat_with_tools_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two-stage compose invokes chat_with_tools more than once against the SAME debug dict (initial research, then a RESEARCH_FLOOR nudge pass or a digest gap-fill pass). The second call must not silently overwrite the first round's tool calls out of the persisted/audited transcript — this was a real bug: `debug["messages"]` got reassigned to a fresh 2-message list every invocation, dropping earlier rounds even though `trace` (mutated by reference) kept accumulating correctly underneath it."""
-    client = MistralClient(api_key="test-key")
+    client = MistralProvider(api_key="test-key")
 
     def make_seq(marker: str) -> list[dict]:
         return [
@@ -128,7 +128,7 @@ def test_debug_transcript_accumulates_across_multiple_chat_with_tools_calls(
 
 def test_cross_pass_dedup_seeds_seen_calls_from_trace(monkeypatch: pytest.MonkeyPatch) -> None:
     """2026-07-16 audit finding: the research floor / gap-fill passes call chat_with_tools again with a fresh conversation but the SAME shared trace, and the per-call dedup cache started empty — so a later pass happily re-ran an earlier pass's identical searches (a real RandGallery session repeated 5 of its 35 tool calls). Seeding seen_calls from the trace makes an exact repeat in pass 2 a no-execute nudge, same as within one pass."""
-    client = MistralClient(api_key="test-key")
+    client = MistralProvider(api_key="test-key")
     executed = {"n": 0}
 
     def handler(**_kwargs: object) -> dict:
@@ -180,7 +180,7 @@ def test_cross_pass_dedup_still_allows_retry_of_errored_calls(
 ) -> None:
     # A transient failure in pass 1 must stay retryable in pass 2.
     """An earlier pass's errored tool call is still retried, not treated as an already-seen duplicate."""
-    client = MistralClient(api_key="test-key")
+    client = MistralProvider(api_key="test-key")
     executed = {"n": 0}
 
     def handler(**_kwargs: object) -> dict:

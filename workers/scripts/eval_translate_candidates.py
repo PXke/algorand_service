@@ -75,7 +75,7 @@ def _run_case(
     candidate: Candidate, language: str, fixture: TranslationFixture, *, sample: bool
 ) -> dict:
     """Translate one fixture into ``language`` with ``candidate``, back-translate it, and run every Layer 1/2 check. Never raises -- a failure is caught and returned as an {"error": ...} entry so one bad case doesn't abort the whole run."""
-    from app.modules.ai.mistral_compose import split_markdown_blocks
+    from app.modules.ai.llm_compose import split_markdown_blocks
     from app.modules.ai.translation_eval import (
         back_translation_consistency,
         digit_consistency,

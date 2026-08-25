@@ -22,7 +22,7 @@ import re
 import time
 from dataclasses import dataclass
 
-from app.modules.ai.mistral_compose import split_markdown_blocks
+from app.modules.ai.llm_compose import split_markdown_blocks
 
 # Small, rarely-changing admin table -- cache the published set in-process
 # rather than re-scanning Cassandra on every single article write.

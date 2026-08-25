@@ -68,5 +68,5 @@ Workers call the equivalent under `workers/app/modules/newspaper/article_compose
 - `workers/app/modules/newspaper/article_compose.py` — scrape template
 - `workers/app/modules/newspaper/article_composer.py` — facade: scrape, `compose_weekly_price`, `compose_weekly_digest` (template + Mistral fallback)
 - `workers/app/modules/newspaper/weekly_digest.py` — digest template + context
-- `workers/app/modules/ai/mistral_compose.py` — Mistral prompts ([ai-mistral-connector.md](ai-mistral-connector.md))
+- `workers/app/modules/ai/llm_compose.py` — Mistral prompts ([ai-mistral-connector.md](ai-mistral-connector.md))
 - `backend/app/core/sanitize.py`

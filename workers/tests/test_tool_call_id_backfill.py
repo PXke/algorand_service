@@ -5,7 +5,7 @@ The same function also backfills a missing `type` -- confirmed live 2026-08-14: 
 
 import pytest
 
-from app.modules.ai.mistral_client import MistralClient, _ensure_tool_call_ids
+from app.modules.ai.llm_openai_compatible import MistralProvider, _ensure_tool_call_ids
 
 
 def _msg(content: str = "", tool_calls: list[dict] | None = None) -> dict:
@@ -53,7 +53,7 @@ def test_id_less_tool_call_gets_a_consistent_id_in_echoed_history_and_tool_resul
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The backfilled id must match between the assistant message's tool_calls[0].id (as later echoed back for round 2) and the paired tool-result message's tool_call_id -- otherwise the fix would just move the mismatch instead of fixing it."""
-    client = MistralClient(api_key="test-key")
+    client = MistralProvider(api_key="test-key")
     payloads: list[dict] = []
     seq = [
         _msg(tool_calls=[_id_less_call()]),
@@ -89,8 +89,8 @@ def test_id_less_tool_call_gets_a_consistent_id_in_echoed_history_and_tool_resul
 def test_a_prior_debug_tool_message_missing_its_tool_call_id_gets_paired_on_merge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Root-caused 2026-08-15 (GPT-5.6-luna, live): a synthetic debug-transcript entry (mistral_compose's review_draft bookkeeping turn) can have an assistant tool_calls entry AND its paired tool-role message both missing their id/tool_call_id, with the two never matching. The id backfill on the assistant side alone isn't enough -- the merge point must also re-pair the following tool-role message's tool_call_id to the (possibly freshly-backfilled) assistant id, by position, the same 1:1 ordering _run_tool_call already produces for a real round."""
-    client = MistralClient(api_key="test-key")
+    """Root-caused 2026-08-15 (GPT-5.6-luna, live): a synthetic debug-transcript entry (llm_compose's review_draft bookkeeping turn) can have an assistant tool_calls entry AND its paired tool-role message both missing their id/tool_call_id, with the two never matching. The id backfill on the assistant side alone isn't enough -- the merge point must also re-pair the following tool-role message's tool_call_id to the (possibly freshly-backfilled) assistant id, by position, the same 1:1 ordering _run_tool_call already produces for a real round."""
+    client = MistralProvider(api_key="test-key")
     payloads: list[dict] = []
     # Shaped exactly like the real bug: assistant tool_calls entry with no id,
     # paired tool-role message with no tool_call_id at all -- two separate gaps.
@@ -134,7 +134,7 @@ def test_a_prior_debug_message_missing_its_id_gets_patched_on_merge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Root-caused 2026-08-13 (LumiRogue recompose ed06b874): the per-round backfill above guards messages THIS call generates, but a later stage (the revision pass) merges in `debug["messages"]` from an earlier stage via _merged_convo_with_prior_debug -- and something upstream of that merge could still leave an id-less tool_calls entry in there (the exact mechanism wasn't pinned down; static and synthetic testing of the per-round path alone couldn't reproduce a gap). Rather than leave the failure class open, the merge itself now re-asserts the id invariant on the WHOLE merged transcript, so a later call can never build a request with a naked tool_calls entry regardless of which earlier stage produced it."""
-    client = MistralClient(api_key="test-key")
+    client = MistralProvider(api_key="test-key")
     payloads: list[dict] = []
     # Simulate a prior stage's transcript that somehow ended up with a
     # tool_calls entry missing an id -- exactly what Mistral's API rejects.

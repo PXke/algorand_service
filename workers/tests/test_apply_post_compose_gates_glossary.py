@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from app.modules.ai.mistral_compose import _apply_post_compose_gates
+from app.modules.ai.llm_compose import _apply_post_compose_gates
 
 
 def _payload() -> dict:

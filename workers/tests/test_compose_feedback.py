@@ -57,7 +57,7 @@ def test_handler_rejects_invalid_category() -> None:
 
 def test_tools_guidance_mentions_pipeline_feedback() -> None:
     """The writer's tools-guidance prompt text documents the pipeline-feedback tool."""
-    import app.modules.ai.mistral_compose as mc
+    import app.modules.ai.llm_compose as mc
 
     assert "report_compose_issue" in mc._TOOLS_GUIDANCE
     assert "PIPELINE FEEDBACK" in mc._TOOLS_GUIDANCE

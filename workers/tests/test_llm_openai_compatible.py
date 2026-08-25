@@ -16,18 +16,12 @@ from app.modules.ai.llm_openai_compatible import (
     OpenAIProvider,
 )
 from app.modules.ai.llm_provider import LLMProvider
-from app.modules.ai.mistral_client import MistralClient
 
 
-def test_mistral_client_is_an_llm_provider() -> None:
-    """MistralClient satisfies the abstract LLMProvider interface (via OpenAICompatibleProvider)."""
-    client = MistralClient(api_key="test-key")
+def test_mistral_provider_is_an_llm_provider() -> None:
+    """MistralProvider satisfies the abstract LLMProvider interface (via OpenAICompatibleProvider)."""
+    client = MistralProvider(api_key="test-key")
     assert isinstance(client, LLMProvider)
-
-
-def test_mistral_client_is_a_mistral_provider() -> None:
-    """MistralClient is MistralProvider (2026-08-15 rename) -- kept as a name every existing bare `MistralClient(...)` call site still resolves to Mistral's own config defaults, same as before the physical move."""
-    assert MistralClient is MistralProvider
 
 
 def test_mistral_provider_is_an_open_ai_compatible_provider() -> None:
@@ -77,7 +71,7 @@ def test_explicit_overrides_win_over_config_defaults() -> None:
 
 
 def test_providers_never_silently_fall_back_to_mistral_key() -> None:
-    """Root-caused while designing this: MistralClient.__init__ falls back to MISTRAL_API_KEY when api_key is None -- every new subclass must unconditionally pass its OWN provider's key so it never silently authenticates as Mistral."""
+    """Root-caused while designing this: MistralProvider.__init__ falls back to MISTRAL_API_KEY when api_key is None -- every new subclass must unconditionally pass its OWN provider's key so it never silently authenticates as Mistral."""
     kimi = KimiProvider()
     openai = OpenAIProvider()
     glm = GLMProvider()
@@ -145,7 +139,7 @@ def test_openai_provider_actually_sends_max_completion_tokens_not_max_tokens(
             captured.update(json or {})
             return FakeResponse()
 
-    import app.modules.ai.mistral_client as mistral_module
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
 
@@ -243,7 +237,7 @@ def test_mistral_provider_sends_a_stable_prompt_cache_key_across_calls(
             captured.append(dict(json or {}))
             return FakeResponse()
 
-    import app.modules.ai.mistral_client as mistral_module
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
 
@@ -282,7 +276,7 @@ def test_deepseek_provider_omits_prompt_cache_key_from_the_actual_request(
             captured.update(json or {})
             return FakeResponse()
 
-    import app.modules.ai.mistral_client as mistral_module
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
 
@@ -325,7 +319,7 @@ def test_record_usage_prefers_the_nested_openai_compatible_cache_field(
         def post(self, *args: object, **kwargs: object) -> Any:  # noqa: ANN401, ARG002
             return FakeResponse()
 
-    import app.modules.ai.mistral_client as mistral_module
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
 
@@ -367,7 +361,7 @@ def test_record_usage_falls_back_to_deepseeks_own_top_level_cache_field(
         def post(self, *args: object, **kwargs: object) -> Any:  # noqa: ANN401, ARG002
             return FakeResponse()
 
-    import app.modules.ai.mistral_client as mistral_module
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
 
@@ -404,7 +398,7 @@ def test_record_usage_defaults_cached_tokens_to_zero_when_absent(
         def post(self, *args: object, **kwargs: object) -> Any:  # noqa: ANN401, ARG002
             return FakeResponse()
 
-    import app.modules.ai.mistral_client as mistral_module
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
 
@@ -440,7 +434,7 @@ def test_openai_provider_omits_temperature_from_the_actual_request(
             captured.update(json or {})
             return FakeResponse()
 
-    import app.modules.ai.mistral_client as mistral_module
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
 
@@ -490,7 +484,7 @@ def test_http_log_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
         def post(self, url: str, headers: dict | None = None, json: dict | None = None) -> Any:  # noqa: ANN401, ARG002
             return FakeResponse()
 
-    import app.modules.ai.mistral_client as mistral_module
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
     provider = OpenAIProvider(api_key="test-key")
@@ -526,7 +520,7 @@ def test_http_log_writes_request_and_response(
         def post(self, url: str, headers: dict | None = None, json: dict | None = None) -> Any:  # noqa: ANN401, ARG002
             return FakeResponse()
 
-    import app.modules.ai.mistral_client as mistral_module
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     monkeypatch.setattr(mistral_module.httpx, "Client", FakeClient)
     provider = DeepSeekProvider(api_key="test-key")

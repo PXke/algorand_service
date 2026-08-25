@@ -434,7 +434,7 @@ _MARKETING_VERBS_RE = re.compile(
 _HEADLINE_MAX_CHARS = 90
 
 # A dollar figure in the headline, e.g. "$2.4K", "$4,000", "$135". The
-# NUMERIC HONESTY prompt rule (mistral_compose.py) already tells the model a
+# NUMERIC HONESTY prompt rule (llm_compose.py) already tells the model a
 # sub-$10K TVL/figure is "negligible, not a headline metric" — but that's a
 # soft prompt rule, and prompt rules drift under revision pressure exactly
 # like the colon-label headline did before it got a deterministic check here

@@ -54,16 +54,16 @@ def test_registered_in_writer_tool_registry() -> None:
 
 def test_chat_with_tools_reraises_spike_and_records_trace(monkeypatch: pytest.MonkeyPatch) -> None:
     """The tool loop's normal contract is 'a tool failure must not abort the article' — abort_article is the deliberate exception. It must escape the loop (not get swallowed into a {"error": ...} result) and the trace must still show the writer's stated reason for admin visibility."""
-    from app.modules.ai.mistral_client import MistralClient
+    from app.modules.ai.llm_openai_compatible import MistralProvider
 
-    client = MistralClient.__new__(MistralClient)
+    client = MistralProvider.__new__(MistralProvider)
     client._api_key = "test-key"
     client._model = "test-model"
     client._metadata = {}
     client._reasoning_effort_unsupported = True
     trace: list = []
 
-    def fake_post(_self: MistralClient, _payload: dict) -> dict:
+    def fake_post(_self: MistralProvider, _payload: dict) -> dict:
         return {
             "choices": [
                 {
@@ -86,8 +86,8 @@ def test_chat_with_tools_reraises_spike_and_records_trace(monkeypatch: pytest.Mo
             ]
         }
 
-    monkeypatch.setattr(MistralClient, "_post", fake_post)
-    monkeypatch.setattr(MistralClient, "_log_task_context", lambda _self, *_a, **_k: None)
+    monkeypatch.setattr(MistralProvider, "_post", fake_post)
+    monkeypatch.setattr(MistralProvider, "_log_task_context", lambda _self, *_a, **_k: None)
 
     with pytest.raises(StorySpikedError):
         client.chat_with_tools(

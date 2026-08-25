@@ -13,17 +13,15 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
 
-from app.core.config import MISTRAL_MAX_SOURCE_CHARS
-from app.modules.ai.llm_provider import LLMProvider
-from app.modules.ai.mistral_client import (
-    MistralClient,
-    MistralCreditError,
-    MistralError,
-    get_mistral_client,
-    get_mistral_digest_client,
-    get_mistral_research_client,
-    get_mistral_rubric_client,
-    get_mistral_translate_client,
+from app.core.config import LLM_MAX_SOURCE_CHARS
+from app.modules.ai.llm_openai_compatible import MistralProvider, OpenAICompatibleProvider
+from app.modules.ai.llm_provider import LLMCreditError, LLMError, LLMProvider
+from app.modules.ai.llm_purpose_router import (
+    get_llm_digest_client,
+    get_llm_research_client,
+    get_llm_rubric_client,
+    get_llm_translate_client,
+    get_llm_writer_client,
 )
 from app.modules.ai.reference_block import append_reference_block
 from app.modules.ai.session_register import SessionRegister, SessionRegisterCassandra
@@ -41,7 +39,7 @@ PROMPT_VERSION = "2026-07-20"
 
 
 @dataclass(frozen=True)
-class MistralArticleFields:
+class LLMArticleFields:
     """The composed article's title/summary/body plus grading metadata."""
 
     title: str
@@ -591,7 +589,8 @@ _FEEDBACK_CHANNELS = (
 
 # Same as _FEEDBACK_CHANNELS but drops the "call suggest_tool for every gap"
 # mandate — used once this session has already hit suggest_tool's per-session
-# cap (mistral_client._CALL_CAPPED_TOOLS). Root-caused 2026-08-06: a
+# cap (OpenAICompatibleProvider._CALL_CAPPED_TOOLS, shared by every provider
+# subclass). Root-caused 2026-08-06: a
 # special-edition compose restarts this same system prompt fresh at the start
 # of each research pass (floor, gap-fill, enumeration gap-fill), so a later
 # pass has no way to know an earlier pass already discharged the "report every
@@ -616,7 +615,7 @@ _FEEDBACK_CHANNELS_TOOL_GAPS_DONE = (
 
 def _feedback_channels_for(trace: list[dict]) -> str:
     """_FEEDBACK_CHANNELS, or the trimmed _FEEDBACK_CHANNELS_TOOL_GAPS_DONE variant once this session has already hit suggest_tool's per-session call cap — see that constant's comment for why."""
-    cap = MistralClient._CALL_CAPPED_TOOLS.get("suggest_tool")
+    cap = OpenAICompatibleProvider._CALL_CAPPED_TOOLS.get("suggest_tool")
     if cap is None:
         return _FEEDBACK_CHANNELS
     count = sum(1 for entry in trace if entry.get("tool") == "suggest_tool")
@@ -949,7 +948,7 @@ def _build_stage2_user(
 
 
 def _cap_stage2_extras(digest: str, extra_blocks: str) -> tuple[str, str]:
-    """Cap digest + extra_blocks (enumeration/outline) to MISTRAL_STAGE2_EXTRAS_MAX_CHARS combined.
+    """Cap digest + extra_blocks (enumeration/outline) to LLM_STAGE2_EXTRAS_MAX_CHARS combined.
 
     Neither has an upstream size limit -- both are already-synthesized model
     output expected to stay compact, but a deep special edition's digest can
@@ -960,28 +959,28 @@ def _cap_stage2_extras(digest: str, extra_blocks: str) -> tuple[str, str]:
     enough, rather than silently sending an oversized request that risks the
     empty-completion failure this cap exists to prevent.
     """
-    from app.core.config import MISTRAL_STAGE2_EXTRAS_MAX_CHARS
+    from app.core.config import LLM_STAGE2_EXTRAS_MAX_CHARS
 
     total = len(digest) + len(extra_blocks)
-    if total <= MISTRAL_STAGE2_EXTRAS_MAX_CHARS:
+    if total <= LLM_STAGE2_EXTRAS_MAX_CHARS:
         return digest, extra_blocks
     logger.warning(
-        "Stage-2 digest+extras (%d chars) exceeds MISTRAL_STAGE2_EXTRAS_MAX_CHARS (%d) -- trimming",
+        "Stage-2 digest+extras (%d chars) exceeds LLM_STAGE2_EXTRAS_MAX_CHARS (%d) -- trimming",
         total,
-        MISTRAL_STAGE2_EXTRAS_MAX_CHARS,
+        LLM_STAGE2_EXTRAS_MAX_CHARS,
     )
     extras_marker = "\n\n[enumeration/outline truncated]"
     digest_marker = "\n\n[digest truncated]"
 
     # extras alone can cover the overage (accounting for its own marker's
     # length) -- digest stays untouched.
-    if len(digest) + len(extras_marker) <= MISTRAL_STAGE2_EXTRAS_MAX_CHARS:
-        extras_budget = MISTRAL_STAGE2_EXTRAS_MAX_CHARS - len(digest) - len(extras_marker)
+    if len(digest) + len(extras_marker) <= LLM_STAGE2_EXTRAS_MAX_CHARS:
+        extras_budget = LLM_STAGE2_EXTRAS_MAX_CHARS - len(digest) - len(extras_marker)
         return digest, extra_blocks[: max(0, extras_budget)] + extras_marker
 
     # Even dropping extras entirely isn't enough -- the digest itself is
     # over budget, so trim its tail too.
-    digest_budget = MISTRAL_STAGE2_EXTRAS_MAX_CHARS - len(digest_marker)
+    digest_budget = LLM_STAGE2_EXTRAS_MAX_CHARS - len(digest_marker)
     return digest[: max(0, digest_budget)] + digest_marker, ""
 
 
@@ -1132,7 +1131,7 @@ def _synthesize_research_digest(
     research_context: str,
     provider: str = "",
 ) -> str:
-    """Stage 1→2 handoff: model-synthesized digest instead of raw tool JSON, unless RESEARCH_DIGEST_MODE=raw (see config.py) or the research provider is deepseek — deepseek's context window is large enough to read the raw trace directly (owner call, 2026-08-06), so it always skips synthesis regardless of the config value; RESEARCH_DIGEST_MODE=raw remains a manual override for forcing raw mode on mistral too. Deterministic asset-facts appendix is still added either way, since that's free regardless of mode."""
+    """Stage 1→2 handoff: model-synthesized digest instead of raw tool JSON, unless RESEARCH_DIGEST_MODE=raw (see config.py) or the research provider is deepseek — deepseek's context window is large enough to read the raw trace directly (owner call, 2026-08-06), so it always skips synthesis regardless of the config value; RESEARCH_DIGEST_MODE=raw remains a manual override for forcing raw mode on Mistral too. Deterministic asset-facts appendix is still added either way, since that's free regardless of mode."""
     from app.core.config import RESEARCH_DIGEST_MODE
 
     asset_facts = _extract_asset_facts(trace)
@@ -1146,9 +1145,9 @@ def _synthesize_research_digest(
     if not raw_trace.strip():
         return ""
     try:
-        from app.core.config import MISTRAL_TEMP_RESEARCH
+        from app.core.config import LLM_TEMP_RESEARCH
 
-        digest_client = get_mistral_digest_client()
+        digest_client = get_llm_digest_client()
         digest = digest_client.chat_completion(
             [
                 {
@@ -1161,7 +1160,7 @@ def _synthesize_research_digest(
                 },
             ],
             json_object=False,
-            temperature=MISTRAL_TEMP_RESEARCH,
+            temperature=LLM_TEMP_RESEARCH,
         )
         text = (digest or "").strip()
         if not text:
@@ -1274,7 +1273,7 @@ def _debug_tool_turn(debug: dict | None, name: str, arguments: dict, result: dic
     caused 2026-08-15: this previously built the assistant tool_calls entry
     with no `id` at all and the tool-role message with no `tool_call_id` at
     all, two SEPARATE gaps that neither matched each other nor got backfilled
-    together -- `_ensure_tool_call_ids` (mistral_client.py) only ever patches
+    together -- `_ensure_tool_call_ids` (llm_openai_compatible.py) only ever patches
     the assistant side, so once this synthetic pair is later merged into a
     revision-pass request (`_merged_convo_with_prior_debug`) and replayed
     through a stricter provider, the id backfill on the assistant side made
@@ -1322,7 +1321,7 @@ def _record_grade(
     body: str,
     revise_count: int,
 ) -> None:
-    """Record the grading result in the trace/debug transcript (like a review_draft tool call) and attach it to the current draft, so every return below carries this grade even when no (further) revision is attempted — the caller (publish gate) reads it via MistralArticleFields.heuristic_grade."""
+    """Record the grading result in the trace/debug transcript (like a review_draft tool call) and attach it to the current draft, so every return below carries this grade even when no (further) revision is attempted — the caller (publish gate) reads it via LLMArticleFields.heuristic_grade."""
     # The grader reads the FULL title+body; we record only a compact label in
     # the trace (title + word count) to avoid dumping the whole body into it.
     grade_args = {"title": title, "words": len(body.split())}
@@ -1346,7 +1345,7 @@ def _grade_current_draft(
     title: str,
     summary: str,
     body: str,
-    quality_mistral: MistralClient,
+    quality_llm: MistralProvider,
     *,
     is_special_edition: bool = False,
 ) -> dict:
@@ -1361,7 +1360,7 @@ def _grade_current_draft(
     except Exception as exc:
         review = {"error": str(exc)[:200], "grade": None}
     try:
-        quality = grade_article_quality_llm(title=title, body=body, client=quality_mistral)
+        quality = grade_article_quality_llm(title=title, body=body, client=quality_llm)
     except Exception as exc:
         quality = {"model": "llm_rubric_error", "error": str(exc)[:200], "issues": []}
     review["quality"] = quality
@@ -1631,7 +1630,7 @@ def _build_revision_prompt(
 
 
 def _attempt_revision(
-    mistral: MistralClient,
+    llm: MistralProvider,
     gen_system: str,
     revise_user: str,
     *,
@@ -1665,7 +1664,7 @@ def _attempt_revision(
     actually fix, not just reword. Falls back to the old tool-less
     chat_json_object path when no tools are given.
     """
-    from app.modules.ai.mistral_client import _parse_json_object
+    from app.modules.ai.llm_openai_compatible import _parse_json_object
 
     messages = [
         {"role": "system", "content": gen_system},
@@ -1675,7 +1674,7 @@ def _attempt_revision(
         if tool_schemas and tool_handlers:
             from app.core.config import WRITER_REVISION_TOOL_MAX_ROUNDS
 
-            raw = mistral.chat_with_tools(
+            raw = llm.chat_with_tools(
                 messages,
                 tools=tool_schemas,
                 handlers=tool_handlers,
@@ -1690,7 +1689,7 @@ def _attempt_revision(
                 note_failure("revision (tool-enabled) did not return a valid JSON object")
                 return None
         else:
-            revised = mistral.chat_json_object(messages, temperature=temperature)
+            revised = llm.chat_json_object(messages, temperature=temperature)
     except Exception as exc:
         note_failure(f"revision call failed: {type(exc).__name__}: {exc}")
         return None
@@ -1701,7 +1700,7 @@ def _attempt_revision(
 
 
 def _review_and_revise(
-    mistral: MistralClient,
+    llm: MistralProvider,
     payload: dict,
     *,
     system: str,
@@ -1733,7 +1732,7 @@ def _review_and_revise(
     hasn't wired tools through, or WRITER_TOOLS_ENABLED off upstream).
     """
     from app.core.config import (
-        MISTRAL_TEMP_WRITE,
+        LLM_TEMP_WRITE,
         WRITER_QUALITY_LLM_MIN_SCORE,
         WRITER_REVIEW_ENABLED,
         WRITER_REVISION_MAX_PASSES,
@@ -1748,7 +1747,7 @@ def _review_and_revise(
     # writer's Large-tier model, and (2026-08-06) it's its own routing
     # purpose so a compose can send its research tool loop to one provider
     # while grading with another (e.g. DeepSeek research, Mistral rubric).
-    quality_mistral = get_mistral_rubric_client()
+    quality_llm = get_llm_rubric_client()
 
     def _note_revision_failure(reason: str) -> None:
         # Surface WHY the revision didn't happen instead of silently keeping the
@@ -1792,7 +1791,7 @@ def _review_and_revise(
             return current
 
         review = _grade_current_draft(
-            title, summary, body, quality_mistral, is_special_edition=is_special_edition
+            title, summary, body, quality_llm, is_special_edition=is_special_edition
         )
         quality = review["quality"]
         _record_grade(
@@ -1844,10 +1843,10 @@ def _review_and_revise(
         gen_system = system + _STAGE2_GENERATION_GUIDANCE
 
         revised = _attempt_revision(
-            mistral,
+            llm,
             gen_system,
             revise_user,
-            temperature=MISTRAL_TEMP_WRITE,
+            temperature=LLM_TEMP_WRITE,
             note_failure=_note_revision_failure,
             tool_schemas=revision_tool_schemas,
             tool_handlers=revision_tool_handlers,
@@ -2118,7 +2117,7 @@ _EVOLUTION_GUIDANCE = (
 )
 
 
-def _clip(text: str, limit: int = MISTRAL_MAX_SOURCE_CHARS) -> str:
+def _clip(text: str, limit: int = LLM_MAX_SOURCE_CHARS) -> str:
     text = text.strip()
     if len(text) <= limit:
         return text
@@ -2184,12 +2183,12 @@ def _coerce_markdown(value: Any) -> str:  # noqa: ANN401 -- model-emitted body c
     return str(value).strip()
 
 
-def _parse_article_fields(payload: dict[str, Any]) -> MistralArticleFields:
+def _parse_article_fields(payload: dict[str, Any]) -> LLMArticleFields:
     title = str(payload.get("title") or "").strip()
     summary = str(payload.get("summary") or "").strip()
     body = _coerce_markdown(payload.get("body")).strip()
     if not title or not summary or not body:
-        raise MistralError("Mistral JSON missing title, summary, or body")
+        raise LLMError("LLM JSON missing title, summary, or body")
     raw_tags = payload.get("tags") or []
     tags: list[str] = []
     if isinstance(raw_tags, list):
@@ -2198,7 +2197,7 @@ def _parse_article_fields(payload: dict[str, Any]) -> MistralArticleFields:
             slug = "".join(ch for ch in slug if ch.isalnum() or ch == "-").strip("-")
             if slug and slug not in tags:
                 tags.append(slug)
-    return MistralArticleFields(
+    return LLMArticleFields(
         title=title,
         summary=summary,
         body=body,
@@ -2212,7 +2211,7 @@ def _parse_article_fields(payload: dict[str, Any]) -> MistralArticleFields:
     )
 
 
-def compose_scrape_article_mistral(
+def compose_scrape_article(
     *,
     service_name: str,
     source_url: str,
@@ -2230,13 +2229,13 @@ def compose_scrape_article_mistral(
     client: LLMProvider | None = None,
     research_client: LLMProvider | None = None,
     session_register: SessionRegister | None = None,
-) -> MistralArticleFields:
-    """Generate newspaper article fields from scrape context via Mistral.
+) -> LLMArticleFields:
+    """Generate newspaper article fields from scrape context via the writer's research -> compose -> grade/revise loop.
 
     ``research_client``/``session_register`` (2026-08-14): override the
     stage-1 research client and/or the compose-session transcript sink used
     for this one call. Both default to None, which resolves to today's exact
-    production behavior (``get_mistral_research_client()`` /
+    production behavior (``get_llm_research_client()`` /
     ``SessionRegisterCassandra()``) -- added so a standalone benchmark
     caller (compose_runner.py) can plug in a different provider and a local
     file-backed register without a queue/Celery/publish coupling, while
@@ -2255,7 +2254,7 @@ def compose_scrape_article_mistral(
     introduction with a fresh headline number. Empty when there's no prior
     article (first_coverage) or the lookup failed -- never blocks a compose.
     """
-    mistral = client or get_mistral_client()
+    llm = client or get_llm_writer_client()
     today = _today_utc()
     source_domain = (urlparse(source_url).netloc or "").lower()
     links_block = _source_links_block(source_links)
@@ -2330,15 +2329,15 @@ Source material (may be days or years old — judge figures against today's date
 {diff_block}
 {_clip(enrichment_block, 5000) if enrichment_block else ""}"""
 
-    from app.core.config import MISTRAL_RESEARCH_SOURCE_CHARS
+    from app.core.config import LLM_RESEARCH_SOURCE_CHARS
 
-    user = _build_user(MISTRAL_MAX_SOURCE_CHARS)
+    user = _build_user(LLM_MAX_SOURCE_CHARS)
     # Research rounds re-send the whole prompt every round — give them a
     # smaller source clip (they decide what to verify, they don't write from
     # it); the full clip rides only in the single stage-2 generation call.
     research_user = (
-        _build_user(MISTRAL_RESEARCH_SOURCE_CHARS)
-        if len(page_text) > MISTRAL_RESEARCH_SOURCE_CHARS
+        _build_user(LLM_RESEARCH_SOURCE_CHARS)
+        if len(page_text) > LLM_RESEARCH_SOURCE_CHARS
         else user
     )
 
@@ -2347,17 +2346,17 @@ Source material (may be days or years old — judge figures against today's date
         user=user,
         research_user=research_user,
         source_url=source_url,
-        mistral=mistral,
+        llm=llm,
         topic=publish_topic,
         research_client=research_client,
         session_register=session_register,
     )
 
 
-def _call_compose_via_writer_tools(**kwargs: object) -> MistralArticleFields:
+def _call_compose_via_writer_tools(**kwargs: object) -> LLMArticleFields:
     """Invoke the shared compose loop, omitting kwargs older workers may lack.
 
-    Rolling deploys can briefly load a ``compose_scrape_article_mistral`` that
+    Rolling deploys can briefly load a ``compose_scrape_article`` that
     passes ``research_user`` while the worker process still holds a pre-clip
     ``_compose_via_writer_tools`` definition — filter to the live signature so
     publish drains do not crash mid-deploy.
@@ -2373,12 +2372,12 @@ def _compose_via_writer_tools(
     system: str,
     user: str,
     source_url: str,
-    mistral: LLMProvider,
+    llm: LLMProvider,
     research_user: str | None = None,
     is_special_edition: bool = False,
     research_client: LLMProvider | None = None,
     session_register: SessionRegister | None = None,
-) -> MistralArticleFields:
+) -> LLMArticleFields:
     """Shared research -> write -> grade/revise loop behind every writer-tools compose path. Only depends on the system/user prompt pair and a label (``source_url``) used for tool scoping and session/investigation bookkeeping — it doesn't assume the source material was a real scraped page, so callers can feed it a from-scratch topic assignment just as well as a scrape diff.
 
     ``research_user``: optional slimmer variant of ``user`` (smaller source
@@ -2390,7 +2389,7 @@ def _compose_via_writer_tools(
     (LLM_MAX_TOOL_ROUNDS) for a genuinely deeper investigation, on top
     of the prompt's own depth instructions.
 
-    ``research_client``/``session_register``: see compose_scrape_article_mistral's docstring.
+    ``research_client``/``session_register``: see compose_scrape_article's docstring.
     """
     from app.modules.newspaper.compose_lock import compose_lock
 
@@ -2399,7 +2398,7 @@ def _compose_via_writer_tools(
             system=system,
             user=user,
             source_url=source_url,
-            mistral=mistral,
+            llm=llm,
             research_user=research_user,
             is_special_edition=is_special_edition,
             research_client=research_client,
@@ -2408,7 +2407,7 @@ def _compose_via_writer_tools(
 
 
 def _run_research_floor(
-    research_mistral: MistralClient,
+    research_llm: MistralProvider,
     system: str,
     stage1_user: str,
     research_schemas: list[dict],
@@ -2432,7 +2431,7 @@ def _run_research_floor(
     domains and stopped at round 4 of a possible 96, floor never engaged.
     """
     from app.core.config import (
-        MISTRAL_TEMP_RESEARCH,
+        LLM_TEMP_RESEARCH,
         RESEARCH_FLOOR_ENABLED,
         RESEARCH_FLOOR_MAX_PASSES,
         RESEARCH_MIN_TOOL_CALLS,
@@ -2454,7 +2453,7 @@ def _run_research_floor(
         if have >= min_calls:
             break
         nudge = _research_floor_nudge(have, min_calls, _format_research_digest(trace))
-        research_mistral.chat_with_tools(
+        research_llm.chat_with_tools(
             [
                 {"role": "system", "content": system + _research_phase_guidance(trace)},
                 {"role": "user", "content": stage1_user + nudge},
@@ -2463,7 +2462,7 @@ def _run_research_floor(
             handlers=research_handlers,
             trace=trace,
             debug=debug,
-            temperature=MISTRAL_TEMP_RESEARCH,
+            temperature=LLM_TEMP_RESEARCH,
             require_tool=None,
             finalize_on_exhaustion=False,
             on_round=(lambda: checkpoint("researching")) if checkpoint else None,
@@ -2472,7 +2471,7 @@ def _run_research_floor(
 
 
 def _run_digest_gap_fill(
-    research_mistral: MistralClient,
+    research_llm: MistralProvider,
     system: str,
     stage1_user: str,
     research_schemas: list[dict],
@@ -2487,7 +2486,7 @@ def _run_digest_gap_fill(
     from app.core.config import (
         DIGEST_GAP_FILL_ENABLED,
         DIGEST_GAP_FILL_MAX_ROUNDS,
-        MISTRAL_TEMP_RESEARCH,
+        LLM_TEMP_RESEARCH,
     )
 
     if not DIGEST_GAP_FILL_ENABLED:
@@ -2495,7 +2494,7 @@ def _run_digest_gap_fill(
     gaps = _extract_unresolved_gaps(digest)
     if not gaps:
         return digest
-    research_mistral.chat_with_tools(
+    research_llm.chat_with_tools(
         [
             {"role": "system", "content": system + _research_phase_guidance(trace)},
             {"role": "user", "content": stage1_user + _gap_fill_nudge(gaps)},
@@ -2504,7 +2503,7 @@ def _run_digest_gap_fill(
         handlers=research_handlers,
         trace=trace,
         debug=debug,
-        temperature=MISTRAL_TEMP_RESEARCH,
+        temperature=LLM_TEMP_RESEARCH,
         require_tool=None,
         max_rounds=DIGEST_GAP_FILL_MAX_ROUNDS,
         # The 2026-07-14 gap-fill pass ran out of rounds here and burned a
@@ -2514,7 +2513,7 @@ def _run_digest_gap_fill(
         show_round_budget=True,
     )
     return _synthesize_research_digest(
-        trace=trace, research_context=stage1_user, provider=research_mistral.provider
+        trace=trace, research_context=stage1_user, provider=research_llm.provider
     )
 
 
@@ -2569,9 +2568,9 @@ def _run_entity_enumeration(*, trace: list[dict], digest: str) -> str:
     if not raw_trace.strip():
         return ""
     try:
-        from app.core.config import MISTRAL_TEMP_RESEARCH
+        from app.core.config import LLM_TEMP_RESEARCH
 
-        digest_client = get_mistral_digest_client()
+        digest_client = get_llm_digest_client()
         enumeration = digest_client.chat_completion(
             [
                 {
@@ -2584,7 +2583,7 @@ def _run_entity_enumeration(*, trace: list[dict], digest: str) -> str:
                 },
             ],
             json_object=False,
-            temperature=MISTRAL_TEMP_RESEARCH,
+            temperature=LLM_TEMP_RESEARCH,
         )
         return (enumeration or "").strip()
     except Exception:
@@ -2621,7 +2620,7 @@ def _enumeration_gap_fill_nudge(gaps: str) -> str:
 
 
 def _run_enumeration_gap_fill(
-    research_mistral: MistralClient,
+    research_llm: MistralProvider,
     system: str,
     stage1_user: str,
     research_schemas: list[dict],
@@ -2634,11 +2633,11 @@ def _run_enumeration_gap_fill(
 ) -> None:
     """One bounded extra tool-calling pass targeting the entity enumeration's own Coverage Gaps -- distinct from (and runs after) the plain digest gap-fill, since the enumeration surfaces gaps a prose digest's generic cap can miss entirely."""
     from app.core.config import (
-        MISTRAL_TEMP_RESEARCH,
+        LLM_TEMP_RESEARCH,
         SPECIAL_EDITION_ENUMERATION_GAP_FILL_MAX_ROUNDS,
     )
 
-    research_mistral.chat_with_tools(
+    research_llm.chat_with_tools(
         [
             {"role": "system", "content": system + _research_phase_guidance(trace)},
             {"role": "user", "content": stage1_user + _enumeration_gap_fill_nudge(gaps)},
@@ -2647,7 +2646,7 @@ def _run_enumeration_gap_fill(
         handlers=research_handlers,
         trace=trace,
         debug=debug,
-        temperature=MISTRAL_TEMP_RESEARCH,
+        temperature=LLM_TEMP_RESEARCH,
         require_tool=None,
         max_rounds=SPECIAL_EDITION_ENUMERATION_GAP_FILL_MAX_ROUNDS,
         finalize_on_exhaustion=False,
@@ -2681,9 +2680,9 @@ def _run_narrative_outline(*, digest: str, enumeration: str) -> str:
     if not digest.strip() and not enumeration.strip():
         return ""
     try:
-        from app.core.config import MISTRAL_TEMP_RESEARCH
+        from app.core.config import LLM_TEMP_RESEARCH
 
-        digest_client = get_mistral_digest_client()
+        digest_client = get_llm_digest_client()
         outline = digest_client.chat_completion(
             [
                 {
@@ -2695,7 +2694,7 @@ def _run_narrative_outline(*, digest: str, enumeration: str) -> str:
                 },
             ],
             json_object=False,
-            temperature=MISTRAL_TEMP_RESEARCH,
+            temperature=LLM_TEMP_RESEARCH,
         )
         return (outline or "").strip()
     except Exception:
@@ -2704,7 +2703,7 @@ def _run_narrative_outline(*, digest: str, enumeration: str) -> str:
 
 
 def _run_special_edition_deepening(
-    research_mistral: MistralClient,
+    research_llm: MistralProvider,
     system: str,
     stage1_user: str,
     research_schemas: list[dict],
@@ -2725,7 +2724,7 @@ def _run_special_edition_deepening(
     gaps = _extract_enumeration_gaps(enumeration) if enumeration else ""
     if gaps:
         _run_enumeration_gap_fill(
-            research_mistral,
+            research_llm,
             system,
             stage1_user,
             research_schemas,
@@ -2736,7 +2735,7 @@ def _run_special_edition_deepening(
             checkpoint=checkpoint,
         )
         digest = _synthesize_research_digest(
-            trace=trace, research_context=stage1_user, provider=research_mistral.provider
+            trace=trace, research_context=stage1_user, provider=research_llm.provider
         )
     outline = _run_narrative_outline(digest=digest, enumeration=enumeration)
     return digest, enumeration, outline
@@ -2761,8 +2760,8 @@ def _append_stage2_debug_turn(debug: dict, digest: str, payload: dict) -> None:
 
 def _run_two_stage_compose(
     *,
-    research_mistral: MistralClient,
-    mistral: MistralClient,
+    research_llm: MistralProvider,
+    llm: MistralProvider,
     system: str,
     user: str,
     research_user: str | None,
@@ -2775,7 +2774,7 @@ def _run_two_stage_compose(
     is_special_edition: bool = False,
 ) -> dict:
     """Two-stage compose: cold research (tools, low temp) on the Small research tier, a floor + gap-fill pass if it under-researched, a structured digest handoff, then a warm no-tools generation on the writer tier, and finally deterministic grade/revise."""
-    from app.core.config import MISTRAL_MODEL_RESEARCH, MISTRAL_TEMP_RESEARCH, MISTRAL_TEMP_WRITE
+    from app.core.config import LLM_TEMP_RESEARCH, LLM_TEMP_WRITE, MISTRAL_MODEL_RESEARCH
 
     checkpoint("researching")
     debug["research_model"] = MISTRAL_MODEL_RESEARCH
@@ -2790,7 +2789,7 @@ def _run_two_stage_compose(
         s for s in tool_schemas if (s.get("function") or {}).get("name") != "review_draft"
     ]
     research_handlers = {k: v for k, v in tool_handlers.items() if k != "review_draft"}
-    research_mistral.chat_with_tools(
+    research_llm.chat_with_tools(
         [
             {"role": "system", "content": system + _research_phase_guidance(trace)},
             {"role": "user", "content": stage1_user},
@@ -2799,7 +2798,7 @@ def _run_two_stage_compose(
         handlers=research_handlers,
         trace=trace,
         debug=debug,
-        temperature=MISTRAL_TEMP_RESEARCH,
+        temperature=LLM_TEMP_RESEARCH,
         require_tool=None,
         max_rounds=max_rounds,
         # Research runs for its tool side-effects (the trace); the
@@ -2810,7 +2809,7 @@ def _run_two_stage_compose(
         show_round_budget=True,
     )
     _run_research_floor(
-        research_mistral,
+        research_llm,
         system,
         stage1_user,
         research_schemas,
@@ -2823,10 +2822,10 @@ def _run_two_stage_compose(
     # Stage 1b — synthesize a structured Research Digest handoff so Stage 2
     # grounds on high-signal facts, not raw tool JSON.
     digest = _synthesize_research_digest(
-        trace=trace, research_context=stage1_user, provider=research_mistral.provider
+        trace=trace, research_context=stage1_user, provider=research_llm.provider
     )
     digest = _run_digest_gap_fill(
-        research_mistral,
+        research_llm,
         system,
         stage1_user,
         research_schemas,
@@ -2845,7 +2844,7 @@ def _run_two_stage_compose(
     outline = ""
     if is_special_edition:
         digest, enumeration, outline = _run_special_edition_deepening(
-            research_mistral,
+            research_llm,
             system,
             stage1_user,
             research_schemas,
@@ -2864,12 +2863,12 @@ def _run_two_stage_compose(
         outline=outline,
     )
     gen_system = system + _STAGE2_GENERATION_GUIDANCE
-    payload = mistral.chat_json_object(
+    payload = llm.chat_json_object(
         [
             {"role": "system", "content": gen_system},
             {"role": "user", "content": gen_user},
         ],
-        temperature=MISTRAL_TEMP_WRITE,
+        temperature=LLM_TEMP_WRITE,
     )
     _append_stage2_debug_turn(debug, digest, payload)
     # Stage 3+4 — deterministic grade, then one revision if weak. Revision
@@ -2879,7 +2878,7 @@ def _run_two_stage_compose(
     # replacement) can actually be fixed, not just reworded from what
     # stage 1 already gathered.
     return _review_and_revise(
-        mistral,
+        llm,
         payload,
         system=system,
         gen_user=gen_user,
@@ -2900,7 +2899,7 @@ def _apply_post_compose_gates(
     user: str,
     research_user: str | None,
     service_id: str = "",
-    glossary_client: MistralClient | None = None,
+    glossary_client: MistralProvider | None = None,
 ) -> dict:
     """Sequential deterministic post-compose gates plus writer-declared judgment flags read from the trace. Order matters: the defunct-entity veto must precede the link-gate delinker below, so it still sees the writer's original links."""
     # Stage-2 assembly: append every successfully fetched research URL the
@@ -3022,7 +3021,7 @@ def _record_compose_telemetry(
     """Best-effort: store investigation findings and tool-insight telemetry for this compose session. Never raises — a telemetry failure must not fail the compose.
 
     `writer_model` must be the writer client's own resolved model (e.g.
-    ``mistral.model``), not a config constant — a canary/DeepSeek-routed call
+    ``llm.model``), not a config constant — a canary/DeepSeek-routed call
     resolves to a different model than its purpose's configured default, and
     compose_sessions.model is the only record of which model actually wrote
     this article (root-caused 2026-08-05, alongside the provider-routing
@@ -3076,12 +3075,12 @@ def _compose_via_writer_tools_locked(
     system: str,
     user: str,
     source_url: str,
-    mistral: LLMProvider,
+    llm: LLMProvider,
     research_user: str | None = None,
     is_special_edition: bool = False,
     research_client: LLMProvider | None = None,
     session_register: SessionRegister | None = None,
-) -> MistralArticleFields:
+) -> LLMArticleFields:
     from app.core.config import WRITER_TOOLS_ENABLED
 
     messages = [
@@ -3093,9 +3092,9 @@ def _compose_via_writer_tools_locked(
         try:
             from app.core.config import (
                 LLM_MAX_TOOL_ROUNDS,
+                LLM_TIMEOUT_SECONDS,
+                LLM_TIMEOUT_SPECIAL_EDITION_MULTIPLIER,
                 MISTRAL_MODEL_RESEARCH,
-                MISTRAL_TIMEOUT_SECONDS,
-                MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER,
                 WRITER_TWO_STAGE,
             )
             from app.modules.ai.writer_tools import all_tools
@@ -3106,12 +3105,12 @@ def _compose_via_writer_tools_locked(
             # is large enough that the plain per-attempt timeout isn't
             # always enough (root-caused 2026-08-04 -- see config.py).
             research_timeout = (
-                MISTRAL_TIMEOUT_SECONDS * MISTRAL_TIMEOUT_SPECIAL_EDITION_MULTIPLIER
+                LLM_TIMEOUT_SECONDS * LLM_TIMEOUT_SPECIAL_EDITION_MULTIPLIER
                 if is_special_edition
                 else None
             )
 
-            research_mistral = research_client or get_mistral_research_client(
+            research_llm = research_client or get_llm_research_client(
                 timeout=research_timeout
             )
             register = session_register or SessionRegisterCassandra()
@@ -3151,9 +3150,9 @@ def _compose_via_writer_tools_locked(
             _sid, _screated = register.new_ref()
 
             def _usage_so_far() -> dict[str, int]:
-                """Combined token usage across both clients used in this session (research_mistral for stage 1, mistral for stage 2/revise) — each is a fresh instance per compose, so its counter is this session's total, not a lifetime one."""
-                research_usage = research_mistral.usage_totals()
-                write_usage = mistral.usage_totals()
+                """Combined token usage across both clients used in this session (research_llm for stage 1, llm for stage 2/revise) — each is a fresh instance per compose, so its counter is this session's total, not a lifetime one."""
+                research_usage = research_llm.usage_totals()
+                write_usage = llm.usage_totals()
                 return {
                     key: research_usage[key] + write_usage[key]
                     for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
@@ -3169,15 +3168,15 @@ def _compose_via_writer_tools_locked(
                         service_id=source_url,
                         source_url=source_url,
                         model=(
-                            research_mistral.model
+                            research_llm.model
                             if stage_status == "researching"
-                            else mistral.model
+                            else llm.model
                         ),
                         # final_output is otherwise always empty on a terminal
                         # failure status -- reusing it to carry the exception
                         # text costs no schema change and is the ONLY place
                         # this ever gets persisted. Root-caused 2026-08-07:
-                        # a MistralError from the API (rate limit, context
+                        # a LLMError from the API (rate limit, context
                         # length, etc.) checkpointed status='error' with no
                         # detail anywhere, Bugsnag had no record of it either,
                         # and this host has no log access to fall back on --
@@ -3197,8 +3196,8 @@ def _compose_via_writer_tools_locked(
 
             if WRITER_TWO_STAGE:
                 payload = _run_two_stage_compose(
-                    research_mistral=research_mistral,
-                    mistral=mistral,
+                    research_llm=research_llm,
+                    llm=llm,
                     system=system,
                     user=user,
                     research_user=research_user,
@@ -3212,7 +3211,7 @@ def _compose_via_writer_tools_locked(
                 )
             else:
                 # Legacy single agentic loop: tools + final article in one pass.
-                raw = mistral.chat_with_tools(
+                raw = llm.chat_with_tools(
                     [
                         {"role": "system", "content": system + _TOOLS_GUIDANCE},
                         {"role": "user", "content": user},
@@ -3232,7 +3231,7 @@ def _compose_via_writer_tools_locked(
                 user=user,
                 research_user=research_user,
                 service_id=source_url,
-                glossary_client=research_mistral,
+                glossary_client=research_llm,
             )
             raw = json.dumps(payload)
             _duration_ms = int((_time.monotonic() - _t0) * 1000)
@@ -3240,8 +3239,8 @@ def _compose_via_writer_tools_locked(
                 source_url,
                 trace,
                 raw,
-                report_errors_model=(research_mistral.model if WRITER_TWO_STAGE else mistral.model),
-                writer_model=mistral.model,
+                report_errors_model=(research_llm.model if WRITER_TWO_STAGE else llm.model),
+                writer_model=llm.model,
                 duration_ms=_duration_ms,
                 session_id=_sid,
                 created_at=_screated,
@@ -3257,7 +3256,7 @@ def _compose_via_writer_tools_locked(
             # below: falling through would trigger the ungrounded single-shot
             # fallback, i.e. compose exactly the evidence-free article the
             # writer just declined to write. The trace already carries the
-            # spike call (mistral_client records it before re-raising), so
+            # spike call (llm_openai_compatible.py records it before re-raising), so
             # the Sessions view shows the writer's own reasoning.
             logger.info(
                 "writer spiked story for %s (%s): %s",
@@ -3268,7 +3267,7 @@ def _compose_via_writer_tools_locked(
             with contextlib.suppress(Exception):
                 _checkpoint("aborted_by_writer")
             raise
-        except MistralCreditError as exc:
+        except LLMCreditError as exc:
             # 401/402 — no retry will help (bad key or credit exhausted), so
             # tag it distinctly from a generic API error: the admin Sessions
             # view and the queue's last_reason should say WHY at a glance
@@ -3276,7 +3275,7 @@ def _compose_via_writer_tools_locked(
             with contextlib.suppress(Exception):
                 _checkpoint("credit_insufficient", detail=str(exc))
             raise
-        except MistralError as exc:
+        except LLMError as exc:
             # A real API error (rate limit, context length, etc.) — already
             # retried with backoff inside the client for the retryable cases.
             # Don't burn another call on a single-shot retry that will just
@@ -3286,7 +3285,7 @@ def _compose_via_writer_tools_locked(
             # mid-compose). logger.exception here mirrors the fallback
             # branch's own 2026-07-16 fix below (same "exception vanishes
             # with zero trace" failure mode) -- root-caused live 2026-08-07
-            # when a MistralError from this exact branch left no detail
+            # when a LLMError from this exact branch left no detail
             # anywhere (Bugsnag had no record, this host has no log access).
             logger.exception("compose hit a Mistral/DeepSeek API error for %s", source_url)
             with contextlib.suppress(Exception):
@@ -3312,7 +3311,7 @@ def _compose_via_writer_tools_locked(
                 with contextlib.suppress(Exception):
                     playwright_session.close()
 
-    payload = mistral.chat_json_object(messages)
+    payload = llm.chat_json_object(messages)
     return _parse_article_fields(payload)
 
 
@@ -3372,17 +3371,17 @@ several calls used limit 3-4 (below even the default), and most queries
 kept circling back to the same two sources instead of branching out."""
 
 
-def compose_assignment_article_mistral(
+def compose_assignment_article(
     *,
     brief_title: str,
     brief_body: str,
     keywords: str,
     brief_id: str,
     is_special_edition: bool = False,
-    client: MistralClient | None = None,
-) -> MistralArticleFields:
-    """Generate a from-scratch article for an editor-assigned topic (no scraped source page). Unlike ``compose_scrape_article_mistral``, the brief text is NOT verified fact — the model must substantiate the topic itself via tools before writing, using the same research -> write -> grade/revise loop. ``is_special_edition`` requests a longer, multi-angle in-depth treatment instead of the standard length-scaled-to-substance pass."""
-    mistral = client or get_mistral_client()
+    client: MistralProvider | None = None,
+) -> LLMArticleFields:
+    """Generate a from-scratch article for an editor-assigned topic (no scraped source page). Unlike ``compose_scrape_article``, the brief text is NOT verified fact — the model must substantiate the topic itself via tools before writing, using the same research -> write -> grade/revise loop. ``is_special_edition`` requests a longer, multi-angle in-depth treatment instead of the standard length-scaled-to-substance pass."""
+    llm = client or get_llm_writer_client()
     today = _today_utc()
 
     system = _writer_system_prompt(today, assignment=True)
@@ -3408,27 +3407,27 @@ verifiable facts before writing.{_SPECIAL_EDITION_DEPTH_INSTRUCTIONS if is_speci
         system=system,
         user=user,
         source_url=f"editorial://brief/{brief_id}",
-        mistral=mistral,
+        llm=llm,
         topic="editorial_assignment",
         is_special_edition=is_special_edition,
     )
 
 
-def compose_recap_from_transcript_mistral(
+def compose_recap_from_transcript(
     *,
     service_name: str,
     source_url: str,
     page_title: str,
     transcript_text: str,
-    client: MistralClient | None = None,
-) -> MistralArticleFields:
+    client: MistralProvider | None = None,
+) -> LLMArticleFields:
     """Community-call recap from a video transcript (Phase 4).
 
     Uses the premium model — transcripts are long-form input.
     """
     from app.core.config import MISTRAL_MODEL_PREMIUM
 
-    mistral = client or MistralClient(model=MISTRAL_MODEL_PREMIUM)
+    llm = client or MistralProvider(model=MISTRAL_MODEL_PREMIUM)
     system = (
         "You are a news editor recapping an Algorand community call from its "
         "transcript. Summarize what was discussed and announced for readers who "
@@ -3453,7 +3452,7 @@ Transcript:
 {_clip(transcript_text, 12000)}
 ```"""
 
-    payload = mistral.chat_json_object(
+    payload = llm.chat_json_object(
         [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -3463,15 +3462,15 @@ Transcript:
     return _parse_article_fields(payload)
 
 
-def compose_weekly_digest_article_mistral(
+def compose_weekly_digest_article(
     context: WeeklyDigestContext,
     *,
-    client: MistralClient | None = None,
-) -> MistralArticleFields:
-    """Generate full weekly digest (price + feed highlights) via Mistral."""
+    client: MistralProvider | None = None,
+) -> LLMArticleFields:
+    """Generate full weekly digest (price + feed highlights) via the digest-tier LLM."""
     from app.core.config import PUBLIC_ARTICLE_BASE_URL
 
-    mistral = client or get_mistral_digest_client()
+    llm = client or get_llm_digest_client()
     snap = context.price
     article_lines = []
     for item in context.articles[:25]:
@@ -3506,7 +3505,7 @@ Market ({snap.asset_name} / {snap.asset_id}):
 Articles published this week ({len(context.articles)}):
 {feed_block}{_price_metrics_block(snap.asset_id)}"""
 
-    payload = mistral.chat_json_object(
+    payload = llm.chat_json_object(
         [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -3524,7 +3523,7 @@ def split_markdown_blocks(text: str) -> list[str]:
     """Split markdown into blank-line-separated blocks, never cutting inside a fenced code block.
 
     Blocks, not sentences, are the translation unit (see
-    translate_article_mistral). A markdown table has no blank lines inside it,
+    translate_article). A markdown table has no blank lines inside it,
     so it survives as one block for free — which matters, because 59% of the
     live corpus contains one. Fenced code needs the explicit guard: a fence
     with a blank line in it would otherwise be split down the middle and both
@@ -3556,15 +3555,15 @@ def _aligned_blocks(payload: dict, expected: int) -> list[str] | None:
     return out if all(out) else None
 
 
-def translate_article_mistral(
+def translate_article(
     *,
     english_title: str,
     english_summary: str,
     english_body: str,
     target_language: str,
-    client: MistralClient | None = None,
+    client: MistralProvider | None = None,
 ) -> dict[str, str]:
-    """Translate an English article to the target language via Mistral, block-aligned to the source.
+    """Translate an English article to the target language via the translate-tier LLM, block-aligned to the source.
 
     Runs on the Small tier (MISTRAL_MODEL_TRANSLATE) — localization needs no
     research or editorial judgment, and this fires once per target language per
@@ -3591,7 +3590,7 @@ def translate_article_mistral(
         glossary_block,
     )
 
-    mistral = client or get_mistral_translate_client()
+    llm = client or get_llm_translate_client()
 
     lang_name = ARTICLE_TRANSLATION_LANG_NAMES.get(target_language, target_language)
     blocks = split_markdown_blocks(english_body)
@@ -3675,7 +3674,7 @@ Body — {n} blocks, return exactly {n}:
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
-    payload = mistral.chat_json_object(messages)
+    payload = llm.chat_json_object(messages)
     translated = _aligned_blocks(payload, n)
     if translated is None:
         # One corrective round. The model usually merges short adjacent blocks;
@@ -3700,7 +3699,7 @@ Body — {n} blocks, return exactly {n}:
                 ),
             }
         )
-        payload = mistral.chat_json_object(messages)
+        payload = llm.chat_json_object(messages)
         translated = _aligned_blocks(payload, n)
     if translated is None:
         # Storing a misaligned translation is how a 42-block article became 9

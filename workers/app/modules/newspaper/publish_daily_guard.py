@@ -6,6 +6,7 @@ import logging
 from datetime import UTC, datetime
 
 import redis
+
 from app.core import config
 from app.modules.newspaper.publish_policy import PublishTier
 

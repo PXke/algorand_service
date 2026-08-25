@@ -42,7 +42,7 @@ def _compose_edit_fields(
     difference here is first_coverage=False + a prior_coverage_block, same
     as any non-first content_update already gets.
     """
-    from app.modules.ai.mistral_client import MistralCreditError, MistralError
+    from app.modules.ai.llm_provider import LLMCreditError, LLMError
     from app.modules.ai.story_spike import StorySpikedError
     from app.modules.newspaper.article_composer import compose_scrape_article
     from app.modules.newspaper.article_grader import prior_service_article_summary
@@ -52,7 +52,7 @@ def _compose_edit_fields(
         # No template fallback exists (owner decision 2026-07-14: a lesser,
         # robotic article is worse than no article) — Mistral or nothing.
         if not mistral_configured():
-            raise MistralError(
+            raise LLMError(
                 "MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback"
             )
         try:
@@ -125,10 +125,10 @@ def _compose_edit_fields(
             "reason": f"{spike.category}: {spike.reason}",
             "linked_article_id": linked_id,
         }
-    except MistralError as exc:
-        credit_issue = isinstance(exc, MistralCreditError)
+    except LLMError as exc:
+        credit_issue = isinstance(exc, LLMCreditError)
         status = "mistral_credit_insufficient" if credit_issue else "mistral_failed"
-        logger.error("Mistral article-edit compose failed for %s: %s", linked_id, exc)
+        logger.error("LLM article-edit compose failed for %s: %s", linked_id, exc)
         return None, {"status": status, "linked_article_id": linked_id, "detail": str(exc)}
 
 

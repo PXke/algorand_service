@@ -1,6 +1,6 @@
 """Frozen source fixtures for scripts/eval_compose_prompts.py.
 
-Each fixture pins the exact `compose_scrape_article_mistral` inputs for one
+Each fixture pins the exact `compose_scrape_article` inputs for one
 realistic scenario the compose prompt has to get right. Keep this list SMALL
 (5-10) and STABLE — the point is a fixed input so the only thing that changes
 between two runs is the prompt, making outputs diffable. Add a fixture only

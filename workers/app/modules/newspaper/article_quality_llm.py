@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from app.modules.ai.mistral_client import MistralClient
+    from app.modules.ai.llm_openai_compatible import MistralProvider
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ _FALLBACK_QUALITY = {
 
 def _parse_quality_response(raw: Any) -> dict[str, Any] | None:  # noqa: ANN401 -- model output, dict or JSON-in-string
     """Parse rubric JSON; salvage fenced/prose-wrapped objects when possible."""
-    from app.modules.ai.mistral_client import _parse_json_object
+    from app.modules.ai.llm_openai_compatible import _parse_json_object
 
     if isinstance(raw, dict):
         return raw
@@ -84,7 +84,7 @@ _QUALITY_DIMS = ("narrative_synthesis", "technical_depth", "critical_distance", 
 
 
 def _graded_scores(
-    mistral: MistralClient, messages: list[dict], *, temperature: float
+    llm: MistralProvider, messages: list[dict], *, temperature: float
 ) -> tuple[dict[str, int | None], dict, list[str]]:
     """Call the rubric, retrying once for any dimension the first pass left null. Returns (scores, parsed_first_response, missing_dims_after_retry).
 
@@ -94,12 +94,12 @@ def _graded_scores(
     any still-missing dimension FAILS CLOSED at 2 (below every revision
     threshold), same stance as _FALLBACK_QUALITY.
     """
-    parsed = mistral.chat_json_object(messages, temperature=temperature, max_tokens=800)
+    parsed = llm.chat_json_object(messages, temperature=temperature, max_tokens=800)
     if not isinstance(parsed, dict):
         raise ValueError("non-object LLM grade")
     scores = {k: _clamp_score(parsed.get(k)) for k in _QUALITY_DIMS}
     if any(v is None for v in scores.values()):
-        retry = mistral.chat_json_object(messages, temperature=temperature, max_tokens=800)
+        retry = llm.chat_json_object(messages, temperature=temperature, max_tokens=800)
         if isinstance(retry, dict):
             for k in _QUALITY_DIMS:
                 if scores[k] is None:
@@ -148,11 +148,11 @@ def grade_article_quality_llm(
     *,
     title: str,
     body: str,
-    client: MistralClient | None = None,
+    client: MistralProvider | None = None,
 ) -> dict[str, Any]:
     """Fast Small-tier rubric for narrative synthesis and technical depth."""
     from app.core.config import WRITER_QUALITY_LLM_ENABLED
-    from app.modules.ai.mistral_client import get_mistral_digest_client
+    from app.modules.ai.llm_purpose_router import get_llm_digest_client
 
     if not WRITER_QUALITY_LLM_ENABLED:
         return {
@@ -169,10 +169,10 @@ def grade_article_quality_llm(
             "technical_depth": None,
             "issues": ["empty body"],
         }
-    mistral: MistralClient = client or get_mistral_digest_client()
+    llm: MistralProvider = client or get_llm_digest_client()
     snippet = text_body[:12000]
     try:
-        from app.core.config import MISTRAL_TEMP_RESEARCH
+        from app.core.config import LLM_TEMP_RESEARCH
 
         messages = [
             {"role": "system", "content": _QUALITY_RUBRIC},
@@ -182,7 +182,7 @@ def grade_article_quality_llm(
             },
         ]
         scores, parsed, missing = _graded_scores(
-            mistral, messages, temperature=MISTRAL_TEMP_RESEARCH
+            llm, messages, temperature=LLM_TEMP_RESEARCH
         )
         issues = [str(i).strip() for i in (parsed.get("issues") or []) if str(i).strip()][:6]
         if missing:

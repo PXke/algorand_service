@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.modules.ai.mistral_client import MistralClient
+from app.modules.ai.llm_openai_compatible import MistralProvider
 
 
 def _msg(content: str = "", tool_calls: list[dict] | None = None) -> dict:
@@ -20,7 +20,7 @@ def _tool_call() -> list[dict]:
 
 def test_round_budget_note_mid_budget() -> None:
     """A round with headroom left states how many rounds remain and frames depth as cheap."""
-    note = MistralClient._round_budget_note(4, 24)
+    note = MistralProvider._round_budget_note(4, 24)
     assert "round 5 of 24" in note
     assert "19 remain" in note
     assert "cheap" in note
@@ -28,14 +28,14 @@ def test_round_budget_note_mid_budget() -> None:
 
 def test_round_budget_note_on_last_round() -> None:
     """The final round says so explicitly, telling the model to wrap up rather than start something new."""
-    note = MistralClient._round_budget_note(23, 24)
+    note = MistralProvider._round_budget_note(23, 24)
     assert "LAST round" in note
     assert "Wrap up" in note
 
 
 def test_default_off_no_note_injected(monkeypatch: pytest.MonkeyPatch) -> None:
     """show_round_budget defaults to False -- existing callers (revision, single-stage) are unaffected."""
-    client = MistralClient(api_key="test-key")
+    client = MistralProvider(api_key="test-key")
     payloads: list[dict] = []
 
     def fake_post(payload: dict) -> dict:
@@ -51,7 +51,7 @@ def test_default_off_no_note_injected(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_enabled_note_appears_in_outgoing_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     """With show_round_budget=True, each round's outgoing request carries a fresh note."""
-    client = MistralClient(api_key="test-key")
+    client = MistralProvider(api_key="test-key")
     payloads: list[dict] = []
     seq = [_msg(tool_calls=_tool_call()), _msg(content="FINAL")]
     calls = {"n": 0}
@@ -78,7 +78,7 @@ def test_enabled_note_appears_in_outgoing_payload(monkeypatch: pytest.MonkeyPatc
 
 def test_note_never_persisted_into_the_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
     """The note must not leak into debug['messages'] -- it would otherwise compound across rounds exactly like the reasoning_content bug (2026-08-06)."""
-    client = MistralClient(api_key="test-key")
+    client = MistralProvider(api_key="test-key")
     seq = [_msg(tool_calls=_tool_call()), _msg(content="FINAL")]
     calls = {"n": 0}
 
@@ -102,7 +102,7 @@ def test_note_never_persisted_into_the_transcript(monkeypatch: pytest.MonkeyPatc
 
 def test_note_reflects_the_actual_max_rounds(monkeypatch: pytest.MonkeyPatch) -> None:
     """The stated ceiling tracks whatever max_rounds this specific call was given, not a hardcoded number."""
-    client = MistralClient(api_key="test-key")
+    client = MistralProvider(api_key="test-key")
     payloads: list[dict] = []
 
     def fake_post(payload: dict) -> dict:

@@ -15,8 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.modules.ai import mistral_compose as mc
-from app.modules.ai.mistral_compose import TranslationAlignmentError, split_markdown_blocks
+from app.modules.ai import llm_compose as mc
+from app.modules.ai.llm_compose import TranslationAlignmentError, split_markdown_blocks
 
 _BODY = """## Heading
 
@@ -43,7 +43,7 @@ def _client(monkeypatch: pytest.MonkeyPatch, *payloads: dict) -> list[list[dict]
 
     monkeypatch.setattr(
         mc,
-        "get_mistral_translate_client",
+        "get_llm_translate_client",
         lambda **_kw: SimpleNamespace(chat_json_object=_chat_json_object),
     )
     return seen
@@ -66,7 +66,7 @@ def test_split_keeps_tables_and_fences_whole() -> None:
 def test_empty_body_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
     """Returns the source untouched (and calls no model) when there is nothing to translate."""
     seen = _client(monkeypatch)
-    out = mc.translate_article_mistral(
+    out = mc.translate_article(
         english_title="T", english_summary="S", english_body="   ", target_language="fr"
     )
     assert out["body"] == "   "
@@ -80,7 +80,7 @@ def test_aligned_translation_is_rejoined_in_order(monkeypatch: pytest.MonkeyPatc
         monkeypatch,
         {"title": "T", "summary": "S", "blocks": [f"bloc {i}" for i in range(n)]},
     )
-    out = mc.translate_article_mistral(
+    out = mc.translate_article(
         english_title="T", english_summary="S", english_body=_BODY, target_language="fr"
     )
     assert split_markdown_blocks(out["body"]) == [f"bloc {i}" for i in range(n)]
@@ -94,7 +94,7 @@ def test_misalignment_triggers_one_corrective_retry(monkeypatch: pytest.MonkeyPa
         {"title": "T", "summary": "S", "blocks": ["merged everything"]},  # too few
         {"title": "T", "summary": "S", "blocks": [f"b{i}" for i in range(n)]},  # corrected
     )
-    out = mc.translate_article_mistral(
+    out = mc.translate_article(
         english_title="T", english_summary="S", english_body=_BODY, target_language="fr"
     )
     assert len(seen) == 2
@@ -115,7 +115,7 @@ def test_unfixable_misalignment_raises_instead_of_storing(
         {"title": "T", "summary": "S", "blocks": ["one", "two"]},
     )
     with pytest.raises(TranslationAlignmentError):
-        mc.translate_article_mistral(
+        mc.translate_article(
             english_title="T", english_summary="S", english_body=_BODY, target_language="ps"
         )
 
@@ -131,7 +131,7 @@ def test_blank_block_is_treated_as_misaligned(monkeypatch: pytest.MonkeyPatch) -
         {"title": "T", "summary": "S", "blocks": blocks},
     )
     with pytest.raises(TranslationAlignmentError):
-        mc.translate_article_mistral(
+        mc.translate_article(
             english_title="T", english_summary="S", english_body=_BODY, target_language="ar"
         )
 
@@ -143,7 +143,7 @@ def test_prompt_states_the_block_count(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch,
         {"title": "T", "summary": "S", "blocks": [f"b{i}" for i in range(n)]},
     )
-    mc.translate_article_mistral(
+    mc.translate_article(
         english_title="T", english_summary="S", english_body=_BODY, target_language="fr"
     )
     system, user = seen[0][0]["content"], seen[0][1]["content"]
@@ -159,7 +159,7 @@ def test_prompt_pins_the_numeral_system(monkeypatch: pytest.MonkeyPatch) -> None
         monkeypatch,
         {"title": "T", "summary": "S", "blocks": [f"b{i}" for i in range(n)]},
     )
-    mc.translate_article_mistral(
+    mc.translate_article(
         english_title="T", english_summary="S", english_body=_BODY, target_language="fa"
     )
     system = seen[0][0]["content"]
@@ -173,13 +173,13 @@ def test_glossary_and_numerals_are_language_specific(monkeypatch: pytest.MonkeyP
     payload = {"title": "T", "summary": "S", "blocks": [f"b{i}" for i in range(n)]}
 
     seen_fr = _client(monkeypatch, payload)
-    mc.translate_article_mistral(
+    mc.translate_article(
         english_title="T", english_summary="S", english_body=_BODY, target_language="fr"
     )
     fr = seen_fr[0][0]["content"]
 
     seen_fa = _client(monkeypatch, payload)
-    mc.translate_article_mistral(
+    mc.translate_article(
         english_title="T", english_summary="S", english_body=_BODY, target_language="fa"
     )
     fa = seen_fa[0][0]["content"]
@@ -198,7 +198,7 @@ def test_prompt_bans_colon_label_titles_and_preserves_named_works(
     Root-caused 2026-07-29 on a live translation: "Algorand Dev Retreat's Sound
     of AVM turns transactions into live synth music" became "Le Son de l'AVM
     d'Algorand : transformer les transactions..." — the colon-label shape the
-    English writer prompt explicitly bans (mistral_compose.py:1402), and "Dev
+    English writer prompt explicitly bans (llm_compose.py:1402), and "Dev
     Retreat" (the event) was dropped entirely.
     """
     n = len(split_markdown_blocks(_BODY))
@@ -206,7 +206,7 @@ def test_prompt_bans_colon_label_titles_and_preserves_named_works(
         monkeypatch,
         {"title": "T", "summary": "S", "blocks": [f"b{i}" for i in range(n)]},
     )
-    mc.translate_article_mistral(
+    mc.translate_article(
         english_title="T", english_summary="S", english_body=_BODY, target_language="fr"
     )
     system = seen[0][0]["content"]

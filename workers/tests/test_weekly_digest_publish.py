@@ -7,7 +7,7 @@ from typing import Any, Never
 
 import pytest
 
-from app.modules.ai.mistral_client import MistralError
+from app.modules.ai.llm_provider import LLMError
 from app.modules.newspaper import weekly_digest_publish
 from app.modules.newspaper.price_analysis import WeeklyPriceSnapshot
 from app.modules.newspaper.weekly_digest import WeeklyDigestContext
@@ -185,7 +185,7 @@ def test_run_skips_cleanly_when_mistral_unavailable(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(weekly_digest_publish, "build_weekly_digest", lambda **_kw: ctx)
 
     def fail_compose(_ctx: WeeklyDigestContext) -> Never:
-        raise MistralError("MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback")
+        raise LLMError("MISTRAL_ENABLED and MISTRAL_API_KEY required — no template fallback")
 
     monkeypatch.setattr(weekly_digest_publish, "compose_weekly_digest", fail_compose)
 
@@ -197,7 +197,7 @@ def test_run_skips_cleanly_when_mistral_unavailable(monkeypatch: pytest.MonkeyPa
 def test_run_skips_cleanly_during_peak_hours(monkeypatch: pytest.MonkeyPatch) -> None:
     """The weekly-digest path is one of the 9 real compose-triggering task paths -- a PeakHoursBlockedError (owner decision 2026-08-15: no exceptions) must be reported as a routine skip, not logged/returned as a Mistral failure."""
     import app.core.config as config
-    from app.modules.ai.mistral_client import PeakHoursBlockedError
+    from app.modules.ai.llm_purpose_router import PeakHoursBlockedError
 
     monkeypatch.setattr(config, "PRICE_ANALYSIS_ENABLED", True)
     ctx = WeeklyDigestContext(

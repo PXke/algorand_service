@@ -8,7 +8,7 @@ from typing import Any, Never
 
 import pytest
 
-from app.modules.ai.mistral_compose import (
+from app.modules.ai.llm_compose import (
     _parse_article_fields,
     _review_and_revise,
     _revision_length_rule,
@@ -486,7 +486,7 @@ def test_quality_rubric_uses_rubric_client_not_writer_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """LLM rubric grading is a judgment task, not generation — it must run on its own dedicated rubric client, not the Large writer client passed in for Stage 2 generation/revision. grade_article_quality_llm's own docstring calls itself a 'Fast Small-tier rubric', but that only ever applied to its unused default — the actual call site was silently passing the writer's Large client until fixed 2026-07-15. The rubric client was split out from the research client entirely 2026-08-06 (its own LLM_PROVIDER_RUBRIC), so a compose can route research and rubric grading to different providers independently."""
-    import app.modules.ai.mistral_compose as mc
+    import app.modules.ai.llm_compose as mc
 
     seen_clients: list[object] = []
 
@@ -503,7 +503,7 @@ def test_quality_rubric_uses_rubric_client_not_writer_client(
         _fake_grade_quality,
     )
     rubric_client = object()
-    monkeypatch.setattr(mc, "get_mistral_rubric_client", lambda: rubric_client)
+    monkeypatch.setattr(mc, "get_llm_rubric_client", lambda: rubric_client)
 
     writer_client = _FakeMistral({"title": "X", "body": "Y"})
     _review_and_revise(

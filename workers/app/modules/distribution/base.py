@@ -22,7 +22,7 @@ class ArticleShare:
     tags: tuple[str, ...] = ()  # writer's lowercase topic slugs, e.g. ("defi", "governance")
 
 
-# Writer tags are lowercase slugs (mistral_compose.py); a few read oddly
+# Writer tags are lowercase slugs (llm_compose.py); a few read oddly
 # title-cased so spell them out the way the ecosystem actually writes them.
 _HASHTAG_CASE_OVERRIDES = {
     "defi": "DeFi",

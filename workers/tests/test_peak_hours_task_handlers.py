@@ -6,7 +6,7 @@ from typing import Never
 
 import pytest
 
-from app.modules.ai.mistral_client import PeakHoursBlockedError
+from app.modules.ai.llm_purpose_router import PeakHoursBlockedError
 from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow
 from app.modules.newspaper.tasks import publish_tasks as pt

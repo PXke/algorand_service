@@ -8,7 +8,8 @@ from typing import Any, Self
 import httpx
 import pytest
 
-from app.modules.ai.mistral_client import MistralClient, MistralCreditError, MistralError
+from app.modules.ai.llm_openai_compatible import MistralProvider
+from app.modules.ai.llm_provider import LLMCreditError, LLMError
 
 
 def test_chat_json_object_parses_response() -> None:
@@ -50,8 +51,8 @@ def test_chat_json_object_parses_response() -> None:
             assert headers["Authorization"] == "Bearer test-key"
             return FakeResponse()
 
-    client = MistralClient(api_key="test-key")
-    import app.modules.ai.mistral_client as mistral_module
+    client = MistralProvider(api_key="test-key")
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     original = httpx.Client
     mistral_module.httpx.Client = FakeClient
@@ -94,8 +95,8 @@ def test_chat_json_object_empty_reply_retries_without_assistant_echo() -> None:
             seen_messages.append(json["messages"])
             return FakeResponse(responses[len(seen_messages) - 1])
 
-    client = MistralClient(api_key="test-key")
-    import app.modules.ai.mistral_client as mistral_module
+    client = MistralProvider(api_key="test-key")
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     original = httpx.Client
     mistral_module.httpx.Client = FakeClient
@@ -110,7 +111,7 @@ def test_chat_json_object_empty_reply_retries_without_assistant_echo() -> None:
 
 
 def test_chat_completion_raises_on_http_error() -> None:
-    """chat_completion raises MistralError on an HTTP error response."""
+    """chat_completion raises LLMError on an HTTP error response."""
 
     class FakeResponse:
         status_code = 401
@@ -129,13 +130,13 @@ def test_chat_completion_raises_on_http_error() -> None:
         def post(self, _url: str, headers: dict | None = None, json: dict | None = None) -> Any:  # noqa: ARG002, ANN401 -- name must match the real callee's keyword arg
             return FakeResponse()
 
-    client = MistralClient(api_key="test-key")
-    import app.modules.ai.mistral_client as mistral_module
+    client = MistralProvider(api_key="test-key")
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     original = httpx.Client
     mistral_module.httpx.Client = FakeClient
     try:
-        with pytest.raises(MistralError, match="401"):
+        with pytest.raises(LLMError, match="401"):
             client.chat_completion([{"role": "user", "content": "hi"}])
     finally:
         mistral_module.httpx.Client = original
@@ -149,7 +150,7 @@ def test_wants_reasoning_effort_retry_matches_mistral_phrasing() -> None:
         text = '{"error":{"message":"reasoning_effort is not enabled for this model"}}'
 
     assert (
-        MistralClient._wants_reasoning_effort_retry(FakeResponse(), {"reasoning_effort": "high"})
+        MistralProvider._wants_reasoning_effort_retry(FakeResponse(), {"reasoning_effort": "high"})
         is True
     )
 
@@ -166,7 +167,7 @@ def test_wants_reasoning_effort_retry_matches_openai_phrasing() -> None:
         )
 
     assert (
-        MistralClient._wants_reasoning_effort_retry(FakeResponse(), {"reasoning_effort": "high"})
+        MistralProvider._wants_reasoning_effort_retry(FakeResponse(), {"reasoning_effort": "high"})
         is True
     )
 
@@ -178,7 +179,7 @@ def test_wants_reasoning_effort_retry_false_when_payload_has_no_reasoning_effort
         status_code = 400
         text = "reasoning_effort is not supported"
 
-    assert MistralClient._wants_reasoning_effort_retry(FakeResponse(), {}) is False
+    assert MistralProvider._wants_reasoning_effort_retry(FakeResponse(), {}) is False
 
 
 def test_wants_reasoning_effort_retry_false_on_unrelated_400() -> None:
@@ -189,7 +190,7 @@ def test_wants_reasoning_effort_retry_false_on_unrelated_400() -> None:
         text = '{"error":{"message":"invalid model"}}'
 
     assert (
-        MistralClient._wants_reasoning_effort_retry(FakeResponse(), {"reasoning_effort": "high"})
+        MistralProvider._wants_reasoning_effort_retry(FakeResponse(), {"reasoning_effort": "high"})
         is False
     )
 
@@ -197,20 +198,20 @@ def test_wants_reasoning_effort_retry_false_on_unrelated_400() -> None:
 def test_post_short_circuits_when_credit_already_marked_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Once the circuit breaker is set, _post must fail fast with NO HTTP call at all — this is the actual fix for the 17-hour hourly re-hammering of a dead key (2026-07-23/24): every later call in the outage window skips straight to MistralCreditError instead of repeating the request."""
+    """Once the circuit breaker is set, _post must fail fast with NO HTTP call at all — this is the actual fix for the 17-hour hourly re-hammering of a dead key (2026-07-23/24): every later call in the outage window skips straight to LLMCreditError instead of repeating the request."""
     monkeypatch.setattr("app.modules.ai.llm_openai_compatible.is_credit_exhausted", lambda _provider: True)
 
     class _ExplodingClient:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             raise AssertionError("must not make an HTTP client when already exhausted")
 
-    import app.modules.ai.mistral_client as mistral_module
+    import app.modules.ai.llm_openai_compatible as mistral_module
 
     original = httpx.Client
     mistral_module.httpx.Client = _ExplodingClient
     try:
-        client = MistralClient(api_key="test-key")
-        with pytest.raises(MistralCreditError):
+        client = MistralProvider(api_key="test-key")
+        with pytest.raises(LLMCreditError):
             client.chat_completion([{"role": "user", "content": "hi"}])
     finally:
         mistral_module.httpx.Client = original
@@ -238,18 +239,17 @@ def test_post_marks_exhausted_on_401() -> None:
             return FakeResponse()
 
     import app.modules.ai.llm_openai_compatible as compat_module
-    import app.modules.ai.mistral_client as mistral_module
 
     original_httpx = httpx.Client
     original_mark = compat_module.mark_credit_exhausted
-    mistral_module.httpx.Client = FakeClient
+    compat_module.httpx.Client = FakeClient
     compat_module.mark_credit_exhausted = lambda _provider: marked.append(True)
     try:
-        client = MistralClient(api_key="test-key")
-        with pytest.raises(MistralCreditError):
+        client = MistralProvider(api_key="test-key")
+        with pytest.raises(LLMCreditError):
             client.chat_completion([{"role": "user", "content": "hi"}])
     finally:
-        mistral_module.httpx.Client = original_httpx
+        compat_module.httpx.Client = original_httpx
         compat_module.mark_credit_exhausted = original_mark
 
     assert marked == [True]
@@ -259,7 +259,7 @@ def test_exhausted_tool_loop_skips_final_completion_when_told(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Research/gap-fill callers run chat_with_tools for its tool side-effects (the trace) and discard the return value. Confirmed 2026-07-14: a gap-fill pass ran out of rounds and the exhaustion fallback paid for a full 'write the final JSON article' completion nobody read. With finalize_on_exhaustion=False the loop returns without that extra call."""
-    client = MistralClient(api_key="k", model="m")
+    client = MistralProvider(api_key="k", model="m")
     calls = {"n": 0}
 
     def _fake_post(_payload: dict) -> dict:

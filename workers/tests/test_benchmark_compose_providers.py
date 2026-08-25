@@ -9,7 +9,7 @@ import pytest
 
 import scripts.benchmark_compose_providers as bm
 from app.modules.ai.compose_runner import ComposeRunResult
-from app.modules.ai.mistral_compose import MistralArticleFields
+from app.modules.ai.llm_compose import LLMArticleFields
 
 
 def _write_snapshot(tmp_path: Path) -> Path:
@@ -74,7 +74,7 @@ def test_run_benchmark_skips_unconfigured_providers_and_runs_configured_ones(
     def _fake_compose(*, article_input, provider_name, session_register) -> ComposeRunResult:  # noqa: ANN001, ARG001
         calls.append(provider_name)
         return ComposeRunResult(
-            fields=MistralArticleFields(
+            fields=LLMArticleFields(
                 title="t", summary="s", body="b", heuristic_grade={"grade": 8.5}
             ),
             usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
@@ -110,7 +110,7 @@ def test_run_benchmark_round_robins_across_providers_before_repeating(
     def _fake_compose(*, article_input, provider_name, session_register) -> ComposeRunResult:  # noqa: ANN001, ARG001
         calls.append(provider_name)
         return ComposeRunResult(
-            fields=MistralArticleFields(title="t", summary="s", body="b"),
+            fields=LLMArticleFields(title="t", summary="s", body="b"),
             usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             provider=provider_name,
             model="m",
@@ -145,7 +145,7 @@ def test_run_benchmark_records_a_failed_run_without_aborting_the_sweep(
         if call_count["n"] == 1:
             raise RuntimeError("simulated API failure")
         return ComposeRunResult(
-            fields=MistralArticleFields(title="t", summary="s", body="b"),
+            fields=LLMArticleFields(title="t", summary="s", body="b"),
             usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             provider=provider_name,
             model="m",

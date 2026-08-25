@@ -19,7 +19,7 @@ CoinGecko `simple/price` API; internal Cassandra CQL ([cql-migrations.md](../arc
 3. `INSERT` into `price_metric_samples`.
 4. Load last 7 days of samples; optional `fetch_weekly_price` chart for reference band.
 5. `build_brief` → `INSERT` into `price_metrics_brief` (`mistral_context` text).
-6. `mistral_compose` loads `load_mistral_context(asset_id)` into price/digest prompts.
+6. `llm_compose` loads `load_mistral_context(asset_id)` into price/digest prompts.
 
 ## Schema
 
@@ -39,7 +39,7 @@ Migration `app/008`: `price_metric_samples`, `price_metrics_brief`.
 
 - `workers/app/modules/metrics/price_metrics_*.py`
 - `workers/app/modules/metrics/tasks/price_metrics_tasks.py`
-- `workers/app/modules/ai/mistral_compose.py` — injects brief
+- `workers/app/modules/ai/llm_compose.py` — injects brief
 
 ## Manual run
 

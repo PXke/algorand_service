@@ -65,10 +65,11 @@ cd workers && PYTHONPATH=. celery -A app.celery_app call app.tasks.newspaper.che
 
 ## Code map
 
-- `workers/app/modules/ai/mistral_client.py`
-- `workers/app/modules/ai/mistral_compose.py`
+- `workers/app/modules/ai/llm_openai_compatible.py` (provider connector; `mistral_client.py` shim deleted 2026-08-25)
+- `workers/app/modules/ai/llm_purpose_router.py` (purpose-based Mistral/DeepSeek routing)
+- `workers/app/modules/ai/llm_compose.py`
 - `workers/app/modules/newspaper/article_composer.py`
-- `workers/tests/test_mistral_client.py`
+- `workers/tests/test_mistral_provider.py`
 - `workers/tests/test_article_composer.py`
 
 ## Depends on

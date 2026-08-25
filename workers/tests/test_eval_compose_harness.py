@@ -39,7 +39,7 @@ def test_run_one_formats_report(monkeypatch: pytest.MonkeyPatch) -> None:
         prompt_version = "test-version"
 
     monkeypatch.setattr(
-        "app.modules.ai.mistral_compose.compose_scrape_article_mistral",
+        "app.modules.ai.llm_compose.compose_scrape_article",
         lambda **_kw: _FakeFields(),
     )
     monkeypatch.setattr(
@@ -56,14 +56,14 @@ def test_run_one_formats_report(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_run_one_reports_compose_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """A compose failure surfaces as a "COMPOSE FAILED" report line with the error message."""
-    from app.modules.ai.mistral_client import MistralError
+    from app.modules.ai.llm_provider import LLMError
 
     fixture = FIXTURES[0]
 
     def _raise(**_kw: object) -> Never:
-        raise MistralError("boom")
+        raise LLMError("boom")
 
-    monkeypatch.setattr("app.modules.ai.mistral_compose.compose_scrape_article_mistral", _raise)
+    monkeypatch.setattr("app.modules.ai.llm_compose.compose_scrape_article", _raise)
 
     report = _run_one(fixture)
     assert "COMPOSE FAILED" in report

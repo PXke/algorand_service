@@ -2,7 +2,7 @@
 
 from app.modules.ai.interrogate import interrogate_compose_session_task
 from app.modules.newspaper.tasks.distribution_tasks import distribute_article
-from app.modules.newspaper.tasks.mistral_diff_tasks import check_and_publish_mistral_on_diff
+from app.modules.newspaper.tasks.llm_diff_tasks import check_and_publish_llm_on_diff
 from app.modules.newspaper.tasks.price_analysis_tasks import (
     publish_weekly_digest,
     publish_weekly_price_analysis,
@@ -23,7 +23,7 @@ from app.modules.newspaper.tasks.queue_drain_tasks import (
 
 __all__ = [
     "apply_recomposed_article",
-    "check_and_publish_mistral_on_diff",
+    "check_and_publish_llm_on_diff",
     "compose_queue_row_now",
     "distribute_article",
     "drain_breaking_publish_queue",

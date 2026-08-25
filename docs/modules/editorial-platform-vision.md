@@ -28,7 +28,7 @@ APIs to add: `GET/PATCH /api/v1/admin/articles`, `POST /api/v1/admin/briefs`, wa
 
 ## 2. Writer agent (not a single prompt)
 
-Evolve from `mistral_compose.py` one-shot to an **agent loop**:
+Evolve from `llm_compose.py` one-shot to an **agent loop**:
 
 - **Model:** thinking / reasoning tier (e.g. Mistral `mistral-medium-latest` or dedicated `MISTRAL_MODEL_AGENT`).
 - **Tools (function calling):**

@@ -6,7 +6,7 @@ snapshot, a provider name, and a local SessionRegister, and get back a
 result with per-run token usage, with zero queue/publish/Celery coupling.
 
 This does NOT duplicate the compose pipeline: it's a thin wrapper around the
-same compose_scrape_article_mistral(...) every Celery task already calls,
+same compose_scrape_article(...) every Celery task already calls,
 using the research_client/session_register override points added there
 specifically for this purpose. Production behavior (publish_tasks.py's
 call sites, which never pass these) is completely unaffected.
@@ -18,14 +18,14 @@ import time
 from dataclasses import dataclass, field
 from uuid import UUID
 
+from app.modules.ai.llm_compose import LLMArticleFields, compose_scrape_article
 from app.modules.ai.llm_registry import get_provider
-from app.modules.ai.mistral_compose import MistralArticleFields, compose_scrape_article_mistral
 from app.modules.ai.session_register import SessionRegister
 
 
 @dataclass(frozen=True)
 class ArticleInput:
-    """Frozen compose_scrape_article_mistral inputs -- the exact kwargs a real compose used, snapshotted once so every benchmark run composes from IDENTICAL source material (see scripts/snapshot_compose_input.py)."""
+    """Frozen compose_scrape_article inputs -- the exact kwargs a real compose used, snapshotted once so every benchmark run composes from IDENTICAL source material (see scripts/snapshot_compose_input.py)."""
 
     service_name: str
     source_url: str
@@ -46,7 +46,7 @@ class ArticleInput:
 class ComposeRunResult:
     """One compose() call's output: the article fields plus everything a benchmark comparison needs."""
 
-    fields: MistralArticleFields
+    fields: LLMArticleFields
     usage: dict[str, int] = field(default_factory=dict)
     provider: str = ""
     model: str = ""
@@ -64,7 +64,7 @@ def compose(
     """Run one full research -> write -> grade/revise compose against `article_input`, using `provider_name` for BOTH the research and writer tiers (a benchmark compares one provider end to end, not a purpose-routed mix), checkpointing through `session_register` instead of prod Cassandra.
 
     No Celery, no publish queue, no article store write -- safe to call
-    directly from a script or a REPL. Raises whatever compose_scrape_article_mistral
+    directly from a script or a REPL. Raises whatever compose_scrape_article
     itself raises (LLMError/LLMCreditError/StorySpikedError) rather than
     falling back to a template -- a benchmark run failing loudly on a bad
     provider/model is more useful than a silently degraded result.
@@ -73,7 +73,7 @@ def compose(
     research = get_provider(provider_name, timeout=timeout)
 
     t0 = time.monotonic()
-    fields = compose_scrape_article_mistral(
+    fields = compose_scrape_article(
         service_name=article_input.service_name,
         source_url=article_input.source_url,
         page_title=article_input.page_title,

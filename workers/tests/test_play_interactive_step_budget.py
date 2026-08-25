@@ -111,7 +111,7 @@ def test_wrap_play_interactive_shares_budget_across_calls_via_context() -> None:
     """The step counter lives in the shared compose context, not per-wrapper-instance state -- two wrap calls with the SAME context share one budget.
 
     ctx starts with a real key (matching every actual caller -- the
-    compose context built in mistral_compose.py always carries
+    compose context built in llm_compose.py always carries
     service_id/source_url/model already) rather than a bare {}: an empty
     dict is falsy in Python, so `context or {}` (the same pattern every
     wrapper in this module uses) would silently swap in a fresh disconnected

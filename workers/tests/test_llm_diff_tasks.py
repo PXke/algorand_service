@@ -6,7 +6,7 @@ import pytest
 
 from app.core.config import mistral_configured
 from app.modules.chain_tail.registry_cache import ServiceEntry
-from app.modules.newspaper import mistral_diff_check
+from app.modules.newspaper import llm_diff_check
 
 
 def test_run_skips_when_mistral_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -16,7 +16,7 @@ def test_run_skips_when_mistral_not_configured(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(config, "MISTRAL_ENABLED", False)
     monkeypatch.setattr(config, "MISTRAL_API_KEY", "")
 
-    result = mistral_diff_check.run_mistral_diff_check()
+    result = llm_diff_check.run_llm_diff_check()
     assert result["status"] == "skipped"
     assert result["checked"] == 0
 
@@ -28,7 +28,7 @@ def test_run_skips_when_classifier_review_pending(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(config, "MISTRAL_ENABLED", True)
     monkeypatch.setattr(config, "MISTRAL_API_KEY", "test-key")
 
-    result = mistral_diff_check.run_mistral_diff_check(
+    result = llm_diff_check.run_llm_diff_check(
         has_pending_classifier_review=lambda: True,
         has_pending_feed_release=lambda: False,
     )
@@ -44,7 +44,7 @@ def test_run_skips_on_feed_backlog_only_when_opted_in(monkeypatch: pytest.Monkey
     monkeypatch.setattr(config, "MISTRAL_ENABLED", True)
     monkeypatch.setattr(config, "MISTRAL_API_KEY", "test-key")
 
-    result = mistral_diff_check.run_mistral_diff_check(
+    result = llm_diff_check.run_llm_diff_check(
         load_services=lambda: (),
         clear_cache=lambda: None,
         has_pending_classifier_review=lambda: False,
@@ -65,7 +65,7 @@ def test_feed_backlog_does_not_pause_intake_by_default(monkeypatch: pytest.Monke
     monkeypatch.setattr(config, "MISTRAL_API_KEY", "test-key")
     monkeypatch.setattr(config, "PAUSE_INTAKE_ON_FEED_BACKLOG", False)
 
-    result = mistral_diff_check.run_mistral_diff_check(
+    result = llm_diff_check.run_llm_diff_check(
         load_services=lambda: (),
         clear_cache=lambda: None,
         has_pending_classifier_review=lambda: False,
@@ -100,7 +100,7 @@ def test_run_polls_all_scrape_sources(monkeypatch: pytest.MonkeyPatch) -> None:
         outcomes.append(kwargs)
         return {"status": "unchanged", "txid": kwargs["txid"]}
 
-    result = mistral_diff_check.run_mistral_diff_check(
+    result = llm_diff_check.run_llm_diff_check(
         publish=fake_publish,
         load_services=lambda: entries,
         clear_cache=lambda: None,

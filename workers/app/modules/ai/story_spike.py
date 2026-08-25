@@ -11,7 +11,7 @@ The tool is named ``abort_article`` (2026-07-20 rename: the old ``spike_story``
 was newsroom jargon the model didn't reliably map to "terminate", and it misused
 it as a status-report step — calling it with "No spike needed" and throwing away
 a correctly-researched wallet guide). Calling it raises :class:`StorySpikedError`,
-which deliberately escapes the tool loop's failure-swallowing (`mistral_client`
+which deliberately escapes the tool loop's failure-swallowing (`llm_openai_compatible`
 re-raises it) and aborts the compose. The task layer resolves the queue row with
 terminal status ``aborted_by_writer`` — no fallback compose, no retry this cycle
 — and the admin Sessions/Queue views carry the writer's stated reason so a human
