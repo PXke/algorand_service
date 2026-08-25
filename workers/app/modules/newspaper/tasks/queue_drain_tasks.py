@@ -6,15 +6,12 @@ heuristic credibility check, "Breaking:" title prefix) was removed entirely
 into this new system as a priority class -- see PublishTier's docstring and
 the deleted breaking_credibility.py.
 
-publish_queue/publish_queue_pending stay live-fed (ingest_signal.py /
-editorial_assignment.py dual-write into both artifacts AND publish_queue,
-see those modules for why) but nothing in this file drains/selects from
-publish_queue anymore -- `drain_to_compose` below reads exclusively from the
-editorial-room `artifacts`/`to_compose` tables (artifact_store.py /
-to_compose_selection.py). `_resolve` (the publish_queue-native resolver) is
-kept only because `publish_tasks.compose_queue_row_now` -- the OLD admin
-manual-override, kept registered for the dual-written rows' rollback value
--- still calls it directly.
+publish_queue/publish_queue_pending/publish_queue_dedupe (and the one-deploy-
+cycle dual-write that fed them from ingest_signal.py/editorial_assignment.py)
+were dropped a day later, once this artifact-native path proved stable in
+prod -- `drain_to_compose` below reads exclusively from the editorial-room
+`artifacts`/`to_compose` tables (artifact_store.py / to_compose_selection.py)
+and always has.
 """
 
 from __future__ import annotations
@@ -46,14 +43,7 @@ from app.modules.newspaper.publish_policy import (
     evaluate_standard_publish,
     remaining_standard_publish_slots,
 )
-from app.modules.newspaper.publish_queue_store import (
-    QueuedPublishRow,
-    is_terminal_outcome,
-    list_pending_queue,
-    mark_queue_done,
-    mark_queue_status,
-    record_queue_reason,
-)
+from app.modules.newspaper.publish_queue_store import QueuedPublishRow, is_terminal_outcome
 from app.modules.newspaper.publish_schedule import record_standard_publish
 from app.modules.newspaper.tasks.publish_tasks import publish_from_queued_row
 from app.modules.newspaper.to_compose_selection import (
@@ -235,20 +225,6 @@ def _run_pre_compose_gates(row: QueuedPublishRow) -> _DrainGate | None:
     return None
 
 
-def _resolve(row: QueuedPublishRow, outcome: dict) -> str:
-    """Mark the queue row done when its compose outcome resolved it (published / review / duplicate); leave it pending otherwise. Returns the status string. Single source of truth for which outcomes dequeue a row — a status missing from TERMINAL_OUTCOMES is the bug class behind 'the same topic reappears'. An outcome may also carry ``queue_status`` (e.g. the content-quality veto's "expired") to retire the row under that status without counting as a successful resolution. Either way the outcome is persisted as the row's last_reason, so the admin queue view can answer "why is/was this row here"."""
-    status = str(outcome.get("status", ""))
-    reason = str(outcome.get("reason", "") or status)
-    queue_status = str(outcome.get("queue_status", ""))
-    if is_terminal_outcome(outcome):
-        mark_queue_done(row.queue_id, reason=reason)
-    elif queue_status:
-        mark_queue_status(row.queue_id, queue_status, reason=reason)
-    elif status:
-        record_queue_reason(row.queue_id, reason)
-    return status
-
-
 def _release_due_backlog(slots: int) -> dict | None:
     """Release an admin-approved backlog item first (held because the cap was full when it was approved) — cheap, no compose cost, and shares this exact pacing gate/budget with composing something new below (folded in from the old standalone drain_approved_feed_queue task/beat entry). Only gates THIS step on the interval, same as before — review composition below intentionally bypasses publish pacing (it doesn't hit the feed until approved), so a blanket check up here would wrongly delay it too. Returns a terminal drain result when something was released, else None to fall through to fresh composition."""
     # Local (not module-level) import so a test's
@@ -273,14 +249,14 @@ def _process_review_row(
     review_full: bool,
     backlog_full: bool,
     reviews_composed: int,
-    resolve: Callable[[QueuedPublishRow, dict], str] = _resolve,
+    resolve: Callable[[QueuedPublishRow, dict], str],
 ) -> tuple[dict | None, bool, int, int]:
     """Compose a review-bound row (or skip it for this run). Returns (results_entry_or_None, updated_review_full, updated_reviews_composed, published_delta).
 
-    ``resolve`` is the row's compose-outcome resolver, injected so this same
-    implementation serves both the publish_queue-native admin paths (default
-    ``_resolve``) and drain_to_compose's artifact-native rows (a closure over
-    ``_resolve_artifact`` -- see that task).
+    ``resolve`` is the row's compose-outcome resolver -- always a closure
+    over ``_resolve_artifact`` (see ``_drain_one_to_compose_slot``), injected
+    rather than called directly so this implementation stays independent of
+    how the artifact is identified/resolved.
     """
     if review_full or reviews_composed >= config.REVIEW_COMPOSE_BATCH_LIMIT:
         return None, review_full, reviews_composed, 0
@@ -320,7 +296,7 @@ def _publish_standard_row(
     row: QueuedPublishRow,
     published: int,
     *,
-    resolve: Callable[[QueuedPublishRow, dict], str] = _resolve,
+    resolve: Callable[[QueuedPublishRow, dict], str],
 ) -> tuple[dict | None, int, dict | None]:
     """Evaluate policy and compose+publish one non-review standard row. Returns (results_entry, published_delta, early_stop_result). See `_process_review_row` for what ``resolve`` is."""
     kind = PublishKind(row.publish_kind)
@@ -358,13 +334,12 @@ def _today_str() -> str:
 # --------------------------------------------------------------------------- #
 # Artifact-native adapter + resolver -- lets every gate/compose helper above
 # (written against QueuedPublishRow) run unmodified against an editorial-room
-# artifact. See this module's docstring for why publish_queue itself is no
-# longer drained.
+# artifact.
 # --------------------------------------------------------------------------- #
 
 
 def _artifact_to_queued_row(artifact: Artifact, content: ArtifactContent | None) -> QueuedPublishRow:
-    """Reconstruct the exact QueuedPublishRow-shape publish_from_queued_row (and every _PRE_COMPOSE_GATES check) expects, from an artifact + its stashed content. ``payload`` is the SAME dict ingest_signal.py/editorial_assignment.py built for publish_queue's own row at signal time (content.metadata["payload"]) -- the two systems see identical compose input by construction, not by convergent reimplementation. ``queue_id`` is set to the artifact_id itself: it is only ever used (a) as a single_flight lock key inside publish_from_queued_row (harmless to share a redis-key namespace with real queue_ids -- different UUID, never collides) and (b) by _resolve_artifact/_resolve_dual_written_queue_row below, which read it back off the row they were given, not off publish_queue."""
+    """Reconstruct the exact QueuedPublishRow-shape publish_from_queued_row (and every _PRE_COMPOSE_GATES check) expects, from an artifact + its stashed content. ``payload`` is the SAME dict ingest_signal.py/editorial_assignment.py built at signal time (content.metadata["payload"]). ``queue_id`` is set to the artifact_id itself -- it is only ever used as a single_flight lock key inside publish_from_queued_row (harmless to share a redis-key namespace with historical real queue_ids -- different UUID, never collides)."""
     meta = (content.metadata or {}) if content else {}
     payload = dict(meta.get("payload") or {})
     payload.setdefault("page_text", content.content if content else "")
@@ -385,74 +360,41 @@ def _artifact_to_queued_row(artifact: Artifact, content: ArtifactContent | None)
     )
 
 
-def _resolve_dual_written_queue_row(
-    content: ArtifactContent | None, *, status: str, reason: str, terminal: bool
-) -> None:
-    """Best-effort: mirror an artifact's TERMINAL resolution onto its dual-written publish_queue row (content.metadata["dual_write_queue_id"], stashed by ingest_signal.py/editorial_assignment.py at signal time), so that rollback-safety shadow copy doesn't accumulate an ever-larger, never-drained pending set now that nothing else consumes publish_queue directly. A transient (non-terminal) outcome leaves both sides pending/retriable in lockstep -- nothing to mirror. Never raises: the dual write exists purely for a possible rollback, so a failure here must never affect the real (artifact-side) outcome."""
-    if not terminal or content is None:
-        return
-    queue_id = str((content.metadata or {}).get("dual_write_queue_id") or "").strip()
-    if not queue_id:
-        return
-    try:
-        mark_queue_status(queue_id, status or "done", reason=reason)
-    except Exception:
-        logger.warning(
-            "failed to mirror resolution onto dual-written publish_queue row %s",
-            queue_id,
-            exc_info=True,
-        )
-
-
-def _resolve_artifact(artifact_id: str, content: ArtifactContent | None, outcome: dict) -> str:
-    """Artifact-native twin of `_resolve`.
-
-    Returns the outcome status string (same contract as `_resolve`), and:
+def _resolve_artifact(artifact_id: str, outcome: dict) -> str:
+    """Resolve an artifact's compose outcome, returning the outcome status string.
 
     - a TERMINAL outcome (published/review/approved_backlog/duplicate/...,
       see publish_queue_store.TERMINAL_OUTCOMES -- reused as-is, the
       resolving-outcome vocabulary is a property of publish_from_queued_row's
-      return shape, not of publish_queue itself) marks the artifact COMPOSED;
+      return shape, not of publish_queue) marks the artifact COMPOSED;
     - an outcome carrying ``queue_status`` (e.g. the content-quality veto's
       "expired") is a permanent drop -- marks the artifact DISCARDED;
     - anything else (rate_limited, mistral_failed, already_running,
       review_queue_full, ...) is transient -- the artifact is left SELECTED
-      so a later drain_to_compose run retries it, mirroring how a transient
-      publish_queue skip leaves that row "pending".
-
-    Either way, also best-effort mirrors the resolution onto the dual-written
-    publish_queue row (see `_resolve_dual_written_queue_row`).
+      so a later drain_to_compose run retries it.
     """
     status = str(outcome.get("status", ""))
-    reason = str(outcome.get("reason", "") or status)
     queue_status = str(outcome.get("queue_status", ""))
-    terminal = is_terminal_outcome(outcome) or bool(queue_status)
 
     if is_terminal_outcome(outcome):
         mark_artifact_status(artifact_id, COMPOSED)
     elif queue_status:
         mark_artifact_status(artifact_id, DISCARDED)
 
-    _resolve_dual_written_queue_row(
-        content, status=queue_status or status, reason=reason, terminal=terminal
-    )
     return status
 
 
 def _resolve_artifact_ignoring_row(
-    artifact_id: str, content: ArtifactContent | None, _row: QueuedPublishRow, outcome: dict
+    artifact_id: str, _row: QueuedPublishRow, outcome: dict
 ) -> str:
-    """`_resolve_artifact` reshaped to the `Callable[[QueuedPublishRow, dict], str]` signature `_process_review_row`/`_publish_standard_row`'s `resolve` param expects -- drain_to_compose binds `artifact_id`/`content` via `functools.partial` once per slot, so each call only needs to pass (row, outcome), matching the default `_resolve`'s own signature. `_row` is unused: unlike `_resolve`, this resolver already knows which artifact it's resolving from the partial-bound arguments, not from the row it's handed."""
-    return _resolve_artifact(artifact_id, content, outcome)
+    """`_resolve_artifact` reshaped to the `Callable[[QueuedPublishRow, dict], str]` signature `_process_review_row`/`_publish_standard_row`'s `resolve` param expects -- drain_to_compose binds `artifact_id` via `functools.partial` once per slot, so each call only needs to pass (row, outcome). `_row` is unused: this resolver already knows which artifact it's resolving from the partial-bound argument, not from the row it's handed."""
+    return _resolve_artifact(artifact_id, outcome)
 
 
-def _record_pre_compose_gate_artifact(
-    artifact_id: str, content: ArtifactContent | None, fired: _DrainGate
-) -> dict:
-    """Artifact-native twin of the old `_record_pre_compose_gate`: a gate with a `mark_status` (domain_capped/brief_archived/novelty_collapsed) is a permanent drop for today's slate -- DISCARD. A cooldown gate (`mark_status=None`) leaves the artifact SELECTED/retriable, same as leaving a publish_queue row "pending" -- nothing to persist beyond this run's results entry."""
+def _record_pre_compose_gate_artifact(artifact_id: str, fired: _DrainGate) -> dict:
+    """Artifact-native twin of the old `_record_pre_compose_gate`: a gate with a `mark_status` (domain_capped/brief_archived/novelty_collapsed) is a permanent drop for today's slate -- DISCARD. A cooldown gate (`mark_status=None`) leaves the artifact SELECTED/retriable -- nothing to persist beyond this run's results entry."""
     if fired.mark_status:
         mark_artifact_status(artifact_id, DISCARDED)
-        _resolve_dual_written_queue_row(content, status=fired.mark_status, reason=fired.name, terminal=True)
     return {"artifact_id": artifact_id, "status": fired.name}
 
 
@@ -514,11 +456,11 @@ def _drain_one_to_compose_slot(
         return None, False
     content = get_artifact_content(artifact_id)
     row = _artifact_to_queued_row(artifact, content)
-    resolve_this = functools.partial(_resolve_artifact_ignoring_row, artifact_id, content)
+    resolve_this = functools.partial(_resolve_artifact_ignoring_row, artifact_id)
 
     fired = _run_pre_compose_gates(row)
     if fired is not None:
-        state.results.append(_record_pre_compose_gate_artifact(artifact_id, content, fired))
+        state.results.append(_record_pre_compose_gate_artifact(artifact_id, fired))
         return None, False
 
     if _row_needs_review(row):
@@ -650,11 +592,11 @@ def drain_to_compose() -> dict[str, object]:
     time_limit=config.COMPOSE_TASK_TIME_LIMIT,
 )
 def compose_artifact_now(artifact_id: str) -> dict[str, object]:
-    """Admin/editorial-triggered immediate compose of one artifact, bypassing drain_to_compose's pacing entirely -- the artifact-native twin of publish_tasks.compose_queue_row_now (kept registered for the dual-written publish_queue rows' own rollback value). Used today by editorial_assignment.py's "compose this brief right now" trigger; a future admin Queue-tab action can dispatch it directly by artifact_id the same way the old Queue tab dispatched compose_queue_row_now by queue_id.
+    """Admin/editorial-triggered immediate compose of one artifact, bypassing drain_to_compose's pacing entirely. Used today by editorial_assignment.py's "compose this brief right now" trigger; a future admin Queue-tab action can dispatch it directly by artifact_id.
 
     Refuses an artifact that isn't PENDING or SELECTED (already composed/
     discarded, or an unknown id) so a stale/duplicate trigger can't
-    double-compose -- same "still pending" guard shape as compose_queue_row_now.
+    double-compose.
     """
     artifact = get_artifact(artifact_id)
     if artifact is None:
@@ -668,7 +610,7 @@ def compose_artifact_now(artifact_id: str) -> dict[str, object]:
     content = get_artifact_content(artifact_id)
     row = _artifact_to_queued_row(artifact, content)
     outcome = publish_from_queued_row(row)
-    _resolve_artifact(artifact_id, content, outcome)
+    _resolve_artifact(artifact_id, outcome)
     return outcome
 
 
@@ -688,77 +630,6 @@ def reap_stale_translation_sessions() -> dict[str, int]:
     )
 
     return _reap()
-
-
-def _curated_discovery(scrape_url: str) -> bool:
-    """True when the row's domain came from a curated listing (ecosystem directory or case-study sync) — best-effort, False on any failure."""
-    try:
-        from app.modules.crawler.domain_tracker import domain_from_url
-        from app.modules.crawler.ecosystem_sync import ecosystem_listed_domains
-
-        return domain_from_url(scrape_url) in ecosystem_listed_domains()
-    except Exception:
-        return False
-
-
-@celery_app.task(name="app.tasks.newspaper.expire_stale_queue_items")
-def expire_stale_queue_items() -> dict[str, object]:
-    """Queue maintenance (Phase 5).
-
-    - Expire stale `announce`-phase rows that were never published before the event passed.
-    - Defer low-score rows that sat in the queue too long; index their page text
-      for search first when available (`indexed_only`), otherwise mark `deferred`.
-    """
-    import time
-
-    from app.modules.search.tasks.index_tasks import index_crawled_page
-
-    now_epoch = int(time.time())
-    announce_max_age = config.PUBLISH_ANNOUNCE_EXPIRE_HOURS * 3600
-    defer_after = config.PUBLISH_DEFER_AFTER_HOURS * 3600
-
-    expired = 0
-    deferred = 0
-    indexed_only = 0
-
-    for row in list_pending_queue(limit=config.PUBLISH_QUEUE_BATCH_LIMIT * 4):
-        age = now_epoch - row.created_at_epoch
-        event_phase = str(row.payload.get("event_phase", ""))
-
-        if event_phase == "announce" and age > announce_max_age:
-            mark_queue_status(row.queue_id, "expired", reason="announce_event_passed")
-            expired += 1
-            continue
-
-        if row.priority < config.PUBLISH_DEFER_PRIORITY_THRESHOLD and age > defer_after:
-            if row.publish_kind == "service_discovery" and _curated_discovery(row.scrape_url):
-                # Curated once-ever introductions (ecosystem directory /
-                # Foundation case-study subjects) are chain-silent by nature,
-                # so their keyword-driven priority is structurally low (~27 =
-                # 0.45 anchor x discovery weight, under the 45 threshold).
-                # They're latency-tolerant by design: leave them pending until
-                # a quiet drain slot picks them up instead of parking them.
-                continue
-            page_text = str(row.payload.get("page_text", ""))
-            if page_text:
-                index_crawled_page.delay(
-                    url=row.scrape_url,
-                    title=str(row.payload.get("page_title", "")),
-                    text=page_text,
-                    service_id=row.service_id,
-                )
-                mark_queue_status(row.queue_id, "indexed_only", reason="stale_low_priority")
-                indexed_only += 1
-            else:
-                mark_queue_status(row.queue_id, "deferred", reason="stale_low_priority")
-                deferred += 1
-
-    return {
-        "status": "ok",
-        "expired": expired,
-        "deferred": deferred,
-        "indexed_only": indexed_only,
-    }
 
 
 def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:

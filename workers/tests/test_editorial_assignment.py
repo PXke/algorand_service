@@ -1,13 +1,11 @@
 """Assigning and refreshing editorial briefs."""
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from app.modules.newspaper import editorial_assignment as ea
-from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
 
 
 def _brief(**overrides: object) -> ea.EditorialBrief:
@@ -77,32 +75,10 @@ def test_build_assignment_payload_carries_is_special_edition() -> None:
 def test_assign_editorial_brief_forces_relevance_and_enqueues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Assigning a brief forces relevance=1.0, enqueues a create, dual-writes an artifact, and triggers an immediate compose of THAT artifact (compose_artifact_now, 2026-08-25 successor to drain_standard_publish_queue.delay())."""
+    """Assigning a brief writes an editorial-room artifact and triggers an immediate compose of it (compose_artifact_now, 2026-08-25 successor to drain_standard_publish_queue.delay()). publish_queue's dual-write was dropped 2026-08-25 -- insert_artifact is now the only write."""
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", True)
     monkeypatch.setattr(ea, "get_brief", lambda brief_id: _brief(brief_id=brief_id))
 
-    captured_priority_kwargs = {}
-
-    def fake_compute_priority(**kwargs: object) -> Any:  # noqa: ANN401 -- test double / fake response
-        captured_priority_kwargs.update(kwargs)
-
-        class _Breakdown:
-            total = 199
-
-        return _Breakdown()
-
-    captured_enqueue_kwargs = {}
-
-    def fake_enqueue_publish(**kwargs: object) -> tuple[str, bool]:
-        captured_enqueue_kwargs.update(kwargs)
-        return ("queue-id-1", True)
-
-    monkeypatch.setattr(
-        "app.modules.newspaper.publish_score.compute_priority", fake_compute_priority
-    )
-    monkeypatch.setattr(
-        "app.modules.newspaper.publish_queue_store.enqueue_publish", fake_enqueue_publish
-    )
     captured_artifact_kwargs = {}
     monkeypatch.setattr(
         "app.modules.newspaper.artifact_store.insert_artifact",
@@ -118,52 +94,19 @@ def test_assign_editorial_brief_forces_relevance_and_enqueues(
 
     assert result["status"] == "enqueued"
     assert result["artifact_id"] == "artifact-id-1"
-    assert captured_priority_kwargs["relevance"] == 1.0
-    assert captured_priority_kwargs["topic"] == PublishTopic.EDITORIAL_ASSIGNMENT
-    assert captured_enqueue_kwargs["publish_kind"] == PublishKind.EDITORIAL_ASSIGNMENT
-    assert captured_enqueue_kwargs["topic"] == PublishTopic.EDITORIAL_ASSIGNMENT
-    assert captured_enqueue_kwargs["priority"] == 199
-    assert captured_enqueue_kwargs["payload"]["publish_mode"] == "create"
-    assert captured_enqueue_kwargs["payload"]["source_kind"] == "editorial_assignment"
     assert captured_artifact_kwargs["channel"] == "brief"
-    assert captured_artifact_kwargs["metadata"]["dual_write_queue_id"] == "queue-id-1"
+    assert captured_artifact_kwargs["metadata"]["payload"]["publish_mode"] == "create"
+    assert captured_artifact_kwargs["metadata"]["payload"]["source_kind"] == "editorial_assignment"
+    assert "dual_write_queue_id" not in captured_artifact_kwargs["metadata"]
     assert compose_now_calls == ["artifact-id-1"]
 
 
-def test_assign_editorial_brief_duplicate_does_not_recompose(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A duplicate enqueue does not trigger an immediate compose."""
-    monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", True)
-    monkeypatch.setattr(ea, "get_brief", lambda brief_id: _brief(brief_id=brief_id))
-    monkeypatch.setattr(
-        "app.modules.newspaper.publish_score.compute_priority",
-        lambda **_kwargs: type("B", (), {"total": 100})(),
-    )
-    monkeypatch.setattr(
-        "app.modules.newspaper.publish_queue_store.enqueue_publish",
-        lambda **_kw: ("existing-queue-id", False),
-    )
-    monkeypatch.setattr(
-        "app.modules.newspaper.artifact_store.insert_artifact",
-        lambda **_kw: ("artifact-id-1", True),
-    )
-    compose_now_calls = []
-    monkeypatch.setattr(
-        "app.modules.newspaper.tasks.queue_drain_tasks.compose_artifact_now.delay",
-        lambda artifact_id: compose_now_calls.append(artifact_id),
-    )
-
-    result = ea.assign_editorial_brief("00000000-0000-0000-0000-000000000001")
-
-    assert result["status"] == "duplicate"
-    assert not compose_now_calls
-
-
 def test_assign_editorial_brief_disabled_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Skips assignment and never enqueues when editorial briefs are disabled."""
+    """Skips assignment and never writes an artifact when editorial briefs are disabled."""
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", False)
     called = []
     monkeypatch.setattr(
-        "app.modules.newspaper.publish_queue_store.enqueue_publish",
+        "app.modules.newspaper.artifact_store.insert_artifact",
         lambda **kw: called.append(kw),
     )
 
@@ -205,29 +148,15 @@ def test_refresh_falls_back_to_assign_without_linked_article(
 
 
 def test_refresh_edits_existing_article_and_bumps_last_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Refreshing a brief with a linked article enqueues an edit, dual-writes an artifact, marks the brief's last run, and triggers an immediate compose of that artifact."""
+    """Refreshing a brief with a linked article writes an edit-mode artifact, marks the brief's last run, and triggers an immediate compose of that artifact."""
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", True)
     linked_id = "11111111-1111-1111-1111-111111111111"
     monkeypatch.setattr(ea, "get_brief", lambda _brief_id: _brief(linked_article_id=linked_id))
 
-    captured_enqueue_kwargs = {}
-    monkeypatch.setattr(
-        "app.modules.newspaper.publish_queue_store.enqueue_publish",
-        lambda **kw: (captured_enqueue_kwargs.update(kw), ("queue-id-2", True))[1],
-    )
-
-    def fake_compute_priority(**_kwargs: object) -> Any:  # noqa: ANN401 -- test double / fake response
-        class _Breakdown:
-            total = 150
-
-        return _Breakdown()
-
-    monkeypatch.setattr(
-        "app.modules.newspaper.publish_score.compute_priority", fake_compute_priority
-    )
+    captured_artifact_kwargs = {}
     monkeypatch.setattr(
         "app.modules.newspaper.artifact_store.insert_artifact",
-        lambda **_kw: ("artifact-id-2", True),
+        lambda **kw: (captured_artifact_kwargs.update(kw), ("artifact-id-2", True))[1],
     )
 
     mark_run_calls = []
@@ -242,8 +171,8 @@ def test_refresh_edits_existing_article_and_bumps_last_run(monkeypatch: pytest.M
 
     assert result["status"] == "enqueued"
     assert result["artifact_id"] == "artifact-id-2"
-    assert captured_enqueue_kwargs["payload"]["publish_mode"] == "edit"
-    assert captured_enqueue_kwargs["payload"]["linked_article_id"] == linked_id
+    assert captured_artifact_kwargs["metadata"]["payload"]["publish_mode"] == "edit"
+    assert captured_artifact_kwargs["metadata"]["payload"]["linked_article_id"] == linked_id
     assert mark_run_calls == [{"brief_id": "00000000-0000-0000-0000-000000000001"}]
     assert compose_now_calls == ["artifact-id-2"]
 

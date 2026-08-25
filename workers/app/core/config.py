@@ -137,39 +137,7 @@ NEWS_REFORMAT_SIMILARITY = env_float("NEWS_REFORMAT_SIMILARITY", 0.85)
 # UNCAUGHT InvalidRequest, failing the whole index_crawled_page task. 500K
 # chars leaves ~32x headroom under that limit for the rest of the row.
 CRAWLED_PAGE_BODY_MAX_CHARS = env_int("CRAWLED_PAGE_BODY_MAX_CHARS", 500_000)
-PUBLISH_IMMEDIATE_PRIORITY = env_int("PUBLISH_IMMEDIATE_PRIORITY", 95)
 PUBLISH_QUEUE_DRAIN_SECONDS = env_int("PUBLISH_QUEUE_DRAIN_SECONDS", 900)
-PUBLISH_QUEUE_BATCH_LIMIT = env_int("PUBLISH_QUEUE_BATCH_LIMIT", 50)
-
-# Drain-order fairness (2026-08-06): four composable mechanisms, each fixing
-# one starvation mode found live with real data (71 pending service_discovery
-# rows, oldest 15 days, none in the top-15 by priority; xGov Governance alone
-# holding 6 of the top-15 content_update slots via 6 distinct per-proposal
-# service_ids under one display name):
-#   1. Age bonus (below) — no row waits forever behind fresher/higher-scoring
-#      competitors; capped so an old low-value row can catch up to a fair
-#      shot, not leapfrog to permanent first place.
-#   2. Fairness grouping by registrable DOMAIN, not service_id — a service
-#      modeled internally as many small service_ids (one per xGov proposal)
-#      still only gets one shot per drain round, not one per service_id.
-#   3. Weighted-random draw (Efraimidis-Spirakis key = U**(1/weight)) instead
-#      of a strict sort — priority still dominates on average, but doesn't
-#      guarantee the identical winner every single drain.
-#   4. Kind-interleave (DRAIN_DISCOVERY_INTERLEAVE_EVERY below) — service_
-#      discovery's own priority ceiling (~100) can never outscore a
-#      substantial content_update (~400+), so without a reserved cadence new-
-#      service coverage is structurally unable to compete at all.
-DRAIN_AGE_BONUS_PER_DAY = env_float("DRAIN_AGE_BONUS_PER_DAY", 4.0)
-DRAIN_AGE_BONUS_MAX = env_float("DRAIN_AGE_BONUS_MAX", 120.0)
-# 1 of every N drain picks is reserved for the discovery lane (when any are
-# pending), regardless of how the content_update backlog scores.
-DRAIN_DISCOVERY_INTERLEAVE_EVERY = env_int("DRAIN_DISCOVERY_INTERLEAVE_EVERY", 5)
-
-# Queue maintenance (Phase 5 — archive & defer)
-PUBLISH_DEFER_PRIORITY_THRESHOLD = env_int("PUBLISH_DEFER_PRIORITY_THRESHOLD", 45)
-PUBLISH_DEFER_AFTER_HOURS = env_int("PUBLISH_DEFER_AFTER_HOURS", 24)
-PUBLISH_ANNOUNCE_EXPIRE_HOURS = env_int("PUBLISH_ANNOUNCE_EXPIRE_HOURS", 72)
-PUBLISH_QUEUE_MAINTENANCE_SECONDS = env_int("PUBLISH_QUEUE_MAINTENANCE_SECONDS", 3600)
 
 OFFICIAL_MAIL_FROM_DOMAINS = env_str(
     "OFFICIAL_MAIL_FROM_DOMAINS",
@@ -577,7 +545,7 @@ LLM_STAGE2_EXTRAS_MAX_CHARS = env_int("MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 160_000
 # The (tool+args) dedup guard still bounds true runaway loops.
 LLM_MAX_TOOL_ROUNDS = env_int("LLM_MAX_TOOL_ROUNDS", 48)
 # Every celery task that composes an article (recompose_published,
-# recompose_review, recompose_session_service, compose_queue_row_now,
+# recompose_review, recompose_session_service,
 # publish_from_chain_event, drain_to_compose (formerly
 # drain_standard_publish_queue), compose_artifact_now) previously relied on
 # the app-wide

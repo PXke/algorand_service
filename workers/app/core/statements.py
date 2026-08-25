@@ -20,10 +20,6 @@ from typing import TYPE_CHECKING
 from algorand_shared.article_statements import (
     ARTICLE_VERSION_INSERT,
     ARTICLE_VERSION_LATEST,
-    PUBLISH_QUEUE_CLEAR_HUMAN_PICK,
-    PUBLISH_QUEUE_DELETE_PENDING,
-    PUBLISH_QUEUE_INSERT_PENDING,
-    PUBLISH_QUEUE_SET_HUMAN_PICK,
 )
 from algorand_shared.chain_statements import CHAIN_CONDUIT_HEAD, CHAIN_TXNS_BY_ROUND
 from algorand_shared.platform_statements import (
@@ -96,61 +92,6 @@ class ServiceEventStmts:
         "service_id, occurred_at, event_id, txid, round, match_kind, match_value"
         ") VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
-
-
-# --------------------------------------------------------------------------- #
-# publish_queue / publish_queue_pending / publish_queue_dedupe
-# --------------------------------------------------------------------------- #
-class PublishQueueStmts:
-    """Prepared statements for the publish queue."""
-
-    DEDUPE_GET = _Stmt(
-        "SELECT queue_id FROM algorand_platform.publish_queue_dedupe WHERE dedupe_key = ?"
-    )
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.publish_queue ("
-        "queue_id, status, priority, topic, publish_kind, "
-        "service_id, display_name, scrape_url, dedupe_key, "
-        "payload, created_at, updated_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    INSERT_PENDING = PUBLISH_QUEUE_INSERT_PENDING
-    INSERT_DEDUPE = _Stmt(
-        "INSERT INTO algorand_platform.publish_queue_dedupe (dedupe_key, queue_id, created_at) "
-        "VALUES (?, ?, ?)"
-    )
-    LIST_PENDING = _Stmt(
-        "SELECT queue_id, priority, topic, publish_kind, service_id, created_at "
-        "FROM algorand_platform.publish_queue_pending WHERE status = ? LIMIT ?"
-    )
-    GET_DETAIL = _Stmt(
-        "SELECT display_name, scrape_url, payload, created_at, human_pick_day "
-        "FROM algorand_platform.publish_queue WHERE queue_id = ?"
-    )
-    GET_FULL = _Stmt(
-        "SELECT status, priority, topic, publish_kind, service_id, display_name, "
-        "scrape_url, payload, created_at, human_pick_day "
-        "FROM algorand_platform.publish_queue WHERE queue_id = ?"
-    )
-    COUNT_PENDING = _Stmt(
-        "SELECT COUNT(*) AS n FROM algorand_platform.publish_queue_pending WHERE status = ?"
-    )
-    GET_STATUS_ROW = _Stmt(
-        "SELECT status, priority, created_at, dedupe_key "
-        "FROM algorand_platform.publish_queue WHERE queue_id = ?"
-    )
-    UPDATE_STATUS = _Stmt(
-        "UPDATE algorand_platform.publish_queue "
-        "SET status = ?, last_reason = ?, updated_at = ? WHERE queue_id = ?"
-    )
-    UPDATE_REASON = _Stmt(
-        "UPDATE algorand_platform.publish_queue "
-        "SET last_reason = ?, updated_at = ? WHERE queue_id = ?"
-    )
-    DELETE_PENDING = PUBLISH_QUEUE_DELETE_PENDING
-    DELETE_DEDUPE = _Stmt("DELETE FROM algorand_platform.publish_queue_dedupe WHERE dedupe_key = ?")
-    SET_HUMAN_PICK = PUBLISH_QUEUE_SET_HUMAN_PICK
-    CLEAR_HUMAN_PICK = PUBLISH_QUEUE_CLEAR_HUMAN_PICK
 
 
 # --------------------------------------------------------------------------- #

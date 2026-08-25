@@ -45,16 +45,6 @@
   // part of the old lane/status system), kept as secondary context.
   let backlog: Array<Record<string, unknown>> = $state([])
 
-  // Legacy publish-queue rows — read-only history, collapsed by default.
-  // The old all/pending/done/deferred/expired lane system is retired; this
-  // is kept only as a reference trail during the cutover to the artifact
-  // pipeline, not as an actionable view.
-  let historyOpen = $state(false)
-  let historyLoaded = $state(false)
-  let historyLoading = $state(false)
-  let historyError = $state<string | null>(null)
-  let history: Array<Record<string, unknown>> = $state([])
-
   async function load() {
     loading = true
     error = null
@@ -89,21 +79,6 @@
     }
   }
 
-  async function loadHistory() {
-    if (historyLoaded || historyLoading) return
-    historyLoading = true
-    historyError = null
-    try {
-      const res = await admin.listPublishQueue()
-      history = Array.isArray(res.items) ? (res.items as Array<Record<string, unknown>>) : []
-      historyLoaded = true
-    } catch (e) {
-      historyError = e instanceof Error ? e.message : String(e)
-    } finally {
-      historyLoading = false
-    }
-  }
-
   function formatTs(raw: unknown): string {
     if (!raw) return '—'
     const s = String(raw).replace('T', ' ')
@@ -116,23 +91,9 @@
     return ''
   }
 
-  function historyMeta(item: Record<string, unknown>): string {
-    return [
-      String(item.publish_kind ?? ''),
-      String(item.topic ?? ''),
-      String(item.scrape_url ?? item.url ?? ''),
-    ]
-      .filter(Boolean)
-      .join(' · ')
-  }
-
   $effect(() => {
     void day
     void load()
-  })
-
-  $effect(() => {
-    if (historyOpen) void loadHistory()
   })
 </script>
 
@@ -255,39 +216,6 @@
     </section>
   {/if}
 
-  <details class="admin-panel history" bind:open={historyOpen}>
-    <summary>Legacy queue history (reference only, being retired)</summary>
-    <p class="admin-muted small history-note">
-      Read-only rows from the old publish-queue lane system, kept for reference while the artifact
-      pipeline takes over. No actions here — composing now happens through the ranked list above.
-    </p>
-    {#if historyLoading}
-      <p class="admin-muted">Loading…</p>
-    {:else if historyError}
-      <p class="admin-err">{historyError}</p>
-    {:else if historyLoaded && history.length === 0}
-      <p class="admin-muted">No legacy queue rows.</p>
-    {:else if historyLoaded}
-      {#each history as item (String(item.queue_id))}
-        <div class="history-row">
-          <div class="history-head">
-            <span class="history-status">{String(item.status ?? '')}</span>
-            <strong class="display-name">
-              {String(item.display_name ?? item.service_id ?? item.queue_id)}
-            </strong>
-            <span class="admin-muted small">prio {Number(item.priority ?? 0)}</span>
-          </div>
-          {#if item.last_reason}
-            <p class="admin-muted small history-reason">{String(item.last_reason)}</p>
-          {/if}
-          {#if historyMeta(item)}
-            <p class="admin-muted small meta">{historyMeta(item)}</p>
-          {/if}
-          <p class="admin-muted small">{formatTs(item.updated_at)}</p>
-        </div>
-      {/each}
-    {/if}
-  </details>
 </div>
 
 <style>
@@ -443,45 +371,4 @@
     white-space: nowrap;
   }
 
-  .history {
-    padding: 14px 18px;
-  }
-
-  .history summary {
-    cursor: pointer;
-    font-weight: 700;
-    font-size: 0.92rem;
-    color: var(--muted);
-  }
-
-  .history-note {
-    margin: 8px 0 12px;
-  }
-
-  .history-row {
-    padding: 8px 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .history-row:last-child {
-    border-bottom: 0;
-  }
-
-  .history-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .history-status {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    color: var(--subtle);
-  }
-
-  .history-reason {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  }
 </style>

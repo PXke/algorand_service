@@ -258,104 +258,14 @@ def admin_list_classifier_reviews(request: Request) -> Response:
     return {"items": items}
 
 
-def admin_list_publish_queue(request: Request) -> Response | dict:
-    """Queue rows with status + last drain/compose decision (last_reason) — the persisted answer to "why was this row skipped/held/resolved" that previously vanished with the Celery task return."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-
-    limit_param = request.query_params.get("limit", "")
-    limit = max(1, min(int(limit_param) if limit_param.isdigit() else 200, 1000))
-    items = store.list_publish_queue(limit=limit)
-    return {"items": items}
-
-
 def admin_pending_feed_backlog(request: Request) -> Response | dict:
-    """Approved articles waiting in pending_feed_queue for paced release (capped by PENDING_FEED_MAX_DEPTH) — distinct from the in-flight composing work publish-queue shows."""
+    """Approved articles waiting in pending_feed_queue for paced release (capped by PENDING_FEED_MAX_DEPTH) — distinct from the in-flight composing work the artifacts/to_compose Queue tab view shows."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
 
     items = store.list_pending_feed_backlog()
     return {"items": items}
-
-
-def admin_publish_queue_breakdown(request: Request) -> Response | dict:
-    """One row's enqueue-time priority_breakdown + content signals."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-
-    queue_id = request.path_params.get("queue_id", "")
-    detail = store.publish_queue_breakdown(queue_id)
-    if detail is None:
-        return json_error_response(404, "not_found", "unknown queue_id")
-    return detail
-
-
-def admin_bump_queue_priority(request: Request) -> Response | dict:
-    """Pin a pending queue row to the front so the next drain composes it next — never touches the daily cap or pacing interval that gate when the drain runs at all."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-
-    queue_id = request.path_params.get("queue_id", "")
-    result = store.bump_queue_priority(queue_id)
-    if result is None:
-        return json_error_response(404, "not_found", "unknown queue_id or not pending")
-    return result
-
-
-def admin_set_human_pick(request: Request) -> Response | dict:
-    """Pin a pending queue row as today's Lane 1 (human pick) slot — one of the day's 3 standard-tier publishes reserved for a deliberate human choice rather than the automated significance/discovery lanes. Distinct from "Compose next" (bump_queue_priority), which only reorders the automated ranking; this reserves a specific lane so the other two lanes know to fill the remaining slots instead."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-
-    queue_id = request.path_params.get("queue_id", "")
-    result = store.set_human_pick_for_today(queue_id)
-    if result is None:
-        return json_error_response(404, "not_found", "unknown queue_id or not pending")
-    return result
-
-
-def admin_recompose_now(request: Request) -> Response | dict:
-    """Compose this pending queue row IMMEDIATELY, bypassing the standard-publish pacing gate entirely — unlike "Compose next" (which only bumps priority and still waits for the pacing interval), this dispatches compose_queue_row_now, which calls publish_from_queued_row directly. Fire-and-forget: a real compose can run many minutes (a special edition's deepened research pass can take 20+), so this returns as soon as the task is queued rather than waiting on it — watch the Sessions/Queue tabs for progress."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-
-    queue_id = request.path_params.get("queue_id", "")
-    if not queue_id:
-        return json_error_response(400, "invalid_request", "queue_id is required")
-    try:
-        from celery import Celery
-
-        from app.core.config import settings
-
-        Celery(broker=settings.celery_broker_url).send_task(
-            "app.tasks.newspaper.compose_queue_row_now",
-            args=[queue_id],
-            queue="pipeline",
-        )
-    except Exception as exc:
-        return json_error_response(502, "broker_unavailable", str(exc))
-    return {"triggered": True, "queue_id": queue_id}
-
-
-def admin_dead_end_queue_row_domain(request: Request) -> Response | dict:
-    """Permanently reject the source domain behind one publish_queue row, straight from the Queue tab — the one-click alternative to hunting the same domain down in the paginated Domains tab."""
-    denied = require_admin_wallet(request)
-    if denied is not None:
-        return denied
-
-    queue_id = request.path_params.get("queue_id", "")
-    wallet = verified_admin_wallet(request)
-    result = store.dead_end_queue_row_domain(queue_id, wallet=wallet)
-    if result is None:
-        return json_error_response(404, "not_found", "unknown queue_id or no resolvable domain")
-    _invalidate_domains_cache()
-    return result
 
 
 def admin_training_stats(request: Request) -> Response:
@@ -708,9 +618,10 @@ def admin_reset_articles(request: Request) -> Response:
         "articles",
         "articles_by_tag",
         "article_versions",
-        "publish_queue",
-        "publish_queue_dedupe",
-        "publish_queue_pending",
+        "artifacts",
+        "artifacts_pending",
+        "artifact_content",
+        "to_compose",
         "page_snapshots",
         "url_queue",
         "url_queue_by_url",
@@ -1828,13 +1739,7 @@ def register_admin_routes(app: Router) -> None:
     app.post("/api/v1/admin/briefs")(admin_create_brief)
     app.post("/api/v1/admin/briefs/:brief_id/assign-now")(admin_assign_brief_now)
     app.get("/api/v1/admin/classifier-reviews")(admin_list_classifier_reviews)
-    app.get("/api/v1/admin/publish-queue")(admin_list_publish_queue)
     app.get("/api/v1/admin/pending-feed-backlog")(admin_pending_feed_backlog)
-    app.get("/api/v1/admin/publish-queue/:queue_id/breakdown")(admin_publish_queue_breakdown)
-    app.post("/api/v1/admin/publish-queue/:queue_id/compose-next")(admin_bump_queue_priority)
-    app.post("/api/v1/admin/publish-queue/:queue_id/recompose-now")(admin_recompose_now)
-    app.post("/api/v1/admin/publish-queue/:queue_id/pick-for-today")(admin_set_human_pick)
-    app.post("/api/v1/admin/publish-queue/:queue_id/dead-end")(admin_dead_end_queue_row_domain)
     app.get("/api/v1/admin/training-stats")(admin_training_stats)
     app.post("/api/v1/admin/retrain")(admin_retrain)
     app.post("/api/v1/admin/classifier-feedback")(admin_classifier_feedback)

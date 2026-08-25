@@ -215,10 +215,6 @@ def _build_beat_schedule() -> dict:
             hour=int(os.getenv("TO_COMPOSE_SELECT_CRON_HOUR", "0")),
         ),
     }
-    schedule["expire-stale-queue-items"] = {
-        "task": "app.tasks.newspaper.expire_stale_queue_items",
-        "schedule": float(os.getenv("PUBLISH_QUEUE_MAINTENANCE_SECONDS", "3600")),
-    }
     schedule["reap-stale-compose-sessions"] = {
         "task": "app.tasks.newspaper.reap_stale_compose_sessions",
         "schedule": float(os.getenv("COMPOSE_SESSION_REAP_SECONDS", "3600")),

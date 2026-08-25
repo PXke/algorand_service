@@ -1159,25 +1159,6 @@ class AdminCassandraStore:
             wallet=wallet,
         )
 
-    def dead_end_queue_row_domain(self, queue_id: str, *, wallet: str) -> dict | None:
-        """Permanently reject the source domain behind one publish_queue row — the one-click "I never want to see this domain again" action for the Queue tab, reached straight from the row that surfaced it instead of hunting for the same domain through the paginated Domains tab (2026-08-04: Kryptonurd — the writer had already correctly aborted it as a dead project, but confirming that judgment as a permanent reject took several page-throughs to find). None when the row or a resolvable domain is missing."""
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import PublishQueueStmts
-
-        try:
-            qid = UUID(queue_id)
-        except ValueError:
-            return None
-        session = get_cassandra_session()
-        row = session.execute(PublishQueueStmts.GET_ROW, (qid,)).one()
-        if row is None:
-            return None
-        domain = self._domain_from_url(row.scrape_url or "")
-        if not domain:
-            return None
-        self.reject_domain_source(domain=domain, wallet=wallet, source_url_hint=row.scrape_url or "")
-        return {"queue_id": queue_id, "domain": domain}
-
     def list_tool_suggestions(self, *, include_resolved: bool = False) -> list[dict]:
         """Capabilities the writer model wished it had (via suggest_tool), newest first. Resolved suggestions (tools that have since shipped) are hidden by default so the Tool gaps panel only shows genuine gaps instead of growing forever — see resolve_tool_suggestions."""
         from datetime import UTC, datetime
@@ -1699,66 +1680,8 @@ class AdminCassandraStore:
             "service_id": (a.service_id or "") if a else "",
         }
 
-    @staticmethod
-    def _queue_row_dict(row: Any) -> dict:  # noqa: ANN401 -- duck-typed Cassandra driver row, no formal class
-        return {
-            "queue_id": str(row.queue_id),
-            "status": row.status or "",
-            "last_reason": getattr(row, "last_reason", None) or "",
-            "priority": int(row.priority or 0),
-            "topic": row.topic or "",
-            "publish_kind": row.publish_kind or "",
-            "service_id": row.service_id or "",
-            "display_name": row.display_name or "",
-            "scrape_url": row.scrape_url or "",
-            "created_at": row.created_at.isoformat() if row.created_at else "",
-            "updated_at": row.updated_at.isoformat() if row.updated_at else "",
-            "human_pick_day": getattr(row, "human_pick_day", None) or "",
-        }
-
-    def list_publish_queue(self, *, limit: int = 200) -> list[dict]:
-        """Publish-queue rows with their status and last drain/compose decision (last_reason). EVERY truly-pending row is always included (read from the same publish_queue_pending index the drain uses — a plain LIMIT scan of the main table returns token-order samples and silently under-reports pending); resolved history fills the remainder up to ``limit``, newest first. Payload deliberately excluded — it carries the full page text; use publish_queue_breakdown for one row's score."""
-        from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
-        from app.core.statements import PublishQueueStmts
-
-        session = get_cassandra_session()
-
-        pending: list[dict] = []
-        pending_ids: set[str] = set()
-        try:
-            id_rows = list(session.execute(PublishQueueStmts.LIST_PENDING_IDS, ("pending", 2000)))
-            for ok, res in execute_parallel_with_args(
-                PublishQueueStmts.GET_ROW,
-                [(row.queue_id,) for row in id_rows],
-                concurrency=64,
-                raise_on_error=False,
-            ):
-                detail = res.one() if ok else None
-                if detail is None:
-                    continue
-                item = self._queue_row_dict(detail)
-                pending.append(item)
-                pending_ids.add(item["queue_id"])
-        except Exception:
-            pending = []
-
-        resolved: list[dict] = []
-        try:
-            scan_limit = max(limit * 5, 1000)
-            for row in session.execute(PublishQueueStmts.LIST_RECENT, (scan_limit,)):
-                item = self._queue_row_dict(row)
-                if item["queue_id"] not in pending_ids and item["status"] != "pending":
-                    resolved.append(item)
-        except Exception:
-            resolved = []
-
-        pending.sort(key=lambda it: it["priority"], reverse=True)
-        resolved.sort(key=lambda it: it["updated_at"], reverse=True)
-        room = max(0, limit - len(pending))
-        return pending + resolved[:room]
-
     def list_pending_feed_backlog(self) -> list[dict]:
-        """Articles already approved and composed, waiting (articles.status='backlog') for the paced-release worker to publish them (PENDING_FEED_MAX_DEPTH caps this at 3) — distinct from publish_queue above, which is in-flight COMPOSING work. Not surfaced anywhere in admin before 2026-07-17; checking it required a direct DB read.
+        """Articles already approved and composed, waiting (articles.status='backlog') for the paced-release worker to publish them (PENDING_FEED_MAX_DEPTH caps this at 3) — distinct from the in-flight composing work the artifacts/to_compose Queue tab view shows. Not surfaced anywhere in admin before 2026-07-17; checking it required a direct DB read.
 
         2026-08-25: reads `articles` directly (was pending_feed_queue, article-
         table consolidation Phase 4) -- title/service_id come straight off the
@@ -1779,100 +1702,3 @@ class AdminCassandraStore:
         ]
         items.sort(key=lambda it: it["approved_at"])
         return items
-
-    def publish_queue_breakdown(self, queue_id: str) -> dict | None:
-        """One row's priority_breakdown (computed at enqueue, stored on the payload) plus content signals — the "why this score" companion to list_publish_queue. None when the row is missing/unreadable."""
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import PublishQueueStmts
-
-        try:
-            qid = UUID(queue_id)
-        except ValueError:
-            return None
-        session = get_cassandra_session()
-        row = session.execute(PublishQueueStmts.GET_PAYLOAD, (qid,)).one()
-        if row is None:
-            return None
-        try:
-            payload = serialization.loads(row.payload or "{}")
-        except Exception:
-            return None
-        return {
-            "queue_id": queue_id,
-            "priority_breakdown": payload.get("priority_breakdown") or "",
-            "signals": payload.get("signals") or {},
-            "tier": payload.get("tier") or "",
-            "page_title": str(payload.get("page_title", "")),
-            "diff_preview": str(payload.get("diff") or "")[:2000],
-        }
-
-    def bump_queue_priority(self, queue_id: str) -> dict | None:
-        """Pin a pending queue row to the front: gives it a priority higher than every other pending row, so the drain's next legitimate run (still fully gated by the daily cap and pacing interval — this never touches either) composes it next instead of whatever would otherwise win on priority. None when the row is missing or not pending."""
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import PublishQueueStmts
-
-        try:
-            qid = UUID(queue_id)
-        except ValueError:
-            return None
-        session = get_cassandra_session()
-        row = session.execute(PublishQueueStmts.GET_ROW, (qid,)).one()
-        if row is None or (row.status or "") != "pending":
-            return None
-
-        max_row = session.execute(PublishQueueStmts.MAX_PENDING_PRIORITY, ("pending",)).one()
-        current_max = int(max_row.priority) if max_row is not None else 0
-        new_priority = max(current_max, int(row.priority or 0)) + 1
-        now = datetime.now(tz=UTC)
-
-        session.execute(PublishQueueStmts.UPDATE_PRIORITY, (new_priority, now, qid))
-        session.execute(
-            PublishQueueStmts.DELETE_PENDING,
-            ("pending", row.priority, row.created_at, qid),
-        )
-        session.execute(
-            PublishQueueStmts.INSERT_PENDING,
-            (
-                "pending",
-                new_priority,
-                row.created_at,
-                qid,
-                row.service_id,
-                row.topic,
-                row.publish_kind,
-            ),
-        )
-        return {"queue_id": queue_id, "priority": new_priority}
-
-    def set_human_pick_for_today(self, queue_id: str) -> dict | None:
-        """Pin a pending publish_queue row's human_pick_day -- the OLD (publish_queue/3-lane) human-pick mechanism.
-
-        2026-08-25: FUNCTIONALLY INERT. drain_to_compose (the live compose
-        trigger) no longer reads publish_queue at all, let alone this
-        column, so this call still succeeds and writes the row (publish_queue
-        stays live-fed for rollback safety, see ingest_signal.py's dual-write
-        note) but nothing acts on it anymore. The live equivalent is the
-        editorial-room artifact system's pin: POST
-        /api/v1/admin/artifacts/:artifact_id/pin-for-tomorrow ->
-        admin_pin_artifact_for_tomorrow -> workers'
-        artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow.
-        Kept registered (not deleted) only because the admin Queue-tab
-        redesign that repoints this UI action to the artifact-native
-        endpoint is a separate, parallel task.
-        """
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import PublishQueueStmts
-
-        try:
-            qid = UUID(queue_id)
-        except ValueError:
-            return None
-        session = get_cassandra_session()
-        row = session.execute(PublishQueueStmts.GET_ROW, (qid,)).one()
-        if row is None or (row.status or "") != "pending":
-            return None
-
-        today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
-        now = datetime.now(tz=UTC)
-        session.execute(PublishQueueStmts.SET_HUMAN_PICK, (today, now, qid))
-        return {"queue_id": queue_id, "human_pick_day": today}
