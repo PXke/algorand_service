@@ -106,6 +106,12 @@ _MAX_THREADS = max(1, (os.cpu_count() or 2) // 2)
 _HEADING = re.compile(r"^(#{1,6}\s+)(.*)$", re.DOTALL)
 _CODE_FENCE = re.compile(r"^```")
 _BARE_URL = re.compile(r"^https?://\S+$")
+# Deliberately simple: only matches a plain `[text](url)` link with no
+# `"title"` portion, so it never touches the more elaborate
+# `[text](url "title")` glossary-link syntax (title text included) that
+# already survives whole-block translation correctly -- see
+# _repair_inline_links for why that's the right scope, not an oversight.
+_INLINE_LINK = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
 
 _load_lock = threading.Lock()
 _milmmt: dict[str, Any] = {}
@@ -167,6 +173,62 @@ def _translate_text_milmmt(text: str, target_language: str) -> str:
     return tokenizer.decode(generated, skip_special_tokens=True).strip()
 
 
+def _looks_translatable_anchor(anchor: str) -> bool:
+    """True for a link anchor worth checking for the leave-it-in-English defect (see _repair_inline_links).
+
+    Multi-word only: a single token is almost always a brand name or a bare
+    domain used as its own anchor text (``Pera's``, ``docs.perawallet.app``)
+    that correctly stays unchanged across languages -- retranslating those
+    is how a fix like this would start breaking things that already work.
+    Real prose anchors (``GitHub repository``, ``Pera's technical
+    documentation hub``) are always 2+ words.
+    """
+    return len(anchor.split()) >= 2
+
+
+def _repair_inline_links(source_text: str, translated_text: str, target_language: str) -> str:
+    """Deterministic post-translation repair for two MiLMMT inline-link defects -- see module docstring: `[text](url)` gets no special handling before the model call, unlike headings/code-fences/bare URLs.
+
+    Found 2026-08-25 diffing a live French article against its English
+    source (docs.perawallet.app "Pera Connect" piece):
+
+    1. **Broken link syntax.** MiLMMT sometimes regenerates a space between
+       `]` and `(` while translating the surrounding sentence, e.g.
+       ``[répositoire GitHub] (https://...)`` -- reproduced live off real
+       model inference on the exact source paragraph, byte-for-byte
+       matching the production defect. A markdown link is never valid with
+       that space, so collapsing it can only repair syntax, never damage a
+       correct link.
+    2. **Untranslated anchor.** MiLMMT occasionally leaves a multi-word
+       anchor's text completely untouched inside an otherwise-translated
+       sentence, e.g. ``[Pera's technical documentation hub](url)``
+       surviving verbatim into the French body. Detected by the source
+       anchor's exact English text still being present in the model's own
+       output; when found, that anchor alone is re-translated (its own
+       small MiLMMT call) and spliced back in. Single-word/bare-domain
+       anchors are skipped (``_looks_translatable_anchor``) since those are
+       usually brand names that are correctly left alone, not a defect.
+
+    Both signatures are read off the SOURCE block's own links (regex scoped
+    to plain `[text](url)`, deliberately not matching the more elaborate
+    `[text](url "title")` glossary-link syntax, which already survives
+    whole-block translation correctly and isn't touched here). Best-effort
+    safety net, not a guarantee -- only catches defects matching these two
+    specific signatures.
+    """
+    translated_text = re.sub(r"\]\s+\(", "](", translated_text)
+    for anchor, _url in _INLINE_LINK.findall(source_text):
+        if not _looks_translatable_anchor(anchor):
+            continue
+        marker = f"[{anchor}]("
+        if marker not in translated_text:
+            continue
+        fixed_anchor = _translate_text_milmmt(anchor, target_language).strip()
+        if fixed_anchor and fixed_anchor != anchor:
+            translated_text = translated_text.replace(marker, f"[{fixed_anchor}](", 1)
+    return translated_text
+
+
 def _translate_block(text: str, target_language: str) -> str:
     """Translate one block, handling the markdown-structure exceptions cheap enough to be safe (see module docstring for what is NOT yet handled).
 
@@ -184,8 +246,10 @@ def _translate_block(text: str, target_language: str) -> str:
         prefix, content = heading.group(1), heading.group(2)
         translated_content = _translate_text_milmmt(content, target_language)
         translated = prefix + translated_content if translated_content.strip() else ""
+        link_source = content
     else:
         translated = _translate_text_milmmt(text, target_language)
+        link_source = text
     if not translated.strip():
         # The engine returned nothing for a non-empty source block. Silently
         # keeping that empty string here would drop the block wholesale --
@@ -203,7 +267,7 @@ def _translate_block(text: str, target_language: str) -> str:
             target_language,
         )
         return text
-    return translated
+    return _repair_inline_links(link_source, translated, target_language)
 
 
 def _log_alignment_findings(english_body: str, translated_body: str, target_language: str) -> None:
