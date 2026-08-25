@@ -28,6 +28,19 @@ from algorand_shared.article_statements import (
     PUBLISH_QUEUE_INSERT_PENDING,
     PUBLISH_QUEUE_SET_HUMAN_PICK,
 )
+from algorand_shared.chain_statements import CHAIN_CONDUIT_HEAD, CHAIN_TXNS_BY_ROUND
+from algorand_shared.platform_statements import (
+    CLASSIFIER_FEEDBACK_INSERT_BY_TIME,
+    DOMAIN_TRACKING_INSERT,
+    GLOSSARY_UPDATE_TRANSLATIONS,
+    PAGE_SNAPSHOT_GET_LATEST,
+    PAGE_SNAPSHOT_INSERT,
+    SERVICE_SOURCE_DELETE_FOR_SERVICE,
+    SERVICE_SOURCE_GET_BY_DOMAIN,
+    SERVICE_SOURCE_LIST_FOR_SERVICE,
+    SERVICE_SOURCE_UPSERT,
+    SERVICE_SOURCE_UPSERT_BY_DOMAIN,
+)
 
 if TYPE_CHECKING:
     from cassandra.query import PreparedStatement
@@ -250,12 +263,7 @@ class DomainTrackingStmts:
         "SELECT last_online_at, category, is_relevant, metadata, frontier_status "
         "FROM algorand_platform.domain_tracking WHERE domain = ?"
     )
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.domain_tracking ("
-        "domain, last_crawled_at, last_online_at, relevance_score, "
-        "category, is_relevant, metadata, frontier_status"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
+    INSERT = DOMAIN_TRACKING_INSERT
     LIST = _Stmt(
         "SELECT domain, frontier_status, is_relevant, metadata "
         "FROM algorand_platform.domain_tracking LIMIT ?"
@@ -310,11 +318,7 @@ class ClassifierFeedbackStmts:
         "predicted_publish, approved, admin_wallet, created_at, metadata"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    INSERT_BY_TIME = _Stmt(
-        "INSERT INTO algorand_platform.classifier_feedback_by_time ("
-        "bucket, created_at, feedback_id, url, approved"
-        ") VALUES (?, ?, ?, ?, ?)"
-    )
+    INSERT_BY_TIME = CLASSIFIER_FEEDBACK_INSERT_BY_TIME
     LIST_IDS = _Stmt(
         "SELECT feedback_id FROM algorand_platform.classifier_feedback_by_time "
         "WHERE bucket = ? LIMIT ?"
@@ -366,15 +370,8 @@ class PriceMetricsStmts:
 class SnapshotStmts:
     """Prepared statements for service-source content snapshots."""
 
-    GET_LATEST = _Stmt(
-        "SELECT content_hash, title, body FROM algorand_platform.page_snapshots "
-        "WHERE source_id = ? LIMIT 1"
-    )
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.page_snapshots "
-        "(source_id, captured_at, content_hash, title, body) "
-        "VALUES (?, ?, ?, ?, ?) USING TTL 3888000"
-    )
+    GET_LATEST = PAGE_SNAPSHOT_GET_LATEST
+    INSERT = PAGE_SNAPSHOT_INSERT
     INSERT_SOURCE = _Stmt(
         "INSERT INTO algorand_platform.page_sources "
         "(source_id, service_id, url, enabled, updated_at) "
@@ -555,11 +552,8 @@ class PendingFeedStmts:
 class ChainStmts:
     """Prepared statements for chain data indexed by Conduit."""
 
-    CONDUIT_HEAD = _Stmt("SELECT value FROM algorand_platform.conduit_meta WHERE id = ?")
-    TXNS_BY_ROUND = _Stmt(
-        "SELECT txid, round, sender, txn_type, txn_json, receiver, amount_microalgos "
-        "FROM algorand_platform.transactions_by_round WHERE round = ?"
-    )
+    CONDUIT_HEAD = CHAIN_CONDUIT_HEAD
+    TXNS_BY_ROUND = CHAIN_TXNS_BY_ROUND
 
 
 # --------------------------------------------------------------------------- #
@@ -606,22 +600,11 @@ class ServiceRegistryStmts:
 class ServiceSourceStmts:
     """Prepared statements for a service's known web sources."""
 
-    UPSERT = _Stmt(
-        "INSERT INTO algorand_platform.service_sources ("
-        "service_id, source_id, source_type, url, domain, enabled, added_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
-    )
-    LIST_FOR_SERVICE = _Stmt(
-        "SELECT source_id, source_type, url, domain, enabled "
-        "FROM algorand_platform.service_sources WHERE service_id = ?"
-    )
-    DELETE_FOR_SERVICE = _Stmt("DELETE FROM algorand_platform.service_sources WHERE service_id = ?")
-    UPSERT_BY_DOMAIN = _Stmt(
-        "INSERT INTO algorand_platform.service_by_domain (domain, service_id) VALUES (?, ?)"
-    )
-    GET_BY_DOMAIN = _Stmt(
-        "SELECT service_id FROM algorand_platform.service_by_domain WHERE domain = ?"
-    )
+    UPSERT = SERVICE_SOURCE_UPSERT
+    LIST_FOR_SERVICE = SERVICE_SOURCE_LIST_FOR_SERVICE
+    DELETE_FOR_SERVICE = SERVICE_SOURCE_DELETE_FOR_SERVICE
+    UPSERT_BY_DOMAIN = SERVICE_SOURCE_UPSERT_BY_DOMAIN
+    GET_BY_DOMAIN = SERVICE_SOURCE_GET_BY_DOMAIN
 
 
 # --------------------------------------------------------------------------- #
@@ -711,7 +694,4 @@ class GlossaryStmts:
         "slug, term, definition, aliases, status, created_at, updated_at, created_by"
         ") VALUES (?, ?, ?, ?, 'draft', ?, ?, ?) IF NOT EXISTS"
     )
-    UPDATE_TRANSLATIONS = _Stmt(
-        "UPDATE algorand_platform.glossary_terms SET translations = translations + ? "
-        "WHERE slug = ? IF EXISTS"
-    )
+    UPDATE_TRANSLATIONS = GLOSSARY_UPDATE_TRANSLATIONS
