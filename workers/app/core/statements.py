@@ -572,6 +572,49 @@ class ViewCountStmts:
 
 
 # --------------------------------------------------------------------------- #
+# pageview analytics -- deferred (write-behind) dimensions
+# --------------------------------------------------------------------------- #
+class AnalyticsFlushStmts:
+    """Variable-delta bumps for the six deferred pageview-analytics dimensions.
+
+    backend defers these to a Redis pending buffer instead of writing
+    directly (2026-08-25) -- see backend's app/modules/seo/analytics_store.py
+    module note above _write_pageview_counters for why these six specifically
+    (and not the others) are safe to apply on a delay. flush_pending_analytics
+    (this module's counterpart to flush_pending_views) drains backend's
+    "news:analytics:pending:*" Redis keys into these tables. Table names/PKs
+    match backend's core/statements.py AnalyticsStmts GEO_BUMP/CAMPAIGN_BUMP/
+    HOUR_BUMP/LANGUAGE_BUMP/REFERRER_PATH_BUMP/REFERRER_URL_BUMP exactly --
+    this just applies a batched delta instead of a fixed +1.
+    """
+
+    GEO_BUMP = _Stmt(
+        "UPDATE algorand_platform.geo_country_daily SET views = views + ? "
+        "WHERE day = ? AND country = ?"
+    )
+    CAMPAIGN_BUMP = _Stmt(
+        "UPDATE algorand_platform.campaign_daily SET views = views + ? "
+        "WHERE day = ? AND campaign = ?"
+    )
+    HOUR_BUMP = _Stmt(
+        "UPDATE algorand_platform.pageview_hour_daily SET views = views + ? "
+        "WHERE day = ? AND hour = ?"
+    )
+    LANGUAGE_BUMP = _Stmt(
+        "UPDATE algorand_platform.pageview_language_daily SET views = views + ? "
+        "WHERE day = ? AND lang = ?"
+    )
+    REFERRER_PATH_BUMP = _Stmt(
+        "UPDATE algorand_platform.pageview_referrer_path_daily SET views = views + ? "
+        "WHERE day = ? AND referrer = ? AND path = ?"
+    )
+    REFERRER_URL_BUMP = _Stmt(
+        "UPDATE algorand_platform.pageview_referrer_url_daily SET views = views + ? "
+        "WHERE day = ? AND referrer_url = ?"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # service_registry
 # --------------------------------------------------------------------------- #
 class ServiceRegistryStmts:

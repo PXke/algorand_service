@@ -1441,6 +1441,69 @@ def _repeated_ua_for_today(user_agent: str | None, day: str) -> bool:
     return repeated
 
 
+# ── Deferred low-risk pageview dimensions (write-behind, 2026-08-25) ────────
+# _write_pageview_counters used to fire every counter bump synchronously — up
+# to 10-12 Cassandra COUNTER UPDATEs per confirmed-human hit, on every SSR
+# document render and SPA beacon site-wide. Mirrors the article view-count fix
+# (app/modules/news/stores/view_counts.py / workers' flush_pending_views): a
+# Cassandra counter-column write is its own separate write path that can't
+# batch with ordinary writes, so buffering the increment in Redis and applying
+# it later on a periodic drain (workers' flush_pending_analytics, every
+# ANALYTICS_FLUSH_SECONDS) trades a bounded reconciliation delay for a big cut
+# in synchronous writes on the hot path.
+#
+# NOT every dimension is safe to defer this way, though: _purge_direct_sample_ua
+# (the UA-repeat-offender clawback) retroactively DECREMENTs specific counters
+# by re-scanning TODAY's already-committed rows the moment a UA crosses
+# _UA_FREQ_THRESHOLD. That only works if the counters it corrects (and the raw
+# per-request sample rows it scans) are already sitting in Cassandra, not
+# still parked in an unflushed Redis buffer -- otherwise the purge would find
+# nothing to correct for a UA's most recent hits, and even if a correction
+# fires, decrementing a buffered-but-not-yet-applied counter would either miss
+# entirely or double-count once the buffer flushes. So the six dimensions the
+# purge NEVER reads or corrects (see its own docstring's "what this can NEVER
+# reach" list) go through the write-behind buffer below: geo, campaign, hour,
+# language, referrer_path, referrer_url. Everything the purge DOES read —
+# PAGEVIEW_BUMP, PATH_KIND_BUMP, DEVICE_BUMP, BROWSER_BUMP, REFERRER_BUMP,
+# DIRECT_UACLASS_BUMP, and the DIRECT_SAMPLE_INSERT/REFERRED_SAMPLE_INSERT raw
+# logs — stays exactly as it was: synchronous, immediate Cassandra writes, so
+# the clawback keeps seeing real committed state at the moment a repeat
+# offender tips over the threshold. (record_session/SESSION_BUMP is also left
+# alone: the purge never touches it either, but it already only fires on a
+# session's 1st/2nd hit rather than every pageview, so it isn't part of this
+# write-amplification problem and touching it would be extra risk for no
+# benefit here.)
+_ANALYTICS_PENDING_PREFIX = "news:analytics:pending:"
+
+
+def _pending_analytics_key(dim: str, *parts: str) -> str:
+    """Redis key for one deferred dimension's pending delta.
+
+    Each free-form part (day, country, campaign text, referrer, path, url...)
+    is hex-encoded before joining on ':' so a part containing ':' itself (a
+    URL, a path) can never be confused with the key's own field separator —
+    the flush job on the workers side reverses this exactly to recover the
+    original column values.
+    """
+    encoded = ":".join(str(p).encode().hex() for p in parts)
+    return f"{_ANALYTICS_PENDING_PREFIX}{dim}:{encoded}"
+
+
+def _buffer_pending_analytics(dim: str, *parts: str) -> None:
+    """Best-effort +1 to a deferred pageview counter's pending Redis key.
+
+    Fails open (never raises) -- a Redis hiccup here must never block page
+    serving, same as every other Redis touch in this module. See the module
+    note above _write_pageview_counters for which six dimensions this is used
+    for and why they're safe to defer past the UA-clawback purge.
+    """
+    try:
+        r = _uv_redis()
+        r.incr(_pending_analytics_key(dim, *parts))
+    except Exception as exc:
+        log.debug("pending analytics buffer skipped (%s): %s", dim, exc)
+
+
 def _write_pageview_counters(
     *,
     day: str,
@@ -1484,37 +1547,46 @@ def _write_pageview_counters(
     session = get_cassandra_session()
     # Privacy-safe unique visitor count (Redis HLL), independent of Cassandra.
     record_unique("human", client_ip, user_agent, day)
+    # These stay synchronous -- the UA-clawback purge reconstructs its
+    # corrections from these exact counters (see the module note above).
     session.execute_async(AnalyticsStmts.PAGEVIEW_BUMP, ("human", day))
     session.execute_async(AnalyticsStmts.PATH_KIND_BUMP, (day, path[:200], "human"))
     # Server-side session stitching + new-vs-returning split.
     record_session(session, client_ip, user_agent, day)
-    # Country (GeoIP, no IP stored) and campaign tag (utm/ref).
+    # Country (GeoIP, no IP stored) and campaign tag (utm/ref) -- never read by
+    # the purge, deferred to the write-behind buffer.
     country = country_for_ip(client_ip)
     if country:
-        session.execute_async(AnalyticsStmts.GEO_BUMP, (day, country))
+        _buffer_pending_analytics("geo", day, country)
     if campaign:
-        session.execute_async(AnalyticsStmts.CAMPAIGN_BUMP, (day, campaign[:80]))
-    # Site-wide device + browser + hour-of-day segmentation.
+        _buffer_pending_analytics("campaign", day, campaign[:80])
+    # Site-wide device + browser stay synchronous (purge-reachable); hour-of-day
+    # and reader language are never read by the purge, deferred.
     session.execute_async(AnalyticsStmts.DEVICE_BUMP, (day, ua_class(user_agent)))
     session.execute_async(AnalyticsStmts.BROWSER_BUMP, (day, browser_family(user_agent)))
-    session.execute_async(AnalyticsStmts.HOUR_BUMP, (day, datetime.now(UTC).hour))
+    _buffer_pending_analytics("hour", day, str(datetime.now(UTC).hour))
     lang = primary_language(accept_language)
     if lang:
-        session.execute_async(AnalyticsStmts.LANGUAGE_BUMP, (day, lang[:8]))
+        _buffer_pending_analytics("language", day, lang[:8])
+    # REFERRER_BUMP stays synchronous -- the purge's REFERRER_BUMP_DECR reads
+    # this exact counter, keyed by the same bucket recorded in the raw sample
+    # row it scans.
     session.execute_async(AnalyticsStmts.REFERRER_BUMP, (day, referrer))
-    # Source -> landing-page attribution (which referrer drove which page).
-    session.execute_async(AnalyticsStmts.REFERRER_PATH_BUMP, (day, referrer, path[:200]))
+    # Source -> landing-page attribution is never read by the purge, deferred.
+    _buffer_pending_analytics("referrer_path", day, referrer, path[:200])
     if referrer == "(direct)":
         _record_direct(session, day, path, referer, user_agent)
     else:
         # Raw per-request sample for '(internal)'/external hits too (2026-08-25) —
         # same retroactive-purge use as _record_direct's, see _record_referred_sample.
+        # Stays synchronous -- this is the exact log the purge scans by day+UA.
         _record_referred_sample(session, day, path, referrer, referer, user_agent)
         # Full external referrer URL (which exact thread/page, not just the
-        # host). Skipped for direct/internal by normalize_referrer_url.
+        # host). Skipped for direct/internal by normalize_referrer_url. Never
+        # read by the purge, deferred.
         ref_url = normalize_referrer_url(referer)
         if ref_url:
-            session.execute_async(AnalyticsStmts.REFERRER_URL_BUMP, (day, ref_url))
+            _buffer_pending_analytics("referrer_url", day, ref_url)
 
 
 def record_pageview(

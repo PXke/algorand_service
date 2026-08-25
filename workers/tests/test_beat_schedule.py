@@ -48,3 +48,23 @@ def test_flush_pending_view_counts_interval_configurable(monkeypatch: pytest.Mon
     monkeypatch.setenv("VIEW_COUNT_FLUSH_SECONDS", "120")
     schedule = celery_app._build_beat_schedule()
     assert schedule["flush-pending-view-counts"]["schedule"] == 120.0
+
+
+def test_flush_pending_analytics_scheduled_every_ten_minutes_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Redis-buffered deferred-analytics flush runs unconditionally (no feature flag) every 10 minutes by default -- see analytics_flush.flush_pending_analytics for why that interval is safe."""
+    monkeypatch.delenv("ANALYTICS_FLUSH_SECONDS", raising=False)
+    schedule = celery_app._build_beat_schedule()
+    assert (
+        schedule["flush-pending-analytics"]["task"]
+        == "app.tasks.newspaper.flush_pending_analytics"
+    )
+    assert schedule["flush-pending-analytics"]["schedule"] == 600.0
+
+
+def test_flush_pending_analytics_interval_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flush interval is overridable via ANALYTICS_FLUSH_SECONDS."""
+    monkeypatch.setenv("ANALYTICS_FLUSH_SECONDS", "180")
+    schedule = celery_app._build_beat_schedule()
+    assert schedule["flush-pending-analytics"]["schedule"] == 180.0
