@@ -1764,6 +1764,103 @@ def admin_investigation_findings(request: Request) -> Response:
     return _compute()
 
 
+def admin_artifacts_to_compose_preview(request: Request) -> Response | dict:
+    """SHADOW MODE, read-only: what the new editorial-room `artifacts`/`to_compose` selection (see workers/app/modules/newspaper/to_compose_selection.py) currently would pick for `day` (default: tomorrow) — the human-pin slot (if pinned) plus the top-priority platform picks, with each pending artifact's live priority breakdown.
+
+    Backend has no direct import of the workers codebase (separate
+    services/venvs, same as every other admin trigger in this file), so this
+    dispatches into worker's preview_to_compose_for_day via Celery and waits
+    on the result — same shape as admin_interrogate_compose_session. Unlike
+    that route's underlying work, this is a handful of Cassandra reads plus
+    some pure-function scoring, so a much shorter timeout than the 90s LLM
+    call there is enough headroom.
+
+    Purely additive: does not read or write publish_queue / articles, and
+    (unlike select_to_compose_for_day) never mutates artifact status or
+    writes to `to_compose` — safe to call on every dashboard load.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    from datetime import UTC, date, datetime, timedelta
+
+    day = (request.query_params.get("day", "") or "").strip()
+    if not day:
+        day = (datetime.now(tz=UTC).date() + timedelta(days=1)).isoformat()
+    else:
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            return json_error_response(400, "invalid_request", "day must be YYYY-MM-DD")
+
+    try:
+        from celery import Celery
+        from celery.exceptions import TimeoutError as CeleryTimeoutError
+
+        from app.core.config import settings
+
+        async_result = Celery(
+            broker=settings.celery_broker_url, backend=settings.redis_result_url
+        ).send_task(
+            "app.tasks.newspaper.preview_to_compose_for_day",
+            args=[day],
+            queue="pipeline",
+        )
+        try:
+            result = async_result.get(timeout=30)
+        except CeleryTimeoutError:
+            return json_error_response(
+                504, "timeout", "the shadow-selection preview took too long"
+            )
+    except Exception as exc:
+        return json_error_response(502, "broker_unavailable", str(exc))
+    return result
+
+
+def admin_pin_artifact_for_tomorrow(request: Request) -> Response | dict:
+    """SHADOW MODE write: pin one editorial-room artifact as tomorrow's human pick (see workers' artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow).
+
+    Safe: writes only to the new shadow `artifacts` / `artifacts_pending` /
+    `to_compose` tables, which nothing on the live compose/publish path
+    (publish_queue, queue_drain_tasks, _select_lane_for_today) reads yet.
+    Same Celery-dispatch-and-wait shape as the preview route above and as
+    admin_interrogate_compose_session — a single targeted UPDATE plus a
+    pending-index reindex, so a short timeout is plenty.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    artifact_id = request.path_params.get("artifact_id", "")
+    if not artifact_id:
+        return json_error_response(400, "invalid_request", "artifact_id is required")
+
+    try:
+        from celery import Celery
+        from celery.exceptions import TimeoutError as CeleryTimeoutError
+
+        from app.core.config import settings
+
+        async_result = Celery(
+            broker=settings.celery_broker_url, backend=settings.redis_result_url
+        ).send_task(
+            "app.tasks.newspaper.pin_artifact_for_tomorrow",
+            args=[artifact_id],
+            queue="pipeline",
+        )
+        try:
+            result = async_result.get(timeout=10)
+        except CeleryTimeoutError:
+            return json_error_response(504, "timeout", "the pin action took too long")
+    except Exception as exc:
+        return json_error_response(502, "broker_unavailable", str(exc))
+
+    if not result.get("ok"):
+        return json_error_response(404, "not_found", "unknown artifact_id")
+    return result
+
+
 def register_admin_routes(app: Router) -> None:
     """Register all admin API endpoints on the given Robyn app."""
     app.get("/api/v1/admin/analytics")(admin_analytics)
@@ -1826,4 +1923,10 @@ def register_admin_routes(app: Router) -> None:
     app.get("/api/v1/admin/articles/:article_id/comments")(admin_list_article_comments)
     app.delete("/api/v1/admin/articles/:article_id/comments/:comment_id")(
         admin_delete_article_comment
+    )
+    # Editorial-room artifact system (2026-08-25, SHADOW MODE) -- preview-only,
+    # not wired to any live compose trigger. See to_compose_selection.py.
+    app.get("/api/v1/admin/artifacts/to-compose-preview")(admin_artifacts_to_compose_preview)
+    app.post("/api/v1/admin/artifacts/:artifact_id/pin-for-tomorrow")(
+        admin_pin_artifact_for_tomorrow
     )

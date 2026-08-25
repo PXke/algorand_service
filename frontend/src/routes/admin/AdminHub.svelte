@@ -15,6 +15,12 @@
     { id: 'Inbox', label: 'Inbox', slug: 'inbox', group: 'Content' },
     { id: 'Glossary', label: 'Glossary', slug: 'glossary', group: 'Content' },
     { id: 'Queue', label: 'Queue', slug: 'queue', group: 'Pipeline' },
+    {
+      id: 'Artifacts Preview',
+      label: 'Artifacts (Preview)',
+      slug: 'artifacts-preview',
+      group: 'Pipeline',
+    },
     { id: 'Classifier', label: 'Classifier', slug: 'classifier', group: 'Pipeline' },
     { id: 'Training', label: 'Training', slug: 'training', group: 'Pipeline' },
     { id: 'Gatekeeper', label: 'Gatekeeper', slug: 'gatekeeper', group: 'Pipeline' },
@@ -44,6 +50,7 @@
     'Domains',
     'Inbox',
     'System',
+    'Artifacts Preview',
   ])
 
   const tabLoaders: Record<TabId, () => Promise<{ default: Component<any> }>> = {
@@ -53,6 +60,7 @@
     Inbox: () => import('./tabs/InboxTab.svelte'),
     Glossary: () => import('./tabs/GlossaryTab.svelte'),
     Queue: () => import('./tabs/QueueTab.svelte'),
+    'Artifacts Preview': () => import('./tabs/ArtifactsPreviewTab.svelte'),
     Classifier: () => import('./tabs/ClassifierTab.svelte'),
     Training: () => import('./tabs/TrainingTab.svelte'),
     Gatekeeper: () => import('./tabs/GatekeeperTab.svelte'),
