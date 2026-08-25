@@ -52,7 +52,18 @@ def hot(request: Request) -> dict:
 
 
 def feed(request: Request) -> Response:
-    """Keyset-paginated article feed, ETag/Last-Modified cacheable."""
+    """Keyset-paginated article feed, ETag/Last-Modified cacheable.
+
+    Also cached server-side (Redis, cache-aside) behind the same `cached_json`
+    primitive as /tags and /hot. Every filter param (service_id/tag/lang/limit)
+    plus the cursor is folded into the key so pages and filtered views never
+    collide. TTL is short (60s, vs /tags and /hot's 300s) because this is the
+    write-sensitive default view readers land on; write paths additionally call
+    `invalidate_feed_first_page()` to bust the no-cursor ("first page") entries
+    immediately rather than waiting out the TTL -- see
+    shared/algorand_shared/feed_cache.py for why only first pages are worth
+    invalidating (older, cursor-paginated pages are immutable once cached).
+    """
     limit_param = query_param(request.query_params.get("limit", ""))
     limit = int(limit_param) if limit_param.isdigit() else None
     service_id = query_param(request.query_params.get("service_id", "")) or None
@@ -60,9 +71,27 @@ def feed(request: Request) -> Response:
     cursor_param = query_param(request.query_params.get("cursor", ""))
     cursor = int(cursor_param) if cursor_param.isdigit() else None
     lang = query_param(request.query_params.get("lang", "")) or None
-    items, next_cursor = news_service.list_feed_page(
-        limit=limit, service_id=service_id, tag=tag, cursor_epoch_ms=cursor, lang=lang
+
+    from app.core.cache import cached_json
+
+    # "first" vs "page" keeps the SCAN-based invalidation in feed_cache.py
+    # (which only ever targets first pages) from having to touch cursor'd
+    # pages at all -- those are stable until TTL regardless of new writes.
+    cache_key = (
+        f"news:feed:{'first' if cursor is None else 'page'}:"
+        f"{service_id or '_'}:{tag or '_'}:{lang or '_'}:"
+        f"{limit if limit is not None else '_'}:{cursor if cursor is not None else ''}"
     )
+
+    def compute() -> dict:
+        items, next_cursor = news_service.list_feed_page(
+            limit=limit, service_id=service_id, tag=tag, cursor_epoch_ms=cursor, lang=lang
+        )
+        return {"items": serialization.to_builtins(items), "next_cursor": next_cursor}
+
+    cached = cached_json(cache_key, 60, compute)
+    items = cached["items"]
+    next_cursor = cached["next_cursor"]
 
     body = serialization.encode(
         {
@@ -77,7 +106,7 @@ def feed(request: Request) -> Response:
         "ETag": etag,
         "Cache-Control": "public, max-age=30",
     }
-    newest_epoch = max((item.published_at_epoch for item in items), default=0)
+    newest_epoch = max((item.get("published_at_epoch") or 0 for item in items), default=0)
     if newest_epoch:
         headers["Last-Modified"] = formatdate(newest_epoch, usegmt=True)
 

@@ -62,6 +62,15 @@ def transition_article_status(
         values["status_updated_at"] = datetime.now(tz=UTC)
     values.update(column_overrides)
     session.execute(ArticlesStmts.INSERT, tuple(values[col] for col in _ARTICLES_COLUMNS))
+
+    # Best-effort: any status/published_at/content move here (publish,
+    # unpublish, delete, draft-toggle, recompose re-publish, ...) can change
+    # what the reader feed's first page shows. See feed_cache.py for why only
+    # the first page is worth busting.
+    from algorand_shared.feed_cache import invalidate_feed_first_page
+
+    invalidate_feed_first_page()
+
     return True
 
 
