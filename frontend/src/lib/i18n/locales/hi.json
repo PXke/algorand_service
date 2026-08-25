@@ -216,6 +216,7 @@
   "articleRelatedTitle": "संबंधित कहानियां",
   "articleOnDesk": "इस डेस्क पर",
   "articleReadingProgress": "पढ़ने की प्रगति",
+  "articleRemainingLabel": "~{pct}% शेष",
   "articleProvenanceNote": "यह लेख ऑन-चेन घटनाओं, बाज़ार डेटा और निगरानी किए गए स्रोतों से AI की मदद से तैयार किया गया, फिर स्वचालित संपादकीय समीक्षा से गुज़रा। दावों की पुष्टि के लिए नीचे दिए गए स्रोत लिंक पर जाएँ, जब उपलब्ध हो।",
   "articleTopicNav": "इस विषय में और",
   "articleOlder": "विषय में पुराना",

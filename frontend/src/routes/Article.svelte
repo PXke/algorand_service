@@ -11,6 +11,7 @@
     rememberContinue,
     saveArticleScroll,
     takeArticleScroll,
+    updateContinueProgress,
   } from '../lib/continueReading'
   import { withLang, articleHref } from '../lib/paths'
   import { articleChromeCollapsed } from '../lib/articleChrome'
@@ -124,6 +125,15 @@
   $effect(() => {
     const id = articleId
     let raf = 0
+    // Read progress is persisted to localStorage (never the backend) so the
+    // homepage "continue reading" strip can show roughly how much is left —
+    // but a localStorage write on every scroll frame is wasted I/O, so the
+    // write itself is debounced well below the rAF-throttled visual update.
+    let writeTimer = 0
+    const scheduleProgressWrite = (p: number) => {
+      if (writeTimer) window.clearTimeout(writeTimer)
+      writeTimer = window.setTimeout(() => updateContinueProgress(id, p), 800)
+    }
     const update = () => {
       raf = 0
       saveArticleScroll(id, window.scrollY)
@@ -135,6 +145,7 @@
       const top = el.getBoundingClientRect().top + window.scrollY
       const span = Math.max(1, el.offsetHeight - window.innerHeight * 0.55)
       progress = Math.min(1, Math.max(0, (window.scrollY - top + 48) / span))
+      scheduleProgressWrite(progress)
       /* Finished it — so stop offering to resume it. "Continue reading" kept
          pointing at articles the reader had already read to the end, because
          nothing ever cleared the entry except opening a different story. */
@@ -155,6 +166,12 @@
       if (raf) cancelAnimationFrame(raf)
       window.removeEventListener('scroll', onScroll)
       window.removeEventListener('resize', onScroll)
+      // Flush: a reader who navigates away mid-scroll shouldn't lose the
+      // last few seconds of progress to an unfired debounce timer.
+      if (writeTimer) {
+        window.clearTimeout(writeTimer)
+        updateContinueProgress(id, progress)
+      }
     }
   })
 
@@ -199,6 +216,11 @@
   })
   const mins = $derived(readingMinutes(article?.body))
   const views = $derived(article?.views ?? 0)
+  // Only worth surfacing once a reader is meaningfully into the piece —
+  // below that it's noise, and past ~75% the "how much is left" framing
+  // stops being useful (they're basically done).
+  const remainingPct = $derived(Math.round((1 - progress) * 100))
+  const showRemaining = $derived(progress >= 0.5 && progress < 0.75)
 
   function deskOf(item: ArticleItem): string {
     const desk = primaryTopic(item.tags)
@@ -300,6 +322,11 @@
       </a>
       <p class="sticky-desk kicker">{deskLabel}</p>
       <strong class="sticky-title">{headline}</strong>
+      {#if showRemaining}
+        <span class="sticky-remaining">
+          {t($messages, 'articleRemainingLabel', { pct: remainingPct })}
+        </span>
+      {/if}
       <ShareBar url={canonicalPath} title={headline} compact />
     </div>
   </div>
@@ -581,6 +608,16 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .sticky-remaining {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    white-space: nowrap;
+  }
   @media (max-width: 519px) {
     .sticky-inner {
       gap: 8px;
@@ -593,6 +630,9 @@
       font-size: 22px;
     }
     .sticky-desk {
+      display: none;
+    }
+    .sticky-remaining {
       display: none;
     }
   }

@@ -1,10 +1,15 @@
-/** Persist last-read article + per-article scroll for "Continue reading". */
+/** Persist last-read article + per-article scroll for "Continue reading".
+ *
+ * Everything here is client-only (localStorage/sessionStorage) — read
+ * progress is never sent to or stored on the backend. */
 
 export type ContinueReading = {
   articleId: string
   title: string
   path: string
   at: number
+  /** Fraction (0-1) of the article read so far, if known. */
+  progress?: number
 }
 
 const CONTINUE_KEY = 'pxke_continue'
@@ -14,6 +19,22 @@ export function rememberContinue(entry: Omit<ContinueReading, 'at'>): void {
   try {
     const payload: ContinueReading = { ...entry, at: Date.now() }
     localStorage.setItem(CONTINUE_KEY, JSON.stringify(payload))
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Update the read-fraction on the stored entry, only if it's still the one
+ * for this article (a stale debounced write racing a navigation away must
+ * not resurrect a "continue reading" entry for the wrong story). */
+export function updateContinueProgress(articleId: string, progress: number): void {
+  try {
+    const raw = localStorage.getItem(CONTINUE_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as ContinueReading
+    if (parsed?.articleId !== articleId) return
+    parsed.progress = Math.min(1, Math.max(0, progress))
+    localStorage.setItem(CONTINUE_KEY, JSON.stringify(parsed))
   } catch {
     /* ignore */
   }
