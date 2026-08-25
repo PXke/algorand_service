@@ -22,6 +22,7 @@
     human_pick_day: string | null
     is_pinned_for_day: boolean
     selected_lane: 'human' | 'platform' | null
+    pool: 'new_service' | 'update'
   }
 
   // A row from the REAL, persisted `to_compose` table (list_to_compose_for_day)
@@ -122,6 +123,14 @@
     return ''
   }
 
+  // new_service: this artifact's service has never had a published article
+  // before. update: the service is already covered and this is a fresh
+  // diff/post/video against it. See to_compose_selection.py's guaranteed
+  // new-service-vs-update pool split for why this distinction exists.
+  function poolLabel(pool: 'new_service' | 'update'): string {
+    return pool === 'new_service' ? 'new service' : 'update / diff'
+  }
+
   $effect(() => {
     void day
     void load()
@@ -194,6 +203,7 @@
           {#if item.selected_lane}
             <span class="lane-badge lane-{item.selected_lane}">{laneLabel(item.selected_lane)}</span>
           {/if}
+          <span class="pool-badge pool-{item.pool}">{poolLabel(item.pool)}</span>
           <strong class="display-name">{item.title || item.service_id || item.artifact_id}</strong>
           <span class="priority admin-muted">priority {item.priority.toFixed(2)}</span>
           {#if item.is_pinned_for_day}
@@ -394,6 +404,22 @@
   .lane-platform {
     background: color-mix(in srgb, var(--gain) 12%, var(--panel));
     color: var(--gain);
+  }
+  .pool-badge {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+    border: 1px solid var(--border);
+  }
+  .pool-new_service {
+    color: var(--primary);
+    border-color: color-mix(in srgb, var(--primary) 40%, transparent);
+  }
+  .pool-update {
+    color: var(--text-muted, var(--admin-muted, currentColor));
   }
   .pinned-badge {
     font-size: 11px;
