@@ -9,8 +9,8 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from algorand_shared.article_transitions import transition_article_status
+
 from app.core.config import NEWS_FEED_BUCKET
-from app.core.feed_bucket import feed_month
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,7 @@ class ArticleDetail:
 def get_article(article_id: str) -> ArticleDetail | None:
     """Load the full detail row for an article (any status -- callers include draft/recompose flows, not just published), or None if not found. 2026-08-24: reads `articles` directly (was `articles_by_id`), now that dual-write coverage is confirmed complete for every real article (see the article-table-consolidation plan's Phase 1)."""
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
 
     session = get_cassandra_session()
@@ -85,6 +86,7 @@ def get_article(article_id: str) -> ArticleDetail | None:
 def article_exists(article_id: str | UUID) -> bool:
     """True when an article with this id exists (any status). 2026-08-24: reads `articles` directly (was `articles_by_id`)."""
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
 
     try:
@@ -123,6 +125,7 @@ def count_feed_articles_with_tag_on_day(
 ) -> int:
     """Count that UTC day's published articles that include a given tag (e.g. breaking). 2026-08-24: reads `articles` directly (was `articles_feed`'s BY_BUCKET_TAGS, one query per month bucket)."""
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
 
     day_start = datetime.fromtimestamp(day_start_epoch, tz=UTC)
@@ -151,6 +154,7 @@ def list_feed_articles(
 ) -> list[FeedArticleRow]:
     """Return the most recent `limit` published articles. 2026-08-24: reads `articles` directly (was `articles_feed`'s BY_BUCKET, one query per month bucket up to 18) -- same year-partition keyset pattern backend's CassandraArticleStore.list_feed_page already uses, almost always just the current year's partition at this platform's ~7/day volume, falling back to prior years only when the current year doesn't have `limit` rows yet."""
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
 
     session = get_cassandra_session()
@@ -205,25 +209,20 @@ def insert_stored_article(
     interest_score: float | None = None,
     approved_at: datetime | None = None,
 ) -> tuple[str, bool]:
-    """Store article in articles_by_id; optionally publish to articles_feed.
+    """Store an article in the consolidated `articles` table; optionally publish it to the feed (status='published' with a claimed slug).
 
-    Also dual-writes into the new consolidated `articles` table (article-table
-    consolidation, step 5) alongside the legacy tables above -- nothing reads
-    from `articles` yet, this just keeps it populated so the eventual read
-    cutover has data to switch onto. ``status`` MUST reflect where this row is
-    actually headed (draft/on_hold/backlog/published) -- unlike
-    ``publish_to_feed`` (which only controls the OLD articles_feed insert),
-    `articles`' status is part of its partition key, so passing the wrong
-    value here silently mislabels the row exactly the way the OLD scattered-
-    presence-across-11-tables design used to. Callers creating an unlisted
-    draft (publish_to_feed=False) MUST pass the real destination status
-    explicitly; there is no safe default to infer it from.
+    ``status`` MUST reflect where this row is actually headed (draft/on_hold/
+    backlog/published) -- `articles`' status is part of its partition key, so
+    passing the wrong value here silently mislabels the row exactly the way
+    the OLD scattered-presence-across-11-tables design used to. Callers
+    creating an unlisted draft (publish_to_feed=False) MUST pass the real
+    destination status explicitly; there is no safe default to infer it from.
 
     Returns (article_id, feed_published).
     """
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts, FeedStmts
     from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
 
     body = auto_link_glossary_terms(body)
@@ -233,23 +232,6 @@ def insert_stored_article(
     image = image_url or None
 
     session = get_cassandra_session()
-    session.execute(
-        ArticleStmts.INSERT,
-        (
-            article_id,
-            service_id,
-            title,
-            summary,
-            body,
-            trigger_txid,
-            trigger_round,
-            source_url,
-            published_at,
-            tag_list,
-            image,
-            prompt_version or None,
-        ),
-    )
     # article_id may be REUSED (e.g. recompose-under-review overwriting its
     # own draft): published_at is part of `articles`' partition key here
     # (unlike the old articles_by_id, keyed by article_id alone), so inserting
@@ -290,20 +272,6 @@ def insert_stored_article(
         ),
     )
     if publish_to_feed:
-        session.execute(
-            FeedStmts.INSERT,
-            (
-                feed_month(published_at),
-                published_at,
-                article_id,
-                service_id,
-                title,
-                summary,
-                tag_list,
-                image,
-                source_url or None,
-            ),
-        )
         # Claim the permanent URL slug at go-live. Held drafts deliberately do
         # NOT claim one: they may never publish, and a draft holding the clean
         # slug would push the real article to -2.
@@ -352,18 +320,16 @@ def update_article(
     body: str,
     tags: list[str] | None = None,
 ) -> bool:
-    """Update article in place; refresh feed row at original published_at.
+    """Update an article's content in place on the `articles` table.
 
-    The feed PK's published_at is FULL (ms) precision — read the raw timestamp
-    from `articles` (2026-08-24: was `articles_by_id`, migrated onto the
-    consolidated table now that dual-write coverage is confirmed complete —
-    see the article-table-consolidation plan's Phase 1) and reuse it verbatim
-    (see update_article_image). This function used to reconstruct it from the
-    seconds-truncated epoch, which upserts a phantom feed row with null
-    service_id/title that 500s the feed. Also stamps updated_at so the
-    revision surfaces as dateModified.
+    Reads the row's current partition key (status/year/published_at) first
+    (2026-08-24: was `articles_by_id`) and reuses it verbatim for the UPDATE —
+    published_at is part of the partition key and never moves for an in-place
+    content edit. Also stamps updated_at so the revision surfaces as
+    dateModified.
     """
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
     from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
 
@@ -377,28 +343,22 @@ def update_article(
         return False
 
     body = auto_link_glossary_terms(body)
-    from app.core.statements import ArticleStmts, FeedStmts
 
     session = get_cassandra_session()
     new_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
     if new_row is None or new_row.published_at is None:
         return False
-    published_at = new_row.published_at  # full precision, matches the feed PK
     tag_list = list(tags) if tags is not None else list(new_row.tags or [])
     if "updated" not in {t.lower() for t in tag_list}:
         tag_list = [*tag_list, "updated"]
 
     updated_at = datetime.now(tz=UTC)
-    session.execute(ArticleStmts.UPDATE, (title, summary, body, tag_list, updated_at, aid))
-    # Complete feed row, not a partial one: this INSERT is an upsert, and on a
-    # deleted feed row a partial write resurrects a degraded article (no image/
-    # source). Harmless on live rows — Cassandra INSERT leaves unlisted columns
-    # untouched, but every listed one must carry the real value.
-    image = new_row.image_url or None
-    # New `articles` table update: in-place edit, published_at (part of the
+    # Complete content update: an in-place edit, published_at (part of the
     # partition key) doesn't move, so a plain UPDATE suffices -- no
-    # delete+insert needed. Best-effort: the OLD-schema write below is
-    # already durable, so a hiccup here must not undo it.
+    # delete+insert needed. Slug is untouched by this statement (not in its
+    # column list), so it stays whatever it already was -- set once at
+    # publish/release time, never recomputed on a content edit.
+    image = new_row.image_url or None
     try:
         session.execute(
             ArticlesStmts.UPDATE_CONTENT,
@@ -417,37 +377,6 @@ def update_article(
         )
     except Exception:
         logger.warning("articles dual-write update failed for %s", aid, exc_info=True)
-    session.execute(
-        FeedStmts.INSERT_FULL,
-        (
-            feed_month(published_at),
-            published_at,
-            aid,
-            existing.service_id,
-            title,
-            summary,
-            tag_list,
-            image,
-            existing.source_url or None,
-            # Carry the stored value (INSERT with null would tombstone it on
-            # an article that was recomposed before this edit).
-            new_row.first_published_at,
-            updated_at,
-        ),
-    )
-    # INSERT_FULL's own column list has no slug column (kept separate per
-    # migration 056 -- see _claim_slug_for_feed), so without this the feed
-    # row's slug silently stays whatever it was before this write -- fine for
-    # an in-place upsert on an unchanged PK, but root-caused live 2026-08-10
-    # (GSC "Page with redirect": 545 pages) as a real desync source: the
-    # homepage reads slug from THIS projection, not articles_by_id, so any
-    # article edited here shows uuid-form links on the homepage even though
-    # articles_by_id.slug is fine, sending Google through an extra 301 on
-    # every such article. Carry it explicitly.
-    if existing.slug:
-        session.execute(
-            ArticleStmts.SET_FEED_SLUG, (existing.slug, feed_month(published_at), published_at, aid)
-        )
     return True
 
 
@@ -483,8 +412,8 @@ def replace_article_content(
     set_article_draft's job exclusively.
     """
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts, FeedStmts
     from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
 
     try:
@@ -510,21 +439,15 @@ def replace_article_content(
     now = datetime.now(tz=UTC)
     image = image_url or None
     if row.status == "draft":
-        session.execute(
-            ArticleStmts.UPDATE_CONTENT_KEEP_TIMESTAMPS,
-            (title, summary, body, tags, image, now, aid),
-        )
-        session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (aid,))
         _dual_write_draft_content(
             session, aid, title=title, summary=summary, body=body, tags=tags, image=image, now=now
         )
         return old_published_at
-    session.execute(
-        ArticleStmts.UPDATE_CONTENT_FULL,
-        (title, summary, body, tags, image, now, first_published_at, now, aid),
-    )
-    session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (aid,))
-    session.execute(FeedStmts.DELETE, (feed_month(old_published_at), old_published_at, aid))
+    # published_at (part of `articles`' partition key) moves on a real
+    # recompose re-publish, so this is a status-preserving delete-old-
+    # partition + insert-new-partition transition, not a plain UPDATE --
+    # also clears translations (new prose invalidates every existing
+    # translation) and carries the slug forward onto the new partition.
     _dual_write_recompose_transition(
         session,
         aid,
@@ -537,30 +460,6 @@ def replace_article_content(
         now=now,
         slug=existing.slug,
     )
-    session.execute(
-        FeedStmts.INSERT_FULL,
-        (
-            feed_month(now),
-            now,
-            aid,
-            existing.service_id,
-            title,
-            summary,
-            tags,
-            image,
-            existing.source_url or None,
-            first_published_at,
-            now,
-        ),
-    )
-    # This path DELETEs the old feed row and INSERTs a genuinely new one at a
-    # new published_at (the PK moves), so there is no existing row for
-    # Cassandra to leave slug untouched on -- unlike update_article's in-place
-    # upsert, every recompose unconditionally lost the feed-visible slug here
-    # until this line (root-caused live 2026-08-10 alongside update_article's
-    # narrower version of the same gap; see its comment for the GSC evidence).
-    if existing.slug:
-        session.execute(ArticleStmts.SET_FEED_SLUG, (existing.slug, feed_month(now), now, aid))
     return now
 
 
@@ -632,23 +531,19 @@ def _dual_write_recompose_transition(
 def _claim_slug_for_feed(
     article_id: UUID, title: str, published_at: datetime, *, status: str = "published"
 ) -> None:
-    """Assign a slug and mirror it onto the feed row (and the new `articles` row).
+    """Assign a slug and set it on the `articles` row.
 
     Never raises: a missing slug degrades to a uuid URL, which still resolves,
     so slug assignment must not be able to fail a publish.
     """
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts
 
     try:
         slug = ensure_article_slug(article_id, title)
         if slug:
             session = get_cassandra_session()
-            session.execute(
-                ArticleStmts.SET_FEED_SLUG,
-                (slug, feed_month(published_at), published_at, article_id),
-            )
             session.execute(
                 ArticlesStmts.SET_SLUG,
                 (slug, status, published_at.year, published_at, article_id),
@@ -670,6 +565,7 @@ def ensure_article_slug(article_id: str | UUID, title: str) -> str | None:
     """
     from algorand_shared.article_statements import ArticlesStmts
     from algorand_shared.slugs import slugify, unique_slug
+
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ArticleStmts
 
@@ -695,27 +591,24 @@ def ensure_article_slug(article_id: str | UUID, title: str) -> str | None:
             ArticleStmts.CLAIM_SLUG, (candidate, aid, datetime.now(tz=UTC))
         ).one()
         # LWT returns [applied] — False means another worker took it first.
+        # The reverse-index claim above is the durable part; writing the slug
+        # back onto the owning `articles` row is the caller's job (every
+        # caller either IS _claim_slug_for_feed, which does that write right
+        # after, or runs strictly after it already has for this article).
         if applied is None or getattr(applied, "applied", True):
-            session.execute(ArticleStmts.SET_ARTICLE_SLUG, (candidate, aid))
             return candidate
     logger.warning("could not claim a slug for %s (base=%s)", aid, base)
     return None
 
 
 def update_article_image(article_id: str, image_url: str) -> bool:
-    """Set an article's image_url in both the detail row and the feed projection.
+    """Set an article's image_url on the `articles` row.
 
     Used to backfill stories that published without a hero image.
-
-    NOTE: the feed PK includes published_at at FULL (ms) precision — we read the
-    raw timestamp from `articles` (2026-08-24: was `articles_by_id`) and reuse
-    it verbatim. Reconstructing it from a seconds-truncated epoch would miss
-    the real clustering key and upsert a phantom row with null
-    service_id/title (which then 500s the feed).
     """
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts, FeedStmts
 
     if not image_url:
         return False
@@ -727,22 +620,6 @@ def update_article_image(article_id: str, image_url: str) -> bool:
     new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
     if new_row is None or new_row.published_at is None:
         return False
-    published_at = new_row.published_at  # full-precision datetime, matches the feed PK
-    session.execute(ArticleStmts.UPDATE_IMAGE, (image_url, aid))
-    feed_result = session.execute(
-        FeedStmts.UPDATE_IMAGE,
-        (image_url, feed_month(published_at), published_at, aid),
-    )
-    if not feed_result.was_applied:
-        # IF EXISTS declined: no feed row at this PK (held article, deleted
-        # row, or moved by a concurrent recompose). Correct no-op — the old
-        # behavior upserted a phantom here.
-        logger.warning(
-            "update_article_image: no feed row for %s at %s — feed image skipped",
-            article_id,
-            published_at,
-        )
-    # New `articles` table update. Best-effort.
     try:
         session.execute(
             ArticlesStmts.UPDATE_IMAGE,
@@ -814,12 +691,12 @@ def record_service_event(
 
 
 def update_article_translations(article_id: str, translations: dict[str, str]) -> bool:
-    """Update article translations map; refresh feed row at original published_at."""
+    """Update an article's translations map on the `articles` table."""
     from uuid import UUID
 
     from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts, FeedStmts
 
     try:
         aid = UUID(article_id)
@@ -828,36 +705,16 @@ def update_article_translations(article_id: str, translations: dict[str, str]) -
 
     session = get_cassandra_session()
 
-    # We must fetch the exact published_at timestamp to update the feed PK.
-    # 2026-08-24: reads `articles` directly (was `articles_by_id`).
+    # 2026-08-24: reads `articles` directly (was `articles_by_id`). Doubles as
+    # the "does this article still exist" guard -- a translation task can
+    # outlive the article it was enqueued for, and dropping the write then is
+    # correct (a plain upsert would resurrect a deleted article as a
+    # translations-only phantom row).
     new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
     if new_row is None or new_row.published_at is None:
         return False
-    published_at = new_row.published_at
 
-    detail_result = session.execute(ArticleStmts.UPDATE_TRANSLATIONS, (translations, aid))
-    if not detail_result.was_applied:
-        # Article deleted after this translation was enqueued — dropping the
-        # write is correct (a plain upsert resurrected phantom rows).
-        logger.warning(
-            "update_article_translations: article %s no longer exists — dropped",
-            article_id,
-        )
-        return False
-    feed_result = session.execute(
-        FeedStmts.UPDATE_TRANSLATIONS,
-        (translations, feed_month(published_at), published_at, aid),
-    )
-    if not feed_result.was_applied:
-        # No feed row at this PK: unlisted/held article, or the row moved
-        # under us (recompose re-publish re-stamps published_at and re-enqueues
-        # fresh translations, so this in-flight write is stale — drop it).
-        logger.warning(
-            "update_article_translations: no feed row for %s at %s — feed skipped",
-            article_id,
-            published_at,
-        )
-    # New `articles` table update. Best-effort.
+    # `articles` table update. Best-effort.
     try:
         session.execute(
             ArticlesStmts.UPDATE_TRANSLATIONS,

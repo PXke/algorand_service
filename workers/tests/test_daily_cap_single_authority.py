@@ -77,7 +77,7 @@ def test_backlog_release_blocked_when_reserve_fails(monkeypatch: pytest.MonkeyPa
             if "pending_feed_queue" in text and "DELETE" in text.upper():
                 deleted.append(params)
                 return SimpleNamespace(one=lambda: None)
-            if "articles_by_id" in text and "SELECT" in text.upper():
+            if "FROM algorand_platform.articles " in text and "SELECT" in text.upper():
                 return SimpleNamespace(one=lambda: feed_art)
             if "articles_feed" in text:
                 raise AssertionError("must not insert a feed row past a failed reserve")
@@ -133,7 +133,7 @@ def test_missing_article_drops_queue_row_but_logs_it(
             if "pending_feed_queue" in text and "DELETE" in text.upper():
                 deleted.append(params)
                 return SimpleNamespace(one=lambda: None)
-            if "articles_by_id" in text and "SELECT" in text.upper():
+            if "FROM algorand_platform.articles " in text and "SELECT" in text.upper():
                 return SimpleNamespace(one=lambda: None)  # article missing
             if "articles_feed" in text:
                 raise AssertionError("must not insert a feed row for a missing article")

@@ -5,8 +5,8 @@ domain. Statements use `?` placeholders and are **prepared lazily on first acces
 (no Cassandra session exists at import time) then cached for the process lifetime via
 `prepare_cached`. At call sites do:
 
-    from app.core.statements import ArticleStmts
-    row = session.execute(ArticleStmts.GET_BY_ID, (aid,)).one()
+    from app.core.statements import ServiceRegistryStmts
+    row = session.execute(ServiceRegistryStmts.GET_ID, (service_id,)).one()
 
 Identical CQL used from several stores should collapse to a single named entry.
 TRUNCATE / DDL and `SELECT now() FROM system.local` cannot be prepared and stay as
@@ -19,15 +19,10 @@ from typing import TYPE_CHECKING
 
 from algorand_shared.article_statements import (
     ARTICLE_CLEAR_TRANSLATIONS,
-    ARTICLE_GET_TAGS,
-    ARTICLE_UPDATE_PUBLISHED_AT,
     ARTICLE_VERSION_INSERT,
     ARTICLE_VERSION_LATEST,
-    FEED_DELETE,
-    FEED_SET_SLUG,
     PENDING_FEED_DELETE,
     PENDING_FEED_INSERT,
-    PENDING_FEED_PEEK_ID,
     PUBLISH_QUEUE_CLEAR_HUMAN_PICK,
     PUBLISH_QUEUE_DELETE_PENDING,
     PUBLISH_QUEUE_INSERT_PENDING,
@@ -55,165 +50,37 @@ class _Stmt:
 
 
 # --------------------------------------------------------------------------- #
-# articles_by_id / articles_feed / service_events
+# articles_by_id / articles_by_slug / service_events
 # --------------------------------------------------------------------------- #
 class ArticleStmts:
-    """Prepared statements for articles_by_id."""
+    """Prepared statements for articles_by_id.
 
-    GET_BY_ID = _Stmt(
-        "SELECT article_id, service_id, title, summary, body, "
-        "trigger_txid, trigger_round, source_url, published_at, prompt_version, "
-        "translations, tags, slug "
-        "FROM algorand_platform.articles_by_id WHERE article_id = ?"
-    )
-    EXISTS = _Stmt("SELECT article_id FROM algorand_platform.articles_by_id WHERE article_id = ?")
-    GET_TAGS = ARTICLE_GET_TAGS
-    GET_PUBLISHED_AT = _Stmt(
-        "SELECT published_at, first_published_at FROM algorand_platform.articles_by_id "
-        "WHERE article_id = ?"
-    )
-    # Mirrors backend's ArticleStmts.GET_PUBLISHED_AT_AND_DRAFT -- used by
-    # replace_article_content's draft guard (2026-08-11) so an approved
-    # recompose of a DRAFTED article can't silently un-draft it back onto
-    # the public feed, same failure shape as the admin content-edit path
-    # fixed 2026-08-11 (AdminCassandraStore._write_article).
-    GET_PUBLISHED_AT_AND_DRAFT = _Stmt(
-        "SELECT published_at, first_published_at, draft FROM algorand_platform.articles_by_id "
-        "WHERE article_id = ?"
-    )
-    GET_IMAGE_META = _Stmt(
-        "SELECT service_id, source_url, image_url FROM algorand_platform.articles_by_id "
-        "WHERE article_id = ?"
-    )
-    GET_IMAGE = _Stmt("SELECT image_url FROM algorand_platform.articles_by_id WHERE article_id = ?")
-    GET_FOR_FEED = _Stmt(
-        "SELECT article_id, service_id, title, summary, published_at, tags, "
-        "image_url, source_url "
-        "FROM algorand_platform.articles_by_id WHERE article_id = ?"
-    )
-    # Stamp the REAL release moment when a review-held draft first goes live —
-    # insert_stored_article stamps published_at at compose time even for
-    # publish_to_feed=False drafts, so first release must overwrite it here
-    # (root-caused 2026-07-14: a held draft's displayed timestamp reflected
-    # when it was drafted, not when it went public, which also let it dodge
-    # the daily cap's published_at-windowed count).
-    UPDATE_PUBLISHED_AT = ARTICLE_UPDATE_PUBLISHED_AT
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.articles_by_id ("
-        "article_id, service_id, title, summary, body, "
-        "trigger_txid, trigger_round, source_url, published_at, tags, image_url, "
-        "prompt_version"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    UPDATE = _Stmt(
-        "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ?, "
-        "updated_at = ? WHERE article_id = ?"
-    )
-    # Content swap for an approved recompose of a PUBLISHED article: replaces
-    # prose + art on the SAME article_id (URL survives; id-based routes).
-    # published_at is re-stamped too — recompose is a re-publish (owner policy
-    # 2026-07-15), so the refreshed story returns to the top of the feed.
-    UPDATE_CONTENT_FULL = _Stmt(
-        "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ?, "
-        "image_url = ?, published_at = ?, first_published_at = ?, updated_at = ? "
-        "WHERE article_id = ?"
-    )
-    # Same content swap as UPDATE_CONTENT_FULL, but for a DRAFTED live article
-    # (2026-08-11): published_at/first_published_at are deliberately left
-    # alone -- a draft has no feed row to re-stamp for, and touching them
-    # would corrupt what set_article_draft's restore path re-inserts if the
-    # owner later un-drafts it.
-    UPDATE_CONTENT_KEEP_TIMESTAMPS = _Stmt(
-        "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ?, "
-        "image_url = ?, updated_at = ? WHERE article_id = ?"
-    )
-    # Slug claim (migration 056). Kept as separate writes rather than widening
-    # the INSERTs above: those take positional params at several call sites,
-    # and a slug is assigned once per article rather than on every write.
+    Article-table consolidation Phase 5: every read/write against
+    articles_by_id/articles_feed proper has moved onto the consolidated
+    `articles` table (see ArticlesStmts in algorand_shared.article_statements
+    and transition_article_status in algorand_shared.article_transitions).
+    What's left here is `articles_by_slug`, a separate reverse-index table
+    untouched by this migration (still the durable slug-uniqueness claim),
+    plus two one-off manual-tool statements kept for workers/scratch/*.py.
+    """
+
+    # Slug claim (migration 056): a lightweight transaction (IF NOT EXISTS)
+    # against the reverse index, so two workers racing on the same title
+    # cannot both take one slug.
     SLUG_TAKEN = _Stmt("SELECT article_id FROM algorand_platform.articles_by_slug WHERE slug = ?")
     CLAIM_SLUG = _Stmt(
         "INSERT INTO algorand_platform.articles_by_slug (slug, article_id, claimed_at) "
         "VALUES (?, ?, ?) IF NOT EXISTS"
     )
-    SET_ARTICLE_SLUG = _Stmt(
-        "UPDATE algorand_platform.articles_by_id SET slug = ? WHERE article_id = ?"
-    )
-    SET_FEED_SLUG = FEED_SET_SLUG
-    GET_ARTICLE_SLUG = _Stmt(
-        "SELECT slug FROM algorand_platform.articles_by_id WHERE article_id = ?"
-    )
     CLEAR_TRANSLATIONS = ARTICLE_CLEAR_TRANSLATIONS
     # Clears one language only, unlike CLEAR_TRANSLATIONS -- for reclaiming a
     # single bad translation (e.g. a corrupted local-engine result) without
     # discarding every other language's already-good work on the same article.
+    # Only remaining caller is workers/scratch/fix_corrupted_pashto.py (a
+    # one-off manual tool, not a production code path).
     DELETE_TRANSLATION_LANG = _Stmt(
         "DELETE translations[?] FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
-    UPDATE_IMAGE = _Stmt(
-        "UPDATE algorand_platform.articles_by_id SET image_url = ? WHERE article_id = ?"
-    )
-    # IF EXISTS (LWT): translation tasks can outlive the article they were
-    # enqueued for — a plain upsert would resurrect a deleted article as a
-    # translations-only phantom row.
-    UPDATE_TRANSLATIONS = _Stmt(
-        "UPDATE algorand_platform.articles_by_id SET translations = translations + ? "
-        "WHERE article_id = ? IF EXISTS"
-    )
-
-
-class FeedStmts:
-    """Prepared statements for the articles_feed projection."""
-
-    BY_BUCKET = _Stmt(
-        "SELECT article_id, service_id, title, summary, published_at, first_published_at "
-        "FROM algorand_platform.articles_feed WHERE bucket = ? LIMIT ?"
-    )
-    BY_BUCKET_TAGS = _Stmt(
-        "SELECT published_at, first_published_at, tags "
-        "FROM algorand_platform.articles_feed WHERE bucket = ? LIMIT ?"
-    )
-    BY_BUCKET_RECENT = _Stmt(
-        "SELECT article_id, service_id, title, tags, published_at "
-        "FROM algorand_platform.articles_feed WHERE bucket = ?"
-    )
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.articles_feed ("
-        "bucket, published_at, article_id, service_id, title, summary, tags, "
-        "image_url, source_url"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    # Complete feed row for a recompose re-publish: published_at moved, so the
-    # old row is DELETEd and this full row inserted. Must carry EVERY projection
-    # column — a partial write here creates a phantom row (null service_id) that
-    # the feed API's defensive filter silently hides (incident 2026-07-15).
-    INSERT_FULL = _Stmt(
-        "INSERT INTO algorand_platform.articles_feed ("
-        "bucket, published_at, article_id, service_id, title, summary, tags, "
-        "image_url, source_url, first_published_at, updated_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    CLEAR_TRANSLATIONS = _Stmt(
-        "DELETE translations FROM algorand_platform.articles_feed "
-        "WHERE bucket = ? AND published_at = ? AND article_id = ?"
-    )
-    # IF EXISTS (LWT) on both: these run against a PK that can be absent (held
-    # article never in the feed, row deleted by an admin, or MOVED by a
-    # recompose re-publish between the caller's published_at read and this
-    # write). A plain upsert then creates a partial phantom row the feed API
-    # silently hides — incident 2026-07-15. Not-applied is a correct no-op.
-    UPDATE_IMAGE = _Stmt(
-        "UPDATE algorand_platform.articles_feed SET image_url = ? "
-        "WHERE bucket = ? AND published_at = ? AND article_id = ? IF EXISTS"
-    )
-    UPDATE_TRANSLATIONS = _Stmt(
-        "UPDATE algorand_platform.articles_feed SET translations = translations + ? "
-        "WHERE bucket = ? AND published_at = ? AND article_id = ? IF EXISTS"
-    )
-    SCAN_ALL = _Stmt(
-        "SELECT bucket, published_at, article_id, "
-        "service_id, title FROM algorand_platform.articles_feed"
-    )
-    DELETE = FEED_DELETE
 
 
 class ServiceEventStmts:
@@ -669,13 +536,7 @@ class PendingFeedStmts:
     """Prepared statements for the pending-feed backlog."""
 
     INSERT = PENDING_FEED_INSERT
-    PEEK = _Stmt(
-        "SELECT bucket, interest_score, approved_at, article_id "
-        "FROM algorand_platform.pending_feed_queue WHERE bucket = ? LIMIT 1"
-    )
     DELETE = PENDING_FEED_DELETE
-    PEEK_ID = PENDING_FEED_PEEK_ID
-    LIST_IDS = _Stmt("SELECT article_id FROM algorand_platform.pending_feed_queue WHERE bucket = ?")
     # article-table consolidation Phase 4: articles.status='backlog' is now
     # the ordering source of truth (see list_backlog_articles); this table is
     # kept as a dual-write until Phase 5 drops it, and this query exists

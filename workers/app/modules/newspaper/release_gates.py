@@ -76,7 +76,6 @@ def apply_release_gates(article_id: str) -> dict[str, Any]:
         from uuid import UUID
 
         from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ArticleStmts
         from app.modules.newspaper.article_version_store import save_article_version
 
         save_article_version(
@@ -90,14 +89,10 @@ def apply_release_gates(article_id: str) -> dict[str, Any]:
         now = datetime.now(tz=UTC)
         aid = UUID(article_id)
         session = get_cassandra_session()
-        # Raw UPDATE, deliberately NOT update_article(): the article is still
-        # unlisted at this instant — update_article would upsert a feed row
-        # and publish it out-of-band; the caller inserts the real feed row
-        # right after this returns.
-        session.execute(
-            ArticleStmts.UPDATE,
-            (art.title, art.summary, new_body, list(art.tags or []), now, aid),
-        )
+        # `articles` table update, deliberately NOT update_article(): the
+        # article is still unlisted at this instant — update_article would
+        # upsert a feed row and publish it out-of-band; the caller inserts
+        # the real feed row right after this returns.
         _dual_write_release_gate_body(session, aid, new_body=new_body, tags=list(art.tags or []), now=now)
         save_article_version(
             article_id=article_id,

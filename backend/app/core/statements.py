@@ -21,16 +21,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from algorand_shared.article_statements import (
-    ARTICLE_CLEAR_TRANSLATIONS,
-    ARTICLE_GET_TAGS,
-    ARTICLE_UPDATE_PUBLISHED_AT,
     ARTICLE_VERSION_INSERT,
     ARTICLE_VERSION_LATEST,
-    FEED_DELETE,
-    FEED_SET_SLUG,
     PENDING_FEED_DELETE,
     PENDING_FEED_INSERT,
-    PENDING_FEED_PEEK_ID,
     PUBLISH_QUEUE_CLEAR_HUMAN_PICK,
     PUBLISH_QUEUE_DELETE_PENDING,
     PUBLISH_QUEUE_INSERT_PENDING,
@@ -55,80 +49,6 @@ class _Stmt:
         from app.core.cassandra import prepare_cached
 
         return prepare_cached(self.cql)
-
-
-# --------------------------------------------------------------------------- #
-# articles_by_id (read-only here; written by the workers service)
-# --------------------------------------------------------------------------- #
-class ArticleStmts:
-    """Prepared statements for articles_by_id."""
-
-    GET_TAGS = ARTICLE_GET_TAGS
-    GET_CARD = _Stmt(
-        "SELECT title, published_at, tags FROM algorand_platform.articles_by_id "
-        "WHERE article_id = ?"
-    )
-    GET_PUBLISHED_AT = _Stmt(
-        "SELECT published_at FROM algorand_platform.articles_by_id WHERE article_id = ?"
-    )
-    GET_PUBLISHED_AT_AND_DRAFT = _Stmt(
-        "SELECT published_at, draft FROM algorand_platform.articles_by_id WHERE article_id = ?"
-    )
-    GET_FEED_ROW = _Stmt(
-        "SELECT article_id, service_id, title, summary, published_at, tags, "
-        "image_url, source_url, slug FROM algorand_platform.articles_by_id WHERE article_id = ?"
-    )
-    GET_SUMMARY_CARD = _Stmt(
-        "SELECT article_id, title, summary, service_id, body FROM algorand_platform.articles_by_id "
-        "WHERE article_id = ?"
-    )
-    UPDATE_CONTENT = _Stmt(
-        "UPDATE algorand_platform.articles_by_id SET title = ?, summary = ?, body = ?, tags = ? "
-        "WHERE article_id = ?"
-    )
-    # An admin content correction (update_article) previously left every
-    # existing translation stored verbatim -- translated from the
-    # PRE-correction English text, now silently wrong in every non-English
-    # locale with no way to detect it short of a manual audit (found live
-    # 2026-08 on more than one article). Clearing here mirrors what
-    # workers' replace_article_content already does on every recompose;
-    # the caller re-enqueues fresh translations for all languages after.
-    CLEAR_TRANSLATIONS = ARTICLE_CLEAR_TRANSLATIONS
-    UPDATE_TAGS = _Stmt("UPDATE algorand_platform.articles_by_id SET tags = ? WHERE article_id = ?")
-    # Stamp the REAL release moment when a held/review draft first goes live —
-    # insert_stored_article stamps published_at at compose time even for
-    # publish_to_feed=False drafts, so first release must overwrite it here,
-    # not just feed the stale value into articles_feed (root-caused 2026-07-14:
-    # a held draft's displayed timestamp reflected when it was drafted, not
-    # when it actually went public, which also let it dodge the daily cap's
-    # published_at-windowed count).
-    UPDATE_PUBLISHED_AT = ARTICLE_UPDATE_PUBLISHED_AT
-    DELETE = _Stmt("DELETE FROM algorand_platform.articles_by_id WHERE article_id = ?")
-    # Admin-only unpublish/restore toggle (migration 059). Content is never
-    # touched here -- the caller separately adds/removes the articles_feed
-    # row, which is what actually controls public reachability via the feed,
-    # sitemap and Most Read. This column only gates the direct-by-id lookup.
-    SET_DRAFT = _Stmt(
-        "UPDATE algorand_platform.articles_by_id SET draft = ? WHERE article_id = ?"
-    )
-
-
-# --------------------------------------------------------------------------- #
-# draft_articles ("currently drafted" admin index, migration 059)
-# --------------------------------------------------------------------------- #
-class DraftArticleStmts:
-    """Prepared statements for the draft-articles admin index."""
-
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.draft_articles "
-        "(article_id, title, source_url, drafted_at) VALUES (?, ?, ?, ?)"
-    )
-    DELETE = _Stmt("DELETE FROM algorand_platform.draft_articles WHERE article_id = ?")
-    # Unbounded scan is fine here -- see the migration's table comment.
-    LIST = _Stmt(
-        "SELECT article_id, title, source_url, drafted_at "
-        "FROM algorand_platform.draft_articles LIMIT 200"
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -193,44 +113,6 @@ class DraftCommentStmts:
     DELETE = _Stmt(
         "DELETE FROM algorand_platform.draft_comments "
         "WHERE article_id = ? AND created_at = ? AND comment_id = ?"
-    )
-
-
-# --------------------------------------------------------------------------- #
-# articles_feed (projection)
-# --------------------------------------------------------------------------- #
-class DeletedArticleStmts:
-    """Prepared statements for the deleted-article tombstone table."""
-
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.deleted_articles (article_id, deleted_at, title) "
-        "VALUES (?, ?, ?)"
-    )
-    GET = _Stmt("SELECT article_id FROM algorand_platform.deleted_articles WHERE article_id = ?")
-    LIST_IDS = _Stmt("SELECT article_id FROM algorand_platform.deleted_articles")
-
-
-class FeedStmts:
-    """Prepared statements for the articles_feed projection."""
-
-    INSERT_FULL = _Stmt(
-        "INSERT INTO algorand_platform.articles_feed ("
-        "bucket, published_at, article_id, service_id, title, summary, tags, "
-        "image_url, source_url"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    DELETE = FEED_DELETE
-    # INSERT_FULL has no slug column of its own (kept as a separate write,
-    # mirroring the workers service's article_store.py) -- a feed row that
-    # never carries one falls back to a uuid URL everywhere that reads slug
-    # from this projection (homepage links, sitemap), which is what an
-    # admin-approved article did unconditionally until this was added
-    # (root-caused live 2026-08-10 via a Bing Webmaster Tools submitted-URL
-    # audit showing raw article ids).
-    SET_FEED_SLUG = FEED_SET_SLUG
-    COUNT_TODAY = _Stmt(
-        "SELECT article_id FROM algorand_platform.articles_feed "
-        "WHERE bucket = ? AND published_at >= ? AND published_at < ?"
     )
 
 
@@ -550,7 +432,6 @@ class PendingFeedStmts:
     """Prepared statements for the pending-feed backlog."""
 
     INSERT = PENDING_FEED_INSERT
-    PEEK_ID = PENDING_FEED_PEEK_ID
     LIST_ALL = _Stmt(
         "SELECT bucket, interest_score, approved_at, article_id "
         "FROM algorand_platform.pending_feed_queue WHERE bucket = ?"
@@ -568,30 +449,6 @@ class PendingFeedStmts:
 class NewsStmts:
     """Prepared statements for reader-facing article reads."""
 
-    INSERT_BY_ID = _Stmt(
-        "INSERT INTO algorand_platform.articles_by_id ("
-        "article_id, service_id, title, summary, body, "
-        "trigger_txid, trigger_round, source_url, published_at, tags, image_url"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    INSERT_FEED = _Stmt(
-        "INSERT INTO algorand_platform.articles_feed ("
-        "bucket, published_at, article_id, service_id, title, summary, tags, image_url, "
-        "source_url"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    FEED_PAGE = _Stmt(
-        "SELECT article_id, service_id, title, summary, published_at, first_published_at, "
-        "updated_at, tags, slug, "
-        "image_url, source_url, translations FROM algorand_platform.articles_feed "
-        "WHERE bucket = ? AND published_at < ? LIMIT ?"
-    )
-    GET_FULL = _Stmt(
-        "SELECT article_id, service_id, title, summary, body, "
-        "trigger_txid, trigger_round, source_url, published_at, updated_at, tags, "
-        "image_url, translations, slug, draft "
-        "FROM algorand_platform.articles_by_id WHERE article_id = ?"
-    )
     # Slug -> article id. A single-partition read on the reverse index, never a
     # scan of articles_by_id.
     ID_BY_SLUG = _Stmt(

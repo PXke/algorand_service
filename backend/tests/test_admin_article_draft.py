@@ -1,4 +1,4 @@
-"""Admin-only draft toggle: pull a live article out of the feed reversibly, without touching its stored content."""
+"""Admin-only draft toggle: flip a live article's `articles` row between status='draft'/'published' reversibly, without touching its stored content."""
 
 from __future__ import annotations
 
@@ -11,6 +11,14 @@ import pytest
 
 from app.modules.admin.stores.cassandra import AdminCassandraStore
 
+# `articles`' column order (see algorand_shared.article_transitions._ARTICLES_COLUMNS).
+_ARTICLES_COLUMNS = (
+    "status", "year", "published_at", "article_id", "service_id", "title", "summary", "body",
+    "image_url", "tags", "source_url", "trigger_txid", "trigger_round", "slug", "translations",
+    "first_published_at", "updated_at", "prompt_version", "composed_by_model",
+    "deleted_at", "status_updated_at", "interest_score", "approved_at",
+)  # fmt: skip
+
 
 class _Result:
     def __init__(self, row: Any = None) -> None:  # noqa: ANN401 -- duck-typed Cassandra row
@@ -21,34 +29,22 @@ class _Result:
 
 
 class _FakeSession:
-    def __init__(self, feed_row: Any) -> None:  # noqa: ANN401 -- duck-typed Cassandra row
-        self._feed_row = feed_row
-        self.draft_updates: list[tuple] = []
-        self.draft_index_inserts: list[tuple] = []
-        self.draft_index_deletes: list[tuple] = []
-        self.feed_deletes: list[tuple] = []
-        self.feed_inserts: list[tuple] = []
-        self.slug_updates: list[tuple] = []
+    def __init__(self, article_row: Any) -> None:  # noqa: ANN401 -- duck-typed Cassandra row
+        self._article_row = article_row
+        self.articles_inserts: list[tuple] = []
+        self.articles_deletes: list[tuple] = []
 
     def prepare(self, cql: str) -> str:
         return cql
 
     def execute(self, query: str, params: tuple = ()) -> _Result:
         q = " ".join(str(query).split())
-        if q.startswith("SELECT") and "articles_by_id" in q:
-            return _Result(self._feed_row)
-        if q.startswith("UPDATE algorand_platform.articles_by_id SET draft"):
-            self.draft_updates.append(tuple(params))
-        elif q.startswith("INSERT INTO algorand_platform.draft_articles"):
-            self.draft_index_inserts.append(tuple(params))
-        elif q.startswith("DELETE FROM algorand_platform.draft_articles"):
-            self.draft_index_deletes.append(tuple(params))
-        elif q.startswith("DELETE FROM algorand_platform.articles_feed"):
-            self.feed_deletes.append(tuple(params))
-        elif q.startswith("INSERT INTO algorand_platform.articles_feed"):
-            self.feed_inserts.append(tuple(params))
-        elif q.startswith("UPDATE algorand_platform.articles_feed SET slug"):
-            self.slug_updates.append(tuple(params))
+        if q.startswith("SELECT") and "FROM algorand_platform.articles WHERE article_id = ?" in q:
+            return _Result(self._article_row)
+        if q.startswith("INSERT INTO algorand_platform.articles ("):
+            self.articles_inserts.append(tuple(params))
+        elif q.startswith("DELETE FROM algorand_platform.articles "):
+            self.articles_deletes.append(tuple(params))
         return _Result(None)
 
 
@@ -59,63 +55,76 @@ def _patch(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:  # noqa: ANN401 
     c.prepare_cached.cache_clear()
 
 
-def _feed_row(article_id: Any, *, slug: str | None = "a-slug") -> Any:  # noqa: ANN401
-    return SimpleNamespace(
+def _feed_row(article_id: Any, *, slug: str | None = "a-slug", status: str = "published") -> Any:  # noqa: ANN401 -- duck-typed Cassandra row, no formal class
+    published_at = datetime.now(tz=UTC)
+    values: dict[str, object] = dict.fromkeys(_ARTICLES_COLUMNS)
+    values.update(
+        status=status,
+        year=published_at.year,
+        published_at=published_at,
         article_id=article_id,
         service_id="svc",
         title="Title",
         summary="Summary",
-        published_at=datetime.now(tz=UTC),
+        body="",
         tags=["a", "b"],
         image_url="https://example.com/img.png",
         source_url="https://example.com/",
+        trigger_txid="",
+        trigger_round=0,
         slug=slug,
     )
+    return SimpleNamespace(**values)
 
 
-def test_set_draft_true_removes_from_feed_and_indexes_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Drafting a live article deletes its articles_feed row and records it in the draft index, but never touches articles_by_id content."""
+def test_set_draft_true_moves_the_articles_row_to_status_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drafting a live article transitions its `articles` row to status='draft', published_at unchanged (not a republish), content untouched."""
     article_id = uuid4()
-    fake = _FakeSession(_feed_row(article_id))
+    row = _feed_row(article_id, status="published")
+    fake = _FakeSession(row)
     _patch(monkeypatch, fake)
     monkeypatch.setattr("app.modules.seo.indexnow.ping_article", lambda *a, **kw: None)  # noqa: ARG005
-    # get_article's own full-row read (GET_FULL) isn't what this test is about
-    # -- stub it so the fake session's simplified GET_FEED_ROW-shaped row
-    # doesn't need every GET_FULL column too.
+    monkeypatch.setattr("app.core.typesense_client.delete_article_document", lambda *a, **kw: None)  # noqa: ARG005
+    # get_article's own full-row read isn't what this test is about -- stub it
+    # so the fake session's simplified article row doesn't need every column
+    # NewsService's get() path expects too.
     monkeypatch.setattr(AdminCassandraStore, "get_article", lambda self, aid: object())  # noqa: ARG005
 
     result = AdminCassandraStore().set_article_draft(str(article_id), True)
 
     assert result is not None
-    assert fake.draft_updates == [(True, article_id)]
-    assert len(fake.draft_index_inserts) == 1
-    assert fake.draft_index_inserts[0][0] == article_id
-    assert len(fake.feed_deletes) == 1
-    assert fake.feed_deletes[0][-1] == article_id
-    assert fake.feed_inserts == []
-    assert fake.draft_index_deletes == []
+    assert len(fake.articles_inserts) == 1
+    values = dict(zip(_ARTICLES_COLUMNS, fake.articles_inserts[0], strict=True))
+    assert values["status"] == "draft"
+    assert values["published_at"] == row.published_at  # unchanged -- not a republish
+    assert values["title"] == "Title"  # content carried forward, untouched
+    assert fake.articles_deletes == [("published", row.year, row.published_at, article_id)]
 
 
-def test_set_draft_false_restores_the_same_feed_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Restoring re-inserts articles_feed with the ORIGINAL published_at (not re-stamped) and re-claims the slug, and clears the draft index."""
+def test_set_draft_false_restores_status_published_without_restamping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restoring transitions the SAME `articles` row back to status='published' with its ORIGINAL published_at (not re-stamped) -- a restore, not a republish."""
     article_id = uuid4()
-    row = _feed_row(article_id)
+    row = _feed_row(article_id, status="draft")
     fake = _FakeSession(row)
     _patch(monkeypatch, fake)
     monkeypatch.setattr("app.modules.seo.indexnow.ping_article", lambda *a, **kw: None)  # noqa: ARG005
+    monkeypatch.setattr(
+        "app.core.typesense_client.upsert_article_document", lambda **kw: None  # noqa: ARG005
+    )
     monkeypatch.setattr(AdminCassandraStore, "get_article", lambda self, aid: object())  # noqa: ARG005
 
     AdminCassandraStore().set_article_draft(str(article_id), False)
 
-    assert fake.draft_updates == [(False, article_id)]
-    assert fake.draft_index_deletes == [(article_id,)]
-    assert fake.draft_index_inserts == []
-    assert len(fake.feed_inserts) == 1
-    inserted = fake.feed_inserts[0]
-    assert inserted[1] == row.published_at  # unchanged -- a restore, not a republish
-    assert inserted[2] == article_id
-    assert len(fake.slug_updates) == 1
-    assert fake.slug_updates[0][0] == "a-slug"
+    assert len(fake.articles_inserts) == 1
+    values = dict(zip(_ARTICLES_COLUMNS, fake.articles_inserts[0], strict=True))
+    assert values["status"] == "published"
+    assert values["published_at"] == row.published_at  # unchanged -- a restore, not a republish
+    assert values["slug"] == "a-slug"  # carried forward, untouched
+    assert fake.articles_deletes == [("draft", row.year, row.published_at, article_id)]
 
 
 def test_set_draft_on_missing_article_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -126,7 +135,7 @@ def test_set_draft_on_missing_article_returns_none(monkeypatch: pytest.MonkeyPat
     result = AdminCassandraStore().set_article_draft(str(uuid4()), True)
 
     assert result is None
-    assert fake.draft_updates == []
+    assert fake.articles_inserts == []
 
 
 def test_list_draft_articles_reads_articles_directly(monkeypatch: pytest.MonkeyPatch) -> None:

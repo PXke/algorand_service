@@ -39,10 +39,6 @@ class StoredArticle:
 class ArticleStore(Protocol):
     """Storage interface for articles."""
 
-    def insert(self, article: StoredArticle, *, feed_bucket: str = "main") -> None:
-        """Insert a new article and its feed row."""
-        ...
-
     def list_feed(self, *, feed_bucket: str = "main", limit: int = 50) -> list[StoredArticle]:
         """List recent feed rows, newest first."""
         ...

@@ -11,7 +11,6 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from app.core import serialization
-from app.core.feed_bucket import feed_month
 
 if TYPE_CHECKING:
     from cassandra.cluster import Session as CassandraSession
@@ -119,11 +118,9 @@ class AdminCassandraStore:
             from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
             from app.core.cassandra import get_cassandra_session
             from app.core.config import settings
-            from app.core.statements import ArticleStmts
 
             session = get_cassandra_session()
-            session.execute(ArticleStmts.CLEAR_TRANSLATIONS, (UUID(article_id),))
-            # New `articles` table dual-write. Best-effort.
+            # `articles` table clear. Best-effort.
             with contextlib.suppress(Exception):
                 from algorand_shared.article_statements import ArticlesStmts
 
@@ -232,34 +229,24 @@ class AdminCassandraStore:
         *,
         tag_extra: str = "",
     ) -> None:
+        from algorand_shared.article_statements import ArticlesStmts
+
         from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ArticleStmts, FeedStmts
 
         aid = UUID(current.article_id)
         tags = list(current.tags or [])
         if tag_extra and tag_extra not in tags:
             tags.append(tag_extra)
         session = get_cassandra_session()
-        # Feed PK precision rule (see replace_article_content in the workers
-        # package): current.published_at_epoch is an int (whole seconds) —
-        # reconstructing a datetime from it truncates the sub-second precision
-        # articles_feed's clustering key actually has, upserting a PHANTOM
-        # duplicate row instead of updating the real one (found live 2026-07-13,
-        # two published articles each showing twice in the sitemap after being
-        # edited through this exact path). Read the real timestamp fresh instead.
-        pub_row = session.execute(ArticleStmts.GET_PUBLISHED_AT_AND_DRAFT, (aid,)).one()
-        session.execute(
-            ArticleStmts.UPDATE_CONTENT,
-            (title, summary, body, tags, aid),
-        )
-        # New `articles` table dual-write: content-only, published_at never
-        # re-stamped by this path regardless of branch below -- mirrors the
-        # old table's own UPDATE_CONTENT exactly, including that it doesn't
-        # touch updated_at either (pre-existing behavior here, not something
-        # to silently fix as part of this dual-write). Best-effort.
+        # Content-only `articles` table update: status/published_at (the
+        # partition key) are left untouched, so this naturally preserves feed
+        # membership exactly as before -- a draft's row stays status='draft'
+        # (invisible to the public feed, which only reads status='published'
+        # rows), a published article's row stays visible with its content
+        # refreshed in place. No separate feed-projection sync step needed
+        # (article-table consolidation Phase 5: `articles` IS the feed
+        # projection for status='published' rows).
         with contextlib.suppress(Exception):
-            from algorand_shared.article_statements import ArticlesStmts
-
             old_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
             if old_row is not None:
                 session.execute(
@@ -277,43 +264,6 @@ class AdminCassandraStore:
                         aid,
                     ),
                 )
-        if pub_row is None or pub_row.published_at is None:
-            # Unpublished/held article: it has no feed row, and the old
-            # fallback (reconstructing published_at from the seconds epoch)
-            # would upsert a phantom at a truncated timestamp.
-            logger.warning(
-                "admin edit: no published_at for %s — feed row skipped",
-                current.article_id,
-            )
-            return
-        if getattr(pub_row, "draft", False):
-            # Root-caused live 2026-08-11 (editing the drafted LumiRogue
-            # article to fix a factual error): this used to always re-insert
-            # the articles_feed row whenever published_at existed, with no
-            # awareness of the draft flag at all -- silently un-drafting a
-            # withdrawn article back onto the public feed as a side effect of
-            # fixing a typo in it. Content-only edit; feed membership is
-            # set_article_draft's job exclusively.
-            logger.info(
-                "admin edit: %s is a draft — content updated, feed row left alone",
-                current.article_id,
-            )
-            return
-        published_at = pub_row.published_at
-        session.execute(
-            FeedStmts.INSERT_FULL,
-            (
-                feed_month(published_at),
-                published_at,
-                aid,
-                current.service_id,
-                title,
-                summary,
-                tags,
-                current.image_url,
-                current.source_url,
-            ),
-        )
 
     def _purge_pending_feed_queue(self, session: CassandraSession, aid: UUID) -> None:
         """Remove any pending_feed_queue row for this article -- an approved article can still be sitting there, waiting for a publish slot, when it gets hard-deleted (e.g. as a duplicate). Without this it's a phantom row: the paced-release worker eventually pulls it and finds nothing, and the admin "up next to publish" view shows an article that no longer exists. Found live 2026-08-16 (3 of 4 backlog rows pointed at articles deleted hours earlier by an unrelated duplicate-cleanup pass)."""
@@ -332,19 +282,15 @@ class AdminCassandraStore:
             logger.warning("failed to purge pending_feed_queue row for article %s", aid, exc_info=True)
 
     def delete_article(self, article_id: str) -> bool:
-        """Delete an article and its feed row; returns False if it did not exist."""
+        """Delete an article; returns False if it did not exist."""
         current = self.get_article(article_id)
         if current is None:
             return False
 
+        from datetime import UTC, datetime
+
         from app.core.cassandra import get_cassandra_session
-        from app.core.statements import (
-            ArticleStmts,
-            ArticleVersionStmts,
-            DeletedArticleStmts,
-            DraftArticleStmts,
-            FeedStmts,
-        )
+        from app.core.statements import ArticleVersionStmts
 
         try:
             aid = UUID(article_id)
@@ -353,29 +299,9 @@ class AdminCassandraStore:
 
         session = get_cassandra_session()
         with contextlib.suppress(Exception):
-            session.execute(DraftArticleStmts.DELETE, (aid,))
-
-        # Tombstone FIRST (before any row disappears): the SSR route serves
-        # 410 Gone for tombstoned ids so search engines drop the URL fast
-        # instead of retrying a 404 for months.
-        from datetime import UTC, datetime
-
-        session.execute(
-            DeletedArticleStmts.INSERT,
-            (aid, datetime.now(tz=UTC), (current.title or "")[:300]),
-        )
-        with contextlib.suppress(Exception):
             from app.modules.seo.sitemap import bust_tombstone_cache
 
             bust_tombstone_cache()
-
-        # Exact stored timestamp -> its month bucket -> precise feed-row delete.
-        ts_row = session.execute(ArticleStmts.GET_PUBLISHED_AT, (aid,)).one()
-        if ts_row is not None and ts_row.published_at is not None:
-            session.execute(
-                FeedStmts.DELETE,
-                (feed_month(ts_row.published_at), ts_row.published_at, aid),
-            )
 
         try:
             version_rows = session.execute(ArticleVersionStmts.LIST_VERSIONS, (aid,))
@@ -386,11 +312,11 @@ class AdminCassandraStore:
 
         self._purge_pending_feed_queue(session, aid)
 
-        session.execute(ArticleStmts.DELETE, (aid,))
-        # New `articles` table dual-write: deletion is a status transition
-        # ('deleted', tombstoned + deleted_at set) not a hard row delete --
-        # matches the tombstone-first intent above (410 Gone, not 404).
-        # Best-effort, doesn't affect the delete's success either way.
+        # Deletion is an `articles` status transition ('deleted', tombstoned +
+        # deleted_at set) not a hard row delete -- the SSR route serves 410
+        # Gone for tombstoned ids so search engines drop the URL fast instead
+        # of retrying a 404 for months. Best-effort, doesn't affect the
+        # delete's success either way.
         with contextlib.suppress(Exception):
             from algorand_shared.article_transitions import transition_article_status
 
@@ -413,60 +339,23 @@ class AdminCassandraStore:
         return True
 
     def set_article_draft(self, article_id: str, draft: bool) -> StoredArticle | None:
-        """Toggle an article's admin-only draft flag, reversibly. Distinct from delete_article: articles_by_id is never touched except the flag itself, so restoring re-inserts the SAME articles_feed row (published_at unchanged) instead of re-publishing as new. Returns None if the article does not exist."""
+        """Toggle an article's admin-only draft flag, reversibly: status flips between 'draft' and 'published' on the `articles` row, published_at unchanged -- restoring makes the SAME row visible again (status='published' is what the public feed reads), not a re-publish. Returns None if the article does not exist."""
+        from algorand_shared.article_statements import ArticlesStmts
+
         from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ArticleStmts, DraftArticleStmts, FeedStmts
 
         try:
             aid = UUID(article_id)
         except ValueError:
             return None
         session = get_cassandra_session()
-        row = session.execute(ArticleStmts.GET_FEED_ROW, (aid,)).one()
-        if row is None:
+        if session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one() is None:
             return None
 
-        session.execute(ArticleStmts.SET_DRAFT, (draft, aid))
-        if draft:
-            session.execute(
-                DraftArticleStmts.INSERT,
-                (aid, row.title, row.source_url, datetime.now(tz=UTC)),
-            )
-        else:
-            session.execute(DraftArticleStmts.DELETE, (aid,))
-        # New `articles` table dual-write: status flips between 'draft' and
-        # 'published', published_at unchanged (same as the old-schema path
-        # above -- restoring re-inserts the SAME feed row, not a re-publish).
-        # Best-effort.
         with contextlib.suppress(Exception):
             from algorand_shared.article_transitions import transition_article_status
 
             transition_article_status(aid, new_status="draft" if draft else "published")
-
-        published_at = row.published_at
-        if published_at is not None:
-            if draft:
-                session.execute(FeedStmts.DELETE, (feed_month(published_at), published_at, aid))
-            else:
-                session.execute(
-                    FeedStmts.INSERT_FULL,
-                    (
-                        feed_month(published_at),
-                        published_at,
-                        aid,
-                        row.service_id,
-                        row.title,
-                        row.summary or "",
-                        list(row.tags or []),
-                        row.image_url,
-                        row.source_url,
-                    ),
-                )
-                if row.slug:
-                    session.execute(
-                        FeedStmts.SET_FEED_SLUG,
-                        (row.slug, feed_month(published_at), published_at, aid),
-                    )
 
         updated = self.get_article(article_id)
 
@@ -1120,8 +1009,10 @@ class AdminCassandraStore:
         _approved: bool = True,
         source_relevant: bool = True,
     ) -> None:
+        from algorand_shared.article_statements import ArticlesStmts
+
         from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ArticleStmts, DomainTrackingStmts
+        from app.core.statements import DomainTrackingStmts
 
         domain = self._domain_from_url(url)
         if domain:
@@ -1160,7 +1051,7 @@ class AdminCassandraStore:
         except ValueError:
             return
         session = get_cassandra_session()
-        row = session.execute(ArticleStmts.GET_TAGS, (aid,)).one()
+        row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
         if row is None:
             return
         tags = list(row.tags or [])
@@ -1174,7 +1065,6 @@ class AdminCassandraStore:
             updated = True
         if not updated:
             return
-        session.execute(ArticleStmts.UPDATE_TAGS, (tags, aid))
         self._dual_write_article_tags(session, aid, tags)
 
     @staticmethod
@@ -1382,49 +1272,26 @@ class AdminCassandraStore:
     def _publish_article_to_feed(self, article_id: str) -> bool:
         from uuid import UUID
 
+        from algorand_shared.article_statements import ArticlesStmts
+
         from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ArticleStmts, FeedStmts
 
         try:
             aid = UUID(article_id)
         except ValueError:
             return False
         session = get_cassandra_session()
-        row = session.execute(ArticleStmts.GET_FEED_ROW, (aid,)).one()
+        row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
         if row is None:
             return False
-        # This is the article's FIRST (and only) entry into articles_feed — a
-        # held/review draft's published_at is stamped at compose time, not
-        # release time, so it must be re-stamped now, on both the feed row and
-        # the source-of-truth articles_by_id row (kept in sync so the single-
-        # article view and the feed listing agree on when it actually went live).
+        # This is the article's FIRST time going public — a held/review
+        # draft's published_at is stamped at compose time, not release time,
+        # so it must be re-stamped now on the `articles` row itself.
         published_at = datetime.now(tz=UTC)
-        tags = list(row.tags or [])
-        session.execute(
-            FeedStmts.INSERT_FULL,
-            (
-                feed_month(published_at),
-                published_at,
-                aid,
-                row.service_id,
-                row.title,
-                row.summary or "",
-                tags,
-                row.image_url,
-                row.source_url,
-            ),
-        )
-        if row.slug:
-            session.execute(
-                FeedStmts.SET_FEED_SLUG,
-                (row.slug, feed_month(published_at), published_at, aid),
-            )
-        session.execute(ArticleStmts.UPDATE_PUBLISHED_AT, (published_at, aid))
-        # New `articles` table dual-write: review-approval is a status
+        # `articles` table dual-write: review-approval is a status
         # transition to 'published' with published_at re-stamped (same as
         # workers' backlog-release path). Best-effort.
         with contextlib.suppress(Exception):
-            from algorand_shared.article_statements import ArticlesStmts
             from algorand_shared.article_transitions import transition_article_status
 
             transition_article_status(

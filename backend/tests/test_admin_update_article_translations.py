@@ -136,10 +136,10 @@ def test_clear_and_reenqueue_sends_the_batch_task_for_every_language(
 
     AdminCassandraStore._clear_and_reenqueue_translations("11111111-1111-1111-1111-111111111111")
 
-    # 1 old-table DELETE + 1 new-`articles`-table dual-write lookup (best-
-    # effort, swallowed here since the fake session's execute() doesn't
-    # support .one()).
-    assert len(fake_session.executed) == 2
+    # 1 `articles`-table lookup (best-effort, swallowed here since the fake
+    # session's execute() doesn't support .one() -- the subsequent
+    # CLEAR_TRANSLATIONS write never runs).
+    assert len(fake_session.executed) == 1
     assert sent["name"] == "app.tasks.newspaper.translate_article_batch"
     assert sent["args"][0] == "11111111-1111-1111-1111-111111111111"
     assert len(sent["args"][1]) >= 6  # every configured language, not one

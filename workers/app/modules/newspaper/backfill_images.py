@@ -3,7 +3,7 @@
 Articles that published before source-image resolution have an empty image_url,
 so their feed tiles and social cards fall back to a generic logo. This walks the
 feed, resolves each imageless story's source artwork (og:image, else brand icon),
-and writes it to both the detail row and the feed projection.
+and writes it back onto the article's `articles` row.
 
 Run on a host with the app env loaded:
     python -m app.modules.newspaper.backfill_images          # apply
@@ -16,11 +16,7 @@ import logging
 import sys
 from uuid import UUID
 
-from app.modules.newspaper.article_store import (
-    get_article,
-    list_feed_articles,
-    update_article_image,
-)
+from app.modules.newspaper.article_store import list_feed_articles, update_article_image
 from app.modules.newspaper.source_image import resolve_article_images
 
 logger = logging.getLogger(__name__)
@@ -28,15 +24,20 @@ logger = logging.getLogger(__name__)
 
 def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
     """Resolve and write a source image for already-published articles missing one."""
+    from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts
 
     session = get_cassandra_session()
     scanned = updated = skipped = failed = 0
     for row in list_feed_articles(limit=limit):
         scanned += 1
         aid = str(row.article_id)
-        meta = session.execute(ArticleStmts.GET_IMAGE_META, (UUID(aid),)).one()
+        # Article-table consolidation Phase 5: one consolidated row (was
+        # articles_by_id's GET_IMAGE_META) -- already carries body too, so no
+        # separate get_article() read is needed for the cited-links fallback
+        # below.
+        meta = session.execute(ArticlesStmts.GET_FULL_BY_ID, (UUID(aid),)).one()
         if meta is None:
             continue
         if (meta.image_url or "").strip():
@@ -45,13 +46,12 @@ def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
         # Body needed for the cited-links fallback (editorial://, mail://
         # sources aren't fetchable, so their image comes from the article's
         # own Sources block).
-        detail = get_article(aid)
         from app.modules.newspaper.tasks.publish_tasks import _validated_hero_checked
 
         og, logo = resolve_article_images(
             source_url=meta.source_url,
             service_id=meta.service_id,
-            body=detail.body if detail else "",
+            body=meta.body or "",
             validate=_validated_hero_checked,
         )
         image = og or logo
@@ -77,15 +77,26 @@ def backfill(*, limit: int = 500, dry_run: bool = False) -> dict:
 
 
 def resync_feed_images(*, limit: int = 500, dry_run: bool = False) -> dict:
-    """Copy each article's image_url from the detail row into the feed projection (idempotent). Heals rows whose feed image got out of sync with the detail."""
+    """Re-apply each article's own image_url via update_article_image (idempotent).
+
+    Historically copied the detail row's image_url into the SEPARATE feed
+    projection when the two could drift out of sync (articles_by_id vs
+    articles_feed, pre article-table consolidation -- a partial feed upsert
+    could leave a stale/blank image_url on the feed-visible copy while the
+    detail row had the real one). `articles` is now a single consolidated row
+    per article, so there is nothing left to drift: this pass degrades to a
+    harmless no-op re-write, kept only so `--resync` on an old runbook/cron
+    entry keeps working rather than erroring outright.
+    """
+    from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts
 
     session = get_cassandra_session()
     synced = 0
     for row in list_feed_articles(limit=limit):
         aid = str(row.article_id)
-        meta = session.execute(ArticleStmts.GET_IMAGE, (UUID(aid),)).one()
+        meta = session.execute(ArticlesStmts.GET_FULL_BY_ID, (UUID(aid),)).one()
         image = (meta.image_url or "").strip() if meta else ""
         if not image:
             continue
@@ -99,29 +110,24 @@ def resync_feed_images(*, limit: int = 500, dry_run: bool = False) -> dict:
 
 
 def cleanup_phantoms(*, dry_run: bool = False) -> dict:
-    """Delete malformed feed rows (null service_id/title) left by an earlier partial upsert, so they stop counting against the feed page size."""
-    from app.core.cassandra import get_cassandra_session
-    from app.core.statements import FeedStmts
+    """No-op (article-table consolidation Phase 5): this bug class is now structurally impossible.
 
-    session = get_cassandra_session()
-    rows = session.execute(FeedStmts.SCAN_ALL)
-    deleted = 0
-    for r in rows:
-        if (r.service_id or "") and (r.title or ""):
-            continue
-        deleted += 1
-        logger.info(
-            "  %s phantom bucket=%s aid=%s",
-            "WOULD delete" if dry_run else "deleted",
-            r.bucket,
-            r.article_id,
-        )
-        if not dry_run:
-            session.execute(
-                FeedStmts.DELETE,
-                (r.bucket, r.published_at, r.article_id),
-            )
-    result = {"deleted_phantoms": deleted, "dry_run": dry_run}
+    A "phantom" row (null service_id/title) could only exist because
+    articles_feed was a SEPARATE projection table, upserted independently
+    from articles_by_id -- a partial write there could land a malformed row
+    with no matching detail row backing it. `articles` has no second,
+    independently-written projection to desync from: a status='published'
+    row IS the article the public feed reads, not a separate feed-presence
+    pointer to one. Kept as a callable no-op (rather than deleted outright,
+    and never wired to a Celery beat -- this has only ever been a manual CLI
+    script) so `--cleanup` on an old runbook/cron entry degrades to "did
+    nothing" instead of an ImportError/AttributeError.
+    """
+    result = {
+        "deleted_phantoms": 0,
+        "dry_run": dry_run,
+        "note": "structurally impossible under the consolidated `articles` schema",
+    }
     logger.info(result)
     return result
 

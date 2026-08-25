@@ -43,13 +43,24 @@ def test_dirty_body_is_corrected_and_persisted(monkeypatch: pytest.MonkeyPatch) 
         lambda **kw: versions.append(kw["edit_reason"]) or 1,
     )
     executed: list = []
+    article_row = SimpleNamespace(
+        status="published",
+        year=2026,
+        published_at=None,
+        title="T",
+        summary="S",
+        image_url="https://example.com/hero.png",
+    )
 
     class _FakeSession:
         def execute(self, stmt: str, params: tuple | None = None) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
             # First-ever import of index_tasks pulls in celery_app, whose
-            # beat-schedule build reads crawler config at import time — only
-            # the article UPDATE is the write under test.
-            if "UPDATE algorand_platform.articles_by_id" in str(stmt):
+            # beat-schedule build reads crawler config at import time.
+            text = str(stmt)
+            if "SELECT" in text.upper() and "FROM algorand_platform.articles WHERE article_id = ?" in text:
+                return SimpleNamespace(one=lambda: article_row)
+            # The `articles` content UPDATE is the write under test.
+            if text.startswith("UPDATE algorand_platform.articles SET title"):
                 executed.append(params)
             return SimpleNamespace(one=lambda: None)
 
@@ -65,7 +76,7 @@ def test_dirty_body_is_corrected_and_persisted(monkeypatch: pytest.MonkeyPatch) 
 
     assert result["changed"] is True
     assert result["notes"]["_authority_removed"] == [INCIDENT_SENTENCE]
-    # before/after versions saved, raw UPDATE executed, search reindexed.
+    # before/after versions saved, `articles` content UPDATE executed, search reindexed.
     assert versions == ["before_edit", "release_gate:_authority_removed"]
     assert len(executed) == 1
     new_body = executed[0][2]
@@ -118,13 +129,28 @@ def test_release_drain_invokes_gates_before_feed_insert(monkeypatch: pytest.Monk
         approved_at=None,
     )
     feed_art = SimpleNamespace(
+        status="backlog",
+        year=2026,
         article_id=pending_row.article_id,
         service_id="svc",
         title="T",
         summary="S",
+        body="",
         tags=["algorand"],
         image_url=None,
         source_url="https://example.com/",
+        trigger_txid="",
+        trigger_round=0,
+        slug=None,
+        translations=None,
+        first_published_at=None,
+        updated_at=None,
+        prompt_version=None,
+        composed_by_model=None,
+        deleted_at=None,
+        status_updated_at=None,
+        interest_score=pending_row.interest_score,
+        approved_at=pending_row.approved_at,
         published_at=None,
     )
 
@@ -144,13 +170,13 @@ def test_release_drain_invokes_gates_before_feed_insert(monkeypatch: pytest.Monk
                 return [backlog_row]
             if "pending_feed_queue" in text and "SELECT" in text.upper():
                 return [pending_row]
-            if "articles_by_id" in text:
-                order.append("get_for_feed")
+            if "SELECT" in text.upper() and "FROM algorand_platform.articles WHERE article_id = ?" in text:
+                order.append("get_article_row")
                 return SimpleNamespace(one=lambda: feed_art)
-            if "articles_feed" in text and "INSERT" in text.upper():
-                order.append("feed_insert")
+            if text.startswith("INSERT INTO algorand_platform.articles ("):
+                order.append("articles_insert")
                 # gate must have run before the article became visible
-                assert calls, "apply_release_gates must run before feed INSERT"
+                assert calls, "apply_release_gates must run before the articles insert"
                 return SimpleNamespace(one=lambda: None)
             order.append("other")
             return SimpleNamespace(one=lambda: None)
@@ -170,4 +196,4 @@ def test_release_drain_invokes_gates_before_feed_insert(monkeypatch: pytest.Monk
     result = qdt._release_pending_feed_backlog(slots=1)
     assert result["published"] == 1
     assert calls == [("gate", pending_row.article_id)]
-    assert "feed_insert" in order
+    assert "articles_insert" in order

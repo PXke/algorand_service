@@ -1,16 +1,20 @@
-"""Feed-projection writes must never upsert partial phantom rows.
+"""Content/image/translation writes against the consolidated `articles` table.
 
-Incident 2026-07-15: Cassandra UPDATE/INSERT are upserts. Any feed write that
-runs against an absent PK (held article never published to the feed, row
-deleted by an admin, or row MOVED by a recompose re-publish re-stamping
-published_at) used to create a partial row with null service_id — which the
-feed API's defensive filter silently hides. Guards under test:
+Historically (pre article-table consolidation) these functions wrote a
+SEPARATE articles_feed projection alongside articles_by_id, and an upsert
+against an absent feed-row primary key could create a partial "phantom" row
+with null service_id -- silently hidden by the feed API's defensive filter
+(incident 2026-07-15). `articles` is a single consolidated row per article
+now: there is no second, independently-written projection for a partial
+write to desync from, so that bug class is structurally impossible. These
+tests instead guard the properties that still matter on the new table:
 
-- FeedStmts.UPDATE_IMAGE / UPDATE_TRANSLATIONS and the articles_by_id
-  translations update are LWT ``IF EXISTS`` — a missing row is a no-op, not
-  a phantom.
-- update_article's feed write is a COMPLETE row (every projection column),
-  so even an upsert-resurrection yields a fully valid row.
+- update_article_image / update_article_translations both read the row
+  first and treat a missing article as a no-op (False), never an upsert
+  that resurrects a deleted article.
+- update_article writes a complete content update (title/summary/body/tags/
+  image_url/updated_at) keyed on the row's current partition
+  (status/year/published_at), which it also read fresh rather than assuming.
 """
 
 from __future__ import annotations
@@ -21,25 +25,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.core.statements import ArticleStmts, FeedStmts
-from app.modules.newspaper.article_store import (
-    update_article,
-    update_article_image,
-    update_article_translations,
-)
-
 _PUBLISHED_AT = datetime(2026, 7, 14, 18, 52, 10, 629000, tzinfo=UTC)
-
-
-def _stmt_cql(registry: type, name: str) -> str:
-    return registry.__dict__[name].cql
-
-
-def test_feed_and_article_mutation_statements_are_conditional() -> None:
-    """The feed/article translation and image update statements all carry an "IF EXISTS" LWT guard."""
-    assert _stmt_cql(FeedStmts, "UPDATE_IMAGE").endswith("IF EXISTS")
-    assert _stmt_cql(FeedStmts, "UPDATE_TRANSLATIONS").endswith("IF EXISTS")
-    assert _stmt_cql(ArticleStmts, "UPDATE_TRANSLATIONS").endswith("IF EXISTS")
 
 
 def _session(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
@@ -52,6 +38,8 @@ def _session(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 def _row(aid: UUID) -> MagicMock:
     row = MagicMock()
     row.article_id = aid
+    row.status = "published"
+    row.year = 2026
     row.service_id = "svc-1"
     row.source_url = "https://example.com/src"
     row.image_url = "https://example.com/hero.png"
@@ -69,130 +57,107 @@ def _row(aid: UUID) -> MagicMock:
     return row
 
 
-def test_update_article_image_missing_feed_row_is_a_noop_not_a_phantom(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A missing feed row on image update is a conditional no-op, never a partial phantom insert."""
+def _writes(session: MagicMock, prefix: str) -> list[tuple]:
+    return [
+        (stmt, params)
+        for stmt, params in (c.args for c in session.execute.call_args_list if len(c.args) == 2)
+        if isinstance(stmt, str) and stmt.startswith(prefix)
+    ]
+
+
+def test_update_article_image_missing_article_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No `articles` row at all (bad id, or deleted between enqueue and run) -- reported as failure, no write attempted."""
+    from app.modules.newspaper.article_store import update_article_image
+
     aid = uuid4()
     session = _session(monkeypatch)
-    result = MagicMock()
-    result.one.return_value = _row(aid)
-    result.was_applied = False  # LWT declined: no row at this PK
-    session.execute.return_value = result
+    session.execute.return_value.one.return_value = None
+
+    assert not update_article_image(str(aid), "https://example.com/new.png")
+    assert _writes(session, "UPDATE algorand_platform.articles SET image_url") == []
+
+
+def test_update_article_image_writes_the_keyed_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Writes image_url keyed on the row's own current status/year/published_at (its partition key)."""
+    from app.modules.newspaper.article_store import update_article_image
+
+    aid = uuid4()
+    session = _session(monkeypatch)
+    session.execute.return_value.one.return_value = _row(aid)
 
     assert update_article_image(str(aid), "https://example.com/new.png")
 
-    feed_updates = [
-        (stmt, params)
-        for stmt, params in (c.args for c in session.execute.call_args_list)
-        if isinstance(stmt, str)
-        and stmt.startswith("UPDATE algorand_platform.articles_feed SET image_url")
-    ]
-    assert len(feed_updates) == 1
-    assert feed_updates[0][0].endswith("IF EXISTS")
+    updates = _writes(session, "UPDATE algorand_platform.articles SET image_url")
+    assert len(updates) == 1
+    _, params = updates[0]
+    assert params == ("https://example.com/new.png", "published", 2026, _PUBLISHED_AT, aid)
 
 
-def test_update_article_translations_dropped_when_article_deleted(
+def test_update_article_translations_dropped_when_article_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Skips the feed translations write entirely once the article-row LWT declines (article deleted)."""
+    """A translation task can outlive the article it was enqueued for -- dropping the write is correct, never an upsert that resurrects it as a translations-only phantom."""
+    from app.modules.newspaper.article_store import update_article_translations
+
     aid = uuid4()
     session = _session(monkeypatch)
-    result = MagicMock()
-    result.one.return_value = _row(aid)
-    result.was_applied = False  # article row gone
-    session.execute.return_value = result
+    session.execute.return_value.one.return_value = None
 
     assert not update_article_translations(str(aid), {"fr": "{}"})
-
-    # The feed write must never run once the article-level LWT declined.
-    feed_updates = [
-        stmt
-        for stmt, _params in (c.args for c in session.execute.call_args_list)
-        if isinstance(stmt, str)
-        and stmt.startswith("UPDATE algorand_platform.articles_feed SET translations")
-    ]
-    assert feed_updates == []
+    assert _writes(session, "UPDATE algorand_platform.articles SET translations") == []
 
 
-def test_update_article_translations_survives_missing_feed_row(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Still reports success updating translations when the article row exists but the feed row is absent."""
+def test_update_article_translations_writes_the_keyed_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Writes translations keyed on the row's own current status/year/published_at."""
+    from app.modules.newspaper.article_store import update_article_translations
+
     aid = uuid4()
     session = _session(monkeypatch)
-
-    def execute(stmt: str, _params: tuple | None = None) -> MagicMock:
-        result = MagicMock()
-        result.one.return_value = _row(aid)
-        # Article row exists; feed row is absent (held/moved by recompose).
-        result.was_applied = not (isinstance(stmt, str) and "articles_feed" in stmt)
-        return result
-
-    session.execute.side_effect = execute
+    session.execute.return_value.one.return_value = _row(aid)
 
     assert update_article_translations(str(aid), {"fr": "{}"})
 
+    updates = _writes(session, "UPDATE algorand_platform.articles SET translations")
+    assert len(updates) == 1
+    _, params = updates[0]
+    assert params == ({"fr": "{}"}, "published", 2026, _PUBLISHED_AT, aid)
 
-def test_update_article_writes_complete_feed_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    """update_article's feed INSERT carries every projection column, including image/source URL and the original published_at."""
+
+def test_update_article_writes_complete_content_update(monkeypatch: pytest.MonkeyPatch) -> None:
+    """update_article's content UPDATE carries every edited column plus the row's own current image_url and partition key -- an in-place edit, published_at never moves."""
+    from app.modules.newspaper.article_store import update_article
+
     aid = uuid4()
     session = _session(monkeypatch)
     session.execute.return_value.one.return_value = _row(aid)
 
     assert update_article(article_id=str(aid), title="New", summary="NS", body="NB")
 
-    inserts = [
-        (stmt, params)
-        for stmt, params in (c.args for c in session.execute.call_args_list if len(c.args) == 2)
-        if isinstance(stmt, str) and stmt.startswith("INSERT INTO algorand_platform.articles_feed")
-    ]
-    assert len(inserts) == 1
-    stmt, params = inserts[0]
-    # Complete projection: image_url and source_url must be carried, so an
-    # upsert onto a deleted row cannot produce a degraded article.
+    updates = _writes(session, "UPDATE algorand_platform.articles SET title")
+    assert len(updates) == 1
+    stmt, params = updates[0]
     assert "image_url" in stmt
-    assert "source_url" in stmt
-    assert "https://example.com/hero.png" in params
-    assert "https://example.com/src" in params
-    # In-place snippet edit: published_at survives (only recompose re-dates).
-    assert params[1] == _PUBLISHED_AT
+    title, summary, body, _tags, image, updated_at, status, year, published_at, article_id = params
+    assert (title, summary, body) == ("New", "NS", "NB")
+    # Carries the row's own current image, never assumes it changed.
+    assert image == "https://example.com/hero.png"
+    # In-place edit: partition key (status/year/published_at) is reused
+    # verbatim from the just-read row, never re-derived.
+    assert (status, year, published_at, article_id) == ("published", 2026, _PUBLISHED_AT, aid)
+    assert isinstance(updated_at, datetime)
 
 
-def test_update_article_carries_slug_onto_the_feed_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Root-caused live 2026-08-10 (GSC 'Page with redirect'): INSERT_FULL has no slug column of its own (kept as a separate write per migration 056), so without an explicit carry the feed row's slug silently goes untouched -- fine on a genuinely unchanged row, but the homepage reads slug from THIS projection, and any desync sends it back to uuid-form links. update_article must carry the article's real slug onto the feed row on every edit."""
+def test_update_article_appends_updated_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A content edit is tagged 'updated' (once) so the frontend can flag revised stories."""
+    from app.modules.newspaper.article_store import update_article
+
     aid = uuid4()
     session = _session(monkeypatch)
     session.execute.return_value.one.return_value = _row(aid)
 
-    assert update_article(article_id=str(aid), title="New", summary="NS", body="NB")
+    assert update_article(article_id=str(aid), title="New", summary="NS", body="NB", tags=["algorand"])
 
-    slug_updates = [
-        (stmt, params)
-        for stmt, params in (c.args for c in session.execute.call_args_list if len(c.args) == 2)
-        if isinstance(stmt, str) and stmt.startswith("UPDATE algorand_platform.articles_feed SET slug")
-    ]
-    assert len(slug_updates) == 1
-    _, params = slug_updates[0]
-    assert params[0] == "existing-slug"
-    assert params[3] == aid
-
-
-def test_update_article_skips_slug_write_when_article_has_none(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No slug write at all for an article that never claimed one -- nothing to carry, and no accidental empty-string slug landing in the feed."""
-    aid = uuid4()
-    session = _session(monkeypatch)
-    row = _row(aid)
-    row.slug = None
-    session.execute.return_value.one.return_value = row
-
-    assert update_article(article_id=str(aid), title="New", summary="NS", body="NB")
-
-    slug_updates = [
-        stmt
-        for stmt, _params in (c.args for c in session.execute.call_args_list if len(c.args) == 2)
-        if isinstance(stmt, str) and stmt.startswith("UPDATE algorand_platform.articles_feed SET slug")
-    ]
-    assert slug_updates == []
+    _, params = _writes(session, "UPDATE algorand_platform.articles SET title")[0]
+    tags = params[3]
+    assert tags.count("updated") == 1
+    assert "algorand" in tags

@@ -1,17 +1,22 @@
-"""replace_article_content must MOVE the feed row completely on a recompose.
+"""replace_article_content must MOVE the article's `articles` row completely on a recompose.
 
 Recompose is a re-publish (owner policy 2026-07-15): published_at is
-re-stamped to the apply time, and since published_at is part of the feed PK
-the old feed row is DELETEd and a complete new row INSERTed.
+re-stamped to the apply time, and since published_at is part of `articles`'
+partition key (status, year, published_at, article_id), the row's OLD
+partition is DELETEd and a complete new one INSERTed --
+transition_article_status's own delete-old-partition + insert-new-partition
+dance, which carries every column not explicitly overridden.
 
-Incident 2026-07-15 (the reason the insert must be COMPLETE): Cassandra
-UPDATE is an upsert. The previous implementation's partial feed UPDATE —
-title/summary/tags/image/updated_at only — re-created a deleted feed row
-WITHOUT service_id/source_url. The feed API's defensive filter
-(news_service.list_feed_page: `if a.service_id and a.title`) then silently
-hid the article from every feed response while articles_by_id and the
-article detail endpoint stayed perfectly healthy, which made the symptom
-look like a server-side caching bug.
+Historically (pre article-table consolidation) this same "the write must be
+COMPLETE" concern applied to a SEPARATE articles_feed projection: Cassandra
+UPDATE is an upsert, and a partial feed UPDATE — title/summary/tags/image/
+updated_at only — re-created a deleted feed row WITHOUT service_id/
+source_url, silently hidden by the feed API's defensive filter (incident
+2026-07-15). `articles` has no second, independently-written projection for
+a partial write to desync from now, but the underlying discipline
+(published_at moves -> delete-old + insert-COMPLETE-new, not a partial
+upsert) is exactly what transition_article_status enforces, so these tests
+now assert on ITS output instead of a separate feed table.
 """
 
 from __future__ import annotations
@@ -26,6 +31,14 @@ import pytest
 from app.modules.newspaper.article_store import replace_article_content
 
 _OLD_PUBLISHED_AT = datetime(2026, 6, 14, 18, 52, 10, 629000, tzinfo=UTC)
+
+# `articles`' column order (see algorand_shared.article_transitions._ARTICLES_COLUMNS).
+_ARTICLES_COLUMNS = (
+    "status", "year", "published_at", "article_id", "service_id", "title", "summary", "body",
+    "image_url", "tags", "source_url", "trigger_txid", "trigger_round", "slug", "translations",
+    "first_published_at", "updated_at", "prompt_version", "composed_by_model",
+    "deleted_at", "status_updated_at", "interest_score", "approved_at",
+)  # fmt: skip
 
 
 def _article_row(aid: UUID) -> MagicMock:
@@ -46,6 +59,13 @@ def _article_row(aid: UUID) -> MagicMock:
     row.slug = "old-title-slug"
     row.status = "published"
     row.year = 2026
+    row.image_url = None
+    row.composed_by_model = None
+    row.deleted_at = None
+    row.status_updated_at = None
+    row.interest_score = None
+    row.approved_at = None
+    row.updated_at = None
     return row
 
 
@@ -78,42 +98,45 @@ def _calls_matching(session: MagicMock, prefix: str) -> list[tuple]:
     ]
 
 
-def test_replace_deletes_old_feed_row_at_full_precision(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Deletes the old feed row keyed by its original full-precision published_at, not a reconstructed epoch."""
+def _inserted_values(session: MagicMock) -> dict[str, object]:
+    inserts = _calls_matching(session, "INSERT INTO algorand_platform.articles (")
+    assert len(inserts) == 1
+    _, params = inserts[0]
+    return dict(zip(_ARTICLES_COLUMNS, params, strict=True))
+
+
+def test_replace_deletes_old_partition_at_full_precision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deletes the row's old partition keyed by its original full-precision published_at, not a reconstructed epoch."""
     aid = uuid4()
     _, session = _run_replace(monkeypatch, _article_row(aid))
 
-    deletes = _calls_matching(session, "DELETE FROM algorand_platform.articles_feed")
+    deletes = _calls_matching(session, "DELETE FROM algorand_platform.articles ")
     assert len(deletes) == 1
     _, params = deletes[0]
-    # Old bucket + the RAW full-precision timestamp (never epoch-reconstructed).
-    assert params == ("2026-06", _OLD_PUBLISHED_AT, aid)
+    # (status, year, published_at, article_id) -- the RAW full-precision
+    # timestamp (never epoch-reconstructed).
+    assert params == ("published", 2026, _OLD_PUBLISHED_AT, aid)
 
 
-def test_replace_inserts_complete_feed_row_at_new_published_at(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Inserts a complete feed row (service_id, source_url, updated_at, first_published_at) at the new published_at."""
+def test_replace_inserts_complete_row_at_new_published_at(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inserts a complete row (service_id, source_url, updated_at, first_published_at) at the new published_at."""
     aid = uuid4()
     new_published_at, session = _run_replace(monkeypatch, _article_row(aid))
     assert new_published_at is not None
 
-    inserts = _calls_matching(session, "INSERT INTO algorand_platform.articles_feed")
-    assert len(inserts) == 1
-    stmt, params = inserts[0]
-    # Every projection column must be present — a partial row is a phantom
-    # the feed API silently hides.
-    assert "service_id" in stmt
-    assert "source_url" in stmt
-    assert "updated_at" in stmt
-    bucket, published_at, row_aid, service_id, _title, *_rest = params
-    assert row_aid == aid
-    assert published_at == new_published_at
-    assert bucket == new_published_at.strftime("%Y-%m")
-    assert service_id == "editorial-brief:53016f2f"
-    assert params[8] == "editorial://brief/53016f2f"  # source_url
+    values = _inserted_values(session)
+    assert values["article_id"] == aid
+    assert values["published_at"] == new_published_at
+    assert values["year"] == new_published_at.year
+    assert values["status"] == "published"
+    assert values["service_id"] == "editorial-brief:53016f2f"
+    assert values["source_url"] == "editorial://brief/53016f2f"
     # First recompose: first_published_at is seeded with the ORIGINAL date.
-    assert params[9] == _OLD_PUBLISHED_AT
+    assert values["first_published_at"] == _OLD_PUBLISHED_AT
+    # New content, cleared translations (a recompose invalidates every
+    # existing translation of the old prose).
+    assert values["title"] == "New title"
+    assert values["translations"] is None
 
 
 def test_replace_restamps_published_at_to_apply_time(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -125,16 +148,11 @@ def test_replace_restamps_published_at_to_apply_time(monkeypatch: pytest.MonkeyP
 
     assert new_published_at is not None
     assert before <= new_published_at <= after
+    assert new_published_at != _OLD_PUBLISHED_AT
 
-    updates = _calls_matching(session, "UPDATE algorand_platform.articles_by_id SET title")
-    assert len(updates) == 1
-    stmt, params = updates[0]
-    assert "published_at = ?" in stmt
-    assert "first_published_at = ?" in stmt
-    # (title, summary, body, tags, image, published_at, first_published_at,
-    #  updated_at, aid)
-    assert params[5] == new_published_at
-    assert params[6] == _OLD_PUBLISHED_AT
+    values = _inserted_values(session)
+    assert values["published_at"] == new_published_at
+    assert values["first_published_at"] == _OLD_PUBLISHED_AT
 
 
 def test_second_recompose_preserves_original_first_published_at(
@@ -147,10 +165,63 @@ def test_second_recompose_preserves_original_first_published_at(
     row.first_published_at = original  # already recomposed once before
     _, session = _run_replace(monkeypatch, row)
 
-    inserts = _calls_matching(session, "INSERT INTO algorand_platform.articles_feed")
-    assert inserts[0][1][9] == original
-    updates = _calls_matching(session, "UPDATE algorand_platform.articles_by_id SET title")
-    assert updates[0][1][6] == original
+    assert _inserted_values(session)["first_published_at"] == original
+
+
+def test_replace_carries_slug_onto_the_new_partition(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The DELETE+INSERT here creates a genuinely new partition row with no prior slug for a plain UPDATE to leave untouched, so the new row's slug must be carried explicitly (same discipline as the pre-consolidation feed-row slug carry, root-caused live 2026-08-10)."""
+    aid = uuid4()
+    _, session = _run_replace(monkeypatch, _article_row(aid))
+
+    slug_updates = _calls_matching(session, "UPDATE algorand_platform.articles SET slug")
+    assert len(slug_updates) == 1
+    _, params = slug_updates[0]
+    assert params[0] == "old-title-slug"
+    assert params[4] == aid
+
+
+def test_replace_skips_slug_carry_when_article_has_no_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An article that never claimed a slug issues no slug write — nothing to carry, and no accidental empty-string slug."""
+    aid = uuid4()
+    row = _article_row(aid)
+    row.slug = None
+    _, session = _run_replace(monkeypatch, row)
+
+    slug_updates = _calls_matching(session, "UPDATE algorand_platform.articles SET slug")
+    assert slug_updates == []
+
+
+def test_replace_insert_binds_none_for_empty_source_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Binds source_url back to None on the new row when it was coerced to an empty string."""
+    aid = uuid4()
+    row = _article_row(aid)
+    row.source_url = None  # get_article coerces to "" — must bind back to None
+    _, session = _run_replace(monkeypatch, row)
+
+    assert _inserted_values(session)["source_url"] is None
+
+
+def test_replace_on_a_drafted_article_never_moves_the_partition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-caused 2026-08-11 (before it could bite live on Lumi Rogue, held in draft): a recompose approved for a DRAFTED live article must update content but never re-stamp published_at or move it off status='draft' -- doing so would silently un-draft a withdrawn article back onto the public feed, exactly the failure already fixed for the admin content-edit path."""
+    aid = uuid4()
+    row = _article_row(aid)
+    row.status = "draft"
+    result, session = _run_replace(monkeypatch, row)
+
+    assert result == _OLD_PUBLISHED_AT  # published_at is NOT re-stamped
+    assert _calls_matching(session, "DELETE FROM algorand_platform.articles ") == []
+    assert _calls_matching(session, "INSERT INTO algorand_platform.articles (") == []
+    content_updates = _calls_matching(session, "UPDATE algorand_platform.articles SET title")
+    assert len(content_updates) == 1
+    _, params = content_updates[0]
+    assert params[0] == "New title"
+    # A plain in-place UPDATE keyed on the row's CURRENT (unchanged)
+    # partition -- published_at only appears in the WHERE clause (the
+    # partition key), never re-derived or moved, unlike the real-recompose
+    # branch above (DELETE-old-partition + INSERT-new-partition).
+    assert params[-4:] == ("draft", 2026, _OLD_PUBLISHED_AT, aid)
 
 
 def test_daily_cap_ignores_recompose_republishes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,58 +258,3 @@ def test_daily_cap_ignores_recompose_republishes(monkeypatch: pytest.MonkeyPatch
     ]
     monkeypatch.setattr(article_store, "list_feed_articles", lambda *, limit=500: rows)  # noqa: ARG005 -- name must match the real callee's keyword arg
     assert article_store.count_articles_published_on_utc_day(day_start_epoch=day_start) == 1
-
-
-def test_replace_carries_slug_onto_the_new_feed_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Root-caused live 2026-08-10 (GSC 'Page with redirect': 545 pages): the DELETE+INSERT here creates a genuinely new feed row with no prior slug for Cassandra to leave untouched, so every recompose silently dropped the feed-visible slug — the homepage reads slug from THIS projection, not articles_by_id, and fell back to uuid-form links, sending every recomposed article's readers (and Google) through an extra 301. The new row's slug must be carried explicitly."""
-    aid = uuid4()
-    new_published_at, session = _run_replace(monkeypatch, _article_row(aid))
-
-    slug_updates = _calls_matching(session, "UPDATE algorand_platform.articles_feed SET slug")
-    assert len(slug_updates) == 1
-    _, params = slug_updates[0]
-    assert params == ("old-title-slug", new_published_at.strftime("%Y-%m"), new_published_at, aid)
-
-
-def test_replace_skips_slug_carry_when_article_has_no_slug(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An article that never claimed a slug (pre-migration-056 row) issues no slug write — nothing to carry, and no accidental empty-string slug."""
-    aid = uuid4()
-    row = _article_row(aid)
-    row.slug = None
-    _, session = _run_replace(monkeypatch, row)
-
-    slug_updates = _calls_matching(session, "UPDATE algorand_platform.articles_feed SET slug")
-    assert slug_updates == []
-
-
-def test_replace_feed_insert_binds_null_for_empty_source_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Binds source_url back to None on the feed insert when it was coerced to an empty string."""
-    aid = uuid4()
-    row = _article_row(aid)
-    row.source_url = None  # get_article coerces to "" — must bind back to None
-    _, session = _run_replace(monkeypatch, row)
-
-    inserts = _calls_matching(session, "INSERT INTO algorand_platform.articles_feed")
-    assert len(inserts) == 1
-    assert inserts[0][1][8] is None  # source_url
-
-
-def test_replace_on_a_drafted_article_never_touches_the_feed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Root-caused 2026-08-11 (before it could bite live on Lumi Rogue, held in draft): a recompose approved for a DRAFTED live article must update content but never rewrite the feed row or re-stamp published_at -- doing so would silently un-draft a withdrawn article back onto the public feed, exactly the failure already fixed for the admin content-edit path."""
-    aid = uuid4()
-    row = _article_row(aid)
-    row.status = "draft"
-    result, session = _run_replace(monkeypatch, row)
-
-    assert result == _OLD_PUBLISHED_AT  # published_at is NOT re-stamped
-    assert _calls_matching(session, "DELETE FROM algorand_platform.articles_feed") == []
-    assert _calls_matching(session, "INSERT INTO algorand_platform.articles_feed") == []
-    content_updates = _calls_matching(
-        session, "UPDATE algorand_platform.articles_by_id SET title"
-    )
-    assert len(content_updates) == 1
-    stmt, params = content_updates[0]
-    assert "published_at" not in stmt  # the timestamp-preserving statement, not the full one
-    assert params[0] == "New title"

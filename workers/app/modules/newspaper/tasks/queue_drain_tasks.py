@@ -10,7 +10,6 @@ from celery.exceptions import SoftTimeLimitExceeded
 
 from app.celery_app import celery_app
 from app.core import config
-from app.core.feed_bucket import feed_month as _feed_month
 from app.modules.ai.mistral_credit_guard import is_credit_exhausted
 from app.modules.newspaper.breaking_credibility import (
     BreakingAssessment,
@@ -84,8 +83,9 @@ def _pending_for_tier(tier: PublishTier, *, limit: int) -> list:
 
 def _pending_feed_backlog_full() -> bool:
     """True when the backlog (articles.status='backlog') already holds PENDING_FEED_MAX_DEPTH+ approved articles awaiting paced release. Composing further ahead than that only burns budget to publish staler content later — the auto-approve → backlog path bypasses the 1-slot review throttle, so without this check hourly drains composed all night (2026-07-16: six articles / two days of inventory queued overnight). Fails open: a Cassandra blip must not stop the pipeline."""
-    from app.core import config as cfg
     from algorand_shared.article_transitions import list_backlog_articles
+
+    from app.core import config as cfg
 
     try:
         return len(list_backlog_articles()) >= cfg.PENDING_FEED_MAX_DEPTH
@@ -803,11 +803,12 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
     """
     from datetime import UTC, datetime
 
+    from algorand_shared.article_statements import ArticlesStmts
     from algorand_shared.article_transitions import list_backlog_articles
 
     from app.core import config as cfg
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts, FeedStmts, PendingFeedStmts
+    from app.core.statements import PendingFeedStmts
 
     session = get_cassandra_session()
     bucket = getattr(cfg, "NEWS_FEED_BUCKET", "main") or "main"
@@ -820,7 +821,10 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
     rows = backlog[:1]
     published = 0
     for r in rows:
-        art = session.execute(ArticleStmts.GET_FOR_FEED, (r.article_id,)).one()
+        # 2026-08-25 (Phase 5): reads `articles` directly (was
+        # articles_by_id's GET_FOR_FEED) -- summary/tags/image_url/
+        # source_url/published_at all live on the same consolidated row now.
+        art = session.execute(ArticlesStmts.GET_FULL_BY_ID, (r.article_id,)).one()
         if art is None:
             # The queue row still gets deleted below (a permanently missing
             # article would otherwise jam this one-row-per-run queue
@@ -854,42 +858,15 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
             if not reserved:
                 logger.info("backlog release blocked: %s", reserve_reason)
                 break
-            # Normally this is the article's FIRST entry into articles_feed —
+            # Normally this is the article's FIRST entry into the public feed —
             # art.published_at was stamped at compose time, not release time,
-            # so it must be re-stamped now on both the feed row and the
-            # source-of-truth articles_by_id row. Defensively clean up a feed
-            # row at the PRE-release published_at first: a backlog item that
-            # somehow already has one (observed 2026-08-03 — a forced/manual
-            # drain released an article that was, unexpectedly, already fed)
-            # would otherwise end up with two live feed rows for one article,
-            # since the clustering key is (bucket, published_at, article_id)
-            # and this INSERT below lands at a different published_at.
-            if art.published_at is not None:
-                session.execute(
-                    FeedStmts.DELETE,
-                    (_feed_month(art.published_at), art.published_at, art.article_id),
-                )
+            # so it must be re-stamped now on the `articles` row itself.
             released_at = datetime.now(tz=UTC)
             try:
-                session.execute(
-                    FeedStmts.INSERT,
-                    (
-                        _feed_month(released_at),
-                        released_at,
-                        art.article_id,
-                        art.service_id,
-                        art.title,
-                        art.summary or "",
-                        list(art.tags or []),
-                        art.image_url,
-                        art.source_url,
-                    ),
-                )
-                session.execute(ArticleStmts.UPDATE_PUBLISHED_AT, (released_at, art.article_id))
-                # New `articles` table dual-write (article-table consolidation,
-                # step 5): backlog -> published status transition. Best-effort,
-                # wrapped so the OLD-schema release (already durable at this
-                # point) is never undone by a hiccup on the new table.
+                # `articles` table backlog -> published status transition
+                # (article-table consolidation Phase 5: this is now the sole
+                # write, articles_feed/articles_by_id's old dual-write halves
+                # were dropped once every read moved onto `articles`).
                 from app.modules.newspaper.article_store import transition_article_status
 
                 try:

@@ -2,8 +2,9 @@
 
 Article state, not an SEO concern — both the HTML document route and the JSON
 article endpoint need it to answer "removed" (410) rather than "never existed"
-(404), and admin writes the tombstone on delete. Kept here so those callers
-share one definition instead of each hand-rolling DeletedArticleStmts.
+(404), and admin writes the tombstone (`articles`.status='deleted') on
+delete. Kept here so those callers share one definition instead of each
+hand-rolling the ArticlesStmts.GET_BY_ID + status check.
 
 Single-id point lookup only. The sitemap builder needs the whole set at once
 and caches it briefly (see seo/sitemap.py); that stays separate on purpose —

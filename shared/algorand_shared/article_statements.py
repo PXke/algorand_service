@@ -119,10 +119,6 @@ PENDING_FEED_DELETE = _Stmt(
     "DELETE FROM algorand_platform.pending_feed_queue "
     "WHERE bucket = ? AND interest_score = ? AND approved_at = ? AND article_id = ?"
 )
-PENDING_FEED_PEEK_ID = _Stmt(
-    "SELECT article_id FROM algorand_platform.pending_feed_queue WHERE bucket = ? LIMIT 1"
-)
-
 # --------------------------------------------------------------------------- #
 # publish_queue / publish_queue_pending
 # --------------------------------------------------------------------------- #

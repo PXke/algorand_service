@@ -11,6 +11,14 @@ import pytest
 
 from app.modules.newspaper.tasks import queue_drain_tasks
 
+# `articles`' column order (see algorand_shared.article_transitions._ARTICLES_COLUMNS).
+_ARTICLES_COLUMNS = (
+    "status", "year", "published_at", "article_id", "service_id", "title", "summary", "body",
+    "image_url", "tags", "source_url", "trigger_txid", "trigger_round", "slug", "translations",
+    "first_published_at", "updated_at", "prompt_version", "composed_by_model",
+    "deleted_at", "status_updated_at", "interest_score", "approved_at",
+)  # fmt: skip
+
 
 class _PendingRow:
     def __init__(self, article_id: str) -> None:
@@ -25,6 +33,7 @@ class _Result:
         self._row = row
 
     def one(self) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
+        """Return the wrapped row (or None)."""
         return self._row
 
 
@@ -34,11 +43,11 @@ class _FakeSession:
     def __init__(self, *, pending_rows: list[_PendingRow], article_row: Any) -> None:  # noqa: ANN401 -- duck-typed Cassandra row/result
         self._pending_rows = pending_rows
         self._article_row = article_row
-        self.feed_inserts: list[tuple] = []
-        self.feed_deletes: list[tuple] = []
-        self.published_at_updates: list[tuple] = []
+        self.articles_inserts: list[tuple] = []
+        self.articles_deletes: list[tuple] = []
 
     def prepare(self, cql: str) -> str:
+        """Identity passthrough -- lets execute() branch on the raw CQL text."""
         return cql
 
     def execute(self, query: str, params: tuple = ()) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
@@ -58,35 +67,40 @@ class _FakeSession:
             ]
         if q.startswith("SELECT") and "pending_feed_queue" in q:
             return list(self._pending_rows)
-        if q.startswith("SELECT") and "articles_by_id" in q:
+        if q.startswith("SELECT") and "FROM algorand_platform.articles WHERE article_id = ?" in q:
+            # Both the top-level GET_FULL_BY_ID read and transition_article_
+            # status's own internal re-read share this exact query text.
             return _Result(self._article_row)
-        if q.startswith("INSERT INTO algorand_platform.articles_feed"):
-            self.feed_inserts.append(tuple(params))
-        elif q.startswith("DELETE FROM algorand_platform.articles_feed"):
-            self.feed_deletes.append(tuple(params))
-        elif q.startswith("UPDATE algorand_platform.articles_by_id SET published_at"):
-            self.published_at_updates.append(tuple(params))
+        if q.startswith("INSERT INTO algorand_platform.articles ("):
+            self.articles_inserts.append(tuple(params))
+        elif q.startswith("DELETE FROM algorand_platform.articles "):
+            self.articles_deletes.append(tuple(params))
         return _Result(None)
 
 
-def test_drain_approved_feed_queue_stamps_release_time_and_keeps_image(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Same staleness bug as the backend release path: a held article's published_at was stamped at compose time — releasing it from pending_feed_queue must stamp the real release moment, and (a second, independent bug found alongside it) must not drop image_url/source_url the way the old INSERT_BASIC statement did."""
-    article_id = uuid4()
-    compose_time = datetime.now(tz=UTC) - timedelta(hours=5)
-    article_row = SimpleNamespace(
+def _article_row(
+    article_id: object, *, status: str = "backlog", published_at: datetime
+) -> SimpleNamespace:
+    values: dict[str, object] = dict.fromkeys(_ARTICLES_COLUMNS)
+    values.update(
+        status=status,
+        year=published_at.year,
+        published_at=published_at,
         article_id=article_id,
         service_id="svc",
         title="Title",
         summary="Summary",
-        published_at=compose_time,
+        body="",
         tags=["a", "b"],
         image_url="https://example.com/img.png",
         source_url="https://example.com/",
+        trigger_txid="",
+        trigger_round=0,
     )
-    fake = _FakeSession(pending_rows=[_PendingRow(article_id)], article_row=article_row)
+    return SimpleNamespace(**values)
 
+
+def _patch_common(monkeypatch: pytest.MonkeyPatch, fake: _FakeSession) -> None:
     import app.core.cassandra as c
 
     monkeypatch.setattr(c, "get_cassandra_session", lambda: fake)
@@ -117,6 +131,19 @@ def test_drain_approved_feed_queue_stamps_release_time_and_keeps_image(
         SimpleNamespace(delay=lambda *_a, **_kw: None),
     )
 
+
+def test_drain_approved_feed_queue_stamps_release_time_and_keeps_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held article's published_at was stamped at compose time — releasing it must re-stamp the real release moment on the `articles` row, carrying image_url/source_url forward unchanged (transition_article_status preserves every column not explicitly overridden)."""
+    article_id = uuid4()
+    compose_time = datetime.now(tz=UTC) - timedelta(hours=5)
+    fake = _FakeSession(
+        pending_rows=[_PendingRow(article_id)],
+        article_row=_article_row(article_id, published_at=compose_time),
+    )
+    _patch_common(monkeypatch, fake)
+
     before = datetime.now(tz=UTC)
     result = queue_drain_tasks.drain_approved_feed_queue()
     after = datetime.now(tz=UTC)
@@ -124,72 +151,36 @@ def test_drain_approved_feed_queue_stamps_release_time_and_keeps_image(
     assert result["status"] == "ok"
     assert result["published"] == 1
 
-    assert len(fake.feed_inserts) == 1
-    feed_params = fake.feed_inserts[0]
-    feed_published_at = feed_params[1]
-    assert feed_published_at != compose_time
-    assert before <= feed_published_at <= after
-    # bucket, published_at, article_id, service_id, title, summary, tags, image_url, source_url
-    assert feed_params[7] == "https://example.com/img.png"
-    assert feed_params[8] == "https://example.com/"
-
-    assert len(fake.published_at_updates) == 1
-    assert fake.published_at_updates[0] == (feed_published_at, article_id)
+    assert len(fake.articles_inserts) == 1
+    values = dict(zip(_ARTICLES_COLUMNS, fake.articles_inserts[0], strict=True))
+    assert values["status"] == "published"
+    assert values["published_at"] != compose_time
+    assert before <= values["published_at"] <= after
+    assert values["image_url"] == "https://example.com/img.png"
+    assert values["source_url"] == "https://example.com/"
 
 
-def test_release_deletes_any_pre_existing_feed_row_before_inserting(
+def test_release_deletes_the_pre_release_partition_before_inserting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A defensive cleanup: if this article somehow already had a feed row at its pre-release (compose-time) published_at, releasing it must delete that row first -- otherwise the article ends up with two live feed rows (observed 2026-08-03: a forced/manual drain released an article that, unexpectedly, was already fed)."""
-    from app.core.feed_bucket import feed_month
-
+    """transition_article_status deletes the row's OLD (pre-release, compose-time) partition before inserting the new one -- published_at is part of the partition key, so this is what keeps a released article from ending up with two live `articles` rows (the old bug, pre-consolidation: two live feed rows for one article)."""
     article_id = uuid4()
     compose_time = datetime.now(tz=UTC) - timedelta(hours=5)
-    article_row = SimpleNamespace(
-        article_id=article_id,
-        service_id="svc",
-        title="Title",
-        summary="Summary",
-        published_at=compose_time,
-        tags=["a", "b"],
-        image_url="",
-        source_url="https://example.com/",
+    fake = _FakeSession(
+        pending_rows=[_PendingRow(article_id)],
+        article_row=_article_row(article_id, published_at=compose_time),
     )
-    fake = _FakeSession(pending_rows=[_PendingRow(article_id)], article_row=article_row)
-
-    import app.core.cassandra as c
-
-    monkeypatch.setattr(c, "get_cassandra_session", lambda: fake)
-    c.prepare_cached.cache_clear()
-
-    monkeypatch.setattr(
-        "app.modules.newspaper.publish_policy.remaining_standard_publish_slots",
-        lambda: 3,
-    )
-    monkeypatch.setattr(
-        "app.modules.newspaper.publish_schedule.is_standard_publish_due",
-        lambda: (True, "no_prior_standard_publish"),
-    )
-    monkeypatch.setattr(queue_drain_tasks, "record_standard_publish", lambda: None)
-    monkeypatch.setattr(
-        "app.modules.newspaper.publish_daily_guard.reserve_publish_slot",
-        lambda **_kw: (True, "ok"),
-    )
-    monkeypatch.setattr(
-        "app.modules.newspaper.tasks.publish_tasks.enqueue_article_translations",
-        lambda *_a, **_kw: None,
-    )
-    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", lambda *_a, **_kw: None)
-    monkeypatch.setattr(
-        "app.modules.newspaper.tasks.distribution_tasks.distribute_article",
-        SimpleNamespace(delay=lambda *_a, **_kw: None),
-    )
+    _patch_common(monkeypatch, fake)
 
     result = queue_drain_tasks.drain_approved_feed_queue()
 
     assert result["status"] == "ok"
-    assert len(fake.feed_deletes) == 1
-    assert fake.feed_deletes[0] == (feed_month(compose_time), compose_time, article_id)
-    # The delete must run before the insert, not after -- otherwise it would
-    # wipe out the freshly-released row instead of the stale one.
-    assert fake.feed_deletes[0][1] != fake.feed_inserts[0][1]
+    assert len(fake.articles_deletes) == 1
+    assert fake.articles_deletes[0] == ("backlog", compose_time.year, compose_time, article_id)
+    # The delete must target the OLD (compose-time) partition, not the
+    # freshly-stamped release one.
+    assert len(fake.articles_inserts) == 1
+    new_published_at = dict(zip(_ARTICLES_COLUMNS, fake.articles_inserts[0], strict=True))[
+        "published_at"
+    ]
+    assert new_published_at != compose_time

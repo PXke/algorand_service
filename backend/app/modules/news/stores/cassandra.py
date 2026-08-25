@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from app.core.feed_bucket import cursor_from_ms, feed_month, to_ms
+from app.core.feed_bucket import cursor_from_ms, to_ms
 from app.modules.news.stores.base import StoredArticle
 
 
@@ -110,61 +110,6 @@ def _articles_row_to_stored(row: Any) -> StoredArticle | None:
 class CassandraArticleStore:
     """Cassandra-backed article storage."""
 
-    def insert(self, article: StoredArticle, *, feed_bucket: str = "main") -> None:
-        # UNREACHABLE IN PRODUCTION as of 2026-07-13: NewsService (the only
-        # consumer of ArticleStore) never calls this — real article writes
-        # happen entirely in the `workers` package via insert_article /
-        # insert_stored_article, which write full-precision datetimes
-        # directly and bypass this class. Kept only to satisfy the
-        # ArticleStore Protocol (InMemoryArticleStore's insert() IS live,
-        # used by ~20 tests). If this ever gets wired up for real: the
-        # published_at reconstruction below TRUNCATES to whole seconds
-        # (StoredArticle.published_at_epoch is an int), which silently
-        # upserts a phantom duplicate row in articles_feed whose PRIMARY KEY
-        # includes published_at at full precision — found and cleaned up one
-        # such duplicate (Bitrue article, 2026-07-13) whose origin predates
-        # this comment and could not be traced to a live call site.
-        """Insert a new article and its feed row. Unreachable in production; kept to satisfy ArticleStore."""
-        _ = feed_bucket  # single-bucket schema; accepted for protocol parity
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import NewsStmts
-
-        session = get_cassandra_session()
-        published_at = datetime.fromtimestamp(article.published_at_epoch, tz=UTC)
-        article_uuid = UUID(article.article_id)
-
-        tags = list(article.tags or [])
-        session.execute(
-            NewsStmts.INSERT_BY_ID,
-            (
-                article_uuid,
-                article.service_id,
-                article.title,
-                article.summary,
-                article.body,
-                article.trigger_txid,
-                article.trigger_round,
-                article.source_url,
-                published_at,
-                tags,
-                article.image_url,
-            ),
-        )
-        session.execute(
-            NewsStmts.INSERT_FEED,
-            (
-                feed_month(published_at),
-                published_at,
-                article_uuid,
-                article.service_id,
-                article.title,
-                article.summary,
-                tags,
-                article.image_url,
-                article.source_url,
-            ),
-        )
-
     def list_feed(self, *, feed_bucket: str = "main", limit: int = 50) -> list[StoredArticle]:
         """List recent feed rows, newest first (wraps list_feed_page, discarding the cursor).
 
@@ -199,6 +144,7 @@ class CassandraArticleStore:
         import math
 
         from algorand_shared.article_statements import ArticlesStmts
+
         from app.core.cassandra import execute_async
 
         cursor_dt = cursor_from_ms(cursor_epoch_ms)
@@ -258,6 +204,7 @@ class CassandraArticleStore:
         volume.
         """
         from algorand_shared.article_statements import ArticlesStmts
+
         from app.core.cassandra import execute_then
 
         try:
@@ -272,6 +219,7 @@ class CassandraArticleStore:
     def get_many(self, article_ids: list[str]) -> dict[str, StoredArticle]:
         """Fetch many articles by id concurrently; missing ids are omitted."""
         from algorand_shared.article_statements import ArticlesStmts
+
         from app.core.cassandra import execute_parallel_with_args
 
         pairs: list[tuple[str, UUID]] = []

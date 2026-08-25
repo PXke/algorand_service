@@ -739,8 +739,7 @@ def admin_reset_articles(request: Request) -> Response:
     from app.core.typesense_client import clear_search_index
 
     tables = (
-        "articles_by_id",
-        "articles_feed",
+        "articles",
         "article_versions",
         "publish_queue",
         "publish_queue_dedupe",
