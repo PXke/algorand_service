@@ -311,22 +311,6 @@ class AdminCassandraStore:
                     updated_at=old_row.updated_at,
                 )
 
-    def _purge_pending_feed_queue(self, session: CassandraSession, aid: UUID) -> None:
-        """Remove any pending_feed_queue row for this article -- an approved article can still be sitting there, waiting for a publish slot, when it gets hard-deleted (e.g. as a duplicate). Without this it's a phantom row: the paced-release worker eventually pulls it and finds nothing, and the admin "up next to publish" view shows an article that no longer exists. Found live 2026-08-16 (3 of 4 backlog rows pointed at articles deleted hours earlier by an unrelated duplicate-cleanup pass)."""
-        from app.core.config import settings
-        from app.core.statements import PendingFeedStmts
-
-        try:
-            bucket = getattr(settings, "news_feed_bucket", "main") or "main"
-            for row in session.execute(PendingFeedStmts.LIST_ALL, (bucket,)):
-                if row.article_id == aid:
-                    session.execute(
-                        PendingFeedStmts.DELETE,
-                        (row.bucket, row.interest_score, row.approved_at, aid),
-                    )
-        except Exception:
-            logger.warning("failed to purge pending_feed_queue row for article %s", aid, exc_info=True)
-
     def delete_article(self, article_id: str) -> bool:
         """Delete an article; returns False if it did not exist."""
         current = self.get_article(article_id)
@@ -355,8 +339,6 @@ class AdminCassandraStore:
                 session.execute(ArticleVersionStmts.DELETE, (aid, row.version))
         except Exception:
             logger.warning("failed to delete version rows for article %s", aid, exc_info=True)
-
-        self._purge_pending_feed_queue(session, aid)
 
         # Deletion is an `articles` status transition ('deleted', tombstoned +
         # deleted_at set) not a hard row delete -- the SSR route serves 410
@@ -1596,12 +1578,11 @@ class AdminCassandraStore:
             logger.warning("failed to record rejected-url cooldown for %s", url, exc_info=True)
 
     def _publish_or_queue_article(self, article_id: str) -> str:
-        """Publish to the feed if under the daily cap; otherwise hold in pending_feed_queue for a worker to release at the configured pace."""
+        """Publish to the feed if under the daily cap; otherwise hold as status='backlog' for a worker to release at the configured pace."""
         from uuid import UUID
 
         from app.core.cassandra import get_cassandra_session
         from app.core.config import settings
-        from app.core.statements import PendingFeedStmts
 
         session = get_cassandra_session()
         bucket = getattr(settings, "news_feed_bucket", "main") or "main"
@@ -1623,25 +1604,26 @@ class AdminCassandraStore:
 
         score = 0.0  # interest unknown here; FIFO within the day is fine
         approved_at = datetime.now(tz=UTC)
-        session.execute(
-            PendingFeedStmts.INSERT,
-            (bucket, score, approved_at, aid),
-        )
-        # New `articles` table dual-write: this is a status transition to
-        # 'backlog' with the same ordering fields as the old-table insert
-        # above (article-table consolidation Phase 4). Best-effort, same
-        # pattern as every other transition_article_status call site here —
-        # the old-table write above is already durable, this must never
-        # undo it on a hiccup. Pre-existing gap: this branch never dual-
-        # wrote a status transition before Phase 4 (only the "published"
-        # branch above did), so a review-approved-but-capped article's
-        # `articles` row stayed on its pre-approval status until now.
-        with contextlib.suppress(Exception):
-            from algorand_shared.article_transitions import transition_article_status
+        from algorand_shared.article_transitions import transition_article_status
 
+        # This is now the ONLY write recording the backlog decision (the old
+        # pending_feed_queue dual-write is gone -- article-table
+        # consolidation Phase 5) -- unlike a redundant secondary write, a
+        # silent failure here would mean the article never gets released,
+        # with nothing to show for it. Log loudly on failure rather than
+        # swallowing it, but still don't crash the caller (this runs as a
+        # post-write side effect after the review itself already resolved).
+        try:
             transition_article_status(
                 aid, new_status="backlog", interest_score=score, approved_at=approved_at
             )
+        except Exception:
+            logger.error(
+                "failed to transition article %s to backlog -- it will never be released",
+                aid,
+                exc_info=True,
+            )
+            return "error"
         return "queued_daily_cap"
 
     def list_classifier_reviews(self, *, limit: int = 50, scan_limit: int = 500) -> list[dict]:

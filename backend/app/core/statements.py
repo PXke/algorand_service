@@ -23,8 +23,6 @@ from typing import TYPE_CHECKING
 from algorand_shared.article_statements import (
     ARTICLE_VERSION_INSERT,
     ARTICLE_VERSION_LATEST,
-    PENDING_FEED_DELETE,
-    PENDING_FEED_INSERT,
     PUBLISH_QUEUE_CLEAR_HUMAN_PICK,
     PUBLISH_QUEUE_DELETE_PENDING,
     PUBLISH_QUEUE_INSERT_PENDING,
@@ -428,22 +426,6 @@ class PublishQueueStmts:
     SET_HUMAN_PICK = PUBLISH_QUEUE_SET_HUMAN_PICK
     CLEAR_HUMAN_PICK = PUBLISH_QUEUE_CLEAR_HUMAN_PICK
 
-
-# --------------------------------------------------------------------------- #
-# pending_feed_queue
-# --------------------------------------------------------------------------- #
-class PendingFeedStmts:
-    """Prepared statements for the pending-feed backlog."""
-
-    INSERT = PENDING_FEED_INSERT
-    LIST_ALL = _Stmt(
-        "SELECT bucket, interest_score, approved_at, article_id "
-        "FROM algorand_platform.pending_feed_queue WHERE bucket = ?"
-    )
-    # Full clustering key required -- (bucket) is only the partition key, see
-    # migration 022. delete_article scans LIST_ALL for a matching article_id
-    # first, then deletes by its own (interest_score, approved_at) pair.
-    DELETE = PENDING_FEED_DELETE
 
 
 # --------------------------------------------------------------------------- #

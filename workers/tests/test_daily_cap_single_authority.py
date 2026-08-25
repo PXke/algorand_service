@@ -103,36 +103,24 @@ def test_backlog_release_blocked_when_reserve_fails(monkeypatch: pytest.MonkeyPa
 def test_missing_article_drops_queue_row_but_logs_it(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A pending_feed_queue row whose article record is gone (or never written) must not be silently discarded — full compose spend produced that row, so losing it without a trace is the same shape of waste as the fresh-auto-approve gate bug (2026-07-23). The row is still deleted (a permanently missing article would otherwise jam this one-row-per-run queue forever), but a warning must be logged."""
+    """A backlog row whose article record is gone (or never written) must not be silently discarded — full compose spend produced that row, so losing it without a trace is the same shape of waste as the fresh-auto-approve gate bug (2026-07-23). The row is simply skipped (there's no separate queue row to delete anymore -- Phase 5 dropped pending_feed_queue, `articles.status='backlog'` IS the queue), but a warning must be logged."""
     import logging
 
     from app.modules.newspaper.tasks import queue_drain_tasks as qdt
 
-    pending_row = SimpleNamespace(
+    backlog_row = SimpleNamespace(
         article_id="00000000-0000-0000-0000-000000000002",
-        bucket="main",
+        service_id="",
+        title="",
         interest_score=50,
         approved_at=None,
     )
-    deleted: list = []
-    backlog_row = SimpleNamespace(
-        article_id=pending_row.article_id,
-        service_id="",
-        title="",
-        interest_score=pending_row.interest_score,
-        approved_at=pending_row.approved_at,
-    )
 
     class _FakeSession:
-        def execute(self, stmt: str, params: tuple | None = None) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
+        def execute(self, stmt: str, _params: tuple | None = None) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
             text = str(stmt)
             if "status = 'backlog'" in text:
                 return [backlog_row]
-            if "pending_feed_queue" in text and "SELECT" in text.upper():
-                return [pending_row]
-            if "pending_feed_queue" in text and "DELETE" in text.upper():
-                deleted.append(params)
-                return SimpleNamespace(one=lambda: None)
             if "FROM algorand_platform.articles " in text and "SELECT" in text.upper():
                 return SimpleNamespace(one=lambda: None)  # article missing
             if "articles_feed" in text:
@@ -146,12 +134,4 @@ def test_missing_article_drops_queue_row_but_logs_it(
         result = qdt._release_pending_feed_backlog(slots=1)
 
     assert result["published"] == 0
-    assert deleted == [
-        (
-            pending_row.bucket,
-            pending_row.interest_score,
-            pending_row.approved_at,
-            pending_row.article_id,
-        )
-    ]
     assert any("no matching article" in rec.message for rec in caplog.records)

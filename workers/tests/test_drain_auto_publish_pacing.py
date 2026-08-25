@@ -214,5 +214,10 @@ def test_capped_compose_is_stashed_to_backlog_not_discarded(
     assert out["status"] == "approved_backlog"
     assert stored["publish_to_feed"] is False
     assert stored["title"] == "Seven Real-World Apps"
-    assert len(executed) == 1  # the pending_feed_queue INSERT
-    assert "pending_feed_queue" in str(executed[0][0])
+    assert stored["status"] == "backlog"
+    assert stored["interest_score"] == 0.0
+    assert stored["approved_at"] is not None
+    # No separate pending_feed_queue INSERT anymore (Phase 5 dropped the
+    # table) -- status='backlog'/interest_score/approved_at on the
+    # insert_stored_article call above (mocked here) IS the queue entry now.
+    assert executed == []

@@ -241,13 +241,9 @@ def _stash_capped_compose_to_backlog(
     tier: PublishTier,
     reason: str,
 ) -> dict[str, str]:
-    """The daily cap filled between the drain's pre-compose check and this publish attempt (composes take minutes; another lane can take the last slot meanwhile). The old behavior returned rate_limited and THREW AWAY the finished article — the 2026-07-15 'Seven Real-World Apps' YouTube compose (~300k tokens, status ok) died exactly this way, then its queue row aged out and the content was lost. Store it unlisted and queue it in pending_feed_queue instead, exactly like the auto-approve backlog path: the paced release ships it once a slot opens."""
+    """The daily cap filled between the drain's pre-compose check and this publish attempt (composes take minutes; another lane can take the last slot meanwhile). The old behavior returned rate_limited and THREW AWAY the finished article — the 2026-07-15 'Seven Real-World Apps' YouTube compose (~300k tokens, status ok) died exactly this way, then its queue row aged out and the content was lost. Store it unlisted with status='backlog' instead, exactly like the auto-approve backlog path: the paced release ships it once a slot opens."""
     from datetime import UTC, datetime
-    from uuid import UUID
 
-    from app.core import config as worker_config
-    from app.core.cassandra import get_cassandra_session
-    from app.core.statements import PendingFeedStmts
     from app.modules.newspaper.article_store import insert_stored_article
     from app.modules.newspaper.security import sanitize_body
 
@@ -282,15 +278,6 @@ def _stash_capped_compose_to_backlog(
         prompt_version=getattr(composed, "prompt_version", ""),
         interest_score=0.0,  # interest unknown here; FIFO within the day is fine
         approved_at=approved_at,
-    )
-    get_cassandra_session().execute(
-        PendingFeedStmts.INSERT,
-        (
-            worker_config.NEWS_FEED_BUCKET or "main",
-            0.0,  # interest unknown here; FIFO within the day is fine
-            approved_at,
-            UUID(article_id),
-        ),
     )
     logger.warning(
         "daily cap filled mid-compose (%s) — stored article %s to the "
@@ -1321,25 +1308,11 @@ def _hold_for_review(
         with contextlib.suppress(Exception):
             mark_brief_run(brief_id=str(payload.get("brief_id", "")), article_id=held_article_id)
     if route_to_backlog:
-        # Approved but the cadence/cap is closed: hand the finished
-        # article to pending_feed_queue — _release_pending_feed_backlog
-        # ships it later at the standard pace (re-stamping published_at
-        # at release, same as the admin approve-when-capped path).
-        from uuid import UUID
-
-        from app.core import config as worker_config
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import PendingFeedStmts
-
-        get_cassandra_session().execute(
-            PendingFeedStmts.INSERT,
-            (
-                worker_config.NEWS_FEED_BUCKET or "main",
-                0.0,  # interest unknown here; FIFO within the day is fine
-                _held_approved_at,
-                UUID(held_article_id),
-            ),
-        )
+        # Approved but the cadence/cap is closed: the article was already
+        # stored with status='backlog' (and interest_score/approved_at set)
+        # above -- _release_pending_feed_backlog ships it later at the
+        # standard pace (re-stamping published_at at release, same as the
+        # admin approve-when-capped path).
         return {
             "status": "approved_backlog",
             "service_id": row.service_id,

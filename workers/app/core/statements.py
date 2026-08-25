@@ -21,8 +21,6 @@ from algorand_shared.article_statements import (
     ARTICLE_CLEAR_TRANSLATIONS,
     ARTICLE_VERSION_INSERT,
     ARTICLE_VERSION_LATEST,
-    PENDING_FEED_DELETE,
-    PENDING_FEED_INSERT,
     PUBLISH_QUEUE_CLEAR_HUMAN_PICK,
     PUBLISH_QUEUE_DELETE_PENDING,
     PUBLISH_QUEUE_INSERT_PENDING,
@@ -525,25 +523,6 @@ class InvestigationStmts:
         ") VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
 
-
-# --------------------------------------------------------------------------- #
-# pending_feed_queue
-# --------------------------------------------------------------------------- #
-class PendingFeedStmts:
-    """Prepared statements for the pending-feed backlog."""
-
-    INSERT = PENDING_FEED_INSERT
-    DELETE = PENDING_FEED_DELETE
-    # article-table consolidation Phase 4: articles.status='backlog' is now
-    # the ordering source of truth (see list_backlog_articles); this table is
-    # kept as a dual-write until Phase 5 drops it, and this query exists
-    # purely so the release path can find+delete the specific old-table row
-    # matching whichever article the NEW query picked (mirrors backend's
-    # _purge_pending_feed_queue, same shape).
-    LIST_ALL = _Stmt(
-        "SELECT bucket, interest_score, approved_at, article_id "
-        "FROM algorand_platform.pending_feed_queue WHERE bucket = ?"
-    )
 
 
 # --------------------------------------------------------------------------- #

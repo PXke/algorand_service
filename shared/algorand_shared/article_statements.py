@@ -1,9 +1,9 @@
 """Prepared CQL shared between backend and workers for article-adjacent tables.
 
 Both deployables read and write the SAME physical Cassandra tables
-(`articles_by_id`, `articles_feed`, `article_versions`, `pending_feed_queue`,
-`publish_queue`+`_pending`) via
-independently hand-maintained statement classes in each service's own
+(`article_versions`, `publish_queue`+`_pending`, and the consolidated
+`articles` table below) via independently hand-maintained statement
+classes in each service's own
 `app/core/statements.py`. That is the exact shape of bug `feed_bucket.py` was
 already extracted to prevent once (see its own docstring) -- a diff of both
 files this session found the two class sets had already partly drifted (see
@@ -107,18 +107,6 @@ ARTICLE_VERSION_INSERT = _Stmt(
     ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
-# --------------------------------------------------------------------------- #
-# pending_feed_queue
-# --------------------------------------------------------------------------- #
-PENDING_FEED_INSERT = _Stmt(
-    "INSERT INTO algorand_platform.pending_feed_queue "
-    "(bucket, interest_score, approved_at, article_id) "
-    "VALUES (?, ?, ?, ?)"
-)
-PENDING_FEED_DELETE = _Stmt(
-    "DELETE FROM algorand_platform.pending_feed_queue "
-    "WHERE bucket = ? AND interest_score = ? AND approved_at = ? AND article_id = ?"
-)
 # --------------------------------------------------------------------------- #
 # publish_queue / publish_queue_pending
 # --------------------------------------------------------------------------- #

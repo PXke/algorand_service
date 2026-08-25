@@ -787,7 +787,7 @@ def expire_stale_queue_items() -> dict[str, object]:
 
 
 def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
-    """Release ONE admin-approved article that was held because the daily feed cap was already reached (pending_feed_queue), interest order.
+    """Release ONE admin-approved article that was held because the daily feed cap was already reached (status='backlog'), interest order.
 
     Shares the SAME pacing clock as the caller (is_standard_publish_due /
     NEWS_STANDARD_INTERVAL_HOURS), not a separate one — a held article going
@@ -806,17 +806,13 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
     from algorand_shared.article_statements import ArticlesStmts
     from algorand_shared.article_transitions import list_backlog_articles
 
-    from app.core import config as cfg
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import PendingFeedStmts
 
     session = get_cassandra_session()
-    bucket = getattr(cfg, "NEWS_FEED_BUCKET", "main") or "main"
     # One per run — the standard-publish interval pacing keeps releases at
     # NEWS_STANDARD_INTERVAL_HOURS apart regardless of which path releases them.
-    # Ordering now comes from articles.status='backlog' (article-table
-    # consolidation Phase 4); pending_feed_queue is still consulted below,
-    # per released article, purely to clean up its now-stale old-table row.
+    # Ordering comes from articles.status='backlog' (article-table
+    # consolidation Phase 4/5).
     backlog = list_backlog_articles()
     rows = backlog[:1]
     published = 0
@@ -826,12 +822,12 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
         # source_url/published_at all live on the same consolidated row now.
         art = session.execute(ArticlesStmts.GET_FULL_BY_ID, (r.article_id,)).one()
         if art is None:
-            # The queue row still gets deleted below (a permanently missing
-            # article would otherwise jam this one-row-per-run queue
-            # forever), but that silently discards whatever compose spend
-            # produced it — log it so the loss is at least visible.
+            # A permanently missing article would otherwise jam this
+            # one-row-per-run backlog forever if it were never skipped, but
+            # that silently discards whatever compose spend produced it —
+            # log it so the loss is at least visible.
             logger.warning(
-                "pending_feed_queue row %s has no matching article — dropping without release",
+                "backlog row %s has no matching article — dropping without release",
                 r.article_id,
             )
         if art is not None:
@@ -919,16 +915,6 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
                 logger.warning(
                     "failed to queue distribution for article %s", art.article_id, exc_info=True
                 )
-        # Old-table cleanup: articles.status has already moved off 'backlog'
-        # above (transition_article_status's own delete-old-partition step),
-        # this just keeps pending_feed_queue in sync until Phase 5 drops it.
-        for old_row in session.execute(PendingFeedStmts.LIST_ALL, (bucket,)):
-            if old_row.article_id == r.article_id:
-                session.execute(
-                    PendingFeedStmts.DELETE,
-                    (old_row.bucket, old_row.interest_score, old_row.approved_at, r.article_id),
-                )
-                break
     return {"status": "ok", "published": published, "slots": slots}
 
 
