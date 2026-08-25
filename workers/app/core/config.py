@@ -1284,6 +1284,11 @@ LLM_PEAK_HOURS_UTC = env_str("LLM_PEAK_HOURS_UTC", "1-4,6-10")
 # LumiRogue benchmark); 90 gives real buffer above that observed worst case
 # rather than cutting it close.
 LLM_PEAK_MARGIN_MINUTES = env_int("LLM_PEAK_MARGIN_MINUTES", 90)
+# DeepSeek policy change (2026-08-25): weekends have no peak/off-peak split
+# at all -- everything is off-peak pricing. Comma-separated Python weekday()
+# ints (Monday=0..Sunday=6); default is Saturday+Sunday. These days skip the
+# hour-window check in LLM_PEAK_HOURS_UTC entirely, all day.
+LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC = env_str("LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC", "5,6")
 
 # Let the Mistral writer call live tools (price, chain head, platform search)
 # on demand while composing. Off = single-shot prompt with pre-gathered context.

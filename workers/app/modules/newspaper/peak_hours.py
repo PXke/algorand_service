@@ -6,6 +6,10 @@ compose is never begun close enough to a peak window that it could still be
 running once peak starts. An already-running compose that crosses into peak
 is fine (each token is billed at whatever rate applies when the request is
 actually made) -- the margin only protects the START decision.
+
+DeepSeek policy change (2026-08-25): weekends carry no peak/off-peak split
+at all -- LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC makes those days off-peak all day,
+short-circuiting the hour-window check entirely.
 """
 
 from __future__ import annotations
@@ -32,6 +36,33 @@ def _parse_peak_windows(spec: str) -> list[tuple[int, int]]:
     return windows
 
 
+def _parse_weekdays(spec: str) -> set[int]:
+    """"5,6" -> {5, 6} -- Python datetime.weekday() ints, Monday=0..Sunday=6. Malformed entries are skipped, never raise -- same fail-toward-not-blocking-compose convention as _parse_peak_windows."""
+    out: set[int] = set()
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            day = int(part)
+        except ValueError:
+            continue
+        if 0 <= day <= 6:
+            out.add(day)
+    return out
+
+
+def _is_off_peak_at(
+    now: datetime, *, windows: list[tuple[int, int]], weekend_days: set[int], horizon_minutes: float
+) -> bool:
+    """Off-peak logic shared by is_off_peak_now and next_off_peak_at's stepping loop, so the two never drift apart on the weekend rule."""
+    if now.weekday() in weekend_days:
+        return True
+    if not windows:
+        return True
+    return not _peak_window_starts_within(now, windows, horizon_minutes)
+
+
 def _peak_window_starts_within(now: datetime, windows: list[tuple[int, int]], horizon_minutes: float) -> bool:
     """True if `now` falls inside a peak window, OR any peak window's start time is within the next `horizon_minutes` (today's remaining windows and tomorrow's early ones, so a check near midnight correctly sees a window that starts just after it)."""
     for day_offset in (0, 1):
@@ -49,13 +80,12 @@ def _peak_window_starts_within(now: datetime, windows: list[tuple[int, int]], ho
 
 
 def is_off_peak_now(*, margin_minutes: float | None = None) -> bool:
-    """True only if starting a compose RIGHT NOW would not currently be, nor soon become, inside a configured peak window within the margin. No configured peak windows (LLM_PEAK_HOURS_UTC empty/unparseable) -- always True, fail open."""
+    """True only if starting a compose RIGHT NOW would not currently be, nor soon become, inside a configured peak window within the margin. Always True on a configured weekend day (LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC) regardless of hour, and always True when no peak windows are configured (LLM_PEAK_HOURS_UTC empty/unparseable) -- fail open."""
     windows = _parse_peak_windows(config.LLM_PEAK_HOURS_UTC)
-    if not windows:
-        return True
+    weekend_days = _parse_weekdays(config.LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC)
     margin = config.LLM_PEAK_MARGIN_MINUTES if margin_minutes is None else margin_minutes
     now = datetime.now(tz=UTC)
-    return not _peak_window_starts_within(now, windows, margin)
+    return _is_off_peak_at(now, windows=windows, weekend_days=weekend_days, horizon_minutes=margin)
 
 
 def next_off_peak_at(*, margin_minutes: float | None = None) -> datetime | None:
@@ -63,6 +93,7 @@ def next_off_peak_at(*, margin_minutes: float | None = None) -> datetime | None:
     if is_off_peak_now(margin_minutes=margin_minutes):
         return None
     windows = _parse_peak_windows(config.LLM_PEAK_HOURS_UTC)
+    weekend_days = _parse_weekdays(config.LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC)
     margin = config.LLM_PEAK_MARGIN_MINUTES if margin_minutes is None else margin_minutes
     now = datetime.now(tz=UTC)
     # Walk forward in small steps until the margin check clears -- simple and
@@ -72,6 +103,6 @@ def next_off_peak_at(*, margin_minutes: float | None = None) -> datetime | None:
     step = timedelta(minutes=5)
     for _ in range(24 * 60 // 5 + 1):  # bounded: at most one full day of stepping
         candidate += step
-        if not _peak_window_starts_within(candidate, windows, margin):
+        if _is_off_peak_at(candidate, windows=windows, weekend_days=weekend_days, horizon_minutes=margin):
             return candidate
     return None

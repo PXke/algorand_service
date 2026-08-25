@@ -8,6 +8,7 @@ import pytest
 
 from app.modules.newspaper.peak_hours import (
     _parse_peak_windows,
+    _parse_weekdays,
     _peak_window_starts_within,
     is_off_peak_now,
     next_off_peak_at,
@@ -78,7 +79,8 @@ def test_is_off_peak_now_inside_peak_window(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(config, "LLM_PEAK_HOURS_UTC", "1-4,6-10")
     monkeypatch.setattr(config, "LLM_PEAK_MARGIN_MINUTES", 90)
-    _freeze_now(monkeypatch, datetime(2026, 8, 15, 7, 0, tzinfo=UTC))
+    monkeypatch.setattr(config, "LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC", "")
+    _freeze_now(monkeypatch, datetime(2026, 8, 15, 7, 0, tzinfo=UTC))  # a Saturday -- isolate hour-window logic from the weekend rule
     assert is_off_peak_now() is False
 
 
@@ -88,7 +90,8 @@ def test_is_off_peak_now_within_margin_of_peak_start(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(config, "LLM_PEAK_HOURS_UTC", "1-4,6-10")
     monkeypatch.setattr(config, "LLM_PEAK_MARGIN_MINUTES", 90)
-    _freeze_now(monkeypatch, datetime(2026, 8, 15, 4, 31, tzinfo=UTC))  # 89 min before 6:00 peak
+    monkeypatch.setattr(config, "LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC", "")
+    _freeze_now(monkeypatch, datetime(2026, 8, 15, 4, 31, tzinfo=UTC))  # 89 min before 6:00 peak, a Saturday
     assert is_off_peak_now() is False
 
 
@@ -98,7 +101,8 @@ def test_is_off_peak_now_safely_before_margin(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(config, "LLM_PEAK_HOURS_UTC", "1-4,6-10")
     monkeypatch.setattr(config, "LLM_PEAK_MARGIN_MINUTES", 90)
-    _freeze_now(monkeypatch, datetime(2026, 8, 15, 4, 0, tzinfo=UTC))  # 120 min before 6:00 peak
+    monkeypatch.setattr(config, "LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC", "")
+    _freeze_now(monkeypatch, datetime(2026, 8, 15, 4, 0, tzinfo=UTC))  # 120 min before 6:00 peak, a Saturday
     assert is_off_peak_now() is True
 
 
@@ -108,7 +112,8 @@ def test_is_off_peak_now_respects_explicit_margin_override(monkeypatch: pytest.M
 
     monkeypatch.setattr(config, "LLM_PEAK_HOURS_UTC", "1-4,6-10")
     monkeypatch.setattr(config, "LLM_PEAK_MARGIN_MINUTES", 90)
-    _freeze_now(monkeypatch, datetime(2026, 8, 15, 4, 31, tzinfo=UTC))  # 89 min before 6:00 peak
+    monkeypatch.setattr(config, "LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC", "")
+    _freeze_now(monkeypatch, datetime(2026, 8, 15, 4, 31, tzinfo=UTC))  # 89 min before 6:00 peak, a Saturday
     assert is_off_peak_now(margin_minutes=0) is True
 
 
@@ -126,9 +131,61 @@ def test_next_off_peak_at_clears_the_margin(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(config, "LLM_PEAK_HOURS_UTC", "1-4,6-10")
     monkeypatch.setattr(config, "LLM_PEAK_MARGIN_MINUTES", 90)
-    _freeze_now(monkeypatch, datetime(2026, 8, 15, 7, 0, tzinfo=UTC))  # inside 6-10 peak window
+    monkeypatch.setattr(config, "LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC", "")
+    _freeze_now(monkeypatch, datetime(2026, 8, 15, 7, 0, tzinfo=UTC))  # inside 6-10 peak window, a Saturday
 
     next_at = next_off_peak_at()
     assert next_at is not None
     # Off-peak resumes at 10:00 (window end); returned instant must itself be off-peak.
     assert next_at.hour == 10
+
+
+def test_parse_weekdays_basic() -> None:
+    """"5,6" -> {5, 6} (Saturday, Sunday)."""
+    assert _parse_weekdays("5,6") == {5, 6}
+
+
+def test_parse_weekdays_skips_malformed_entries() -> None:
+    """A bad env value degrades to fewer/no weekend days, never raises."""
+    assert _parse_weekdays("5,garbage,6,,9,-1") == {5, 6}
+
+
+def test_parse_weekdays_empty_spec() -> None:
+    """Empty or missing spec parses to no always-off-peak weekdays."""
+    assert _parse_weekdays("") == set()
+    assert _parse_weekdays(None) == set()  # type: ignore[arg-type]
+
+
+def test_is_off_peak_now_weekend_override_ignores_peak_hour(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Saturday inside a configured peak window is still off-peak when that weekday is in LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC."""
+    import app.core.config as config
+
+    monkeypatch.setattr(config, "LLM_PEAK_HOURS_UTC", "1-4,6-10")
+    monkeypatch.setattr(config, "LLM_PEAK_MARGIN_MINUTES", 90)
+    monkeypatch.setattr(config, "LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC", "5,6")
+    _freeze_now(monkeypatch, datetime(2026, 8, 15, 7, 0, tzinfo=UTC))  # Saturday, inside 6-10 peak window
+    assert is_off_peak_now() is True
+
+
+def test_is_off_peak_now_weekday_unaffected_by_weekend_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A normal weekday inside a peak window still blocks, even with the weekend override configured."""
+    import app.core.config as config
+
+    monkeypatch.setattr(config, "LLM_PEAK_HOURS_UTC", "1-4,6-10")
+    monkeypatch.setattr(config, "LLM_PEAK_MARGIN_MINUTES", 90)
+    monkeypatch.setattr(config, "LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC", "5,6")
+    _freeze_now(monkeypatch, datetime(2026, 8, 17, 7, 0, tzinfo=UTC))  # Monday, inside 6-10 peak window
+    assert is_off_peak_now() is False
+
+
+def test_next_off_peak_at_none_when_weekend_override_already_clears_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked-looking hour on a configured weekend day is already off-peak -- nothing to wait for."""
+    import app.core.config as config
+
+    monkeypatch.setattr(config, "LLM_PEAK_HOURS_UTC", "1-4,6-10")
+    monkeypatch.setattr(config, "LLM_PEAK_MARGIN_MINUTES", 90)
+    monkeypatch.setattr(config, "LLM_ALWAYS_OFF_PEAK_WEEKDAYS_UTC", "5,6")
+    _freeze_now(monkeypatch, datetime(2026, 8, 15, 7, 0, tzinfo=UTC))  # Saturday, inside 6-10 peak window
+    assert next_off_peak_at() is None
