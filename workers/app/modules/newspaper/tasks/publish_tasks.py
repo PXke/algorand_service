@@ -1122,6 +1122,30 @@ def _grade_and_gate(
     grades were consistently 7.3-10 while completeness failed almost
     universally). Still recorded in grade_meta for visibility.
 
+    This exclusion is a property of THIS function, so it applies identically
+    to every caller that reaches gate_draft() through it: _hold_for_review
+    (discards gate_ok — a held draft is held regardless), recompose_review
+    (same, discards gate_ok — always routes to a human), and
+    recompose_published's auto_apply decision (DOES gate on gate_ok). There
+    is no separate, stricter completeness-inclusive path for recompose —
+    a 2026-08-25 audit of classifier_review_queue outcomes (33 resolved
+    holds, 76% human-override rate) suspected recompose_published still
+    gated on gate.passed (factuality AND completeness), by analogy with
+    _fresh_auto_approve_passes which legitimately does use gate.passed for
+    FRESH content (see that function's docstring — zero prior human vetting
+    there, unlike recompose). That suspicion does not hold: git history
+    shows recompose_published had its own dedicated completeness-exclusion
+    (originally _recompose_published_grade_and_gate, same "owner confirmed
+    2026-07-12" reasoning) from the same day as this function's, well before
+    the 2026-07-26 refactor (5011077) collapsed all three near-duplicate
+    grade/gate helpers into this one — so recompose_published has never used
+    gate.passed here. The gk_completeness:"fail" reason string showing up on
+    both later-approved and later-rejected review rows in that audit isn't a
+    gating bug; it's expected, since completeness is deliberately
+    display-only metadata on this path (per the paragraph above) and was
+    never wired to block or allow anything for recompose — a human reviewer
+    may or may not weigh it, but the code doesn't.
+
     The grade is read straight off ``composed.heuristic_grade`` — the FUSED
     grade (article_grader.fuse_quality_into_grade: schema/structure+length
     AND the LLM quality rubric) the writer's own grade/revise loop already
