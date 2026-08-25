@@ -80,6 +80,20 @@ def robots_txt() -> str:
         # engines follow.
         "Disallow: /api/",
         "Allow: /api/v1/img",
+        # Legacy `?lang=xx` article URLs (replaced by the /xx/ path prefix
+        # 2026-07-29) all 301 to their canonical path form -- correctly, per
+        # GSC's own "Page with redirect" classification (confirmed live
+        # 2026-08-25: every sampled URL redirects clean, none indexed). But
+        # GSC also showed 1500+ of these in the crawl, most from articles
+        # published well after the migration -- Google appears to have
+        # learned `?lang=` as a standing parameter pattern for this domain
+        # and keeps re-testing it against new slugs, at zero benefit (it
+        # already knows the answer is "redirects"). Blocking it here doesn't
+        # touch real users -- robots.txt only affects crawlers, the 301
+        # itself still fires for anyone who follows an old bookmark/link --
+        # it just stops burning crawl budget on a re-check with a
+        # predetermined outcome.
+        "Disallow: /*?lang=",
         "",
         f"Sitemap: {site_url()}/sitemap.xml",
     ]

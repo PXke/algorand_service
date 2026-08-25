@@ -561,6 +561,12 @@ def test_robots_txt_blocks_api_but_allows_image_proxy() -> None:
     assert "Allow: /api/v1/img" in txt
 
 
+def test_robots_txt_blocks_legacy_lang_query_param() -> None:
+    """Legacy ?lang= article URLs all 301 to their canonical path form (2026-07-29 migration) -- blocking further crawl saves budget on a re-check with a predetermined outcome, without affecting real users (robots.txt doesn't touch the redirect itself)."""
+    txt = sitemap.robots_txt()
+    assert "Disallow: /*?lang=" in txt
+
+
 def test_robots_news_sitemap_gated_by_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """Includes or omits the news sitemap link in robots.txt based on the feature flag."""
     monkeypatch.setattr(sitemap.settings, "seo_news_sitemap_enabled", False)
