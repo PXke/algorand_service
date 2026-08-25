@@ -92,7 +92,7 @@ def _build_beat_schedule() -> dict:
             "schedule": float(os.getenv("BLUESKY_POLL_SECONDS", "3600")),
         }
     # Beats are a slow SAFETY-NET heartbeat: the real work is triggered on demand
-    # by admin actions (approving an article fires drain_standard_publish_queue;
+    # by admin actions (approving/rejecting a review fires drain_to_compose;
     # approving a domain fires drain_url_queue + fetch_source). So these can be
     # spaced way out — workers stay idle until you accept something.
     schedule["drain-url-queue"] = {
@@ -160,15 +160,16 @@ def _build_beat_schedule() -> dict:
             "task": "app.tasks.metrics.collect_price_metrics",
             "schedule": float(os.getenv("PRICE_METRICS_POLL_SECONDS", "3600")),
         }
-    schedule["ensure-review-ready"] = {
-        "task": "app.tasks.newspaper.ensure_review_ready",
-        "schedule": float(os.getenv("ENSURE_REVIEW_READY_SECONDS", "3600")),
-    }
+    # ensure_review_ready was retired 2026-08-25 (folded into drain_to_compose,
+    # which now composes eligible review-bound to_compose slots on every one
+    # of its own runs -- see queue_drain_tasks.py's module docstring).
+    #
     # drain_approved_feed_queue's pending_feed_queue release was folded into
     # drain_standard_publish_queue (2026-07-14) — they already shared one
     # pacing gate/budget, so a separate task+beat entry was an avoidable
     # extra moving part that most cycles did nothing anyway. The task itself
     # is kept registered (queue_drain_tasks.py) for manual/debug triggers.
+    # drain_to_compose (its 2026-08-25 successor) inherited this same fold-in.
     schedule["sync-ecosystem-directories"] = {
         "task": "app.tasks.crawler.sync_ecosystem_directories",
         "schedule": float(os.getenv("ECOSYSTEM_SYNC_SECONDS", "86400")),
@@ -189,13 +190,30 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.crawler.reevaluate_pending_domains",
         "schedule": float(os.getenv("PENDING_REEVALUATE_SECONDS", "86400")),
     }
-    schedule["drain-standard-publish-queue"] = {
-        "task": "app.tasks.newspaper.drain_standard_publish_queue",
+    # Editorial-room compose trigger (2026-08-25): replaces
+    # drain_standard_publish_queue as the live selection/compose mechanism --
+    # see queue_drain_tasks.py's module docstring for the full picture. Same
+    # env var and default interval as the task it replaces (PUBLISH_QUEUE_DRAIN_SECONDS
+    # kept, not renamed, so an existing prod env override carries forward
+    # unchanged). The BREAKING fast path (drain-breaking-publish-queue, its
+    # own ~5min beat) was removed entirely, not folded in here — owner's
+    # call, "it is a concept that didn't work well" (see PublishTier's
+    # docstring and the deleted breaking_credibility.py).
+    schedule["drain-to-compose"] = {
+        "task": "app.tasks.newspaper.drain_to_compose",
         "schedule": float(os.getenv("PUBLISH_QUEUE_DRAIN_SECONDS", "3600")),
     }
-    schedule["drain-breaking-publish-queue"] = {
-        "task": "app.tasks.newspaper.drain_breaking_publish_queue",
-        "schedule": float(os.getenv("PUBLISH_BREAKING_DRAIN_SECONDS", "300")),
+    # Once-daily: picks the day's to_compose slate (human pin + N-1 platform
+    # picks). Runs early UTC so a "pin for tomorrow" set any time the day
+    # before is captured before drain-to-compose's first run of the day.
+    # drain_to_compose self-heals via _ensure_today_selected if this beat is
+    # ever late/missed, so the exact hour isn't precision-critical.
+    schedule["select-to-compose-for-today"] = {
+        "task": "app.tasks.newspaper.select_to_compose_for_today",
+        "schedule": crontab(
+            minute=int(os.getenv("TO_COMPOSE_SELECT_CRON_MINUTE", "5")),
+            hour=int(os.getenv("TO_COMPOSE_SELECT_CRON_HOUR", "0")),
+        ),
     }
     schedule["expire-stale-queue-items"] = {
         "task": "app.tasks.newspaper.expire_stale_queue_items",
@@ -209,12 +227,11 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.newspaper.reap_stale_translation_sessions",
         "schedule": float(os.getenv("TRANSLATION_SESSION_REAP_SECONDS", "3600")),
     }
-    # Editorial-room artifacts (2026-08-25, SHADOW MODE): recomputes priority
-    # for every PENDING artifact once a day. Only touches the new
-    # artifacts/artifacts_pending tables -- zero interaction with the live
-    # publish_queue drain/selection tasks above, so this runs unconditionally
-    # (no AUTO_COMPOSE_PAUSED-style gate) to actually populate the shadow
-    # system for real, per the phase's design.
+    # Editorial-room artifacts: recomputes priority for every PENDING
+    # artifact once a day, feeding drain-to-compose's daily selection above.
+    # Runs unconditionally (no AUTO_COMPOSE_PAUSED-style gate) -- scoring is
+    # cheap pure computation, not a compose spend, so it should stay fresh
+    # even while composing itself is paused.
     schedule["sweep-artifact-priorities"] = {
         "task": "app.tasks.newspaper.sweep_artifact_priorities",
         "schedule": float(os.getenv("ARTIFACT_PRIORITY_SWEEP_SECONDS", "86400")),

@@ -1,11 +1,11 @@
 USE algorand_platform;
 
--- Editorial-room artifacts (2026-08-25, owner design discussion): a fully
--- additive, SHADOW-MODE replacement for the publish_queue selection system
--- (see queue_drain_tasks.py's _select_lane_for_today + publish_score.py's
--- compute_priority). Nothing here is read by the live compose/publish path
--- yet -- publish_queue/publish_queue_pending stay the sole real selection
--- mechanism until a later phase.
+-- Editorial-room artifacts: the LIVE replacement for the publish_queue
+-- selection system (cut over 2026-08-25, same day this schema landed --
+-- see queue_drain_tasks.py's drain_to_compose + select_to_compose_for_today_task,
+-- and artifact_priority.py's compute_artifact_priority). publish_queue /
+-- publish_queue_pending stay live-fed (a deliberate rollback-safety
+-- dual-write) but are no longer read for selection or compose triggering.
 --
 -- `artifacts` is any raw candidate that could become an article -- a crawled
 -- page diff, a YouTube video, a mail message, a brief, a tweet. It mirrors

@@ -1,40 +1,65 @@
-"""Celery tasks that drain the publish queue (breaking, standard, review) on their beats."""
+"""Celery tasks that drain the editorial-room `to_compose` selection into real composes (2026-08-25) -- the live successor to the old publish_queue-based standard/breaking drain.
+
+The BREAKING fast path (separate daily cap, no-cooldown-no-novelty vetoes,
+heuristic credibility check, "Breaking:" title prefix) was removed entirely
+(owner's call, "it is a concept that didn't work well") rather than folded
+into this new system as a priority class -- see PublishTier's docstring and
+the deleted breaking_credibility.py.
+
+publish_queue/publish_queue_pending stay live-fed (ingest_signal.py /
+editorial_assignment.py dual-write into both artifacts AND publish_queue,
+see those modules for why) but nothing in this file drains/selects from
+publish_queue anymore -- `drain_to_compose` below reads exclusively from the
+editorial-room `artifacts`/`to_compose` tables (artifact_store.py /
+to_compose_selection.py). `_resolve` (the publish_queue-native resolver) is
+kept only because `publish_tasks.compose_queue_row_now` -- the OLD admin
+manual-override, kept registered for the dual-written rows' rollback value
+-- still calls it directly.
+"""
 
 from __future__ import annotations
 
+import functools
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.celery_app import celery_app
 from app.core import config
 from app.modules.ai.mistral_credit_guard import is_credit_exhausted
-from app.modules.newspaper.breaking_credibility import (
-    BreakingAssessment,
-    assess_breaking_credibility,
+from app.modules.newspaper.artifact_store import (
+    COMPOSED,
+    DISCARDED,
+    PENDING,
+    SELECTED,
+    Artifact,
+    ArtifactContent,
+    get_artifact,
+    get_artifact_content,
+    mark_artifact_status,
 )
 from app.modules.newspaper.publish_policy import (
     PublishKind,
     PublishTier,
-    evaluate_breaking_publish,
     evaluate_standard_publish,
-    remaining_breaking_publish_slots,
     remaining_standard_publish_slots,
 )
 from app.modules.newspaper.publish_queue_store import (
     QueuedPublishRow,
-    clear_human_pick,
     is_terminal_outcome,
     list_pending_queue,
     mark_queue_done,
     mark_queue_status,
-    queue_row_tier,
     record_queue_reason,
 )
 from app.modules.newspaper.publish_schedule import record_standard_publish
 from app.modules.newspaper.tasks.publish_tasks import publish_from_queued_row
+from app.modules.newspaper.to_compose_selection import (
+    list_to_compose_for_day,
+    select_to_compose_for_day,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +100,6 @@ def _row_needs_review(row: QueuedPublishRow) -> bool:
     category = _fallback_category(text, row.scrape_url)
     decision, _confidence = predict_publish(text, row.scrape_url, category)
     return decision is not True
-
-
-def _pending_for_tier(tier: PublishTier, *, limit: int) -> list:
-    return [row for row in list_pending_queue(limit=limit) if queue_row_tier(row) == tier]
 
 
 def _pending_feed_backlog_full() -> bool:
@@ -228,200 +249,13 @@ def _resolve(row: QueuedPublishRow, outcome: dict) -> str:
     return status
 
 
-def _compose_review_row(row: QueuedPublishRow) -> dict:
-    """Compose one review-bound row at standard tier and resolve it. Shared by the standard drain's review branch and ensure_review_ready."""
-    outcome = publish_from_queued_row(row, publish_tier=PublishTier.STANDARD)
-    _resolve(row, outcome)
-    return outcome
-
-
-@dataclass
-class _BreakingVetoCtx:
-    """Loop state the breaking vetoes need beyond the row: whether the single review slot is occupied this run, and the credibility assessment — set by the credibility veto (last gate) and reused by the drain to tag the SUCCESS outcome with its method, so it's only computed once and only for rows that reach that gate. Mutable on purpose (unlike _DrainGate rows)."""
-
-    row: object
-    review_full: bool
-    assessment: BreakingAssessment | None = None
-
-
-def _breaking_policy_veto(ctx: _BreakingVetoCtx) -> dict | None:
-    """Schedule/kind/diff policy (daily cap, weekly-not-queued, small diff)."""
-    decision = evaluate_breaking_publish(
-        PublishKind(ctx.row.publish_kind),
-        diff=ctx.row.payload.get("diff"),
-        source_kind=ctx.row.payload.get("source_kind"),
-    )
-    if not decision.allowed:
-        return {"status": "skipped", "reason": decision.reason}
-    return None
-
-
-def _breaking_review_slot_veto(ctx: _BreakingVetoCtx) -> dict | None:
-    """Composing a review-bound item into a full review queue just returns "review_queue_full" — a status the drain does NOT mark done, so the row would recompose every beat, burning a full Mistral loop each time. Leave it pending until the admin clears the review queue."""
-    if ctx.review_full and _row_needs_review(ctx.row):
-        return {"status": "skipped", "reason": "review_queue_full"}
-    return None
-
-
-def _breaking_credibility_veto(ctx: _BreakingVetoCtx) -> dict | None:
-    """Breaking must be corroborated (alert keywords + evidence).
-
-    The assessment is a pure heuristic over the row's static page_text, so a
-    not-credible verdict can never change on a later beat — retire the row
-    (queue_status) instead of leaving it pending. A pending row here was
-    re-assessed every ~2-minute breaking beat forever AND held the service's
-    one-pending-row slot hostage: observed 2026-07-17, a hay-app row stuck
-    "not_credible" for 7 days, starving all hay-app coverage. The next scrape
-    re-offers the story fresh if it grows real evidence.
-    """
-    ctx.assessment = assess_breaking_credibility(
-        page_text=str(ctx.row.payload.get("page_text", "")),
-        source_url=ctx.row.scrape_url,
-        topic=ctx.row.topic,
-    )
-    if not ctx.assessment.credible:
-        return {
-            "status": "skipped",
-            "reason": f"not_credible:{ctx.assessment.reason}",
-            "method": ctx.assessment.method,
-            "queue_status": "expired",
-        }
-    return None
-
-
-# Evaluated in order, first non-None outcome wins — same pattern as the
-# standard drain's _PRE_COMPOSE_GATES and compose-side _PRE_COMPOSE_VETOES.
-# Deliberately NO domain/service cooldown or novelty veto here (owner
-# decision, re-confirmed 2026-07-17): breaking is the one tier where a
-# genuine alert must never wait behind a cooldown from routine coverage
-# of the same source. Credibility + policy caps are the safety net.
-_BREAKING_VETOES = (
-    _breaking_policy_veto,
-    _breaking_review_slot_veto,
-    _breaking_credibility_veto,
-)
-
-
-def _run_breaking_vetoes(ctx: _BreakingVetoCtx) -> dict | None:
-    """First veto outcome for this breaking row, or None when all pass."""
-    for veto in _BREAKING_VETOES:
-        outcome = veto(ctx)
-        if outcome is not None:
-            return outcome
-    return None
-
-
-def _record_breaking_veto_outcome(row: QueuedPublishRow, veto_outcome: dict) -> dict:
-    """Persist a breaking-drain veto's disposition on the row and return its results-list entry.
-
-    A veto may carry queue_status (credibility: a permanent verdict on
-    static text) to retire the row; the transient vetoes (daily cap, review
-    slot) leave it pending for a later beat.
-    """
-    veto_queue_status = str(veto_outcome.get("queue_status", ""))
-    veto_reason = str(veto_outcome.get("reason", "skipped"))
-    if veto_queue_status:
-        mark_queue_status(row.queue_id, veto_queue_status, reason=veto_reason)
-    else:
-        record_queue_reason(row.queue_id, veto_reason)
-    return {"queue_id": row.queue_id, **veto_outcome}
-
-
-def _publish_breaking_row(
-    row: QueuedPublishRow, ctx: _BreakingVetoCtx, review_full: bool
-) -> tuple[dict, str, bool]:
-    """Compose+publish one vetted breaking row. Returns (results_entry, status, updated_review_full).
-
-    Breaking news (scams/incidents) is urgent and rare — exempt from the
-    per-website daily article cap so a critical alert is never held.
-    """
-    from app.modules.crawler.classifier_review_store import review_queue_full
-
-    outcome = publish_from_queued_row(
-        row, publish_tier=PublishTier.BREAKING, enforce_domain_cap=False
-    )
-    status = _resolve(row, outcome)
-    if status in ("review", "duplicate", "duplicate_review_pending"):
-        # Filling the review slot closes it for the rest of this run.
-        review_full = review_queue_full()
-    # ctx.assessment is guaranteed set: the credibility veto (last gate) ran
-    # and passed for any row that reaches a compose.
-    entry = {"queue_id": row.queue_id, **outcome, "credibility": ctx.assessment.method}
-    return entry, status, review_full
-
-
-@celery_app.task(
-    name="app.tasks.newspaper.drain_breaking_publish_queue",
-    soft_time_limit=config.COMPOSE_TASK_SOFT_TIME_LIMIT,
-    time_limit=config.COMPOSE_TASK_TIME_LIMIT,
-)
-def drain_breaking_publish_queue() -> dict[str, object]:
-    """Publish breaking-tier items immediately up to the separate daily cap."""
-    if config.AUTO_COMPOSE_PAUSED:
-        return {"status": "skipped", "reason": "auto_compose_paused", "published": 0}
-    if is_credit_exhausted(config.LLM_PROVIDER_WRITER):
-        return {"status": "skipped", "reason": "mistral_credit_exhausted", "published": 0}
-    slots = remaining_breaking_publish_slots()
-    if slots <= 0:
-        return {"status": "skipped", "reason": "breaking_daily_cap_reached", "published": 0}
-
-    pending = _pending_for_tier(PublishTier.BREAKING, limit=config.PUBLISH_QUEUE_BATCH_LIMIT)
-    published = 0
-    results: list[dict[str, str]] = []
-
-    from app.modules.crawler.classifier_review_store import review_queue_full
-
-    # Same guard as the standard drain: when the single review slot is already
-    # occupied, composing a review-bound breaking item just returns
-    # "review_queue_full" — a status this drain does NOT mark done, so the row
-    # would recompose every beat, burning a full Mistral loop each time. Leave
-    # it pending until the admin clears the review queue.
-    review_full = review_queue_full()
-    try:
-        for row in pending:
-            if published >= slots:
-                break
-            # Per-row vetoes (_BREAKING_VETOES): publish policy, review-slot
-            # availability, credibility — in that order.
-            ctx = _BreakingVetoCtx(row=row, review_full=review_full)
-            veto_outcome = _run_breaking_vetoes(ctx)
-            if veto_outcome is not None:
-                results.append(_record_breaking_veto_outcome(row, veto_outcome))
-                continue
-
-            entry, status, review_full = _publish_breaking_row(row, ctx, review_full)
-            if status == "published":
-                published += 1
-            elif status == "rate_limited":
-                return {
-                    "status": "skipped",
-                    "reason": entry.get("reason", "rate_limited"),
-                    "published": published,
-                    "results": results,
-                }
-            results.append(entry)
-    except SoftTimeLimitExceeded:
-        # Killed mid-compose: the in-flight row was never marked done, so it
-        # stays pending. Return partial progress instead of crashing.
-        return {
-            "status": "interrupted",
-            "tier": "breaking",
-            "reason": "soft_time_limit",
-            "published": published,
-            "results": results,
-        }
-
-    return {
-        "status": "ok",
-        "tier": "breaking",
-        "published": published,
-        "slots_remaining_start": slots,
-        "results": results,
-    }
-
-
 def _release_due_backlog(slots: int) -> dict | None:
     """Release an admin-approved backlog item first (held because the cap was full when it was approved) — cheap, no compose cost, and shares this exact pacing gate/budget with composing something new below (folded in from the old standalone drain_approved_feed_queue task/beat entry). Only gates THIS step on the interval, same as before — review composition below intentionally bypasses publish pacing (it doesn't hit the feed until approved), so a blanket check up here would wrongly delay it too. Returns a terminal drain result when something was released, else None to fall through to fresh composition."""
+    # Local (not module-level) import so a test's
+    # monkeypatch.setattr("...publish_schedule.is_standard_publish_due", ...)
+    # is actually observed here -- a module-level `from ... import` binds its
+    # own name in THIS module's namespace once at import time and would not
+    # see a later patch applied to publish_schedule's own attribute.
     from app.modules.newspaper.publish_schedule import is_standard_publish_due
 
     due, _detail = is_standard_publish_due()
@@ -433,19 +267,21 @@ def _release_due_backlog(slots: int) -> dict | None:
     return None
 
 
-def _record_pre_compose_gate(row: QueuedPublishRow, fired: _DrainGate) -> dict:
-    """Persist a fired pre-compose gate's disposition on the row and return its results-list entry."""
-    if fired.mark_status:
-        mark_queue_status(row.queue_id, fired.mark_status, reason=fired.name)
-    else:
-        record_queue_reason(row.queue_id, fired.name)
-    return {"queue_id": row.queue_id, "status": fired.name}
-
-
 def _process_review_row(
-    row: QueuedPublishRow, *, review_full: bool, backlog_full: bool, reviews_composed: int
+    row: QueuedPublishRow,
+    *,
+    review_full: bool,
+    backlog_full: bool,
+    reviews_composed: int,
+    resolve: Callable[[QueuedPublishRow, dict], str] = _resolve,
 ) -> tuple[dict | None, bool, int, int]:
-    """Compose a review-bound row (or skip it for this run). Returns (results_entry_or_None, updated_review_full, updated_reviews_composed, published_delta)."""
+    """Compose a review-bound row (or skip it for this run). Returns (results_entry_or_None, updated_review_full, updated_reviews_composed, published_delta).
+
+    ``resolve`` is the row's compose-outcome resolver, injected so this same
+    implementation serves both the publish_queue-native admin paths (default
+    ``_resolve``) and drain_to_compose's artifact-native rows (a closure over
+    ``_resolve_artifact`` -- see that task).
+    """
     if review_full or reviews_composed >= config.REVIEW_COMPOSE_BATCH_LIMIT:
         return None, review_full, reviews_composed, 0
     if backlog_full:
@@ -456,8 +292,8 @@ def _process_review_row(
 
     from app.modules.crawler.classifier_review_store import review_queue_full
 
-    outcome = _compose_review_row(row)
-    outcome_status = outcome.get("status")
+    outcome = publish_from_queued_row(row, publish_tier=PublishTier.STANDARD)
+    outcome_status = resolve(row, outcome)
     published_delta = 0
     if outcome_status == "review":
         reviews_composed += 1
@@ -481,9 +317,12 @@ def _process_review_row(
 
 
 def _publish_standard_row(
-    row: QueuedPublishRow, published: int
+    row: QueuedPublishRow,
+    published: int,
+    *,
+    resolve: Callable[[QueuedPublishRow, dict], str] = _resolve,
 ) -> tuple[dict | None, int, dict | None]:
-    """Evaluate policy and compose+publish one non-review standard row. Returns (results_entry, published_delta, early_stop_result)."""
+    """Evaluate policy and compose+publish one non-review standard row. Returns (results_entry, published_delta, early_stop_result). See `_process_review_row` for what ``resolve`` is."""
     kind = PublishKind(row.publish_kind)
     diff = row.payload.get("diff")
     decision = evaluate_standard_publish(
@@ -493,7 +332,7 @@ def _publish_standard_row(
         return None, 0, {"status": "skipped", "reason": decision.reason, "published": 0}
 
     outcome = publish_from_queued_row(row, publish_tier=PublishTier.STANDARD)
-    status = _resolve(row, outcome)
+    status = resolve(row, outcome)
     if status == "published":
         record_standard_publish()
         return {"queue_id": row.queue_id, **outcome}, 1, None
@@ -510,16 +349,127 @@ def _publish_standard_row(
     return {"queue_id": row.queue_id, **outcome}, 0, None
 
 
-def _standard_drain_setup() -> tuple[int, dict | None]:
-    """Slot budget and early-exit checks before composing anything: auto-compose pause, daily cap, admin-approved backlog release, and credit exhaustion. Returns (slots, early_result) — early_result is a terminal drain result the caller should return immediately, else None to proceed.
+def _today_str() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(tz=UTC).strftime("%Y-%m-%d")
+
+
+# --------------------------------------------------------------------------- #
+# Artifact-native adapter + resolver -- lets every gate/compose helper above
+# (written against QueuedPublishRow) run unmodified against an editorial-room
+# artifact. See this module's docstring for why publish_queue itself is no
+# longer drained.
+# --------------------------------------------------------------------------- #
+
+
+def _artifact_to_queued_row(artifact: Artifact, content: ArtifactContent | None) -> QueuedPublishRow:
+    """Reconstruct the exact QueuedPublishRow-shape publish_from_queued_row (and every _PRE_COMPOSE_GATES check) expects, from an artifact + its stashed content. ``payload`` is the SAME dict ingest_signal.py/editorial_assignment.py built for publish_queue's own row at signal time (content.metadata["payload"]) -- the two systems see identical compose input by construction, not by convergent reimplementation. ``queue_id`` is set to the artifact_id itself: it is only ever used (a) as a single_flight lock key inside publish_from_queued_row (harmless to share a redis-key namespace with real queue_ids -- different UUID, never collides) and (b) by _resolve_artifact/_resolve_dual_written_queue_row below, which read it back off the row they were given, not off publish_queue."""
+    meta = (content.metadata or {}) if content else {}
+    payload = dict(meta.get("payload") or {})
+    payload.setdefault("page_text", content.content if content else "")
+    payload.setdefault("page_title", content.title if content else "")
+    display_name = str(meta.get("display_name") or (content.title if content else "") or artifact.service_id or "")
+    created_at = artifact.created_at
+    return QueuedPublishRow(
+        queue_id=artifact.artifact_id,
+        priority=int(artifact.priority),
+        topic=str(payload.get("topic", "")),
+        publish_kind=str(payload.get("publish_kind", "")),
+        service_id=artifact.service_id or "",
+        display_name=display_name,
+        scrape_url=artifact.url or "",
+        payload=payload,
+        created_at_epoch=int(created_at.timestamp()) if created_at else 0,
+        human_pick_day=artifact.human_pick_day,
+    )
+
+
+def _resolve_dual_written_queue_row(
+    content: ArtifactContent | None, *, status: str, reason: str, terminal: bool
+) -> None:
+    """Best-effort: mirror an artifact's TERMINAL resolution onto its dual-written publish_queue row (content.metadata["dual_write_queue_id"], stashed by ingest_signal.py/editorial_assignment.py at signal time), so that rollback-safety shadow copy doesn't accumulate an ever-larger, never-drained pending set now that nothing else consumes publish_queue directly. A transient (non-terminal) outcome leaves both sides pending/retriable in lockstep -- nothing to mirror. Never raises: the dual write exists purely for a possible rollback, so a failure here must never affect the real (artifact-side) outcome."""
+    if not terminal or content is None:
+        return
+    queue_id = str((content.metadata or {}).get("dual_write_queue_id") or "").strip()
+    if not queue_id:
+        return
+    try:
+        mark_queue_status(queue_id, status or "done", reason=reason)
+    except Exception:
+        logger.warning(
+            "failed to mirror resolution onto dual-written publish_queue row %s",
+            queue_id,
+            exc_info=True,
+        )
+
+
+def _resolve_artifact(artifact_id: str, content: ArtifactContent | None, outcome: dict) -> str:
+    """Artifact-native twin of `_resolve`.
+
+    Returns the outcome status string (same contract as `_resolve`), and:
+
+    - a TERMINAL outcome (published/review/approved_backlog/duplicate/...,
+      see publish_queue_store.TERMINAL_OUTCOMES -- reused as-is, the
+      resolving-outcome vocabulary is a property of publish_from_queued_row's
+      return shape, not of publish_queue itself) marks the artifact COMPOSED;
+    - an outcome carrying ``queue_status`` (e.g. the content-quality veto's
+      "expired") is a permanent drop -- marks the artifact DISCARDED;
+    - anything else (rate_limited, mistral_failed, already_running,
+      review_queue_full, ...) is transient -- the artifact is left SELECTED
+      so a later drain_to_compose run retries it, mirroring how a transient
+      publish_queue skip leaves that row "pending".
+
+    Either way, also best-effort mirrors the resolution onto the dual-written
+    publish_queue row (see `_resolve_dual_written_queue_row`).
+    """
+    status = str(outcome.get("status", ""))
+    reason = str(outcome.get("reason", "") or status)
+    queue_status = str(outcome.get("queue_status", ""))
+    terminal = is_terminal_outcome(outcome) or bool(queue_status)
+
+    if is_terminal_outcome(outcome):
+        mark_artifact_status(artifact_id, COMPOSED)
+    elif queue_status:
+        mark_artifact_status(artifact_id, DISCARDED)
+
+    _resolve_dual_written_queue_row(
+        content, status=queue_status or status, reason=reason, terminal=terminal
+    )
+    return status
+
+
+def _resolve_artifact_ignoring_row(
+    artifact_id: str, content: ArtifactContent | None, _row: QueuedPublishRow, outcome: dict
+) -> str:
+    """`_resolve_artifact` reshaped to the `Callable[[QueuedPublishRow, dict], str]` signature `_process_review_row`/`_publish_standard_row`'s `resolve` param expects -- drain_to_compose binds `artifact_id`/`content` via `functools.partial` once per slot, so each call only needs to pass (row, outcome), matching the default `_resolve`'s own signature. `_row` is unused: unlike `_resolve`, this resolver already knows which artifact it's resolving from the partial-bound arguments, not from the row it's handed."""
+    return _resolve_artifact(artifact_id, content, outcome)
+
+
+def _record_pre_compose_gate_artifact(
+    artifact_id: str, content: ArtifactContent | None, fired: _DrainGate
+) -> dict:
+    """Artifact-native twin of the old `_record_pre_compose_gate`: a gate with a `mark_status` (domain_capped/brief_archived/novelty_collapsed) is a permanent drop for today's slate -- DISCARD. A cooldown gate (`mark_status=None`) leaves the artifact SELECTED/retriable, same as leaving a publish_queue row "pending" -- nothing to persist beyond this run's results entry."""
+    if fired.mark_status:
+        mark_artifact_status(artifact_id, DISCARDED)
+        _resolve_dual_written_queue_row(content, status=fired.mark_status, reason=fired.name, terminal=True)
+    return {"artifact_id": artifact_id, "status": fired.name}
+
+
+def _ensure_today_selected(day: str) -> None:
+    """Self-heal a missed/late `select_to_compose_for_today_task` beat: if `day`'s to_compose slate hasn't been picked yet, pick it now. A no-op the moment a row already exists for `day` -- cheap enough to call at the top of every drain_to_compose run."""
+    if list_to_compose_for_day(day):
+        return
+    select_to_compose_for_day(day)
+
+
+def _drain_to_compose_setup() -> tuple[int, dict | None]:
+    """Slot budget and early-exit checks before composing anything: daily cap, admin-approved backlog release, credit exhaustion. Returns (slots, early_result) -- early_result is a terminal drain result the caller should return immediately, else None to proceed. Artifact-native twin of the old `_standard_drain_setup` (AUTO_COMPOSE_PAUSED is checked by the caller before this runs, same split as before).
 
     Backlog release never composes (it only publishes already-paid-for
-    work), so it must run even while Mistral credit is exhausted -- but NOT
-    while auto-compose is explicitly paused, since that's an operator saying
-    "nothing automatic happens right now," full stop.
+    work), so it runs even while LLM credit is exhausted -- but after the
+    daily cap check, since a capped day shouldn't even attempt a release.
     """
-    if config.AUTO_COMPOSE_PAUSED:
-        return 0, {"status": "skipped", "reason": "auto_compose_paused", "published": 0}
     slots = remaining_standard_publish_slots()
     if slots <= 0:
         return slots, {"status": "skipped", "reason": "standard_daily_cap_reached", "published": 0}
@@ -534,167 +484,192 @@ def _standard_drain_setup() -> tuple[int, dict | None]:
     return slots, None
 
 
-def _today_str() -> str:
-    from datetime import UTC, datetime
+@dataclass
+class _ToComposeRunState:
+    """Mutable state threaded through one drain_to_compose run's slot loop -- review-slot occupancy, this run's compose budget, and the accumulating results list.
 
-    return datetime.now(tz=UTC).strftime("%Y-%m-%d")
-
-
-def _select_lane_for_today(pending: list[QueuedPublishRow]) -> str | None:
-    """Which of the 3 daily lanes this run's fresh compose should draw from.
-
-    Lanes are human pick / biggest-significant / genuinely-new. Returns None
-    to fall back to the plain priority order (all 3 lanes already used
-    today, or a lane's pool was empty when its turn came — a quiet day must
-    never stall a slot).
-
-    Order matters: a human pick always wins if present and unused; discovery
-    (Lane 3, "genuinely new") is checked before scale (Lane 2, "biggest") so
-    a day with both a discovery and an update candidate doesn't let the
-    (usually more numerous) update pool crowd out the one-shot discovery
-    lane.
+    `published` is shared across BOTH the review and non-review branches
+    (faithfully porting the old standard drain's identical shared counter):
+    a review-bound slot's fresh-auto-approve can itself publish straight to
+    the feed, and that ALSO counts against the one-fresh-compose-per-run
+    budget a later non-review slot checks -- see _drain_one_to_compose_slot.
     """
-    from app.modules.newspaper.publish_daily_guard import lanes_used_today
 
-    today = _today_str()
-    used = lanes_used_today()
-    if "human" not in used and any(
-        getattr(row, "human_pick_day", None) == today for row in pending
-    ):
-        return "human"
-    if "discovery" not in used and any(
-        row.publish_kind == PublishKind.SERVICE_DISCOVERY.value for row in pending
-    ):
-        return "discovery"
-    if "scale" not in used and any(
-        row.publish_kind != PublishKind.SERVICE_DISCOVERY.value for row in pending
-    ):
-        return "scale"
-    return None
+    review_full: bool
+    backlog_full: bool
+    reviews_composed: int = 0
+    published: int = 0
+    results: list[dict[str, object]] = field(default_factory=list)
 
 
-def _record_lane_consumed(row: QueuedPublishRow, lane: str | None) -> None:
-    """After a successful fresh compose+publish, mark the lane spent and clear a consumed human pin."""
-    if lane is None:
-        return
-    from app.modules.newspaper.publish_daily_guard import record_lane_used
+def _drain_one_to_compose_slot(
+    slot_row: dict[str, object], state: _ToComposeRunState
+) -> tuple[dict | None, bool]:
+    """Process one to_compose slot, mutating `state` in place. Returns (early_stop_result, should_break): a non-None `early_stop_result` (rate_limited) is a terminal drain result the caller must return immediately; `should_break` means stop iterating the rest of this run's slate WITHOUT an error -- the one-fresh-compose-per-run budget is already spent."""
+    artifact_id = str(slot_row["artifact_id"])
+    artifact = get_artifact(artifact_id)
+    if artifact is None or artifact.status != SELECTED:
+        # Already composed/discarded on an earlier run for this same day's
+        # slate, or a stale/bad reference -- nothing to do.
+        return None, False
+    content = get_artifact_content(artifact_id)
+    row = _artifact_to_queued_row(artifact, content)
+    resolve_this = functools.partial(_resolve_artifact_ignoring_row, artifact_id, content)
 
-    record_lane_used(lane)
-    if lane == "human":
-        clear_human_pick(row.queue_id)
+    fired = _run_pre_compose_gates(row)
+    if fired is not None:
+        state.results.append(_record_pre_compose_gate_artifact(artifact_id, content, fired))
+        return None, False
+
+    if _row_needs_review(row):
+        entry, state.review_full, state.reviews_composed, published_delta = _process_review_row(
+            row,
+            review_full=state.review_full,
+            backlog_full=state.backlog_full,
+            reviews_composed=state.reviews_composed,
+            resolve=resolve_this,
+        )
+        state.published += published_delta
+        if entry is not None:
+            state.results.append(entry)
+        return None, False
+
+    if state.published >= 1:
+        # This run's shared compose/publish budget is already spent (by an
+        # earlier non-review compose OR a review-branch fresh-auto-approve
+        # that published straight to the feed) -- faithful port of the old
+        # standard drain's own `if published >= 1: break`.
+        return None, True
+    entry, published_delta, early_stop = _publish_standard_row(
+        row, state.published, resolve=resolve_this
+    )
+    if early_stop is not None:
+        return early_stop, False
+    state.published += published_delta
+    if entry is not None:
+        state.results.append(entry)
+    return None, False
 
 
-def _publish_standard_row_for_lane(
-    row: QueuedPublishRow, published: int, lane: str | None
-) -> tuple[dict | None, int, dict | None]:
-    """`_publish_standard_row`, gated by this run's selected lane (see `_select_lane_for_today`).
-
-    A non-matching row is left pending (never marked/skipped as rejected) so
-    a later row or a later run can take it. Returns the same
-    (entry, published_delta, early_stop) shape as `_publish_standard_row`.
-    """
-    if lane is not None and not _row_matches_lane(row, lane):
-        return None, 0, None
-    entry, published_delta, early_stop = _publish_standard_row(row, published)
-    if published_delta:
-        _record_lane_consumed(row, lane)
-    return entry, published_delta, early_stop
-
-
-def _row_matches_lane(row: QueuedPublishRow, lane: str) -> bool:
-    if lane == "human":
-        return getattr(row, "human_pick_day", None) == _today_str()
-    if lane == "discovery":
-        return row.publish_kind == PublishKind.SERVICE_DISCOVERY.value
-    if lane == "scale":
-        return row.publish_kind != PublishKind.SERVICE_DISCOVERY.value
-    return True
+@celery_app.task(name="app.tasks.newspaper.select_to_compose_for_today")
+def select_to_compose_for_today_task() -> dict[str, object]:
+    """Daily beat: pick today's `to_compose` slate -- the human pin an admin set yesterday via "pin for tomorrow" (see artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow) plus N-1 top-priority platform picks. See to_compose_selection.select_to_compose_for_day for the full selection rule (including why an unpinned human slot is left empty, never backfilled)."""
+    return select_to_compose_for_day(_today_str())
 
 
 @celery_app.task(
-    name="app.tasks.newspaper.drain_standard_publish_queue",
+    name="app.tasks.newspaper.drain_to_compose",
     soft_time_limit=config.COMPOSE_TASK_SOFT_TIME_LIMIT,
     time_limit=config.COMPOSE_TASK_TIME_LIMIT,
 )
-def drain_standard_publish_queue() -> dict[str, object]:
-    """Publish standard-tier items on the ~3h schedule, up to 7/day.
+def drain_to_compose() -> dict[str, object]:
+    """Compose today's already-selected `to_compose` slate -- the live successor to drain_standard_publish_queue (see this module's docstring for what changed and why).
 
-    Composes at most one fresh row per run, so the 3-lane split (human pick /
-    biggest-significant / genuinely-new) plays out ACROSS runs over the day:
-    each run's `_select_lane_for_today` call picks whichever lane hasn't had
-    its slot filled yet, and only rows matching that lane are eligible for
-    THIS run's fresh compose below (review-bound rows are unaffected — see
-    _process_review_row, which is intentionally outside the lane split).
+    Cadence: `select_to_compose_for_today_task` picks the day's fixed slate
+    ONCE (a dedicated daily beat, self-healed here too via
+    `_ensure_today_selected` in case that beat is late/missed); THIS task
+    then runs on a tighter cadence (same beat interval the old standard
+    drain used) and composes eligible slots from that fixed slate --
+    review-bound slots up to REVIEW_COMPOSE_BATCH_LIMIT per run (unpaced,
+    same as before: a held draft doesn't hit the feed until approved), and
+    at most ONE fresh non-review compose per run, paced by
+    evaluate_standard_publish's own is_standard_publish_due() check (so N
+    articles are never fired simultaneously the moment they're selected).
+    A slot a gate defers (cooldown) or that hits review_queue_full stays
+    SELECTED and is retried on a later run within the same day; a slot a
+    gate permanently drops (domain_capped/novelty_collapsed/brief_archived)
+    is DISCARDED and — matching to_compose_selection's own no-backfill
+    design for an unused human slot — is NOT replaced by the next-best
+    pending artifact this run; that slot is simply lost for the day. This
+    mirrors an existing, deliberate limitation of the (already-built,
+    already-tested) selection design, not a new gap introduced here.
     """
-    slots, early_result = _standard_drain_setup()
+    if config.AUTO_COMPOSE_PAUSED:
+        return {"status": "skipped", "reason": "auto_compose_paused", "published": 0}
+
+    slots, early_result = _drain_to_compose_setup()
     if early_result is not None:
         return early_result
 
-    pending = _pending_for_tier(PublishTier.STANDARD, limit=config.PUBLISH_QUEUE_BATCH_LIMIT)
-    lane = _select_lane_for_today(pending)
-    published = 0
-    results: list[dict[str, str]] = []
+    today = _today_str()
+    _ensure_today_selected(today)
+    slate = list_to_compose_for_day(today)
+    if not slate:
+        return {
+            "status": "ok",
+            "tier": "standard",
+            "published": 0,
+            "results": [],
+            "reason": "no_selection_for_today",
+        }
 
     from app.modules.crawler.classifier_review_store import review_queue_full
 
-    # If the review slot is already full (admin hasn't acted on the pending item),
-    # composing more review-bound articles just burns full Mistral agentic loops on
-    # a result that gets discarded with "review_queue_full". Skip them until the
-    # admin clears the queue; publish-worthy items still flow below.
-    review_full = review_queue_full()
-    backlog_full = _pending_feed_backlog_full()
-    reviews_composed = 0
+    state = _ToComposeRunState(
+        review_full=review_queue_full(), backlog_full=_pending_feed_backlog_full()
+    )
+
     try:
-        for row in pending:
-            # Pre-compose vetoes (_PRE_COMPOSE_GATES): per-website daily cap,
-            # domain/service diversity cooldowns, and the drain-time duplicate
-            # cut, in that order. All run BEFORE the review branch below (a
-            # review draft still re-covers the same project/story).
-            fired = _run_pre_compose_gates(row)
-            if fired is not None:
-                results.append(_record_pre_compose_gate(row, fired))
-                continue
-
-            if _row_needs_review(row):
-                entry, review_full, reviews_composed, published_delta = _process_review_row(
-                    row,
-                    review_full=review_full,
-                    backlog_full=backlog_full,
-                    reviews_composed=reviews_composed,
-                )
-                published += published_delta
-                if entry is not None:
-                    results.append(entry)
-                continue
-
-            if published >= 1:
-                break
-            entry, published_delta, early_stop = _publish_standard_row_for_lane(
-                row, published, lane
-            )
+        for slot_row in sorted(slate, key=lambda r: r["slot"]):
+            early_stop, should_break = _drain_one_to_compose_slot(slot_row, state)
             if early_stop is not None:
-                return {**early_stop, "results": results}
-            published += published_delta
-            if entry is not None:
-                results.append(entry)
+                return {**early_stop, "compose_day": today, "results": state.results}
+            if should_break:
+                # Faithful port of the old standard drain's own `break`: once
+                # this run has spent its one fresh non-review compose (or
+                # decided it can't), remaining slots -- review-bound or not
+                # -- wait for the next run rather than being skipped-and-
+                # continued past.
+                break
     except SoftTimeLimitExceeded:
-        # Killed mid-compose despite the budget guard: return partial progress.
-        # The in-flight row was never marked done, so it stays pending.
+        # Killed mid-compose despite the budget guard: return partial
+        # progress. The in-flight artifact was never marked done, so it
+        # stays SELECTED/retriable.
         return {
             "status": "interrupted",
             "tier": "standard",
             "reason": "soft_time_limit",
-            "published": published,
-            "results": results,
+            "compose_day": today,
+            "published": state.published,
+            "results": state.results,
         }
 
     return {
         "status": "ok",
         "tier": "standard",
-        "published": published,
+        "compose_day": today,
+        "published": state.published,
         "slots_remaining_start": slots,
-        "results": results,
+        "results": state.results,
     }
+
+
+@celery_app.task(
+    name="app.tasks.newspaper.compose_artifact_now",
+    soft_time_limit=config.COMPOSE_TASK_SOFT_TIME_LIMIT,
+    time_limit=config.COMPOSE_TASK_TIME_LIMIT,
+)
+def compose_artifact_now(artifact_id: str) -> dict[str, object]:
+    """Admin/editorial-triggered immediate compose of one artifact, bypassing drain_to_compose's pacing entirely -- the artifact-native twin of publish_tasks.compose_queue_row_now (kept registered for the dual-written publish_queue rows' own rollback value). Used today by editorial_assignment.py's "compose this brief right now" trigger; a future admin Queue-tab action can dispatch it directly by artifact_id the same way the old Queue tab dispatched compose_queue_row_now by queue_id.
+
+    Refuses an artifact that isn't PENDING or SELECTED (already composed/
+    discarded, or an unknown id) so a stale/duplicate trigger can't
+    double-compose -- same "still pending" guard shape as compose_queue_row_now.
+    """
+    artifact = get_artifact(artifact_id)
+    if artifact is None:
+        return {"status": "error", "reason": "artifact_not_found"}
+    if artifact.status not in (PENDING, SELECTED):
+        return {
+            "status": "error",
+            "reason": f"artifact not pending/selected (status={artifact.status!r}) — refused",
+        }
+
+    content = get_artifact_content(artifact_id)
+    row = _artifact_to_queued_row(artifact, content)
+    outcome = publish_from_queued_row(row)
+    _resolve_artifact(artifact_id, content, outcome)
+    return outcome
 
 
 @celery_app.task(name="app.tasks.newspaper.reap_stale_compose_sessions")
@@ -935,34 +910,12 @@ def drain_approved_feed_queue() -> dict[str, object]:
     return _release_pending_feed_backlog(slots=slots)
 
 
-@celery_app.task(name="app.tasks.newspaper.ensure_review_ready")
-def ensure_review_ready() -> dict[str, object]:
-    """Keep exactly one composed article waiting in the review queue at all times (when candidates exist), so the admin always has one to act on."""
-    if config.AUTO_COMPOSE_PAUSED:
-        return {"status": "skipped", "reason": "auto_compose_paused"}
-    if is_credit_exhausted(config.LLM_PROVIDER_WRITER):
-        return {"status": "skipped", "reason": "mistral_credit_exhausted"}
-    from app.modules.crawler.classifier_review_store import review_queue_full
-
-    if review_queue_full():
-        return {"status": "skipped", "reason": "review_queue_full"}
-    if _pending_feed_backlog_full():
-        # Auto-approve routes most composes past the review slot into the
-        # backlog — when a full day of releases is already queued, this beat
-        # composing "one for the admin" really just kept stacking inventory
-        # (2026-07-16 overnight loop).
-        return {"status": "skipped", "reason": "pending_feed_backlog_full"}
-    pending = _pending_for_tier(PublishTier.STANDARD, limit=8)
-    for row in pending:
-        if not _row_needs_review(row):
-            continue
-        # Same diversity guards as the standard drain: never pull a candidate whose
-        # registrable domain is over its daily cap or inside its multi-day cooldown.
-        # Without this, the review slot surfaces a just-covered (duplicate) domain
-        # even though drain_standard_publish_queue would have skipped it.
-        if _domain_capped(row) or _domain_in_cooldown(row) or _service_in_cooldown(row):
-            continue
-        outcome = _compose_review_row(row)
-        if outcome.get("status") == "review":
-            return {"status": "composed", "queue_id": row.queue_id}
-    return {"status": "no_candidate"}
+# ensure_review_ready (the old "keep exactly one composed article waiting in
+# review at all times" beat) is retired -- its purpose is now served by
+# drain_to_compose itself: every run composes eligible review-bound slots
+# from the day's already-selected slate (up to REVIEW_COMPOSE_BATCH_LIMIT,
+# unpaced) on the SAME tight cadence ensure_review_ready used to run on, so a
+# separate dedicated task doing the identical thing against a DIFFERENT data
+# source (publish_queue) would double-compose. Same consolidation shape this
+# codebase already used once for drain_approved_feed_queue -> folded into
+# drain_standard_publish_queue (2026-07-14, see _release_due_backlog above).

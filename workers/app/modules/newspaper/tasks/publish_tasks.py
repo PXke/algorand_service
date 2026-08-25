@@ -409,13 +409,8 @@ def _content_quality_fails(relevance: float, kind: PublishKind | None = None) ->
     return relevance < config.FRONTIER_CONTENT_REJECT_SCORE
 
 
-def _writer_flagged_breaking(tier: PublishTier, composed: ArticleComposeResult) -> bool:
-    """True when the writer called mark_breaking_news this compose and the row isn't already breaking-tier. Kept pure/tiny so the decision is testable without exercising the rest of publish_from_queued_row."""
-    return bool(getattr(composed, "breaking_reason", None)) and tier != PublishTier.BREAKING
-
-
 def _effective_alert_topic(topic: PublishTopic, composed: ArticleComposeResult) -> PublishTopic:
-    """Reader-facing topic for tags and match keys. The keyword topic classifier still ROUTES rows (priority, mandatory review — a false positive there only costs a review slot), but a scam/incident label only keeps its reader-facing consequences — the alert tag and the scam-topic match-key carve-out — when the writer confirmed it via the confirm_alert_topic tool. 2026-07-18: the Foundation's own homepage rebrand shipped toward readers tagged 'scam-alert' because a quoted research paper asked about 'malicious servers' — second false scam labeling in a week; same fix shape as mark_breaking_news for the tier. Kept pure/tiny like _writer_flagged_breaking above."""
+    """Reader-facing topic for tags and match keys. The keyword topic classifier still ROUTES rows (priority, mandatory review — a false positive there only costs a review slot), but a scam/incident label only keeps its reader-facing consequences — the alert tag and the scam-topic match-key carve-out — when the writer confirmed it via the confirm_alert_topic tool. 2026-07-18: the Foundation's own homepage rebrand shipped toward readers tagged 'scam-alert' because a quoted research paper asked about 'malicious servers' — second false scam labeling in a week. Kept pure/tiny."""
     if topic not in (PublishTopic.SCAM_ALERT, PublishTopic.NETWORK_INCIDENT):
         return topic
     confirmed = getattr(composed, "confirmed_alert", None)
@@ -558,7 +553,7 @@ class _ComposeVetoCtx:
 
 
 def _domain_cap_veto(ctx: _ComposeVetoCtx) -> dict | None:
-    """Per-website daily article cap (COMPOSE_MAX_PER_DOMAIN_PER_DAY). Breaking alerts pass enforce_domain_cap=False so a critical warning is never held."""
+    """Per-website daily article cap (COMPOSE_MAX_PER_DOMAIN_PER_DAY). ``enforce_domain_cap=False`` is available for a caller that must never hold a row on this cap alone (no live caller currently sets it — the old breaking-tier fast path was the last one, removed 2026-08-25)."""
     if not (ctx.enforce_domain_cap and ctx.compose_domain):
         return None
     from app.modules.crawler.domain_tracker import domain_compose_cap_reached
@@ -896,16 +891,6 @@ def _compose_or_error(
         return None, {"status": status, "service_id": row.service_id, "detail": str(exc)}
 
 
-def _maybe_upgrade_to_breaking(
-    tier: PublishTier, composed: ArticleComposeResult, row: QueuedPublishRow
-) -> PublishTier:
-    """Writer-declared breaking news (mark_breaking_news tool) replaces the deterministic keyword classifier disabled 2026-07-17 — see classify_publish_tier's docstring. Upgrading tier here, before the cap check and the "Breaking:" prefix downstream, means the writer's call flows through the SAME tested cap/prefix/pacing-bypass machinery the old (broken-detection, sound-mechanics) system used — only the DECISION MAKER changed, from a page-text substring scan to the model that actually researched the story."""
-    if _writer_flagged_breaking(tier, composed):
-        logger.info("writer marked %s breaking: %s", row.service_id, composed.breaking_reason)
-        return PublishTier.BREAKING
-    return tier
-
-
 def _determine_review_divert(
     composed: ArticleComposeResult,
     *,
@@ -998,9 +983,7 @@ def _resolve_hero_and_image(
         return "", ""
 
 
-def _pacing_open_for_auto_approve(tier: PublishTier) -> bool:
-    if tier == PublishTier.BREAKING:
-        return True  # breaking is urgent by definition
+def _pacing_open_for_auto_approve(tier: PublishTier) -> bool:  # noqa: ARG001 -- tier kept for API stability, see PublishTier's docstring
     from app.modules.newspaper.publish_policy import remaining_standard_publish_slots
     from app.modules.newspaper.publish_schedule import is_standard_publish_due
 
@@ -1420,9 +1403,6 @@ def _finalize_publish(
 
     title, summary, body = composed.title, composed.summary, sanitize_body(composed.body)
     body = _with_hero_image(body, hero_image, title, source_url=row.scrape_url)
-    if tier == PublishTier.BREAKING and not title.lower().startswith("breaking"):
-        title = f"Breaking: {title}"
-        summary = f"**Breaking news.** {summary}"
     source_kind = _source_kind_from_url(row.scrape_url)
     try:
         article_id = insert_article(
@@ -1667,8 +1647,6 @@ def _publish_from_queued_row_impl(
     duplicate_outcome = _post_compose_duplicate_veto(composed, row.service_id, publish_kind)
     if duplicate_outcome is not None:
         return duplicate_outcome
-
-    tier = _maybe_upgrade_to_breaking(tier, composed, row)
 
     # Classifier gate: only confidently publish-worthy content goes straight
     # to the feed. Everything else is stored unpublished and queued for admin

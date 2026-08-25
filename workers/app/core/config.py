@@ -85,17 +85,6 @@ MAINNET_INDEXER_URL = env_str("MAINNET_INDEXER_URL", "https://mainnet-idx.algono
 )
 NEWS_FEED_BUCKET = env_str("NEWS_FEED_BUCKET", "main")
 NEWS_MAX_ARTICLES_PER_DAY = min(max(1, env_int("NEWS_MAX_ARTICLES_PER_DAY", 3)), 7)
-NEWS_MAX_BREAKING_PER_DAY = env_int("NEWS_MAX_BREAKING_PER_DAY", 2)
-# Off (2026-07-17): classify_publish_tier's keyword-based BREAKING detection
-# produced real false positives — a crypto.news interview about Algorand's
-# "zero downtime" track record got tagged NETWORK_INCIDENT (the bare words
-# "down"/"network"/"lost " are all it took) and shipped as "Breaking:" about
-# a 10-month-old, already-concluded campaign. Owner decision: no deterministic
-# BREAKING tier for now; a future version should have the WRITER decide via
-# an explicit tool call, not a keyword scan. classify_publish_tier always
-# returns STANDARD while this is false — topic classification (scam_alert /
-# network_incident) and their mandatory-review routing are untouched.
-BREAKING_TIER_ENABLED = env_bool("BREAKING_TIER_ENABLED", False)
 NEWS_STRICT_DAILY_CAP = env_bool("NEWS_STRICT_DAILY_CAP", True)
 CRAWL_PAUSE_WHEN_PUBLISH_CAP_FULL = env_bool("CRAWL_PAUSE_WHEN_PUBLISH_CAP_FULL", True)
 
@@ -127,7 +116,6 @@ WRITER_ENRICHMENT_FETCH_TWEETS = env_bool("WRITER_ENRICHMENT_FETCH_TWEETS", True
 WRITER_EDITORIAL_BRIEFS_ENABLED = env_bool("WRITER_EDITORIAL_BRIEFS_ENABLED", True)
 
 ARTICLE_EDIT_WINDOW_HOURS = env_int("ARTICLE_EDIT_WINDOW_HOURS", 24)
-BREAKING_INLINE_DRAIN = env_bool("BREAKING_INLINE_DRAIN", False)
 NEWS_STANDARD_INTERVAL_HOURS = env_int("NEWS_STANDARD_INTERVAL_HOURS", 8)
 NEWS_MIN_DIFF_LINES = env_int("NEWS_MIN_DIFF_LINES", 3)
 # CONTENT_UPDATE-specific relevance floor: a service-diff item below this is
@@ -151,7 +139,6 @@ NEWS_REFORMAT_SIMILARITY = env_float("NEWS_REFORMAT_SIMILARITY", 0.85)
 CRAWLED_PAGE_BODY_MAX_CHARS = env_int("CRAWLED_PAGE_BODY_MAX_CHARS", 500_000)
 PUBLISH_IMMEDIATE_PRIORITY = env_int("PUBLISH_IMMEDIATE_PRIORITY", 95)
 PUBLISH_QUEUE_DRAIN_SECONDS = env_int("PUBLISH_QUEUE_DRAIN_SECONDS", 900)
-PUBLISH_BREAKING_DRAIN_SECONDS = env_int("PUBLISH_BREAKING_DRAIN_SECONDS", 120)
 PUBLISH_QUEUE_BATCH_LIMIT = env_int("PUBLISH_QUEUE_BATCH_LIMIT", 50)
 
 # Drain-order fairness (2026-08-06): four composable mechanisms, each fixing
@@ -591,8 +578,9 @@ LLM_STAGE2_EXTRAS_MAX_CHARS = env_int("MISTRAL_STAGE2_EXTRAS_MAX_CHARS", 160_000
 LLM_MAX_TOOL_ROUNDS = env_int("LLM_MAX_TOOL_ROUNDS", 48)
 # Every celery task that composes an article (recompose_published,
 # recompose_review, recompose_session_service, compose_queue_row_now,
-# publish_from_chain_event, drain_standard_publish_queue,
-# drain_breaking_publish_queue) previously relied on the app-wide
+# publish_from_chain_event, drain_to_compose (formerly
+# drain_standard_publish_queue), compose_artifact_now) previously relied on
+# the app-wide
 # task_soft_time_limit/task_time_limit (celery_app.py, 1800s/1860s = 30/31min)
 # -- fine when LLM_MAX_TOOL_ROUNDS was 24 and a deep compose ran ~22min,
 # but the 24->48 raise above pushes a full-budget research pass alone to
@@ -1260,14 +1248,16 @@ PAUSE_INTAKE_ON_FEED_BACKLOG = env_bool("PAUSE_INTAKE_ON_FEED_BACKLOG", False)
 # Single kill-switch for ALL automatic composition (celery-beat AND
 # admin-triggered). Before this existed, "pause auto-compose for testing"
 # was done by setting MISTRAL_DIFF_POLL_SECONDS / PUBLISH_QUEUE_DRAIN_SECONDS
-# / PUBLISH_BREAKING_DRAIN_SECONDS / ENSURE_REVIEW_READY_SECONDS to a huge
-# interval (2026-08-05) -- that only blocks celery-beat's OWN schedule. It
-# does NOT block _trigger_compose_next() in admin/stores/cassandra.py, which
-# fires drain_standard_publish_queue directly (by design, so approving a
-# review composes the next candidate immediately) -- a leak that let a
-# 107-item backlog auto-drain itself while the beat freeze was still active
-# (found live 2026-08-09). Check this flag at every entry point instead of
-# each task's own scheduling interval.
+# / PUBLISH_BREAKING_DRAIN_SECONDS (retired 2026-08-25 with the BREAKING tier)
+# / ENSURE_REVIEW_READY_SECONDS (also retired 2026-08-25) to a huge interval
+# (2026-08-05) -- that only blocks celery-beat's OWN schedule. It does NOT
+# block _trigger_compose_next() in admin/stores/cassandra.py, which fires the
+# live compose-trigger task (drain_to_compose, formerly
+# drain_standard_publish_queue) directly (by design, so approving a review
+# composes the next candidate immediately) -- a leak that let a 107-item
+# backlog auto-drain itself while the beat freeze was still active (found
+# live 2026-08-09). Check this flag at every entry point instead of each
+# task's own scheduling interval.
 AUTO_COMPOSE_PAUSED = env_bool("AUTO_COMPOSE_PAUSED", False)
 
 # DeepSeek peak/off-peak billing (effective 2026-08-16 16:00 UTC): peak hours
@@ -1409,10 +1399,12 @@ FRESH_AUTO_APPROVE_ENABLED = env_bool("FRESH_AUTO_APPROVE_ENABLED", True)
 FRESH_AUTO_APPROVE_GRADE_FLOOR = env_float("FRESH_AUTO_APPROVE_GRADE_FLOOR", 8.0)
 
 # --------------------------------------------------------------------------- #
-# Editorial-room artifacts (2026-08-25, SHADOW MODE) -- see artifact_store.py
-# / artifact_priority.py / to_compose_selection.py. These knobs govern only
-# the new artifacts/to_compose tables; they have zero effect on the live
-# publish_queue selection path (compute_priority / _select_lane_for_today).
+# Editorial-room artifacts -- see artifact_store.py / artifact_priority.py /
+# to_compose_selection.py. LIVE (2026-08-25): these knobs govern the
+# artifacts/to_compose tables that now drive real selection (see
+# queue_drain_tasks.drain_to_compose); publish_queue's own compute_priority
+# formula still runs (rollback-safety dual-write) but no longer selects
+# anything.
 # --------------------------------------------------------------------------- #
 # Priority sweep: how often the daily beat recomputes every PENDING
 # artifact's priority (see tasks/artifact_tasks.py:sweep_artifact_priorities).

@@ -17,9 +17,10 @@ from app.modules.newspaper.tasks.publish_tasks import (
     recompose_session_service,
 )
 from app.modules.newspaper.tasks.queue_drain_tasks import (
-    drain_breaking_publish_queue,
-    drain_standard_publish_queue,
+    compose_artifact_now,
+    drain_to_compose,
     expire_stale_queue_items,
+    select_to_compose_for_today_task,
 )
 from app.modules.newspaper.tasks.view_count_tasks import flush_pending_views_task
 from app.modules.newspaper.tasks.x_search_sweep_tasks import sweep_x_search_weekly
@@ -27,10 +28,10 @@ from app.modules.newspaper.tasks.x_search_sweep_tasks import sweep_x_search_week
 __all__ = [
     "apply_recomposed_article",
     "check_and_publish_llm_on_diff",
+    "compose_artifact_now",
     "compose_queue_row_now",
     "distribute_article",
-    "drain_breaking_publish_queue",
-    "drain_standard_publish_queue",
+    "drain_to_compose",
     "expire_stale_queue_items",
     "flush_pending_analytics_task",
     "flush_pending_views_task",
@@ -41,5 +42,6 @@ __all__ = [
     "recompose_published",
     "recompose_review",
     "recompose_session_service",
+    "select_to_compose_for_today_task",
     "sweep_x_search_weekly",
 ]

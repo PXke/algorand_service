@@ -32,9 +32,7 @@ def _init_key(*, tier: PublishTier, day: str) -> str:
     return f"news:publish_count:init:{tier.value}:{day}"
 
 
-def _cap_for_tier(tier: PublishTier) -> int:
-    if tier == PublishTier.BREAKING:
-        return config.NEWS_MAX_BREAKING_PER_DAY
+def _cap_for_tier(tier: PublishTier) -> int:  # noqa: ARG001 -- tier kept for API stability, see PublishTier's docstring
     return config.NEWS_MAX_ARTICLES_PER_DAY
 
 
@@ -57,17 +55,11 @@ def _ensure_counter_initialized(
     if not client.set(init, "1", nx=True, ex=90_000):
         return
 
-    from app.modules.newspaper.publish_policy import (
-        count_breaking_articles_on_utc_day,
-        count_standard_articles_on_utc_day,
-        utc_day_start_epoch,
-    )
+    from app.modules.newspaper.article_store import count_articles_published_on_utc_day
+    from app.modules.newspaper.publish_policy import utc_day_start_epoch
 
     day_start = utc_day_start_epoch(when)
-    if tier == PublishTier.BREAKING:
-        db_count = count_breaking_articles_on_utc_day(day_start_epoch=day_start)
-    else:
-        db_count = count_standard_articles_on_utc_day(day_start_epoch=day_start)
+    db_count = count_articles_published_on_utc_day(day_start_epoch=day_start)
 
     key = _counter_key(tier=tier, day=day)
     client.set(key, db_count, ex=90_000)

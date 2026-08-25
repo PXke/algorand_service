@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 
 from app.core import config
@@ -11,7 +12,6 @@ from app.modules.newspaper.event_lifecycle import EventPhase, build_event_dedupe
 from app.modules.newspaper.publish_policy import (
     PublishIntent,
     PublishKind,
-    PublishTier,
     build_dedupe_key,
     build_publish_intent,
     evaluate_enqueue,
@@ -29,6 +29,8 @@ from app.modules.newspaper.snapshot_store import (
     source_id_for_service,
 )
 from app.modules.pipeline.core.diffing import build_text_diff
+
+logger = logging.getLogger(__name__)
 
 # Volatile tokens that change on a page without the story changing: numbers,
 # money amounts, percentages, clock times, "N minutes/hours ago" phrasing, and
@@ -282,7 +284,6 @@ def ingest_publish_signal(
     from app.modules.ai.content_signals import compute_content_signals
     from app.modules.crawler.domain_tracker import url_recently_rejected
     from app.modules.newspaper.article_store import record_service_event
-    from app.modules.newspaper.tasks.queue_drain_tasks import drain_breaking_publish_queue
 
     def _record_event() -> None:
         record_service_event(
@@ -412,46 +413,166 @@ def ingest_publish_signal(
         intent, mode_info=mode_info, service_id=service_id, content_hash=content_hash
     )
 
+    # Built once, shared verbatim by both writes below: publish_queue's
+    # `payload` JSON blob and artifact_content.metadata["payload"] (the
+    # editorial-room artifact system's equivalent input, read back by
+    # queue_drain_tasks._artifact_to_queued_row when this artifact composes).
+    queue_payload = {
+        "page_text": page_text,
+        "page_title": page_title,
+        "diff": diff,
+        "is_first_snapshot": is_first,
+        "txid": txid,
+        "round_num": round_num,
+        "source_kind": source_kind or "",
+        "match_kind": match_kind,
+        "match_value": match_value,
+        "og_image": og_image,
+        "published_at": published_at,
+        "inner_links": inner_links or [],
+        "mail_from": mail_from,
+        "mistral_only": mistral_only,
+        "transcript_text": transcript_text,
+        "tier": intent.tier.value,
+        "publish_kind": intent.kind.value,
+        "topic": intent.topic.value if intent.topic else "",
+        "event_id": intent.event_id,
+        "event_phase": intent.event_phase,
+        "publish_mode": mode_info["publish_mode"],
+        "linked_article_id": mode_info.get("linked_article_id") or "",
+        "signals": signals.to_payload(),
+        "priority_breakdown": intent.priority_breakdown,
+    }
+
     queue_id, created = enqueue_publish(
         service_id=service_id,
         display_name=display_name,
         scrape_url=source_url,
-        payload={
-            "page_text": page_text,
-            "page_title": page_title,
-            "diff": diff,
-            "is_first_snapshot": is_first,
-            "txid": txid,
-            "round_num": round_num,
-            "source_kind": source_kind or "",
-            "match_kind": match_kind,
-            "match_value": match_value,
-            "og_image": og_image,
-            "published_at": published_at,
-            "inner_links": inner_links or [],
-            "mail_from": mail_from,
-            "mistral_only": mistral_only,
-            "transcript_text": transcript_text,
-            "tier": intent.tier.value,
-            "publish_kind": intent.kind.value,
-            "topic": intent.topic.value if intent.topic else "",
-            "event_id": intent.event_id,
-            "event_phase": intent.event_phase,
-            "publish_mode": mode_info["publish_mode"],
-            "linked_article_id": mode_info.get("linked_article_id") or "",
-            "signals": signals.to_payload(),
-            "priority_breakdown": intent.priority_breakdown,
-        },
+        payload=queue_payload,
         priority=intent.priority,
         publish_kind=intent.kind,
         topic=intent.topic,
         dedupe_key=dedupe_key,
     )
     _record_event()
+
+    # Dual-write into the editorial-room artifact system (2026-08-25): the
+    # live compose trigger now reads exclusively from `artifacts`/
+    # `to_compose` (see queue_drain_tasks.drain_to_compose), so this is the
+    # real, load-bearing write from this point on -- NOT shadow-mode
+    # anymore. publish_queue is still ALSO written (enqueue_publish above)
+    # deliberately: publish_queue/publish_queue_pending stay live-fed data
+    # rather than a snapshot that goes stale the moment this deploys, so a
+    # fast rollback to the old drain tasks (git-reverted, not re-migrated)
+    # would have real, current rows to work with instead of an empty or
+    # weeks-stale queue. This is a deliberate, temporary safety margin for
+    # this one deploy cycle (owner's call) -- drop the dual-write once the
+    # new path is confirmed stable in prod.
+    #
+    # insert_artifact runs regardless of `created` (a publish_queue dedupe
+    # hit): its own dedup (one PENDING artifact per service_id, see
+    # artifact_store.py) is coarser than publish_queue's per-content-hash
+    # dedupe_key, and replace-not-accumulate makes a redundant call here
+    # harmless -- the newest content for a service always wins either way.
+    try:
+        _insert_artifact_for_signal(
+            service_id=service_id,
+            source_url=source_url,
+            page_title=page_title,
+            page_text=page_text,
+            source_kind=source_kind,
+            display_name=display_name,
+            match_kind=match_kind,
+            match_value=match_value,
+            published_at=published_at,
+            queue_payload=queue_payload,
+            queue_id=queue_id,
+        )
+    except Exception:
+        # The artifact write must never take down the (already-committed)
+        # publish_queue enqueue above -- best-effort, logged for visibility.
+        logger.warning(
+            "insert_artifact failed for service_id=%s url=%s", service_id, source_url,
+            exc_info=True,
+        )
+
     if not created:
         return {"status": "duplicate", "queue_id": queue_id, "txid": txid}
 
-    if intent.tier == PublishTier.BREAKING and config.BREAKING_INLINE_DRAIN:
-        drain_breaking_publish_queue.delay()
-
     return {"status": "enqueued", "queue_id": queue_id, "txid": txid}
+
+
+# Maps ingest_publish_signal's `source_kind` to the artifacts table's
+# `channel` column. `channel` is a plain text column (no CQL enum), so this
+# is free to diverge from 077_artifacts.cql's illustrative
+# "crawler / youtube / mail / twitter / brief / special_edition" list where a
+# more accurate name exists for a lane that migration comment predates:
+# "bluesky" and "forum" get their own channel rather than being folded into
+# the aspirational "twitter" value (no X/Twitter poll lane exists yet -- see
+# search_x, which is a research TOOL, not an ingest lane). Everything else
+# (plain web crawl, single-page compose, xgov's programmatic chain-derived
+# proposal text, and any source_kind not listed) falls into "crawler" --
+# each is "a raw candidate discovered/fetched by an automated lane", the
+# same bucket the migration's docstring describes for that channel.
+# "editorial_assignment" is NOT handled here -- that lane bypasses
+# ingest_publish_signal entirely (see editorial_assignment.py's own
+# insert_artifact calls, channel "brief"/"special_edition").
+_CHANNEL_BY_SOURCE_KIND = {
+    "youtube": "youtube",
+    "mail": "mail",
+    "bluesky": "bluesky",
+    "forum": "forum",
+}
+
+
+def _channel_for_source_kind(source_kind: str | None) -> str:
+    """`artifacts.channel` for a given `ingest_publish_signal` `source_kind` -- see `_CHANNEL_BY_SOURCE_KIND`."""
+    return _CHANNEL_BY_SOURCE_KIND.get((source_kind or "").strip().lower(), "crawler")
+
+
+def _insert_artifact_for_signal(
+    *,
+    service_id: str,
+    source_url: str,
+    page_title: str,
+    page_text: str,
+    source_kind: str | None,
+    display_name: str,
+    match_kind: str,
+    match_value: str,
+    published_at: str,
+    queue_payload: dict,
+    queue_id: str,
+) -> None:
+    """Create (or replace-for-this-service) the editorial-room artifact for one publish signal, mirroring the exact content just enqueued to publish_queue."""
+    from datetime import UTC, datetime
+
+    from app.modules.gatekeeper.fact_align import event_anchor_date
+    from app.modules.newspaper.artifact_store import insert_artifact
+
+    event_date = None
+    anchor = event_anchor_date(published_at=published_at, page_title=page_title, page_text=page_text)
+    if anchor is not None:
+        event_date = datetime(anchor.year, anchor.month, anchor.day, tzinfo=UTC)
+
+    insert_artifact(
+        service_id=service_id or None,
+        url=source_url or None,
+        channel=_channel_for_source_kind(source_kind),
+        content=page_text,
+        title=page_title,
+        metadata={
+            "display_name": display_name,
+            "source_kind": source_kind or "",
+            "match_kind": match_kind,
+            "match_value": match_value,
+            # Best-effort cross-reference so the compose-trigger's resolve
+            # step can mirror the real outcome onto this dual-written
+            # publish_queue row too (see drain_to_compose._resolve_artifact)
+            # -- keeps that shadow copy's pending set from growing forever
+            # now that nothing else drains it.
+            "dual_write_queue_id": queue_id,
+            "payload": queue_payload,
+        },
+        event_date=event_date,
+    )

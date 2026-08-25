@@ -4,6 +4,23 @@ Cross-cutting workflow doc spanning `newspaper`, `gatekeeper`, `article-translat
 and `distribution` bricks. Traced against code 2026-07-13 — verify line numbers
 before relying on them if this doc gets old.
 
+> **2026-08-25 selection-layer cutover**: the "land a row on `publish_queue`,
+> a drain picks it up" description below (§ Entry points / Two release
+> shapes) describes the RETIRED selection mechanism. The live path now is:
+> every trigger below still writes to `publish_queue` (kept live-fed,
+> rollback safety only) but ALSO writes an `artifacts` row
+> (`newspaper/artifact_store.py`); `artifact_priority.py` scores pending
+> artifacts daily; `to_compose_selection.select_to_compose_for_day` picks
+> each day's compose slate (one admin-pinned "human" slot + N-1 top-priority
+> "platform" slots); `queue_drain_tasks.drain_to_compose` composes from that
+> slate on the old drain's cadence, calling the exact same
+> `publish_from_queued_row` this doc describes below (via an artifact->row
+> adapter) — so everything from "Ordered steps (full compose path)" onward
+> is still accurate for what a compose actually DOES, just no longer for how
+> a candidate gets SELECTED. The BREAKING tier/lane (`drain_breaking_publish_queue`,
+> `PublishTier.BREAKING`) was removed entirely, not carried into the new
+> system. See `queue_drain_tasks.py`'s module docstring for the full picture.
+
 ## Entry points into the pipeline
 
 | Trigger | Where |

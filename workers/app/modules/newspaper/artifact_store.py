@@ -1,8 +1,12 @@
-"""Cassandra-backed store for the editorial-room `artifacts` table (2026-08-25, SHADOW MODE).
+"""Cassandra-backed store for the editorial-room `artifacts` table.
 
-This is a fully additive replacement candidate for `publish_queue` (see
-`app.modules.newspaper.publish_queue_store`), NOT yet read by the live
-compose/publish path. It mirrors that module's own shape closely on purpose:
+This is the LIVE replacement for `publish_queue` as the compose/publish
+selection mechanism (cut over 2026-08-25 -- see
+`app.modules.newspaper.tasks.queue_drain_tasks.drain_to_compose`).
+`publish_queue`/`publish_queue_store` stay live-fed too (a deliberate
+rollback-safety dual-write from ingest_signal.py/editorial_assignment.py),
+but nothing reads FROM publish_queue for selection/compose purposes anymore.
+This module mirrors that module's own shape closely on purpose:
 
   - `artifacts` (thin, frequently scanned) + `artifacts_pending` (a
     status-partitioned pending index) mirrors `publish_queue` +

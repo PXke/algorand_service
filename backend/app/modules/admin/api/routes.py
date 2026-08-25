@@ -1561,8 +1561,11 @@ def admin_compose_next(request: Request) -> Response:
         diff_async = app_c.send_task(
             "app.tasks.newspaper.check_and_publish_mistral_on_diff", queue="pipeline"
         )
+        # 2026-08-25: repointed from drain_standard_publish_queue (retired)
+        # to its editorial-room successor -- see
+        # workers/app/modules/newspaper/tasks/queue_drain_tasks.py.
         drain_async = app_c.send_task(
-            "app.tasks.newspaper.drain_standard_publish_queue", queue="pipeline"
+            "app.tasks.newspaper.drain_to_compose", queue="pipeline"
         )
         # Both tasks return almost instantly when they find nothing to do
         # (Redis/Cassandra reads only) — real scraping/composing/publishing
@@ -1708,7 +1711,12 @@ def admin_investigation_findings(request: Request) -> Response:
 
 
 def admin_artifacts_to_compose_preview(request: Request) -> Response | dict:
-    """SHADOW MODE, read-only: what the new editorial-room `artifacts`/`to_compose` selection (see workers/app/modules/newspaper/to_compose_selection.py) currently would pick for `day` (default: tomorrow) — the human-pin slot (if pinned) plus the top-priority platform picks, with each pending artifact's live priority breakdown.
+    """Read-only: what the editorial-room `artifacts`/`to_compose` selection (see workers/app/modules/newspaper/to_compose_selection.py) currently would pick for `day` (default: tomorrow) — the human-pin slot (if pinned) plus the top-priority platform picks, with each pending artifact's live priority breakdown.
+
+    2026-08-25: this selection is LIVE -- select_to_compose_for_today_task
+    (a daily beat) and drain_to_compose (the compose trigger) both read the
+    same `to_compose` table this preview is forecasting. This endpoint
+    itself is still read-only and side-effect-free either way.
 
     Backend has no direct import of the workers codebase (separate
     services/venvs, same as every other admin trigger in this file), so this
@@ -1718,9 +1726,8 @@ def admin_artifacts_to_compose_preview(request: Request) -> Response | dict:
     some pure-function scoring, so a much shorter timeout than the 90s LLM
     call there is enough headroom.
 
-    Purely additive: does not read or write publish_queue / articles, and
-    (unlike select_to_compose_for_day) never mutates artifact status or
-    writes to `to_compose` — safe to call on every dashboard load.
+    Never mutates artifact status or writes to `to_compose` (unlike
+    select_to_compose_for_day itself) — safe to call on every dashboard load.
     """
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -1762,11 +1769,13 @@ def admin_artifacts_to_compose_preview(request: Request) -> Response | dict:
 
 
 def admin_pin_artifact_for_tomorrow(request: Request) -> Response | dict:
-    """SHADOW MODE write: pin one editorial-room artifact as tomorrow's human pick (see workers' artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow).
+    """Pin one editorial-room artifact as tomorrow's human pick (see workers' artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow).
 
-    Safe: writes only to the new shadow `artifacts` / `artifacts_pending` /
-    `to_compose` tables, which nothing on the live compose/publish path
-    (publish_queue, queue_drain_tasks, _select_lane_for_today) reads yet.
+    2026-08-25: this is the LIVE human-pick mechanism -- the pinned artifact
+    is picked up by the next select_to_compose_for_today_task run and
+    composed by drain_to_compose (see queue_drain_tasks.py). Writes to
+    `artifacts` / `artifacts_pending` / `to_compose`, never to publish_queue.
+
     Same Celery-dispatch-and-wait shape as the preview route above and as
     admin_interrogate_compose_session — a single targeted UPDATE plus a
     pending-index reindex, so a short timeout is plenty.

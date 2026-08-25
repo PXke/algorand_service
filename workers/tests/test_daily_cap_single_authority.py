@@ -14,7 +14,6 @@ import pytest
 
 from app.modules.newspaper.publish_policy import (
     PublishTier,
-    remaining_breaking_publish_slots,
     remaining_standard_publish_slots,
 )
 
@@ -31,10 +30,8 @@ def test_advisory_reads_delegate_to_guard_counter(monkeypatch: pytest.MonkeyPatc
         "app.modules.newspaper.publish_daily_guard.published_count_today", _fake_count
     )
     monkeypatch.setattr("app.modules.newspaper.publish_policy.config.NEWS_MAX_ARTICLES_PER_DAY", 3)
-    monkeypatch.setattr("app.modules.newspaper.publish_policy.config.NEWS_MAX_BREAKING_PER_DAY", 2)
     assert remaining_standard_publish_slots() == 1
-    assert remaining_breaking_publish_slots() == 0
-    assert seen == [PublishTier.STANDARD, PublishTier.BREAKING]
+    assert seen == [PublishTier.STANDARD]
 
 
 def test_backlog_release_blocked_when_reserve_fails(monkeypatch: pytest.MonkeyPatch) -> None:
