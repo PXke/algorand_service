@@ -245,6 +245,23 @@ def test_news_feed_filters_by_tag_case_insensitive() -> None:
     assert next_cursor is None
 
 
+def test_news_feed_tag_filter_paginates_by_cursor() -> None:
+    """Migration 073: tag-filtered feed pages now get real keyset pagination (the old over-fetch-and-filter path never returned a cursor for a tag filter)."""
+    store = InMemoryArticleStore()
+    store.insert(_story("a1", 100, ["nft"]))
+    store.insert(_story("a2", 200, ["nft"]))
+    store.insert(_story("a3", 300, ["nft"]))
+    service = NewsService(store=store)
+
+    first_page, cursor = service.list_feed_page(tag="nft", limit=2)
+    assert [item.article_id for item in first_page] == ["a3", "a2"]
+    assert cursor is not None
+
+    second_page, next_cursor = service.list_feed_page(tag="nft", limit=2, cursor_epoch_ms=cursor)
+    assert [item.article_id for item in second_page] == ["a1"]
+    assert next_cursor is None
+
+
 def test_hot_feed_ranks_by_views_then_recency() -> None:
     """Falls back to recency ordering when all articles have zero views."""
     store = InMemoryArticleStore()

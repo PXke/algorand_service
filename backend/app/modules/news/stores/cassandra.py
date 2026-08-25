@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from app.core.feed_bucket import cursor_from_ms, to_ms
-from app.modules.news.stores.base import StoredArticle
+from app.modules.news.stores.base import StoredArticle, TagSummary
 
 
 def _epoch(dt: datetime | None) -> int:
@@ -245,4 +245,73 @@ class CassandraArticleStore:
                 stored = _articles_row_to_stored(row)
                 if stored is not None:
                     out[raw] = stored
+        return out
+
+    def list_by_tag_page(
+        self, tag: str, *, limit: int = 50, cursor_epoch_ms: int | None = None
+    ) -> tuple[list[StoredArticle], int | None]:
+        """Keyset-paginated feed of published articles carrying `tag`, from the maintained `articles_by_tag` index (migration 073) -- a direct single-partition read, not a scan-and-filter over the whole feed.
+
+        Same cursor convention as list_feed_page: cursor_epoch_ms is the
+        published_at (ms) of the last item on the previous page, defaulting
+        to "just past now" for the first page.
+        """
+        from algorand_shared.article_statements import ArticleTagIndexStmts
+
+        from app.core.cassandra import get_cassandra_session
+
+        clean = (tag or "").strip().lower()
+        if not clean:
+            return [], None
+        cursor_dt = cursor_from_ms(cursor_epoch_ms)
+        rows = list(
+            get_cassandra_session().execute(ArticleTagIndexStmts.LIST_PAGE, (clean, cursor_dt, limit))
+        )
+        items = [_feed_row_to_stored(row) for row in rows]
+        last_dt = rows[-1].published_at if rows else None
+        next_cursor = to_ms(last_dt) if (len(items) >= limit and last_dt) else None
+        return items, next_cursor
+
+    def tag_summary(self, *, sample_limit: int = 200) -> list[TagSummary]:
+        """Per-tag (count, last_epoch, sample article ids) from `articles_by_tag`, replacing the old 500-row-scan-plus-500-point-reads tag_stats path with: one DISTINCT scan for the (small, stable) tag universe, then a COUNT + a bounded LIST fanned out concurrently per tag.
+
+        ``sample_limit`` bounds the per-tag article-id sample used to sum
+        view counts and find the last-seen epoch -- irrelevant at this
+        platform's real per-tag volume, a safety cap against a pathological
+        single tag dominating the corpus.
+        """
+        from algorand_shared.article_statements import ArticleTagIndexStmts
+
+        from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
+
+        tags = sorted({row.tag for row in get_cassandra_session().execute(ArticleTagIndexStmts.LIST_TAGS) if row.tag})
+        if not tags:
+            return []
+        count_results = execute_parallel_with_args(
+            ArticleTagIndexStmts.COUNT, [(t,) for t in tags], raise_on_error=False
+        )
+        sample_results = execute_parallel_with_args(
+            ArticleTagIndexStmts.LIST_RECENT,
+            [(t, sample_limit) for t in tags],
+            raise_on_error=False,
+        )
+        out: list[TagSummary] = []
+        for tag, (count_ok, count_res), (sample_ok, sample_res) in zip(
+            tags, count_results, sample_results, strict=True
+        ):
+            count = 0
+            if count_ok:
+                count_row = count_res.one()
+                if count_row is not None:
+                    count = int(count_row.count)
+            rows = list(sample_res) if sample_ok else []
+            last_epoch = _epoch(rows[0].published_at) if rows else 0
+            out.append(
+                TagSummary(
+                    tag=tag,
+                    count=count,
+                    last_epoch=last_epoch,
+                    article_ids=[str(r.article_id) for r in rows],
+                )
+            )
         return out

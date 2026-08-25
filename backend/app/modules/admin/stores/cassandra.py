@@ -287,6 +287,29 @@ class AdminCassandraStore:
                 from algorand_shared.feed_cache import invalidate_feed_first_page
 
                 invalidate_feed_first_page()
+                # articles_by_tag dual-write: published_at (part of the
+                # `articles` partition key) is untouched by this in-place
+                # edit, but tags can change -- reconcile the tag index too.
+                from algorand_shared.article_tag_index import sync_tag_index
+
+                sync_tag_index(
+                    aid,
+                    old_status=old_row.status,
+                    old_tags=list(old_row.tags or []),
+                    old_published_at=old_row.published_at,
+                    new_status=old_row.status,
+                    new_tags=tags,
+                    new_published_at=old_row.published_at,
+                    service_id=old_row.service_id,
+                    title=title,
+                    summary=summary,
+                    image_url=old_row.image_url,
+                    source_url=old_row.source_url,
+                    slug=old_row.slug,
+                    translations=dict(old_row.translations) if old_row.translations else None,
+                    first_published_at=old_row.first_published_at,
+                    updated_at=old_row.updated_at,
+                )
 
     def _purge_pending_feed_queue(self, session: CassandraSession, aid: UUID) -> None:
         """Remove any pending_feed_queue row for this article -- an approved article can still be sitting there, waiting for a publish slot, when it gets hard-deleted (e.g. as a duplicate). Without this it's a phantom row: the paced-release worker eventually pulls it and finds nothing, and the admin "up next to publish" view shows an article that no longer exists. Found live 2026-08-16 (3 of 4 backlog rows pointed at articles deleted hours earlier by an unrelated duplicate-cleanup pass)."""
@@ -1088,19 +1111,52 @@ class AdminCassandraStore:
             updated = True
         if not updated:
             return
-        self._dual_write_article_tags(session, aid, tags)
+        self._dual_write_article_tags(session, aid, tags, old_row=row)
 
     @staticmethod
-    def _dual_write_article_tags(session: CassandraSession, aid: UUID, tags: list[str]) -> None:
-        """New `articles` table dual-write for a tags-only correction. Best-effort."""
+    def _dual_write_article_tags(
+        session: CassandraSession,
+        aid: UUID,
+        tags: list[str],
+        *,
+        old_row: Any,  # noqa: ANN401 -- duck-typed Cassandra driver row, no formal class
+    ) -> None:
+        """New `articles` table dual-write for a tags-only correction. Best-effort.
+
+        ``old_row`` is the caller's already-fetched full row (carries the
+        PRE-correction tags, needed to reconcile articles_by_tag) -- the
+        partition-key columns used for the write itself are re-read fresh via
+        GET_BY_ID rather than reused from ``old_row``, same as before this
+        dual-write existed, in case they moved between the caller's read and
+        this write.
+        """
         with contextlib.suppress(Exception):
             from algorand_shared.article_statements import ArticlesStmts
+            from algorand_shared.article_tag_index import sync_tag_index
 
             new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
             if new_row is not None:
                 session.execute(
                     ArticlesStmts.UPDATE_TAGS,
                     (tags, new_row.status, new_row.year, new_row.published_at, aid),
+                )
+                sync_tag_index(
+                    aid,
+                    old_status=new_row.status,
+                    old_tags=list(old_row.tags or []),
+                    old_published_at=new_row.published_at,
+                    new_status=new_row.status,
+                    new_tags=tags,
+                    new_published_at=new_row.published_at,
+                    service_id=old_row.service_id,
+                    title=old_row.title,
+                    summary=old_row.summary,
+                    image_url=old_row.image_url,
+                    source_url=old_row.source_url,
+                    slug=old_row.slug,
+                    translations=dict(old_row.translations) if old_row.translations else None,
+                    first_published_at=old_row.first_published_at,
+                    updated_at=old_row.updated_at,
                 )
 
     def _complete_classifier_review(self, review_id: str, *, resolution: str) -> bool:

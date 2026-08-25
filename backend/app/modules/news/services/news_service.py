@@ -86,16 +86,29 @@ class NewsService:
     ) -> tuple[list[ArticleFeedItem], int | None]:
         """List a page of feed items, keyset-paginated by cursor_epoch_ms."""
         cap = limit if limit is not None else settings.news_feed_limit
-        if service_id or tag:
+        if tag:
+            # Direct single-partition read on the `articles_by_tag` index
+            # (migration 073) -- real clustering-ordered pagination, not the
+            # old over-fetch-and-filter-in-Python scan.
+            wanted = tag.strip().lower()
+            articles, next_cursor = self._store.list_by_tag_page(
+                wanted, limit=cap, cursor_epoch_ms=cursor_epoch_ms
+            )
+            if service_id:
+                # Combined filter is rare; the tag index is already the small
+                # side, so filter service_id in Python same as before. No
+                # cross-partition cursor for this combined case (matches
+                # prior behavior).
+                articles = [a for a in articles if a.service_id == service_id]
+                next_cursor = None
+            return (
+                self._with_feed_views([self._to_feed_item(a, lang) for a in articles]),
+                next_cursor,
+            )
+        if service_id:
             # Filtered view: over-fetch and filter (no cross-partition cursor).
             articles = self._store.list_feed(limit=max(cap * 4, 100))
-            if service_id:
-                articles = [a for a in articles if a.service_id == service_id]
-            if tag:
-                wanted = tag.strip().lower()
-                articles = [
-                    a for a in articles if any(t.strip().lower() == wanted for t in (a.tags or []))
-                ]
+            articles = [a for a in articles if a.service_id == service_id]
             articles = articles[:cap]
             return (
                 self._with_feed_views([self._to_feed_item(a, lang) for a in articles]),
@@ -125,9 +138,12 @@ class NewsService:
 
     # ── Engagement views (tag cloud + most-read) ─────────────────────────────
     #
-    # Both scan the recent feed (bounded) and join the per-article read
-    # counters. At current corpus size this is a few hundred rows; callers
-    # cache the result (see routes) so the scan runs at most every few minutes.
+    # hot_feed/_recent_with_views scan the recent feed (bounded) and join the
+    # per-article read counters -- ranking needs a recency-ordered window
+    # regardless. tag_stats (below) reads the maintained articles_by_tag
+    # index instead, since it needs the whole tag universe, not a window.
+    # Callers cache the result either way (see routes) so this runs at most
+    # every few minutes.
 
     _ENGAGEMENT_SCAN_LIMIT = 500
 
@@ -202,20 +218,31 @@ class NewsService:
         return sorted(items, key=key, reverse=True)[:limit]
 
     def tag_stats(self) -> dict:
-        """Per-tag coverage and readership over the recent feed: how often the newsroom tagged a topic, how many reads those stories drew, and when the topic last appeared. Tags are the writer's own labels, so this is the paper's real taxonomy (richer than the fixed sections)."""
-        stats: dict[str, dict] = {}
-        pairs = self._recent_with_views()
-        for item, views in pairs:
-            for raw in item.tags or []:
-                tag = raw.strip().lower()
-                if not tag:
-                    continue
-                entry = stats.setdefault(tag, {"tag": tag, "count": 0, "views": 0, "last_epoch": 0})
-                entry["count"] += 1
-                entry["views"] += views
-                entry["last_epoch"] = max(entry["last_epoch"], item.published_at_epoch)
-        ordered = sorted(stats.values(), key=lambda e: (-e["count"], -e["views"]))
-        return {"article_count": len(pairs), "tags": ordered}
+        """Per-tag coverage and readership: how often the newsroom tagged a topic, how many reads those stories drew, and when the topic last appeared. Tags are the writer's own labels, so this is the paper's real taxonomy (richer than the fixed sections).
+
+        Reads the maintained `articles_by_tag` index (migration 073) instead
+        of scanning the recent feed and joining view counters row-by-row:
+        the tag universe and each tag's exact article count come from the
+        index directly, and only a bounded per-tag sample of article ids is
+        used to sum view counts (view-count reads themselves are unchanged --
+        still the existing bulk counter lookup).
+        """
+        from app.modules.news.stores.view_counts import get_views_bulk
+
+        summaries = self._store.tag_summary()
+        all_ids = [aid for summary in summaries for aid in summary.article_ids]
+        views_by_id = get_views_bulk(all_ids) if all_ids else {}
+        tags = [
+            {
+                "tag": summary.tag,
+                "count": summary.count,
+                "views": sum(views_by_id.get(aid, 0) for aid in summary.article_ids),
+                "last_epoch": summary.last_epoch,
+            }
+            for summary in summaries
+        ]
+        tags.sort(key=lambda e: (-e["count"], -e["views"]))
+        return {"article_count": self.count_feed(), "tags": tags}
 
     def translation_langs_for(self, article_id: str) -> list[str]:
         """List the language codes this article has a stored translation for."""

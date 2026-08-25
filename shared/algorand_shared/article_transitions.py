@@ -11,8 +11,11 @@ write path" bug this whole consolidation exists to kill.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 _ARTICLES_COLUMNS = (
     "status", "year", "published_at", "article_id", "service_id", "title", "summary", "body",
@@ -71,6 +74,36 @@ def transition_article_status(
 
     invalidate_feed_first_page()
 
+    # articles_by_tag dual-write (migration 073): every status transition
+    # that moves a row into/out of/within 'published' must reconcile the tag
+    # index the same way -- this is the single hook point for the majority
+    # of call sites (delete, draft-toggle, backlog-release, review-approve,
+    # recompose-republish all go through this function). Best-effort, same
+    # as every other dual-write here: articles_by_tag is a read-path
+    # optimization, never allowed to fail the actual status transition.
+    try:
+        from algorand_shared.article_tag_index import sync_tag_index
+
+        sync_tag_index(
+            article_id,
+            old_status=old.status,
+            old_tags=list(old.tags or []),
+            old_published_at=old.published_at,
+            new_status=values["status"],
+            new_tags=list(values["tags"] or []),
+            new_published_at=values["published_at"],
+            service_id=values["service_id"],
+            title=values["title"],
+            summary=values["summary"],
+            image_url=values["image_url"],
+            source_url=values["source_url"],
+            slug=values["slug"],
+            translations=values["translations"],
+            first_published_at=values["first_published_at"],
+            updated_at=values["updated_at"],
+        )
+    except Exception:
+        logger.warning("articles_by_tag dual-write failed for %s", article_id, exc_info=True)
     return True
 
 
