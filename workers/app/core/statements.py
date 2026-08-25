@@ -655,24 +655,6 @@ class ServiceSourceStmts:
 
 
 # --------------------------------------------------------------------------- #
-# gatekeeper_validation_report
-# --------------------------------------------------------------------------- #
-class GatekeeperStmts:
-    """Prepared statements for gatekeeper telemetry/training data."""
-
-    INSERT_REPORT = _Stmt(
-        "INSERT INTO algorand_platform.gatekeeper_validation_report "
-        "(bucket, computed_at, report_json, n_anchors, trusted_count) "
-        "VALUES ('main', ?, ?, ?, ?)"
-    )
-    LIST_ANCHORS = _Stmt(
-        "SELECT anchor_id, article_id, url, source_text, article_text, "
-        "factuality_fail, tone_fail, error_types FROM algorand_platform.gatekeeper_anchors "
-        "WHERE bucket = 'main' LIMIT ?"
-    )
-
-
-# --------------------------------------------------------------------------- #
 # editorial_briefs
 # --------------------------------------------------------------------------- #
 class EditorialBriefStmts:

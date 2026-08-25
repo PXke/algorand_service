@@ -685,3 +685,11 @@ file = "backend/schema/migrations/app/077_artifacts.cql"
 tier = "prod"
 status = "active"
 description = "add artifacts / artifacts_pending / artifact_content / to_compose: SHADOW-MODE editorial-room schema (owner design discussion 2026-08-25) replacing publish_queue's real-time 3-lane selection with a unified artifact model, a periodic priority sweep, and a day-ahead to_compose selection table -- purely additive, not read by the live compose/publish path in this phase (publish_queue/_select_lane_for_today untouched); artifacts/artifacts_pending mirror publish_queue/publish_queue_pending's thin-table-plus-pending-index shape, artifact_content mirrors the articles/article_history content split"
+
+[[migrations]]
+stream = "app"
+version = "078"
+file = "backend/schema/migrations/app/078_drop_gatekeeper_anchors.cql"
+tier = "prod"
+status = "active"
+description = "drop gatekeeper_anchors / gatekeeper_validation_report (migration 032): retires the LLM-annotator validation harness -- zero downstream consumers of trusted_types (confirmed via grep) and the anchor pool was never populated (0/40 tagged); owner call 2026-08-25 to trust the existing article_grader.py rubric instead; the deterministic pre-publish gate (gatekeeper/live.py) and grader support modules (fact_align.py/completeness.py/structure.py) are unaffected"

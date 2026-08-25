@@ -200,29 +200,6 @@ class ClassifierFeedbackStmts:
 
 
 # --------------------------------------------------------------------------- #
-# gatekeeper_anchors / gatekeeper_validation_report
-# --------------------------------------------------------------------------- #
-class GatekeeperStmts:
-    """Prepared statements for gatekeeper telemetry/training data."""
-
-    INSERT_ANCHOR = _Stmt(
-        "INSERT INTO algorand_platform.gatekeeper_anchors ("
-        "bucket, created_at, anchor_id, article_id, url, source_text, "
-        "article_text, factuality_fail, tone_fail, error_types, admin_wallet"
-        ") VALUES ('main', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    LIST_ANCHORS = _Stmt(
-        "SELECT created_at, anchor_id, article_id, url, factuality_fail, "
-        "tone_fail, error_types FROM algorand_platform.gatekeeper_anchors "
-        "WHERE bucket = 'main' LIMIT ?"
-    )
-    GET_REPORT = _Stmt(
-        "SELECT computed_at, report_json, n_anchors, trusted_count "
-        "FROM algorand_platform.gatekeeper_validation_report WHERE bucket = 'main' LIMIT 1"
-    )
-
-
-# --------------------------------------------------------------------------- #
 # domain_tracking
 # --------------------------------------------------------------------------- #
 class DomainTrackingStmts:
