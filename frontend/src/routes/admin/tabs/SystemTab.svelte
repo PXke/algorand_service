@@ -9,12 +9,27 @@
     onmessage?: (msg: string) => void
   } = $props()
 
-  let health = $state<Record<string, unknown> | null>(null)
+  type CheckStatus = 'loading' | 'ok' | 'error'
+  type CheckState = { status: CheckStatus; ok: boolean; detail: string }
+
+  // Same names/order as backend/app/core/health.py's CHECKS registry — each
+  // is fetched from its own endpoint so a slow one (Typesense, the Conduit
+  // chain-index query) can't hold up the others.
+  const CHECK_NAMES = ['redis', 'cassandra', 'typesense', 'conduit_index', 'celery_queues']
+
+  function pendingCheck(): CheckState {
+    return { status: 'loading', ok: false, detail: '' }
+  }
+
+  let checks = $state<Record<string, CheckState>>(
+    Object.fromEntries(CHECK_NAMES.map((n) => [n, pendingCheck()])),
+  )
   let workers = $state<Array<Record<string, unknown>>>([])
+  let workersLoading = $state(true)
   let workersError = $state<string | null>(null)
   let scrapers = $state<Array<Record<string, unknown>>>([])
-  let loading = $state(true)
-  let error = $state<string | null>(null)
+  let scrapersLoading = $state(true)
+  let scrapersError = $state<string | null>(null)
   let fetchedAt = $state<Date | null>(null)
   let running = $state<Set<string>>(new Set())
   let runningAll = $state(false)
@@ -24,35 +39,68 @@
   let confirmClear = $state(false)
   let confirmReset = $state(false)
 
-  async function load() {
-    loading = true
-    error = null
-    workersError = null
-    try {
-      const [h, c, s] = await Promise.all([
-        admin.healthReady().catch(() => ({ status: 'unreachable' })),
-        admin.celeryWorkers().catch((e) => {
-          workersError = e instanceof Error ? e.message : String(e)
-          return { workers: [] }
-        }),
-        admin.listScrapers(),
-      ])
-      health = h as Record<string, unknown>
-      workers = Array.isArray(c.workers) ? (c.workers as Array<Record<string, unknown>>) : []
-      scrapers = Array.isArray(s.items) ? (s.items as Array<Record<string, unknown>>) : []
-      fetchedAt = new Date()
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e)
-    } finally {
-      loading = false
-    }
+  function loadCheck(name: string): Promise<void> {
+    checks[name] = pendingCheck()
+    return admin
+      .healthCheck(name)
+      .then((r) => {
+        checks[name] = { status: 'ok', ok: r.ok === true, detail: String(r.detail ?? '') }
+      })
+      .catch((e) => {
+        checks[name] = {
+          status: 'error',
+          ok: false,
+          detail: e instanceof Error ? e.message : String(e),
+        }
+      })
   }
 
-  const checks = $derived(
-    Array.isArray(health?.checks) ? (health!.checks as Array<Record<string, unknown>>) : [],
-  )
+  function loadWorkers(): Promise<void> {
+    workersLoading = true
+    workersError = null
+    return admin
+      .celeryWorkers()
+      .then((c) => {
+        workers = Array.isArray(c.workers) ? (c.workers as Array<Record<string, unknown>>) : []
+      })
+      .catch((e) => {
+        workersError = e instanceof Error ? e.message : String(e)
+      })
+      .finally(() => {
+        workersLoading = false
+      })
+  }
 
-  const overallOk = $derived(health?.status === 'ok')
+  function loadScrapers(): Promise<void> {
+    scrapersLoading = true
+    scrapersError = null
+    return admin
+      .listScrapers()
+      .then((s) => {
+        scrapers = Array.isArray(s.items) ? (s.items as Array<Record<string, unknown>>) : []
+      })
+      .catch((e) => {
+        scrapersError = e instanceof Error ? e.message : String(e)
+      })
+      .finally(() => {
+        scrapersLoading = false
+      })
+  }
+
+  async function load() {
+    // Fire every section's fetch at once; each updates its own state as
+    // soon as it resolves instead of waiting on the others. `fetchedAt`
+    // just timestamps the toolbar once the whole batch has settled — it
+    // doesn't gate any section's render.
+    const tasks = [...CHECK_NAMES.map((name) => loadCheck(name)), loadWorkers(), loadScrapers()]
+    await Promise.allSettled(tasks)
+    fetchedAt = new Date()
+  }
+
+  const essentialChecksDone = $derived(
+    checks.redis?.status !== 'loading' && checks.cassandra?.status !== 'loading',
+  )
+  const overallOk = $derived((checks.redis?.ok ?? false) && (checks.cassandra?.ok ?? false))
 
   function checkLabel(name: string): string {
     if (name === 'celery_queues') return 'Celery queues'
@@ -170,131 +218,135 @@
     </div>
   </div>
 
-  {#if loading}
-    <p class="muted">Loading…</p>
-  {:else if error}
-    <p class="err">{error}</p>
-  {:else}
-    {#if health?.status}
-      <div class="banner" class:ok={overallOk}>
-        {#if overallOk}
-          ✓ All systems operational
-        {:else}
-          Status: {String(health.status)}
-        {/if}
-      </div>
-    {/if}
-
-    <section class="panel">
-      <h3>Celery workers</h3>
-      {#if workersError}
-        <p class="warn-text">Worker ping failed: {workersError}</p>
-      {:else if !workers.length}
-        <p class="warn-text">
-          {loading ? 'Pinging workers…' : 'No Celery workers answered the ping — the worker service may be down.'}
-        </p>
+  {#if essentialChecksDone}
+    <div class="banner" class:ok={overallOk}>
+      {#if overallOk}
+        ✓ All systems operational
       {:else}
-        {#each workers as w}
-          <div class="worker-row">
-            <span class="dot" class:online={w.online === true}></span>
-            <span class="mono name">{String(w.name ?? '')}</span>
-            <span class="subtle">
-              {w.online ? `${Number(w.active_tasks ?? 0)} active` : 'offline'}
-            </span>
-          </div>
-        {/each}
+        Status: degraded
       {/if}
-    </section>
+    </div>
+  {/if}
 
-    {#each checks as c}
-      {@const name = String(c.name ?? '')}
-      {@const ok = c.ok === true}
-      {@const detail = String(c.detail ?? '')}
-      {@const chips = name === 'celery_queues' ? parseQueueChips(detail) : null}
-      <section class="panel check-card">
-        <div class="check-head">
-          <span class="dot" class:online={ok}></span>
-          <h3>{checkLabel(name)}</h3>
+  <section class="panel">
+    <h3>Celery workers</h3>
+    {#if workersError}
+      <p class="warn-text">Worker ping failed: {workersError}</p>
+    {:else if workersLoading}
+      <p class="muted">Pinging workers…</p>
+    {:else if !workers.length}
+      <p class="warn-text">No Celery workers answered the ping — the worker service may be down.</p>
+    {:else}
+      {#each workers as w}
+        <div class="worker-row">
+          <span class="dot" class:online={w.online === true}></span>
+          <span class="mono name">{String(w.name ?? '')}</span>
+          <span class="subtle">
+            {w.online ? `${Number(w.active_tasks ?? 0)} active` : 'offline'}
+          </span>
         </div>
-        {#if chips}
-          <div class="chips">
-            {#each chips as chip}
-              <span class="chip" class:highlight={chip.depth > 0}>
-                {chip.key} {chip.depth}
-              </span>
-            {/each}
-          </div>
-        {:else}
-          <p class="subtle detail">{detail || (ok ? 'healthy' : 'failing')}</p>
-        {/if}
-      </section>
-    {/each}
+      {/each}
+    {/if}
+  </section>
 
-    {#if scrapers.length}
-      <section class="panel stack">
-        <div class="section-head">
-          <div>
-            <h3>Run tasks now</h3>
-            <p class="subtle">Queue a worker task immediately instead of waiting for its schedule.</p>
-          </div>
-          <button class="btn btn-primary" type="button" disabled={runningAll || running.size > 0} onclick={() => runAll()}>
-            {runningAll ? 'Queuing…' : 'Run all'}
-          </button>
-        </div>
-        <div class="scraper-grid">
-          {#each scrapers as s}
-            {@const action = String(s.action ?? '')}
-            {@const label = String(s.label ?? action)}
-            {@const desc = String(s.description ?? '')}
-            {@const busy = running.has(action)}
-            <div class="scraper-row" title={desc || undefined}>
-              <div>
-                <strong>{label}</strong>
-                {#if desc}
-                  <p class="subtle desc">{desc}</p>
-                {/if}
-              </div>
-              <button class="btn btn-sm" type="button" disabled={busy} onclick={() => run(action, label)}>
-                {busy ? '…' : 'Run'}
-              </button>
-            </div>
+  {#each CHECK_NAMES as name}
+    {@const c = checks[name]}
+    {@const chips = c.status === 'ok' && name === 'celery_queues' ? parseQueueChips(c.detail) : null}
+    <section class="panel check-card">
+      <div class="check-head">
+        <span class="dot" class:online={c.status === 'ok' && c.ok} class:pending={c.status === 'loading'}></span>
+        <h3>{checkLabel(name)}</h3>
+      </div>
+      {#if c.status === 'loading'}
+        <p class="subtle detail">Checking…</p>
+      {:else if chips}
+        <div class="chips">
+          {#each chips as chip}
+            <span class="chip" class:highlight={chip.depth > 0}>
+              {chip.key} {chip.depth}
+            </span>
           {/each}
         </div>
-      </section>
-    {/if}
+      {:else}
+        <p class="subtle detail">{c.detail || (c.ok ? 'healthy' : 'failing')}</p>
+      {/if}
+    </section>
+  {/each}
 
+  {#if scrapersError}
+    <section class="panel">
+      <h3>Run tasks now</h3>
+      <p class="warn-text">Failed to load scraper actions: {scrapersError}</p>
+    </section>
+  {:else if scrapersLoading}
+    <section class="panel">
+      <h3>Run tasks now</h3>
+      <p class="muted">Loading…</p>
+    </section>
+  {:else if scrapers.length}
     <section class="panel stack">
       <div class="section-head">
         <div>
-          <h3>Content localization</h3>
-          <p class="subtle">
-            Queue missing article translations (فارسی, پښتو, العربية, Русский, …) for stories already on
-            the feed.
-          </p>
+          <h3>Run tasks now</h3>
+          <p class="subtle">Queue a worker task immediately instead of waiting for its schedule.</p>
         </div>
-        <button class="btn" type="button" disabled={backfilling} onclick={() => backfill()}>
-          {backfilling ? 'Queuing…' : 'Backfill translations'}
+        <button class="btn btn-primary" type="button" disabled={runningAll || running.size > 0} onclick={() => runAll()}>
+          {runningAll ? 'Queuing…' : 'Run all'}
         </button>
       </div>
-    </section>
-
-    <section class="panel stack danger-zone">
-      <div class="section-head">
-        <div>
-          <h3>Beta tools</h3>
-          <p class="subtle">Truncate article, publish, crawl, and search state. Irreversible.</p>
-        </div>
-        <div class="danger-actions">
-          <button class="btn danger-outline" type="button" onclick={() => (confirmClear = true)}>
-            Clear domains
-          </button>
-          <button class="btn danger-outline" type="button" onclick={() => (confirmReset = true)}>
-            Reset all
-          </button>
-        </div>
+      <div class="scraper-grid">
+        {#each scrapers as s}
+          {@const action = String(s.action ?? '')}
+          {@const label = String(s.label ?? action)}
+          {@const desc = String(s.description ?? '')}
+          {@const busy = running.has(action)}
+          <div class="scraper-row" title={desc || undefined}>
+            <div>
+              <strong>{label}</strong>
+              {#if desc}
+                <p class="subtle desc">{desc}</p>
+              {/if}
+            </div>
+            <button class="btn btn-sm" type="button" disabled={busy} onclick={() => run(action, label)}>
+              {busy ? '…' : 'Run'}
+            </button>
+          </div>
+        {/each}
       </div>
     </section>
   {/if}
+
+  <section class="panel stack">
+    <div class="section-head">
+      <div>
+        <h3>Content localization</h3>
+        <p class="subtle">
+          Queue missing article translations (فارسی, پښتو, العربية, Русский, …) for stories already on
+          the feed.
+        </p>
+      </div>
+      <button class="btn" type="button" disabled={backfilling} onclick={() => backfill()}>
+        {backfilling ? 'Queuing…' : 'Backfill translations'}
+      </button>
+    </div>
+  </section>
+
+  <section class="panel stack danger-zone">
+    <div class="section-head">
+      <div>
+        <h3>Beta tools</h3>
+        <p class="subtle">Truncate article, publish, crawl, and search state. Irreversible.</p>
+      </div>
+      <div class="danger-actions">
+        <button class="btn danger-outline" type="button" onclick={() => (confirmClear = true)}>
+          Clear domains
+        </button>
+        <button class="btn danger-outline" type="button" onclick={() => (confirmReset = true)}>
+          Reset all
+        </button>
+      </div>
+    </div>
+  </section>
 </div>
 
 {#if confirmClear}
@@ -400,6 +452,9 @@
   }
   .dot.online {
     background: var(--gain);
+  }
+  .dot.pending {
+    background: var(--subtle);
   }
   .check-card .check-head {
     display: flex;
@@ -521,9 +576,5 @@
     gap: 8px;
     justify-content: flex-end;
     margin-top: 8px;
-  }
-  .err {
-    color: var(--danger);
-    margin: 0;
   }
 </style>

@@ -727,6 +727,32 @@ def admin_celery_overview(request: Request) -> Response:
         return json_error_response(502, "broker_unavailable", str(exc))
 
 
+def admin_health_check(request: Request) -> Response:
+    """Run one readiness check (redis/cassandra/typesense/conduit_index/celery_queues) by name.
+
+    Split out of `/health/ready` so the System tab can fire one request per
+    check in parallel instead of one combined call that blocks on the
+    slowest dependency (Typesense and the Conduit chain-index query are
+    usually the culprits). `/health/ready` itself is untouched — the deploy
+    pipeline still gates on that single combined payload.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    from app.core.cache import cached_json
+    from app.core.health import CHECKS
+
+    name = request.path_params.get("name", "")
+    check = CHECKS.get(name)
+    if check is None:
+        return json_error_response(404, "unknown_check", f"unknown check: {name}")
+
+    # Short cache: a Cassandra/Typesense probe isn't free, and Refresh plus
+    # multiple admins on the tab shouldn't each pay for it.
+    return cached_json(f"admin:health-check:{name}", 5, lambda: asdict(check()))
+
+
 def admin_reset_articles(request: Request) -> Response:
     """Beta convenience: wipe all article/publish state so the pipeline starts fresh. Keeps sources, classifier feedback and pending reviews."""
     denied = require_admin_wallet(request)
@@ -1760,6 +1786,7 @@ def register_admin_routes(app: Router) -> None:
     app.get("/api/v1/admin/scrapers")(admin_list_scrapers)
     app.post("/api/v1/admin/scrapers/run")(admin_run_scraper)
     app.get("/api/v1/admin/celery")(admin_celery_overview)
+    app.get("/api/v1/admin/health-checks/:name")(admin_health_check)
     app.post("/api/v1/admin/articles/reset")(admin_reset_articles)
     app.post("/api/v1/admin/classifier-reviews/clear")(admin_clear_classifier_reviews)
     app.get("/api/v1/admin/domains")(admin_list_domains)
