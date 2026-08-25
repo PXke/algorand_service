@@ -176,6 +176,23 @@ class ArticlesStmts:
         "FROM algorand_platform.articles "
         "WHERE status = 'published' AND year = ? AND published_at < ? LIMIT ?"
     )
+    # 2026-08-24: replaces articles_feed.BY_BUCKET_RECENT for the novelty/
+    # duplicate-detection corpus (article_grader._recent_articles) -- one
+    # query per relevant year (the ~10-week decay window spans at most 2
+    # calendar years) instead of one per month bucket.
+    LIST_RECENT_FOR_NOVELTY = _Stmt(
+        "SELECT article_id, service_id, title, tags, published_at "
+        "FROM algorand_platform.articles "
+        "WHERE status = 'published' AND year = ? AND published_at > ?"
+    )
+    # 2026-08-24: replaces articles_feed.COUNT_TODAY / BY_BUCKET_TAGS-for-day
+    # for daily-cap and tag-cap counting -- "today"/"this UTC day" is always
+    # within the current year partition, so no fan-out needed.
+    COUNT_PUBLISHED_IN_RANGE = _Stmt(
+        "SELECT article_id, tags, first_published_at, published_at "
+        "FROM algorand_platform.articles "
+        "WHERE status = 'published' AND year = ? AND published_at >= ? AND published_at < ?"
+    )
     SET_SLUG = _Stmt(
         "UPDATE algorand_platform.articles SET slug = ? "
         "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"

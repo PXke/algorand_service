@@ -1529,16 +1529,17 @@ class AdminCassandraStore:
             logger.warning("failed to trigger compose-next task", exc_info=True)
 
     def _feed_count_today(self, session: CassandraSession, _bucket: str = "") -> int:
+        """2026-08-24: reads `articles` directly (was `articles_feed`'s COUNT_TODAY)."""
         from datetime import UTC, datetime, timedelta
 
-        from app.core.statements import FeedStmts
+        from algorand_shared.article_statements import ArticlesStmts
 
         day_start = datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         day_end = day_start + timedelta(days=1)
-        # Today is always within the current month partition.
+        # Today is always within the current year partition.
         rows = session.execute(
-            FeedStmts.COUNT_TODAY,
-            (feed_month(day_start), day_start, day_end),
+            ArticlesStmts.COUNT_PUBLISHED_IN_RANGE,
+            (day_start.year, day_start, day_end),
         )
         return sum(1 for _ in rows)
 

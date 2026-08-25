@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from algorand_shared.article_transitions import transition_article_status
 
 from app.core.config import NEWS_FEED_BUCKET
-from app.core.feed_bucket import feed_month, months_back
+from app.core.feed_bucket import feed_month
 
 logger = logging.getLogger(__name__)
 
@@ -122,30 +122,26 @@ def count_feed_articles_with_tag_on_day(
     *,
     tag: str,
     day_start_epoch: int,
-    limit: int = 500,
+    limit: int = 500,  # noqa: ARG001 -- kept for call-site compatibility; unbounded now that this is a single year-partition range scan, not a multi-bucket fan-out
 ) -> int:
-    """Count today's feed rows that include a given tag (e.g. breaking)."""
-    from datetime import UTC, datetime
+    """Count that UTC day's published articles that include a given tag (e.g. breaking). 2026-08-24: reads `articles` directly (was `articles_feed`'s BY_BUCKET_TAGS, one query per month bucket)."""
+    from algorand_shared.article_statements import ArticlesStmts
 
-    from app.core.cassandra import execute_parallel_with_args
-    from app.core.statements import FeedStmts
+    from app.core.cassandra import get_cassandra_session
 
-    buckets = list(months_back(datetime.now(tz=UTC), 2))
-    rows = []
-    for ok, page in execute_parallel_with_args(
-        FeedStmts.BY_BUCKET_TAGS, [(mbucket, limit) for mbucket in buckets]
-    ):
-        if ok:
-            rows.extend(list(page))
+    day_start = datetime.fromtimestamp(day_start_epoch, tz=UTC)
+    day_end = day_start + timedelta(days=1)
+    session = get_cassandra_session()
+    rows = session.execute(
+        ArticlesStmts.COUNT_PUBLISHED_IN_RANGE, (day_start.year, day_start, day_end)
+    )
     needle = tag.strip().lower()
     count = 0
     for row in rows:
         # first_published_at survives recompose re-publishes; a refresh must
         # not count as a fresh publish for the daily caps.
-        published_at = getattr(row, "first_published_at", None) or row.published_at
-        if not published_at:
-            continue
-        if int(published_at.timestamp()) < day_start_epoch:
+        published_at = row.first_published_at or row.published_at
+        if not published_at or published_at < day_start:
             continue
         tags = row.tags or []
         normalized = {str(t).lower() for t in tags}
@@ -157,37 +153,29 @@ def count_feed_articles_with_tag_on_day(
 def list_feed_articles(
     *, _bucket: str = NEWS_FEED_BUCKET, limit: int = 100
 ) -> list[FeedArticleRow]:
-    """Return the most recent feed articles across the trailing 18 monthly buckets."""
-    from datetime import UTC, datetime
+    """Return the most recent `limit` published articles. 2026-08-24: reads `articles` directly (was `articles_feed`'s BY_BUCKET, one query per month bucket up to 18) -- same year-partition keyset pattern backend's CassandraArticleStore.list_feed_page already uses, almost always just the current year's partition at this platform's ~7/day volume, falling back to prior years only when the current year doesn't have `limit` rows yet."""
+    from algorand_shared.article_statements import ArticlesStmts
 
-    from app.core.cassandra import execute_parallel_with_args
-    from app.core.statements import FeedStmts
+    from app.core.cassandra import get_cassandra_session
 
-    # Fan the per-month bucket reads out concurrently (newest bucket first), then
-    # take the first `limit` rows. Each bucket is capped at `limit` so the union is
-    # at most buckets*limit before truncation.
-    buckets = list(months_back(datetime.now(tz=UTC), 18))
-    rows = []
-    for ok, page in execute_parallel_with_args(
-        FeedStmts.BY_BUCKET, [(mbucket, limit) for mbucket in buckets]
-    ):
-        if ok:
-            rows.extend(list(page))
-        if len(rows) >= limit:
+    session = get_cassandra_session()
+    cursor_dt = datetime.now(tz=UTC)
+    rows: list = []
+    # 3 years back comfortably covers the old 18-month scan's intent; the
+    # loop breaks as soon as `limit` is satisfied, so extra years are only
+    # ever queried if genuinely needed.
+    for year in range(cursor_dt.year, cursor_dt.year - 3, -1):
+        remaining = limit - len(rows)
+        if remaining <= 0:
             break
-    rows = rows[:limit]
+        rows.extend(
+            session.execute(ArticlesStmts.LIST_PUBLISHED_PAGE, (year, cursor_dt, remaining))
+        )
     items: list[FeedArticleRow] = []
     for row in rows:
         published_at = row.published_at
         epoch = int(published_at.timestamp()) if published_at else 0
-        # FeedStmts.BY_BUCKET doesn't select translations at all (unlike the
-        # other call sites) — getattr(default=None), NOT row.translations
-        # directly, or this raises AttributeError on every row and silently
-        # breaks every caller (count_articles_published_on_utc_day and thus
-        # the daily publish cap — found live 2026-07-13, self-inflicted by
-        # the translations JSON-serialization fix earlier the same day).
-        raw_translations = getattr(row, "translations", None)
-        first_published = getattr(row, "first_published_at", None)
+        first_published = row.first_published_at
         items.append(
             FeedArticleRow(
                 article_id=str(row.article_id),
@@ -195,7 +183,7 @@ def list_feed_articles(
                 title=row.title,
                 summary=row.summary or "",
                 published_at_epoch=epoch,
-                translations=dict(raw_translations) if raw_translations else None,
+                translations=dict(row.translations) if row.translations else None,
                 first_published_at_epoch=(
                     int(first_published.timestamp()) if first_published else None
                 ),

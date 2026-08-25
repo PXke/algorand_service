@@ -137,14 +137,18 @@ def _recent_articles(limit: int = 60) -> list[_Recent]:
 
     now = datetime.now(tz=UTC)
     # Cover the full age-decay horizon (~10 weeks) so older near-duplicates are
-    # SEEN and tapered by age, rather than hard-cut by a too-short month window.
-    buckets = set()
-    cursor = now.replace(day=1)
-    for _ in range(4):  # current + 3 prior months spans 70+ days in all cases
-        buckets.add(cursor.strftime("%Y-%m"))
-        cursor = (cursor - timedelta(days=1)).replace(day=1)
+    # SEEN and tapered by age, rather than hard-cut by a too-short window.
+    # 2026-08-24: reads `articles` directly (was `articles_feed`'s
+    # BY_BUCKET_RECENT, one query per month bucket) -- one query per relevant
+    # YEAR now (the window spans at most 2 calendar years), since `articles`
+    # partitions status='published' rows by year, not month.
+    cutoff = now.replace(day=1)
+    for _ in range(3):  # current + 3 prior months spans 70+ days in all cases
+        cutoff = (cutoff - timedelta(days=1)).replace(day=1)
+    years = sorted({cutoff.year, now.year})
+    from algorand_shared.article_statements import ArticlesStmts
+
     from app.core.cassandra import execute_parallel_with_args
-    from app.core.statements import FeedStmts
 
     def _epoch(pa: datetime | None) -> float:
         if pa is None:
@@ -152,22 +156,22 @@ def _recent_articles(limit: int = 60) -> list[_Recent]:
         return (pa.replace(tzinfo=UTC) if pa.tzinfo is None else pa).timestamp()
 
     rows: list = []
-    # Fan the per-month bucket reads out concurrently rather than serially.
+    # Fan the per-year reads out concurrently rather than serially.
     for ok, page in execute_parallel_with_args(
-        FeedStmts.BY_BUCKET_RECENT, [(bucket,) for bucket in buckets]
+        ArticlesStmts.LIST_RECENT_FOR_NOVELTY, [(year, cutoff) for year in years]
     ):
         if ok:
             rows.extend(page)
-    # `buckets` is an unordered set and the per-bucket reads run in parallel,
-    # so `rows` is concatenated in whatever order those calls happen to
-    # complete -- NOT chronological. Without sorting first, truncating to
-    # `limit` below let an older month's bucket "win the race" and crowd a
-    # genuinely recent article out of the comparison set entirely, silently
-    # disabling duplicate detection for that service. Root-caused 2026-08-16:
-    # 24 exact-title duplicates went live undetected at gaps ranging from
-    # under an hour to 23 days -- non-deterministic per call, not
-    # proportional to elapsed time, which only made sense once this ordering
-    # bug was found.
+    # The per-year reads run in parallel, so `rows` is concatenated in
+    # whatever order those calls happen to complete -- NOT chronological.
+    # Without sorting first, truncating to `limit` below let an older year's
+    # results "win the race" and crowd a genuinely recent article out of the
+    # comparison set entirely, silently disabling duplicate detection for
+    # that service. Root-caused 2026-08-16 in the old month-bucket version of
+    # this same bug: 24 exact-title duplicates went live undetected at gaps
+    # ranging from under an hour to 23 days -- non-deterministic per call,
+    # not proportional to elapsed time, which only made sense once this
+    # ordering bug was found.
     rows.sort(key=lambda r: _epoch(getattr(r, "published_at", None)), reverse=True)
     rows = rows[:limit]
     views = get_views_bulk([str(r.article_id) for r in rows]) if rows else {}
