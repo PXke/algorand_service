@@ -414,6 +414,30 @@ class IntelligenceStmts:
 
 
 # --------------------------------------------------------------------------- #
+# x_search_weekly (weekly X/Twitter sweep cache, read by the search_x tool)
+# --------------------------------------------------------------------------- #
+class XSearchWeeklyStmts:
+    """Prepared statements for the weekly per-service X search cache.
+
+    One row per service_id, overwritten by each sweep run (see x_search_store.py).
+    """
+
+    LIST_ALL = _Stmt(
+        "SELECT service_id, display_name, query, posts_json, post_count, swept_at, error "
+        "FROM algorand_platform.x_search_weekly"
+    )
+    GET = _Stmt(
+        "SELECT service_id, display_name, query, posts_json, post_count, swept_at, error "
+        "FROM algorand_platform.x_search_weekly WHERE service_id = ?"
+    )
+    UPSERT = _Stmt(
+        "INSERT INTO algorand_platform.x_search_weekly ("
+        "service_id, display_name, query, posts_json, post_count, swept_at, error"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # tool_suggestions / compose_sessions / tool_usage_stats
 # --------------------------------------------------------------------------- #
 class ToolInsightStmts:

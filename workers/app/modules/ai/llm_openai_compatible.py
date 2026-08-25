@@ -758,15 +758,18 @@ class OpenAICompatibleProvider(LLMProvider):
     # session, not banned outright — a handful of genuinely new terms is
     # legitimate, unbounded is not.
     #
-    # search_x (added 2026-08-21) is capped for a different reason: it's
-    # real per-call money (X's pay-as-you-go API), and a model can just as
+    # search_x (added 2026-08-21) was originally capped because it was real
+    # per-call money (X's pay-as-you-go API) and a model could just as
     # easily vary its query text call after call, defeating the exact-repeat
-    # dedup the same way. This session cap is the second of three layers
-    # (the others: research_tools.py fixes max_results at 10 so a single
-    # call's cost is small and predictable, and config.X_SEARCH_DAILY_CAP
-    # hard-stops total calls across ALL articles composed today) — one
-    # article research pass genuinely does not need more than a couple of
-    # X searches.
+    # dedup the same way. Reworked 2026-08-25 into a read against a weekly
+    # scheduled sweep (x_search_sweep.py) instead of a live call, so this is
+    # now a free Cassandra lookup — but the cap is kept anyway at the same
+    # small ceiling: it costs nothing to keep, and one article research pass
+    # still gains nothing from calling it more than a couple of times (a
+    # miss against the tracked-service list doesn't get better by
+    # rephrasing endlessly), so this is now purely a runaway-tool-loop
+    # guard, the same class of protection as suggest_glossary_term/
+    # suggest_tool above, not a cost control.
     _CALL_CAPPED_TOOLS: ClassVar[dict[str, int]] = {
         "suggest_glossary_term": 8,
         "suggest_tool": 6,

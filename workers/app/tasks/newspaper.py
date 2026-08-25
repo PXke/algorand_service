@@ -20,6 +20,7 @@ from app.modules.newspaper.tasks.queue_drain_tasks import (
     drain_standard_publish_queue,
     expire_stale_queue_items,
 )
+from app.modules.newspaper.tasks.x_search_sweep_tasks import sweep_x_search_weekly
 
 __all__ = [
     "apply_recomposed_article",
@@ -36,4 +37,5 @@ __all__ = [
     "recompose_published",
     "recompose_review",
     "recompose_session_service",
+    "sweep_x_search_weekly",
 ]

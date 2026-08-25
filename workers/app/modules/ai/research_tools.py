@@ -7,10 +7,13 @@
 - search_bluesky: free public Bluesky post search for community sentiment.
   Public AppView needs no auth. Bluesky is a public host, so it rides the SSRF
   guard like any other untrusted fetch.
-- search_x: paid X (Twitter) recent-search, opt-in (X_SEARCH_ENABLED +
-  X_BEARER_TOKEN both required to register). Fixed result count + a daily
-  Redis-backed call budget + a per-session cap keep spend predictable -- see
-  config.X_SEARCH_ENABLED's comment for the full picture.
+- search_x: reads this week's scheduled X (Twitter) search sweep, opt-in
+  (X_SEARCH_ENABLED required to register). Redesigned 2026-08-25 from a live
+  per-compose API call into a read against a weekly Cassandra cache
+  (x_search_weekly, populated by x_search_sweep.py's Celery beat task) --
+  compose no longer spends money on this at all. See config.X_SEARCH_ENABLED's
+  comment for the full picture, and _x_search_live below for the one place
+  that still calls X's API (the sweep, never the writer).
 
 Every handler is failure-tolerant: an error returns {"error": ...} and never
 aborts the article.
@@ -26,6 +29,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import httpx
+
+    from app.modules.newspaper.x_search_store import XSearchSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -169,35 +174,23 @@ def _tool_search_bluesky(query: str, limit: int = 10) -> dict[str, Any]:
 _X_SEARCH_BASE = "https://api.x.com/2/tweets/search/recent"
 # X bills per RESULT RETURNED (pay-as-you-go, $0.005/resource quoted
 # 2026-08-21), charged the moment X's API sends it back -- truncating text
-# in the response we hand to the model does NOT reduce cost, only
-# max_results (how many posts we ask for) and the call count do. Fixed at
-# X's own API minimum for recent-search and deliberately not
-# model-adjustable, so per-call cost is small and predictable ($0.05/call at
-# 10 results). See config.X_SEARCH_ENABLED's comment for the full control
-# picture (this cap + the daily call budget below + a per-session call cap
-# in llm_openai_compatible.py's _CALL_CAPPED_TOOLS).
+# in the response does NOT reduce cost, only max_results (how many posts we
+# ask for) and the call count do. Fixed at X's own API minimum for
+# recent-search and deliberately not model-adjustable, so each sweep call's
+# cost is small and predictable ($0.05/call at 10 results). See
+# config.X_SEARCH_ENABLED's comment for the full control picture.
 _X_SEARCH_MAX_RESULTS = 10
 
-
-def _x_daily_cap_reserve() -> tuple[bool, int, int]:
-    """Atomically reserve one call against today's X search budget. Returns (allowed, count_after, cap). Same INCR+EXPIRE pattern as publish_daily_guard.py -- INCR first, decrement back out if that pushed past the cap, so concurrent callers never both slip through under the limit."""
-    import redis
-
-    from app.core.config import REDIS_URL, X_SEARCH_DAILY_CAP
-
-    day = __import__("datetime").datetime.now(tz=__import__("datetime").UTC).strftime("%Y-%m-%d")
-    key = f"news:x_search_count:{day}"
-    client = redis.from_url(REDIS_URL, decode_responses=True)
-    count = int(client.incr(key))
-    client.expire(key, 90_000)  # a bit over 24h, same margin as the publish-slot cap
-    if count > X_SEARCH_DAILY_CAP:
-        client.decr(key)
-        return False, count - 1, X_SEARCH_DAILY_CAP
-    return True, count, X_SEARCH_DAILY_CAP
+# Tokens too generic to identify a specific tracked service on their own --
+# stripped before matching a writer's free-text query against a stored
+# snapshot's display_name/service_id, same reasoning as writer_tools.py's
+# _GENERIC_TOKENS (a shared "algorand" alone would false-match nearly every
+# tracked service).
+_X_MATCH_STOPWORDS = frozenset({"the", "a", "an", "and", "of", "for", "on", "algorand", "algo"})
 
 
-def _tool_search_x(query: str) -> dict[str, Any]:
-    """Search recent public X (Twitter) posts -- many Algorand ecosystem projects announce primarily on X rather than Bluesky. Paid per call (X's pay-as-you-go API), so this is capped hard: a fixed small result count and a daily call budget shared across every article composed today. Treat results as social opinion/announcement, never cited as established fact on its own."""
+def _x_search_live(query: str) -> dict[str, Any]:
+    """Live X (Twitter) recent-search call -- used ONLY by the weekly sweep task (x_search_sweep.py), never at compose/writer time. See _tool_search_x for the compose-time reader that serves cached weekly results instead of calling X directly."""
     from app.core.config import X_BEARER_TOKEN, X_SEARCH_ENABLED
     from app.core.net_guard import guarded_get
 
@@ -206,13 +199,6 @@ def _tool_search_x(query: str) -> dict[str, Any]:
         return {"query": query, "posts": []}
     if not X_SEARCH_ENABLED or not X_BEARER_TOKEN:
         return {"query": query, "error": "X search not configured", "posts": []}
-    allowed, count, cap = _x_daily_cap_reserve()
-    if not allowed:
-        return {
-            "query": query,
-            "error": f"X search daily budget reached ({cap} calls) -- try again tomorrow",
-            "posts": [],
-        }
     try:
         resp = guarded_get(
             _X_SEARCH_BASE,
@@ -245,13 +231,79 @@ def _tool_search_x(query: str) -> dict[str, Any]:
                 "url": f"https://x.com/i/web/status/{pid}" if pid else "",
             }
         )
-    result: dict[str, Any] = {
+    return {"query": query, "count": len(posts), "posts": posts}
+
+
+def _tokenize_for_x_match(text: str) -> set[str]:
+    return {t for t in re.split(r"[^a-z0-9]+", (text or "").lower()) if t and t not in _X_MATCH_STOPWORDS}
+
+
+def _best_x_search_match(
+    query: str, snapshots: list[XSearchSnapshot]
+) -> XSearchSnapshot | None:
+    """Best-effort match of a writer's free-text query onto one tracked service's stored snapshot, by shared non-generic token overlap (same shape as writer_tools.py's _match_existing_tool) -- a service's snapshot rather than a full-text search index, since the sweep only ever covers known ecosystem services, not arbitrary topics. A token-subset match (e.g. query 'Folks Finance liquidations' containing display_name 'Folks Finance' whole) scores a bonus over plain overlap, since that's the strongest signal a query is actually about that service."""
+    q_tokens = _tokenize_for_x_match(query)
+    if not q_tokens:
+        return None
+    best = None
+    best_score = 0
+    for snap in snapshots:
+        name_tokens = _tokenize_for_x_match(snap.display_name) | _tokenize_for_x_match(snap.service_id)
+        if not name_tokens:
+            continue
+        overlap = q_tokens & name_tokens
+        score = len(overlap)
+        if score and (name_tokens <= q_tokens or q_tokens <= name_tokens):
+            score += 1
+        if score > best_score:
+            best_score = score
+            best = snap
+    return best if best_score > 0 else None
+
+
+def _tool_search_x(query: str) -> dict[str, Any]:
+    """Search this week's swept X (Twitter) posts for a TRACKED Algorand ecosystem service -- results come from a weekly scheduled sweep of known services (service_registry), not a live arbitrary search, so this only ever covers ecosystem projects the newsroom already tracks. Treat results as social opinion/announcement, never cited as established fact on their own."""
+    from app.core.config import X_SEARCH_ENABLED
+
+    q = (query or "").strip()
+    if not q:
+        return {"query": query, "posts": []}
+    if not X_SEARCH_ENABLED:
+        return {"query": query, "error": "X search not configured", "posts": []}
+    try:
+        from app.modules.newspaper.x_search_store import list_snapshots
+
+        snapshots = list_snapshots()
+    except Exception as exc:
+        return {"query": query, "error": str(exc)[:200], "posts": []}
+
+    match = _best_x_search_match(q, snapshots)
+    if match is None:
+        result: dict[str, Any] = {
+            "query": query,
+            "error": (
+                "no tracked service matches this query -- search_x now reads a "
+                "weekly sweep of known Algorand ecosystem services rather than an "
+                "arbitrary live search, so it can only answer for a project already "
+                "in the service registry"
+            ),
+            "posts": [],
+        }
+        sample = sorted({s.display_name for s in snapshots if s.display_name})[:8]
+        if sample:
+            result["tracked_services_sample"] = sample
+        return result
+
+    posts = list(match.posts)[:_X_SEARCH_MAX_RESULTS]
+    result = {
         "query": query,
+        "matched_service": match.display_name or match.service_id,
+        "swept_at": match.swept_at.isoformat() if match.swept_at else None,
         "count": len(posts),
         "posts": posts,
-        "daily_calls_used": count,
-        "daily_call_cap": cap,
     }
+    if match.error and not posts:
+        result["sweep_error"] = match.error
     # Root-caused 2026-08-21 (HesabPay/Movement article): the writer cited a
     # single reply with 0 likes/0 reposts/0 replies as "Algorand community
     # members noticed" -- a real post, but the engagement numbers right next
@@ -259,7 +311,7 @@ def _tool_search_x(query: str) -> dict[str, Any]:
     # every result genuinely IS low-engagement) is more reliable than a
     # static schema warning, since it responds to the actual numbers instead
     # of hoping the model remembers a general instruction.
-    if posts and max((p["likes"] + p["reposts"] + p["replies"]) for p in posts) < 3:
+    if posts and max((p.get("likes", 0) + p.get("reposts", 0) + p.get("replies", 0)) for p in posts) < 3:
         result["engagement_note"] = (
             "Every result has minimal engagement (under 3 combined likes/reposts/"
             "replies). Cite a specific post only if its CONTENT is genuinely useful "
@@ -321,19 +373,20 @@ _X_SEARCH_SCHEMA = {
     "function": {
         "name": "search_x",
         "description": (
-            "Search recent public X (Twitter) posts for a topic -- many Algorand "
-            "ecosystem projects announce primarily on X rather than Bluesky. Paid "
-            "per call and rationed by a daily budget shared across every article "
-            "composed today, so use it only when the story's value genuinely "
-            "depends on an X-only signal (an announcement, a stated reason, "
-            "community reaction) that search_bluesky and search_web could not "
-            "surface. Always returns exactly 10 most-recent matching posts, each "
-            "with likes/reposts/replies -- cite a specific post only when it is "
-            "genuinely useful to the article, and check its engagement before "
-            "framing it as a reaction: a single reply with 0 likes/0 reposts is "
-            "one account's opinion, not 'the community' or 'users'. Treat results "
-            "as social opinion/announcement, never cited as established fact on "
-            "their own."
+            "Recent public X (Twitter) posts about a TRACKED Algorand ecosystem "
+            "service -- many projects announce primarily on X rather than Bluesky. "
+            "Backed by a weekly scheduled sweep of known services (not a live "
+            "search), so this only answers for a project already tracked by the "
+            "newsroom -- name the service/project directly in the query (e.g. its "
+            "product name) rather than a generic topic. Free to call (no live API "
+            "cost), but still capped per session since a miss doesn't get better by "
+            "rephrasing the query many times. Up to 10 most-recent matching posts "
+            "from the last sweep, each with likes/reposts/replies -- cite a "
+            "specific post only when it is genuinely useful to the article, and "
+            "check its engagement before framing it as a reaction: a single reply "
+            "with 0 likes/0 reposts is one account's opinion, not 'the community' "
+            "or 'users'. Treat results as social opinion/announcement, never cited "
+            "as established fact on their own."
         ),
         "parameters": {
             "type": "object",
@@ -3652,9 +3705,13 @@ def research_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if BLUESKY_SEARCH_ENABLED and bsky_ready:
         schemas.append(_BLUESKY_SCHEMA)
         handlers["search_bluesky"] = _tool_search_bluesky
-    from app.core.config import X_BEARER_TOKEN, X_SEARCH_ENABLED
+    from app.core.config import X_SEARCH_ENABLED
 
-    if X_SEARCH_ENABLED and X_BEARER_TOKEN:
+    # No X_BEARER_TOKEN check here (unlike before 2026-08-25): the tool now
+    # only ever reads the weekly-swept Cassandra cache, never calls X
+    # directly -- the token is needed by the sweep task alone. Gating on
+    # X_SEARCH_ENABLED still keeps this the feature's single master switch.
+    if X_SEARCH_ENABLED:
         schemas.append(_X_SEARCH_SCHEMA)
         handlers["search_x"] = _tool_search_x
     from app.core.config import TELEGRAM_BOT_TOKEN

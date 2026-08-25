@@ -653,3 +653,11 @@ file = "backend/schema/migrations/app/073_articles_by_tag.cql"
 tier = "prod"
 status = "active"
 description = "add articles_by_tag: per-tag partition index (tag, published_at, article_id, ...feed-card columns) replacing the tag_stats 500-row-scan + feed?tag=X over-fetch-and-filter pattern; list-SAI on articles.tags evaluated and rejected (no ORDER BY with a 2ndary-index predicate, and tag_stats needs the distinct-tag universe which SAI can't answer either) -- see shared/algorand_shared/article_tag_index.py for the write-path"
+
+[[migrations]]
+stream = "app"
+version = "074"
+file = "backend/schema/migrations/app/074_x_search_weekly.cql"
+tier = "prod"
+status = "active"
+description = "add x_search_weekly: per-service cache of the weekly X (Twitter) search sweep, superseded each run, read by the search_x writer tool instead of a live per-compose API call"

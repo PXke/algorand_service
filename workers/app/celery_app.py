@@ -140,6 +140,22 @@ def _build_beat_schedule() -> dict:
                 day_of_week=os.getenv("PRICE_ANALYSIS_CRON_DOW", "mon"),
             ),
         }
+    # search_x's data source (redesigned 2026-08-25 from a live per-compose
+    # call): gated on X_SEARCH_ENABLED the same way WEEKLY_DIGEST_ENABLED
+    # above gates its own beat entry -- X_SEARCH_ENABLED is the feature's
+    # master kill switch (see config.py), now controlling this weekly sweep
+    # rather than a live call path. run_x_search_weekly_sweep() re-checks
+    # the same flag itself, so a manual/admin trigger of the task also stays
+    # a no-op when the feature is off.
+    if os.getenv("X_SEARCH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}:
+        schedule["x-search-weekly-sweep"] = {
+            "task": "app.tasks.newspaper.sweep_x_search_weekly",
+            "schedule": crontab(
+                minute=int(os.getenv("X_SEARCH_SWEEP_CRON_MINUTE", "0")),
+                hour=int(os.getenv("X_SEARCH_SWEEP_CRON_HOUR", "8")),
+                day_of_week=os.getenv("X_SEARCH_SWEEP_CRON_DOW", "sun"),
+            ),
+        }
     if is_crawler_enabled(CrawlerType.METRICS):
         schedule["collect-price-metrics"] = {
             "task": "app.tasks.metrics.collect_price_metrics",
