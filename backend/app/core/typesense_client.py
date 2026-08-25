@@ -7,6 +7,8 @@ import logging
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from algorand_shared.glossary_refs import extract_glossary_slugs
+
 from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
 from app.core.config import settings
 
@@ -49,7 +51,11 @@ def _translation_field_defs() -> list[dict[str, object]]:
     for lang in ARTICLE_TRANSLATION_LANGS:
         locale = lang if lang in _CJK_LOCALE_HINTS else None
         for base in ("title", "summary", "body"):
-            field: dict[str, object] = {"name": f"{base}_{lang}", "type": "string", "optional": True}
+            field: dict[str, object] = {
+                "name": f"{base}_{lang}",
+                "type": "string",
+                "optional": True,
+            }
             if locale:
                 field["locale"] = locale
             fields.append(field)
@@ -65,6 +71,12 @@ ARTICLES_SCHEMA = {
         {"name": "tokens", "type": "string[]", "optional": True},
         {"name": "service_id", "type": "string", "facet": True},
         {"name": "published_at", "type": "int64", "sort": True},
+        # Slugs of glossary terms this article links (English body + every
+        # translated body, unioned -- see algorand_shared.glossary_refs).
+        # Facet+optional so a glossary term page can filter
+        # `glossary_slugs:=slug` to list referencing articles, and older
+        # documents indexed before this field existed just don't match it.
+        {"name": "glossary_slugs", "type": "string[]", "facet": True, "optional": True},
         *_translation_field_defs(),
     ],
     "default_sorting_field": "published_at",
@@ -144,6 +156,7 @@ def ensure_articles_collection() -> bool:
     if client is not None:
         _ensure_tokens_field(client)
         _ensure_translation_fields(client)
+        _ensure_glossary_slugs_field(client)
         ensure_article_search_synonyms(client)
     return True
 
@@ -167,6 +180,20 @@ def _ensure_translation_fields(client: typesense.Client) -> None:
         # Fields already exist, or the collection was just created with the
         # current schema (which already includes them).
         logger.debug("translation field patch skipped", exc_info=True)
+
+
+def _ensure_glossary_slugs_field(client: typesense.Client) -> None:
+    """Add the optional glossary_slugs field to collections created before it existed (same patch pattern as tokens/translation fields)."""
+    try:
+        client.collections[ARTICLES_COLLECTION].update(
+            {
+                "fields": [
+                    {"name": "glossary_slugs", "type": "string[]", "facet": True, "optional": True}
+                ]
+            }
+        )
+    except Exception:
+        logger.debug("glossary_slugs field patch skipped", exc_info=True)
 
 
 def _translation_document_fields(translations: dict[str, str] | None) -> dict[str, str]:
@@ -248,6 +275,7 @@ def upsert_article_document(
         return
     try:
         ensure_articles_collection()
+        translation_fields = _translation_document_fields(translations)
         document = {
             "id": article_id,
             "title": title,
@@ -255,8 +283,11 @@ def upsert_article_document(
             "body": body,
             "service_id": service_id,
             "published_at": published_at_epoch,
+            "glossary_slugs": extract_glossary_slugs(
+                body, *(v for k, v in translation_fields.items() if k.startswith("body_"))
+            ),
         }
-        document.update(_translation_document_fields(translations))
+        document.update(translation_fields)
         client.collections[ARTICLES_COLLECTION].documents.upsert(document)
     except Exception:
         logger.warning("typesense_article_upsert_failed id=%s", article_id, exc_info=True)

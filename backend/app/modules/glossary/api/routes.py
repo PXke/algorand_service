@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+from app.core import serialization
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_response
 from app.core.query_params import query_param
@@ -32,7 +33,23 @@ def get_glossary_term(request: Request) -> Response:
     return asdict(term)
 
 
+def list_glossary_term_articles(request: Request) -> Response:
+    """Published articles that reference this glossary term (by stable slug, not display text -- see SearchService.list_by_glossary_slug), for the term page's "referenced in" list."""
+    from app.modules.search.services.search_service import SearchService
+
+    slug = request.path_params.get("slug", "").strip().lower()
+    if not slug:
+        return json_error_response(400, "invalid_request", "slug required")
+    lang = query_param(request.query_params.get("lang", "")) or None
+    limit_param = query_param(request.query_params.get("limit", "20"))
+    limit = int(limit_param) if limit_param.isdigit() else 20
+    limit = min(max(1, limit), 50)
+    items = SearchService().list_by_glossary_slug(slug, limit=limit, lang=lang)
+    return {"items": serialization.to_builtins(items)}
+
+
 def register_glossary_routes(app: Router) -> None:
     """Attach the public glossary JSON API to the app."""
     app.get("/api/v1/glossary")(list_glossary)
     app.get("/api/v1/glossary/:slug")(get_glossary_term)
+    app.get("/api/v1/glossary/:slug/articles")(list_glossary_term_articles)

@@ -1,10 +1,125 @@
 <script lang="ts">
   import { marked, Renderer } from 'marked'
   import type { Attachment } from 'svelte/attachments'
+  import { get } from 'svelte/store'
   import { looksLikeFaviconUrl, proxiedImageUrl, sameImageUrl } from '../lib/images'
   import { renderChartHtml } from '../lib/chartRender'
+  import { glossaryApi, type GlossaryTerm } from '../lib/api/glossary'
+  import { activeLocale, messages, t } from '../lib/i18n'
+  import { navigate } from '../lib/router'
+  import Icon from './Icon.svelte'
 
   let { source = '', skipHref = '' }: { source?: string; skipHref?: string } = $props()
+
+  // Resolved glossary entries are small (a name + a sentence or two) and
+  // rarely change mid-session -- cache across every Markdown instance on the
+  // page (an article body can link the same term several times, and admin
+  // preview tabs re-render on every keystroke) rather than refetching.
+  const glossaryEntryCache = new Map<string, GlossaryTerm>()
+
+  let wrapEl: HTMLDivElement | undefined = $state()
+  let popoverSlug: string | null = $state(null)
+  let popoverPos: { top: number; left: number } | null = $state(null)
+  let popoverFallback: { term: string; definition: string } | null = $state(null)
+  let popoverEntry: GlossaryTerm | null = $state(null)
+  let popoverLoading = $state(false)
+  let popoverFailed = $state(false)
+
+  function closeGlossaryPopover(): void {
+    popoverSlug = null
+    popoverPos = null
+    popoverFallback = null
+    popoverEntry = null
+    popoverLoading = false
+    popoverFailed = false
+  }
+
+  // Source changes (recompose, admin preview edits, article navigation)
+  // invalidate any open popover's anchor position.
+  $effect(() => {
+    void source
+    closeGlossaryPopover()
+  })
+
+  $effect(() => {
+    if (!popoverSlug) return
+    const onPointerDown = (e: PointerEvent) => {
+      const node = e.target
+      if (node instanceof Node && wrapEl?.contains(node)) return
+      closeGlossaryPopover()
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeGlossaryPopover()
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  })
+
+  async function openGlossaryPopover(anchor: HTMLAnchorElement): Promise<void> {
+    const slug = anchor.dataset.glossarySlug
+    if (!slug || !wrapEl) return
+    const rect = anchor.getBoundingClientRect()
+    const wrapRect = wrapEl.getBoundingClientRect()
+    popoverSlug = slug
+    popoverPos = { top: rect.bottom - wrapRect.top + 8, left: rect.left - wrapRect.left }
+    popoverFallback = { term: anchor.textContent ?? '', definition: anchor.title ?? '' }
+    popoverFailed = false
+    const cached = glossaryEntryCache.get(slug)
+    if (cached) {
+      popoverEntry = cached
+      return
+    }
+    popoverEntry = null
+    popoverLoading = true
+    try {
+      const entry = await glossaryApi.fetchTerm(slug, get(activeLocale))
+      glossaryEntryCache.set(slug, entry)
+      if (popoverSlug === slug) popoverEntry = entry
+    } catch {
+      if (popoverSlug === slug) popoverFailed = true
+    } finally {
+      if (popoverSlug === slug) popoverLoading = false
+    }
+  }
+
+  /** Click delegate for the whole rendered body: only glossary term links get
+      the popover treatment. A plain left click opens/closes it in place; any
+      modified click (new tab, new window, context menu) is left completely
+      alone so the underlying page keeps working for anyone who wants it. */
+  function onContainerClick(event: MouseEvent): void {
+    const target = event.target
+    // A click that lands inside the popover itself (its text, padding, or a
+    // button that isn't a glossary link) must not fall through to the
+    // "close on any other click" branch below -- that branch exists for
+    // clicks elsewhere in the article, not for the popover's own content.
+    if (target instanceof Element && target.closest('.glossary-popover')) return
+    const anchor =
+      target instanceof Element ? target.closest<HTMLAnchorElement>('a.glossary-term') : null
+    if (!anchor) {
+      if (popoverSlug) closeGlossaryPopover()
+      return
+    }
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return
+    }
+    event.preventDefault()
+    if (popoverSlug === anchor.dataset.glossarySlug) {
+      closeGlossaryPopover()
+    } else {
+      void openGlossaryPopover(anchor)
+    }
+  }
+
+  function viewFullGlossaryEntry(): void {
+    if (!popoverSlug) return
+    const slug = popoverSlug
+    closeGlossaryPopover()
+    navigate(`/glossary/${encodeURIComponent(slug)}`)
+  }
 
   function hostOf(url: string): string {
     try {
@@ -185,6 +300,19 @@
       if (href && /^https?:\/\//i.test(href)) {
         return out.replace('<a ', '<a target="_blank" rel="noopener noreferrer" ')
       }
+      // Glossary auto-linker output (workers glossary_linker.py):
+      // `[term](/glossary/slug "definition")`. Tagged with its own class +
+      // slug so it can be styled apart from a citation link and, on click,
+      // opened as an in-page popover instead of a full navigation (see
+      // openGlossaryPopover below) -- the plain href/title stay in the
+      // markup so the page still works with JS off or on a modified click.
+      const glossaryMatch = href ? href.match(/^\/glossary\/([a-z0-9-]+)\/?$/i) : null
+      if (glossaryMatch) {
+        return out.replace(
+          '<a ',
+          `<a class="glossary-term" data-glossary-slug="${esc(glossaryMatch[1])}" `,
+        )
+      }
       return out
     }
 
@@ -215,8 +343,42 @@
 </script>
 
 {#if html}
-  <div class="md" {@attach markOverflow(html)}>
-    {@html html}
+  <div class="md-wrap" bind:this={wrapEl} onclick={onContainerClick} role="presentation">
+    <div class="md" {@attach markOverflow(html)}>
+      {@html html}
+    </div>
+    {#if popoverSlug && popoverPos}
+      {@const shown = popoverEntry ?? popoverFallback}
+      <div
+        class="glossary-popover"
+        style="top: {popoverPos.top}px; left: {popoverPos.left}px"
+        role="dialog"
+        aria-label={shown?.term ?? ''}
+      >
+        <button
+          type="button"
+          class="glossary-popover-close"
+          onclick={closeGlossaryPopover}
+          aria-label={t($messages, 'close')}
+        >
+          <Icon name="close" size={14} />
+        </button>
+        <p class="kicker glossary-popover-kicker">{t($messages, 'navGlossary')}</p>
+        <p class="glossary-popover-term">{shown?.term ?? ''}</p>
+        <p class="glossary-popover-def">
+          {shown?.definition ?? ''}
+          {#if popoverLoading && !popoverEntry}<span class="glossary-popover-loading"
+              >…</span
+            >{/if}
+        </p>
+        {#if popoverFailed && !popoverEntry}
+          <p class="glossary-popover-def muted">{t($messages, 'errorGeneric')}</p>
+        {/if}
+        <button type="button" class="glossary-popover-link" onclick={viewFullGlossaryEntry}>
+          {t($messages, 'glossaryViewEntry')}<span aria-hidden="true"> →</span>
+        </button>
+      </div>
+    {/if}
   </div>
 {/if}
 
@@ -341,6 +503,18 @@
   }
   .md :global(a:hover) {
     text-decoration-color: var(--accent);
+  }
+
+  /* Glossary auto-links read as "opens a definition", not "leaves the
+     article" -- a dotted underline instead of the citation/source solid
+     one, same accent ink so it still reads as a link. The native `title`
+     attribute (set by glossary_linker.py) still gives a hover preview for
+     free; click opens the richer in-page popover below. */
+  .md :global(a.glossary-term) {
+    text-decoration-style: dotted;
+    text-decoration-thickness: 1.6px;
+    text-underline-offset: 3px;
+    cursor: pointer;
   }
 
   /* Pull quote: italic serif between hairlines — type, not a callout bar. */
@@ -734,5 +908,107 @@
     .md :global(.table-hint) {
       transition: none;
     }
+  }
+
+  /* Anchors the glossary popover to the article flow instead of the
+     viewport, so it scrolls with the text it's attached to. */
+  .md-wrap {
+    position: relative;
+  }
+
+  /* Same "floating card over prose" pattern as AnnotatedMarkdown's
+     comment-popover (the site's one other inline-in-body popover), themed
+     with the mono kicker + accent square used everywhere else a strip of
+     machine-stamped metadata sits above hand-set type (masthead dateline,
+     AppShell's nav popover-hint, this page's own .kicker headers). */
+  .glossary-popover {
+    position: absolute;
+    z-index: 5;
+    width: min(300px, 84vw);
+    padding: 14px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    animation: glossary-pop-in 0.15s ease both;
+  }
+  @keyframes glossary-pop-in {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .glossary-popover {
+      animation: none;
+    }
+  }
+  .glossary-popover-close {
+    position: absolute;
+    top: 8px;
+    inset-inline-end: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+  }
+  .glossary-popover-close:hover {
+    color: var(--accent);
+  }
+  .glossary-popover-kicker {
+    display: flex;
+    align-items: center;
+    padding-inline-end: 24px;
+  }
+  .glossary-popover-kicker::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-inline-end: 8px;
+    background: var(--accent);
+  }
+  .glossary-popover-term {
+    margin: 6px 0 0;
+    font-family: var(--font-display);
+    font-size: 1.02rem;
+    font-weight: 700;
+    color: var(--on-surface);
+  }
+  .glossary-popover-def {
+    margin: 6px 0 0;
+    font-family: var(--font-serif);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    color: var(--md-ink);
+  }
+  .glossary-popover-loading {
+    color: var(--muted);
+  }
+  .glossary-popover-link {
+    display: inline-flex;
+    margin-top: 10px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .glossary-popover-link:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 </style>

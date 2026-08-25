@@ -197,3 +197,72 @@ def test_search_typesense_parses_highlights(monkeypatch: pytest.MonkeyPatch) -> 
     assert result.engine == "typesense"
     assert len(result.items) == 1
     assert result.items[0].snippet == "the <mark>governance</mark> proposal passed"
+
+
+def test_list_by_glossary_slug_filters_and_sorts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Queries the glossary_slugs field (not term text), newest first -- the "referenced in" list on a glossary term page."""
+
+    class _FakeDocuments:
+        def search(self, params: dict) -> dict:
+            assert params["filter_by"] == "glossary_slugs:=arc-27"
+            assert params["sort_by"] == "published_at:desc"
+            return {
+                "hits": [
+                    {
+                        "document": {
+                            "id": "a1",
+                            "title": "Wallets adopt ARC-27",
+                            "summary": "Summary",
+                            "service_id": "svc",
+                            "published_at": 1700000000,
+                        }
+                    }
+                ]
+            }
+
+    class _FakeCollection:
+        documents = _FakeDocuments()
+
+    class _FakeCollections:
+        def __getitem__(self, _name: str) -> _FakeCollection:
+            return _FakeCollection()
+
+    class _FakeClient:
+        collections = _FakeCollections()
+
+    monkeypatch.setattr(
+        "app.modules.search.services.search_service.get_typesense_client",
+        lambda: _FakeClient(),
+    )
+    monkeypatch.setattr(
+        "app.modules.search.services.search_service.ensure_articles_collection",
+        lambda: True,
+    )
+    items = SearchService(
+        news_service=NewsService(store=InMemoryArticleStore())
+    ).list_by_glossary_slug("arc-27")
+    assert len(items) == 1
+    assert items[0].article_id == "a1"
+    assert items[0].title == "Wallets adopt ARC-27"
+
+
+def test_list_by_glossary_slug_empty_when_typesense_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No feed-scan fallback for the cross-reference list -- unavailable Typesense means an empty (not erroring) list."""
+    monkeypatch.setattr(
+        "app.modules.search.services.search_service.get_typesense_client",
+        lambda: None,
+    )
+    items = SearchService(
+        news_service=NewsService(store=InMemoryArticleStore())
+    ).list_by_glossary_slug("arc-27")
+    assert items == []
+
+
+def test_list_by_glossary_slug_blank_slug_short_circuits() -> None:
+    """A blank/whitespace-only slug returns empty without touching Typesense at all."""
+    items = SearchService(
+        news_service=NewsService(store=InMemoryArticleStore())
+    ).list_by_glossary_slug("  ")
+    assert items == []

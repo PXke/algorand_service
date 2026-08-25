@@ -82,6 +82,61 @@ class SearchService:
             logger.exception("Feed scan search failed")
             return SearchResponse(query=q, engine="error", items=[])
 
+    def list_by_glossary_slug(
+        self, slug: str, *, limit: int = 20, lang: str | None = None
+    ) -> list[SearchHit]:
+        """Published articles whose body links this glossary term -- the "referenced in" list on a glossary term page.
+
+        Filters on the stable `glossary_slugs` field (see
+        algorand_shared.glossary_refs / indexer.py's upsert_article_document),
+        not on term text, so this works identically for every locale: a
+        French reader's article body carries French anchor text but the same
+        `/glossary/slug` href, and that's what got indexed. Typesense-only --
+        unlike `search()` there's no feed-scan fallback (a feed scan would
+        have to re-run the same body regex per request across every stored
+        article/translation, which is real work for what is a supplementary
+        "see also" list, not the page's own content) -- so this simply
+        returns an empty list when Typesense is unavailable rather than
+        raising or degrading the glossary page itself.
+        """
+        slug = slug.strip()
+        if not slug:
+            return []
+        client = get_typesense_client()
+        if client is None or not ensure_articles_collection():
+            return []
+        norm_lang = _normalize_lang(lang)
+        try:
+            result = client.collections[ARTICLES_COLLECTION].documents.search(
+                {
+                    "q": "*",
+                    "query_by": "title",
+                    "filter_by": f"glossary_slugs:={slug}",
+                    "sort_by": "published_at:desc",
+                    "per_page": max(1, min(limit, 100)),
+                }
+            )
+        except Exception as exc:
+            logger.warning("Typesense glossary cross-reference query failed slug=%s: %s", slug, exc)
+            return []
+        hits: list[SearchHit] = []
+        for found in result.get("hits", []):
+            doc = found.get("document", {})
+            title = str((norm_lang and doc.get(f"title_{norm_lang}")) or doc.get("title", ""))
+            summary = str((norm_lang and doc.get(f"summary_{norm_lang}")) or doc.get("summary", ""))
+            hits.append(
+                SearchHit(
+                    article_id=str(doc.get("id", "")),
+                    title=title,
+                    summary=summary,
+                    service_id=doc.get("service_id"),
+                    published_at_epoch=int(doc["published_at"])
+                    if doc.get("published_at") is not None
+                    else None,
+                )
+            )
+        return hits[:limit]
+
     def _search_typesense(
         self,
         client: typesense.Client,
