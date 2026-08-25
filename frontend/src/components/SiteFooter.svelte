@@ -54,11 +54,6 @@
               target="_blank"
               rel="noopener noreferrer">Bluesky</a
             >
-            <a
-              href="https://mastodon.social/@pxkealgorandnews"
-              target="_blank"
-              rel="noopener noreferrer">Mastodon</a
-            >
             <a href="https://t.me/PXkeAlgorandNews" target="_blank" rel="noopener noreferrer"
               >Telegram</a
             >

@@ -7,11 +7,19 @@ without a human copy/paste step.
 
 ## Status
 
-`done` — Bluesky, Telegram, Mastodon live; Nostr not started
+`done` — Bluesky, Telegram live; Nostr not started
+
+Mastodon was removed 2026-08-25: the owner's account was banned by its
+instance for publishing AI-generated content — an active platform-policy
+violation, not a code-quality decision. The `mastodon.py` distributor, its
+`MASTODON_INSTANCE_URL` / `MASTODON_ACCESS_TOKEN` config, its dispatcher
+wiring, and the "Follow us on Mastodon" footer link were all deleted rather
+than feature-flagged off. Don't re-add without first confirming a
+replacement instance/account's AI-content policy.
 
 ## Features (should do)
 
-- `SocialDistributor` interface (`post_article` / `enabled`), one implementation per channel: `bluesky.py`, `telegram.py`, `mastodon.py`
+- `SocialDistributor` interface (`post_article` / `enabled`), one implementation per channel: `bluesky.py`, `telegram.py`
 - `dispatcher.py:distribute()` fans out to all channels, gated per-channel only by presence of credentials (no single master flag), fault-isolated — one channel failing never blocks the others
 - Wired into real publish paths via Celery task `distribute_article` (`newspaper/tasks/distribution_tasks.py`), called from `queue_drain_tasks.py` and `publish_tasks.py`
 - Not called from recompose/auto-apply by design — avoids re-posting edits
@@ -26,7 +34,7 @@ without a human copy/paste step.
 
 ## Standards & RFCs
 
-AT Protocol (Bluesky), Telegram Bot API, Mastodon API.
+AT Protocol (Bluesky), Telegram Bot API.
 
 ## Depends on
 
@@ -34,5 +42,5 @@ AT Protocol (Bluesky), Telegram Bot API, Mastodon API.
 
 ## Code map
 
-- `workers/app/modules/distribution/` (`bluesky.py`, `telegram.py`, `mastodon.py`, `dispatcher.py`)
+- `workers/app/modules/distribution/` (`bluesky.py`, `telegram.py`, `dispatcher.py`)
 - `workers/app/modules/newspaper/tasks/distribution_tasks.py`

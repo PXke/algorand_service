@@ -62,7 +62,7 @@ flowchart TD
     G -->|fails + enforce on| R[Diverted to review queue]
     G -->|passes / shadow / disabled| P[insert_article\nwrites articles_by_id + articles_feed]
     F --> P
-    P --> D[distribute_article.delay\nBluesky / Telegram / Mastodon]
+    P --> D[distribute_article.delay\nBluesky / Telegram]
     P --> X[enqueue_article_translations\n8 langs, fire-and-forget]
     D -.original-language only, no ordering dependency.- X
 ```

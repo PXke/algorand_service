@@ -5,7 +5,7 @@
 - Frontier crawler: discovery, per-URL politeness/cooldown, domain approve/reject state machine, ecosystem-directory sync, mention-based discovery — all on the Celery beat schedule
 - Chain-tail watcher: tails new Algorand rounds, matches transactions against the service registry, triggers article generation; hourly xGov proposal poll
 - Two-stage writer pipeline: research → gap-fill → write → grade → revise (Mistral), with a deterministic pre-publish gatekeeper (rule-based completeness + numeric-entailment factuality check, live in shadow/non-enforcing mode) — a ModernBERT quality/relevance head is defined alongside it but has no training or serving wiring today
-- Social auto-distribution on publish: Bluesky, Telegram, Mastodon (each gated by presence of its own credentials, fault-isolated per channel)
+- Social auto-distribution on publish: Bluesky, Telegram (each gated by presence of its own credentials, fault-isolated per channel; Mastodon removed 2026-08-25, account banned for AI-generated content)
 - Typesense indexing (event-driven, not polled): articles and crawled pages
 - Weekly digest — market + feed highlights ([weekly-price-analysis.md](../docs/modules/weekly-price-analysis.md))
 - Price metrics — CoinGecko poll + Mistral brief ([price-metrics-mistral.md](../docs/modules/price-metrics-mistral.md))
@@ -30,7 +30,7 @@ Prefer **Docker** for integration tests (Python 3.14, Cassandra, Redis): `make d
 - `app/modules/chain_tail/`: chain round watcher + xGov proposal poll → triggers article generation from chain events
 - `app/modules/newspaper/`: writer pipeline (research/compose/grade/revise), service-watch, articles, weekly digest, price analysis
 - `app/modules/gatekeeper/`: pre-publish quality/factuality gate — live deterministic rule-based gate (`live.py`), plus an unwired ModernBERT quality/relevance model+training scaffold (`model.py`, `training.py`)
-- `app/modules/distribution/`: social auto-posting (`bluesky.py`, `telegram.py`, `mastodon.py`) + dispatcher, called from the real publish paths
+- `app/modules/distribution/`: social auto-posting (`bluesky.py`, `telegram.py`) + dispatcher, called from the real publish paths
 - `app/modules/search/`: Typesense indexing tasks (article + crawled-page), distinct from the backend's `search` module
 - `app/modules/scraper/`: fetch/extract/hash brick
 - `app/modules/pipeline/`: diff and transformation brick

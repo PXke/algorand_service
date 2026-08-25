@@ -1,4 +1,4 @@
-"""Abstract base for auto-posting a published article to an external social channel (Bluesky, Telegram, ...). One method per channel to implement; the dispatcher (dispatcher.py) handles enable-checking, per-channel failure isolation, and fan-out so adding a new channel never touches an existing one."""
+"""Abstract base for auto-posting a published article to an external social channel (Bluesky, Telegram). One method per channel to implement; the dispatcher (dispatcher.py) handles enable-checking, per-channel failure isolation, and fan-out so adding a new channel never touches an existing one."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _hashtag_label(raw: str) -> str:
 
 
 def hashtags_for(tags: Sequence[str], *, limit: int = 4) -> list[str]:
-    """Deterministic tag-slug -> hashtag list, always anchored by #Algorand first (ecosystem discovery matters more than any one article's topic, especially on Mastodon where hashtags ARE the discovery mechanism — no site-wide full-text search there). Deduped case-insensitively so an article already tagged "algorand" doesn't produce #Algorand twice."""
+    """Deterministic tag-slug -> hashtag list, always anchored by #Algorand first (ecosystem discovery matters more than any one article's topic). Deduped case-insensitively so an article already tagged "algorand" doesn't produce #Algorand twice."""
     seen: set[str] = set()
     out: list[str] = []
     for raw in ("algorand", *tags):
