@@ -6,6 +6,8 @@ import contextlib
 import email
 import hashlib
 import imaplib
+import logging
+from collections.abc import Callable
 from email.header import decode_header
 
 from app.core.config import (
@@ -16,6 +18,8 @@ from app.core.config import (
     MAIL_IMAP_USER,
 )
 from app.modules.scraper.core.base import ScrapeResult
+
+logger = logging.getLogger(__name__)
 
 
 class MailScraperError(Exception):
@@ -38,8 +42,30 @@ def decode_mime_header(value: str | None) -> str:
     return "".join(out).strip()
 
 
-def fetch_unread_messages(*, limit: int = 20) -> list[dict[str, str]]:
-    """Fetch recent UNSEEN messages from configured IMAP mailbox."""
+def poll_unread_messages(
+    *,
+    limit: int = 20,
+    on_message: Callable[[dict[str, str]], bool],
+) -> list[dict[str, str]]:
+    r"""Fetch recent UNSEEN messages one at a time and hand each to `on_message`.
+
+    Uses ``BODY.PEEK[]`` rather than ``RFC822`` to fetch a message's body --
+    per IMAP spec, fetching the full ``RFC822`` form implicitly sets the
+    server-side ``\\Seen`` flag the instant it's fetched, regardless of
+    whether the message is ever actually processed. ``BODY.PEEK[]`` fetches
+    the identical content without that side effect, so a message is only
+    marked ``\\Seen`` (via an explicit ``STORE``) after ``on_message`` returns
+    ``True`` for it. A message ``on_message`` returns ``False`` for -- or
+    that raises out of ``on_message`` entirely -- is left unseen, so it's
+    picked up again on the next poll instead of being silently lost.
+
+    ``on_message`` is called once per fetched message with
+    ``{"uid", "from", "subject", "text"}`` and should return whether it was
+    processed successfully. If it raises, the exception is caught here so
+    the rest of the batch still gets attempted (callers that want finer
+    control over their own error handling/logging should catch inside
+    ``on_message`` and return ``False`` instead of letting it raise).
+    """
     if not MAIL_IMAP_HOST or not MAIL_IMAP_USER:
         return []
 
@@ -53,27 +79,43 @@ def fetch_unread_messages(*, limit: int = 20) -> list[dict[str, str]]:
         uids = data[0].split()[-limit:]
         messages: list[dict[str, str]] = []
         for uid in uids:
-            _st, fetched = client.fetch(uid, "(RFC822)")
-            if not fetched or not fetched[0]:
+            message = _fetch_message(client, uid)
+            if message is None:
                 continue
-            raw = fetched[0][1]
-            msg = email.message_from_bytes(raw)
-            subject = decode_mime_header(msg.get("Subject"))
-            from_hdr = decode_mime_header(msg.get("From"))
-            body = _extract_body(msg)
-            text = f"From: {from_hdr}\nSubject: {subject}\n\n{body}"
-            messages.append(
-                {
-                    "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
-                    "from": from_hdr,
-                    "subject": subject,
-                    "text": text,
-                }
-            )
+            messages.append(message)
+            try:
+                success = on_message(message)
+            except Exception:
+                logger.exception(
+                    "poll_unread_messages: on_message raised for uid=%s; leaving unseen",
+                    message["uid"],
+                )
+                continue
+            if success:
+                client.store(uid, "+FLAGS", "\\Seen")
         return messages
     finally:
         with contextlib.suppress(Exception):
             client.logout()
+
+
+def _fetch_message(client: imaplib.IMAP4_SSL, uid: bytes) -> dict[str, str] | None:
+    r"""Fetch and parse one message by UID via BODY.PEEK[] (does not mark it \\Seen)."""
+    _st, fetched = client.fetch(uid, "(BODY.PEEK[])")
+    if not fetched or not fetched[0]:
+        return None
+    raw = fetched[0][1]
+    msg = email.message_from_bytes(raw)
+    subject = decode_mime_header(msg.get("Subject"))
+    from_hdr = decode_mime_header(msg.get("From"))
+    body = _extract_body(msg)
+    text = f"From: {from_hdr}\nSubject: {subject}\n\n{body}"
+    return {
+        "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
+        "from": from_hdr,
+        "subject": subject,
+        "text": text,
+    }
 
 
 def _extract_body(msg: email.message.Message) -> str:
