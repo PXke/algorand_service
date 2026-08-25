@@ -223,9 +223,21 @@ def test_reevaluate_promotes_only_scored_pending_above_threshold(
         "app.modules.crawler.url_queue.enqueue_url",
         lambda url, **_kw: enqueued.append(url) or ("", True),
     )
+    service_calls = []
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.ensure_monitored_service",
+        lambda domain, **kw: service_calls.append((domain, kw)) or True,
+    )
     out = uq.reevaluate_pending_domains(limit=10)
     assert out["promoted"] == 1
     assert out["promoted_domains"] == ["good.fi"]
     assert promoted[0][0] == "good.fi"
     assert promoted[0][1]["frontier_status_override"] == "approved"
     assert enqueued == ["https://good.fi"]
+    # A retro-promote is a full automated approve, same as the discovery-time
+    # auto-approve and deep_classify_domain — it must also register the
+    # monitored source, or the domain gets crawled forever without ever
+    # reaching the publish queue (root-caused 2026-08-25: this task predates
+    # neither ensure_monitored_service nor the discovery-time fix that wired
+    # it in, but was never itself wired to it).
+    assert service_calls == [("good.fi", {"scrape_url": "https://good.fi"})]

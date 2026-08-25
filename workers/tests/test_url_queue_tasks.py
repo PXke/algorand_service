@@ -159,7 +159,12 @@ def test_sample_domain_pages_cache_miss_falls_back_to_live_fetch(
     assert pages == [("https://svc.example", "live text", ())]
 
 
-def _patch_common(monkeypatch: pytest.MonkeyPatch, driver: _FakeDriver) -> list[tuple]:
+def _patch_common(
+    monkeypatch: pytest.MonkeyPatch,
+    driver: _FakeDriver,
+    *,
+    service_calls: list[tuple] | None = None,
+) -> list[tuple]:
     import app.modules.crawler.tasks.url_queue_tasks as uq
 
     monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: driver)
@@ -169,7 +174,92 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, driver: _FakeDriver) -> list[
         "app.modules.crawler.domain_tracker.update_domain_status",
         lambda domain, **kw: calls.append((domain, kw)),
     )
+    # ensure_monitored_service does real Cassandra/session work with no
+    # network available in tests — stub it out (and, when the caller wants
+    # to assert on it, record the calls).
+    sink = service_calls if service_calls is not None else []
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.ensure_monitored_service",
+        lambda domain, **kw: sink.append((domain, kw)) or True,
+    )
     return calls
+
+
+def test_deep_classify_domain_celery_name_resolves_to_the_real_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Celery task registered under "app.tasks.crawler.deep_classify_domain" must be the real deep_classify_domain (the one that writes the verdict back), not the internal crawl-only helper.
+
+    Regression test for a real bug (root-caused 2026-08-25): the
+    ``@celery_app.task(name=...)`` decorator used to sit on
+    ``_deep_crawl_for_relevance`` instead, so every escalation dispatched via
+    ``_classify_and_store_domain``'s ``send_task("app.tasks.crawler.
+    deep_classify_domain", kwargs={"domain": ..., "seed_url": ..., "max_pages":
+    ...})`` would resolve to a function that doesn't even accept ``seed_url``
+    (it takes ``landing_url``) and never calls update_domain_status — every
+    real escalation silently failed at the worker, and the domain stayed
+    stuck at frontier_status="pending" with deep_classify_queued="true"
+    forever (see _classify_and_store_domain's no-op-when-already-queued
+    check). Importing ``deep_classify_domain`` directly (as the other tests
+    in this file do) can't catch this — it has to go through the registered
+    task name the way production dispatch actually does.
+    """
+    from app.celery_app import celery_app
+
+    driver = _FakeDriver(
+        {
+            "https://svc.example": _result(
+                "https://svc.example", "algorand mainnet testnet asa" * 5, ""
+            ),
+        }
+    )
+    service_calls: list[tuple] = []
+    calls = _patch_common(monkeypatch, driver, service_calls=service_calls)
+
+    task = celery_app.tasks["app.tasks.crawler.deep_classify_domain"]
+    # The broken registration would raise TypeError here (unexpected keyword
+    # argument 'seed_url') before ever reaching the assertions below.
+    out = task(domain="svc.example", seed_url="https://svc.example", max_pages=200)
+
+    assert out["verdict"] == "approved"
+    assert calls, (
+        "the real deep_classify_domain must write the verdict back via update_domain_status"
+    )
+    assert calls[0][1]["frontier_status_override"] == "approved"
+    assert service_calls == [("svc.example", {"scrape_url": "https://svc.example"})]
+
+
+def test_classify_pending_domains_celery_name_resolves_to_the_real_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Celery task registered under "app.tasks.crawler.classify_pending_domains" must be the real orchestrator, not the small _pending_domains_to_classify fetch-helper (same misplaced-decorator bug class as deep_classify_domain, root-caused 2026-08-25).
+
+    Not currently reachable in production (nothing dispatches this task by
+    name today — the daily beat calls the real function directly, in-process,
+    from reevaluate_pending_domains), but a live trap for the next caller
+    that does. The broken registration takes ``(session, limit)`` positionally
+    and knows nothing of ``dry_run``/``auto_reject``, so calling it the way a
+    caller would reasonably expect (matching classify_pending_domains'
+    documented kwargs) would raise TypeError.
+    """
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+    from app.celery_app import celery_app
+
+    monkeypatch.setattr(
+        "app.core.cassandra.get_cassandra_session",
+        lambda: SimpleNamespace(execute=lambda _stmt, _params: [], prepare=lambda cql: cql),
+    )
+    monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: object())
+
+    task = celery_app.tasks["app.tasks.crawler.classify_pending_domains"]
+    out = task(limit=10, dry_run=True, auto_reject=False)
+
+    # Only the real classify_pending_domains returns this shape; the
+    # mis-registered helper returns a bare list of (domain, meta) tuples.
+    assert out["status"] == "ok"
+    assert out["dry_run"] is True
+    assert "scored" in out
+    assert "rejected" in out
 
 
 def test_deep_classify_domain_approves_on_first_relevant_page(
@@ -198,12 +288,20 @@ def test_deep_classify_domain_approves_on_first_relevant_page(
             ),
         }
     )
-    calls = _patch_common(monkeypatch, driver)
+    service_calls: list[tuple] = []
+    calls = _patch_common(monkeypatch, driver, service_calls=service_calls)
     out = deep_classify_domain(domain="quantoz.example", max_pages=200)
     assert out["verdict"] == "approved"
     assert out["found_at"] == "https://quantoz.example/products/eurq-usdq"
     assert calls[0][1]["is_relevant"] is True
     assert calls[0][1]["frontier_status_override"] == "approved"
+    # An automated approve must also register the monitored source (mirrors
+    # the discovery-time auto-approve in link_extractor.py) — otherwise this
+    # domain gets crawled into the research corpus forever without ever
+    # producing a publish candidate.
+    assert service_calls == [
+        ("quantoz.example", {"scrape_url": "https://quantoz.example/products/eurq-usdq"})
+    ]
 
 
 def test_deep_classify_domain_rejects_when_nothing_found_within_budget(
@@ -217,7 +315,8 @@ def test_deep_classify_domain_rejects_when_nothing_found_within_budget(
             ),
         }
     )
-    calls = _patch_common(monkeypatch, driver)
+    service_calls: list[tuple] = []
+    calls = _patch_common(monkeypatch, driver, service_calls=service_calls)
     out = deep_classify_domain(domain="offtopic.example", max_pages=200)
     assert out["verdict"] == "dead_end"
     assert out["pages_fetched"] == 1
@@ -227,6 +326,8 @@ def test_deep_classify_domain_rejects_when_nothing_found_within_budget(
     assert calls[0][1]["is_relevant"] is False
     assert calls[0][1]["frontier_status_override"] == "dead_end"
     assert calls[0][1]["metadata"]["deep_classify_exhaustive"] == "true"
+    # A reject must never register a monitored service.
+    assert service_calls == []
 
 
 def test_deep_classify_domain_stops_at_max_pages(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -509,7 +610,8 @@ def test_deep_classify_domain_approves_via_external_corroboration(
             )
         }
     )
-    calls = _patch_common(monkeypatch, driver)
+    service_calls: list[tuple] = []
+    calls = _patch_common(monkeypatch, driver, service_calls=service_calls)
     import app.modules.crawler.tasks.url_queue_tasks as uq
 
     monkeypatch.setattr(
@@ -528,3 +630,6 @@ def test_deep_classify_domain_approves_via_external_corroboration(
         calls[0][1]["metadata"]["content_relevance_url"]
         == "https://reddit.com/r/AlgorandOfficial/x"
     )
+    # Registers the monitored source at the domain's OWN landing page, not
+    # the outside corroborating URL (a Reddit post isn't on this domain).
+    assert service_calls == [("chainsilent.example", {"scrape_url": "https://chainsilent.example"})]
