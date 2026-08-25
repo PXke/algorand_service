@@ -80,6 +80,13 @@
   let pinningId = $state<string | null>(null)
   let pinError = $state<string | null>(null)
 
+  // "Redo today's picks" — clears the real, persisted to_compose selection
+  // for `day` and immediately re-runs selection, reverting any artifact it
+  // had selected back to pending first (unless it's already composed/
+  // discarded, in which case it's left alone and reported back).
+  let resetting = $state(false)
+  let resetError = $state<string | null>(null)
+
   // Row expand-in-place: which artifact's content panel is currently open
   // (at most one at a time), a per-id cache of already-fetched detail so
   // re-expanding a row doesn't refetch, and the in-flight/error state for
@@ -157,6 +164,35 @@
       pinError = e instanceof Error ? e.message : String(e)
     } finally {
       pinningId = null
+    }
+  }
+
+  async function redoPicks() {
+    if (
+      !confirm(
+        `Redo the picks for ${day}? This clears the currently locked-in selection and picks again ` +
+          'from the full pool. Any pick already turned into a composed article stays as-is — only ' +
+          'still-pending selections are undone.',
+      )
+    ) {
+      return
+    }
+    resetting = true
+    resetError = null
+    try {
+      const res = (await admin.resetToComposeForDay(day)) as Record<string, unknown>
+      const reset = (res.reset ?? {}) as Record<string, unknown>
+      const skipped = Array.isArray(reset.skipped) ? reset.skipped : []
+      onmessage?.(
+        skipped.length
+          ? `Picks redone for ${day} — ${skipped.length} already-composed/discarded pick(s) left as-is`
+          : `Picks redone for ${day}`,
+      )
+      await load()
+    } catch (e) {
+      resetError = e instanceof Error ? e.message : String(e)
+    } finally {
+      resetting = false
     }
   }
 
@@ -245,13 +281,19 @@
 
     <!-- Section 1: what has actually been selected (real to_compose rows). -->
     <section class="admin-panel stack">
-      <div class="section-head">
+      <div class="section-head row">
         <h3>Selected for {day} ({selected.length})</h3>
+        <button class="btn compact" type="button" disabled={resetting || loading} onclick={() => redoPicks()}>
+          {resetting ? 'Redoing…' : "Redo today's picks"}
+        </button>
       </div>
       <p class="admin-muted small">
         The real, persisted lineup — what the daily selection beat (00:05 UTC) actually locked in
         for this day. This is not a forecast; it only changes when that beat runs.
       </p>
+      {#if resetError}
+        <p class="admin-err">{resetError}</p>
+      {/if}
       {#if selected.length === 0}
         <p class="admin-muted empty-note">
           Nothing locked in yet — the daily selection runs at 00:05 UTC and will pick from the
@@ -610,6 +652,14 @@
     margin: 0;
     font-size: 1rem;
     font-weight: 700;
+  }
+
+  .section-head.row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
   }
 
   .empty-note {

@@ -567,6 +567,189 @@ def test_surplus_slot_beyond_the_floor_goes_to_next_highest_priority_regardless_
     assert chosen == {new_id, old_a_id, old_b_id}
 
 
+# --------------------------------------------------------------------------- #
+# reset_to_compose_for_day / reset_and_reselect_for_day (2026-08-26) -- the
+# "redo today's picks" admin action: clear a day's locked-in to_compose
+# selection, revert any still-SELECTED artifact it picked back to pending,
+# and (for the combined function) immediately re-run selection.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reset_clears_to_compose_rows_for_the_day() -> None:
+    """After a reset, the day's to_compose partition is fully empty."""
+    from app.modules.newspaper.artifact_store import insert_artifact
+    from app.modules.newspaper.to_compose_selection import (
+        list_to_compose_for_day,
+        reset_to_compose_for_day,
+        select_to_compose_for_day,
+    )
+
+    insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    insert_artifact(service_id="svc-b", url=None, channel="brief", content="b")
+    select_to_compose_for_day("2026-08-26")
+    assert list_to_compose_for_day("2026-08-26") != []
+
+    reset_to_compose_for_day("2026-08-26")
+
+    assert list_to_compose_for_day("2026-08-26") == []
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reset_reverts_still_selected_artifacts_to_pending(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """Every artifact a prior select_to_compose_for_day run picked (and left SELECTED) goes back to PENDING and is reported in reverted_to_pending."""
+    from app.modules.newspaper.artifact_store import PENDING, SELECTED, insert_artifact
+    from app.modules.newspaper.to_compose_selection import (
+        reset_to_compose_for_day,
+        select_to_compose_for_day,
+    )
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-26")
+    assert fake_artifact_session.artifacts[aid]["status"] == SELECTED
+
+    result = reset_to_compose_for_day("2026-08-26")
+
+    assert result["reverted_to_pending"] == [aid]
+    assert result["skipped"] == []
+    assert result["fully_reverted"] is True
+    assert fake_artifact_session.artifacts[aid]["status"] == PENDING
+    pending_ids = {str(r["artifact_id"]) for r in fake_artifact_session.pending.values()}
+    assert aid in pending_ids
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reset_does_not_revert_an_already_composed_artifact(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """An artifact that progressed past SELECTED to COMPOSED (drain_to_compose already ran) between the original selection and the reset must be left alone -- reported in `skipped`, never resurrected."""
+    from app.modules.newspaper.artifact_store import (
+        COMPOSED,
+        insert_artifact,
+        mark_artifact_status,
+    )
+    from app.modules.newspaper.to_compose_selection import (
+        reset_to_compose_for_day,
+        select_to_compose_for_day,
+    )
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-26")
+    mark_artifact_status(aid, COMPOSED)  # simulates drain_to_compose already having run
+
+    result = reset_to_compose_for_day("2026-08-26")
+
+    assert result["reverted_to_pending"] == []
+    assert result["skipped"] == [{"artifact_id": aid, "status": COMPOSED}]
+    assert result["fully_reverted"] is False
+    assert fake_artifact_session.artifacts[aid]["status"] == COMPOSED
+    assert fake_artifact_session.pending == {}
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reset_does_not_revert_an_already_discarded_artifact(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """Symmetric to the composed case: an artifact a pre-compose gate permanently DISCARDED after selection is also left alone, not resurrected."""
+    from app.modules.newspaper.artifact_store import (
+        DISCARDED,
+        insert_artifact,
+        mark_artifact_status,
+    )
+    from app.modules.newspaper.to_compose_selection import (
+        reset_to_compose_for_day,
+        select_to_compose_for_day,
+    )
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-26")
+    mark_artifact_status(aid, DISCARDED)
+
+    result = reset_to_compose_for_day("2026-08-26")
+
+    assert result["skipped"] == [{"artifact_id": aid, "status": DISCARDED}]
+    assert fake_artifact_session.artifacts[aid]["status"] == DISCARDED
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reset_still_clears_to_compose_even_when_a_pick_was_skipped() -> None:
+    """The to_compose rows are cleared unconditionally -- a skipped (already-progressed) artifact only blocks its OWN status revert, not the partition clear."""
+    from app.modules.newspaper.artifact_store import COMPOSED, insert_artifact, mark_artifact_status
+    from app.modules.newspaper.to_compose_selection import (
+        list_to_compose_for_day,
+        reset_to_compose_for_day,
+        select_to_compose_for_day,
+    )
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-26")
+    mark_artifact_status(aid, COMPOSED)
+
+    reset_to_compose_for_day("2026-08-26")
+
+    assert list_to_compose_for_day("2026-08-26") == []
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reset_on_a_day_with_nothing_selected_is_a_clean_noop(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """Resetting a day that was never selected (an empty to_compose partition) doesn't error -- zero cleared, zero reverted, fully_reverted True."""
+    from app.modules.newspaper.to_compose_selection import reset_to_compose_for_day
+
+    result = reset_to_compose_for_day("2026-08-26")
+
+    assert result["cleared_slots"] == 0
+    assert result["reverted_to_pending"] == []
+    assert result["skipped"] == []
+    assert result["fully_reverted"] is True
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reset_and_reselect_produces_a_fresh_valid_selection(
+    fake_artifact_session: FakeArtifactSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The combined one-button action: after reset_and_reselect_for_day, the day has a brand-new to_compose lineup drawn from the widened (reverted) pending pool -- exercising the idempotency the module docstring calls out (clearing to_compose first is what makes a second select_to_compose_for_day call for the same day safe)."""
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import (
+        SELECTED,
+        insert_artifact,
+        update_artifact_priority,
+    )
+    from app.modules.newspaper.to_compose_selection import (
+        list_to_compose_for_day,
+        reset_and_reselect_for_day,
+        select_to_compose_for_day,
+    )
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)
+
+    low_id, _ = insert_artifact(service_id="svc-low", url=None, channel="brief", content="low")
+    update_artifact_priority(low_id, 1.0)
+    select_to_compose_for_day("2026-08-26")
+    first_rows = list_to_compose_for_day("2026-08-26")
+    assert [r["artifact_id"] for r in first_rows] == [low_id]
+    assert fake_artifact_session.artifacts[low_id]["status"] == SELECTED
+
+    # A higher-priority artifact shows up only AFTER the reset widens the
+    # pool back out (it was inserted before the reset but couldn't have won
+    # the already-locked-in slot).
+    high_id, _ = insert_artifact(service_id="svc-high", url=None, channel="brief", content="high")
+    update_artifact_priority(high_id, 9.0)
+
+    result = reset_and_reselect_for_day("2026-08-26")
+
+    assert result["reset"]["reverted_to_pending"] == [low_id]
+    rows = list_to_compose_for_day("2026-08-26")
+    assert [r["artifact_id"] for r in rows] == [high_id]
+    assert fake_artifact_session.artifacts[high_id]["status"] == SELECTED
+    # The reverted artifact is genuinely back in play (pending), just lost
+    # this round to the higher-priority newcomer.
+    assert fake_artifact_session.artifacts[low_id]["status"] == "pending"
+
+
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_preview_pool_field_present_for_every_pending_item_not_just_selected(
     monkeypatch: pytest.MonkeyPatch,

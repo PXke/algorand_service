@@ -1733,6 +1733,64 @@ def admin_artifacts_to_compose_selected(request: Request) -> Response | dict:
     return {"compose_day": day, "items": result}
 
 
+def admin_reset_to_compose_for_day(request: Request) -> Response | dict:
+    """"Redo today's picks": clear `day`'s (default: tomorrow, matching the sibling to-compose routes and the Queue tab's own day field) locked-in `to_compose` selection and immediately re-run selection over the widened pool -- the fix for a bad automatic pick, or forcing a re-pick after correcting an upstream priority/pool bug, without waiting for the next daily beat.
+
+    2026-08-26: dispatches into worker's reset_and_reselect_to_compose_for_day
+    (see to_compose_selection.reset_and_reselect_for_day), which clears
+    `to_compose` for `day`, reverts any artifact it had selected back to
+    PENDING -- but ONLY when that artifact is still in SELECTED status; one
+    already progressed to composed (a real article now exists) or discarded
+    (a gate permanently dropped it) is left alone and reported in the
+    response's `reset.skipped` list -- then immediately calls
+    select_to_compose_for_day(day) again, so the caller gets a freshly
+    re-picked lineup in one round trip rather than two separate admin
+    actions.
+
+    Same cross-service dispatch shape as the other artifact routes (backend
+    has no direct import of the workers codebase): send_task + a short
+    synchronous .get(). This does real Cassandra reads/writes plus a fresh
+    selection pass (comparable cost to the preview route's live recompute),
+    so it gets the same timeout headroom as admin_artifacts_to_compose_preview
+    rather than the selected/pin routes' much shorter ones.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    from datetime import UTC, date, datetime, timedelta
+
+    day = (request.query_params.get("day", "") or "").strip()
+    if not day:
+        day = (datetime.now(tz=UTC).date() + timedelta(days=1)).isoformat()
+    else:
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            return json_error_response(400, "invalid_request", "day must be YYYY-MM-DD")
+
+    try:
+        from celery import Celery
+        from celery.exceptions import TimeoutError as CeleryTimeoutError
+
+        from app.core.config import settings
+
+        async_result = Celery(
+            broker=settings.celery_broker_url, backend=settings.redis_result_url
+        ).send_task(
+            "app.tasks.newspaper.reset_and_reselect_to_compose_for_day",
+            args=[day],
+            queue="pipeline",
+        )
+        try:
+            result = async_result.get(timeout=30)
+        except CeleryTimeoutError:
+            return json_error_response(504, "timeout", "the picks reset took too long")
+    except Exception as exc:
+        return json_error_response(502, "broker_unavailable", str(exc))
+    return result
+
+
 def admin_pin_artifact_for_tomorrow(request: Request) -> Response | dict:
     """Pin one editorial-room artifact as tomorrow's human pick (see workers' artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow).
 
@@ -1881,6 +1939,7 @@ def register_admin_routes(app: Router) -> None:
     # daily beat; pin-for-tomorrow writes the human pick both read from.
     app.get("/api/v1/admin/artifacts/to-compose-preview")(admin_artifacts_to_compose_preview)
     app.get("/api/v1/admin/artifacts/to-compose-selected")(admin_artifacts_to_compose_selected)
+    app.post("/api/v1/admin/artifacts/to-compose-reset")(admin_reset_to_compose_for_day)
     app.post("/api/v1/admin/artifacts/:artifact_id/pin-for-tomorrow")(
         admin_pin_artifact_for_tomorrow
     )

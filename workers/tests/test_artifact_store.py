@@ -394,3 +394,113 @@ def test_no_service_id_artifacts_never_concatenate(
     assert content_b is not None
     assert content_a.content == "brief one"
     assert content_b.content == "brief two"
+
+
+# --------------------------------------------------------------------------- #
+# revert_artifact_to_pending (2026-08-26) -- the reverse of mark_artifact_status's
+# pending -> non-pending move, used by to_compose_selection.reset_to_compose_for_day
+# to undo a SELECTED artifact's status flip when an admin redoes a day's picks.
+# --------------------------------------------------------------------------- #
+
+
+def test_revert_artifact_to_pending_moves_selected_back_and_reindexes(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """A SELECTED artifact reverts to PENDING status and gets a fresh artifacts_pending row (it was removed when mark_artifact_status moved it to SELECTED in the first place)."""
+    from app.modules.newspaper.artifact_store import (
+        PENDING,
+        SELECTED,
+        insert_artifact,
+        mark_artifact_status,
+        revert_artifact_to_pending,
+    )
+
+    artifact_id, _ = insert_artifact(
+        service_id="svc-1", url="https://x.io/", channel="crawler", content="x"
+    )
+    mark_artifact_status(artifact_id, SELECTED)
+    assert fake_artifact_session.pending == {}
+
+    ok = revert_artifact_to_pending(artifact_id)
+
+    assert ok is True
+    assert fake_artifact_session.artifacts[artifact_id]["status"] == PENDING
+    (row,) = fake_artifact_session.pending.values()
+    assert str(row["artifact_id"]) == artifact_id
+    assert row["service_id"] == "svc-1"
+    assert row["status"] == PENDING
+
+
+def test_revert_artifact_to_pending_is_a_noop_for_composed(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """A COMPOSED artifact (already turned into a real article) must never be silently resurrected back to pending -- returns False and leaves it untouched."""
+    from app.modules.newspaper.artifact_store import (
+        COMPOSED,
+        insert_artifact,
+        mark_artifact_status,
+        revert_artifact_to_pending,
+    )
+
+    artifact_id, _ = insert_artifact(service_id="svc-1", url=None, channel="brief", content="x")
+    mark_artifact_status(artifact_id, COMPOSED)
+
+    ok = revert_artifact_to_pending(artifact_id)
+
+    assert ok is False
+    assert fake_artifact_session.artifacts[artifact_id]["status"] == COMPOSED
+    assert fake_artifact_session.pending == {}
+
+
+def test_revert_artifact_to_pending_is_a_noop_for_discarded(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """A DISCARDED artifact (a pre-compose gate permanently dropped it) must also never be silently resurrected -- same guard as the composed case."""
+    from app.modules.newspaper.artifact_store import (
+        DISCARDED,
+        insert_artifact,
+        mark_artifact_status,
+        revert_artifact_to_pending,
+    )
+
+    artifact_id, _ = insert_artifact(service_id="svc-1", url=None, channel="brief", content="x")
+    mark_artifact_status(artifact_id, DISCARDED)
+
+    ok = revert_artifact_to_pending(artifact_id)
+
+    assert ok is False
+    assert fake_artifact_session.artifacts[artifact_id]["status"] == DISCARDED
+
+
+def test_revert_artifact_to_pending_is_a_noop_for_already_pending(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """An artifact that's already PENDING (never selected) is left alone -- no duplicate pending-index row."""
+    from app.modules.newspaper.artifact_store import insert_artifact, revert_artifact_to_pending
+
+    artifact_id, _ = insert_artifact(service_id="svc-1", url=None, channel="brief", content="x")
+
+    ok = revert_artifact_to_pending(artifact_id)
+
+    assert ok is False
+    assert len(fake_artifact_session.pending) == 1
+
+
+def test_revert_artifact_to_pending_unknown_id_returns_false(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """An artifact_id with no matching row returns False rather than raising."""
+    import uuid
+
+    from app.modules.newspaper.artifact_store import revert_artifact_to_pending
+
+    assert revert_artifact_to_pending(str(uuid.uuid4())) is False
+
+
+def test_revert_artifact_to_pending_malformed_id_returns_false(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """A non-UUID artifact_id fails closed to False rather than raising, matching pin_artifact_for_day's own contract for a bad id."""
+    from app.modules.newspaper.artifact_store import revert_artifact_to_pending
+
+    assert revert_artifact_to_pending("not-a-uuid") is False
