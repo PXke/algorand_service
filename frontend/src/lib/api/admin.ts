@@ -146,5 +146,13 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.getJson(`/api/v1/admin/articles/${articleId}/comments`, h()),
     deleteComment: (articleId: string, commentId: string) =>
       api.deleteJson(`/api/v1/admin/articles/${articleId}/comments/${commentId}`, h()),
+    // Editorial-room artifact system (SHADOW MODE, not wired to live compose).
+    artifactsToComposePreview: (day?: string) =>
+      api.getJson(
+        `/api/v1/admin/artifacts/to-compose-preview${day ? `?day=${encodeURIComponent(day)}` : ''}`,
+        h(),
+      ),
+    pinArtifactForTomorrow: (artifactId: string) =>
+      api.postJson(`/api/v1/admin/artifacts/${encodeURIComponent(artifactId)}/pin-for-tomorrow`, {}, h()),
   }
 }

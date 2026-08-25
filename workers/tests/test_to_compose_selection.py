@@ -221,3 +221,128 @@ def test_pin_for_tomorrow_uses_day_after_today() -> None:
     assert ok is True
     result = select_to_compose_for_day("2026-08-26")
     assert result["human_picked"] is True
+
+
+# --------------------------------------------------------------------------- #
+# preview_to_compose_for_day -- the read-only twin of select_to_compose_for_day
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_preview_never_mutates_pending_artifacts_or_to_compose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike select_to_compose_for_day, preview must leave every artifact PENDING and never write a to_compose row -- it's dispatched on every admin page load/poll, so it must be safe to call repeatedly."""
+    monkeypatch.setattr(
+        "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
+    )
+    from app.modules.newspaper.artifact_store import (
+        PENDING,
+        insert_artifact,
+        list_pending_artifacts,
+    )
+    from app.modules.newspaper.to_compose_selection import (
+        list_to_compose_for_day,
+        preview_to_compose_for_day,
+    )
+
+    insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    insert_artifact(service_id="svc-b", url=None, channel="brief", content="b")
+
+    preview_to_compose_for_day("2026-08-26")
+    preview_to_compose_for_day("2026-08-26")  # calling it twice must not change anything either
+
+    assert {a.status for a in list_pending_artifacts()} == {PENDING}
+    assert len(list_pending_artifacts()) == 2
+    assert list_to_compose_for_day("2026-08-26") == []
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_preview_matches_what_select_would_actually_pick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lanes preview_to_compose_for_day assigns must agree with a real select_to_compose_for_day run over the same data -- the whole point of the preview is to be trustworthy."""
+    monkeypatch.setattr(
+        "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
+    )
+    from app.core import config as cfg
+    from app.modules.newspaper.artifact_store import (
+        insert_artifact,
+        pin_artifact_for_day,
+        update_artifact_priority,
+    )
+    from app.modules.newspaper.to_compose_selection import (
+        list_to_compose_for_day,
+        preview_to_compose_for_day,
+        select_to_compose_for_day,
+    )
+
+    monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # N=3 -> 2 platform slots
+
+    human_id, _ = insert_artifact(service_id="svc-human", url=None, channel="brief", content="pinned")
+    pin_artifact_for_day(human_id, "2026-08-26")
+    ids = [human_id]
+    for i, prio in enumerate([9.0, 5.0, 1.0]):
+        aid, _ = insert_artifact(
+            service_id=f"svc-{i}", url=None, channel="brief", content=f"content {i}"
+        )
+        update_artifact_priority(aid, prio)
+        ids.append(aid)
+
+    preview = preview_to_compose_for_day("2026-08-26")
+    preview_lanes = {item["artifact_id"]: item["selected_lane"] for item in preview["items"]}
+
+    real = select_to_compose_for_day("2026-08-26")
+    real_rows = list_to_compose_for_day("2026-08-26")
+    real_lanes = {row["artifact_id"]: row["lane"] for row in real_rows}
+
+    assert preview["human_picked"] == real["human_picked"]
+    assert preview["platform_slots_filled"] == real["platform_slots_filled"]
+    for artifact_id, lane in real_lanes.items():
+        assert preview_lanes[artifact_id] == lane
+    # Everything NOT selected by the real run must show no lane in the preview.
+    unselected = [aid for aid in ids if aid not in real_lanes]
+    assert unselected  # sanity: N=3 leaves at least one of these 4 artifacts unpicked
+    for artifact_id in unselected:
+        assert preview_lanes[artifact_id] is None
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_preview_includes_priority_breakdown_and_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each preview item carries its title (from artifact_content) and the three named score components, summing to the reported total priority."""
+    monkeypatch.setattr(
+        "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
+    )
+    from app.modules.newspaper.artifact_store import insert_artifact
+    from app.modules.newspaper.to_compose_selection import preview_to_compose_for_day
+
+    insert_artifact(
+        service_id="svc-a", url=None, channel="brief", content="hello world", title="A Title"
+    )
+
+    preview = preview_to_compose_for_day("2026-08-26")
+    (item,) = preview["items"]
+
+    assert item["title"] == "A Title"
+    breakdown = item["priority_breakdown"]
+    assert set(breakdown) == {"word_count", "timeliness", "ecosystem_listed"}
+    assert item["priority"] == pytest.approx(sum(breakdown.values()), abs=0.0001)
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_preview_flags_the_pin_for_the_requested_day_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """is_pinned_for_day is true only for the artifact pinned for THIS specific day, not for a pin set for some other day."""
+    monkeypatch.setattr(
+        "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
+    )
+    from app.modules.newspaper.artifact_store import insert_artifact, pin_artifact_for_day
+    from app.modules.newspaper.to_compose_selection import preview_to_compose_for_day
+
+    picked_id, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    pin_artifact_for_day(picked_id, "2026-08-26")
+    other_id, _ = insert_artifact(service_id="svc-b", url=None, channel="brief", content="b")
+    pin_artifact_for_day(other_id, "2026-09-01")
+
+    preview = preview_to_compose_for_day("2026-08-26")
+    flags = {item["artifact_id"]: item["is_pinned_for_day"] for item in preview["items"]}
+
+    assert flags[picked_id] is True
+    assert flags[other_id] is False
