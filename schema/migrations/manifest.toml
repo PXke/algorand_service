@@ -669,3 +669,11 @@ file = "backend/schema/migrations/app/075_x_search_weekly.cql"
 tier = "prod"
 status = "active"
 description = "add x_search_weekly: per-service cache of the weekly X (Twitter) search sweep, superseded each run, read by the search_x writer tool instead of a live per-compose API call"
+
+[[migrations]]
+stream = "app"
+version = "076"
+file = "backend/schema/migrations/app/076_pageview_referred_sample.cql"
+tier = "prod"
+status = "active"
+description = "add pageview_referred_sample: extends the '(direct)'-only retroactive-purge raw-request log (pageview_direct_sample) to '(internal)'/external-referred hits too, so a repeat-offender UA farming hits via in-app navigation or an external referrer can be clawed back the same way a direct-bucket one already is -- kept as a separate table (not merged into pageview_direct_sample) so the admin 'recent direct requests' panel, which reads that table straight through, isn't polluted with non-direct rows"
