@@ -737,6 +737,7 @@ def admin_reset_articles(request: Request) -> Response:
 
     tables = (
         "articles",
+        "articles_by_tag",
         "article_versions",
         "publish_queue",
         "publish_queue_dedupe",

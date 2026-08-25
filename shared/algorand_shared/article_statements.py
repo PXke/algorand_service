@@ -72,29 +72,6 @@ class _Stmt:
 
 
 # --------------------------------------------------------------------------- #
-# articles_by_id
-# --------------------------------------------------------------------------- #
-ARTICLE_GET_TAGS = _Stmt("SELECT tags FROM algorand_platform.articles_by_id WHERE article_id = ?")
-ARTICLE_UPDATE_PUBLISHED_AT = _Stmt(
-    "UPDATE algorand_platform.articles_by_id SET published_at = ? WHERE article_id = ?"
-)
-ARTICLE_CLEAR_TRANSLATIONS = _Stmt(
-    "DELETE translations FROM algorand_platform.articles_by_id WHERE article_id = ?"
-)
-
-# --------------------------------------------------------------------------- #
-# articles_feed
-# --------------------------------------------------------------------------- #
-FEED_DELETE = _Stmt(
-    "DELETE FROM algorand_platform.articles_feed "
-    "WHERE bucket = ? AND published_at = ? AND article_id = ?"
-)
-FEED_SET_SLUG = _Stmt(
-    "UPDATE algorand_platform.articles_feed SET slug = ? "
-    "WHERE bucket = ? AND published_at = ? AND article_id = ?"
-)
-
-# --------------------------------------------------------------------------- #
 # article_versions
 # --------------------------------------------------------------------------- #
 ARTICLE_VERSION_LATEST = _Stmt(

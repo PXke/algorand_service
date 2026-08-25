@@ -18,7 +18,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from algorand_shared.article_statements import (
-    ARTICLE_CLEAR_TRANSLATIONS,
     ARTICLE_VERSION_INSERT,
     ARTICLE_VERSION_LATEST,
     PUBLISH_QUEUE_CLEAR_HUMAN_PICK,
@@ -61,18 +60,22 @@ class _Stmt:
 
 
 # --------------------------------------------------------------------------- #
-# articles_by_id / articles_by_slug / service_events
+# articles_by_slug / service_events
 # --------------------------------------------------------------------------- #
 class ArticleStmts:
-    """Prepared statements for articles_by_id.
+    """Prepared statements for articles_by_slug, the reverse slug-uniqueness index.
 
     Article-table consolidation Phase 5: every read/write against
     articles_by_id/articles_feed proper has moved onto the consolidated
     `articles` table (see ArticlesStmts in algorand_shared.article_statements
-    and transition_article_status in algorand_shared.article_transitions).
-    What's left here is `articles_by_slug`, a separate reverse-index table
-    untouched by this migration (still the durable slug-uniqueness claim),
-    plus two one-off manual-tool statements kept for workers/scratch/*.py.
+    and transition_article_status in algorand_shared.article_transitions),
+    and articles_by_id itself is dropped (migration 074). `articles_by_slug`
+    is a separate reverse-index table, untouched by that migration, still the
+    durable slug-uniqueness claim. The two former manual-tool translation-
+    clear statements that used to live here (workers/scratch/
+    backfill_stale_translations.py, fix_corrupted_pashto.py) targeted
+    articles_by_id and are gone with it -- a future similar incident needs a
+    new recipe against `articles`' own `translations` map column.
     """
 
     # Slug claim (migration 056): a lightweight transaction (IF NOT EXISTS)
@@ -82,15 +85,6 @@ class ArticleStmts:
     CLAIM_SLUG = _Stmt(
         "INSERT INTO algorand_platform.articles_by_slug (slug, article_id, claimed_at) "
         "VALUES (?, ?, ?) IF NOT EXISTS"
-    )
-    CLEAR_TRANSLATIONS = ARTICLE_CLEAR_TRANSLATIONS
-    # Clears one language only, unlike CLEAR_TRANSLATIONS -- for reclaiming a
-    # single bad translation (e.g. a corrupted local-engine result) without
-    # discarding every other language's already-good work on the same article.
-    # Only remaining caller is workers/scratch/fix_corrupted_pashto.py (a
-    # one-off manual tool, not a production code path).
-    DELETE_TRANSLATION_LANG = _Stmt(
-        "DELETE translations[?] FROM algorand_platform.articles_by_id WHERE article_id = ?"
     )
 
 
