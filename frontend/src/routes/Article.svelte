@@ -720,6 +720,18 @@
     margin-top: 48px;
     padding-top: 28px;
     border-top: 1px solid var(--border);
+    /* The entrance animation below (opacity/transform, fill-mode "both")
+       leaves this element promoted to its own stacking context even after
+       it finishes playing — CSS keeps an animation "in effect" forever
+       once fill-mode retains its end state. .topic-nav and .related get
+       the same promotion from their own entrance animations, and being
+       later siblings with equal (auto) stacking order, they paint over
+       this one — which trapped the share menu's popover (position:
+       absolute, z-index below) behind the prev/next and "On this desk"
+       sections instead of on top of them. An explicit stacking order here
+       settles that regardless of animation state. */
+    position: relative;
+    z-index: 1;
   }
   .end-matter :global(.share) {
     align-self: flex-start;
