@@ -33,6 +33,16 @@ def _install_no_network_guard() -> None:
 _install_no_network_guard()
 
 
+def _install_no_sleep_guard() -> None:
+    """Unit tests must never really sleep -- the no-network guard above means every retry-with-backoff code path (LLM provider network/rate-limit retries, scrape retries, etc.) is guaranteed to fail on every attempt, so `time.sleep`ing through the real backoff schedule (up to 4 retries * up to 120s each in the LLM provider) burns real wall-clock time for zero information. Five test files were independently hand-rolling the identical `monkeypatch.setattr("time.sleep", ...)` fixture before this; installed process-wide (not per-test) so newly-added retry-heavy tests get it automatically instead of silently costing minutes until someone notices."""
+    import time
+
+    time.sleep = lambda _seconds=0, *_a, **_kw: None
+
+
+_install_no_sleep_guard()
+
+
 class FakeRedis:
     """In-memory stand-in for the redis-py client, covering the get/set/incr/decr/expire/exists surface used across the crawl-budget, cooldown, and publish-cap modules.
 

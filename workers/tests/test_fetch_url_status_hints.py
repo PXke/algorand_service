@@ -10,12 +10,6 @@ import pytest
 from app.modules.ai.research_tools import _tool_fetch_url
 
 
-@pytest.fixture(autouse=True)
-def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every retryable status/exception case here now runs through _guarded_get_with_retry's real 5-attempt backoff (added 2026-07-10) — without this, these tests genuinely sleep out the full schedule (80s for 429, 30s for 500/503/timeouts), which is most of the whole suite's runtime for zero extra coverage. Retry COUNT/behavior is still exercised; only the wall-clock wait is removed."""
-    monkeypatch.setattr("time.sleep", lambda _seconds: None)
-
-
 def _status_response(url: str, status_code: int) -> httpx.Response:
     return httpx.Response(status_code, request=httpx.Request("GET", url))
 

@@ -162,8 +162,9 @@ class ArticlesStmts:
         "INSERT INTO algorand_platform.articles ("
         "status, year, published_at, article_id, service_id, title, summary, body, "
         "image_url, tags, source_url, trigger_txid, trigger_round, slug, translations, "
-        "first_published_at, updated_at, burst_day, prompt_version, composed_by_model, deleted_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "first_published_at, updated_at, burst_day, prompt_version, composed_by_model, deleted_at, "
+        "status_updated_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Feed listing: `articles` doubles as the feed projection for
     # status='published' (see the plan) -- year is the partition granularity
@@ -192,6 +193,15 @@ class ArticlesStmts:
         "SELECT article_id, tags, first_published_at, published_at "
         "FROM algorand_platform.articles "
         "WHERE status = 'published' AND year = ? AND published_at >= ? AND published_at < ?"
+    )
+    # 2026-08-24: id (+ status_updated_at) enumeration for a given status/
+    # year, shared by draft-article listing (backend admin -- needs
+    # status_updated_at as its "drafted_at" sort key) and deleted-article
+    # listing (410 sitemap exclusion -- ignores the extra column, just needs
+    # the ids).
+    LIST_IDS_BY_STATUS = _Stmt(
+        "SELECT article_id, status_updated_at "
+        "FROM algorand_platform.articles WHERE status = ? AND year = ?"
     )
     SET_SLUG = _Stmt(
         "UPDATE algorand_platform.articles SET slug = ? "
@@ -246,7 +256,8 @@ class ArticlesStmts:
     GET_FULL_BY_ID = _Stmt(
         "SELECT status, year, published_at, article_id, service_id, title, summary, body, "
         "image_url, tags, source_url, trigger_txid, trigger_round, slug, translations, "
-        "first_published_at, updated_at, burst_day, prompt_version, composed_by_model, deleted_at "
+        "first_published_at, updated_at, burst_day, prompt_version, composed_by_model, deleted_at, "
+        "status_updated_at "
         "FROM algorand_platform.articles WHERE article_id = ?"
     )
     # Direct SAI point-query on service_id -- replaces the article_match_keys

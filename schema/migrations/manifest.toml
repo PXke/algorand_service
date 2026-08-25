@@ -621,3 +621,11 @@ file = "backend/schema/migrations/app/069_drop_article_match_keys.cql"
 tier = "prod"
 status = "active"
 description = "drop article_match_keys / article_match_keys_by_article: crawl-based edit-vs-create follow-up routing removed after prod data showed it fired legitimately twice ever (both >1 month old), against 1,657 total candidates -- explicit-id edits (editorial briefs, admin recompose) never used these tables"
+
+[[migrations]]
+stream = "app"
+version = "070"
+file = "backend/schema/migrations/app/070_articles_status_updated_at.cql"
+tier = "prod"
+status = "active"
+description = "add articles.status_updated_at: generic 'when did status last change' timestamp, closing the gap found migrating list_draft_articles() off draft_articles.drafted_at (deleted_at already covers the 'deleted' transition specifically; this covers every other one)"

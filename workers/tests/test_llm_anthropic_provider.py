@@ -16,11 +16,6 @@ from app.modules.ai.llm_anthropic_provider import (
 from app.modules.ai.llm_provider import LLMCreditError, LLMError, LLMProvider
 
 
-@pytest.fixture(autouse=True)
-def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("time.sleep", lambda _seconds: None)
-
-
 def _fake_client(post_fn: Callable[..., object]) -> type:
     """Build a fake httpx.Client class whose .post(...) delegates to post_fn -- same pattern the other provider tests use."""
 

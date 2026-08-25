@@ -23,13 +23,33 @@ def is_article_tombstoned(article_id: str) -> bool:
 
     Fails OPEN (False): a Cassandra hiccup must degrade to a plain 404, never
     break the article route or wrongly claim a live article is gone.
+
+    2026-08-24: checks `articles` first (status='deleted' is dual-written on
+    every delete since the article-table consolidation), falling back to the
+    legacy `deleted_articles` table for tombstones predating it. Live count
+    comparison found 171 of 309 `deleted_articles` rows have NO matching
+    `articles` row at all -- their `articles_by_id` row was already
+    hard-deleted by the time the original data migration ran, so there was
+    nothing to carry forward. `deleted_articles` stays authoritative for
+    that historical set until/unless it's explicitly backfilled -- treating
+    `articles` as the sole source here would have silently turned 171 real
+    410s into 404s.
     """
     try:
+        from algorand_shared.article_statements import ArticlesStmts
+
         from app.core.cassandra import get_cassandra_session
+
+        aid = UUID(article_id)
+        session = get_cassandra_session()
+        row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+        if row is not None:
+            return row.status == "deleted"
+
         from app.core.statements import DeletedArticleStmts
 
-        row = get_cassandra_session().execute(DeletedArticleStmts.GET, (UUID(article_id),)).one()
-        return row is not None
+        legacy_row = session.execute(DeletedArticleStmts.GET, (aid,)).one()
+        return legacy_row is not None
     except Exception:
         logger.debug("tombstone lookup failed for %s — treating as not deleted", article_id)
         return False

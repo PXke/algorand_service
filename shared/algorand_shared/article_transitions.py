@@ -11,14 +11,14 @@ write path" bug this whole consolidation exists to kill.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 _ARTICLES_COLUMNS = (
     "status", "year", "published_at", "article_id", "service_id", "title", "summary", "body",
     "image_url", "tags", "source_url", "trigger_txid", "trigger_round", "slug", "translations",
     "first_published_at", "updated_at", "burst_day", "prompt_version", "composed_by_model",
-    "deleted_at",
+    "deleted_at", "status_updated_at",
 )  # fmt: skip
 
 
@@ -53,6 +53,13 @@ def transition_article_status(
     values["status"] = new_status or old.status
     values["published_at"] = published_at
     values["year"] = published_at.year
+    # A genuine status change (not just published_at moving, e.g. a
+    # recompose re-publish that keeps status='published') stamps
+    # status_updated_at -- "when did this row's status last change," the
+    # generic counterpart to deleted_at (which only covers the 'deleted'
+    # transition specifically).
+    if new_status is not None and new_status != old.status:
+        values["status_updated_at"] = datetime.now(tz=UTC)
     values.update(column_overrides)
     session.execute(ArticlesStmts.INSERT, tuple(values[col] for col in _ARTICLES_COLUMNS))
     return True

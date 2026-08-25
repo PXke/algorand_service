@@ -18,14 +18,6 @@ from app.modules.newspaper.tasks.publish_tasks import (
     _with_hero_image,
 )
 
-
-@pytest.fixture(autouse=True)
-def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    # _is_real_image retries once with a real sleep between attempts — no
-    # test here needs that actual delay.
-    monkeypatch.setattr("time.sleep", lambda *_a, **_kw: None)
-
-
 _BODY = """HesabPay runs on Algorand.
 
 Inline citation: [case study](https://algorand.co/case-studies/hesabpay).
@@ -181,7 +173,8 @@ def test_hero_allows_cdn_hosted_og_images() -> None:
 def test_hero_url_encodes_literal_spaces() -> None:
     """A raw og:image URL with unencoded spaces (found live 2026-08-09, risein.com) must not
     break markdown link parsing -- CommonMark truncates a bare link destination at the first
-    unescaped whitespace, spilling the rest as literal text right after the image."""
+    unescaped whitespace, spilling the rest as literal text right after the image.
+    """
     image = "https://files.risein.com/courses/algorand/SCxj-Build on Algorand Course.png"
     out = _with_hero_image("body", image, "t", source_url="https://risein.com/courses/x")
     assert "SCxj-Build%20on%20Algorand%20Course.png" in out

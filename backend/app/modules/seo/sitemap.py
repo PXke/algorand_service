@@ -166,21 +166,44 @@ def bust_tombstone_cache() -> None:
 
 
 def _tombstoned_ids(_article_ids: Iterable[str] | None = None) -> set[str]:
-    """Article IDs hard-deleted by admin (410 Gone). Full-table scan of a tiny tombstone set, cached briefly so sitemap builds don't hammer Cassandra."""
+    """Article IDs hard-deleted by admin (410 Gone). Union of two sources, cached briefly so sitemap builds don't hammer Cassandra.
+
+    2026-08-24: `articles` (status='deleted', scanned across recent years --
+    this platform's entire history is 2026 so far, a few years of margin is
+    plenty) is the primary source now, UNION'd with the legacy
+    `deleted_articles` full-table scan. Live count comparison found 171 of
+    309 `deleted_articles` rows have no matching `articles` row at all --
+    tombstoned before the article-table consolidation, when their
+    `articles_by_id` row was already hard-deleted, so there was nothing to
+    carry forward into the new table. Dropping the legacy scan would have
+    silently un-excluded 171 real dead URLs from the sitemap.
+    """
     now = time.monotonic()
     cached = _tombstone_cache.get("ids")
     cached_at = float(_tombstone_cache.get("mono", 0.0))
     if isinstance(cached, set) and now - cached_at < 60:
         return cached
+    picked: set[str] = set()
+    try:
+        from algorand_shared.article_statements import ArticlesStmts
+
+        from app.core.cassandra import get_cassandra_session
+
+        session = get_cassandra_session()
+        current_year = datetime.now(tz=UTC).year
+        for year in range(current_year, current_year - 3, -1):
+            rows = session.execute(ArticlesStmts.LIST_IDS_BY_STATUS, ("deleted", year))
+            picked.update(str(row.article_id) for row in rows)
+    except Exception:
+        logger.debug("articles tombstone lookup failed", exc_info=True)
     try:
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import DeletedArticleStmts
 
         rows = get_cassandra_session().execute(DeletedArticleStmts.LIST_IDS)
-        picked = {str(row.article_id) for row in rows}
+        picked.update(str(row.article_id) for row in rows)
     except Exception:
-        logger.debug("tombstone lookup failed; sitemap omits no extra filter", exc_info=True)
-        picked = set()
+        logger.debug("legacy deleted_articles lookup failed", exc_info=True)
     _tombstone_cache["mono"] = now
     _tombstone_cache["ids"] = picked
     return picked

@@ -501,30 +501,43 @@ class AdminCassandraStore:
         return updated
 
     def list_draft_articles(self) -> list[dict]:
-        """Currently-drafted articles, for the admin UI's restore list -- these are absent from articles_feed by design, so the normal feed listing can never surface them."""
+        """Currently-drafted articles, for the admin UI's restore list -- these are absent from articles_feed by design, so the normal feed listing can never surface them.
+
+        2026-08-24: enumeration reads `articles` directly (was
+        `draft_articles`, which could hold ghost rows left behind by a
+        delete that hadn't cleaned up the index -- authoritative status
+        enumeration makes that class of bug impossible here). status_updated_at
+        (migration 070) is the drafted_at equivalent -- the old table's own
+        drafted_at column had no counterpart on `articles` until this.
+        """
+        from datetime import UTC, datetime
+
+        from algorand_shared.article_statements import ArticlesStmts
+
         from app.core.cassandra import get_cassandra_session
-        from app.core.statements import DraftArticleStmts
         from app.modules.news.stores.cassandra import CassandraArticleStore
 
         session = get_cassandra_session()
-        rows = list(session.execute(DraftArticleStmts.LIST))
+        current_year = datetime.now(tz=UTC).year
+        rows = []
+        for year in range(current_year, current_year - 3, -1):
+            rows.extend(session.execute(ArticlesStmts.LIST_IDS_BY_STATUS, ("draft", year)))
+        if not rows:
+            return []
         stored = CassandraArticleStore().get_many([str(row.article_id) for row in rows])
         items = []
         for row in rows:
             aid = str(row.article_id)
             article = stored.get(aid)
-            # Delete left the index row behind (until 2026-08-17), so most
-            # draft_articles entries are ghosts: click → admin get 404s.
             if article is None or not article.draft:
-                with contextlib.suppress(Exception):
-                    session.execute(DraftArticleStmts.DELETE, (row.article_id,))
                 continue
+            drafted_at = row.status_updated_at
             items.append(
                 {
                     "article_id": aid,
                     "title": article.title,
-                    "source_url": article.source_url or row.source_url,
-                    "drafted_at": row.drafted_at.isoformat() if row.drafted_at else None,
+                    "source_url": article.source_url or "",
+                    "drafted_at": drafted_at.isoformat() if drafted_at else None,
                 }
             )
         items.sort(key=lambda it: it["drafted_at"] or "", reverse=True)

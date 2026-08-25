@@ -289,6 +289,7 @@ def insert_stored_article(
             prompt_version or None,
             None,  # composed_by_model: not yet plumbed through this call, accepted gap
             None,  # deleted_at: never set at creation
+            datetime.now(tz=UTC),  # status_updated_at: the first-ever status assignment
         ),
     )
     if publish_to_feed:

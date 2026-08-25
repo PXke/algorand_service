@@ -129,32 +129,21 @@ def test_set_draft_on_missing_article_returns_none(monkeypatch: pytest.MonkeyPat
     assert fake.draft_updates == []
 
 
-def test_list_draft_articles_drops_ghosts_and_prunes_the_index(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Delete used to leave draft_articles rows behind; the admin list must not
-    surface those as clickable 404s, and should delete the stale index row."""
+def test_list_draft_articles_reads_articles_directly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2026-08-24: enumeration comes from `articles` (status='draft'), not the legacy `draft_articles` index -- authoritative status means no ghost-row concept anymore. status_updated_at is the drafted_at equivalent."""
     live_id = uuid4()
-    ghost_id = uuid4()
     live_row = SimpleNamespace(
         article_id=live_id,
-        title="Live draft",
-        source_url="https://example.com/live",
-        drafted_at=datetime(2026, 8, 17, tzinfo=UTC),
-    )
-    ghost_row = SimpleNamespace(
-        article_id=ghost_id,
-        title="Deleted leftover",
-        source_url="https://example.com/gone",
-        drafted_at=datetime(2026, 8, 1, tzinfo=UTC),
+        status_updated_at=datetime(2026, 8, 17, tzinfo=UTC),
     )
     fake = _FakeSession(None)
     orig_execute = fake.execute
 
     def execute(query: str, params: tuple = ()) -> Any:  # noqa: ANN401
         q = " ".join(str(query).split())
-        if "FROM algorand_platform.draft_articles LIMIT" in q:
-            return [ghost_row, live_row]
+        if "FROM algorand_platform.articles WHERE status = ? AND year = ?" in q:
+            # Only the current year (the test's default clock) has a row.
+            return [live_row] if params[1] == datetime.now(tz=UTC).year else []
         return orig_execute(query, params)
 
     fake.execute = execute  # type: ignore[method-assign]
@@ -175,5 +164,21 @@ def test_list_draft_articles_drops_ghosts_and_prunes_the_index(
 
     assert [it["article_id"] for it in items] == [str(live_id)]
     assert items[0]["title"] == "Live draft (current title)"
-    assert fake.draft_index_deletes == [(ghost_id,)]
+    assert items[0]["drafted_at"] == "2026-08-17T00:00:00+00:00"
+
+
+def test_list_draft_articles_returns_empty_with_no_drafts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No status='draft' rows in any scanned year -- no CassandraArticleStore call needed, empty list back."""
+    fake = _FakeSession(None)
+
+    def execute(query: str, params: tuple = ()) -> Any:  # noqa: ANN401
+        q = " ".join(str(query).split())
+        if "FROM algorand_platform.articles WHERE status = ? AND year = ?" in q:
+            return []
+        return fake.__class__.execute(fake, query, params)
+
+    fake.execute = execute  # type: ignore[method-assign]
+    _patch(monkeypatch, fake)
+
+    assert AdminCassandraStore().list_draft_articles() == []
 

@@ -164,7 +164,6 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, driver: _FakeDriver) -> list[
 
     monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: driver)
     monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
-    monkeypatch.setattr("time.sleep", lambda _: None)
     calls: list[tuple] = []
     monkeypatch.setattr(
         "app.modules.crawler.domain_tracker.update_domain_status",
