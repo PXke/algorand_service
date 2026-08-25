@@ -229,3 +229,7 @@ def test_reevaluate_promotes_only_scored_pending_above_threshold(
     assert promoted[0][0] == "good.fi"
     assert promoted[0][1]["frontier_status_override"] == "approved"
     assert enqueued == ["https://good.fi"]
+    # relevance_score must not be passed here either -- the 0.61 verdict
+    # already lives in content_relevance; passing it too would clobber the
+    # domain's keyword-scale relevance_score column (root-caused 2026-08-25).
+    assert "relevance_score" not in promoted[0][1]

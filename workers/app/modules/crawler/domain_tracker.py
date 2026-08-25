@@ -526,7 +526,7 @@ def suppress_dead_project_domain(domain: str, *, days: int, reason: str = "") ->
 def update_domain_status(
     domain: str,
     *,
-    relevance_score: float,
+    relevance_score: float | None = None,
     category: str = "",
     is_relevant: bool | None = None,
     online: bool = True,
@@ -547,6 +547,23 @@ def update_domain_status(
     Previously this overwrote is_relevant (and wiped metadata) on every page, so a
     thin / off-topic page silently flipped admin-approved domains off and erased
     the human marker — making reactivation un-sticky.
+
+    ``relevance_score`` is likewise PRESERVED unless a caller passes it
+    explicitly, for the same reason: it's the cheap ~0-10 keyword-hit signal
+    (score_content_for_storage / preview_score — register_pending_domain and
+    discovery_store.store_discovery_content are its writers) that the admin
+    Domains tab shows as the "predicted" badge and sorts pending domains on.
+    A DELIBERATE relevance verdict (classify_pending_domains / deep_classify_
+    domain / reevaluate_pending_domains) is a different 0-1 scale and belongs
+    ONLY in metadata's ``content_relevance`` key, which the admin UI already
+    prefers over this column when present — those callers must NOT also pass
+    relevance_score, or they clobber the keyword-scale number with an
+    incompatible one (root-caused 2026-08-25: euranet.com/brex.com sat at
+    6.0/8.0 post-recrawl despite already having a real content_relevance
+    verdict of 0.39/0.50 in metadata, right next to domains still carrying a
+    stale 0-1 verdict-scale number in this same column because they hadn't
+    been recrawled since — same column, two incompatible scales depending on
+    which writer touched it last).
     """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import DomainTrackingStmts
@@ -556,6 +573,13 @@ def update_domain_status(
     now = datetime.now(tz=UTC)
     session = get_cassandra_session()
     existing = session.execute(DomainTrackingStmts.GET_FOR_UPDATE, (domain,)).one()
+
+    if relevance_score is not None:
+        resolved_relevance = relevance_score
+    elif existing is not None and existing.relevance_score is not None:
+        resolved_relevance = float(existing.relevance_score)
+    else:
+        resolved_relevance = 0.0
 
     # Decision columns: preserve unless the caller overrides them explicitly.
     if is_relevant is not None:
@@ -584,7 +608,7 @@ def update_domain_status(
             domain,
             now,
             last_online,
-            relevance_score,
+            resolved_relevance,
             resolved_category,
             resolved_relevant,
             merged_meta,

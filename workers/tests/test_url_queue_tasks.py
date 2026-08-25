@@ -204,6 +204,11 @@ def test_deep_classify_domain_approves_on_first_relevant_page(
     assert out["found_at"] == "https://quantoz.example/products/eurq-usdq"
     assert calls[0][1]["is_relevant"] is True
     assert calls[0][1]["frontier_status_override"] == "approved"
+    # relevance_score must NOT be passed -- the 0-1 verdict belongs only in
+    # metadata's content_relevance, or it clobbers the domain's keyword-scale
+    # score with an incompatible number (root-caused 2026-08-25).
+    assert "relevance_score" not in calls[0][1]
+    assert calls[0][1]["metadata"]["content_relevance"] == f"{out['score']:.3f}"
 
 
 def test_deep_classify_domain_rejects_when_nothing_found_within_budget(
@@ -227,6 +232,7 @@ def test_deep_classify_domain_rejects_when_nothing_found_within_budget(
     assert calls[0][1]["is_relevant"] is False
     assert calls[0][1]["frontier_status_override"] == "dead_end"
     assert calls[0][1]["metadata"]["deep_classify_exhaustive"] == "true"
+    assert "relevance_score" not in calls[0][1]
 
 
 def test_deep_classify_domain_stops_at_max_pages(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,6 +355,8 @@ def test_classify_pending_domains_rejects_outright_when_deep_classify_disabled(
     assert out["rejected"] == 1
     assert out["escalated_to_deep_classify"] == 0
     assert rejected_calls[0][1]["frontier_status_override"] == "dead_end"
+    assert "relevance_score" not in rejected_calls[0][1]
+    assert rejected_calls[0][1]["metadata"]["content_relevance"] is not None
 
 
 def test_classify_pending_domains_marks_fetch_errors_so_they_stop_recurring(
@@ -524,6 +532,7 @@ def test_deep_classify_domain_approves_via_external_corroboration(
     assert out["verdict"] == "approved"
     assert out["via"] == "external_corroboration"
     assert calls[0][1]["is_relevant"] is True
+    assert "relevance_score" not in calls[0][1]
     assert (
         calls[0][1]["metadata"]["content_relevance_url"]
         == "https://reddit.com/r/AlgorandOfficial/x"

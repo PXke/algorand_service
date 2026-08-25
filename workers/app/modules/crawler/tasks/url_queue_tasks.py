@@ -314,9 +314,12 @@ def deep_classify_domain(
 
     if found is not None:
         found_url, score_result = found
+        # relevance_score is deliberately omitted (preserved as-is): it's the
+        # keyword-scale ~0-10 per-page signal, not this 0-1 verdict, which
+        # lives in metadata's content_relevance below (see update_domain_
+        # status's docstring — root-caused 2026-08-25).
         update_domain_status(
             domain,
-            relevance_score=score_result.score,
             is_relevant=True,
             online=True,
             frontier_status_override="approved",
@@ -350,9 +353,9 @@ def deep_classify_domain(
     corroboration = _external_corroboration(domain)
     if corroboration is not None:
         corrob_url, corrob_snippet = corroboration
+        # relevance_score omitted — see the comment on the approve branch above.
         update_domain_status(
             domain,
-            relevance_score=0.45,
             is_relevant=True,
             online=True,
             frontier_status_override="approved",
@@ -380,9 +383,9 @@ def deep_classify_domain(
             "via": "external_corroboration",
         }
 
+    # relevance_score omitted — see the comment on the approve branch above.
     update_domain_status(
         domain,
-        relevance_score=0.0,
         is_relevant=False,
         online=True,
         frontier_status_override="dead_end",
@@ -527,9 +530,11 @@ def _classify_and_store_domain(
     if will_reject:
         new_meta["frontier_status"] = "dead_end"
         new_meta["auto_rejected"] = "content_off_topic"
+        # relevance_score omitted (preserved as-is) — new_meta["content_relevance"]
+        # above already carries this 0-1 verdict; the column stays on its
+        # keyword scale (see update_domain_status's docstring).
         update_domain_status(
             domain,
-            relevance_score=score,
             is_relevant=False,
             online=True,
             metadata=new_meta,
@@ -699,9 +704,11 @@ def reevaluate_pending_domains(*, limit: int = 40) -> dict[str, object]:
             continue
         if score < FRONTIER_CONTENT_PROMOTE_SCORE:
             continue
+        # relevance_score omitted (preserved as-is) — metadata's content_relevance
+        # (read above as `score`) already carries this 0-1 verdict; the column
+        # stays on its keyword scale (see update_domain_status's docstring).
         update_domain_status(
             r.domain,
-            relevance_score=score,
             is_relevant=True,
             online=True,
             frontier_status_override="approved",

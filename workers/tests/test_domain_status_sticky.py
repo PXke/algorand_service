@@ -19,12 +19,14 @@ class _Row:
         metadata: dict | None = None,
         category: str | None = None,
         last_online_at: Any = None,  # noqa: ANN401 -- duck-typed Cassandra row/result
+        relevance_score: float | None = None,
     ) -> None:
         self.frontier_status = frontier_status
         self.is_relevant = is_relevant
         self.metadata = metadata
         self.category = category
         self.last_online_at = last_online_at
+        self.relevance_score = relevance_score
 
 
 class _FakeSession:
@@ -57,6 +59,7 @@ def _patch(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:  # noqa: ANN401 
 
 
 # Positions in the INSERT params tuple.
+_RELEVANCE_SCORE = 3
 _IS_RELEVANT = 5
 _METADATA = 6
 _FRONTIER_STATUS = 7
@@ -109,6 +112,44 @@ def test_new_domain_defaults_to_pending(monkeypatch: pytest.MonkeyPatch) -> None
     _patch(monkeypatch, fake)
     domain_tracker.update_domain_status("brandnew.io", relevance_score=0.9, is_relevant=True)
     assert fake.inserted[_FRONTIER_STATUS] == "pending"
+
+
+def test_relevance_score_preserved_when_omitted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller that omits relevance_score must not clobber the existing keyword-scale score.
+
+    Root-caused 2026-08-25: deep_classify_domain overwrote the ~0-10 per-page
+    signal with an incompatible 0-1 verdict, so a later per-page recrawl (also
+    on the 0-10 scale) then clobbered it right back -- whichever writer ran
+    last won, on an admin-facing column two callers assumed two different
+    scales for.
+    """
+    fake = _FakeSession(_Row(frontier_status="approved", is_relevant=True, relevance_score=8.0))
+    _patch(monkeypatch, fake)
+    domain_tracker.update_domain_status("euranet.com", is_relevant=True, metadata={"x": "y"})
+    assert fake.inserted[_RELEVANCE_SCORE] == 8.0
+
+
+def test_relevance_score_explicit_still_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller that DOES pass relevance_score explicitly still gets to set it.
+
+    The keyword-scale writers (register_pending_domain / store_discovery_content)
+    always pass it -- preservation only kicks in when the argument is omitted
+    entirely.
+    """
+    fake = _FakeSession(_Row(frontier_status="approved", is_relevant=True, relevance_score=8.0))
+    _patch(monkeypatch, fake)
+    domain_tracker.update_domain_status("euranet.com", relevance_score=6.0, is_relevant=True)
+    assert fake.inserted[_RELEVANCE_SCORE] == 6.0
+
+
+def test_relevance_score_defaults_to_zero_for_brand_new_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A brand-new domain with no prior row and no explicit relevance_score gets 0.0, not None/crash."""
+    fake = _FakeSession(None)
+    _patch(monkeypatch, fake)
+    domain_tracker.update_domain_status("brandnew.io", is_relevant=True)
+    assert fake.inserted[_RELEVANCE_SCORE] == 0.0
 
 
 def test_explicit_status_still_applies(monkeypatch: pytest.MonkeyPatch) -> None:

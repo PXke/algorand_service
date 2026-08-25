@@ -48,6 +48,13 @@ def store_discovery_content(
     # domain's relevance. That verdict belongs to the admin or to the deliberate
     # content-relevance task (classify_pending_domains). Passing is_relevant=None
     # preserves the existing decision.
+    #
+    # relevance_score here is storage_score (~0-10, score_content_for_storage) —
+    # the same keyword-hit scale register_pending_domain seeds at discovery time.
+    # Keep it that way: classify_pending_domains/deep_classify_domain/
+    # reevaluate_pending_domains carry their own 0-1 verdict in metadata's
+    # content_relevance instead of this column (see update_domain_status's
+    # docstring) specifically so this per-page write never clobbers it.
     update_domain_status(
         domain,
         relevance_score=storage_score,
