@@ -661,3 +661,11 @@ file = "backend/schema/migrations/app/074_drop_legacy_article_tables.cql"
 tier = "prod"
 status = "active"
 description = "article-table consolidation final step: drop articles_by_id, articles_feed, draft_articles, deleted_articles, pending_feed_queue -- every read/write migrated onto the consolidated `articles` table across 5 phases, confirmed via full repo grep immediately before this migration; a JSON backup of all 5 tables was already taken before the original data migration"
+
+[[migrations]]
+stream = "app"
+version = "075"
+file = "backend/schema/migrations/app/075_x_search_weekly.cql"
+tier = "prod"
+status = "active"
+description = "add x_search_weekly: per-service cache of the weekly X (Twitter) search sweep, superseded each run, read by the search_x writer tool instead of a live per-compose API call"

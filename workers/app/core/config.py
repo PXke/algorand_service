@@ -1307,21 +1307,36 @@ INVESTIGATIVE_TOOLS_ENABLED = env_bool("INVESTIGATIVE_TOOLS_ENABLED", True)
 # Free public Bluesky post search for community sentiment (no Twitter/X, no key).
 BLUESKY_SEARCH_ENABLED = env_bool("BLUESKY_SEARCH_ENABLED", True)
 
-# X (Twitter) recent-search, paid per-resource on X's pay-as-you-go API
-# (no subscription/minimum, credits deducted per call -- see
-# https://docs.x.com/x-api/getting-started/pricing). Unlike Bluesky, this is
-# real money per call, so it's opt-in (default off) and kept deliberately
-# small: research_tools.py fixes max_results at 10 (X's own API minimum, and
-# the smallest unit of cost) rather than letting the model request more, and
-# X_SEARCH_DAILY_CAP hard-stops total calls per UTC day via a Redis counter
-# (same INCR+EXPIRE pattern as publish_daily_guard.py) -- refusing outright
-# once hit, not degrading quality. Session-level throttling lives alongside
-# suggest_tool/suggest_glossary_term in llm_openai_compatible.py's
-# _CALL_CAPPED_TOOLS so one article can't burn a large slice of the daily
-# budget alone. Owner decision 2026-08-21: worth it if usage stays capped.
+# X (Twitter) recent-search, paid per-resource on X's pay-as-you-go API (no
+# subscription/minimum, credits deducted per call -- see
+# https://docs.x.com/x-api/getting-started/pricing). Originally a live
+# per-compose writer tool call (shipped 2026-08-21, rationed by a daily
+# Redis-backed call budget); redesigned 2026-08-25 into a weekly scheduled
+# sweep (workers/app/modules/newspaper/x_search_sweep.py, beat-scheduled in
+# celery_app.py) that calls X once per TRACKED ecosystem service
+# (service_registry -- the same list llm_diff_check.py polls) and stores
+# results in the x_search_weekly table (see x_search_store.py), superseding
+# the previous week's row each run. The writer's search_x tool
+# (research_tools.py) now reads that cache instead of calling X live, so an
+# article compose no longer spends money on this at all -- billing is now a
+# known, fixed weekly headcount instead of an open-ended per-compose budget.
+# X_SEARCH_ENABLED is the master kill switch: it gates the weekly beat task
+# (nothing is swept when off) and the tool's own registration (nothing to
+# read when the sweep never runs). research_tools.py still fixes
+# max_results at 10 (X's own API minimum) for the sweep's own calls, and the
+# per-session call cap in llm_openai_compatible.py's _CALL_CAPPED_TOOLS is
+# kept on search_x anyway -- cheap to keep, and it now guards against a
+# runaway tool-calling loop rather than cost (the cached reads are free).
 X_BEARER_TOKEN = env_str("X_BEARER_TOKEN", "")
 X_SEARCH_ENABLED = env_bool("X_SEARCH_ENABLED", False)
-X_SEARCH_DAILY_CAP = env_int("X_SEARCH_DAILY_CAP", 20)
+# Defensive ceiling on how many tracked services one weekly sweep run calls
+# X for -- NOT a spend-limiting knob the way the old daily cap was (the
+# sweep itself is now the only thing that spends money on this at all: a
+# known weekly headcount, one call per tracked service). This just stops
+# the sweep from silently ballooning if service_registry grows past a sane
+# weekly budget; raise it if the tracked-service count legitimately outgrows
+# it.
+X_SEARCH_WEEKLY_SWEEP_MAX_SERVICES = env_int("X_SEARCH_WEEKLY_SWEEP_MAX_SERVICES", 200)
 
 # Self-hosted SearXNG metasearch for general web research (no Google, no key,
 # no per-query cost). Empty = web search tool disabled.
