@@ -61,6 +61,7 @@ def test_chat_with_tools_reraises_spike_and_records_trace(monkeypatch: pytest.Mo
     client._model = "test-model"
     client._metadata = {}
     client._reasoning_effort_unsupported = True
+    client._prompt_cache_key = "test-cache-key"
     trace: list = []
 
     def fake_post(_self: MistralProvider, _payload: dict) -> dict:

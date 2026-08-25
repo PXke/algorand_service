@@ -126,7 +126,9 @@ def test_translate_batch_task_persists_and_pings_per_language(
     monkeypatch.setattr(local_translate, "translate_article_batch", _fake_batch)
     monkeypatch.setattr(
         "app.modules.newspaper.article_store.get_article",
-        lambda _id: SimpleNamespace(title="T", summary="S", body="B", translations={}),
+        lambda _id: SimpleNamespace(
+            title="T", summary="S", body="B", translations={}, slug="article-1-slug"
+        ),
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_store.update_article_translations",
@@ -134,7 +136,7 @@ def test_translate_batch_task_persists_and_pings_per_language(
     )
     monkeypatch.setattr(
         "app.modules.newspaper.indexnow.ping_translation",
-        lambda _article_id, lang: pinged.append(lang),
+        lambda _article_id, lang, slug=None: pinged.append(lang),  # noqa: ARG005 -- name must match the real callee's keyword arg
     )
 
     result = pt.translate_article_batch_task("article-1", ["fa", "ru"])

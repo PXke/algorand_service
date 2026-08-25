@@ -1,5 +1,6 @@
 """Grounding rules added after the rug.ninja draft (2026-07-08): the writer transplanted a competitor launchpad's redemption feature (a GluedLaunch search snippet) onto the subject, invented a "same price for every buyer" guarantee when the official docs were a TBD stub, and relayed token devs' self-published claims as fact. These tests pin the prompt text that guards each failure so a future prompt refactor can't silently drop it."""
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -58,7 +59,16 @@ def test_narrative_guidance_carries_asset_affiliation_check() -> None:
 
 
 def test_stakes_rule_allows_algorand_expert_knowledge(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Thin sources must not block layer-1 explanation — use protocol expertise, not invented partnerships or quotes."""
+    """Thin sources must not block layer-1 explanation — use protocol expertise, not invented partnerships or quotes.
+
+    Root-caused 2026-08-05 (commit 80ac307): the old per-article "Technical
+    Stakes & Depth" bridge (gated on thin sources, with its own "expert
+    knowledge of Algorand" license and "Do not invent false quotes" line) was
+    removed entirely and replaced by _ALGORAND_PRIMER — a standing background
+    block available unconditionally, not just when sources are thin — plus
+    STRICT QUOTE GROUNDING (already the more specific, more thorough quote
+    rule) taking sole ownership of the quote-fabrication ban.
+    """
     captured = {}
 
     def _fake_via_tools(**kwargs: object) -> mc.LLMArticleFields:
@@ -78,8 +88,9 @@ def test_stakes_rule_allows_algorand_expert_knowledge(monkeypatch: pytest.Monkey
         client=SimpleNamespace(),
     )
     system = captured["system"]
-    assert "expert knowledge of Algorand" in system
-    assert "Do not invent false quotes" in system
+    assert "ABOUT ALGORAND" in system
+    assert "Pure Proof-of-Stake consensus" in system
+    assert "STRICT QUOTE GROUNDING" in system
     assert "never announce a technical upgrade" not in system
 
 
@@ -144,10 +155,18 @@ def test_narrative_guidance_anchors_length_to_facts() -> None:
 
 
 def test_research_digest_synthesis_schema() -> None:
-    """The digest-synthesis prompt asks for Verified Facts and Verbatim Quotes sections."""
+    """The digest-synthesis prompt asks for Verified Facts and Verbatim Quotes sections.
+
+    The old research-phase protocol had the model reply with the literal word
+    READY to signal it was done researching (removed 2026-07-09, commit
+    7ed4439); this guards against that "reply READY" handoff coming back. A
+    plain substring check is too broad — "ALREADY" (as in "an address you have
+    ALREADY established") legitimately contains "READY" and isn't the old
+    protocol, so this checks for the standalone word.
+    """
     assert "Verified Facts" in mc._RESEARCH_DIGEST_SYNTHESIS
     assert "Verbatim Quotes" in mc._RESEARCH_DIGEST_SYNTHESIS
-    assert "READY" not in mc._RESEARCH_PHASE_GUIDANCE
+    assert re.search(r"\bREADY\b", mc._RESEARCH_PHASE_GUIDANCE) is None
 
 
 def test_research_digest_synthesis_carries_chart_verbatim() -> None:
@@ -187,24 +206,38 @@ def test_stage2_expert_knowledge_carveout_excludes_business_facts() -> None:
 
 
 def test_technical_stakes_bridges_algorand_layer1() -> None:
-    """The writing guidelines mention layer-1 architecture, legacy friction, and Pure Proof-of-Stake."""
-    guidelines = mc._writing_guidelines("2026-07-09")
-    assert "layer-1 architecture" in guidelines
-    assert "legacy friction" in guidelines
-    assert "Pure Proof-of-Stake" in guidelines
+    """The standing Algorand primer mentions layer-1 architecture and Pure Proof-of-Stake as background the writer can draw on.
+
+    Root-caused 2026-08-05 (commit 80ac307): the old per-article "Technical
+    Stakes & Depth" bridge inside _writing_guidelines (which named "layer-1
+    architecture" and "legacy friction" explicitly) was removed entirely and
+    replaced by _ALGORAND_PRIMER, a standing background block stated once up
+    front rather than re-derived per article — see
+    test_technical_stakes_bridge_is_relevance_gated for why the per-article
+    mandate was dropped rather than merely reworded.
+    """
+    assert "layer-1 blockchain" in mc._ALGORAND_PRIMER
+    assert "Pure Proof-of-Stake consensus" in mc._ALGORAND_PRIMER
 
 
 def test_technical_stakes_bridge_is_relevance_gated() -> None:
-    """Root-caused 2026-07-18 on the live D13.co article: the old 'if the source lacks technical depth you MUST use expert knowledge to explain theoretical mechanisms' wording made the writer bolt state proofs onto a wallet-phishing post-mortem (state proofs don't fix key theft) — the grader's technical_depth dimension then rewarded exactly that filler. Same failure produced the UNDP/Stellar piece's speculative 'where Algorand fits' padding. The bridge must be relevance-gated: skip it when no mechanic is genuinely implicated, never manufacture one."""
+    """Root-caused 2026-07-18 on the live D13.co article: the old 'if the source lacks technical depth you MUST use expert knowledge to explain theoretical mechanisms' wording made the writer bolt state proofs onto a wallet-phishing post-mortem (state proofs don't fix key theft) — the grader's technical_depth dimension then rewarded exactly that filler. Same failure produced the UNDP/Stellar piece's speculative 'where Algorand fits' padding.
+
+    First fix (commit b7d1dac): made the per-article bridge relevance-gated
+    ("RELEVANCE GATES THE BRIDGE") instead of mandatory. Superseded
+    2026-08-05 (commit 80ac307, root-caused on the live Hampelman NFT
+    article's repeated finality/fees boilerplate): even the gated version
+    kept reaching for the same 2-3 named mechanics by default, so the owner
+    removed the per-article bridge mandate entirely rather than tighten the
+    gate further -- _ALGORAND_PRIMER states the background ONCE, unconditionally,
+    and explicitly tells the model most stories don't need it, so there is no
+    per-article MANDATE left to gate.
+    """
     guidelines = mc._writing_guidelines("2026-07-09")
-    assert "RELEVANCE GATES THE BRIDGE" in guidelines
-    assert "state proofs do not fix wallet phishing" in guidelines
-    assert "skip the bridge rather than" in guidelines
-    # The expert-knowledge license survives (thin sources still get depth —
-    # see test_stakes_rule_allows_algorand_expert_knowledge) but the
-    # always-bridge MANDATE is gone: explaining is permitted, not required.
+    assert "RELEVANCE GATES THE BRIDGE" not in guidelines
     assert "MUST use your expert knowledge" not in guidelines
-    assert "expert knowledge of Algorand" in guidelines
+    assert "most stories do not need to restate any of this" in mc._ALGORAND_PRIMER
+    assert "never as a default opener or mid-piece ritual" in mc._ALGORAND_PRIMER
 
 
 def test_writing_guidelines_requires_explaining_the_articles_own_frame() -> None:
@@ -212,22 +245,43 @@ def test_writing_guidelines_requires_explaining_the_articles_own_frame() -> None
     guidelines = mc._writing_guidelines("2026-07-09")
     assert "EXPLAIN YOUR OWN FRAME" in guidelines
     assert "OUTSIDE crypto" in guidelines
-    assert "return to it at least once more" in guidelines
+    # Tightened 2026-08-05 (commit 9e91316, same Hampelman article, second
+    # pass): "return to it at least once more" invited unbounded
+    # re-invocation and a follow-up draft named the frame 5 times in 862
+    # words. Reworded to "ONCE more" and later consolidated (commit 08b70ce)
+    # to point at NO REPETITION, ANYWHERE for the count logic instead of
+    # restating it here.
+    assert "return to it ONCE more" in guidelines
     assert "Ship of Theseus" in guidelines
 
 
 def test_writing_guidelines_bans_cross_section_restatement() -> None:
-    """Root-caused 2026-07-15 on a real NFT-marketplace article: 'fees are undisclosed' and 'AlgoSeas volume is self-reported/unverified' each showed up in the per-subject prose, the comparison table, a bulleted 'why this matters' analysis, AND a reader-guidance section — four independent re-derivations of the same two facts. The existing 'state the challenge once' rule didn't catch this because it's scoped to criticism of a project's shortcomings, not general factual restatement across a table/bullets/guidance structure."""
+    """Root-caused 2026-07-15 on a real NFT-marketplace article: 'fees are undisclosed' and 'AlgoSeas volume is self-reported/unverified' each showed up in the per-subject prose, the comparison table, a bulleted 'why this matters' analysis, AND a reader-guidance section — four independent re-derivations of the same two facts. The existing 'state the challenge once' rule didn't catch this because it's scoped to criticism of a project's shortcomings, not general factual restatement across a table/bullets/guidance structure.
+
+    Consolidated 2026-08-05 (commit af4bae0): "No restatement across
+    sections" was merged with the "Honest but empathetic" bullet's own
+    narrower "state the challenge once" clause into one "NO REPETITION,
+    ANYWHERE" rule that covers both a criticized shortcoming and a plain
+    data point.
+    """
     guidelines = mc._writing_guidelines("2026-07-09")
-    assert "No restatement across sections" in guidelines
-    assert "ONCE, in the section it belongs to" in guidelines
+    assert "NO REPETITION, ANYWHERE" in guidelines
+    assert "ONCE, in the single section it belongs to" in guidelines
 
 
 def test_narrative_guidance_requires_data_table() -> None:
-    """Stage 2 guidance requires a data presentation table with Concept/Real-World Implication columns."""
+    """Stage 2 guidance requires a data presentation table with Concept/Real-World Implication columns.
+
+    The expert-knowledge-of-Algorand-layer-1 carve-out lives in
+    _STAGE2_GENERATION_GUIDANCE (appended to the Stage-2 system prompt), not
+    _NARRATIVE_GUIDANCE (the Stage-2 user prompt, built by
+    _build_stage2_user) -- both reach the same Stage-2 call, see
+    test_stage2_expert_knowledge_carveout_excludes_business_facts for the
+    dedicated coverage of that carve-out's own constraints.
+    """
     assert "DATA PRESENTATION" in mc._NARRATIVE_GUIDANCE
     assert "Concept' and 'Real-World Implication'" in mc._NARRATIVE_GUIDANCE
-    assert "expert knowledge of Algorand layer-1" in mc._NARRATIVE_GUIDANCE
+    assert "expert knowledge of Algorand layer-1" in mc._STAGE2_GENERATION_GUIDANCE
 
 
 def test_build_stage2_user_omits_tool_trace() -> None:
@@ -482,9 +536,15 @@ def test_stage2_forbids_nonverbatim_quotation_marks() -> None:
 
 
 def test_writing_guidelines_forbid_the_boilerplate_lede() -> None:
-    """2026-07-16: every recent article opened with the identical PPoS/ finality/fees paragraph — cross-article repetition the per-article rubric can't see. The guidelines must tell the writer to lead with the story-specific tension and keep protocol mechanics mid-piece."""
+    """2026-07-16: every recent article opened with the identical PPoS/ finality/fees paragraph — cross-article repetition the per-article rubric can't see. The guidelines must tell the writer to lead with the story-specific tension and keep protocol mechanics mid-piece.
+
+    Renamed 2026-08-05 (commit 30fe253) from "Vary your lede" (a negative,
+    do-NOT framing) to "Open Like A Story, Not A Pitch" (leads with the
+    positive instruction), keeping the same negative example and 2026-07-16
+    incident citation as supporting evidence.
+    """
     text = mc._writing_guidelines("2026-07-16")
-    assert "Vary your lede" in text
+    assert "Open Like A Story, Not A Pitch" in text
     assert "standard" in text
     assert "layer-1 pitch" in text
     assert "specific to THIS story" in text
