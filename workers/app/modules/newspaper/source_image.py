@@ -15,6 +15,16 @@ from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
 
+# Same identifying UA every other fetcher in this codebase sends (http_scraper,
+# youtube_scraper, link_extractor, …) — this module was the one place that
+# fetched with none at all, which several Cloudflare/WAF-fronted sources (e.g.
+# defillama.com, blog.perawallet.app) 403 outright: httpx's bare default UA
+# ("python-httpx/x.y") reads as an anonymous bot and gets blocked, while this
+# self-identifying one sails through unchallenged. Root-caused 2026-08-25
+# against real imageless prod articles — both 403'd every candidate URL with
+# no UA and returned 200 with it, live-verified.
+_USER_AGENT = "algorand-platform-newspaper/1.0 (+https://algorand.pxke.me)"
+
 # validate(image_url, declaring_page_url, kind) -> validated image URL or "".
 # Anchored to the page that DECLARED the image, not the article's source_url:
 # an og:image legitimately lives on the declaring page's own domain/CDN (a
@@ -71,7 +81,9 @@ def _images_from_url(url: str) -> tuple[str, str]:
     from app.core.net_guard import guarded_get
     from app.modules.scraper.core.page_metadata import extract_og_image, extract_source_logo
 
-    resp = guarded_get(url, headers={"Accept": "text/html"}, timeout=8.0)
+    resp = guarded_get(
+        url, headers={"Accept": "text/html", "User-Agent": _USER_AGENT}, timeout=8.0
+    )
     resp.raise_for_status()
     final = str(resp.url)
     soup = BeautifulSoup(resp.text, "html.parser")
