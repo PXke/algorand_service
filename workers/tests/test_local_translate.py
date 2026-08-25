@@ -320,6 +320,146 @@ def test_translate_block_keeps_real_translation_when_non_empty(
     assert result == "Bonjour le monde"
 
 
+# --- inline markdown link repair ---------------------------------------------
+#
+# Found 2026-08-25 diffing a live French article
+# (docs.perawallet.app "Pera Connect" piece) against its English source: two
+# distinct MiLMMT defects on `[text](url)` links embedded in ordinary prose,
+# which get no special handling before the model call (unlike headings,
+# code fences, and bare URLs). Both were reproduced off real MiLMMT
+# inference on the exact source paragraphs, byte-for-byte matching what was
+# actually served -- these fixtures use that real captured text, not
+# invented examples.
+
+
+def test_translate_block_collapses_space_before_link_paren(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MiLMMT sometimes regenerates a space between a link's `]` and `(` while translating the surrounding sentence -- this is what actually broke the "Dépôt GitHub"-style link the owner reported: markdown never allows that space, so the link fails to parse and renders as literal bracket/paren text."""
+    monkeypatch.setattr(
+        lt,
+        "_translate_text_milmmt",
+        lambda _text, _lang: (
+            "Pour plus de détails, lisez le [répositoire GitHub] "
+            "(https://github.com/perawallet/connect)."
+        ),
+    )
+    text = "Read more in the [GitHub repository](https://github.com/perawallet/connect) for details."
+    result = lt._translate_block(text, "fr")
+    assert result == (
+        "Pour plus de détails, lisez le [répositoire GitHub]"
+        "(https://github.com/perawallet/connect)."
+    )
+
+
+def test_translate_block_collapses_space_before_paren_with_multiple_links(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real captured production output: TWO links in one block, both corrupted with the same stray space -- both must be repaired, not just the first."""
+    real_prod_translated = (
+        "Le package a enregistré 46 854 téléchargements le mois dernier. Le "
+        "[répositoire GitHub] (https://github.com/perawallet/connect) compte 70 étoiles, et "
+        "l'[exemple d'application d'exemple] (https://perawallet.github.io/pera-demo-dapp/) "
+        "montre plus de cent scénarios."
+    )
+    monkeypatch.setattr(lt, "_translate_text_milmmt", lambda _text, _lang: real_prod_translated)
+    text = (
+        "The package recorded 46,854 downloads in the trailing month. The "
+        "[GitHub repository](https://github.com/perawallet/connect) carries 70 stars, and "
+        "the [example dApp](https://perawallet.github.io/pera-demo-dapp/) shows more than a "
+        "hundred scenarios."
+    )
+    result = lt._translate_block(text, "fr")
+    assert "] (" not in result
+    assert "[répositoire GitHub](https://github.com/perawallet/connect)" in result
+    assert (
+        "[exemple d'application d'exemple](https://perawallet.github.io/pera-demo-dapp/)"
+        in result
+    )
+
+
+def test_translate_block_retranslates_untranslated_multiword_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real captured production defect: MiLMMT translated the whole surrounding sentence but left the link's anchor text "Pera's technical documentation hub" completely in English. The repair path detects the untouched anchor and issues a small dedicated MiLMMT call to translate just that phrase, splicing the result back into the link."""
+    text = (
+        "The SDK sits at the center of [Pera's technical documentation hub]"
+        "(https://docs.perawallet.app/), which organizes four integration surfaces."
+    )
+    whole_block_output = (
+        "Le SDK est au cœur de [Pera's technical documentation hub]"
+        "(https://docs.perawallet.app/), qui organise quatre interfaces d'intégration."
+    )
+
+    def _fake_translate(inner_text: str, _lang: str) -> str:
+        if inner_text == text:
+            return whole_block_output
+        if inner_text == "Pera's technical documentation hub":
+            return "hub de documentation technique de Pera"
+        raise AssertionError(f"unexpected translation call: {inner_text!r}")
+
+    monkeypatch.setattr(lt, "_translate_text_milmmt", _fake_translate)
+    result = lt._translate_block(text, "fr")
+    assert "Pera's technical documentation hub" not in result
+    assert (
+        "[hub de documentation technique de Pera](https://docs.perawallet.app/)" in result
+    )
+
+
+def test_translate_block_leaves_single_word_anchor_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single-word anchor (a brand name/proper noun, e.g. "Pera's") legitimately staying unchanged across languages must NOT trigger a retranslation call -- only multi-word anchors are treated as the leave-it-in-English defect."""
+    calls: list[str] = []
+
+    def _fake_translate(inner_text: str, _lang: str) -> str:
+        calls.append(inner_text)
+        return "le portefeuille qui s'ouvre généralement est [Pera's](https://perawallet.app/)."
+
+    monkeypatch.setattr(lt, "_translate_text_milmmt", _fake_translate)
+    text = "the wallet that typically opens is [Pera's](https://perawallet.app/)."
+    lt._translate_block(text, "fr")
+    # Only the one whole-block call -- no second call for the single-word anchor.
+    assert calls == [text]
+
+
+def test_translate_block_link_repair_does_not_touch_titled_glossary_links(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`[text](url "title")` glossary links already survive whole-block translation correctly (unlike plain links) -- the repair regex is scoped to skip them entirely, so a correctly-translated title is never re-touched."""
+    text = (
+        'Apps use [Algorand Standard Asset](/glossary/algorand-standard-asset "A built-in '
+        'mechanism.") for tokens.'
+    )
+    translated = (
+        'Les applications utilisent [Algorand Standard Asset](/glossary/algorand-standard-asset '
+        '"Un mécanisme intégré.") pour les tokens.'
+    )
+    monkeypatch.setattr(lt, "_translate_text_milmmt", lambda _text, _lang: translated)
+    result = lt._translate_block(text, "fr")
+    assert result == translated
+
+
+def test_looks_translatable_anchor_multiword_true() -> None:
+    """Multi-word anchors (real prose) are flagged as worth checking for the leave-it-in-English defect."""
+    assert lt._looks_translatable_anchor("GitHub repository") is True
+    assert lt._looks_translatable_anchor("Pera's technical documentation hub") is True
+
+
+def test_looks_translatable_anchor_single_token_false() -> None:
+    """Single-token anchors (brand names, bare domains) are skipped -- they legitimately don't translate."""
+    assert lt._looks_translatable_anchor("Pera's") is False
+    assert lt._looks_translatable_anchor("docs.perawallet.app") is False
+
+
+def test_repair_inline_links_skips_retranslation_when_anchor_already_translated() -> None:
+    """No spurious extra call when the anchor was correctly translated already (the common, non-buggy case) -- only the space-before-paren repair should apply."""
+    source = "See the [GitHub repository](https://github.com/perawallet/connect) for more."
+    translated = "Voir le [répositoire GitHub] (https://github.com/perawallet/connect) pour plus."
+    result = lt._repair_inline_links(source, translated, "fr")
+    assert result == "Voir le [répositoire GitHub](https://github.com/perawallet/connect) pour plus."
+
+
 # --- alignment-findings observability ----------------------------------------
 
 
