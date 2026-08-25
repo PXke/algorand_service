@@ -20,7 +20,6 @@
   let error = $state<string | null>(null)
 
   let query = $state('')
-  let listKey = $state(0)
 
   type Beat = {
     tag: string
@@ -70,11 +69,6 @@
     navigate(`/topic/${encodeURIComponent(tag)}`)
   }
 
-  $effect(() => {
-    query
-    if (!loading) listKey++
-  })
-
   onMount(() => {
     const ac = new AbortController()
     void (async () => {
@@ -101,7 +95,7 @@
 
 <div class="page page-wide stack index">
   {#snippet beatList(items: Beat[])}
-    {#key listKey}
+    {#key query}
       <ol class="beats">
         {#each items as item, i (item.tag)}
           <li style="--enter-delay: {staggerMs(i)}ms">

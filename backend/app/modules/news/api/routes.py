@@ -28,11 +28,20 @@ def stats(request: Request) -> dict:
 
 
 def tags(request: Request) -> dict:
-    """Per-tag coverage/readership aggregate for the topics cloud. The scan joins view counters across the recent feed, so it hides behind a short cache; the cloud tolerates minutes-stale heat."""
+    """Per-tag coverage/readership aggregate for the topics cloud.
+
+    tag_stats() fans out a DISTINCT scan plus a COUNT and a LIST_RECENT per
+    tag across the whole tag universe (see its own docstring) -- real work,
+    not a cheap `len()`. At this site's actual (low) traffic a 300s TTL was
+    expiring between real visits, so most readers hit the slow path anyway;
+    the aggregate itself only moves when a new article is tagged, which at
+    an hours-scale publish cadence is far slower than 300s. The cloud
+    tolerates minutes-stale heat, so the TTL is set to tolerate them.
+    """
     _ = request
     from app.core.cache import cached_json
 
-    return cached_json("news:tags", 300, news_service.tag_stats)
+    return cached_json("news:tags", 1800, news_service.tag_stats)
 
 
 def hot(request: Request) -> dict:
