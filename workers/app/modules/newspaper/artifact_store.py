@@ -426,6 +426,48 @@ def mark_artifact_status(artifact_id: str, status: str) -> None:
         )
 
 
+def revert_artifact_to_pending(artifact_id: str) -> bool:
+    """Move an artifact back into the pending lane -- the reverse of mark_artifact_status's pending -> non-pending transition (re-adds the artifacts_pending index row mark_artifact_status would have removed). Used by to_compose_selection.reset_to_compose_for_day to undo a SELECTED artifact's status flip when an admin redoes a day's to_compose picks.
+
+    Guarded to only ever move an artifact OUT of SELECTED: reverting a
+    COMPOSED artifact (already turned into a real article by drain_to_compose)
+    or a DISCARDED one (a pre-compose gate permanently dropped it) back to
+    pending would silently resurrect work that has already moved past
+    selection -- never what a "redo the picks" admin action should do.
+    Returns False (no-op, nothing mutated) for an unknown id or any status
+    other than SELECTED; True when it actually reverted.
+    """
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ArtifactStmts
+
+    try:
+        aid = uuid.UUID(str(artifact_id))
+    except ValueError:
+        return False
+    session = get_cassandra_session()
+    status_row = session.execute(ArtifactStmts.GET_STATUS_ROW, (aid,)).one()
+    if status_row is None or status_row.status != SELECTED:
+        return False
+
+    full = session.execute(ArtifactStmts.GET, (aid,)).one()
+    session.execute(ArtifactStmts.UPDATE_STATUS, (PENDING, aid))
+    session.execute(
+        ArtifactStmts.INSERT_PENDING,
+        (
+            PENDING,
+            status_row.priority,
+            status_row.created_at,
+            aid,
+            full.service_id if full else None,
+            full.channel if full else None,
+            full.url if full else None,
+            full.event_date if full else None,
+            full.human_pick_day if full else None,
+        ),
+    )
+    return True
+
+
 def _set_pending_index_pin(
     session: object, aid: uuid.UUID, status_row: object, day: str | None
 ) -> None:

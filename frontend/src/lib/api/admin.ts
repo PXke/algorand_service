@@ -144,5 +144,11 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.postJson(`/api/v1/admin/artifacts/${encodeURIComponent(artifactId)}/pin-for-tomorrow`, {}, h()),
     getArtifactContent: (artifactId: string) =>
       api.getJson(`/api/v1/admin/artifacts/${encodeURIComponent(artifactId)}/content`, h()),
+    resetToComposeForDay: (day?: string) =>
+      api.postJson(
+        `/api/v1/admin/artifacts/to-compose-reset${day ? `?day=${encodeURIComponent(day)}` : ''}`,
+        {},
+        h(),
+      ),
   }
 }

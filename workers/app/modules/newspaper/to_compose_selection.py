@@ -251,6 +251,72 @@ def list_to_compose_for_day(day: str) -> list[dict[str, object]]:
     return sorted(out, key=lambda r: r["slot"])
 
 
+def reset_to_compose_for_day(day: str) -> dict[str, object]:
+    """Admin-facing "redo the picks" building block: clear `day`'s locked-in `to_compose` selection and revert any artifact it selected back to PENDING, so a follow-up select_to_compose_for_day(day) call is free to re-pick from the full widened pool again.
+
+    Guard (the same one revert_artifact_to_pending itself enforces): only an
+    artifact still in SELECTED status is reverted. One that has since
+    progressed to COMPOSED (drain_to_compose already turned it into a real
+    article) or DISCARDED (a pre-compose gate permanently dropped it) is left
+    completely alone -- re-running selection can never un-publish or
+    un-discard those, and this function must never silently pretend it did.
+    Each such artifact is reported in `skipped` (with its actual current
+    status) rather than just vanishing from the count, so an admin UI can say
+    "N of these picks had already moved on and were left as-is" instead of
+    claiming a full clean reset that didn't actually happen.
+
+    WRITES: deletes every to_compose row for `day` and reverts each
+    still-SELECTED artifact's status back to pending (re-adding it to the
+    pending index). Does NOT re-run selection itself -- see
+    reset_and_reselect_for_day for the one-button combination the admin
+    "Redo today's picks" route actually calls.
+    """
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import ToComposeStmts
+    from app.modules.newspaper.artifact_store import get_artifact, revert_artifact_to_pending
+
+    rows = list_to_compose_for_day(day)
+
+    reverted: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for row in rows:
+        artifact_id = str(row["artifact_id"])
+        artifact = get_artifact(artifact_id)
+        status = artifact.status if artifact is not None else "unknown"
+        if status == SELECTED and revert_artifact_to_pending(artifact_id):
+            reverted.append(artifact_id)
+        else:
+            skipped.append({"artifact_id": artifact_id, "status": status})
+
+    session = get_cassandra_session()
+    session.execute(ToComposeStmts.DELETE_FOR_DAY, (day,))
+
+    return {
+        "status": "ok",
+        "compose_day": day,
+        "cleared_slots": len(rows),
+        "reverted_to_pending": reverted,
+        "skipped": skipped,
+        # Convenience flag: True only when every cleared slot's artifact was
+        # still SELECTED and got reverted -- False means at least one pick
+        # had already progressed (composed/discarded) and was left alone,
+        # which the admin UI should surface rather than silently swallow.
+        "fully_reverted": len(skipped) == 0,
+    }
+
+
+def reset_and_reselect_for_day(day: str, *, now: datetime | None = None) -> dict[str, object]:
+    """One-button admin "redo today's picks" action: reset_to_compose_for_day(day) immediately followed by a fresh select_to_compose_for_day(day) over the now-widened pending pool. This is the function the admin "Redo today's picks" route actually calls -- see each half's own docstring for exactly what it does and (for the reset half) its already-progressed-artifact guard."""
+    reset_result = reset_to_compose_for_day(day)
+    selection_result = select_to_compose_for_day(day, now=now)
+    return {
+        "status": "ok",
+        "compose_day": day,
+        "reset": reset_result,
+        "selection": selection_result,
+    }
+
+
 def preview_to_compose_for_day(day: str) -> dict[str, object]:
     """Read-only preview of what select_to_compose_for_day(day) currently would pick -- the query behind the admin shadow-selection dashboard.
 

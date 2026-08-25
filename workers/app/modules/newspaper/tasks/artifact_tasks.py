@@ -1,4 +1,4 @@
-"""Celery entries for the editorial-room artifact system: the daily priority sweep beat, plus four on-demand tasks the admin preview/selected/pin/content endpoints dispatch into.
+"""Celery entries for the editorial-room artifact system: the daily priority sweep beat, plus five on-demand tasks the admin preview/selected/pin/content/reset endpoints dispatch into.
 
 These tasks only ever touch the `artifacts`/`artifacts_pending`/
 `artifact_content`/`to_compose` tables (see artifact_priority.py /
@@ -48,6 +48,14 @@ def list_to_compose_for_day(day: str) -> list[dict[str, object]]:
     )
 
     return _list_selected(day)
+
+
+@celery_app.task(name="app.tasks.newspaper.reset_and_reselect_to_compose_for_day")
+def reset_and_reselect_to_compose_for_day(day: str) -> dict[str, object]:
+    """On-demand write: the admin "Redo today's picks" action -- clear `day`'s locked-in `to_compose` selection, revert any still-SELECTED artifact it picked back to pending, then immediately re-run selection over the widened pool. See to_compose_selection.reset_and_reselect_for_day (and reset_to_compose_for_day's own docstring) for the full guard: an artifact that already progressed past SELECTED (composed or discarded) is left alone and reported in the reset half's `skipped` list, never silently reverted."""
+    from app.modules.newspaper.to_compose_selection import reset_and_reselect_for_day
+
+    return reset_and_reselect_for_day(day)
 
 
 @celery_app.task(name="app.tasks.newspaper.pin_artifact_for_tomorrow")

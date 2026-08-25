@@ -1,11 +1,12 @@
-"""The four on-demand Celery task wrappers artifact_tasks.py adds for the admin dashboard: preview_to_compose_for_day (live forecast), list_to_compose_for_day (the real persisted selection), pin_artifact_for_tomorrow (writes a human pin), and get_artifact_detail (full title/content/url for one artifact, on expand).
+"""The five on-demand Celery task wrappers artifact_tasks.py adds for the admin dashboard: preview_to_compose_for_day (live forecast), list_to_compose_for_day (the real persisted selection), pin_artifact_for_tomorrow (writes a human pin), get_artifact_detail (full title/content/url for one artifact, on expand), and reset_and_reselect_to_compose_for_day (the "Redo today's picks" action).
 
 Confirms each task body is a thin delegation to its already-tested
 to_compose_selection / artifact_store function (preview_to_compose_for_day /
-list_to_compose_for_day / pin_for_tomorrow / get_artifact+get_artifact_content)
-and that all four are reachable under their registered task names -- the
-backend admin routes dispatch by name via Celery.send_task, so a drifted name
-would 404 silently at runtime with no import-time signal.
+list_to_compose_for_day / pin_for_tomorrow / get_artifact+get_artifact_content /
+reset_and_reselect_for_day) and that all five are reachable under their
+registered task names -- the backend admin routes dispatch by name via
+Celery.send_task, so a drifted name would 404 silently at runtime with no
+import-time signal.
 """
 
 from __future__ import annotations
@@ -158,6 +159,34 @@ def test_get_artifact_detail_returns_none_for_unknown_or_malformed_id(
     assert result is None
 
 
+def test_reset_and_reselect_task_delegates_to_reset_and_reselect_for_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Celery task body is a thin delegation to to_compose_selection.reset_and_reselect_for_day -- the "Redo today's picks" admin action."""
+    from app.modules.newspaper.tasks import artifact_tasks
+
+    called = {}
+
+    def _fake_reset_and_reselect(day: str) -> dict[str, object]:
+        called["day"] = day
+        return {
+            "status": "ok",
+            "compose_day": day,
+            "reset": {"cleared_slots": 1, "reverted_to_pending": ["a"], "skipped": []},
+            "selection": {"status": "ok", "compose_day": day},
+        }
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.to_compose_selection.reset_and_reselect_for_day",
+        _fake_reset_and_reselect,
+    )
+    result = artifact_tasks.reset_and_reselect_to_compose_for_day.run("2026-08-26")
+
+    assert called["day"] == "2026-08-26"
+    assert result["reset"]["reverted_to_pending"] == ["a"]
+    assert result["selection"]["compose_day"] == "2026-08-26"
+
+
 def test_all_admin_tasks_registered_under_their_own_names() -> None:
     """Pins the exact task names the backend admin routes dispatch by -- a drifted name here would 404 silently at runtime with no import-time signal."""
     from app.modules.newspaper.tasks import artifact_tasks
@@ -172,6 +201,9 @@ def test_all_admin_tasks_registered_under_their_own_names() -> None:
         "app.tasks.newspaper.pin_artifact_for_tomorrow"
     )
     assert artifact_tasks.get_artifact_detail.name == ("app.tasks.newspaper.get_artifact_detail")
+    assert artifact_tasks.reset_and_reselect_to_compose_for_day.name == (
+        "app.tasks.newspaper.reset_and_reselect_to_compose_for_day"
+    )
 
 
 def test_artifact_tasks_module_is_imported_by_celery_app() -> None:
