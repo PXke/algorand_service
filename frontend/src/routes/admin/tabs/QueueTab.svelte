@@ -24,39 +24,60 @@
     selected_lane: 'human' | 'platform' | null
   }
 
+  // A row from the REAL, persisted `to_compose` table (list_to_compose_for_day)
+  // — what the daily selection beat actually locked in, not a forecast.
+  type SelectedItem = {
+    slot: number
+    artifact_id: string
+    lane: 'human' | 'platform'
+    service_id: string | null
+    picked_at: string | null
+  }
+
   function tomorrowIso(): string {
     const d = new Date()
     d.setDate(d.getDate() + 1)
     return d.toISOString().slice(0, 10)
   }
 
-  // Ranked pending artifacts (the queue's primary view).
   let day = $state(tomorrowIso())
+
+  // Section 1: the real, persisted selection for `day` — empty until the
+  // 00:05 UTC daily beat has run for it.
+  let selected: SelectedItem[] = $state([])
+
+  // Section 2: ranked pending artifacts — the candidate pool a selection run
+  // would draw from (a live forecast, not the real selection above).
   let items: PreviewItem[] = $state([])
   let humanPicked = $state(false)
   let platformSlotsFilled = $state(0)
   let platformSlotsAvailable = $state(0)
-  let loading = $state(true)
-  let error = $state<string | null>(null)
   let pinningId = $state<string | null>(null)
   let pinError = $state<string | null>(null)
 
-  // Approved & awaiting paced release — still a live, distinct concept (not
-  // part of the old lane/status system), kept as secondary context.
+  // Section 3: approved & awaiting paced release — still a live, distinct
+  // concept (not part of the old lane/status system).
   let backlog: Array<Record<string, unknown>> = $state([])
+
+  let loading = $state(true)
+  let error = $state<string | null>(null)
 
   async function load() {
     loading = true
     error = null
     try {
-      const [res, b] = await Promise.all([
+      const [res, sel, b] = await Promise.all([
         admin.artifactsToComposePreview(day) as Promise<Record<string, unknown>>,
+        admin
+          .artifactsToComposeSelected(day)
+          .catch(() => ({ items: [] })) as Promise<Record<string, unknown>>,
         admin.listPendingFeedBacklog().catch(() => ({ items: [] })),
       ])
       items = Array.isArray(res.items) ? (res.items as PreviewItem[]) : []
       humanPicked = Boolean(res.human_picked)
       platformSlotsFilled = Number(res.platform_slots_filled ?? 0)
       platformSlotsAvailable = Number(res.platform_slots_available ?? 0)
+      selected = Array.isArray(sel.items) ? (sel.items as SelectedItem[]) : []
       backlog = Array.isArray(b.items) ? (b.items as Array<Record<string, unknown>>) : []
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
@@ -85,7 +106,7 @@
     return s.length > 16 ? s.slice(0, 16) : s
   }
 
-  function laneLabel(lane: PreviewItem['selected_lane']): string {
+  function laneLabel(lane: 'human' | 'platform' | null): string {
     if (lane === 'human') return 'human pick'
     if (lane === 'platform') return 'platform pick'
     return ''
@@ -102,10 +123,12 @@
     <div>
       <h2>Queue</h2>
       <p class="admin-muted intro">
-        Pending artifacts ranked by priority — what's coming up to compose next. Pin one as
-        tomorrow's human pick, or let the top platform-ranked artifacts fill the remaining slots.
-        Once an artifact is composed it becomes an article, visible in the
-        <a href="/admin?tab=articles">Articles</a> tab — it no longer lingers here.
+        Three views of the editorial-room artifact pipeline: what's actually been
+        <strong>selected</strong> for the compose day below, the full candidate pool
+        <strong>ranked by priority</strong>, and what's already composed and
+        <strong>awaiting paced release</strong>. Once an artifact is composed it becomes an
+        article, visible in the <a href="/admin?tab=articles">Articles</a> tab — it no longer
+        lingers here.
       </p>
     </div>
     <button class="btn compact" type="button" disabled={loading} onclick={() => load()}>
@@ -119,103 +142,144 @@
       <input type="date" bind:value={day} class="admin-select" />
     </label>
     <p class="admin-muted small">
-      Showing what would currently be selected for this day —
-      {humanPicked ? 'a human pick is pinned' : 'no human pick is pinned yet'}, plus
-      {platformSlotsFilled} of {platformSlotsAvailable} platform slot(s) filled by top-priority
-      pending artifacts.
-    </p>
-    <p class="admin-muted small">
       "Pin for tomorrow" always pins the real tomorrow's human slot, regardless of which day you're
       viewing above.
     </p>
   </div>
 
-  {#if pinError}
-    <p class="admin-err">{pinError}</p>
-  {/if}
-
   {#if loading}
     <p class="admin-muted">Loading…</p>
   {:else if error}
     <p class="admin-err">{error}</p>
-  {:else if items.length === 0}
-    <section class="admin-panel empty">
-      <strong>No pending artifacts</strong>
-      <p class="admin-muted">Nothing is waiting in the artifact pool right now.</p>
-    </section>
   {:else}
-    {#each items as item (item.artifact_id)}
-      <div class="admin-panel artifact-row" class:selected={Boolean(item.selected_lane)}>
-        <div class="row-head">
-          {#if item.selected_lane}
-            <span class="lane-badge lane-{item.selected_lane}">{laneLabel(item.selected_lane)}</span>
-          {/if}
-          <strong class="display-name">{item.title || item.service_id || item.artifact_id}</strong>
-          <span class="priority admin-muted">priority {item.priority.toFixed(2)}</span>
-          {#if item.is_pinned_for_day}
-            <span class="pinned-badge" title="Pinned as the human pick for {day}">
-              pinned for {day}
-            </span>
-          {/if}
-        </div>
-        <p class="admin-muted small meta">
-          {[item.channel, item.service_id, item.url].filter(Boolean).join(' · ')}
-        </p>
-        <p class="admin-muted small">
-          created {formatTs(item.created_at)}
-          {#if item.event_date} · event {formatTs(item.event_date)}{/if}
-        </p>
-        <div class="breakdown-block">
-          <strong>Priority breakdown</strong>
-          <div class="breakdown-grid mono">
-            <span>word count</span><span>{item.priority_breakdown.word_count.toFixed(2)}</span>
-            <span>timeliness</span><span>{item.priority_breakdown.timeliness.toFixed(2)}</span>
-            <span>ecosystem listed</span><span>{item.priority_breakdown.ecosystem_listed.toFixed(2)}</span>
-          </div>
-        </div>
-        <div class="row-actions">
-          <button
-            class="btn compact"
-            type="button"
-            disabled={pinningId === item.artifact_id || item.is_pinned_for_day}
-            onclick={() => pinForTomorrow(item.artifact_id)}
-          >
-            {#if pinningId === item.artifact_id}
-              Pinning…
-            {:else if item.is_pinned_for_day}
-              Pinned ✓
-            {:else}
-              Pin for tomorrow
-            {/if}
-          </button>
-        </div>
-      </div>
-    {/each}
-  {/if}
-
-  {#if backlog.length}
+    <!-- Section 1: what has actually been selected (real to_compose rows). -->
     <section class="admin-panel stack">
       <div class="section-head">
-        <h3>Approved — awaiting paced release ({backlog.length})</h3>
+        <h3>Selected for {day} ({selected.length})</h3>
       </div>
       <p class="admin-muted small">
-        Already-composed articles waiting their turn on the standard release pace — distinct from
-        the pending-artifact ranking above.
+        The real, persisted lineup — what the daily selection beat (00:05 UTC) actually locked in
+        for this day. This is not a forecast; it only changes when that beat runs.
       </p>
-      {#each backlog as item (String(item.service_id ?? item.title))}
-        <div class="backlog-row">
-          <span class="backlog-title">
-            {String(item.title ?? item.service_id ?? '—')}
-          </span>
-          {#if item.service_id && item.title}
-            <span class="admin-muted small">{String(item.service_id)}</span>
-          {/if}
-          <span class="backlog-time admin-muted">{formatTs(item.approved_at)}</span>
-        </div>
-      {/each}
+      {#if selected.length === 0}
+        <p class="admin-muted empty-note">
+          Nothing locked in yet — the daily selection runs at 00:05 UTC and will pick from the
+          ranked list below.
+        </p>
+      {:else}
+        {#each selected as sel (sel.artifact_id)}
+          <div class="selected-row">
+            <span class="lane-badge lane-{sel.lane}">{laneLabel(sel.lane)}</span>
+            <span class="selected-service">{sel.service_id || sel.artifact_id}</span>
+            <span class="admin-muted small">slot {sel.slot}</span>
+            <span class="admin-muted small selected-time">{formatTs(sel.picked_at)}</span>
+          </div>
+        {/each}
+      {/if}
     </section>
-  {/if}
 
+    <!-- Section 2: the ranked candidate pool a selection run draws from. -->
+    <section class="stack">
+      <div class="section-head">
+        <h3>Pending, ranked by priority</h3>
+      </div>
+      <p class="admin-muted small">
+        Forecast only, recomputed live — what a selection run would currently pick for {day}, not
+        what's actually been locked in above.
+        {humanPicked ? 'A human pick is currently pinned.' : 'No human pick is pinned yet.'}
+        {platformSlotsFilled} of {platformSlotsAvailable} platform slot(s) would currently be filled
+        by top-priority pending artifacts. Pin one below as tomorrow's human pick, or let the
+        top-ranked artifacts fill the remaining slots on their own.
+      </p>
+
+      {#if pinError}
+        <p class="admin-err">{pinError}</p>
+      {/if}
+
+      {#if items.length === 0}
+        <div class="admin-panel empty">
+          <strong>No pending artifacts</strong>
+          <p class="admin-muted">Nothing is waiting in the artifact pool right now.</p>
+        </div>
+      {:else}
+        {#each items as item (item.artifact_id)}
+          <div class="admin-panel artifact-row" class:selected={Boolean(item.selected_lane)}>
+            <div class="row-head">
+              {#if item.selected_lane}
+                <span class="lane-badge lane-{item.selected_lane}"
+                  >{laneLabel(item.selected_lane)}</span
+                >
+              {/if}
+              <strong class="display-name">{item.title || item.service_id || item.artifact_id}</strong>
+              <span class="priority admin-muted">priority {item.priority.toFixed(2)}</span>
+              {#if item.is_pinned_for_day}
+                <span class="pinned-badge" title="Pinned as the human pick for {day}">
+                  pinned for {day}
+                </span>
+              {/if}
+            </div>
+            <p class="admin-muted small meta">
+              {[item.channel, item.service_id, item.url].filter(Boolean).join(' · ')}
+            </p>
+            <p class="admin-muted small">
+              created {formatTs(item.created_at)}
+              {#if item.event_date} · event {formatTs(item.event_date)}{/if}
+            </p>
+            <div class="breakdown-block">
+              <strong>Priority breakdown</strong>
+              <div class="breakdown-grid mono">
+                <span>word count</span><span>{item.priority_breakdown.word_count.toFixed(2)}</span>
+                <span>timeliness</span><span>{item.priority_breakdown.timeliness.toFixed(2)}</span>
+                <span>ecosystem listed</span><span
+                  >{item.priority_breakdown.ecosystem_listed.toFixed(2)}</span
+                >
+              </div>
+            </div>
+            <div class="row-actions">
+              <button
+                class="btn compact"
+                type="button"
+                disabled={pinningId === item.artifact_id || item.is_pinned_for_day}
+                onclick={() => pinForTomorrow(item.artifact_id)}
+              >
+                {#if pinningId === item.artifact_id}
+                  Pinning…
+                {:else if item.is_pinned_for_day}
+                  Pinned ✓
+                {:else}
+                  Pin for tomorrow
+                {/if}
+              </button>
+            </div>
+          </div>
+        {/each}
+      {/if}
+    </section>
+
+    <!-- Section 3: already composed, waiting on the release pace. -->
+    {#if backlog.length}
+      <section class="admin-panel stack">
+        <div class="section-head">
+          <h3>Approved — awaiting paced release ({backlog.length})</h3>
+        </div>
+        <p class="admin-muted small">
+          Already-composed articles waiting their turn on the standard release pace — distinct from
+          both the real selection and the ranked candidate pool above.
+        </p>
+        {#each backlog as item (String(item.service_id ?? item.title))}
+          <div class="backlog-row">
+            <span class="backlog-title">
+              {String(item.title ?? item.service_id ?? '—')}
+            </span>
+            {#if item.service_id && item.title}
+              <span class="admin-muted small">{String(item.service_id)}</span>
+            {/if}
+            <span class="backlog-time admin-muted">{formatTs(item.approved_at)}</span>
+          </div>
+        {/each}
+      </section>
+    {/if}
+  {/if}
 </div>
 
 <style>
@@ -252,6 +316,11 @@
     margin: 0;
     font-size: 0.88rem;
   }
+  .stack {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
   .artifact-row {
     display: flex;
     flex-direction: column;
@@ -283,6 +352,7 @@
     letter-spacing: 0.2px;
     padding: 2px 8px;
     border-radius: 999px;
+    white-space: nowrap;
   }
   .lane-human {
     background: color-mix(in srgb, var(--primary) 14%, var(--panel));
@@ -343,6 +413,33 @@
     font-weight: 700;
   }
 
+  .empty-note {
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--surface);
+  }
+
+  .selected-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--surface);
+  }
+
+  .selected-service {
+    flex: 1;
+    min-width: 140px;
+    font-weight: 600;
+  }
+
+  .selected-time {
+    white-space: nowrap;
+  }
+
   .backlog-row {
     display: grid;
     grid-template-columns: 1fr auto;
@@ -370,5 +467,4 @@
     font-size: 11px;
     white-space: nowrap;
   }
-
 </style>

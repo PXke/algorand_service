@@ -1679,6 +1679,60 @@ def admin_artifacts_to_compose_preview(request: Request) -> Response | dict:
     return result
 
 
+def admin_artifacts_to_compose_selected(request: Request) -> Response | dict:
+    """Read-only: the REAL, persisted `to_compose` lineup for `day` (default: tomorrow) -- what select_to_compose_for_day(day) actually picked the last time the daily beat (select_to_compose_for_today_task, 00:05 UTC) ran for that day, slot-ordered. Empty (`items: []`) until that beat has fired for `day` -- this is expected, not an error, and the UI should say so rather than reading as broken.
+
+    Distinct from admin_artifacts_to_compose_preview just above: the preview
+    forecasts what a selection run would currently pick (recomputed live,
+    every dashboard load); this route reads back what was actually locked in
+    and written to the `to_compose` table. They can legitimately disagree --
+    e.g. the pending pool has changed since the beat last ran -- and the
+    admin UI keeps them in visually separate sections for exactly that
+    reason.
+
+    Same cross-service dispatch shape as the preview route (backend has no
+    direct import of the workers codebase), but the underlying work
+    (to_compose_selection.list_to_compose_for_day) is a single already-
+    prepared Cassandra SELECT with no scoring/computation, so a materially
+    shorter timeout than the preview route's is plenty.
+    """
+    denied = require_admin_wallet(request)
+    if denied is not None:
+        return denied
+
+    from datetime import UTC, date, datetime, timedelta
+
+    day = (request.query_params.get("day", "") or "").strip()
+    if not day:
+        day = (datetime.now(tz=UTC).date() + timedelta(days=1)).isoformat()
+    else:
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            return json_error_response(400, "invalid_request", "day must be YYYY-MM-DD")
+
+    try:
+        from celery import Celery
+        from celery.exceptions import TimeoutError as CeleryTimeoutError
+
+        from app.core.config import settings
+
+        async_result = Celery(
+            broker=settings.celery_broker_url, backend=settings.redis_result_url
+        ).send_task(
+            "app.tasks.newspaper.list_to_compose_for_day",
+            args=[day],
+            queue="pipeline",
+        )
+        try:
+            result = async_result.get(timeout=10)
+        except CeleryTimeoutError:
+            return json_error_response(504, "timeout", "the to-compose lookup took too long")
+    except Exception as exc:
+        return json_error_response(502, "broker_unavailable", str(exc))
+    return {"compose_day": day, "items": result}
+
+
 def admin_pin_artifact_for_tomorrow(request: Request) -> Response | dict:
     """Pin one editorial-room artifact as tomorrow's human pick (see workers' artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow).
 
@@ -1777,9 +1831,12 @@ def register_admin_routes(app: Router) -> None:
     app.delete("/api/v1/admin/articles/:article_id/comments/:comment_id")(
         admin_delete_article_comment
     )
-    # Editorial-room artifact system (2026-08-25, SHADOW MODE) -- preview-only,
-    # not wired to any live compose trigger. See to_compose_selection.py.
+    # Editorial-room artifact system -- LIVE since 2026-08-25 (see
+    # to_compose_selection.py). preview forecasts what a selection run would
+    # currently pick; selected reads back what was actually persisted by the
+    # daily beat; pin-for-tomorrow writes the human pick both read from.
     app.get("/api/v1/admin/artifacts/to-compose-preview")(admin_artifacts_to_compose_preview)
+    app.get("/api/v1/admin/artifacts/to-compose-selected")(admin_artifacts_to_compose_selected)
     app.post("/api/v1/admin/artifacts/:artifact_id/pin-for-tomorrow")(
         admin_pin_artifact_for_tomorrow
     )

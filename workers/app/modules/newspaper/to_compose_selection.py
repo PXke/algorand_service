@@ -226,7 +226,14 @@ def _insert_slot(
 
 
 def list_to_compose_for_day(day: str) -> list[dict[str, object]]:
-    """Read back the selected lineup for a compose day, slot-ordered (for tests / a future admin view)."""
+    """Read back the REAL, persisted selection for a compose day, slot-ordered -- what select_to_compose_for_day(day) actually picked the last time it ran (empty until then), not a forecast. Used directly in tests and (via the `list_to_compose_for_day` Celery task) by the admin dashboard's "selected for tomorrow" section.
+
+    `picked_at` is isoformatted (not a raw datetime) so this is safe to hand
+    straight to a JSON-serializing transport -- Celery's default JSON
+    serializer (kombu) wraps a raw datetime in a `{"__type__": ...}` envelope
+    rather than a plain ISO string, which would leak into the admin API
+    response.
+    """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ToComposeStmts
 
@@ -237,7 +244,7 @@ def list_to_compose_for_day(day: str) -> list[dict[str, object]]:
             "artifact_id": str(row.artifact_id),
             "lane": row.lane,
             "service_id": row.service_id,
-            "picked_at": row.picked_at,
+            "picked_at": row.picked_at.isoformat() if row.picked_at else None,
         }
         for row in session.execute(ToComposeStmts.LIST_FOR_DAY, (day,))
     ]

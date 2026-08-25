@@ -63,6 +63,26 @@ def test_human_pin_fills_slot_zero() -> None:
 
 
 @pytest.mark.usefixtures("fake_artifact_session")
+def test_list_to_compose_for_day_isoformats_picked_at() -> None:
+    """picked_at comes back as an ISO string, not a raw datetime -- required so this is safe to hand straight to a JSON-serializing transport (Celery's default JSON serializer wraps a raw datetime in a `{"__type__": ...}` envelope, which would otherwise leak into the admin API response)."""
+    from app.modules.newspaper.artifact_store import insert_artifact, pin_artifact_for_day
+    from app.modules.newspaper.to_compose_selection import (
+        list_to_compose_for_day,
+        select_to_compose_for_day,
+    )
+
+    picked_id, _ = insert_artifact(
+        service_id="svc-picked", url=None, channel="brief", content="picked"
+    )
+    pin_artifact_for_day(picked_id, "2026-08-26")
+    select_to_compose_for_day("2026-08-26", now=dt.datetime(2026, 8, 26, 0, 5, tzinfo=dt.UTC))
+
+    rows = list_to_compose_for_day("2026-08-26")
+
+    assert rows[0]["picked_at"] == "2026-08-26T00:05:00+00:00"
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
 def test_a_pin_for_a_different_day_is_not_used() -> None:
     """A pin set for some OTHER day must not accidentally fill today's/tomorrow's human slot."""
     from app.modules.newspaper.artifact_store import insert_artifact, pin_artifact_for_day
