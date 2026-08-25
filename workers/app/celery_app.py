@@ -194,6 +194,17 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.newspaper.reap_stale_translation_sessions",
         "schedule": float(os.getenv("TRANSLATION_SESSION_REAP_SECONDS", "3600")),
     }
+    # Drains backend's Redis-buffered per-article view increments into the
+    # article_view_counts Cassandra counter (2026-08-25, replacing a direct
+    # Cassandra write on every article page view — counter columns are their
+    # own write path and don't batch). 10 minutes: nothing reads this counter
+    # for anything sub-10-minute (hot_feed's velocity ranking floors article
+    # age at 6h), so this is a vanity/ranking metric that tolerates a short,
+    # self-correcting lag.
+    schedule["flush-pending-view-counts"] = {
+        "task": "app.tasks.newspaper.flush_pending_views",
+        "schedule": float(os.getenv("VIEW_COUNT_FLUSH_SECONDS", "600")),
+    }
     # Self-heals index_article.delay() misses: that task fires once at publish
     # time with no retry, so a transient Typesense hiccup silently drops an
     # article from search forever (found 2026-08-02: a live, feed-listed
