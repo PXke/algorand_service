@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from algorand_shared.article_transitions import transition_article_status
+from algorand_shared.feed_cache import invalidate_feed_first_page
 
 from app.core.config import NEWS_FEED_BUCKET
 
@@ -276,6 +277,7 @@ def insert_stored_article(
         # NOT claim one: they may never publish, and a draft holding the clean
         # slug would push the real article to -2.
         _claim_slug_for_feed(article_id, title, published_at, status=status)
+        invalidate_feed_first_page()
         return str(article_id), True
     return str(article_id), False
 
@@ -377,6 +379,7 @@ def update_article(
         )
     except Exception:
         logger.warning("articles dual-write update failed for %s", aid, exc_info=True)
+    invalidate_feed_first_page()
     return True
 
 
@@ -627,6 +630,7 @@ def update_article_image(article_id: str, image_url: str) -> bool:
         )
     except Exception:
         logger.warning("articles dual-write image update failed for %s", aid, exc_info=True)
+    invalidate_feed_first_page()
     return True
 
 
