@@ -187,15 +187,31 @@ def test_hero_allows_same_platform_shared_media_host() -> None:
     # subdomains distinct (so unrelated authors aren't merged as one source),
     # which made Medium's own shared image CDN (miro.medium.com) look foreign
     # to any one *.medium.com publication.
-    """A shared-media host on the same publishing platform (e.g. Medium's own CDN) is accepted; a genuinely different platform is not."""
+    """A shared-media host on the same publishing platform (e.g. Medium's own CDN) is accepted."""
     assert _plausible_image_host(
         "https://miro.medium.com/v2/resize:fit:2400/1*abc.jpeg",
         "https://valar-staking.medium.com",
     )
-    # A genuinely different platform must still be rejected.
-    assert not _plausible_image_host(
-        "https://miro.medium.com/v2/resize:fit:2400/1*abc.jpeg",
-        "https://some-blog.substack.com",
+
+
+def test_hero_allows_miro_for_medium_custom_domain() -> None:
+    # 2026-08-25 widening: the *.medium.com same-suffix rule above only
+    # covers Medium's OWN subdomains -- it never fires for a Medium
+    # publication living on its own custom/vanity domain (the real, live
+    # case: blog.perawallet.app, a genuine Pera Wallet Medium blog), whose
+    # site_domain is perawallet.app and shares no suffix with medium.com at
+    # all. Every image on every custom-domain Medium blog was silently
+    # rejected as foreign. miro.medium.com is promoted to the flat, global
+    # _IMAGE_CDN_HINTS list instead -- the same treatment already given to
+    # other single-vendor-but-multi-tenant media hosts here (twimg,
+    # googleusercontent, gitbook): nobody hotlinks a specific stranger's
+    # Medium-hosted image as their OWN declared share image, so trusting the
+    # host globally (like those others) carries the same low risk while
+    # actually fixing the common case.
+    """Medium's media CDN is trusted for ANY declaring site now, matching the existing global-CDN precedent (twimg/gitbook/googleusercontent) -- not just literal *.medium.com subdomains."""
+    assert _plausible_image_host(
+        "https://miro.medium.com/v2/resize:fit:1024/1*abc.png",
+        "https://blog.perawallet.app",
     )
 
 
@@ -295,10 +311,13 @@ def test_validated_hero_does_not_shape_reject_icon_urls() -> None:
     )
 
 
-def _fake_response(*, content: bytes, status_ok: bool = True) -> Any:  # noqa: ANN401 -- test double / fake response
+def _fake_response(
+    *, content: bytes, status_ok: bool = True, content_type: str = "image/png"
+) -> Any:  # noqa: ANN401 -- test double / fake response
     class _Resp:
         def __init__(self) -> None:
             self.content = content
+            self.headers = {"content-type": content_type}
 
         def raise_for_status(self) -> None:
             if not status_ok:
@@ -473,3 +492,76 @@ def test_validated_hero_checked_never_fetches_for_implausible_domain(
         )
         == ""
     )
+
+
+# --- 2026-08-25: real prod articles published imageless, root-caused against ---
+# --- their actual live source URLs (defillama.com, blog.perawallet.app, a   ---
+# --- vercel-hosted SVG favicon).                                            ---
+
+
+def test_images_from_url_sends_identifying_user_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Root cause #1: this fetch was the one place in the codebase with no
+    # User-Agent at all (every other scraper sends one) -- httpx's bare
+    # default UA reads as an anonymous bot to Cloudflare/WAF-fronted hosts and
+    # gets a 403 (live-reproduced against defillama.com and
+    # blog.perawallet.app: 403 with no UA, 200 with this one), which
+    # `_images_from_url` then surfaces as a raised HTTPStatusError -- an
+    # entire candidate silently skipped for a reason that has nothing to do
+    # with whether the source actually has an image.
+    """_images_from_url's page fetch sends the same identifying UA every other fetcher in the codebase uses."""
+    seen_headers: dict = {}
+
+    class _PageResp:
+        url = "https://defillama.com/chain/algorand"
+        text = "<html></html>"
+
+        def raise_for_status(self) -> None:
+            pass
+
+    def _fake_get(_url: str, *, headers: dict | None = None, **_kw: object) -> Any:  # noqa: ANN401
+        seen_headers.update(headers or {})
+        return _PageResp()
+
+    monkeypatch.setattr("app.core.net_guard.guarded_get", _fake_get)
+    si._images_from_url("https://defillama.com/chain/algorand")
+    assert seen_headers.get("User-Agent") == si._USER_AGENT
+
+
+def test_is_real_image_sends_identifying_user_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_is_real_image's raw asset fetch also sends the identifying UA (some CDNs block a bare image fetch the same way they block a bare page fetch)."""
+    seen_headers: dict = {}
+
+    def _fake_get(_url: str, *, headers: dict | None = None, **_kw: object) -> Any:  # noqa: ANN401
+        seen_headers.update(headers or {})
+        return _fake_response(content=_png_bytes(size=(300, 300)))
+
+    monkeypatch.setattr("app.core.net_guard.guarded_get", _fake_get)
+    assert publish_tasks._is_real_image("https://vestige.fi/hero.png")
+    assert seen_headers.get("User-Agent") == publish_tasks._HERO_FETCH_UA
+
+
+def test_is_real_image_accepts_genuine_svg(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Root cause #2: PIL has no SVG decoder, so Image.open() raised
+    # UnidentifiedImageError on EVERY real SVG (reproduced against
+    # vitejs.dev/logo.svg, vuejs.org/logo.svg, and GitHub's own favicon.svg --
+    # all three genuine, correctly-served icons, all three unconditionally
+    # rejected). The exception was swallowed by the retry/except wrapper and
+    # logged as a generic fetch failure, silently discarding an otherwise-
+    # perfectly-good brand icon instead of judging it on its own terms (a
+    # vector image has no pixel dimensions to be "too small or blurry").
+    """A genuine SVG image (real <svg> content, svg content-type) is accepted without a pixel-dimension check."""
+    svg = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"></svg>'
+    monkeypatch.setattr(
+        "app.core.net_guard.guarded_get",
+        lambda *_a, **_kw: _fake_response(content=svg, content_type="image/svg+xml"),
+    )
+    assert publish_tasks._is_real_image("https://example.com/favicon.svg", min_dimension=256)
+
+
+def test_is_real_image_rejects_mislabeled_svg_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `.svg`-shaped URL that actually serves an HTML error/redirect page (the real brain-chain.app case: a dead cross-domain favicon link) is still rejected, not nodded through by the extension check alone."""
+    monkeypatch.setattr(
+        "app.core.net_guard.guarded_get",
+        lambda *_a, **_kw: _fake_response(content=b"<html><body>Not found</body></html>", content_type="text/html"),
+    )
+    assert not publish_tasks._is_real_image("https://brain-chain.app/favicon.svg")

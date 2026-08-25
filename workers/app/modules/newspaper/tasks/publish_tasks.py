@@ -35,6 +35,12 @@ from app.modules.search.tasks.index_tasks import index_article, index_crawled_pa
 logger = logging.getLogger(__name__)
 
 
+# Same identifying UA source_image.py sends for the page fetch — the raw
+# asset fetch here was still going out with none, and some of the same
+# Cloudflare/WAF-fronted hosts that block a bare page fetch also block a bare
+# image fetch (2026-08-25).
+_HERO_FETCH_UA = "algorand-platform-newspaper/1.0 (+https://algorand.pxke.me)"
+
 # Host fragments that mark a third-party og:image as CDN/media hosting rather
 # than another site's content. Share images hosted off-domain are the NORM
 # (cloudinary, cloudfront, discourse-cdn, ipfs gateways…) — only a third-party
@@ -61,6 +67,15 @@ _IMAGE_CDN_HINTS: tuple[str, ...] = (
     # pattern as the others here, found missing during the 2026-07-14
     # backfill (a perfectly good 1200x630 GitBook OG image was rejected).
     "gitbook",
+    # Medium's own media CDN (miro.medium.com) — the _PLATFORM_SUFFIXES
+    # same-platform-subdomain rule below only fires when the SOURCE itself is
+    # on a *.medium.com host; a Medium publication on its own custom domain
+    # (blog.perawallet.app, a real Medium blog with a vanity domain) has a
+    # site_domain of perawallet.app, so that rule never triggers and every
+    # og:image — always served from miro.medium.com regardless of the
+    # publication's domain — was rejected as a foreign host. Root-caused
+    # 2026-08-25 against a real imageless blog.perawallet.app article.
+    "miro",
 )
 
 
@@ -126,6 +141,18 @@ def _is_real_image(url: str, *, min_dimension: int = 120) -> bool:
     which happened for real to several perfectly fine images
     (algorand.co, two GitBook OG images, x402.org, hesab.com) during the
     2026-07-14 backfill and had to be manually restored.
+
+    SVG icons are a separate case, not a retry-worthy failure: PIL has no SVG
+    decoder at all, so Image.open() raises UnidentifiedImageError on every
+    single SVG regardless of content — root-caused 2026-08-25 chasing a real
+    imageless article whose brand icon was a genuine, correctly-served
+    favicon.svg (reproduced against vitejs.dev, vuejs.org and GitHub's own
+    favicon.svg: all three real, all three unconditionally rejected as
+    "degenerate/decoy"). A vector image has no pixel dimensions to be too
+    small or blurry, so it skips the min_dimension/blank-alpha checks
+    entirely and is accepted on nothing more than a sane byte size and an
+    actual `<svg` tag — guarding against a mislabeled 404/redirect landing
+    page served at a `.svg` path with the real content-type of text/html.
     """
     import time
     from io import BytesIO
@@ -137,8 +164,12 @@ def _is_real_image(url: str, *, min_dimension: int = 120) -> bool:
         if attempt:
             time.sleep(0.75)
         try:
-            resp = guarded_get(url, timeout=10.0)
+            resp = guarded_get(url, headers={"User-Agent": _HERO_FETCH_UA}, timeout=10.0)
             resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "").lower()
+            if "svg" in content_type or url.lower().split("?")[0].endswith(".svg"):
+                body = resp.content
+                return len(body) > 64 and b"<svg" in body[:1024].lower()
             from PIL import Image
 
             img = Image.open(BytesIO(resp.content))
