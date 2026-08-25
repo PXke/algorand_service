@@ -656,8 +656,8 @@ description = "add articles_by_tag: per-tag partition index (tag, published_at, 
 
 [[migrations]]
 stream = "app"
-version = "074"
-file = "backend/schema/migrations/app/074_x_search_weekly.cql"
+version = "075"
+file = "backend/schema/migrations/app/075_x_search_weekly.cql"
 tier = "prod"
 status = "active"
 description = "add x_search_weekly: per-service cache of the weekly X (Twitter) search sweep, superseded each run, read by the search_x writer tool instead of a live per-compose API call"
