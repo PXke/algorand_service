@@ -8,10 +8,21 @@ const RTL = new Set<LocaleCode>(['ar', 'fa', 'ps'])
 
 const catalogs: Record<string, Record<string, string>> = { en: en as Record<string, string> }
 
+// `en` is loaded statically above and always wins in `catalogs`, so it's
+// excluded from the glob's candidate set here — otherwise the bundler can't
+// tell that branch is dead and still emits a redundant lazy `en-*.js` chunk
+// that's never actually requested at runtime.
+const localeModules = import.meta.glob<{ default: Record<string, string> }>([
+  './locales/*.json',
+  '!./locales/en.json',
+])
+
 async function loadCatalog(code: LocaleCode): Promise<Record<string, string>> {
   if (catalogs[code]) return catalogs[code]
+  const load = localeModules[`./locales/${code}.json`]
+  if (!load) return catalogs.en
   try {
-    const mod = await import(`./locales/${code}.json`)
+    const mod = await load()
     catalogs[code] = mod.default as Record<string, string>
     return catalogs[code]
   } catch {

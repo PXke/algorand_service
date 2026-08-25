@@ -8,9 +8,30 @@ import { restoreSession } from './lib/auth/session'
 import { startPageviewTracking } from './lib/router'
 import { applyLangFromUrl, startLocaleUrlSync } from './lib/localeUrl'
 
-// First thing on the page: catch as much of the bootstrap sequence as
-// possible under passive error monitoring.
-initBugsnag()
+/**
+ * Run `fn` once the browser is idle (or after a timeout fallback), so it
+ * doesn't compete with critical-path fetches during first paint. Shared by
+ * initBugsnag and service-worker registration below — neither needs to run
+ * before mount, just eventually.
+ */
+function runWhenIdle(fn: () => void, timeout = 4000): void {
+  const ric = (
+    window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number
+    }
+  ).requestIdleCallback
+  if (typeof ric === 'function') {
+    ric(fn, { timeout })
+  } else {
+    window.setTimeout(fn, Math.min(timeout, 2500))
+  }
+}
+
+// Catch the bootstrap sequence under passive error monitoring, but deferred
+// to idle time — it's already behind a dynamic import so it doesn't block
+// render, but firing it synchronously still competes for network bandwidth
+// with critical-path fetches during first paint.
+runWhenIdle(initBugsnag)
 
 applyLangFromUrl()
 startLocaleUrlSync()
@@ -41,7 +62,7 @@ function signalSpaReady(): void {
 }
 
 function registerSwWhenIdle(): void {
-  const run = () => {
+  runWhenIdle(() => {
     void import('virtual:pwa-register')
       .then(({ registerSW }) => {
         registerSW({
@@ -58,17 +79,7 @@ function registerSwWhenIdle(): void {
       .catch(() => {
         /* PWA plugin absent in some local setups */
       })
-  }
-  const ric = (
-    window as Window & {
-      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number
-    }
-  ).requestIdleCallback
-  if (typeof ric === 'function') {
-    ric(run, { timeout: 4000 })
-  } else {
-    window.setTimeout(run, 2500)
-  }
+  })
 }
 
 /**
