@@ -41,7 +41,12 @@
 
   /* Pipeline articles close with "## Sources" (or "References") and a bullet
      list of links. Restyle that list as citation rows: host in mono, title
-     after — a wire index, not a stack of underlined URLs. */
+     after — a wire index, not a stack of underlined URLs. The whole block is
+     wrapped in a native <details> — a long source list otherwise runs the
+     reader off the end of the article for a section they rarely open. The
+     heading tag/attrs (open/close) are kept nested inside <summary> so the
+     document outline still sees a heading, same trick used by the admin
+     <details> panels (QueueTab's history, AnalyticsTab's ref-group). */
   function restyleSources(html: string): string {
     /* Heading inner is [^<]* so we cannot backtrack across earlier h2s to
        the first <ul> in the article and skip the actual Sources list. */
@@ -64,7 +69,12 @@
           const title = showTitle ? `<span class="cite-title">${aMatch[2]}</span>` : ''
           return `<li class="cite"><a href="${href}" target="_blank" rel="noopener noreferrer"><span class="cite-host">${host || titleText}</span>${title}</a></li>`
         })
-        return `${open}${inner}${close}<ul class="cite-list">${rewritten}</ul>`
+        const count = (rewritten.match(/<li\b/gi) ?? []).length
+        return (
+          `<details class="cite-block"><summary class="cite-summary">${open}${inner} ` +
+          `<span class="cite-count">(${count})</span>${close}</summary>` +
+          `<ul class="cite-list">${rewritten}</ul></details>`
+        )
       },
     )
   }
@@ -376,6 +386,36 @@
   .md :global(li > ul),
   .md :global(li > ol) {
     margin: 8px 0 0;
+  }
+
+  /* Sources / References — collapsed by default behind a native <details>
+     disclosure (same mechanism the admin panels use for the same job:
+     QueueTab's history, AnalyticsTab's ref-group), since a dozen-plus
+     citations otherwise run the reader off the end of the article. The
+     heading keeps its normal h2 rule (border-top hairline, size, margin)
+     unchanged — it's just nested inside <summary> now — so only the
+     disclosure affordance itself needs new rules here. */
+  .md :global(.cite-summary) {
+    cursor: pointer;
+  }
+  .md :global(.cite-summary)::marker {
+    color: var(--muted);
+    font-size: 0.7em;
+  }
+  .md :global(.cite-summary:hover h2),
+  .md :global(.cite-summary:hover h3) {
+    color: var(--accent);
+  }
+  .md :global(.cite-count) {
+    font-family: var(--font-mono);
+    font-size: 0.48em;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    color: var(--muted);
+    vertical-align: middle;
+  }
+  .md :global(details.cite-block[open] .cite-summary) {
+    margin-bottom: 4px;
   }
 
   /* Sources / References — a citation ledger, not a bulleted URL dump. */
