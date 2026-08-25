@@ -459,11 +459,26 @@ def _fresh_auto_approve_passes(
     body: str,
     page_text: str,
     source_url: str,
+    heuristic_grade: dict | None = None,
     defunct_domains: tuple[str, ...] = (),
     unsourced_hold_reason: str = "",
     broken_link_hold_reason: str = "",
 ) -> tuple[bool, dict[str, str]]:
-    """Strict autonomous-approve gate for content that would otherwise wait for a human review click (owner decision 2026-07-12): grade + headline + gatekeeper factuality AND completeness must ALL clear a bar at least as strict as recompose_published's — fresh content has zero prior human vetting at all, unlike recompose which only touches content a human already approved once, so there's no argument for a looser bar here. Unlike recompose (which deliberately drops completeness from its gate — see the comment at its call site), fresh candidates are exactly what completeness's domain_provenance check exists to triage, so gate_ok uses gate.passed (factuality AND completeness), not factuality alone. Fails CLOSED: any missing or errored signal blocks auto-approve, never allows it. Always returns metadata (even on failure) for the review-row audit trail."""
+    """Strict autonomous-approve gate for content that would otherwise wait for a human review click (owner decision 2026-07-12): grade + headline + gatekeeper factuality AND completeness must ALL clear a bar at least as strict as recompose_published's — fresh content has zero prior human vetting at all, unlike recompose which only touches content a human already approved once, so there's no argument for a looser bar here. Unlike recompose (which deliberately drops completeness from its gate — see the comment at its call site), fresh candidates are exactly what completeness's domain_provenance check exists to triage, so gate_ok uses gate.passed (factuality AND completeness), not factuality alone. Fails CLOSED: any missing or errored signal blocks auto-approve, never allows it. Always returns metadata (even on failure) for the review-row audit trail.
+
+    ``heuristic_grade`` must be the FUSED grade (article_grader.fuse_quality_into_grade
+    output — same dict ArticleComposeResult.heuristic_grade carries, already
+    computed once during compose by the writer's own grade/revise loop) so
+    FRESH_AUTO_APPROVE_GRADE_FLOOR is judged on the same scale as everywhere
+    else in the pipeline. Root-caused 2026-08-25: this gate used to call
+    grade_article_draft() fresh, which returns the schema/structure+length
+    grade ONLY — the LLM rubric's narrative-quality judgment (75% of the
+    weight everywhere else) had zero say in whether a fresh article skipped
+    human review. Passing the already-fused compose-time grade costs nothing
+    extra (no new LLM call — it's a dict already sitting on ``composed``) and
+    is more correct than re-grading, since it's graded with the exact
+    is_special_edition flag the compose itself used.
+    """
     import json as _json
 
     from app.core import config as worker_config
@@ -493,18 +508,23 @@ def _fresh_auto_approve_passes(
         meta["broken_link_hold_reason"] = broken_link_hold_reason[:200]
         return False, meta
     grade_value: float | None = None
-    try:
-        from app.modules.newspaper.article_grader import grade_article_draft
-
-        grade = grade_article_draft(title=title, body=body, source_url=source_url)
-        grade_value = float(grade["grade"])
-        meta["grade"] = str(grade["grade"])
-        meta["grade_detail"] = _json.dumps(
-            {"subscores": grade["subscores"], "issues": grade["issues"]},
-            separators=(",", ":"),
-        )
-    except Exception:
-        logger.warning("fresh auto-approve grading failed for %s", source_url, exc_info=True)
+    if heuristic_grade:
+        try:
+            grade_value = float(heuristic_grade["grade"])
+            meta["grade"] = str(heuristic_grade["grade"])
+            meta["grade_detail"] = _json.dumps(
+                {
+                    "subscores": heuristic_grade.get("subscores"),
+                    "issues": heuristic_grade.get("issues"),
+                },
+                separators=(",", ":"),
+            )
+        except Exception:
+            logger.warning(
+                "fresh auto-approve grading failed for %s", source_url, exc_info=True
+            )
+    else:
+        logger.warning("fresh auto-approve missing compose-time grade for %s", source_url)
 
     gate_ok = False
     try:
@@ -1026,6 +1046,7 @@ def _maybe_auto_approve(
         body=composed.body,
         page_text=page_text_for_clf,
         source_url=row.scrape_url,
+        heuristic_grade=composed.heuristic_grade,
         defunct_domains=defunct_domains,
         unsourced_hold_reason=unsourced_hold_reason,
         broken_link_hold_reason=broken_link_hold_reason,
@@ -1080,10 +1101,7 @@ def _grade_and_gate(
     source_url: str,
     page_text: str,
     service_id: str,
-    published_at: str = "",
-    tags: tuple[str, ...] = (),
     label: str = "",
-    is_special_edition: bool = False,
 ) -> tuple[dict[str, str], float | None, bool]:
     """Quality grade + deterministic gatekeeper for one draft, in the shape every caller needs.
 
@@ -1104,13 +1122,23 @@ def _grade_and_gate(
     grades were consistently 7.3-10 while completeness failed almost
     universally). Still recorded in grade_meta for visibility.
 
-    is_special_edition must be threaded through from the caller — root-caused
-    2026-08-06: grade_article_schema has skipped the length floor/ceiling for
-    special editions since 2026-08-04, but this function (the one every
-    held-for-review/recompose path actually calls) never accepted the flag at
-    all, so a genuinely deep special edition still showed the reviewer a
-    "too long — cut padding/filler" issue the in-compose revision loop
-    already knew not to raise.
+    The grade is read straight off ``composed.heuristic_grade`` — the FUSED
+    grade (article_grader.fuse_quality_into_grade: schema/structure+length
+    AND the LLM quality rubric) the writer's own grade/revise loop already
+    computed once during compose — rather than re-running
+    grade_article_draft() here. Two reasons: (1) it's free (no new LLM call,
+    just reading a dict already on ``composed``), and (2) root-caused
+    2026-08-25: this function used to call grade_article_draft() fresh,
+    which is schema-only and gives the LLM rubric's narrative-quality
+    judgment zero weight — exactly the gap fuse_quality_into_grade's
+    2026-08-06 fix was meant to close everywhere, but this shared
+    held-for-review/recompose helper (and RECOMPOSE_AUTO_APPLY_GRADE_FLOOR's
+    gate at its recompose_published call site) kept computing the old
+    schema-only number instead. This also makes the is_special_edition
+    threading this function used to need for its own grade_article_draft
+    call moot: composed.heuristic_grade was already graded during compose
+    with the correct is_special_edition flag (llm_compose._grade_current_draft
+    receives it from the same compose call that produced ``composed``).
     """
     import json as _json
 
@@ -1118,27 +1146,22 @@ def _grade_and_gate(
 
     grade_meta: dict[str, str] = {}
     grade_value: float | None = None
-    try:
-        from app.modules.newspaper.article_grader import grade_article_draft
-
-        grade = grade_article_draft(
-            title=title,
-            body=composed.body,
-            source_url=source_url,
-            published_at=published_at,
-            tags=tags,
-            is_special_edition=is_special_edition,
-        )
-        grade_value = float(grade["grade"])
-        grade_meta = {
-            "grade": str(grade["grade"]),
-            "grade_detail": _json.dumps(
-                {"subscores": grade["subscores"], "issues": grade["issues"]},
-                separators=(",", ":"),
-            ),
-        }
-    except Exception:
-        grade_meta = {}
+    heuristic_grade = composed.heuristic_grade
+    if heuristic_grade:
+        try:
+            grade_value = float(heuristic_grade["grade"])
+            grade_meta = {
+                "grade": str(heuristic_grade["grade"]),
+                "grade_detail": _json.dumps(
+                    {
+                        "subscores": heuristic_grade.get("subscores"),
+                        "issues": heuristic_grade.get("issues"),
+                    },
+                    separators=(",", ":"),
+                ),
+            }
+        except Exception:
+            grade_meta = {}
 
     gate_ok = False
     try:
@@ -1259,9 +1282,6 @@ def _hold_for_review(
         source_url=row.scrape_url,
         page_text=page_text_for_clf,
         service_id=row.scrape_url,
-        published_at=str(payload.get("published_at", "")),
-        tags=tuple(held_tags),
-        is_special_edition=bool(payload.get("is_special_edition", False)),
     )
     review_id = ""
     if not route_to_backlog:
@@ -2904,7 +2924,6 @@ def recompose_published(
         page_text=page_text,
         service_id=source_url or f"article:{article_id}",
         label=article_id,
-        is_special_edition=bool(getattr(brief_for_recompose, "is_special_edition", False)),
     )
 
     from app.core import config as worker_config
