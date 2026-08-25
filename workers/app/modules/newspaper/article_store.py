@@ -237,7 +237,9 @@ def insert_stored_article(
     # (unlike the old articles_by_id, keyed by article_id alone), so inserting
     # at a fresh published_at without deleting any existing row first would
     # leave an orphaned duplicate behind at the old partition key.
-    old_row = session.execute(ArticlesStmts.GET_BY_ID, (article_id,)).one()
+    # GET_FULL_BY_ID (not GET_BY_ID) -- the tags-index sync below needs the
+    # old row's tags, not just its partition key.
+    old_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (article_id,)).one()
     if old_row is not None:
         session.execute(
             ArticlesStmts.DELETE,
@@ -271,6 +273,35 @@ def insert_stored_article(
             approved_at,
         ),
     )
+    # articles_by_tag dual-write (migration 073): covers both branches this
+    # function can take (fresh insert, and a reused article_id whose OLD row
+    # may have been a live published article, e.g. recompose-under-review
+    # overwriting its own draft). No slug yet at this point -- slug is
+    # claimed below (feed path only) and back-filled onto any tag-index rows
+    # by _claim_slug_for_feed itself.
+    try:
+        from algorand_shared.article_tag_index import sync_tag_index
+
+        sync_tag_index(
+            article_id,
+            old_status=old_row.status if old_row is not None else None,
+            old_tags=list(old_row.tags or []) if old_row is not None else None,
+            old_published_at=old_row.published_at if old_row is not None else None,
+            new_status=status,
+            new_tags=tag_list,
+            new_published_at=published_at,
+            service_id=service_id,
+            title=title,
+            summary=summary,
+            image_url=image,
+            source_url=source_url,
+            slug=None,
+            translations=None,
+            first_published_at=None,
+            updated_at=None,
+        )
+    except Exception:
+        logger.warning("articles_by_tag dual-write failed for %s", article_id, exc_info=True)
     if publish_to_feed:
         # Claim the permanent URL slug at go-live. Held drafts deliberately do
         # NOT claim one: they may never publish, and a draft holding the clean
@@ -375,6 +406,29 @@ def update_article(
                 aid,
             ),
         )
+        # articles_by_tag dual-write: published_at doesn't move for an
+        # in-place edit, but tags can (the "updated" tag is always appended
+        # above), so the tag-index rows still need reconciling.
+        from algorand_shared.article_tag_index import sync_tag_index
+
+        sync_tag_index(
+            aid,
+            old_status=new_row.status,
+            old_tags=list(new_row.tags or []),
+            old_published_at=new_row.published_at,
+            new_status=new_row.status,
+            new_tags=tag_list,
+            new_published_at=new_row.published_at,
+            service_id=new_row.service_id,
+            title=title,
+            summary=summary,
+            image_url=image,
+            source_url=new_row.source_url,
+            slug=new_row.slug,
+            translations=dict(new_row.translations) if new_row.translations else None,
+            first_published_at=new_row.first_published_at,
+            updated_at=updated_at,
+        )
     except Exception:
         logger.warning("articles dual-write update failed for %s", aid, exc_info=True)
     return True
@@ -474,7 +528,12 @@ def _dual_write_draft_content(
     image: str | None,
     now: datetime,
 ) -> None:
-    """New `articles` table dual-write for replace_article_content's draft branch: content-only update on the row's current partition (drafted articles don't re-stamp published_at, status stays untouched -- restoring visibility stays set_article_draft's job). Best-effort."""
+    """New `articles` table dual-write for replace_article_content's draft branch: content-only update on the row's current partition (drafted articles don't re-stamp published_at, status stays untouched -- restoring visibility stays set_article_draft's job). Best-effort.
+
+    No articles_by_tag sync needed here: this branch only runs when
+    row.status == 'draft' (checked by the caller) and status stays untouched
+    -- a drafted article was never in the tag index and doesn't enter it now.
+    """
     from algorand_shared.article_statements import ArticlesStmts
 
     new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
@@ -548,6 +607,20 @@ def _claim_slug_for_feed(
                 ArticlesStmts.SET_SLUG,
                 (slug, status, published_at.year, published_at, article_id),
             )
+            # articles_by_tag dual-write: the tag-index rows for this article
+            # (written by sync_tag_index at insert/transition time, BEFORE a
+            # slug existed) need the same back-fill, or a tag-filtered feed
+            # page would show this article with a permanently missing slug
+            # even after the main feed already has it. slug is a non-key
+            # column on articles_by_tag, so this is a plain per-tag UPDATE,
+            # not a delete+insert.
+            row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (article_id,)).one()
+            if row is not None:
+                from algorand_shared.article_tag_index import set_slug_in_tag_index
+
+                set_slug_in_tag_index(
+                    article_id, tags=list(row.tags or []), published_at=published_at, slug=slug
+                )
     except Exception as exc:
         logger.warning("slug claim failed for %s: %s", article_id, exc)
 

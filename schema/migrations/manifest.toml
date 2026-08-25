@@ -645,3 +645,11 @@ file = "backend/schema/migrations/app/072_articles_backlog_ordering.cql"
 tier = "prod"
 status = "active"
 description = "add articles.interest_score/approved_at: article-table consolidation Phase 4, lets a status='backlog' row carry pending_feed_queue's (interest_score DESC, approved_at ASC) ordering directly"
+
+[[migrations]]
+stream = "app"
+version = "073"
+file = "backend/schema/migrations/app/073_articles_by_tag.cql"
+tier = "prod"
+status = "active"
+description = "add articles_by_tag: per-tag partition index (tag, published_at, article_id, ...feed-card columns) replacing the tag_stats 500-row-scan + feed?tag=X over-fetch-and-filter pattern; list-SAI on articles.tags evaluated and rejected (no ORDER BY with a 2ndary-index predicate, and tag_stats needs the distinct-tag universe which SAI can't answer either) -- see shared/algorand_shared/article_tag_index.py for the write-path"

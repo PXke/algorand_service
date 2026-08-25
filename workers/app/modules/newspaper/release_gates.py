@@ -143,5 +143,31 @@ def _dual_write_release_gate_body(
             ArticlesStmts.UPDATE_CONTENT,
             (new_row.title, new_row.summary, new_body, tags, new_row.image_url, now, *key),
         )
+        # articles_by_tag dual-write: a no-op today (the article is still
+        # unlisted at this instant, see this function's caller's own
+        # comment -- status isn't 'published' yet), included for the same
+        # reason every other `articles` content write reconciles the tag
+        # index: correctness shouldn't depend on this call site staying
+        # pre-publish-only forever.
+        from algorand_shared.article_tag_index import sync_tag_index
+
+        sync_tag_index(
+            aid,
+            old_status=new_row.status,
+            old_tags=list(new_row.tags or []),
+            old_published_at=new_row.published_at,
+            new_status=new_row.status,
+            new_tags=tags,
+            new_published_at=new_row.published_at,
+            service_id=new_row.service_id,
+            title=new_row.title,
+            summary=new_row.summary,
+            image_url=new_row.image_url,
+            source_url=new_row.source_url,
+            slug=new_row.slug,
+            translations=dict(new_row.translations) if new_row.translations else None,
+            first_published_at=new_row.first_published_at,
+            updated_at=now,
+        )
     except Exception:
         logger.warning("articles dual-write release-gate body update failed for %s", aid, exc_info=True)

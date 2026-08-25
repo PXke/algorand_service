@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.modules.news.stores.base import StoredArticle
+from app.modules.news.stores.base import StoredArticle, TagSummary
 
 
 class InMemoryArticleStore:
@@ -61,3 +61,34 @@ class InMemoryArticleStore:
             for aid in article_ids
             if (article := self._by_id.get(aid)) is not None
         }
+
+    def list_by_tag_page(
+        self, tag: str, *, limit: int = 50, cursor_epoch_ms: int | None = None
+    ) -> tuple[list[StoredArticle], int | None]:
+        """List stored articles carrying `tag` (case/whitespace-insensitive), newest first, keyset-paginated -- mirrors the Cassandra store's cursor convention over the small in-process list."""
+        clean = (tag or "").strip().lower()
+        if not clean:
+            return [], None
+        matches = [
+            a for a in self._feed if any((t or "").strip().lower() == clean for t in (a.tags or []))
+        ]
+        if cursor_epoch_ms is not None:
+            cursor_epoch = cursor_epoch_ms / 1000
+            matches = [a for a in matches if a.published_at_epoch < cursor_epoch]
+        page = matches[:limit]
+        next_cursor = page[-1].published_at_epoch * 1000 if len(page) >= limit and page else None
+        return page, next_cursor
+
+    def tag_summary(self) -> list[TagSummary]:
+        """Per-tag (count, last_epoch, article ids) over every stored article -- a plain scan, fine at test/dev scale."""
+        stats: dict[str, TagSummary] = {}
+        for article in self._feed:
+            for raw in article.tags or []:
+                tag = (raw or "").strip().lower()
+                if not tag:
+                    continue
+                summary = stats.setdefault(tag, TagSummary(tag=tag))
+                summary.count += 1
+                summary.last_epoch = max(summary.last_epoch, article.published_at_epoch)
+                summary.article_ids.append(article.article_id)
+        return list(stats.values())

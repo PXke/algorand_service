@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 
@@ -36,6 +36,23 @@ class StoredArticle:
     draft: bool = False
 
 
+@dataclass
+class TagSummary:
+    """One tag's coverage over the live feed: how many published articles carry it, when it last appeared, and a sample of article ids (capped) to sum view counts over.
+
+    ``count``/``last_epoch`` are exact (a single-partition COUNT / the newest
+    clustering row on the Cassandra store), unlike ``article_ids`` which is a
+    bounded sample -- large enough that the view-count total it feeds is a
+    faithful approximation, never re-scanned in full just to rank the topic
+    cloud.
+    """
+
+    tag: str
+    count: int = 0
+    last_epoch: int = 0
+    article_ids: list[str] = field(default_factory=list)
+
+
 class ArticleStore(Protocol):
     """Storage interface for articles."""
 
@@ -53,4 +70,14 @@ class ArticleStore(Protocol):
 
     def get_many(self, article_ids: list[str]) -> dict[str, StoredArticle]:
         """Fetch many articles by id; missing ids are omitted."""
+        ...
+
+    def list_by_tag_page(
+        self, tag: str, *, limit: int = 50, cursor_epoch_ms: int | None = None
+    ) -> tuple[list[StoredArticle], int | None]:
+        """List published articles carrying `tag` (case/whitespace-insensitive), newest first, keyset-paginated. Returns (items, next_cursor_ms)."""
+        ...
+
+    def tag_summary(self) -> list[TagSummary]:
+        """Per-tag coverage over the live feed (topic-cloud aggregate source data), one entry per distinct tag in use."""
         ...

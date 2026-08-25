@@ -281,3 +281,61 @@ class ArticlesStmts:
         "DELETE FROM algorand_platform.articles "
         "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"
     )
+
+
+# --------------------------------------------------------------------------- #
+# articles_by_tag -- migration 073. Per-tag partition index maintained by
+# article_tag_index.sync_tag_index alongside every `articles` write that can
+# change status or tags; powers both `feed?tag=X` (real clustering-ordered,
+# keyset-paginated lookup) and tag_stats (distinct-tag universe + cheap
+# single-partition COUNT), replacing a 500-row scan-and-filter in Python.
+# See migration 073's own comment for why this table exists instead of SAI
+# on `articles.tags`.
+# --------------------------------------------------------------------------- #
+class ArticleTagIndexStmts:
+    """Prepared statements for the `articles_by_tag` index table."""
+
+    INSERT = _Stmt(
+        "INSERT INTO algorand_platform.articles_by_tag ("
+        "tag, published_at, article_id, service_id, title, summary, image_url, "
+        "source_url, slug, translations, first_published_at, updated_at, tags"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    DELETE = _Stmt(
+        "DELETE FROM algorand_platform.articles_by_tag "
+        "WHERE tag = ? AND published_at = ? AND article_id = ?"
+    )
+    # slug is claimed at release, not creation (see article_store.py's
+    # _claim_slug_for_feed) -- after sync_tag_index has already written the
+    # tag-index rows with slug=NULL. A non-key column, so a plain UPDATE
+    # back-fills it without a delete+insert.
+    SET_SLUG = _Stmt(
+        "UPDATE algorand_platform.articles_by_tag SET slug = ? "
+        "WHERE tag = ? AND published_at = ? AND article_id = ?"
+    )
+    # Mirrors ArticlesStmts.LIST_PUBLISHED_PAGE's column set exactly, so both
+    # feed a card through the same _feed_row_to_stored mapper on the backend
+    # side.
+    LIST_PAGE = _Stmt(
+        "SELECT article_id, service_id, title, summary, published_at, first_published_at, "
+        "updated_at, tags, slug, image_url, source_url, translations "
+        "FROM algorand_platform.articles_by_tag "
+        "WHERE tag = ? AND published_at < ? LIMIT ?"
+    )
+    # Same column set, no cursor -- used by tag_stats to sample a tag's most
+    # recent articles (for the last-seen epoch and the view-count sum), not
+    # to paginate.
+    LIST_RECENT = _Stmt(
+        "SELECT article_id, service_id, title, summary, published_at, first_published_at, "
+        "updated_at, tags, slug, image_url, source_url, translations "
+        "FROM algorand_platform.articles_by_tag WHERE tag = ? LIMIT ?"
+    )
+    # Single-partition COUNT -- cheap and exact, unlike a cross-partition
+    # GROUP BY (which Cassandra genuinely can't do well); this is the reason
+    # tag is the partition key here.
+    COUNT = _Stmt("SELECT COUNT(*) FROM algorand_platform.articles_by_tag WHERE tag = ?")
+    # Distinct partition keys = the tag universe. Cheap: DISTINCT on a
+    # partition key is a per-partition scan that only reads one row per
+    # partition, and this platform's real tag cardinality is small and
+    # stable (a news-site topic taxonomy, not user-generated free text).
+    LIST_TAGS = _Stmt("SELECT DISTINCT tag FROM algorand_platform.articles_by_tag")
