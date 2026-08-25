@@ -121,6 +121,45 @@ def test_publish_article_to_feed_stamps_release_time_not_compose_time(
     assert pinged[0]["kwargs"]["slug"] == "a-real-slug"
 
 
+def test_publish_article_to_feed_indexes_the_article_in_typesense(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A review-approved article going live must be indexed immediately, not wait on the once-daily reindex_articles safety net (backend has no Celery worker of its own to fire index_article.delay like workers' publish_tasks does, so this is a direct call)."""
+    article_id = uuid4()
+    row = _article_row(
+        article_id, published_at=datetime.now(tz=UTC) - timedelta(hours=5), slug="a-real-slug"
+    )
+    fake = _FakeSession(row)
+    _patch(monkeypatch, fake)
+    monkeypatch.setattr("app.modules.seo.indexnow.ping_article", lambda *_a, **_kw: None)
+    typesense_calls: list[dict] = []
+    monkeypatch.setattr(
+        "app.core.typesense_client.upsert_article_document",
+        lambda **kw: typesense_calls.append(kw),
+    )
+    published_article = SimpleNamespace(
+        article_id=str(article_id),
+        title="Title",
+        summary="Summary",
+        body="",
+        service_id="svc",
+        published_at_epoch=1234,
+    )
+    monkeypatch.setattr(AdminCassandraStore, "get_article", lambda self, aid: published_article)  # noqa: ARG005
+
+    assert AdminCassandraStore()._publish_article_to_feed(str(article_id)) is True
+
+    assert len(typesense_calls) == 1
+    assert typesense_calls[0] == {
+        "article_id": str(article_id),
+        "title": "Title",
+        "summary": "Summary",
+        "body": "",
+        "service_id": "svc",
+        "published_at_epoch": 1234,
+    }
+
+
 def test_publish_article_to_feed_skips_slug_write_when_article_has_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
