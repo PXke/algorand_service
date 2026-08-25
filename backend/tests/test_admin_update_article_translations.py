@@ -53,6 +53,7 @@ def _store_with_fakes(
 
 
 def test_body_change_clears_and_reenqueues_translations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A body edit is a real content change and must clear/re-enqueue translations."""
     current = _article()
     updated = _article(body="Corrected body")
     store, calls = _store_with_fakes(monkeypatch, current=current, updated=updated)
@@ -83,10 +84,12 @@ def test_update_article_reindexes_typesense_with_the_new_content(
         "body": "Corrected body",
         "service_id": updated.service_id,
         "published_at_epoch": updated.published_at_epoch,
+        "translations": updated.translations,
     }
 
 
 def test_title_only_change_also_clears_translations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A title-only edit is still a real content change and must clear/re-enqueue translations."""
     current = _article()
     updated = _article(title="Corrected title")
     store, calls = _store_with_fakes(monkeypatch, current=current, updated=updated)
@@ -118,6 +121,7 @@ def test_no_stored_translations_skips_the_clear_call(monkeypatch: pytest.MonkeyP
 
 
 def test_missing_article_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """update_article on an id that no longer resolves to a real article must not attempt to clear translations."""
     store = AdminCassandraStore()
     monkeypatch.setattr(store, "get_article", lambda _id: None)
     calls: list[str] = []

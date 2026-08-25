@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { get } from 'svelte/store'
   import { searchApi } from '../lib/api/search'
-  import { messages, t } from '../lib/i18n'
+  import { activeLocale, messages, t } from '../lib/i18n'
   import { articleHref } from '../lib/paths'
   import { route, navigate } from '../lib/router'
   import { ApiException } from '../lib/api/client'
@@ -50,7 +51,7 @@
     error = null
     searched = true
     try {
-      const res = await searchApi.search(trimmed)
+      const res = await searchApi.search(trimmed, 20, undefined, get(activeLocale))
       items = res.items
       engine = res.engine
     } catch (e) {

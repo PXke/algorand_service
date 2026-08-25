@@ -111,6 +111,7 @@ class AdminCassandraStore:
                     body=updated.body,
                     service_id=updated.service_id,
                     published_at_epoch=updated.published_at_epoch,
+                    translations=updated.translations,
                 )
             # Content changed at its existing URL — notify IndexNow (Bing asks
             # for update pings, not just adds). Best-effort, never blocks.
@@ -402,6 +403,7 @@ class AdminCassandraStore:
                     body=updated.body,
                     service_id=updated.service_id,
                     published_at_epoch=updated.published_at_epoch,
+                    translations=updated.translations,
                 )
 
         with contextlib.suppress(Exception):
@@ -1271,6 +1273,7 @@ class AdminCassandraStore:
                     body=published.body,
                     service_id=published.service_id,
                     published_at_epoch=published.published_at_epoch,
+                    translations=published.translations,
                 )
         # The article just became publicly visible — notify IndexNow, same as
         # the workers' direct-publish path does. Best-effort, never blocks.
