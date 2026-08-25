@@ -669,6 +669,14 @@ class AnalyticsStmts:
         "(day, ts, path, referer, user_agent, ua_class) "
         "VALUES (?, now(), ?, ?, ?, ?)"
     )
+    # Same raw-sample idea as DIRECT_SAMPLE_INSERT, widened (2026-08-25) to
+    # '(internal)'/external-referred hits — see pageview_referred_sample
+    # migration 074 for why this is a separate table.
+    REFERRED_SAMPLE_INSERT = _Stmt(
+        "INSERT INTO algorand_platform.pageview_referred_sample "
+        "(day, ts, path, bucket, referer, user_agent, ua_class) "
+        "VALUES (?, now(), ?, ?, ?, ?, ?)"
+    )
     PAGEVIEW_BUMP = _Stmt(
         "UPDATE algorand_platform.pageview_daily SET views = views + 1 WHERE kind = ? AND day = ?"
     )
@@ -715,6 +723,14 @@ class AnalyticsStmts:
     )
     DIRECT_SAMPLE_DELETE = _Stmt(
         "DELETE FROM algorand_platform.pageview_direct_sample WHERE day = ? AND ts = ?"
+    )
+    # '(internal)'/external-referred mirror of the two statements above (2026-08-25).
+    REFERRED_SAMPLE_ALL_BY_DAY = _Stmt(
+        "SELECT ts, path, bucket, referer, user_agent, ua_class "
+        "FROM algorand_platform.pageview_referred_sample WHERE day = ?"
+    )
+    REFERRED_SAMPLE_DELETE = _Stmt(
+        "DELETE FROM algorand_platform.pageview_referred_sample WHERE day = ? AND ts = ?"
     )
     PAGEVIEW_BUMP_DECR = _Stmt(
         "UPDATE algorand_platform.pageview_daily SET views = views - ? WHERE kind = ? AND day = ?"

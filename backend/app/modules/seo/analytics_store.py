@@ -1269,14 +1269,81 @@ def _record_direct(
     )
 
 
+def _record_referred_sample(
+    session: CassandraSession,
+    day: str,
+    path: str,
+    bucket: str,
+    referer: str | None,
+    user_agent: str | None,
+) -> None:
+    """Diagnostics for a human pageview that landed in '(internal)' or an external referrer host (2026-08-25): append a short-lived raw sample (TTL on the table), mirroring _record_direct's pageview_direct_sample write so the SAME retroactive-purge mechanism (_purge_direct_sample_ua) can reconstruct a correction for these buckets too — previously only '(direct)' had a raw per-request log at all. Kept in a separate table from pageview_direct_sample (see migration 074) rather than widening that one, so the admin "recent direct requests" panel — which reads pageview_direct_sample straight through and labels every row a direct hit — doesn't get non-direct rows mixed in."""
+    from app.core.statements import AnalyticsStmts
+
+    session.execute_async(
+        AnalyticsStmts.REFERRED_SAMPLE_INSERT,
+        (
+            day,
+            path[:200],
+            bucket[:120],
+            (referer or "")[:300],
+            (user_agent or "")[:300],
+            ua_class(user_agent),
+        ),
+    )
+
+
+def _scan_and_delete_sample_matches(
+    session: CassandraSession,
+    all_stmt: object,
+    delete_stmt: object,
+    day: str,
+    user_agent: str,
+    fixed_bucket: str | None,
+) -> list[tuple[str, str]]:
+    """Scan one raw-sample table's day partition, delete every row matching `user_agent`, and return (path, bucket) for each deleted row.
+
+    `fixed_bucket` is the bucket label for a table that doesn't carry its own
+    bucket column (pageview_direct_sample is always '(direct)' by
+    construction); pass None to read it off each row instead
+    (pageview_referred_sample). Fails open to an empty list on any Cassandra
+    hiccup — a scan/delete failure on one table must never block correcting
+    from the other.
+    """
+    try:
+        rows = list(session.execute(all_stmt, (day,)))
+    except Exception as exc:
+        log.debug("ua purge scan skipped: %s", exc)
+        return []
+    out: list[tuple[str, str]] = []
+    for r in rows:
+        if r.user_agent != user_agent:
+            continue
+        out.append((r.path, fixed_bucket if fixed_bucket is not None else r.bucket))
+        try:
+            session.execute_async(delete_stmt, (day, r.ts))
+        except Exception as exc:
+            log.debug("ua purge row delete skipped: %s", exc)
+    return out
+
+
 def _purge_direct_sample_ua(session: CassandraSession, user_agent: str, day: str) -> int:
-    """Retroactive correction (2026-07-22): the moment a UA's is_repeated_ua count JUST crosses _UA_FREQ_THRESHOLD, its earlier hits TODAY have already been counted as human — but only via the '(direct)' bucket is there a raw per-request log (pageview_direct_sample) to reconstruct the correction from. Walks today's sample rows for this exact UA, decrements every counter they fed, and deletes the rows so they stop showing as human direct traffic. Returns the number of hits purged.
+    """Retroactive correction (2026-07-22, widened 2026-08-25): the moment a UA's is_repeated_ua count JUST crosses _UA_FREQ_THRESHOLD, its earlier hits TODAY have already been counted as human. Walks today's raw sample rows for this exact UA across BOTH pageview_direct_sample ('(direct)' hits) and pageview_referred_sample ('(internal)'/external-referred hits, added 2026-08-25 to close the gap where only the '(direct)' bucket had a raw log to correct from), decrements every counter they fed, and deletes the rows so they stop showing as human traffic. Returns the number of hits purged.
+
+    Each matched row's OWN recorded referrer bucket drives the
+    REFERRER_BUMP_DECR call (not a hardcoded '(direct)'), and
+    DIRECT_UACLASS_BUMP_DECR only applies to the '(direct)'-table matches,
+    since only those ever fed that counter in the first place (see
+    _record_direct vs _record_referred_sample).
 
     What this can NEVER reach, by design of what's stored at all: unique-
     visitor counts (Redis HyperLogLog has no remove operation — a one-way
     structure), sessions (stitched via a privacy-safe token with no UA
-    linkage kept), and any bot traffic that arrived WITH a real referrer —
-    pageview_direct_sample only ever captured '(direct)' hits.
+    linkage kept), any bot traffic that arrived WITH a real referrer, and —
+    even for a matched row — the per-(referrer, path) / full-referrer-URL /
+    geo / campaign / language / hour-of-day counters that same hit also fed
+    (never decremented, same bounded scope the original '(direct)'-only
+    version already had).
 
     Best-effort: any Cassandra hiccup here must never surface to the caller —
     this runs inline in record_pageview and must not risk failing a real
@@ -1284,31 +1351,43 @@ def _purge_direct_sample_ua(session: CassandraSession, user_agent: str, day: str
     """
     from app.core.statements import AnalyticsStmts
 
-    try:
-        rows = list(session.execute(AnalyticsStmts.DIRECT_SAMPLE_ALL_BY_DAY, (day,)))
-    except Exception as exc:
-        log.debug("ua purge scan skipped: %s", exc)
-        return 0
-
-    matches = [r for r in rows if r.user_agent == user_agent]
+    direct_matches = _scan_and_delete_sample_matches(
+        session,
+        AnalyticsStmts.DIRECT_SAMPLE_ALL_BY_DAY,
+        AnalyticsStmts.DIRECT_SAMPLE_DELETE,
+        day,
+        user_agent,
+        fixed_bucket="(direct)",
+    )
+    referred_matches = _scan_and_delete_sample_matches(
+        session,
+        AnalyticsStmts.REFERRED_SAMPLE_ALL_BY_DAY,
+        AnalyticsStmts.REFERRED_SAMPLE_DELETE,
+        day,
+        user_agent,
+        fixed_bucket=None,
+    )
+    matches = direct_matches + referred_matches
     if not matches:
         return 0
 
     per_path: dict[str, int] = {}
-    for r in matches:
-        per_path[r.path] = per_path.get(r.path, 0) + 1
-        try:
-            session.execute_async(AnalyticsStmts.DIRECT_SAMPLE_DELETE, (day, r.ts))
-        except Exception as exc:
-            log.debug("ua purge row delete skipped: %s", exc)
+    per_bucket: dict[str, int] = {}
+    for path, bucket in matches:
+        per_path[path] = per_path.get(path, 0) + 1
+        per_bucket[bucket] = per_bucket.get(bucket, 0) + 1
 
     total = len(matches)
     uac = ua_class(user_agent)
     browser = browser_family(user_agent)
     try:
         session.execute_async(AnalyticsStmts.PAGEVIEW_BUMP_DECR, (total, "human", day))
-        session.execute_async(AnalyticsStmts.REFERRER_BUMP_DECR, (total, day, "(direct)"))
-        session.execute_async(AnalyticsStmts.DIRECT_UACLASS_BUMP_DECR, (total, day, uac))
+        for bucket, count in per_bucket.items():
+            session.execute_async(AnalyticsStmts.REFERRER_BUMP_DECR, (count, day, bucket))
+        if direct_matches:  # only the '(direct)' bucket ever fed this counter
+            session.execute_async(
+                AnalyticsStmts.DIRECT_UACLASS_BUMP_DECR, (len(direct_matches), day, uac)
+            )
         session.execute_async(AnalyticsStmts.DEVICE_BUMP_DECR, (total, day, uac))
         session.execute_async(AnalyticsStmts.BROWSER_BUMP_DECR, (total, day, browser))
         for path, count in per_path.items():
@@ -1428,6 +1507,9 @@ def _write_pageview_counters(
     if referrer == "(direct)":
         _record_direct(session, day, path, referer, user_agent)
     else:
+        # Raw per-request sample for '(internal)'/external hits too (2026-08-25) —
+        # same retroactive-purge use as _record_direct's, see _record_referred_sample.
+        _record_referred_sample(session, day, path, referrer, referer, user_agent)
         # Full external referrer URL (which exact thread/page, not just the
         # host). Skipped for direct/internal by normalize_referrer_url.
         ref_url = normalize_referrer_url(referer)

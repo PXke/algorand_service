@@ -481,14 +481,17 @@ def test_is_repeated_ua_ignores_empty_and_fails_open(monkeypatch: pytest.MonkeyP
 
 
 class _FakeSession:
-    """Captures execute/execute_async calls; execute() returns canned rows."""
+    """Captures execute/execute_async calls; execute() returns canned rows, optionally varying per statement (rows_by_stmt) for tests that scan more than one table."""
 
-    def __init__(self, rows: tuple = ()) -> None:
+    def __init__(self, rows: tuple = (), rows_by_stmt: dict | None = None) -> None:
         self.rows = list(rows)
+        self.rows_by_stmt = rows_by_stmt or {}
         self.calls: list = []
 
     def execute(self, stmt: str, params: tuple) -> list:
         self.calls.append(("execute", stmt, params))
+        if stmt in self.rows_by_stmt:
+            return self.rows_by_stmt[stmt]
         return self.rows
 
     def execute_async(self, stmt: str, params: tuple) -> None:
@@ -501,7 +504,7 @@ class _FakeSession:
 def test_purge_direct_sample_ua_decrements_matching_hits_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Deletes and decrements counters only for the day's rows matching the target UA."""
+    """Deletes and decrements counters only for the day's rows matching the target UA, within the '(direct)' table alone."""
     _patch_prepare(monkeypatch)
     ua = "Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0.0.0 Safari/537.36"
     other_ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6) Version/17.6 Safari/604.1"
@@ -519,7 +522,7 @@ def test_purge_direct_sample_ua_decrements_matching_hits_only(
             ts="t4", path="/", referer="", user_agent=other_ua, ua_class="mobile-browser"
         ),
     ]
-    sess = _FakeSession(rows)
+    sess = _FakeSession(rows_by_stmt={AnalyticsStmts.DIRECT_SAMPLE_ALL_BY_DAY: rows})
     purged = a._purge_direct_sample_ua(sess, ua, "2026-07-22")
     assert purged == 3
 
@@ -529,6 +532,7 @@ def test_purge_direct_sample_ua_decrements_matching_hits_only(
         ("2026-07-22", "t2"),
         ("2026-07-22", "t3"),
     }
+    assert not any(c[1] == AnalyticsStmts.REFERRED_SAMPLE_DELETE for c in sess.calls)
 
     pageview_decr = next(c for c in sess.calls if c[1] == AnalyticsStmts.PAGEVIEW_BUMP_DECR)
     assert pageview_decr[2] == (3, "human", "2026-07-22")
@@ -543,8 +547,86 @@ def test_purge_direct_sample_ua_decrements_matching_hits_only(
     }
 
 
+def test_purge_direct_sample_ua_spans_internal_and_external_buckets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Widened (2026-08-25) purge: a repeat-offender UA farming hits via '(internal)' navigation and an external referrer gets clawed back too, from pageview_referred_sample -- each row's OWN bucket drives REFERRER_BUMP_DECR, and only the '(direct)'-table matches feed DIRECT_UACLASS_BUMP_DECR."""
+    _patch_prepare(monkeypatch)
+    ua = "Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0.0.0 Safari/537.36"
+    other_ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6) Version/17.6 Safari/604.1"
+    direct_rows = [
+        SimpleNamespace(
+            ts="t1", path="/about", referer="", user_agent=ua, ua_class="desktop-browser"
+        ),
+        SimpleNamespace(
+            ts="t2", path="/", referer="", user_agent=other_ua, ua_class="mobile-browser"
+        ),
+    ]
+    referred_rows = [
+        SimpleNamespace(
+            ts="t3",
+            path="/contact",
+            bucket="(internal)",
+            referer="",
+            user_agent=ua,
+            ua_class="desktop-browser",
+        ),
+        SimpleNamespace(
+            ts="t4",
+            path="/news",
+            bucket="reddit.com",
+            referer="https://reddit.com/x",
+            user_agent=ua,
+            ua_class="desktop-browser",
+        ),
+        SimpleNamespace(
+            ts="t5",
+            path="/",
+            bucket="(internal)",
+            referer="",
+            user_agent=other_ua,
+            ua_class="mobile-browser",
+        ),
+    ]
+    sess = _FakeSession(
+        rows_by_stmt={
+            AnalyticsStmts.DIRECT_SAMPLE_ALL_BY_DAY: direct_rows,
+            AnalyticsStmts.REFERRED_SAMPLE_ALL_BY_DAY: referred_rows,
+        }
+    )
+    purged = a._purge_direct_sample_ua(sess, ua, "2026-07-22")
+    assert purged == 3  # t1 (direct) + t3, t4 (referred) -- t2/t5 belong to other_ua
+
+    direct_deletes = {c[2] for c in sess.calls if c[1] == AnalyticsStmts.DIRECT_SAMPLE_DELETE}
+    assert direct_deletes == {("2026-07-22", "t1")}
+    referred_deletes = {c[2] for c in sess.calls if c[1] == AnalyticsStmts.REFERRED_SAMPLE_DELETE}
+    assert referred_deletes == {("2026-07-22", "t3"), ("2026-07-22", "t4")}
+
+    pageview_decr = next(c for c in sess.calls if c[1] == AnalyticsStmts.PAGEVIEW_BUMP_DECR)
+    assert pageview_decr[2] == (3, "human", "2026-07-22")
+
+    referrer_decrs = {c[2] for c in sess.calls if c[1] == AnalyticsStmts.REFERRER_BUMP_DECR}
+    assert referrer_decrs == {
+        (1, "2026-07-22", "(direct)"),
+        (1, "2026-07-22", "(internal)"),
+        (1, "2026-07-22", "reddit.com"),
+    }
+
+    # Only the single '(direct)'-table match feeds the direct-uaclass counter --
+    # the '(internal)'/external matches never bumped it in the first place.
+    uaclass_decr = next(c for c in sess.calls if c[1] == AnalyticsStmts.DIRECT_UACLASS_BUMP_DECR)
+    assert uaclass_decr[2] == (1, "2026-07-22", "desktop-browser")
+
+    path_decrs = {c[2] for c in sess.calls if c[1] == AnalyticsStmts.PATH_KIND_BUMP_DECR}
+    assert path_decrs == {
+        (1, "2026-07-22", "/about", "human"),
+        (1, "2026-07-22", "/contact", "human"),
+        (1, "2026-07-22", "/news", "human"),
+    }
+
+
 def test_purge_direct_sample_ua_no_match_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Returns zero purged and issues no deletes when no row matches the target UA."""
+    """Returns zero purged and issues no deletes when no row in either table matches the target UA."""
     _patch_prepare(monkeypatch)
     sess = _FakeSession(
         [
@@ -555,7 +637,10 @@ def test_purge_direct_sample_ua_no_match_is_a_noop(monkeypatch: pytest.MonkeyPat
     )
     purged = a._purge_direct_sample_ua(sess, "target-ua", "2026-07-22")
     assert purged == 0
-    assert sess.calls == [("execute", AnalyticsStmts.DIRECT_SAMPLE_ALL_BY_DAY, ("2026-07-22",))]
+    assert sess.calls == [
+        ("execute", AnalyticsStmts.DIRECT_SAMPLE_ALL_BY_DAY, ("2026-07-22",)),
+        ("execute", AnalyticsStmts.REFERRED_SAMPLE_ALL_BY_DAY, ("2026-07-22",)),
+    ]
 
 
 def test_purge_direct_sample_ua_fails_closed_on_scan_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1164,6 +1249,73 @@ def test_write_pageview_counters_commits_non_staged_hits(monkeypatch: pytest.Mon
     )
     assert sum(1 for c in sess.calls if c[1] == AnalyticsStmts.PAGEVIEW_BUMP) == 2
     assert not any(k.startswith(a._DIRECT_STAGE_PREFIX) for k in fake.store)
+
+
+def test_write_pageview_counters_samples_internal_and_external_not_direct_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'(internal)' and external-referred hits get a REFERRED_SAMPLE_INSERT row (2026-08-25 widening) with their own bucket, not a DIRECT_SAMPLE_INSERT -- the two raw-sample tables stay disjoint by referrer bucket, same as their DECR counterparts in the purge."""
+    fake = _FakeStageRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake)
+    monkeypatch.setattr(a, "record_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(a, "record_unique", lambda *_args, **_kwargs: None)
+    sess = _FakeSession()
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: sess)
+
+    # Non-article path -> never staged, always commits synchronously.
+    a._write_pageview_counters(
+        day="2026-08-25",
+        path="/news",
+        referer="https://algorand.pxke.me/",  # in-site nav -> '(internal)'
+        user_agent="Mozilla/5.0 (X11; Linux x86_64) Chrome/128.0.0.0 Safari/537.36",
+        client_ip="1.2.3.4",
+        campaign=None,
+        accept_language="en-US",
+    )
+    a._write_pageview_counters(
+        day="2026-08-25",
+        path="/news",
+        referer="https://reddit.com/r/algorand",
+        user_agent="Mozilla/5.0 (X11; Linux x86_64) Chrome/128.0.0.0 Safari/537.36",
+        client_ip="1.2.3.4",
+        campaign=None,
+        accept_language="en-US",
+    )
+
+    referred_inserts = [c for c in sess.calls if c[1] == AnalyticsStmts.REFERRED_SAMPLE_INSERT]
+    assert len(referred_inserts) == 2
+    buckets = {c[2][2] for c in referred_inserts}  # (day, path, bucket, referer, ua, ua_class)
+    assert buckets == {"(internal)", "reddit.com"}
+    assert not any(c[1] == AnalyticsStmts.DIRECT_SAMPLE_INSERT for c in sess.calls)
+    assert not any(c[1] == AnalyticsStmts.DIRECT_UACLASS_BUMP for c in sess.calls)
+
+
+def test_beacon_fetch_with_internal_referrer_still_counted_and_sampled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard tying the widened (2026-08-25) referred-sample logging back to the 2026-07-26 beacon incident: a real fetch() beacon hit with an internal referrer (bare */* Accept, no Accept-Language, navigation=False) must still be counted AND get a raw sample row for the retroactive-purge mechanism. is_missing_accept_header/is_missing_accept_language stay conditioned on navigation=True only (untouched by this change) -- if a future change ever applied them to the beacon path, this test would start failing the count assertion below."""
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(a, "_uv_redis", lambda: fake_redis)
+    sess = _FakeSession()
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: sess)
+    monkeypatch.setattr(a, "record_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(a, "record_unique", lambda *_args, **_kwargs: None)
+
+    chrome = "Mozilla/5.0 (X11; Linux x86_64) Chrome/128.0.0.0 Safari/537.36"
+    a.record_pageview(
+        path="/topic/defi",
+        referer="https://algorand.pxke.me/",  # in-app navigation -> '(internal)'
+        user_agent=chrome,
+        sec_fetch_mode="cors",  # browsers DO send this on fetch()
+        accept="*/*",  # real fetch() default -- must not be judged on a beacon
+        accept_language=None,  # real fetch() often omits this too
+        navigation=False,
+    )
+
+    assert any(c[1] == AnalyticsStmts.PAGEVIEW_BUMP for c in sess.calls)
+    sample_calls = [c for c in sess.calls if c[1] == AnalyticsStmts.REFERRED_SAMPLE_INSERT]
+    assert len(sample_calls) == 1
+    assert sample_calls[0][2][2] == "(internal)"  # bucket
 
 
 def test_reconcile_direct_pageviews(monkeypatch: pytest.MonkeyPatch) -> None:

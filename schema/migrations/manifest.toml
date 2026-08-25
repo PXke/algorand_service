@@ -653,3 +653,11 @@ file = "backend/schema/migrations/app/073_articles_by_tag.cql"
 tier = "prod"
 status = "active"
 description = "add articles_by_tag: per-tag partition index (tag, published_at, article_id, ...feed-card columns) replacing the tag_stats 500-row-scan + feed?tag=X over-fetch-and-filter pattern; list-SAI on articles.tags evaluated and rejected (no ORDER BY with a 2ndary-index predicate, and tag_stats needs the distinct-tag universe which SAI can't answer either) -- see shared/algorand_shared/article_tag_index.py for the write-path"
+
+[[migrations]]
+stream = "app"
+version = "074"
+file = "backend/schema/migrations/app/074_pageview_referred_sample.cql"
+tier = "prod"
+status = "active"
+description = "add pageview_referred_sample: extends the '(direct)'-only retroactive-purge raw-request log (pageview_direct_sample) to '(internal)'/external-referred hits too, so a repeat-offender UA farming hits via in-app navigation or an external referrer can be clawed back the same way a direct-bucket one already is -- kept as a separate table (not merged into pageview_direct_sample) so the admin 'recent direct requests' panel, which reads that table straight through, isn't polluted with non-direct rows"
