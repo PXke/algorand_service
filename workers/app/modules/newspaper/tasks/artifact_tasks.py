@@ -1,4 +1,4 @@
-"""Celery entries for the editorial-room artifact system: the daily priority sweep beat, plus two on-demand tasks the admin preview/pin endpoints dispatch into.
+"""Celery entries for the editorial-room artifact system: the daily priority sweep beat, plus three on-demand tasks the admin preview/selected/pin endpoints dispatch into.
 
 These tasks only ever touch the `artifacts`/`artifacts_pending`/
 `artifact_content`/`to_compose` tables (see artifact_priority.py /
@@ -38,6 +38,16 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
     )
 
     return _preview(day)
+
+
+@celery_app.task(name="app.tasks.newspaper.list_to_compose_for_day")
+def list_to_compose_for_day(day: str) -> list[dict[str, object]]:
+    """On-demand, read-only: the REAL persisted `to_compose` lineup for `day` -- what select_to_compose_for_day(day) actually picked the last time the daily beat ran, not a forecast. See to_compose_selection.list_to_compose_for_day. Dispatched by the admin dashboard's "selected for tomorrow" GET endpoint. Empty until select_to_compose_for_today_task has fired at least once for `day`."""
+    from app.modules.newspaper.to_compose_selection import (
+        list_to_compose_for_day as _list_selected,
+    )
+
+    return _list_selected(day)
 
 
 @celery_app.task(name="app.tasks.newspaper.pin_artifact_for_tomorrow")

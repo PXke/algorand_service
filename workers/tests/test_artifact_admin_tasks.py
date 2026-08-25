@@ -1,11 +1,11 @@
-"""The two on-demand Celery task wrappers artifact_tasks.py adds for the new admin shadow-selection dashboard: preview_to_compose_for_day (read-only) and pin_artifact_for_tomorrow (writes a human pin).
+"""The three on-demand Celery task wrappers artifact_tasks.py adds for the admin dashboard: preview_to_compose_for_day (live forecast), list_to_compose_for_day (the real persisted selection), and pin_artifact_for_tomorrow (writes a human pin).
 
 Confirms each task body is a thin delegation to its already-tested
-to_compose_selection function (preview_to_compose_for_day / pin_for_tomorrow,
-covered directly in test_to_compose_selection.py) and that both are reachable
-under their registered task names -- the backend admin routes dispatch by
-name via Celery.send_task, so a drifted name would 404 silently at runtime
-with no import-time signal.
+to_compose_selection function (preview_to_compose_for_day / list_to_compose_for_day /
+pin_for_tomorrow, covered directly in test_to_compose_selection.py) and that
+all three are reachable under their registered task names -- the backend
+admin routes dispatch by name via Celery.send_task, so a drifted name would
+404 silently at runtime with no import-time signal.
 """
 
 from __future__ import annotations
@@ -32,6 +32,41 @@ def test_preview_task_delegates_to_preview_to_compose_for_day(
 
     assert called["day"] == "2026-08-26"
     assert result == {"status": "ok", "compose_day": "2026-08-26", "items": []}
+
+
+def test_list_selected_task_delegates_to_list_to_compose_for_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Celery task body is a thin delegation to to_compose_selection.list_to_compose_for_day."""
+    from app.modules.newspaper.tasks import artifact_tasks
+
+    called = {}
+
+    def _fake_list(day: str) -> list[dict[str, object]]:
+        called["day"] = day
+        return [{"slot": 0, "artifact_id": "abc", "lane": "human", "service_id": "svc-a"}]
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.to_compose_selection.list_to_compose_for_day", _fake_list
+    )
+    result = artifact_tasks.list_to_compose_for_day.run("2026-08-26")
+
+    assert called["day"] == "2026-08-26"
+    assert result == [{"slot": 0, "artifact_id": "abc", "lane": "human", "service_id": "svc-a"}]
+
+
+def test_list_selected_task_returns_empty_before_the_beat_has_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty `to_compose` table (the daily beat hasn't fired for this day yet) surfaces as an empty list, not an error."""
+    from app.modules.newspaper.tasks import artifact_tasks
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.to_compose_selection.list_to_compose_for_day", lambda _day: []
+    )
+    result = artifact_tasks.list_to_compose_for_day.run("2026-08-26")
+
+    assert result == []
 
 
 def test_pin_task_delegates_to_pin_for_tomorrow(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -63,12 +98,15 @@ def test_pin_task_reports_false_for_an_unknown_artifact(monkeypatch: pytest.Monk
     assert result == {"ok": False, "artifact_id": "nope"}
 
 
-def test_both_admin_tasks_registered_under_their_own_names() -> None:
+def test_all_admin_tasks_registered_under_their_own_names() -> None:
     """Pins the exact task names the backend admin routes dispatch by -- a drifted name here would 404 silently at runtime with no import-time signal."""
     from app.modules.newspaper.tasks import artifact_tasks
 
     assert artifact_tasks.preview_to_compose_for_day.name == (
         "app.tasks.newspaper.preview_to_compose_for_day"
+    )
+    assert artifact_tasks.list_to_compose_for_day.name == (
+        "app.tasks.newspaper.list_to_compose_for_day"
     )
     assert artifact_tasks.pin_artifact_for_tomorrow.name == (
         "app.tasks.newspaper.pin_artifact_for_tomorrow"
