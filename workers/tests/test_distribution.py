@@ -13,7 +13,6 @@ from app.modules.distribution.base import (
 )
 from app.modules.distribution.bluesky import BlueskyDistributor
 from app.modules.distribution.dispatcher import distribute
-from app.modules.distribution.mastodon import MastodonDistributor
 from app.modules.distribution.telegram import TelegramDistributor
 
 _SHARE = ArticleShare(
@@ -243,79 +242,6 @@ def test_telegram_reports_api_level_failure() -> None:
 
     assert not result.ok
     assert "not a member" in result.detail
-
-
-# ── Mastodon ─────────────────────────────────────────────────────────────
-
-
-def test_mastodon_disabled_without_credentials() -> None:
-    """MastodonDistributor is disabled unless both instance URL and access token are set."""
-    assert not MastodonDistributor(instance_url="", access_token="").enabled
-    assert not MastodonDistributor(instance_url="https://mastodon.social", access_token="").enabled
-    assert MastodonDistributor(instance_url="https://mastodon.social", access_token="tok").enabled
-
-
-def test_mastodon_post_success_with_media() -> None:
-    """Posts to Mastodon with the uploaded share image attached as media."""
-    with patch("app.modules.distribution.mastodon.httpx.Client") as client_cls:
-        client = client_cls.return_value.__enter__.return_value
-        client.get.return_value.raise_for_status = lambda: None
-        client.get.return_value.content = b"fake-image-bytes"
-        client.get.return_value.headers = {"content-type": "image/png"}
-
-        def post_side_effect(path: str, **_kwargs: object) -> MagicMock:
-            resp = MagicMock()
-            resp.raise_for_status = lambda: None
-            if path == "/api/v1/media":
-                resp.json.return_value = {"id": "media-42"}
-            return resp
-
-        client.post.side_effect = post_side_effect
-
-        result = MastodonDistributor(
-            instance_url="https://mastodon.social", access_token="tok"
-        ).post_article(_SHARE)
-
-    assert result.ok
-    status_call = next(c for c in client.post.call_args_list if c.args[0] == "/api/v1/statuses")
-    assert status_call.kwargs["data"]["media_ids"] == ["media-42"]
-    assert _SHARE.url in status_call.kwargs["data"]["status"]
-    assert "#Algorand #Infrastructure #Layer1" in status_call.kwargs["data"]["status"]
-
-
-def test_mastodon_post_survives_media_upload_failure() -> None:
-    """A failed media upload still lets the status post, without an attached image."""
-    with patch("app.modules.distribution.mastodon.httpx.Client") as client_cls:
-        client = client_cls.return_value.__enter__.return_value
-        client.get.side_effect = ConnectionError("image host down")
-        resp = MagicMock()
-        resp.raise_for_status = lambda: None
-        client.post.return_value = resp
-
-        result = MastodonDistributor(
-            instance_url="https://mastodon.social", access_token="tok"
-        ).post_article(_SHARE)
-
-    assert result.ok
-    status_call = client.post.call_args
-    assert "media_ids" not in status_call.kwargs["data"]
-
-
-def test_mastodon_post_failure_does_not_raise() -> None:
-    """A post failure is caught and returned as a failed DistributionResult, never raised."""
-    with patch("app.modules.distribution.mastodon.httpx.Client") as client_cls:
-        client = client_cls.return_value.__enter__.return_value
-        client.get.return_value.raise_for_status = lambda: None
-        client.get.return_value.content = b"x"
-        client.get.return_value.headers = {"content-type": "image/png"}
-        client.post.side_effect = ConnectionError("instance down")
-
-        result = MastodonDistributor(
-            instance_url="https://mastodon.social", access_token="tok"
-        ).post_article(_SHARE)
-
-    assert not result.ok
-    assert result.channel == "mastodon"
 
 
 # ── Dispatcher ───────────────────────────────────────────────────────────

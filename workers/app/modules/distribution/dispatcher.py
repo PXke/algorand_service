@@ -12,7 +12,6 @@ log = logging.getLogger(__name__)
 def _build_distributors() -> list[SocialDistributor]:
     from app.core import config
     from app.modules.distribution.bluesky import BlueskyDistributor
-    from app.modules.distribution.mastodon import MastodonDistributor
     from app.modules.distribution.telegram import TelegramDistributor
 
     return [
@@ -20,10 +19,6 @@ def _build_distributors() -> list[SocialDistributor]:
             handle=config.BLUESKY_IDENTIFIER, app_password=config.BLUESKY_APP_PASSWORD
         ),
         TelegramDistributor(bot_token=config.TELEGRAM_BOT_TOKEN, chat_id=config.TELEGRAM_CHAT_ID),
-        MastodonDistributor(
-            instance_url=config.MASTODON_INSTANCE_URL,
-            access_token=config.MASTODON_ACCESS_TOKEN,
-        ),
     ]
 
 

@@ -44,7 +44,7 @@ milestones above:
 - **Two-stage writer pipeline** — research → gap-fill → write → grade → revise via Mistral, with a pre-publish gatekeeper (deterministic gate live in shadow mode; ModernBERT MTTH quality head staged, not yet serving) (`workers/app/modules/newspaper/`, `workers/app/modules/gatekeeper/`)
 - **SEO crawl surfaces** — sitemaps, RSS, robots, llms.txt, OG share cards; SPA serves app HTML (`backend/app/modules/seo/`, `frontend/`)
 - **Admin console** — wallet-gated ops/CMS: article edit, source curation, classifier retrain, gatekeeper tuning, publish queue, analytics (`backend/app/modules/admin/`, SPA `/admin`)
-- **Social auto-distribution** — Bluesky, Telegram, Mastodon posting on publish (`workers/app/modules/distribution/`)
+- **Social auto-distribution** — Bluesky, Telegram posting on publish (`workers/app/modules/distribution/`)
 - **8-language article translation** (every non-English UI locale), 9-language UI (`frontend/src/lib/i18n/`)
 - **msgspec** for all wire schemas (pydantic fully removed); **prepared-statement registry** for all Cassandra queries (`backend/app/core/statements.py`)
 

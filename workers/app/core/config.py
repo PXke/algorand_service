@@ -740,11 +740,10 @@ BLUESKY_APP_PASSWORD = env_str("BLUESKY_APP_PASSWORD", "")
 # added as an admin of the channel either way).
 TELEGRAM_BOT_TOKEN = env_str("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = env_str("TELEGRAM_CHAT_ID", "")
-# e.g. "https://mastodon.social" — whichever instance the bot account lives
-# on. Access token from Settings > Development > New Application (needs
-# write:statuses + write:media scopes) on that instance.
-MASTODON_INSTANCE_URL = env_str("MASTODON_INSTANCE_URL", "")
-MASTODON_ACCESS_TOKEN = env_str("MASTODON_ACCESS_TOKEN", "")
+# Mastodon distribution removed 2026-08-25: the owner's account was banned
+# by the instance for publishing AI-generated content (platform-policy
+# violation, not a code-quality call). MASTODON_INSTANCE_URL /
+# MASTODON_ACCESS_TOKEN env vars are no longer read anywhere.
 # Client-side rate limiting (Redis-coordinated across all workers), shared by
 # BOTH LLM providers (Mistral and DeepSeek — see llm_rate_limit.py). Spacing
 # is a hard floor on time between calls (leaky bucket). Lowered 15.0 -> 5.0
