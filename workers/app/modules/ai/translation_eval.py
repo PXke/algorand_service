@@ -28,14 +28,22 @@ Layer 3 (fluency) has no function here on purpose.
 
 The Candidate registry below is a SEPARATE, offline evaluation-only surface
 -- it never touches app.modules.ai.local_translate's production entry points
-except to reuse its two loaded baseline models directly (same cache, same
-_MAX_THREADS cap). local_translate.py stays exactly what it is: two fixed
-engines, a hard never-both-resident guarantee, a production-sized Redis
-lock. This module does NOT take local_translate_lock() -- that lock is
-keyed/sized for production batch traffic. Run eval scripts that use this
-registry by hand, off-peak, the same convention scripts/eval_compose_prompts.py
-already uses for its own cost reasons -- never automatically, never in CI,
-and never while a real translation batch might be in flight.
+except to reuse its one loaded baseline model (MiLMMT) directly (same cache,
+same _MAX_THREADS cap). local_translate.py stays exactly what it is: one
+fixed engine, a production-sized Redis lock. This module does NOT take
+local_translate_lock() -- that lock is keyed/sized for production batch
+traffic. Run eval scripts that use this registry by hand, off-peak, the same
+convention scripts/eval_compose_prompts.py already uses for its own cost
+reasons -- never automatically, never in CI, and never while a real
+translation batch might be in flight.
+
+Historical note: at the time of this module's original 2026-07-31 survey
+run, local_translate.py ran TWO engines (MiLMMT plus SeamlessM4T for
+Pashto) and this registry had a matching SeamlessM4T baseline candidate.
+SeamlessM4T was removed 2026-08-25 (see local_translate.py's module
+docstring for why) along with its baseline candidate here; the rest of this
+module's comments describing the original two-baseline survey are left
+intact as a factual record of what was actually run and found.
 """
 
 from __future__ import annotations
@@ -375,13 +383,12 @@ class Candidate:
     src/tgt swapped) -- every loader below is written to support that.
 
     ``sample=True`` requests the sampling-variance run mode (see the plan):
-    both current production engines decode deterministically by default
-    (MiLMMT do_sample=False, SeamlessM4T fixed beam search), so a naive
-    "run N times" test would trivially report 100% consistency and prove
-    nothing. Every candidate except SeamlessM4T honors it by switching to
-    temperature sampling; SeamlessM4T's beam search
-    has no simple sampling equivalent and ignores the flag -- see
-    _seamless_translate.
+    MiLMMT (the current production engine) decodes deterministically by
+    default (do_sample=False), so a naive "run N times" test would trivially
+    report 100% consistency and prove nothing. Historical note: SeamlessM4T,
+    a former production engine and baseline candidate here (removed
+    2026-08-25, see local_translate.py's module docstring), used fixed beam
+    search with no simple sampling equivalent and ignored this flag entirely.
     """
 
     name: str
@@ -499,8 +506,8 @@ def translate_block_with(
 
 # --- generic loader cache for every non-baseline (third-party) candidate ---
 # A single slot map keyed by HF model id, separate from local_translate.py's
-# own two-engine cache. Baseline candidates (MiLMMT, SeamlessM4T) reuse
-# local_translate's cache/loaders directly instead -- see below.
+# own MiLMMT cache. The MiLMMT baseline candidate reuses local_translate's
+# cache/loader directly instead -- see below.
 
 _loaded: dict[str, dict[str, Any]] = {}
 _load_lock = threading.Lock()
@@ -761,17 +768,16 @@ _HYMT2 = Candidate(
 # custom code is updated for newer transformers, or if pinning an older
 # transformers version is ever worth it for one bonus candidate.
 
-# --- production baselines, reusing local_translate.py's own cache/loaders ---
-# These wrap the SAME model singletons production uses (lt._load_milmmt() /
-# lt._load_seamless() -- same cache dict, not a reload), so a concurrent
-# production batch would corrupt eval results and vice versa. Do not run
-# this harness while a real translation batch might be in flight (see
-# module docstring).
+# --- production baseline, reusing local_translate.py's own cache/loader ---
+# This wraps the SAME model singleton production uses (lt._load_milmmt() --
+# same cache dict, not a reload), so a concurrent production batch would
+# corrupt eval results and vice versa. Do not run this harness while a real
+# translation batch might be in flight (see module docstring).
 #
-# local_translate.py's own _translate_text_milmmt/_translate_text_seamless
-# are English-source-only by design (production never back-translates), so
-# these reimplement the same fixed template/call shape with swappable
-# src/tgt -- needed here for Layer 2's back-translation direction.
+# local_translate.py's own _translate_text_milmmt is English-source-only by
+# design (production never back-translates), so this reimplements the same
+# fixed template/call shape with swappable src/tgt -- needed here for Layer
+# 2's back-translation direction.
 
 
 def _milmmt_translate(text: str, src_lang: str, tgt_lang: str, *, sample: bool = False) -> str:
@@ -792,39 +798,20 @@ def _milmmt_translate(text: str, src_lang: str, tgt_lang: str, *, sample: bool =
     return tokenizer.decode(generated, skip_special_tokens=True).strip()
 
 
-def _seamless_translate(
-    text: str,
-    src_lang: str,
-    tgt_lang: str,
-    *,
-    sample: bool = False,  # noqa: ARG001 -- accepted for interface uniformity, see docstring
-) -> str:
-    """``sample`` is accepted for interface uniformity but ignored -- SeamlessM4T here always uses fixed beam search (num_beams=5), same as production. Beam search and temperature sampling aren't simply combinable, and this is the one baseline candidate where matching production's exact call shape (for a meaningful comparison) matters more than sampling-mode coverage."""
-    import torch
-
-    processor, model = lt._load_seamless()
-    inputs = processor(text=text, src_lang=lt._SEAMLESS_LANG[src_lang], return_tensors="pt")
-    torch.set_num_threads(_MAX_THREADS)
-    with torch.inference_mode():
-        tokens = model.generate(
-            **inputs, tgt_lang=lt._SEAMLESS_LANG[tgt_lang], num_beams=5, max_new_tokens=512
-        )[0]
-    return processor.decode(tokens, skip_special_tokens=True).strip()
-
-
 _MILMMT_BASELINE = Candidate(
     name="milmmt-46-4b (prod baseline)",
     license="Gemma Terms of Use (not Apache -- see local_translate.py module docstring)",
     translate_fn=_milmmt_translate,
-    unload_fn=lambda: lt.unload_engine("milmmt"),
+    unload_fn=lt.unload_milmmt,
 )
 
-_SEAMLESS_BASELINE = Candidate(
-    name="seamless-m4t-v2 (prod baseline, Pashto)",
-    license="CC-BY-NC-4.0 (non-commercial -- accepted exception, see local_translate.py module docstring)",
-    translate_fn=_seamless_translate,
-    unload_fn=lambda: lt.unload_engine("seq2seq"),
-)
+# SeamlessM4T's baseline candidate (seamless-m4t-v2, the Pashto production
+# engine at the time of this 2026-07-31 survey run) was removed 2026-08-25
+# along with local_translate.py's own SeamlessM4T support -- see that
+# module's docstring. Production now routes Pashto to DeepSeek instead
+# (DEEPSEEK_TRANSLATE_LANGS in app/core/config.py), so there is no local
+# "ps" baseline left to compare against; ps below now compares only the
+# third-party candidates against each other.
 
 
 # Starter set: 3 candidates for every language (fa/ps via the grouped
@@ -839,5 +826,5 @@ CANDIDATES: dict[str, list[Candidate]] = {
     "zh": [_MILMMT_BASELINE, _opus_mt_candidate("zh"), _M2M100, _HYMT2],
     "hi": [_MILMMT_BASELINE, _opus_mt_candidate("hi"), _M2M100, _HYMT2],
     "fa": [_MILMMT_BASELINE, _M2M100, _opus_mt_ine_candidate("fa"), _HYMT2],
-    "ps": [_SEAMLESS_BASELINE, _M2M100, _opus_mt_ine_candidate("ps")],
+    "ps": [_M2M100, _opus_mt_ine_candidate("ps")],
 }

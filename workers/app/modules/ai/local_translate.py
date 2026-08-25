@@ -1,47 +1,49 @@
 """Local (on-box) translation, replacing the Mistral translation lane.
 
-Two pluggable engines, chosen per target language (see ``ENGINE_FOR_LANG``):
+Single engine: xiaomi-research/MiLMMT-46-4B-v0.1, a Gemma3-4B continual
+pretrain fine-tuned specifically for translation across 46 languages. Gemma
+Terms of Use, not Apache -- read the prohibited-use policy before this
+reaches a commercial product. Covers ar/fa/ru/zh/hi/es/fr; Pashto (``ps``)
+does NOT go through this module -- see ``DEEPSEEK_TRANSLATE_LANGS`` below.
 
-  - "seq2seq": facebook/seamless-m4t-v2-large (``SeamlessM4Tv2ForTextToText``,
-    the text-only variant -- skips the speech/vocoder weights this pipeline
-    never uses). CC-BY-NC 4.0, same non-commercial restriction as NLLB.
-    Pashto only, for now -- the one language with no fluent alternative at
-    any size (see the FLORES eng->pbt spBLEU figures discussed earlier this
-    thread).
-  - "milmmt": xiaomi-research/MiLMMT-46-4B-v0.1, a Gemma3-4B continual
-    pretrain fine-tuned specifically for translation across 46 languages.
-    Gemma Terms of Use, not Apache -- read the prohibited-use policy before
-    this reaches a commercial product. Everything except Pashto.
+REMOVED 2026-08-25: this module used to also run facebook/seamless-m4t-v2-large
+(engine "seq2seq") for Pashto, the one language MiLMMT doesn't cover. A
+2026-08-23 side-by-side comparison confirmed SeamlessM4T broken on
+markdown-heavy content: it repeatedly collapsed list/table-heavy blocks into
+repetition-loop degeneration, in one case destroying every citation in a
+source list outright. Production had already worked around this by routing
+Pashto to DeepSeek instead (``DEEPSEEK_TRANSLATE_LANGS`` in
+``app/core/config.py``, checked by ``translate_article_batch_task`` in
+``publish_tasks.py`` BEFORE a language ever reaches this module) -- so
+SeamlessM4T's engine path here was already dead code in production, and is
+now deleted outright rather than kept as an unreachable fallback. The
+two-engine "route per language" architecture (``ENGINE_FOR_LANG``,
+``engine_for``, per-engine load/unload dicts, and the SeamlessM4T-only
+list/table cell-splitting workaround) went with it, since none of it has a
+second engine left to route between. See
+docs/architecture/translation-model-survey.md for the full historical
+survey record.
 
-Neither engine takes a system prompt or free-form instructions. SeamlessM4T is
-pure seq2seq (source text + language codes in, translated text out); MiLMMT
-has exactly ONE fixed template, demonstrated only on single segments. All the
-Mistral-era prompt engineering -- anti-calque rules, per-language glossary,
-digit-system pinning, colon-label title ban, named-entity preservation -- has
-no home here; it only worked because Mistral is a chat model that follows
+MiLMMT takes no system prompt or free-form instructions -- exactly ONE fixed
+template, demonstrated only on single segments. All the Mistral-era prompt
+engineering -- anti-calque rules, per-language glossary, digit-system
+pinning, colon-label title ban, named-entity preservation -- has no home
+here; it only worked because Mistral is a chat model that follows
 instructions. That machinery is gone, not ported.
 
 Markdown structure inside a block, resolved 2026-08-01 by the
 promising-ranking survey (see docs/architecture/translation-model-survey.md):
 headings get their ``#`` prefix stripped and reapplied outside the model call
-(cheap, clearly correct) for both engines, and code fences / bare URLs pass
-through untouched. For lists and tables the two engines differ for real,
-not just "unproven": MiLMMT handles both correctly fed as one whole block
-(the only candidate across the entire survey that did) and is left on that
-path. SeamlessM4T does not -- confirmed to destroy a table outright (real
-data replaced with repetition-loop degeneration, not just reformatting) and
-collapse a list into one run-on line when fed either as a whole block --
-so its path splits list items / table cells into isolated per-item/per-cell
-model calls and reassembles the markdown structure deterministically
-instead (see _translate_block, _is_list_block/_is_table_block). 59% of the
-corpus has a table.
+(cheap, clearly correct), and code fences / bare URLs pass through untouched.
+Lists and tables need no special handling -- MiLMMT was the ONE candidate
+across the entire survey that handled both correctly fed as one whole block,
+so they go through _translate_block like any other text. 59% of the corpus
+has a table.
 
-Both models run CPU-only (no GPU on dev or prod). Loaded lazily, cached
-in-process, and reused within a call -- but NEVER both resident at once in
-production: translate_article_batch (the multi-language entry point, used by
-the Celery task) loads one engine, translates everything routed to it,
-explicitly unloads, then moves to the next. Only one inference batch runs at
-a time across the whole worker fleet -- see local_translate_lock.py for why.
+The model runs CPU-only (no GPU on dev or prod). Loaded lazily, cached
+in-process, and reused across calls within a process -- see
+local_translate_lock.py for why only one inference batch runs at a time
+across the whole worker fleet.
 """
 
 from __future__ import annotations
@@ -63,28 +65,18 @@ logger = logging.getLogger(__name__)
 # (core_model_loading.py, GLOBAL_WORKERS) to load safetensors shards
 # concurrently. Under free-threaded CPython (python3.15t -- see
 # build_tokenizers_ft.sh), that reliably segfaults inside the interpreter
-# itself partway through SeamlessM4Tv2ForTextToText.from_pretrained (found
-# 2026-08-07: reproduced with a bare `from_pretrained` call, fully cached
-# weights, dmesg showed the crash in python3.15t's own binary on a
-# ThreadPoolExecutor thread -- a free-threading/thread-pool interaction
-# bug, not anything specific to this model or our code). Forcing the
-# documented synchronous fallback avoids the crash entirely; must be set
-# before transformers is imported anywhere in this process.
+# itself partway through from_pretrained (found 2026-08-07: reproduced with
+# a bare `from_pretrained` call, fully cached weights, dmesg showed the
+# crash in python3.15t's own binary on a ThreadPoolExecutor thread -- a
+# free-threading/thread-pool interaction bug in transformers' generic
+# weight-loading path itself, not anything specific to the model being
+# loaded or our code). First reproduced against SeamlessM4Tv2ForTextToText,
+# but the crash site (GLOBAL_WORKERS in core_model_loading.py) is shared by
+# every from_pretrained call including MiLMMT's AutoModelForCausalLM, so
+# this stays in place after SeamlessM4T's removal. Forcing the documented
+# synchronous fallback avoids the crash entirely; must be set before
+# transformers is imported anywhere in this process.
 os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
-
-ENGINE_FOR_LANG: dict[str, str] = {
-    "ps": "seq2seq",
-}
-_DEFAULT_ENGINE = "milmmt"
-# Fixed load order for a multi-engine batch (see translate_article_batch).
-# NOT dict-iteration order over a language->engine grouping, which would
-# follow ARTICLE_TRANSLATION_LANGS' actual order (fa, ps, ar, ...) and load
-# milmmt, unload it for ps's seq2seq, then reload milmmt again for the rest
-# -- exactly the double-load this whole batching design exists to prevent.
-_ENGINE_ORDER = ("seq2seq", "milmmt")
-
-_SEAMLESS_MODEL_ID = "facebook/seamless-m4t-v2-large"
-_SEAMLESS_LANG = {"en": "eng", "ps": "pbt"}
 
 _MILMMT_MODEL_ID = "xiaomi-research/MiLMMT-46-4B-v0.1"
 # Exact strings MiLMMT's own model card lists among its 46 supported
@@ -100,12 +92,9 @@ _MILMMT_LANG_NAME = {
     "es": "Spanish",
     "fr": "French",
 }
-# Caps CPU threads for BOTH engines to leave headroom for everything else on
-# the same box (Cassandra/Celery/Typesense on prod) -- hard requirement, owner
-# 2026-07-30: "we do not use more than half the CPU in production." No
-# per-engine exception -- an earlier version of this comment carved one out
-# for SeamlessM4T (Pashto-only, less frequent) on the author's own reasoning,
-# not something asked for; restated here unqualified for both.
+# Caps CPU threads to leave headroom for everything else on the same box
+# (Cassandra/Celery/Typesense on prod) -- hard requirement, owner 2026-07-30:
+# "we do not use more than half the CPU in production."
 #
 # At 3 articles/day (budget-capped -- see workers/app/core/config.py's
 # publish cadence), a translation pass across every language for one article
@@ -118,48 +107,8 @@ _HEADING = re.compile(r"^(#{1,6}\s+)(.*)$", re.DOTALL)
 _CODE_FENCE = re.compile(r"^```")
 _BARE_URL = re.compile(r"^https?://\S+$")
 
-# List/table cell-level splitting -- SeamlessM4T (seq2seq) ONLY, see
-# _translate_block. Ported 2026-08-01 from the eval harness
-# (translation_eval.py) after the promising-ranking survey found SeamlessM4T
-# destroys markdown tables outright when fed one as a whole block (real data
-# replaced with repetition-loop degeneration, not just reformatting) and
-# collapses lists into one run-on line -- resolving the "UNPROVEN" risk this
-# module's docstring used to flag, now proven and fixed for this engine.
-# MiLMMT was the ONE candidate across the entire survey that handled both
-# correctly as whole blocks; deliberately NOT touched here to avoid risking
-# an already-proven path for a problem it doesn't have. See
-# docs/architecture/translation-model-survey.md for the full evidence.
-_LIST_ITEM_SPLIT = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+)(.*)$")
-_TABLE_ROW_SPLIT = re.compile(r"^\s*\|(.*)\|\s*$")
-_SEPARATOR_CELL = re.compile(r"^\s*:?-+:?\s*$")
-
 _load_lock = threading.Lock()
-_seamless: dict[str, Any] = {}
 _milmmt: dict[str, Any] = {}
-
-
-def engine_for(target_language: str) -> str:
-    """Which engine a target language routes to. Defaults to "milmmt" for anything not explicitly mapped, so adding a language without deciding its engine still translates (just via the general-purpose model) rather than KeyError-ing at runtime."""
-    return ENGINE_FOR_LANG.get(target_language, _DEFAULT_ENGINE)
-
-
-def _load_seamless() -> tuple[Any, Any]:
-    with _load_lock:
-        if not _seamless:
-            import torch
-            from transformers import AutoProcessor, SeamlessM4Tv2ForTextToText
-
-            logger.info("loading %s (first use this process)", _SEAMLESS_MODEL_ID)
-            _seamless["processor"] = AutoProcessor.from_pretrained(_SEAMLESS_MODEL_ID)
-            # bf16, matching MiLMMT below -- this had no dtype= at all before
-            # (silent fp32 default), the one free win found by a 2026-08-25
-            # CPU-perf investigation: no quantization lib is installed here
-            # and IPEX was tried and dropped (no wheel for this box's
-            # free-threaded python3.15t), so bf16 is what's actually available.
-            _seamless["model"] = SeamlessM4Tv2ForTextToText.from_pretrained(
-                _SEAMLESS_MODEL_ID, dtype=torch.bfloat16
-            )
-        return _seamless["processor"], _seamless["model"]
 
 
 def _load_milmmt() -> tuple[Any, Any]:
@@ -176,30 +125,8 @@ def _load_milmmt() -> tuple[Any, Any]:
         return _milmmt["tokenizer"], _milmmt["model"]
 
 
-def _unload_seamless() -> None:
-    with _load_lock:
-        if _seamless:
-            logger.info("unloading %s", _SEAMLESS_MODEL_ID)
-            _seamless.clear()
-    gc.collect()
-
-
-def _unload_milmmt() -> None:
-    with _load_lock:
-        if _milmmt:
-            logger.info("unloading %s", _MILMMT_MODEL_ID)
-            _milmmt.clear()
-    gc.collect()
-
-
-_UNLOAD_FOR_ENGINE: dict[str, Callable[[], None]] = {
-    "seq2seq": _unload_seamless,
-    "milmmt": _unload_milmmt,
-}
-
-
-def unload_engine(engine: str) -> None:
-    """Evict the cached model/processor for ``engine`` so it stops counting toward resident memory -- this plus the fixed load order in translate_article_batch is what guarantees the two models are never both loaded at once.
+def unload_milmmt() -> None:
+    """Evict the cached MiLMMT model/tokenizer so it stops counting toward resident memory.
 
     CPU-only, no CUDA cache to clear. ``gc.collect()`` frees the Python
     objects, but glibc malloc does not always hand pages back to the OS
@@ -210,22 +137,11 @@ def unload_engine(engine: str) -> None:
     shows this matters in practice; not worth the extra ctypes surface
     up front on a guess.
     """
-    fn = _UNLOAD_FOR_ENGINE.get(engine)
-    if fn is not None:
-        fn()
-
-
-def _translate_text_seamless(text: str, target_language: str) -> str:
-    import torch
-
-    processor, model = _load_seamless()
-    inputs = processor(text=text, src_lang=_SEAMLESS_LANG["en"], return_tensors="pt")
-    torch.set_num_threads(_MAX_THREADS)
-    with torch.inference_mode():
-        tokens = model.generate(
-            **inputs, tgt_lang=_SEAMLESS_LANG[target_language], num_beams=5, max_new_tokens=512
-        )[0]
-    return processor.decode(tokens, skip_special_tokens=True).strip()
+    with _load_lock:
+        if _milmmt:
+            logger.info("unloading %s", _MILMMT_MODEL_ID)
+            _milmmt.clear()
+    gc.collect()
 
 
 def _translate_text_milmmt(text: str, target_language: str) -> str:
@@ -251,52 +167,12 @@ def _translate_text_milmmt(text: str, target_language: str) -> str:
     return tokenizer.decode(generated, skip_special_tokens=True).strip()
 
 
-def _is_list_block(text: str) -> bool:
-    lines = [line for line in text.split("\n") if line.strip()]
-    return bool(lines) and all(_LIST_ITEM_SPLIT.match(line) for line in lines)
-
-
-def _is_table_block(text: str) -> bool:
-    lines = [line for line in text.split("\n") if line.strip()]
-    return bool(lines) and all(_TABLE_ROW_SPLIT.match(line) for line in lines)
-
-
-def _translate_list_block_seamless(text: str, target_language: str) -> str:
-    """Translate each list item's text in isolation, reassembling with its original bullet/number prefix -- same principle as heading handling, applied per item."""
-    out_lines = []
-    for line in text.split("\n"):
-        match = _LIST_ITEM_SPLIT.match(line)
-        if not match or not match.group(2).strip():
-            out_lines.append(line)
-            continue
-        prefix, content = match.group(1), match.group(2)
-        out_lines.append(prefix + _translate_text_seamless(content, target_language))
-    return "\n".join(out_lines)
-
-
-def _translate_table_block_seamless(text: str, target_language: str) -> str:
-    """Translate each table cell's text in isolation, reassembling the row -- the separator row (all-dashes cells) passes through unchanged, never sent to the model."""
-    out_lines = []
-    for line in text.split("\n"):
-        match = _TABLE_ROW_SPLIT.match(line)
-        if not match:
-            out_lines.append(line)
-            continue
-        cells = [c.strip() for c in match.group(1).split("|")]
-        if all(_SEPARATOR_CELL.match(c) for c in cells):
-            out_lines.append(line)
-            continue
-        translated_cells = [_translate_text_seamless(c, target_language) if c else c for c in cells]
-        out_lines.append("| " + " | ".join(translated_cells) + " |")
-    return "\n".join(out_lines)
-
-
-def _translate_block(text: str, target_language: str, engine: str) -> str:
+def _translate_block(text: str, target_language: str) -> str:
     """Translate one block, handling the markdown-structure exceptions cheap enough to be safe (see module docstring for what is NOT yet handled).
 
-    List/table cell-level splitting is seq2seq (SeamlessM4T) ONLY -- MiLMMT
-    handles both correctly as a whole block (proven across the full
-    promising-ranking survey) and is deliberately left on its original path.
+    No list/table cell-level splitting needed -- MiLMMT handles both
+    correctly fed as one whole block (proven across the full
+    promising-ranking survey); see module docstring.
     """
     stripped = text.strip()
     if not stripped:
@@ -304,17 +180,12 @@ def _translate_block(text: str, target_language: str, engine: str) -> str:
     if _CODE_FENCE.match(stripped) or _BARE_URL.match(stripped):
         return text  # never translate code or a bare link
     heading = _HEADING.match(text)
-    translate_fn = _translate_text_seamless if engine == "seq2seq" else _translate_text_milmmt
     if heading:
         prefix, content = heading.group(1), heading.group(2)
-        translated_content = translate_fn(content, target_language)
+        translated_content = _translate_text_milmmt(content, target_language)
         translated = prefix + translated_content if translated_content.strip() else ""
-    elif engine == "seq2seq" and _is_table_block(text):
-        translated = _translate_table_block_seamless(text, target_language)
-    elif engine == "seq2seq" and _is_list_block(text):
-        translated = _translate_list_block_seamless(text, target_language)
     else:
-        translated = translate_fn(text, target_language)
+        translated = _translate_text_milmmt(text, target_language)
     if not translated.strip():
         # The engine returned nothing for a non-empty source block. Silently
         # keeping that empty string here would drop the block wholesale --
@@ -328,9 +199,8 @@ def _translate_block(text: str, target_language: str, engine: str) -> str:
         # a stray English block inside an otherwise-translated article is a
         # visible, known degradation; a silently missing table is not.
         logger.warning(
-            "local translation of a block returned empty (lang=%s engine=%s); falling back to source text",
+            "local translation of a block returned empty (lang=%s); falling back to source text",
             target_language,
-            engine,
         )
         return text
     return translated
@@ -386,16 +256,13 @@ def _translate_article_no_lock(
     reentrant, so a second acquire() from inside an already-held batch would
     incorrectly raise LocalTranslateBusyError against itself.
     """
-    engine = engine_for(target_language)
     blocks = split_markdown_blocks(english_body)
 
-    title = _translate_block(english_title, target_language, engine)
+    title = _translate_block(english_title, target_language)
     summary = (
-        _translate_block(english_summary, target_language, engine)
-        if english_summary.strip()
-        else ""
+        _translate_block(english_summary, target_language) if english_summary.strip() else ""
     )
-    translated_blocks = [_translate_block(b, target_language, engine) for b in blocks]
+    translated_blocks = [_translate_block(b, target_language) for b in blocks]
     translated_body = "\n\n".join(translated_blocks).strip() or english_body
 
     _log_alignment_findings(english_body, translated_body, target_language)
@@ -414,7 +281,7 @@ def translate_article_local(
     english_body: str,
     target_language: str,
 ) -> dict[str, str]:
-    """Translate one article via the local engine mapped to ``target_language``.
+    """Translate one article via MiLMMT, the local engine.
 
     Same block-per-call shape as the retired Mistral path, but alignment is
     now structural rather than a contract the model can violate: this calls
@@ -425,8 +292,8 @@ def translate_article_local(
     Serialized via local_translate_lock -- see that module for why. This is
     the single-language entry point (used by the manual backfill script and
     any other one-off caller); for translating one article into SEVERAL
-    languages, use translate_article_batch instead, which loads each engine
-    only once for the whole batch rather than once per language.
+    languages, use translate_article_batch instead, which loads MiLMMT only
+    once for the whole batch rather than once per language.
     """
     with local_translate_lock():
         return _translate_article_no_lock(
@@ -447,17 +314,14 @@ def translate_article_batch(
     on_language_done: Callable[[str, dict[str, str]], None] | None = None,
     on_language_error: Callable[[str, str], None] | None = None,
 ) -> dict[str, list[str] | dict[str, str]]:
-    """Translate one article into every language in ``target_languages``, loading each engine's model at most ONCE for the whole batch.
-
-    Groups languages by engine_for(lang) and processes each engine group in
-    the fixed _ENGINE_ORDER: load, translate every language in that group
-    reusing the one loaded instance, unload before moving to the next group.
-    Never both engines resident at once -- this is the actual production
-    memory guarantee, not just a CPU one.
+    """Translate one article into every language in ``target_languages``, loading MiLMMT at most ONCE for the whole batch.
 
     Holds local_translate_lock() for the WHOLE batch, one acquisition, not
     once per language -- see _translate_article_no_lock for why the
-    per-language calls inside must not re-acquire it.
+    per-language calls inside must not re-acquire it. MiLMMT is unloaded
+    once at the end (``finally``), not per language -- ``_load_milmmt``'s own
+    idempotent caching is what keeps it loaded exactly once across every
+    language in the batch.
 
     ``on_language_start(lang)``, ``on_language_done(lang, result)`` and
     ``on_language_error(lang, reason)`` -- if given -- fire synchronously
@@ -466,44 +330,34 @@ def translate_article_batch(
     language, marked running -> ok/error) instead of only learning about a
     hung or crashed language after the whole batch's own multi-hour timeout
     fires. Any exception from any of them is logged and swallowed: a
-    transient callback failure for one language must not skip that engine's
-    unload step or abort translation of the remaining languages.
+    transient callback failure for one language must not skip the unload
+    step or abort translation of the remaining languages.
 
     A single language's translation raising does NOT abort the batch --
     caught, recorded in the returned "failed" dict, and the loop continues.
     This matches the failure isolation the old one-task-per-language design
-    already had: one language failing was always independent of the others,
-    and grouping by engine is a scheduling change, not a blast-radius one.
+    already had: one language failing was always independent of the others.
 
     Returns {"ok": [...langs...], "failed": {lang: reason, ...}}.
     """
-    groups: dict[str, list[str]] = {}
-    for lang in target_languages:
-        groups.setdefault(engine_for(lang), []).append(lang)
-
     ok: list[str] = []
     failed: dict[str, str] = {}
     with local_translate_lock():
-        for engine in _ENGINE_ORDER:
-            langs = groups.get(engine)
-            if not langs:
-                continue
-            try:
-                for lang in langs:
-                    _translate_one_language(
-                        lang=lang,
-                        engine=engine,
-                        english_title=english_title,
-                        english_summary=english_summary,
-                        english_body=english_body,
-                        on_language_start=on_language_start,
-                        on_language_done=on_language_done,
-                        on_language_error=on_language_error,
-                        ok=ok,
-                        failed=failed,
-                    )
-            finally:
-                unload_engine(engine)
+        try:
+            for lang in target_languages:
+                _translate_one_language(
+                    lang=lang,
+                    english_title=english_title,
+                    english_summary=english_summary,
+                    english_body=english_body,
+                    on_language_start=on_language_start,
+                    on_language_done=on_language_done,
+                    on_language_error=on_language_error,
+                    ok=ok,
+                    failed=failed,
+                )
+        finally:
+            unload_milmmt()
 
     return {"ok": ok, "failed": failed}
 
@@ -511,7 +365,6 @@ def translate_article_batch(
 def _translate_one_language(
     *,
     lang: str,
-    engine: str,
     english_title: str,
     english_summary: str,
     english_body: str,
@@ -535,7 +388,7 @@ def _translate_one_language(
             target_language=lang,
         )
     except Exception:
-        logger.error("local translation failed: lang=%s engine=%s", lang, engine, exc_info=True)
+        logger.error("local translation failed: lang=%s", lang, exc_info=True)
         failed[lang] = "translation_error"
         if on_language_error is not None:
             try:

@@ -1,5 +1,15 @@
 # Translation model survey: MiLMMT vs. smaller seq2seq candidates
 
+**Addendum, 2026-08-25:** SeamlessM4T (this survey's Pashto production
+baseline) has since been removed from production code. A 2026-08-23
+side-by-side comparison confirmed it broken for markdown-heavy content --
+repeated repetition-loop degeneration on list/table blocks, in one case
+destroying every citation in a source list outright. Pashto now translates
+via DeepSeek instead of a local engine (see `DEEPSEEK_TRANSLATE_LANGS` in
+`workers/app/core/config.py`). This document's findings below are left as
+the historical record of what was actually run and found; they are not
+rewritten to match the current architecture.
+
 Run 2026-07-31 (`20260731T085110Z_deterministic`, 120 cases). First real run
 of the "promising-ranking" harness (`workers/app/modules/ai/translation_eval.py`
 + `workers/scripts/eval_translate_*`) built to answer "how much fixing
