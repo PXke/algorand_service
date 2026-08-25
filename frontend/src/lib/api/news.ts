@@ -1,4 +1,4 @@
-import { api, ApiException, type RequestOpts } from './client'
+import { api, type RequestOpts } from './client'
 import { arrayItemsOf } from './parse'
 
 export type ArticleItem = {
@@ -204,29 +204,5 @@ export const newsApi = {
       },
       PULSE_CACHE_TTL_MS,
     )
-  },
-
-  async fetchBlockMix(
-    round: number,
-    signal?: AbortSignal,
-  ): Promise<{
-    round: number
-    txns: number
-    inners: number
-    kinds: Array<{ id: string; count: number }>
-  } | null> {
-    try {
-      const body = await api.getJson(`/api/v1/metrics/chain-pulse/${round}`, optsOf(signal))
-      return {
-        round: Number(body.round ?? round),
-        txns: Number(body.txns ?? 0),
-        inners: Number(body.inners ?? 0),
-        kinds: readKinds(body.kinds),
-      }
-    } catch (e) {
-      if (e instanceof ApiException && (e.statusCode === 404 || e.statusCode === 400)) return null
-      if (e instanceof DOMException && e.name === 'AbortError') return null
-      throw e
-    }
   },
 }

@@ -142,18 +142,6 @@ export async function peraSignLoginProof(
   return { proofMethod: 'arc0025_txn', signedTxnB64 }
 }
 
-/** @deprecated use peraSignLoginProof */
-export async function peraSignSiwa(
-  walletAddress: string,
-  signingMessage: string,
-): Promise<{ proofMethod: 'signed_bytes'; signatureB64: string }> {
-  const proof = await peraSignLoginProof(walletAddress, signingMessage)
-  if (proof.proofMethod !== 'signed_bytes') {
-    throw new Error('Wallet did not return a data signature')
-  }
-  return proof
-}
-
 type Transportish = {
   close: () => void
   open: () => void
