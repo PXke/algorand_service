@@ -53,7 +53,6 @@ def derive_article_tags(
     title: str = "",
     publish_kind: str | None = None,
     publish_topic: str | None = None,
-    publish_tier: str | None = None,
 ) -> list[str]:
     """Build display tags for a feed article from service metadata.
 
@@ -69,9 +68,6 @@ def derive_article_tags(
     if topic in _TOPIC_TAGS:
         mapped = _TOPIC_TAGS[topic]
         (meta if is_meta_tag(mapped) else topical).append(mapped)
-
-    if (publish_tier or "").strip().lower() == "breaking":
-        topical.append("breaking")
 
     meta.extend(_publish_kind_tags(publish_kind))
 

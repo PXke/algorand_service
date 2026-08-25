@@ -269,7 +269,6 @@ def _stash_capped_compose_to_backlog(
     image_field: str | None,
     publish_kind: PublishKind,
     topic: PublishTopic,
-    tier: PublishTier,
     reason: str,
 ) -> dict[str, str]:
     """The daily cap filled between the drain's pre-compose check and this publish attempt (composes take minutes; another lane can take the last slot meanwhile). The old behavior returned rate_limited and THREW AWAY the finished article — the 2026-07-15 'Seven Real-World Apps' YouTube compose (~300k tokens, status ok) died exactly this way, then its queue row aged out and the content was lost. Store it unlisted with status='backlog' instead, exactly like the auto-approve backlog path: the paced release ships it once a slot opens."""
@@ -289,7 +288,6 @@ def _stash_capped_compose_to_backlog(
             title=title,
             publish_kind=composed.publish_kind or publish_kind.value,
             publish_topic=_effective_alert_topic(topic, composed).value,
-            publish_tier=tier.value,
         ),
         getattr(composed, "extra_tags", ()),
     )
@@ -1220,7 +1218,6 @@ def _hold_for_review(
     payload: dict,
     composed: ArticleComposeResult,
     *,
-    tier: PublishTier,
     topic: PublishTopic,
     publish_kind: PublishKind,
     compose_domain: str,
@@ -1274,7 +1271,6 @@ def _hold_for_review(
             title=held_title,
             publish_kind=composed.publish_kind or publish_kind.value,
             publish_topic=_effective_alert_topic(topic, composed).value,
-            publish_tier=tier.value,
         ),
         getattr(composed, "extra_tags", ()),
     )
@@ -1395,7 +1391,6 @@ def _reserve_slot_or_backlog(
                     image_field=image_field,
                     publish_kind=publish_kind,
                     topic=topic,
-                    tier=tier,
                     reason=reserve_reason,
                 )
             return {"status": "rate_limited", "reason": reserve_reason, "tier": tier.value}
@@ -1409,7 +1404,6 @@ def _reserve_slot_or_backlog(
                 image_field=image_field,
                 publish_kind=publish_kind,
                 topic=topic,
-                tier=tier,
                 reason=str(exc),
             )
         return {"status": "rate_limited", "reason": str(exc), "tier": tier.value}
@@ -1452,7 +1446,6 @@ def _finalize_publish(
                     title=title,
                     publish_kind=composed.publish_kind or publish_kind.value,
                     publish_topic=_effective_alert_topic(topic, composed).value,
-                    publish_tier=tier.value,
                 ),
                 getattr(composed, "extra_tags", ()),
             ),
@@ -1720,7 +1713,6 @@ def _publish_from_queued_row_impl(
             row,
             payload,
             composed,
-            tier=tier,
             topic=topic,
             publish_kind=publish_kind,
             compose_domain=compose_domain,
@@ -2238,7 +2230,6 @@ def recompose_review(review_id: str) -> dict[str, str]:
             title=composed.title,
             publish_kind=composed.publish_kind or PublishKind.SERVICE_DISCOVERY.value,
             publish_topic=PublishTopic.GENERIC.value,
-            publish_tier=PublishTier.STANDARD.value,
         ),
         getattr(composed, "extra_tags", ()),
     )
@@ -2917,7 +2908,6 @@ def recompose_published(
             title=composed.title,
             publish_kind=composed.publish_kind or PublishKind.SERVICE_DISCOVERY.value,
             publish_topic=PublishTopic.GENERIC.value,
-            publish_tier=PublishTier.STANDARD.value,
         ),
         getattr(composed, "extra_tags", ()),
     )

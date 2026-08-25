@@ -19,7 +19,7 @@ import pytest
 
 from app.modules.ai.content_signals import ContentSignals
 from app.modules.newspaper.article_composer import ArticleComposeResult
-from app.modules.newspaper.publish_policy import PublishKind, PublishTier, PublishTopic
+from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
 from app.modules.newspaper.tasks import publish_tasks as pt
 
 
@@ -80,7 +80,6 @@ def test_review_queue_full_race_stores_and_enqueues_instead_of_discarding(
         row,
         {"txid": "", "round_num": 0},
         composed,
-        tier=PublishTier.STANDARD,
         topic=PublishTopic.GENERIC,
         publish_kind=PublishKind.CONTENT_UPDATE,
         compose_domain="aetheralabs.es",
@@ -144,7 +143,6 @@ def test_route_to_backlog_ignores_review_queue_full_as_before(
         row,
         {"txid": "", "round_num": 0},
         composed,
-        tier=PublishTier.STANDARD,
         topic=PublishTopic.GENERIC,
         publish_kind=PublishKind.CONTENT_UPDATE,
         compose_domain="",

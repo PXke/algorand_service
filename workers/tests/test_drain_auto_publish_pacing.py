@@ -217,7 +217,6 @@ def test_capped_compose_is_stashed_to_backlog_not_discarded(
         image_field="",
         publish_kind=PublishKind.CONTENT_UPDATE,
         topic=PublishTopic.GENERIC,
-        tier=pt.PublishTier.STANDARD,
         reason="standard daily publish cap reached (3/3)",
     )
 
