@@ -67,6 +67,16 @@
     return '#9AA0A6'
   }
 
+  // relevance_score runs ~0-10 (score_content_for_storage), unlike the 0-1
+  // content_relevance scale above -- same traffic-light idea, different
+  // thresholds. Mirrors the >=3 cutoff the backend already uses for the
+  // "possible service" nudge.
+  function predictedColor(score: number): string {
+    if (score >= 4) return '#2E7D32'
+    if (score >= 2) return '#B7791F'
+    return '#9AA0A6'
+  }
+
   function statusDotColor(item: Record<string, unknown>): string {
     const pending = item.frontier_status === 'pending'
     const relevant = item.is_relevant === true
@@ -267,6 +277,19 @@
               title={humanReasons || 'Content relevance score'}
             >
               rel {contentRel.toFixed(2)}
+            </span>
+          {:else if pending && score > 0}
+            <!-- No page-fetch relevance yet (classify_pending_domains hasn't
+                 reached this domain), so this cheap discovery-time keyword
+                 score is what's currently ranking it in the pending list --
+                 surface it as a badge, not just the buried meta-line text,
+                 so the ordering is legible at a glance. -->
+            <span
+              class="rel-chip"
+              style="color: {predictedColor(score)}; border-color: color-mix(in srgb, {predictedColor(score)} 40%, transparent); background: color-mix(in srgb, {predictedColor(score)} 12%, transparent)"
+              title="Predicted interest (discovery-time keyword score, not yet content-classified) -- currently ranking this domain"
+            >
+              predicted {score.toFixed(1)}
             </span>
           {/if}
           {#if item.possible_service === true}
