@@ -77,7 +77,7 @@ def test_build_assignment_payload_carries_is_special_edition() -> None:
 def test_assign_editorial_brief_forces_relevance_and_enqueues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Assigning a brief forces relevance=1.0, enqueues a create, and triggers a drain."""
+    """Assigning a brief forces relevance=1.0, enqueues a create, dual-writes an artifact, and triggers an immediate compose of THAT artifact (compose_artifact_now, 2026-08-25 successor to drain_standard_publish_queue.delay())."""
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", True)
     monkeypatch.setattr(ea, "get_brief", lambda brief_id: _brief(brief_id=brief_id))
 
@@ -103,15 +103,21 @@ def test_assign_editorial_brief_forces_relevance_and_enqueues(
     monkeypatch.setattr(
         "app.modules.newspaper.publish_queue_store.enqueue_publish", fake_enqueue_publish
     )
-    drain_calls = []
+    captured_artifact_kwargs = {}
     monkeypatch.setattr(
-        "app.modules.newspaper.tasks.queue_drain_tasks.drain_standard_publish_queue.delay",
-        lambda: drain_calls.append(1),
+        "app.modules.newspaper.artifact_store.insert_artifact",
+        lambda **kw: (captured_artifact_kwargs.update(kw), ("artifact-id-1", True))[1],
+    )
+    compose_now_calls = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.tasks.queue_drain_tasks.compose_artifact_now.delay",
+        lambda artifact_id: compose_now_calls.append(artifact_id),
     )
 
     result = ea.assign_editorial_brief("00000000-0000-0000-0000-000000000001")
 
     assert result["status"] == "enqueued"
+    assert result["artifact_id"] == "artifact-id-1"
     assert captured_priority_kwargs["relevance"] == 1.0
     assert captured_priority_kwargs["topic"] == PublishTopic.EDITORIAL_ASSIGNMENT
     assert captured_enqueue_kwargs["publish_kind"] == PublishKind.EDITORIAL_ASSIGNMENT
@@ -119,11 +125,13 @@ def test_assign_editorial_brief_forces_relevance_and_enqueues(
     assert captured_enqueue_kwargs["priority"] == 199
     assert captured_enqueue_kwargs["payload"]["publish_mode"] == "create"
     assert captured_enqueue_kwargs["payload"]["source_kind"] == "editorial_assignment"
-    assert drain_calls == [1]
+    assert captured_artifact_kwargs["channel"] == "brief"
+    assert captured_artifact_kwargs["metadata"]["dual_write_queue_id"] == "queue-id-1"
+    assert compose_now_calls == ["artifact-id-1"]
 
 
-def test_assign_editorial_brief_duplicate_does_not_redrain(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A duplicate enqueue does not trigger a drain."""
+def test_assign_editorial_brief_duplicate_does_not_recompose(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A duplicate enqueue does not trigger an immediate compose."""
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", True)
     monkeypatch.setattr(ea, "get_brief", lambda brief_id: _brief(brief_id=brief_id))
     monkeypatch.setattr(
@@ -134,16 +142,20 @@ def test_assign_editorial_brief_duplicate_does_not_redrain(monkeypatch: pytest.M
         "app.modules.newspaper.publish_queue_store.enqueue_publish",
         lambda **_kw: ("existing-queue-id", False),
     )
-    drain_calls = []
     monkeypatch.setattr(
-        "app.modules.newspaper.tasks.queue_drain_tasks.drain_standard_publish_queue.delay",
-        lambda: drain_calls.append(1),
+        "app.modules.newspaper.artifact_store.insert_artifact",
+        lambda **_kw: ("artifact-id-1", True),
+    )
+    compose_now_calls = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.tasks.queue_drain_tasks.compose_artifact_now.delay",
+        lambda artifact_id: compose_now_calls.append(artifact_id),
     )
 
     result = ea.assign_editorial_brief("00000000-0000-0000-0000-000000000001")
 
     assert result["status"] == "duplicate"
-    assert not drain_calls
+    assert not compose_now_calls
 
 
 def test_assign_editorial_brief_disabled_flag(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,7 +205,7 @@ def test_refresh_falls_back_to_assign_without_linked_article(
 
 
 def test_refresh_edits_existing_article_and_bumps_last_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Refreshing a brief with a linked article enqueues an edit and marks the brief's last run."""
+    """Refreshing a brief with a linked article enqueues an edit, dual-writes an artifact, marks the brief's last run, and triggers an immediate compose of that artifact."""
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", True)
     linked_id = "11111111-1111-1111-1111-111111111111"
     monkeypatch.setattr(ea, "get_brief", lambda _brief_id: _brief(linked_article_id=linked_id))
@@ -213,22 +225,27 @@ def test_refresh_edits_existing_article_and_bumps_last_run(monkeypatch: pytest.M
     monkeypatch.setattr(
         "app.modules.newspaper.publish_score.compute_priority", fake_compute_priority
     )
+    monkeypatch.setattr(
+        "app.modules.newspaper.artifact_store.insert_artifact",
+        lambda **_kw: ("artifact-id-2", True),
+    )
 
     mark_run_calls = []
     monkeypatch.setattr(ea, "mark_brief_run", lambda **kw: mark_run_calls.append(kw))
-    drain_calls = []
+    compose_now_calls = []
     monkeypatch.setattr(
-        "app.modules.newspaper.tasks.queue_drain_tasks.drain_standard_publish_queue.delay",
-        lambda: drain_calls.append(1),
+        "app.modules.newspaper.tasks.queue_drain_tasks.compose_artifact_now.delay",
+        lambda artifact_id: compose_now_calls.append(artifact_id),
     )
 
     result = ea.refresh_editorial_brief("00000000-0000-0000-0000-000000000001")
 
     assert result["status"] == "enqueued"
+    assert result["artifact_id"] == "artifact-id-2"
     assert captured_enqueue_kwargs["payload"]["publish_mode"] == "edit"
     assert captured_enqueue_kwargs["payload"]["linked_article_id"] == linked_id
     assert mark_run_calls == [{"brief_id": "00000000-0000-0000-0000-000000000001"}]
-    assert drain_calls == [1]
+    assert compose_now_calls == ["artifact-id-2"]
 
 
 def test_scan_schedule_assigns_unlinked_and_refreshes_due(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,12 +1,12 @@
-"""Celery entries for the editorial-room artifact system (2026-08-25, SHADOW MODE): the daily priority sweep beat, plus two on-demand tasks the new admin preview/pin endpoints dispatch into.
+"""Celery entries for the editorial-room artifact system: the daily priority sweep beat, plus two on-demand tasks the admin preview/pin endpoints dispatch into.
 
-These tasks only ever touch the new `artifacts`/`artifacts_pending`/
+These tasks only ever touch the `artifacts`/`artifacts_pending`/
 `artifact_content`/`to_compose` tables (see artifact_priority.py /
-artifact_store.py / to_compose_selection.py) -- none of them interact with
-publish_queue, drain_standard_publish_queue, or any other live
-compose/publish task. Safe to run regardless of AUTO_COMPOSE_PAUSED or any
-other live-pipeline gate, since nothing they read or write is read by
-anything live yet.
+artifact_store.py / to_compose_selection.py) directly -- they don't call
+into queue_drain_tasks.py themselves. Safe to run regardless of
+AUTO_COMPOSE_PAUSED or any other live-pipeline gate: scoring/preview/pin are
+cheap pure computation and Cassandra writes, not a compose spend, and should
+stay fresh even while composing itself is paused.
 
 The backend admin service has no direct import of the workers codebase (per
 this repo's usual backend<->workers boundary -- separate services/venvs), so

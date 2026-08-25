@@ -899,16 +899,6 @@ def all_tools(
     except Exception:
         logger.warning("failed to load abort_article tool", exc_info=True)
     try:
-        from app.modules.ai.breaking_news_tool import (
-            MARK_BREAKING_NEWS_SCHEMA,
-            mark_breaking_news_handler,
-        )
-
-        schemas.append(MARK_BREAKING_NEWS_SCHEMA)
-        handlers["mark_breaking_news"] = mark_breaking_news_handler
-    except Exception:
-        logger.warning("failed to load mark_breaking_news tool", exc_info=True)
-    try:
         from app.modules.ai.alert_topic_tool import (
             CONFIRM_ALERT_TOPIC_SCHEMA,
             confirm_alert_topic_handler,

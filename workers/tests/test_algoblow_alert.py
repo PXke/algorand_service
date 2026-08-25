@@ -1,14 +1,18 @@
-"""AlgoBlow scam alerts classify as breaking tier and extract domains/addresses."""
+"""AlgoBlow scam alerts classify as scam_alert topic (forcing human review) and extract domains/addresses.
+
+The BREAKING publish TIER (a separate, now-removed concept -- see
+PublishTier's docstring) used to also get pinned here; those two cases were
+deleted 2026-08-25 along with classify_publish_tier itself. Topic
+classification (this file's remaining coverage) is untouched by that
+removal -- scam_alert still forces mandatory human review via
+is_breaking_topic, regardless of tier.
+"""
 
 from pathlib import Path
 
-import pytest
-
 from app.modules.newspaper.publish_policy import (
     PublishKind,
-    PublishTier,
     PublishTopic,
-    classify_publish_tier,
     classify_publish_topic,
 )
 from app.modules.newspaper.scam_enrichment import (
@@ -28,12 +32,8 @@ VICTIM_ADDRS = [
 ]
 
 
-def test_algoblow_classified_scam_breaking(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Classifies the AlgoBlow alert as scam_alert/breaking tier when BREAKING_TIER_ENABLED is on."""
-    # BREAKING_TIER_ENABLED defaults off (2026-07-17) — this pins the
-    # underlying keyword logic for when it's re-enabled; topic classification
-    # itself (asserted below) is unaffected and still forces human review.
-    monkeypatch.setattr("app.core.config.BREAKING_TIER_ENABLED", True)
+def test_algoblow_classified_scam_alert() -> None:
+    """Classifies the AlgoBlow alert as scam_alert -- forces mandatory human review regardless of publish tier."""
     topic = classify_publish_topic(
         page_text=D13_TEXT,
         diff=None,
@@ -41,19 +41,6 @@ def test_algoblow_classified_scam_breaking(monkeypatch: pytest.MonkeyPatch) -> N
         source_kind="push",
     )
     assert topic == PublishTopic.SCAM_ALERT
-    assert classify_publish_tier(topic=topic, page_text=D13_TEXT) == PublishTier.BREAKING
-
-
-def test_algoblow_stays_standard_tier_while_breaking_disabled() -> None:
-    """Still tags the AlgoBlow alert as scam_alert but keeps it standard tier while the breaking flag is off."""
-    topic = classify_publish_topic(
-        page_text=D13_TEXT,
-        diff=None,
-        publish_kind=PublishKind.CONTENT_UPDATE,
-        source_kind="push",
-    )
-    assert topic == PublishTopic.SCAM_ALERT
-    assert classify_publish_tier(topic=topic, page_text=D13_TEXT) == PublishTier.STANDARD
 
 
 def test_algoblow_extracts_domain_and_addresses() -> None:

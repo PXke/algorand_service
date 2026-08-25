@@ -1,13 +1,15 @@
-"""Day-ahead `to_compose` selection (2026-08-25, SHADOW MODE): human-slot-stays-empty-if-unpicked, N-1 platform fill, and per-service dedup excluding the human's own pick.
+"""Day-ahead `to_compose` selection: human-slot-stays-empty-if-unpicked, N-1 platform fill, and per-service dedup excluding the human's own pick.
 
 Uses the shared `fake_artifact_session` fixture (conftest.py) -- via
 `@pytest.mark.usefixtures` for tests that only need its monkeypatching side
 effect, or as a plain parameter for tests that inspect its in-memory tables
 directly.
 
-NONE of this touches publish_queue / _select_lane_for_today / any live
-compose trigger -- select_to_compose_for_day is a plain function, not wired
-to any beat in this phase.
+This file only exercises select_to_compose_for_day/preview_to_compose_for_day
+directly as plain functions -- the live compose trigger that CALLS
+select_to_compose_for_day on a beat (queue_drain_tasks.select_to_compose_for_today_task)
+and composes from its output (queue_drain_tasks.drain_to_compose) is covered
+separately in the queue_drain_tasks test files.
 """
 
 from __future__ import annotations

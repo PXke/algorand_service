@@ -35,37 +35,58 @@ def test_cooldown_disabled_when_hours_zero(
 
 
 def test_drain_skips_row_when_service_in_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A service already in its cooldown must not be composed at all this run — even when its registrable domain differs from whatever domain last composed for the same service_id (multi-domain project case)."""
-    from app.modules.newspaper.publish_queue_store import QueuedPublishRow
+    """A service already in its cooldown must not be composed at all this run — even when its registrable domain differs from whatever domain last composed for the same service_id (multi-domain project case). Exercised against drain_to_compose (2026-08-25 successor to drain_standard_publish_queue) — _service_in_cooldown itself is unchanged, reused as-is against an artifact-backed row."""
+    from datetime import UTC, datetime
+
+    from app.modules.newspaper.artifact_store import SELECTED, Artifact, ArtifactContent
     from app.modules.newspaper.tasks import queue_drain_tasks as q
 
-    row = QueuedPublishRow(
-        queue_id="q1",
-        priority=5,
-        topic="",
-        publish_kind="content_update",
+    artifact = Artifact(
+        artifact_id="a1",
         service_id="valar-solutions",
-        display_name="",
-        scrape_url="https://valar.solutions/",
-        payload={},
-        created_at_epoch=0,
+        url="https://valar.solutions/",
+        channel="crawler",
+        created_at=datetime(2026, 8, 25, tzinfo=UTC),
+        event_date=None,
+        priority=5.0,
+        priority_computed_at=None,
+        status=SELECTED,
+    )
+    content = ArtifactContent(
+        artifact_id="a1",
+        title="t",
+        content="x",
+        metadata={"payload": {"publish_kind": "content_update"}},
     )
 
     monkeypatch.setattr(q, "remaining_standard_publish_slots", lambda: 5)
-    monkeypatch.setattr(q, "_pending_for_tier", lambda *_a, **_k: [row])
+    monkeypatch.setattr(q, "_release_due_backlog", lambda _slots: None)
+    monkeypatch.setattr(q, "_pending_feed_backlog_full", lambda: False)
+    monkeypatch.setattr(q, "_ensure_today_selected", lambda _day: None)
+    monkeypatch.setattr(
+        q,
+        "list_to_compose_for_day",
+        lambda _day: [
+            {"slot": 0, "artifact_id": "a1", "lane": "platform", "service_id": artifact.service_id}
+        ],
+    )
+    monkeypatch.setattr(q, "get_artifact", lambda _aid: artifact)
+    monkeypatch.setattr(q, "get_artifact_content", lambda _aid: content)
     monkeypatch.setattr(q, "_domain_capped", lambda _r: False)
     monkeypatch.setattr(q, "_domain_in_cooldown", lambda _r: False)
     monkeypatch.setattr(q, "_service_in_cooldown", lambda _r: True)  # in cooldown
     monkeypatch.setattr(q, "_row_needs_review", lambda _r: True)  # would go to review
+    monkeypatch.setattr(q, "mark_artifact_status", lambda *_a, **_k: None)
+    monkeypatch.setattr(q, "_resolve_dual_written_queue_row", lambda *_a, **_k: None)
 
-    def _spy_review(_r: QueuedPublishRow) -> Never:
+    def _spy_review(*_a: object, **_k: object) -> Never:
         raise AssertionError("cooldown row must not be composed")
 
-    monkeypatch.setattr(q, "_compose_review_row", _spy_review)
+    monkeypatch.setattr(q, "publish_from_queued_row", _spy_review)
     import app.modules.crawler.classifier_review_store as crs
 
     monkeypatch.setattr(crs, "review_queue_full", lambda: False)
 
-    out = q.drain_standard_publish_queue()
+    out = q.drain_to_compose()
     statuses = [r.get("status") for r in out["results"]]
     assert "service_cooldown" in statuses

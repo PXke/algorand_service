@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -118,6 +121,37 @@ def _build_assignment_payload(brief: EditorialBrief) -> dict[str, Any]:
     }
 
 
+def _channel_for_brief(brief: EditorialBrief) -> str:
+    """artifacts.channel for an editorial-brief assignment -- "special_edition" for a flagged special edition, else "brief"."""
+    return "special_edition" if brief.is_special_edition else "brief"
+
+
+def _insert_artifact_for_brief(
+    brief: EditorialBrief, *, scrape_url: str, payload: dict[str, Any], queue_id: str
+) -> str | None:
+    """Dual-write (see ingest_signal.py's own dual-write for the full reasoning): create/replace this brief's editorial-room artifact alongside its publish_queue row. Best-effort -- never blocks the (already-committed) enqueue above. Returns the new artifact_id, or None on failure."""
+    try:
+        from app.modules.newspaper.artifact_store import insert_artifact
+
+        artifact_id, _created = insert_artifact(
+            service_id=f"editorial-brief:{brief.brief_id}",
+            url=scrape_url,
+            channel=_channel_for_brief(brief),
+            content=brief.body_markdown,
+            title=brief.title,
+            metadata={
+                "display_name": brief.title,
+                "source_kind": "editorial_assignment",
+                "dual_write_queue_id": queue_id,
+                "payload": payload,
+            },
+        )
+        return artifact_id
+    except Exception:
+        logger.warning("insert_artifact failed for brief %s", brief.brief_id, exc_info=True)
+        return None
+
+
 def assign_editorial_brief(brief_id: str) -> dict[str, Any]:
     """First-run: enqueue a brand-new article for this brief's topic. Relevance is forced to 1.0 — an editor already decided this is worth covering, so the content-relevance classifier shouldn't gate it (novelty/timeliness still apply normally: an editor-picked topic that duplicates something just published shouldn't rank artificially high)."""
     from app.core.config import WRITER_EDITORIAL_BRIEFS_ENABLED
@@ -157,17 +191,26 @@ def assign_editorial_brief(brief_id: str) -> dict[str, Any]:
         dedupe_key=f"editorial-assignment:{brief.brief_id}:initial",
         payload=payload,
     )
-    if created:
+    artifact_id = _insert_artifact_for_brief(
+        brief, scrape_url=scrape_url, payload=payload, queue_id=queue_id
+    )
+    if created and artifact_id:
         # An assignment is a deliberate, one-off admin action — unlike the
         # passive scrape/mail pipeline, it should compose right away rather
-        # than wait for the next hourly standard-queue beat.
-        from app.modules.newspaper.tasks.queue_drain_tasks import drain_standard_publish_queue
+        # than wait for the next compose-trigger beat. Targets THIS artifact
+        # specifically (compose_artifact_now bypasses pacing, same as the old
+        # drain_standard_publish_queue.delay() trigger it replaces) rather
+        # than a general drain, since the general to_compose selection only
+        # runs once a day and would otherwise leave this assignment waiting
+        # until tomorrow's slate.
+        from app.modules.newspaper.tasks.queue_drain_tasks import compose_artifact_now
 
-        drain_standard_publish_queue.delay()
+        compose_artifact_now.delay(artifact_id)
     return {
         "status": "enqueued" if created else "duplicate",
         "brief_id": brief.brief_id,
         "queue_id": queue_id,
+        "artifact_id": artifact_id,
     }
 
 
@@ -215,18 +258,22 @@ def refresh_editorial_brief(brief_id: str) -> dict[str, Any]:
         dedupe_key=f"editorial-assignment:{brief.brief_id}:{run_marker}",
         payload=payload,
     )
+    artifact_id = _insert_artifact_for_brief(
+        brief, scrape_url=scrape_url, payload=payload, queue_id=queue_id
+    )
     # Bump last_run_at at enqueue time (not compose completion) — a failed
     # compose just delays the next attempt by one cadence period, which is
     # simpler than threading a completion callback back through the drain.
     mark_brief_run(brief_id=brief.brief_id)
-    if created:
-        from app.modules.newspaper.tasks.queue_drain_tasks import drain_standard_publish_queue
+    if created and artifact_id:
+        from app.modules.newspaper.tasks.queue_drain_tasks import compose_artifact_now
 
-        drain_standard_publish_queue.delay()
+        compose_artifact_now.delay(artifact_id)
     return {
         "status": "enqueued" if created else "duplicate",
         "brief_id": brief.brief_id,
         "queue_id": queue_id,
+        "artifact_id": artifact_id,
     }
 
 

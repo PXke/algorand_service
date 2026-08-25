@@ -13,8 +13,8 @@ Modes (read-only by default — only --clear/--force delete anything):
                terminal while a lock is somehow still held).
   --force      clear regardless of the staleness check (use only once you've
                confirmed no worker is genuinely composing right now).
-  --drain      after clearing, enqueue a standard drain so the pending row
-               retries immediately instead of waiting for the safety-net beat.
+  --drain      after clearing, enqueue drain_to_compose so today's selected
+               slate retries immediately instead of waiting for the safety-net beat.
   --max-age N  staleness threshold in seconds (default 1200 — comfortably past a
                normal compose but under the lock's 1860s self-expiry).
 
@@ -137,10 +137,10 @@ def _maybe_trigger_drain(drain: bool) -> None:
         logger.info("the pending row will retry on the next drain beat (add --drain to do it now).")
         return
     try:
-        from app.modules.newspaper.tasks.queue_drain_tasks import drain_standard_publish_queue
+        from app.modules.newspaper.tasks.queue_drain_tasks import drain_to_compose
 
-        drain_standard_publish_queue.delay()
-        logger.info("enqueued drain_standard_publish_queue — workers will retry pending rows.")
+        drain_to_compose.delay()
+        logger.info("enqueued drain_to_compose — workers will retry the day's selected slate.")
     except Exception as exc:
         logger.info("(could not enqueue drain: %s; the safety-net beat will still retry)", exc)
 

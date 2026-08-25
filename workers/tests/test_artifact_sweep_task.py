@@ -1,8 +1,8 @@
 """The Celery beat task wrapper (tasks/artifact_tasks.py) and its beat-schedule/import wiring.
 
-Confirms the sweep is registered as its own independent beat entry that
-touches nothing on the live publish_queue drain path -- and that the task
-body is a thin delegation to artifact_priority.sweep_artifact_priorities
+Confirms the sweep is registered as its own independent beat entry, distinct
+from (though feeding into) drain_to_compose's daily selection -- and that
+the task body is a thin delegation to artifact_priority.sweep_artifact_priorities
 (already covered directly in test_artifact_priority.py).
 """
 
@@ -34,7 +34,7 @@ def test_sweep_registered_as_its_own_beat_entry_not_the_drain_tasks() -> None:
     """The sweep is registered under its own task name.
 
     Pins that it is a distinct, additive beat entry rather than piggybacking
-    on any live publish_queue drain task name.
+    on the live selection/compose-trigger task names.
     """
     from app.celery_app import _build_beat_schedule
 
@@ -44,8 +44,9 @@ def test_sweep_registered_as_its_own_beat_entry_not_the_drain_tasks() -> None:
         "app.tasks.newspaper.sweep_artifact_priorities"
     )
     # Distinct from (and does not replace) the live selection/drain beats.
-    assert schedule["drain-standard-publish-queue"]["task"] == (
-        "app.tasks.newspaper.drain_standard_publish_queue"
+    assert schedule["drain-to-compose"]["task"] == "app.tasks.newspaper.drain_to_compose"
+    assert schedule["select-to-compose-for-today"]["task"] == (
+        "app.tasks.newspaper.select_to_compose_for_today"
     )
 
 

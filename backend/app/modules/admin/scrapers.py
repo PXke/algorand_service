@@ -51,19 +51,16 @@ SCRAPER_ACTIONS: dict[str, ScraperAction] = {
             "Drain URL queue",
             "Crawl URLs waiting in the discovery queue.",
         ),
+        # 2026-08-25: repointed from drain_standard_publish_queue (retired)
+        # to its editorial-room successor. "publish_breaking" (drain_breaking_
+        # publish_queue) was removed entirely, not repointed -- the BREAKING
+        # fast path itself was retired, owner's call.
         ScraperAction(
             "publish_standard",
-            "app.tasks.newspaper.drain_standard_publish_queue",
+            "app.tasks.newspaper.drain_to_compose",
             "pipeline",
-            "Publish standard queue",
-            "Release queued standard articles (respects daily caps).",
-        ),
-        ScraperAction(
-            "publish_breaking",
-            "app.tasks.newspaper.drain_breaking_publish_queue",
-            "pipeline",
-            "Publish breaking queue",
-            "Release queued breaking articles.",
+            "Compose from today's selection",
+            "Compose eligible slots from today's to_compose selection (respects daily caps).",
         ),
         ScraperAction(
             "reindex_search",

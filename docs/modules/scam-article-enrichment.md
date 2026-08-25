@@ -10,7 +10,7 @@ Example (Foundation, May 2026):
 
 ## Goal
 
-Before compose/publish on `scam_alert` / breaking tier:
+Before compose/publish on `scam_alert` topic content (the separate BREAKING publish tier this doc originally also referenced was removed entirely 2026-08-25 — scam_alert's mandatory-review routing is unaffected):
 
 1. **Extract** domains and URLs from the alert (`algoblow.com`).
 2. **Cross-reference** data we already have (prior articles, metrics, registry).

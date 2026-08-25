@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from app.core import config
-from app.modules.newspaper.article_store import count_articles_published_on_utc_day
 
 
 class PublishKind(StrEnum):
@@ -21,10 +20,20 @@ class PublishKind(StrEnum):
 
 
 class PublishTier(StrEnum):
-    """Publish urgency tier (standard vs. breaking)."""
+    """Publish urgency tier.
+
+    Only STANDARD remains (2026-08-25): the BREAKING fast path (separate
+    daily cap, no-cooldown-no-novelty vetoes, heuristic credibility check,
+    "Breaking:" title prefix) was removed entirely -- owner's call, "it is a
+    concept that didn't work well" (see the deleted breaking_credibility.py
+    and drain_to_compose in queue_drain_tasks.py). Kept as a single-member
+    enum rather than collapsed away: `tier` is still threaded through
+    queue/artifact payloads, outcome dicts, and Redis counter keys as a
+    labeled field, and removing it outright would touch dozens of call sites
+    for zero behavior change now that there is exactly one tier.
+    """
 
     STANDARD = "standard"
-    BREAKING = "breaking"
 
 
 class PublishTopic(StrEnum):
@@ -136,6 +145,10 @@ _COMMUNITY_PHRASES = (
 )
 
 _BREAKING_PHRASES = (
+    # Despite the name (kept for the NETWORK_INCIDENT topic classifier below,
+    # which pre-dates and is independent of the now-removed BREAKING publish
+    # TIER -- see PublishTier's docstring), these are used only to detect
+    # network-incident-shaped CONTENT, never to fast-track publishing.
     "chain down",
     "network halt",
     "network outage",
@@ -201,32 +214,6 @@ def remaining_standard_publish_slots(*, when: datetime | None = None) -> int:
 
     published = published_count_today(tier=PublishTier.STANDARD, when=when)
     return max(0, config.NEWS_MAX_ARTICLES_PER_DAY - published)
-
-
-def remaining_breaking_publish_slots(*, when: datetime | None = None) -> int:
-    """Remaining breaking-tier publish slots left for the UTC day."""
-    from app.modules.newspaper.publish_daily_guard import published_count_today
-
-    published = published_count_today(tier=PublishTier.BREAKING, when=when)
-    return max(0, config.NEWS_MAX_BREAKING_PER_DAY - published)
-
-
-def count_standard_articles_on_utc_day(*, day_start_epoch: int, limit: int = 500) -> int:
-    """Count articles published that UTC day excluding breaking-tagged ones."""
-    total = count_articles_published_on_utc_day(day_start_epoch=day_start_epoch, limit=limit)
-    breaking = count_breaking_articles_on_utc_day(day_start_epoch=day_start_epoch, limit=limit)
-    return max(0, total - breaking)
-
-
-def count_breaking_articles_on_utc_day(*, day_start_epoch: int, limit: int = 500) -> int:
-    """Count articles tagged "breaking" that were published on the given UTC day."""
-    from app.modules.newspaper.article_store import count_feed_articles_with_tag_on_day
-
-    return count_feed_articles_with_tag_on_day(
-        tag="breaking",
-        day_start_epoch=day_start_epoch,
-        limit=limit,
-    )
 
 
 def priority_for_topic(topic: PublishTopic) -> int:
@@ -361,11 +348,10 @@ def build_publish_intent(
         classifier_publish=classifier_publish,
         classifier_confidence=classifier_confidence,
     )
-    tier = classify_publish_tier(topic=topic, page_text=page_text)
     return PublishIntent(
         kind=kind,
         topic=topic,
-        tier=tier,
+        tier=PublishTier.STANDARD,
         priority=breakdown.total,
         priority_breakdown=(
             f"relevance={breakdown.relevance_bonus}+novelty={breakdown.novelty_bonus}"
@@ -382,22 +368,6 @@ def build_publish_intent(
         event_id=event_id,
         event_phase=event_phase,
     )
-
-
-def classify_publish_tier(*, topic: PublishTopic, page_text: str) -> PublishTier:
-    """Breaking tier: scams, network incidents — immediate path, separate daily cap. Disabled by default (BREAKING_TIER_ENABLED, 2026-07-17): the keyword scan below false-positived on ordinary positive infrastructure claims (see config.py) — the topic-classification short-circuits above it stay live (SCAM_ALERT/NETWORK_INCIDENT still force human review), only the "skip the queue, prepend Breaking:" escalation is off."""
-    if not config.BREAKING_TIER_ENABLED:
-        return PublishTier.STANDARD
-    if topic in (PublishTopic.SCAM_ALERT, PublishTopic.NETWORK_INCIDENT):
-        return PublishTier.BREAKING
-    lower = page_text.lower()
-    if _contains_any(lower, _SCAM_PHRASES):
-        return PublishTier.BREAKING
-    if _contains_any(lower, _BREAKING_PHRASES) and _contains_any(
-        lower, ("chain", "network", "mainnet", "outage", "halt", "down")
-    ):
-        return PublishTier.BREAKING
-    return PublishTier.STANDARD
 
 
 def is_breaking_topic(topic: PublishTopic) -> bool:
@@ -571,26 +541,6 @@ def evaluate_standard_publish(
     return PublishDecision(kind=kind, allowed=True, reason="ok")
 
 
-def evaluate_breaking_publish(
-    kind: PublishKind,
-    *,
-    diff: str | None = None,
-    when: datetime | None = None,
-    source_kind: str | None = None,
-) -> PublishDecision:
-    """Breaking drain: separate cap, no interval — publish when credible."""
-    enqueue_decision = evaluate_enqueue(kind, diff=diff, source_kind=source_kind)
-    if not enqueue_decision.allowed:
-        return enqueue_decision
-
-    if remaining_breaking_publish_slots(when=when) <= 0:
-        return PublishDecision(
-            kind=kind,
-            allowed=False,
-            reason="breaking_daily_cap_reached",
-        )
-
-    return PublishDecision(kind=kind, allowed=True, reason="ok")
 
 
 def trim_text_to_chars(text: str, max_chars: int) -> str:

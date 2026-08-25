@@ -1,4 +1,4 @@
-"""Priority scoring for editorial-room `artifacts` (2026-08-25, SHADOW MODE).
+"""Priority scoring for editorial-room `artifacts` -- feeds the LIVE day-ahead to_compose selection (see to_compose_selection.py / queue_drain_tasks.select_to_compose_for_today_task).
 
 Architected as `priority = sum(component_score(artifact, content) for
 component_score in SCORE_COMPONENTS)` so a future signal (sentiment, on-chain
@@ -7,9 +7,11 @@ tuple below without restructuring `sweep_artifact_priorities`, the daily beat
 that recomputes every PENDING artifact's score.
 
 This is a deliberately separate, simpler formula from
-`publish_score.compute_priority` (the LIVE publish_queue scorer) -- same
-general shape (a handful of additive components, one of them an age-decay
-curve) but its own scale and its own three v1 components:
+`publish_score.compute_priority` (which still exists, still scores
+publish_queue's own dual-written rows for rollback-safety observability, but
+no longer drives any live selection decision) -- same general shape (a
+handful of additive components, one of them an age-decay curve) but its own
+scale and its own three v1 components:
 
   1. word_count_score      -- substantial content scores higher, diminishing
                                returns past ARTIFACT_WORD_COUNT_CAP words.
@@ -19,9 +21,6 @@ curve) but its own scale and its own three v1 components:
   3. ecosystem_listed_score -- flat bonus for a URL whose domain is in the
                                SAME ecosystem_listed directory registry the
                                crawler-discovery scorer already uses.
-
-Nothing here is read by the live compose/publish path; `publish_score.py`'s
-own formula is untouched.
 """
 
 from __future__ import annotations

@@ -53,10 +53,6 @@ class LLMArticleFields:
     # itself failed. Lets a caller (e.g. the publish gate) act on the SAME grade
     # the writer saw, instead of recomputing it blind.
     heuristic_grade: dict | None = None
-    # Writer-declared urgency (mark_breaking_news tool, replaces the
-    # deterministic keyword classifier disabled 2026-07-17) — None unless the
-    # writer actually called the tool this compose.
-    breaking_reason: str | None = None
     # Writer-confirmed alert class ("scam_alert"/"network_incident" via the
     # confirm_alert_topic tool) — None unless confirmed. The keyword topic
     # classifier still routes queue rows, but reader-facing alert tags and
@@ -2203,7 +2199,6 @@ def _parse_article_fields(payload: dict[str, Any]) -> LLMArticleFields:
         body=body,
         tags=tuple(tags[:6]),
         heuristic_grade=payload.get("_heuristic_grade"),
-        breaking_reason=payload.get("_breaking_reason"),
         confirmed_alert=payload.get("_confirmed_alert"),
         defunct_domains=tuple(payload.get("_defunct_domains") or ()),
         unsourced_hold_reason=str(payload.get("_unsourced_hold_reason") or ""),
@@ -2972,15 +2967,6 @@ def _apply_post_compose_gates(
     stale_deadlines = stale_deadline_issues(str(payload.get("body", "")))
     if stale_deadlines:
         payload["_stale_deadlines"] = stale_deadlines
-    # Writer-declared breaking news (replaces the deterministic keyword
-    # classifier, disabled 2026-07-17): scanned from the trace like the
-    # gates above, since mark_breaking_news never mutates the draft —
-    # it's a judgment call the publish gate reads afterward.
-    from app.modules.ai.breaking_news_tool import breaking_reason_from_trace
-
-    breaking_reason = breaking_reason_from_trace(trace)
-    if breaking_reason is not None:
-        payload["_breaking_reason"] = breaking_reason
     # Writer-confirmed alert class (confirm_alert_topic tool) — same
     # post-hoc trace scan; the publish gate uses it to decide whether
     # a keyword-routed scam/incident topic earns its reader-facing

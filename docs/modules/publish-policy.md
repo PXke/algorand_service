@@ -1,5 +1,35 @@
 # Publish policy — queue, priority, and daily cap
 
+> **This doc predates several major changes and is not being fully rewritten
+> here — treat the sections below as historical/aspirational except where
+> noted.** Two load-bearing corrections as of 2026-08-25:
+>
+> 1. **The BREAKING tier/lane was removed entirely** (not "planned" or
+>    "done" — deleted). Every mention below of `drain_breaking_publish_queue`,
+>    `NEWS_MAX_BREAKING_PER_DAY`, `PUBLISH_BREAKING_DRAIN_SECONDS`,
+>    `breaking_credibility.py`, `BREAKING_INLINE_DRAIN`, or a "breaking lane"
+>    describes a retired system. Owner's call: "it is a concept that didn't
+>    work well." Scam/incident CONTENT still forces mandatory human review
+>    (`is_breaking_topic`/`scam_alert`/`network_incident` topics, unaffected)
+>    — only the separate-cap/no-wait/"Breaking:"-prefix fast-PUBLISH path is
+>    gone.
+> 2. **Selection no longer reads `publish_queue`.** The editorial-room
+>    `artifacts`/`to_compose` system (`artifact_store.py`,
+>    `artifact_priority.py`, `to_compose_selection.py`) is now the live
+>    selection mechanism; `queue_drain_tasks.drain_to_compose` composes from
+>    its daily `to_compose` selection. `publish_queue` stays live-fed
+>    (dual-write, rollback safety) but nothing reads it for selection
+>    anymore. See `queue_drain_tasks.py`'s module docstring for the current
+>    picture; the sections below describing "queue"/"drain" priority
+>    mechanics are otherwise still representative of the SCORING and GATING
+>    logic (topic/priority weights, daily cap enforcement, pacing), just not
+>    of how a candidate gets picked.
+>
+> Also note: the Discord/Reddit/Telegram ingestion lanes described in
+> several sections below were removed in the 2026-06-26 pipeline
+> simplification and were never restored — don't take their presence here as
+> current.
+
 The news feed stays readable by **enqueueing** signals from many sources, **scoring** them on one scale, and **draining** at most **7 articles per UTC day** (configurable). A burst of 1,000 first-time discoveries becomes a ranked backlog, not 1,000 same-day posts.
 
 ## Target model (from scratch)

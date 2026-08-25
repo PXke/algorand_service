@@ -1,9 +1,10 @@
-"""Day-ahead compose selection for the editorial-room `to_compose` table (2026-08-25, SHADOW MODE).
+"""Day-ahead compose selection for the editorial-room `to_compose` table.
 
-NOT wired to any live compose trigger yet -- a plain, directly-callable
-function (plus an admin-facing pin hook) that a future admin UI / beat task
-can call, per this phase's explicit scope ("doesn't need to be a live beat
-task yet since nothing consumes to_compose for real composing"). See
+LIVE (2026-08-25): `select_to_compose_for_day` is called once daily by
+`app.modules.newspaper.tasks.queue_drain_tasks.select_to_compose_for_today_task`
+(a beat), and `drain_to_compose` (a tighter-cadence beat in the same module)
+composes from its output. `preview_to_compose_for_day` remains the read-only
+admin-dashboard forecast, called directly (not on a beat). See
 artifact_store.py for the human-pin mechanism and artifact_priority.py for
 the priority this reads.
 """

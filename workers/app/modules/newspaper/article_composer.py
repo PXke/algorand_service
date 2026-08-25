@@ -36,7 +36,6 @@ class ArticleComposeResult:
     extra_tags: tuple[str, ...] = ()
     prompt_version: str = ""
     heuristic_grade: dict | None = None
-    breaking_reason: str | None = None
     confirmed_alert: str | None = None
     # Hard-divert signals from llm_compose's post-hoc gates (chain_entity_gate,
     # unsourced_specifics_gate) — MUST be forwarded from LLMArticleFields on
@@ -183,7 +182,6 @@ def compose_scrape_article(
         extra_tags=getattr(fields, "tags", ()),
         prompt_version=getattr(fields, "prompt_version", ""),
         heuristic_grade=getattr(fields, "heuristic_grade", None),
-        breaking_reason=getattr(fields, "breaking_reason", None),
         confirmed_alert=getattr(fields, "confirmed_alert", None),
         defunct_domains=getattr(fields, "defunct_domains", ()),
         unsourced_hold_reason=getattr(fields, "unsourced_hold_reason", ""),

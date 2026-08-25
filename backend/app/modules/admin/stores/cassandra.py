@@ -1362,7 +1362,10 @@ class AdminCassandraStore:
             # candidate. (Do NOT also fire check_and_publish_mistral_on_diff here:
             # it re-scrapes all monitored sources and is a heavy periodic task, not
             # something an admin click should trigger.)
-            app.send_task("app.tasks.newspaper.drain_standard_publish_queue", queue="pipeline")
+            # 2026-08-25: repointed from drain_standard_publish_queue (retired)
+            # to its editorial-room successor -- see
+            # workers/app/modules/newspaper/tasks/queue_drain_tasks.py.
+            app.send_task("app.tasks.newspaper.drain_to_compose", queue="pipeline")
         except Exception:
             logger.warning("failed to trigger compose-next task", exc_info=True)
 
@@ -1382,7 +1385,7 @@ class AdminCassandraStore:
         return sum(1 for _ in rows)
 
     # Shares the SAME Redis key and interval as the workers' primary
-    # drain_standard_publish_queue pacing (publish_schedule.py /
+    # drain_to_compose pacing (publish_schedule.py /
     # NEWS_STANDARD_INTERVAL_HOURS) — an admin-approved article published
     # immediately here is still a standard-tier release and must respect the
     # same cadence as one released by the worker's queue drain. Previously
@@ -1839,7 +1842,21 @@ class AdminCassandraStore:
         return {"queue_id": queue_id, "priority": new_priority}
 
     def set_human_pick_for_today(self, queue_id: str) -> dict | None:
-        """Pin a pending queue row as Lane 1 (human pick) of the day's 3 publish slots — distinct from bump_queue_priority, which only reorders within the automated ranking. drain_standard_publish_queue checks human_pick_day == today's UTC date before falling through to the automated lane selection, so this reserves a specific slot rather than just jumping the line. None when the row is missing or not pending."""
+        """Pin a pending publish_queue row's human_pick_day -- the OLD (publish_queue/3-lane) human-pick mechanism.
+
+        2026-08-25: FUNCTIONALLY INERT. drain_to_compose (the live compose
+        trigger) no longer reads publish_queue at all, let alone this
+        column, so this call still succeeds and writes the row (publish_queue
+        stays live-fed for rollback safety, see ingest_signal.py's dual-write
+        note) but nothing acts on it anymore. The live equivalent is the
+        editorial-room artifact system's pin: POST
+        /api/v1/admin/artifacts/:artifact_id/pin-for-tomorrow ->
+        admin_pin_artifact_for_tomorrow -> workers'
+        artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow.
+        Kept registered (not deleted) only because the admin Queue-tab
+        redesign that repoints this UI action to the artifact-native
+        endpoint is a separate, parallel task.
+        """
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import PublishQueueStmts
 
