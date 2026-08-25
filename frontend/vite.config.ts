@@ -50,9 +50,21 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // Precache the reading shell — not the lazy wallet/admin hunks.
+        // Precache the reading shell — not the lazy wallet/admin chunks, the
+        // 13 individual admin tab chunks (only the AdminHub shell itself was
+        // excluded before, not its lazily-loaded tabs), or the 8 non-English
+        // locale bundles (only `en` is on the critical path; the rest load
+        // on demand via runtimeCaching below the first time a visitor picks
+        // one). The locale glob deliberately excludes `en-*.js` and
+        // `es5-*.js` (a legacy-JS polyfill chunk, unrelated to the `es`
+        // locale) — verified against a real `dist/assets` listing.
         globPatterns: ['**/*.{js,css,html,ico,svg,woff2,png,webp}'],
-        globIgnores: ['**/wallet-connect-*.js', '**/AdminHub-*'],
+        globIgnores: [
+          '**/wallet-connect-*.js',
+          '**/AdminHub-*',
+          '**/*Tab-*.{js,css}',
+          '**/{es,fr,zh,ar,ps,fa,ru,hi}-*.js',
+        ],
         navigateFallback: '/index.html',
         // Anything the SERVER renders must opt out, or a navigation to it gets
         // the SPA shell handed back by the service worker — which is why
@@ -87,6 +99,19 @@ export default defineConfig({
               ],
             },
           },
+          {
+            // Non-English locale bundles: excluded from the precache above
+            // (globIgnores) so no visitor pays for 8 languages they'll never
+            // read, but content-hashed and immutable once fetched — cache
+            // them the first time a visitor actually switches locale.
+            urlPattern: ({ url }) =>
+              /\/assets\/(?:es|fr|zh|ar|ps|fa|ru|hi)-[\w-]+\.js$/.test(url.pathname),
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'locales',
+              expiration: { maxEntries: 8 },
+            },
+          },
         ],
       },
     }),
@@ -108,14 +133,18 @@ export default defineConfig({
     target: 'es2022',
     cssMinify: true,
     modulePreload: { polyfill: false },
-    chunkSizeWarningLimit: 900,
+    // wallet-connect now also absorbs Pera's/Defly's/Lute's own SDK bundles
+    // (see codeSplitting groups below) — expected to sit around ~1.6 MB.
+    // It's a lazy, on-demand chunk excluded from the PWA precache, so its
+    // size doesn't affect first load; raised only to stop this warning.
+    chunkSizeWarningLimit: 1700,
     rolldownOptions: {
       output: {
         codeSplitting: {
           groups: [
             {
               name: 'wallet-connect',
-              test: /node_modules[\\/](@walletconnect|algosdk|tweetnacl|qrcode|buffer)/,
+              test: /node_modules[\\/](@walletconnect|algosdk|tweetnacl|qrcode|buffer|@perawallet|@blockshake|@galaxypay)/,
             },
           ],
         },
