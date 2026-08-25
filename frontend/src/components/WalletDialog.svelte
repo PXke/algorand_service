@@ -11,7 +11,8 @@
     wakeWalletTransport,
     walletFlow,
   } from '../lib/auth/session'
-  import { openWalletDeepLink, walletAppLaunchLink } from '../lib/auth/walletconnect'
+  import { openWalletDeepLink } from '../lib/auth/walletconnect'
+  import { WALLET_OPTIONS, type WalletId } from '../lib/auth/walletProviders'
   import {
     enableWcDebugFromQuery,
     toggleWcDebug,
@@ -30,6 +31,14 @@
   let step = $state<'address' | 'sign'>('address')
   let launchFailed = $state(false)
   let started = $state(false)
+  let selectedWallet = $state<WalletId | null>(null)
+
+  /** Matches Pera's original hint wording exactly when Pera is picked. */
+  function walletWindowLabel(id: WalletId): string {
+    if (id === 'lute') return 'Lute'
+    if (id === 'defly') return 'Defly Wallet'
+    return 'Pera Wallet'
+  }
   let titlePressTimer: number | null = null
   let reviveTimer: number | null = null
   let lastReviveAt = 0
@@ -111,10 +120,6 @@
     window.addEventListener('pageshow', onPageShow)
     window.addEventListener('focus', onFocus)
     document.addEventListener('keydown', onKeydown)
-    if (mode === 'wallet' && !started) {
-      started = true
-      void beginWallet()
-    }
     return () => {
       document.body.style.overflow = prevOverflow
       document.body.style.paddingRight = prevPaddingRight
@@ -135,18 +140,24 @@
     if (reviveTimer != null) window.clearTimeout(reviveTimer)
   })
 
-  async function beginWallet() {
+  async function beginWallet(id: WalletId) {
     try {
-      await signInWithWalletConnect()
+      await signInWithWalletConnect(id)
       onclose()
     } catch {
       /* error surfaced via walletFlow / authError */
     }
   }
 
-  async function retryWallet() {
+  function pickWallet(id: WalletId) {
+    selectedWallet = id
     started = true
-    await beginWallet()
+    void beginWallet(id)
+  }
+
+  async function retryWallet() {
+    if (!selectedWallet) return
+    await beginWallet(selectedWallet)
   }
 
   async function closeDialog() {
@@ -154,10 +165,15 @@
     onclose()
   }
 
-  function reopenWalletApp() {
+  async function reopenWalletApp() {
+    if (!selectedWallet) return
+    const { loadWalletAdapter } = await import('../lib/auth/walletProviders')
+    const adapter = await loadWalletAdapter(selectedWallet)
+    const link = adapter.appLaunchLink()
+    if (!link) return
     launchFailed = false
     leftForWallet = true
-    const ok = openWalletDeepLink(walletAppLaunchLink())
+    const ok = openWalletDeepLink(link)
     if (!ok) launchFailed = true
   }
 
@@ -216,6 +232,8 @@
       >
         {#if mode === 'manual'}
           {t($messages, 'walletSignInTitle')}
+        {:else if !started}
+          {t($messages, 'walletPickTitle')}
         {:else if phase === 'error'}
           {t($messages, 'walletErrorTitle')}
         {:else if phase === 'signing'}
@@ -230,13 +248,7 @@
         class="mode"
         class:on={mode === 'wallet'}
         type="button"
-        onclick={() => {
-          mode = 'wallet'
-          if (!started) {
-            started = true
-            void beginWallet()
-          }
-        }}>{t($messages, 'walletConnect')}</button
+        onclick={() => (mode = 'wallet')}>{t($messages, 'walletConnect')}</button
       >
       <button
         class="mode"
@@ -247,7 +259,23 @@
     </div>
 
     {#if mode === 'wallet'}
-      {#if phase === 'error'}
+      {#if !started}
+        <p class="hint muted">{t($messages, 'walletPickHint')}</p>
+        <div class="wallet-options">
+          {#each WALLET_OPTIONS as opt (opt.id)}
+            <button
+              class="btn btn-outlined wallet-option"
+              type="button"
+              onclick={() => pickWallet(opt.id)}>{opt.label}</button
+            >
+          {/each}
+        </div>
+        <div class="row">
+          <button class="btn" type="button" onclick={() => closeDialog()}
+            >{t($messages, 'walletCancel')}</button
+          >
+        </div>
+      {:else if phase === 'error'}
         <p class="err">{flowError ?? t($messages, 'walletErrorGeneric')}</p>
         <div class="row">
           <button class="btn" type="button" onclick={() => closeDialog()}
@@ -267,12 +295,18 @@
           <button class="btn" type="button" onclick={() => closeDialog()}
             >{t($messages, 'walletCancel')}</button
           >
-          <button class="btn btn-outlined" type="button" onclick={() => reopenWalletApp()}
-            >{t($messages, 'walletOpenWallet')}</button
-          >
+          {#if selectedWallet !== 'lute'}
+            <button class="btn btn-outlined" type="button" onclick={() => reopenWalletApp()}
+              >{t($messages, 'walletOpenWallet')}</button
+            >
+          {/if}
         </div>
       {:else}
-        <p class="hint muted">{t($messages, 'walletPairingHint')}</p>
+        <p class="hint muted">
+          {t($messages, 'walletPairingHint', {
+            wallet: selectedWallet ? walletWindowLabel(selectedWallet) : walletWindowLabel('pera'),
+          })}
+        </p>
 
         {#if launchFailed}
           <p class="err">{t($messages, 'walletOpenFailed')}</p>
@@ -334,10 +368,14 @@
 </div>
 
 <style>
-  /* Pera's own connect modal (opened by peraConnect() during 'pairing') must
-     render ABOVE our backdrop or it's unusable — default z-index is 10,
-     ours is 200. See @perawallet/connect's README "Customizing Style". */
-  :global(.pera-wallet-modal) {
+  /* Pera's / Defly's own connect modals (opened by peraConnect()/deflyConnect()
+     during 'pairing') must render ABOVE our backdrop or they're unusable —
+     default z-index is 10, ours is 200. See @perawallet/connect's README
+     "Customizing Style"; Defly's modal root class mirrors it 1:1
+     (@blockshake/defly-connect is the same author's SDK). Lute has no
+     in-page modal — it opens its own popup window. */
+  :global(.pera-wallet-modal),
+  :global(.defly-wallet-modal) {
     z-index: 201;
   }
   .backdrop {
@@ -448,6 +486,21 @@
     padding: 0.45rem 0.55rem;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+  .wallet-options {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .wallet-option {
+    border-radius: 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    min-height: 44px;
+    text-align: center;
   }
   .row {
     display: flex;
