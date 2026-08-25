@@ -464,11 +464,14 @@ class NewsStmts:
 # article_view_counts (counter table)
 # --------------------------------------------------------------------------- #
 class ViewCountStmts:
-    """Prepared statements for per-article view counters."""
+    """Prepared statements for per-article view counters.
 
-    BUMP = _Stmt(
-        "UPDATE algorand_platform.article_view_counts SET views = views + 1 WHERE article_id = ?"
-    )
+    No BUMP entry here: increments happen in Redis on the hot article-page-view
+    path (see app/modules/news/stores/view_counts.py's record_view). The actual
+    counter-column write lives in workers/ (ViewCountStmts.BUMP there), applied
+    in bulk by the flush_pending_views beat task every 10 minutes.
+    """
+
     GET = _Stmt("SELECT views FROM algorand_platform.article_view_counts WHERE article_id = ?")
 
 

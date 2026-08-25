@@ -29,3 +29,22 @@ def test_editorial_brief_scan_stays_off_for_falsey_values(monkeypatch: pytest.Mo
     """Keeps the editorial-brief scan beat off for a falsey env value like "0"."""
     monkeypatch.setenv("EDITORIAL_BRIEF_SCAN_ENABLED", "0")
     assert "scan-editorial-brief-schedule" not in celery_app._build_beat_schedule()
+
+
+def test_flush_pending_view_counts_scheduled_every_ten_minutes_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Redis-buffered view-count flush runs unconditionally (no feature flag) every 10 minutes by default -- see view_counts.flush_pending_views for why that interval is safe."""
+    monkeypatch.delenv("VIEW_COUNT_FLUSH_SECONDS", raising=False)
+    schedule = celery_app._build_beat_schedule()
+    assert (
+        schedule["flush-pending-view-counts"]["task"] == "app.tasks.newspaper.flush_pending_views"
+    )
+    assert schedule["flush-pending-view-counts"]["schedule"] == 600.0
+
+
+def test_flush_pending_view_counts_interval_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flush interval is overridable via VIEW_COUNT_FLUSH_SECONDS."""
+    monkeypatch.setenv("VIEW_COUNT_FLUSH_SECONDS", "120")
+    schedule = celery_app._build_beat_schedule()
+    assert schedule["flush-pending-view-counts"]["schedule"] == 120.0

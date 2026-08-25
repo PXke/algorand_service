@@ -20,6 +20,7 @@ from app.modules.newspaper.tasks.queue_drain_tasks import (
     drain_standard_publish_queue,
     expire_stale_queue_items,
 )
+from app.modules.newspaper.tasks.view_count_tasks import flush_pending_views_task
 
 __all__ = [
     "apply_recomposed_article",
@@ -29,6 +30,7 @@ __all__ = [
     "drain_breaking_publish_queue",
     "drain_standard_publish_queue",
     "expire_stale_queue_items",
+    "flush_pending_views_task",
     "interrogate_compose_session_task",
     "publish_from_chain_event",
     "publish_weekly_digest",

@@ -557,13 +557,20 @@ class ChainStmts:
 
 
 # --------------------------------------------------------------------------- #
-# article_view_counts (counter table; read-only here, IN-bind on partition key)
+# article_view_counts (counter table; IN-bind on partition key for bulk reads)
 # --------------------------------------------------------------------------- #
 class ViewCountStmts:
     """Prepared statements for per-article view counters."""
 
     GET_BULK = _Stmt(
         "SELECT article_id, views FROM algorand_platform.article_view_counts WHERE article_id IN ?"
+    )
+    # Variable-increment bump: applies a batched delta (not always 1), used by
+    # flush_pending_views to drain Redis's pending per-article increments into
+    # the counter column. backend's article-page-view path no longer writes
+    # this table directly -- see app/modules/newspaper/view_counts.py.
+    BUMP = _Stmt(
+        "UPDATE algorand_platform.article_view_counts SET views = views + ? WHERE article_id = ?"
     )
 
 
