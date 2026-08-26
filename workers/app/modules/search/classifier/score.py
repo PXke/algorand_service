@@ -62,19 +62,37 @@ KNOWN_DOMAINS: frozenset[str] = frozenset(
 # marketing copy stays chain-agnostic (2026-07-21).
 EXPLORER_DOMAINS: frozenset[str] = frozenset({"allo.info", "explorer.perawallet.app"})
 
-POSITIVE_KEYWORDS: tuple[str, ...] = (
+# Chain-agnostic blockchain-infra vocabulary: "defi"/"testnet"/"mainnet"/
+# "walletconnect"/"indexer" describe concepts common to essentially every
+# chain's own documentation (Ethereum, Aave, Bitcoin, ...) and carry NO
+# Algorand-specific signal on their own. Root-caused 2026-08-26: calnix.
+# gitbook.io (Aave/Ethereum docs, zero Algorand mentions) and protegecoin.
+# com.br (a generic Bitcoin custody guide, zero Algorand mentions) both
+# landed exactly at content_relevance=0.500 — precisely
+# FRONTIER_CONTENT_PROMOTE_SCORE — purely from repeated hits in this family,
+# with no domain anchor, explorer link, or exact "algorand" mention anywhere
+# on either page. Kept separate from ALGORAND_KEYWORDS below and capped hard
+# in score_page() so this family alone can never clear either that promote
+# threshold or this module's own DEFAULT_THRESHOLD.
+GENERIC_KEYWORDS: tuple[str, ...] = (
+    "walletconnect",
+    "defi",
+    "testnet",
+    "mainnet",
+    "indexer",
+)
+
+# Terms specific enough to Algorand itself (its name/ticker, its ASA/ARC/
+# PPoS/algod technical vocabulary, and named ecosystem projects) to count as
+# genuine signal at full weight.
+ALGORAND_KEYWORDS: tuple[str, ...] = (
     "algorand",
     "algo ",
     " algo",
     "asa ",
     "arc-",
-    "walletconnect",
-    "defi",
-    "testnet",
-    "mainnet",
     "microalgo",
     "algod",
-    "indexer",
     "pure proof of stake",
     "ppos",
     # Ecosystem proper nouns — a story can be entirely Algorand-relevant
@@ -89,6 +107,11 @@ POSITIVE_KEYWORDS: tuple[str, ...] = (
     "algokit",
     "hesabpay",
 )
+
+# Back-compat combined list — content_categorizer's fallback category guesser
+# just wants "does this page look Algorand-ish at all" (presence-based, not
+# weighted), so it's fine for it to keep seeing the full family here.
+POSITIVE_KEYWORDS: tuple[str, ...] = ALGORAND_KEYWORDS + GENERIC_KEYWORDS
 
 
 def _ecosystem_listed() -> frozenset[str]:
@@ -241,10 +264,24 @@ def score_page(
     # just presence/absence — a page repeating "algorand" several times in
     # body copy should outscore one that name-drops it once, same fix as
     # the quality-floor gate (urvote.ca, 2026-07-24).
-    keyword_hit_count = sum(min(lowered.count(kw), _KEYWORD_FAMILY_CAP) for kw in POSITIVE_KEYWORDS)
-    if keyword_hit_count:
-        score += min(0.5, keyword_hit_count * 0.08)
-        reasons.append(f"keywords:{keyword_hit_count}")
+    #
+    # Algorand-specific and generic-blockchain hits are scored SEPARATELY
+    # (root-caused 2026-08-26, calnix.gitbook.io/protegecoin.com.br): the
+    # generic family (defi/testnet/mainnet/walletconnect/indexer) applies
+    # equally to any chain's own docs, so it's capped at 0.15 — well below
+    # both this function's DEFAULT_THRESHOLD (0.35) and
+    # FRONTIER_CONTENT_PROMOTE_SCORE (0.5) — and can never by itself carry a
+    # page into scope. Only the Algorand-specific family keeps the full 0.5
+    # weight budget.
+    algorand_hit_count = sum(min(lowered.count(kw), _KEYWORD_FAMILY_CAP) for kw in ALGORAND_KEYWORDS)
+    generic_hit_count = sum(min(lowered.count(kw), _KEYWORD_FAMILY_CAP) for kw in GENERIC_KEYWORDS)
+    keyword_hit_count = algorand_hit_count + generic_hit_count
+    if algorand_hit_count:
+        score += min(0.5, algorand_hit_count * 0.08)
+        reasons.append(f"keywords:{algorand_hit_count}")
+    if generic_hit_count:
+        score += min(0.15, generic_hit_count * 0.03)
+        reasons.append(f"generic_keywords:{generic_hit_count}")
 
     for delta, reason in (_reject_signal(text, keyword_hit_count), _spam_signal(text)):
         if reason:
