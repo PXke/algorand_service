@@ -344,6 +344,100 @@ def reset_and_reselect_for_day(day: str, *, now: datetime | None = None) -> dict
     }
 
 
+def find_stale_selected_artifacts(*, today: str | None = None) -> list[dict[str, object]]:
+    """Read-only: every `to_compose` row for a day strictly BEFORE `today` whose artifact is still SELECTED -- a slot `drain_to_compose` never got to before its own day rolled over, and that nothing else in this module ever revisits on its own.
+
+    Root-caused live 2026-08-26: `select_to_compose_for_day` moves a picked
+    artifact PENDING -> SELECTED the moment it's chosen (`_insert_slot` ->
+    `mark_artifact_status`), for BOTH the human pick and every platform pick
+    alike -- there is no lane-specific exception here. `drain_to_compose`
+    only ever composes `list_to_compose_for_day(today)` -- literally
+    TODAY's own slate, every run, forever. If a slot stays SELECTED past
+    midnight (a gate cooldown that never cleared, review_queue_full all
+    day, a soft-time-limit interruption near end of day, or simply too many
+    slots for the compose budget that day), its artifact is now invisible
+    to EVERY future day: `list_pending_artifacts()` only returns
+    status=PENDING rows, so it can never be re-picked, and no future
+    `drain_to_compose` run ever looks at a day other than its own `today`.
+    The content is silently stranded -- not published, not discarded, not
+    reconsidered, just permanently SELECTED. Confirmed two real real-world
+    casualties from 2026-08-25's platform picks (`algorand-co`,
+    `forum-algorand-co`) sitting exactly like this before this function was
+    written.
+
+    Read-only, no writes -- pairs with `reclaim_stale_selected_artifacts`
+    (dry_run=True by default there too) the same way this module's other
+    report/act pairs work. `to_compose` has no per-day index to query
+    against, so this does a full-table scan (`ToComposeStmts.LIST_ALL`) --
+    safe, since the table holds at most a handful of rows per day, forever.
+    """
+    from app.core.cassandra import get_cassandra_session
+
+    from algorand_shared.artifact_statements import ToComposeStmts
+    from algorand_shared.artifact_store import get_artifact
+
+    today = today or datetime.now(tz=UTC).date().isoformat()
+    session = get_cassandra_session()
+
+    stale: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for row in session.execute(ToComposeStmts.LIST_ALL):
+        if row.compose_day >= today:
+            continue
+        artifact_id = str(row.artifact_id)
+        if artifact_id in seen:
+            continue
+        artifact = get_artifact(artifact_id)
+        if artifact is not None and artifact.status == SELECTED:
+            seen.add(artifact_id)
+            stale.append(
+                {
+                    "artifact_id": artifact_id,
+                    "compose_day": row.compose_day,
+                    "lane": row.lane,
+                    "service_id": row.service_id,
+                }
+            )
+    return stale
+
+
+def reclaim_stale_selected_artifacts(
+    *, today: str | None = None, dry_run: bool = True
+) -> dict[str, object]:
+    """Revert every stale-selected artifact (see `find_stale_selected_artifacts`) back to PENDING, re-entering it into the normal priority-ranked pool so a future `select_to_compose_for_day` can pick it up again like any other candidate -- not forced to the front, just no longer permanently stuck.
+
+    Uses the existing `revert_artifact_to_pending` (built for the admin
+    "redo picks" action, `reset_to_compose_for_day` above) rather than a new
+    write path. A reclaimed HUMAN-lane pick also has its stale
+    `human_pick_day` cleared (`clear_artifact_pin`) -- otherwise the
+    artifact goes back to PENDING still carrying a human_pick_day for a day
+    that has already passed, which is inert (no future day's exact-date
+    match will ever equal it) but confusing leftover state to see on an
+    otherwise-ordinary pending artifact.
+
+    `dry_run=True` by default, mirroring every other act-on-live-data
+    function in this codebase added this session (`gray_zone_
+    reconciliation.dispatch_gray_zone_deep_classify`, `browser_reaper.
+    reap_orphaned_browser_processes`) -- reports what WOULD be reclaimed
+    without writing anything until a caller opts in.
+    """
+    from algorand_shared.artifact_store import clear_artifact_pin, revert_artifact_to_pending
+
+    stale = find_stale_selected_artifacts(today=today)
+    reclaimed: list[dict[str, object]] = []
+    for finding in stale:
+        artifact_id = str(finding["artifact_id"])
+        if dry_run:
+            reclaimed.append(finding)
+            continue
+        if revert_artifact_to_pending(artifact_id):
+            if finding["lane"] == "human":
+                clear_artifact_pin(artifact_id)
+            reclaimed.append(finding)
+
+    return {"dry_run": dry_run, "reclaimed_count": len(reclaimed), "reclaimed": reclaimed}
+
+
 def preview_to_compose_for_day(day: str) -> dict[str, object]:
     """Read-only preview of what select_to_compose_for_day(day) currently would pick -- the query behind the admin shadow-selection dashboard.
 

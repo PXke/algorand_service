@@ -124,3 +124,14 @@ class ToComposeStmts:
         "FROM algorand_platform.to_compose WHERE compose_day = ?"
     )
     DELETE_FOR_DAY = _Stmt("DELETE FROM algorand_platform.to_compose WHERE compose_day = ?")
+    # Unfiltered full-table scan -- no WHERE clause, so no ALLOW FILTERING
+    # needed even though compose_day is the partition key. Safe: this table
+    # holds at most NEWS_MAX_ARTICLES_PER_DAY rows per day, forever, so even
+    # a year of history is a few thousand rows. Backs
+    # to_compose_selection.find_stale_selected_artifacts, which needs every
+    # past day's rows and has no cheap way to enumerate which days exist
+    # otherwise (added 2026-08-26).
+    LIST_ALL = _Stmt(
+        "SELECT compose_day, slot, artifact_id, lane, service_id, picked_at "
+        "FROM algorand_platform.to_compose"
+    )

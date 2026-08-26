@@ -499,6 +499,29 @@ def select_to_compose_for_today_task() -> dict[str, object]:
     return select_to_compose_for_day(_today_str())
 
 
+@celery_app.task(name="app.tasks.newspaper.reclaim_stale_selected_artifacts")
+def reclaim_stale_selected_artifacts_task() -> dict[str, object]:
+    """Beat: revert any artifact still SELECTED for a `to_compose` day that has already passed back to PENDING, so it re-enters normal ranking instead of staying permanently stranded.
+
+    Root-caused live 2026-08-26 (see to_compose_selection.
+    find_stale_selected_artifacts's own docstring for the full mechanism):
+    `drain_to_compose` only ever composes TODAY's own slate, every run,
+    forever -- a slot still SELECTED when its day rolls over (a gate
+    cooldown that never cleared, review_queue_full all day, a
+    soft-time-limit interruption near midnight, more slots than the day's
+    compose budget could reach) is invisible to every future day's
+    selection AND every future drain run alike. Found two real casualties
+    from 2026-08-25's platform picks sitting exactly like this. Runs
+    dry_run=False -- this beat's entire purpose is to actually reclaim, not
+    just report; call to_compose_selection.find_stale_selected_artifacts
+    directly for a read-only look first if you want to preview what a run
+    would touch.
+    """
+    from algorand_shared.to_compose_selection import reclaim_stale_selected_artifacts
+
+    return reclaim_stale_selected_artifacts(dry_run=False)
+
+
 @celery_app.task(
     name="app.tasks.newspaper.drain_to_compose",
     soft_time_limit=config.COMPOSE_TASK_SOFT_TIME_LIMIT,

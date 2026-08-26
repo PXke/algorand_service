@@ -261,6 +261,19 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.newspaper.reap_orphaned_browser_processes",
         "schedule": float(os.getenv("BROWSER_REAP_SECONDS", "300")),
     }
+    # Root-caused 2026-08-26 (see to_compose_selection.
+    # find_stale_selected_artifacts's own docstring): select_to_compose_for_day
+    # flips a picked artifact PENDING -> SELECTED immediately, for both the
+    # human pick and every platform pick alike, but drain_to_compose only
+    # ever composes TODAY's slate -- a slot still SELECTED when its day
+    # rolls over is invisible to every future day's selection and drain run,
+    # permanently stranded with no recovery path otherwise. Hourly and cheap
+    # (to_compose holds a handful of rows per day, ever) -- found two real
+    # already-stranded platform picks live before this existed.
+    schedule["reclaim-stale-selected-artifacts"] = {
+        "task": "app.tasks.newspaper.reclaim_stale_selected_artifacts",
+        "schedule": float(os.getenv("STALE_SELECTION_REAP_SECONDS", "3600")),
+    }
     # Editorial-room artifacts: recomputes priority for every PENDING
     # artifact once a day, feeding drain-to-compose's daily selection above.
     # Runs unconditionally (no AUTO_COMPOSE_PAUSED-style gate) -- scoring is

@@ -894,3 +894,146 @@ def test_preview_pool_field_present_for_every_pending_item_not_just_selected(
     assert by_service["svc-fresh"]["pool"] == "new_service"
     # Even the artifact this preview would NOT select still carries its pool.
     assert by_service["svc-fresh"]["selected_lane"] is None
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_find_stale_selected_finds_a_platform_pick_stuck_past_its_day(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """A platform pick selected for a day that has since passed, still SELECTED (drain_to_compose never reached it), is reported stale -- the real 2026-08-25 casualty this function was root-caused from."""
+    from algorand_shared.artifact_store import SELECTED, insert_artifact
+    from algorand_shared.to_compose_selection import (
+        find_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-25")
+    assert fake_artifact_session.artifacts[aid]["status"] == SELECTED
+
+    stale = find_stale_selected_artifacts(today="2026-08-26")
+
+    assert len(stale) == 1
+    assert stale[0]["artifact_id"] == aid
+    assert stale[0]["compose_day"] == "2026-08-25"
+    assert stale[0]["lane"] == "platform"
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_find_stale_selected_ignores_todays_own_selection() -> None:
+    """A pick selected for TODAY is never flagged stale -- drain_to_compose may still legitimately reach it later the same day."""
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import (
+        find_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-26")
+
+    assert find_stale_selected_artifacts(today="2026-08-26") == []
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_find_stale_selected_ignores_already_composed_or_discarded() -> None:
+    """A past-day pick that already progressed past SELECTED (composed or discarded by drain_to_compose before the day ended) is not stale -- it resolved, it just didn't get stuck."""
+    from algorand_shared.artifact_store import (
+        COMPOSED,
+        DISCARDED,
+        insert_artifact,
+        mark_artifact_status,
+    )
+    from algorand_shared.to_compose_selection import (
+        find_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    composed_id, _ = insert_artifact(service_id="svc-composed", url=None, channel="brief", content="a")
+    discarded_id, _ = insert_artifact(service_id="svc-discarded", url=None, channel="brief", content="b")
+    select_to_compose_for_day("2026-08-25")
+    mark_artifact_status(composed_id, COMPOSED)
+    mark_artifact_status(discarded_id, DISCARDED)
+
+    assert find_stale_selected_artifacts(today="2026-08-26") == []
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_dry_run_makes_no_writes(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """dry_run=True (the default) reports what would be reclaimed without touching artifact status or the pending index."""
+    from algorand_shared.artifact_store import SELECTED, insert_artifact
+    from algorand_shared.to_compose_selection import (
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-25")
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=True)
+
+    assert result["dry_run"] is True
+    assert result["reclaimed_count"] == 1
+    assert fake_artifact_session.artifacts[aid]["status"] == SELECTED
+    assert fake_artifact_session.pending == {}
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_reverts_platform_pick_to_pending(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """A real (dry_run=False) reclaim moves the artifact back to PENDING and re-adds it to the pending index, so a future select_to_compose_for_day can pick it up again like any other candidate."""
+    from algorand_shared.artifact_store import PENDING, insert_artifact
+    from algorand_shared.to_compose_selection import (
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-25")
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
+
+    assert result["reclaimed_count"] == 1
+    assert fake_artifact_session.artifacts[aid]["status"] == PENDING
+    pending_ids = {str(r["artifact_id"]) for r in fake_artifact_session.pending.values()}
+    assert aid in pending_ids
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_clears_a_reclaimed_humans_stale_pin(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """Reclaiming a stranded HUMAN pick also clears its stale human_pick_day -- otherwise it goes back to pending still carrying a pin for a day that has already passed, confusing leftover state on an otherwise-ordinary pending artifact."""
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import (
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    pin_artifact_for_day(aid, "2026-08-25")
+    select_to_compose_for_day("2026-08-25")
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
+
+    assert result["reclaimed_count"] == 1
+    assert fake_artifact_session.artifacts[aid]["human_pick_day"] is None
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_does_not_clear_pin_for_an_unreclaimed_platform_pick() -> None:
+    """The clear-pin side effect only ever fires for the human lane -- a reclaimed platform pick (never had a human_pick_day at all) must not trip it."""
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import (
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-25")
+
+    # No exception, no crash touching a human_pick_day that was never set.
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
+    assert result["reclaimed_count"] == 1
