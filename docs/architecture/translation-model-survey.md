@@ -272,6 +272,46 @@ candidates' actual translation *content* is — most of what drags their
 numbers down is the list/table formatting collapse (Finding 1), not wrong
 meaning.
 
+## 2026-08-26 update: upgraded to MiLMMT v1.0
+
+xiaomi-research released `MiLMMT-46-4B-v1.0` on 2026-08-21 — same
+architecture/license/language coverage as the `v0.1` this survey picked,
+with published WMT24++ gains (most notably Persian: COMETKiwi 80.03→83.31,
+XCOMET 80.84→86.74), still no Pashto coverage (the DeepSeek routing this
+survey's Findings already established stays correct, unchanged).
+
+Ran a side-by-side eval on the production box across all 7 covered
+languages (ar/fa/ru/zh/hi/es/fr), 4 fixtures each (plain prose, markdown
+headers+list, digit-heavy, inline markdown link), both versions, 56 cases
+total:
+
+- **Structural/digit-grounding: 0 failures on either version**, all 56
+  cases — no regression, no improvement either (both were already clean
+  here, consistent with Finding 2).
+- **One link-drop quirk found, shared by both versions equally**: a
+  paragraph with two markdown links loses the second one's `[text](url)`
+  wrapper (translates the anchor text as plain prose, URL and brackets
+  gone) on es/fa/fr, not on ar/ru/zh/hi. Same behavior on v0.1 and v1.0 —
+  not a v1.0 regression, a pre-existing model-family weakness on
+  multi-link paragraphs worth a dedicated follow-up eval of its own
+  (`link_repair` in `local_translate.py` already handles two OTHER known
+  MiLMMT link defects — broken syntax and untranslated anchors — but not
+  this third one, a full link disappearance).
+- **Throughput: inconclusive, not trustworthy from this run.** The box was
+  under heavy, fluctuating unrelated load (a large crawl backlog) for the
+  entire eval window; per-language deltas ranged from v1.0 being 18%
+  *faster* to 62% *slower* than v0.1 depending on which language happened
+  to run during a load spike. Needs a clean re-benchmark on an idle box if
+  a real throughput number is ever needed.
+- **Fluency**: both versions produce well-formed, complete output with no
+  garbling on manual inspection (not independently verified by a native
+  speaker) — deferred to the published external benchmark numbers above
+  for the actual quality claim.
+
+Net: no regression on anything measured, and a real published quality gain
+for Persian specifically. Upgraded `_MILMMT_MODEL_ID` in
+`local_translate.py` to `xiaomi-research/MiLMMT-46-4B-v1.0`.
+
 ## Next steps
 
 1. ~~Prototype cell-by-cell table translation~~ — done (Finding 4,

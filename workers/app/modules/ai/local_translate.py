@@ -1,6 +1,12 @@
 """Local (on-box) translation, replacing the Mistral translation lane.
 
-Single engine: xiaomi-research/MiLMMT-46-4B-v0.1, a Gemma3-4B continual
+Single engine: xiaomi-research/MiLMMT-46-4B-v1.0 (upgraded 2026-08-26 from
+v0.1 -- same architecture/license/language coverage, a real published
+quality jump on WMT24++, most notably Persian, per a side-by-side eval run
+on this box across all 7 covered languages: zero new structural/digit-
+grounding failures vs v0.1, and the one link-drop quirk found is shared by
+both versions equally, not a v1.0 regression -- see
+docs/architecture/translation-model-survey.md), a Gemma3-4B continual
 pretrain fine-tuned specifically for translation across 46 languages. Gemma
 Terms of Use, not Apache -- read the prohibited-use policy before this
 reaches a commercial product. Covers ar/fa/ru/zh/hi/es/fr; Pashto (``ps``)
@@ -78,7 +84,7 @@ logger = logging.getLogger(__name__)
 # transformers is imported anywhere in this process.
 os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
 
-_MILMMT_MODEL_ID = "xiaomi-research/MiLMMT-46-4B-v0.1"
+_MILMMT_MODEL_ID = "xiaomi-research/MiLMMT-46-4B-v1.0"
 # Exact strings MiLMMT's own model card lists among its 46 supported
 # languages -- not our internal display names (which carry parentheticals
 # like "Spanish (Castilian)" the model was never trained to parse).
