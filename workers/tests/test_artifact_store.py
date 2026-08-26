@@ -401,7 +401,7 @@ def test_concatenation_venue_service_id_survives_repeated_cycles(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """A real per-item lane (forum/xgov/youtube/bluesky) passes the same venue_service_id on every insert for a given service_id -- confirm it's still correctly carried through 3 concatenation cycles in a row, ending on the latest call's own value."""
-    from app.modules.newspaper.artifact_store import get_artifact, insert_artifact
+    from algorand_shared.artifact_store import get_artifact, insert_artifact
 
     insert_artifact(
         service_id="svc-venue", url=None, channel="youtube", content="v1", venue_service_id="algorand-yt"
@@ -422,7 +422,7 @@ def test_concatenation_preserves_venue_service_id_when_a_later_call_omits_it(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """venue_service_id identifies the SERVICE, not one update event, so it must never regress from set to unset just because a later call in the concatenation chain doesn't pass one -- unlike title (which deliberately always takes the latest). This is exactly the shape reconcile_duplicate_pending_artifacts's fold can hit when only one of several duplicates ever got backfilled (see test_service_reconciliation.py)."""
-    from app.modules.newspaper.artifact_store import get_artifact, insert_artifact
+    from algorand_shared.artifact_store import get_artifact, insert_artifact
 
     insert_artifact(
         service_id="svc-venue2", url=None, channel="bluesky", content="v1", venue_service_id="acct-bsky"

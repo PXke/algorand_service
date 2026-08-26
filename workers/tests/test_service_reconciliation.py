@@ -440,7 +440,7 @@ def test_reconcile_folds_three_duplicates_to_one_with_all_three_contents_present
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """A worse version of the same incident: THREE pending artifacts land on one service_id (e.g. two successive raw repoints), not just two. The fold must still converge to exactly one survivor, and none of the three original contents may be dropped along the way -- an oldest-first two-at-a-time fold is an easy place to accidentally lose the middle one."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         PENDING,
         get_artifact_content,
         insert_artifact,
@@ -490,7 +490,7 @@ def test_reconcile_three_duplicate_fold_preserves_venue_service_id_from_any_dupl
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """Only ONE of three duplicates ever got venue_service_id backfilled (plausible after a partial historical backfill or an inconsistent repoint) -- the fold must not silently lose it just because a later fold step happens to re-insert a duplicate that itself carries None."""
-    from app.modules.newspaper.artifact_store import get_artifact, insert_artifact
+    from algorand_shared.artifact_store import get_artifact, insert_artifact
 
     id_1, _ = insert_artifact(
         service_id="temp-a", url=None, channel="bluesky", content="v1", venue_service_id=None
@@ -519,7 +519,7 @@ def test_reconcile_survivor_priority_is_freshly_zeroed_not_a_stale_carryover(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """insert_artifact always starts a brand-new row at priority 0.0 -- the fold must go through that exact path, so a merged survivor is never left carrying one of the discarded duplicates' own stale (possibly high) priority. A real priority sweep picks it back up on its own next pass; this only checks it isn't left with something WRONG in the meantime."""
-    from app.modules.newspaper.artifact_store import get_artifact, update_artifact_priority
+    from algorand_shared.artifact_store import get_artifact, update_artifact_priority
 
     _older_id, newer_id = _seed_duplicate_pending(fake_artifact_session)
     # Give the about-to-be-discarded duplicate an artificially high priority,
