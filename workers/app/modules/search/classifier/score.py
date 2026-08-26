@@ -246,10 +246,19 @@ DEFAULT_THRESHOLD = 0.35
 # longer fires on "algorithm" and "asa" not on "nasa" — the substring matching
 # that the two ad-hoc keyword lists in publish_classifier used to do. score_page
 # keeps its own phrase-tuned POSITIVE_KEYWORDS for the weighted 0-1 classifier.
+#
+# "algo" and "asa" are deliberately NOT in this list — see AMBIGUOUS_KEYWORDS
+# above: both are ordinary standalone words in Spanish/Portuguese ("algo" =
+# "something", "asa" = "wing"), so a non-English, non-Algorand page can rack
+# up genuine, word-boundary-correct hits on them alone. keyword_hits() below
+# still counts them, but folded into AMBIGUOUS_KEYWORD_RE at a fraction of a
+# real hit's weight (same 0.3 ratio score_page uses for its own ambiguous
+# tier), so repeated "algo"/"asa" mentions with zero other signal can never
+# alone clear is_content_quality_sufficient's floor (root-caused 2026-08-26,
+# same protegecoin.com.br-class Portuguese page that motivated the
+# score_page fix).
 RELEVANCE_KEYWORDS: tuple[str, ...] = (
     "algorand",
-    "algo",
-    "asa",
     "defi",
     "mainnet",
     "testnet",
@@ -264,12 +273,32 @@ _RELEVANCE_KEYWORD_RE: tuple[re.Pattern[str], ...] = tuple(
 
 _KEYWORD_FAMILY_CAP = 3
 
+# Same de-weighting ratio score_page applies to its AMBIGUOUS_KEYWORDS tier
+# (0.03/hit vs 0.10/hit for a genuine Algorand-specific term -- 0.3). At this
+# weight, two fully-capped ambiguous keywords (_KEYWORD_FAMILY_CAP each) add
+# at most 2 * 3 * 0.3 = 1.8 points here -- deliberately kept BELOW 2, not just
+# below 3, so a long page (len>=300) padded entirely with "algo"/"asa" still
+# can't clear is_content_quality_sufficient's relaxed >=2 floor on the
+# ambiguous tier alone.
+_AMBIGUOUS_RELEVANCE_WEIGHT = 0.3
 
-def keyword_hits(text: str) -> int:
-    """Weighted on-topic keyword signal in ``text`` (word-boundary matched, so no algorithm/nasa false positives). Each family contributes its OCCURRENCE count, capped at ``_KEYWORD_FAMILY_CAP`` so one repeated term can't inflate the score without bound — but a page that says "Algorand" repeatedly now scores above one that name-drops it once, instead of both being flattened to the same single point. Root-caused 2026-07-24: urvote.ca's homepage says "Algorand" 2+ times in body copy (built-on-Algorand blurb, Startup Challenge mention) and nothing else on the family list, so the old presence-only count gave it 1 point regardless — same as a single incidental mention — and it failed the quality floor despite being genuinely, specifically Algorand-related. One shared helper so the storage score and the quality gate can't drift apart again."""
+
+def keyword_hits(text: str) -> float:
+    """Weighted on-topic keyword signal in ``text`` (word-boundary matched, so no algorithm/nasa false positives). Each RELEVANCE_KEYWORDS entry contributes its OCCURRENCE count, capped at ``_KEYWORD_FAMILY_CAP`` so one repeated term can't inflate the score without bound — but a page that says "Algorand" repeatedly now scores above one that name-drops it once, instead of both being flattened to the same single point. Root-caused 2026-07-24: urvote.ca's homepage says "Algorand" 2+ times in body copy (built-on-Algorand blurb, Startup Challenge mention) and nothing else on the family list, so the old presence-only count gave it 1 point regardless — same as a single incidental mention — and it failed the quality floor despite being genuinely, specifically Algorand-related. One shared helper so the storage score and the quality gate can't drift apart again.
+
+    "algo"/"asa" hits (AMBIGUOUS_KEYWORD_RE) are added on top at
+    ``_AMBIGUOUS_RELEVANCE_WEIGHT`` instead of full weight — see the
+    RELEVANCE_KEYWORDS comment above for why.
+    """
     if not text:
-        return 0
-    return sum(min(len(pat.findall(text)), _KEYWORD_FAMILY_CAP) for pat in _RELEVANCE_KEYWORD_RE)
+        return 0.0
+    specific_hits = sum(
+        min(len(pat.findall(text)), _KEYWORD_FAMILY_CAP) for pat in _RELEVANCE_KEYWORD_RE
+    )
+    ambiguous_hits = sum(
+        min(len(pat.findall(text)), _KEYWORD_FAMILY_CAP) for pat in _AMBIGUOUS_KEYWORD_RE
+    )
+    return specific_hits + ambiguous_hits * _AMBIGUOUS_RELEVANCE_WEIGHT
 
 
 @dataclass(frozen=True)

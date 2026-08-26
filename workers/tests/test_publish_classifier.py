@@ -129,6 +129,27 @@ def test_is_content_quality_sufficient_repeated_single_family() -> None:
     assert not is_content_quality_sufficient(f"{padding}Powered by Algorand.")
 
 
+def test_ambiguous_algo_asa_alone_do_not_satisfy_the_quality_floor() -> None:
+    """Repeated, word-boundary-correct "algo"/"asa" hits alone -- Portuguese text with zero "algorand" mention -- must not satisfy is_content_quality_sufficient's floor. Both words are real, unrelated vocabulary in other languages (Spanish/Portuguese "algo" = "something", Portuguese "asa" = "wing"), so genuine hits on them alone are weak evidence, not full-weight Algorand signal (same root cause as score_page's AMBIGUOUS_KEYWORDS split, 2026-08-26)."""
+    text = (
+        "Preciso de algo para consertar a asa do aviao. Tenho algo em mente, "
+        "mas nao sei se essa asa vai funcionar. Talvez algo diferente, uma "
+        "asa nova, resolva o problema. Algo assim seria ideal para essa asa. "
+        "Ainda estou pensando em algo mais simples para essa asa quebrada, "
+        "mas talvez algo assim va custar caro para consertar essa asa."
+    )
+    assert len(text) >= 300
+    assert not is_content_quality_sufficient(text)
+    assert score_content_for_storage(text) < 3
+
+
+def test_algorand_mention_is_unaffected_by_the_ambiguous_split() -> None:
+    """A genuine, repeated "algorand" mention still satisfies the quality floor and scores well for storage, unaffected by demoting "algo"/"asa" to the ambiguous tier -- "algorand" itself has no cross-language collision risk."""
+    text = "Algorand Algorand Algorand — built for real-world finance."
+    assert is_content_quality_sufficient(text)
+    assert score_content_for_storage(text) >= 3
+
+
 def test_sampling_forces_review(monkeypatch: pytest.MonkeyPatch) -> None:
     """A random draw below the sampling threshold forces manual review (returns None)."""
     import app.modules.ai.publish_classifier as pc
