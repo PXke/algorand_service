@@ -1212,6 +1212,26 @@ XGOV_VENUE_SERVICE_ID = env_str("XGOV_VENUE_SERVICE_ID", "xgov-algorand-co")
 FRONTIER_RETRO_PROMOTE_ENABLED = env_bool("FRONTIER_RETRO_PROMOTE_ENABLED", True)
 FRONTIER_CONTENT_PROMOTE_SCORE = env_float("FRONTIER_CONTENT_PROMOTE_SCORE", 0.5)
 
+# One-time gray-zone reconciliation (2026-08-26 audit): 665 domains were found
+# sitting at frontier_status="approved" with content_relevance in
+# [FRONTIER_CONTENT_REJECT_SCORE, FRONTIER_CONTENT_PROMOTE_SCORE) -- the same
+# "not confident enough, escalate" range reevaluate_pending_domains already
+# treats as unresolved for the PENDING side of the frontier, except these got
+# waved through to "approved" off a shallow single-page/sample classification
+# pass and never got the full deep_classify_domain treatment (see
+# gray_zone_reconciliation.py). OFF by default, unlike the read-mostly daily
+# sweeps above: every domain this dispatches fires a REAL up-to-
+# FRONTIER_DEEP_CLASSIFY_MAX_PAGES-page crawl on the scrape queue, so it must
+# stay a small, deliberate trickle, never a bulk sweep -- root-caused
+# 2026-08-2x resource-contention incident, where a large batch of
+# classify_pending_domains chunks dispatched at once saturated the
+# concurrency=4 scrape worker pool and starved unrelated admin/routine tasks.
+# Flip on only after reviewing gray_zone_reconciliation.find_gray_zone_domains()'s
+# report and confirming the limit/interval below are an acceptable pace for
+# the real backlog size.
+FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED = env_bool("FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED", False)
+FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT = env_int("FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT", 5)
+
 # Hard cap on items waiting in the admin classifier queue. Once reached, the
 # pipeline stops composing/holding new reviews until the admin clears some.
 MAX_PENDING_REVIEWS = env_int("MAX_PENDING_REVIEWS", 1)

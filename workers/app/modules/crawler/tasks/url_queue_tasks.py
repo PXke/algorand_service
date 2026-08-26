@@ -813,3 +813,31 @@ def reevaluate_pending_domains(*, limit: int = 40) -> dict[str, object]:
         "promoted_domains": promoted[:40],
         "threshold": FRONTIER_CONTENT_PROMOTE_SCORE,
     }
+
+
+@celery_app.task(name="app.tasks.crawler.reclassify_gray_zone_domains")
+def reclassify_gray_zone_domains(*, limit: int | None = None) -> dict[str, object]:
+    """Small, throttled companion to reevaluate_pending_domains above, but for the OTHER frontier bucket: domains already frontier_status="approved" whose content_relevance never actually cleared FRONTIER_CONTENT_PROMOTE_SCORE (the 2026-08-26 665-domain gray-zone audit — see gray_zone_reconciliation.py's module docstring for the full picture). reevaluate_pending_domains only ever scans frontier_status="pending" rows, so it never touches these.
+
+    Gated on FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED (default off) in addition
+    to whatever gates the beat schedule entry itself — a defense-in-depth
+    no-op if this task is ever triggered directly (e.g. by name from an
+    admin shell) before the feature has been deliberately turned on. When
+    enabled, dispatches at most `limit` (default
+    FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT, deliberately small) domains per
+    call to the real deep_classify_domain task — never runs the crawl
+    itself, see dispatch_gray_zone_deep_classify's own docstring for why
+    that matters here specifically (every dispatch is a real network crawl,
+    unlike the cheap read-mostly sweeps elsewhere on this schedule).
+    """
+    from app.core.config import (
+        FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED,
+        FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT,
+    )
+    from app.modules.crawler.gray_zone_reconciliation import dispatch_gray_zone_deep_classify
+
+    if not FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED:
+        return {"status": "skipped", "reason": "gray_zone_reclassify_disabled"}
+
+    effective_limit = FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT if limit is None else limit
+    return dispatch_gray_zone_deep_classify(limit=effective_limit, dry_run=False)
