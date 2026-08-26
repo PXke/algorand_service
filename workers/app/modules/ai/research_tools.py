@@ -3233,7 +3233,13 @@ _CAPTURE_SCREENSHOT_SCHEMA = {
             "whole scrollable page (e.g. a long leaderboard); the default "
             "(viewport only) is what a real visitor sees without "
             "scrolling. Slow (loads a full browser) — expect several "
-            "seconds."
+            "seconds. You will be shown the actual image right after this "
+            "call returns — look at it before deciding. If it genuinely "
+            "earns a place in the article, EMBED IT YOURSELF in the "
+            "article body as markdown: ![caption](image_url), using the "
+            "image_url value from this tool's own result. Nothing does "
+            "this for you — if you don't write that line, the screenshot "
+            "never appears to a reader no matter how useful it looked."
         ),
         "parameters": {
             "type": "object",
