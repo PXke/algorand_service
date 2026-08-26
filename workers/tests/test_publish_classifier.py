@@ -38,6 +38,25 @@ def test_relevance_score_uses_explorer_link_when_text_says_nothing() -> None:
     assert with_link > without_links
 
 
+def test_score_content_for_storage_penalizes_seo_spam_shapes() -> None:
+    """A keyword-stuffed price-prediction spam page (the bitnation.co shape, root-caused 2026-08-26) must score meaningfully lower than an equally keyword-dense but organic page."""
+    spam_text = (
+        "Algorand ALGO Price Prediction 2024, 2025-2030. "
+        "Is Algorand a good investment? Should you buy Algorand now? "
+        "Algorand mainnet ASA defi testnet algod ppos microalgo"
+    )
+    organic_text = "Algorand mainnet ASA defi testnet algod ppos microalgo Algorand Algorand"
+    spam_score = score_content_for_storage(spam_text)
+    organic_score = score_content_for_storage(organic_text)
+    assert spam_score < organic_score
+
+
+def test_score_content_for_storage_never_goes_negative() -> None:
+    """Heavy spam on a thin, barely-relevant page must clamp at 0, not go negative."""
+    text = "best crypto casino how to buy is it a good investment should you buy 2024-2025"
+    assert score_content_for_storage(text) == 0.0
+
+
 def test_score_content_for_storage_uses_explorer_link() -> None:
     """An outbound Algorand-explorer link also lifts the storage-scoring score."""
     text = "A private, encrypted AI protocol. No email, no logging."

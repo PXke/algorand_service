@@ -104,7 +104,21 @@ def timeliness_score(
 
 
 def ecosystem_listed_score(url: str | None) -> float:
-    """Flat ARTIFACT_ECOSYSTEM_LISTED_BOOST when the artifact's URL domain is directory-listed (the SAME `ecosystem_listed_domains()` registry the crawler-discovery scorer uses for the identical class of problem -- a chain-silent-but-important service keyword scoring would otherwise miss), else 0.0. An artifact with no URL (a brief, a mail message) never earns this bonus."""
+    """Flat ARTIFACT_ECOSYSTEM_LISTED_BOOST when the artifact's URL domain is directory-listed in EITHER `ecosystem_listed_domains()` (the curated directory registry) OR `KNOWN_DOMAINS` (score_page's own hardcoded anchor list), else 0.0. An artifact with no URL (a brief, a mail message) never earns this bonus.
+
+    Checking only `ecosystem_listed_domains()` (2026-08-26 fix) missed every
+    chain-silent service that's hardcoded in `KNOWN_DOMAINS` specifically
+    BECAUSE it's chain-silent (sealed.channel, hesab.af, lofty.ai,
+    zerosignal.ai, dark-coin.com/.io, sowandreap.in) -- exactly the class
+    this bonus's own docstring claims to protect, verified empirically
+    against real production artifacts: sealed.channel/hesab.af were getting
+    zero bonus while a generic multi-chain aggregator already present in
+    `ecosystem_listed_domains()` outranked genuinely Algorand-native
+    services. `domain_from_url` already collapses to the registrable eTLD+1
+    domain, so a plain membership check against both sets is sufficient --
+    no subdomain-suffix matching needed here the way score.py's own
+    `_domain_signal` needs it against raw hostnames.
+    """
     from app.core.config import ARTIFACT_ECOSYSTEM_LISTED_BOOST
 
     if not url:
@@ -112,9 +126,10 @@ def ecosystem_listed_score(url: str | None) -> float:
     try:
         from app.modules.crawler.domain_tracker import domain_from_url
         from app.modules.crawler.ecosystem_sync import ecosystem_listed_domains
+        from app.modules.search.classifier.score import KNOWN_DOMAINS
 
         domain = domain_from_url(url)
-        if domain and domain in ecosystem_listed_domains():
+        if domain and (domain in ecosystem_listed_domains() or domain in KNOWN_DOMAINS):
             return float(ARTIFACT_ECOSYSTEM_LISTED_BOOST)
     except Exception:
         return 0.0

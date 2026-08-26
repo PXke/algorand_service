@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.modules.search.classifier.score import keyword_hits, score_page
+from app.modules.search.classifier.score import keyword_hits, score_page, seo_spam_hits
 
 if TYPE_CHECKING:
     from sklearn.feature_extraction.text import TfidfVectorizer
@@ -151,11 +151,24 @@ def relevance_score(text: str, url: str = "", outbound_links: tuple[str, ...] = 
 def score_content_for_storage(
     text: str, url: str = "", outbound_links: tuple[str, ...] = ()
 ) -> float:
-    """Crude storage-relevance score (~0–10): on-topic keyword families present plus the page classifier's 0–1 score scaled ×5. Used for the domain relevance_score column / admin sort and the frontier preview_score — not a hard gate, so the loose scale is fine."""
+    """Crude storage-relevance score (~0–10): on-topic keyword families present plus the page classifier's 0–1 score scaled ×5, minus an SEO-spam penalty. Used for the domain relevance_score column / admin sort and the frontier preview_score — not a hard gate, so the loose scale is fine.
+
+    The spam penalty (2026-08-26) closes a real gap: `keyword_hits` has no
+    interaction with `seo_spam_hits` at all, so a keyword-stuffed spam page
+    (e.g. bitnation.co's "Algorand (ALGO) Price Prediction 2024, 2025-2030")
+    could still reach a comfortably positive score here and get auto-approved,
+    even though `score_page`'s own spam signal correctly flags the same page
+    as off-topic (`in_scope=False`). `-3` per spam hit was validated against
+    a real production capture (7 -> 1) and a reconstructed denser spam-farm
+    text (11 -> 0), with every legitimate site in the same test set (nodely.io,
+    folks.finance, sealed.channel, algorand.foundation, perawallet.app,
+    hesab.af) scoring identically before and after.
+    """
     hits = keyword_hits(text)
     if url:
         hits += int(score_page(url=url, text=text, outbound_links=outbound_links).score * 5)
-    return float(hits)
+    hits -= seo_spam_hits(text) * 3
+    return float(max(0, hits))
 
 
 def is_content_quality_sufficient(text: str) -> bool:

@@ -172,6 +172,22 @@ def test_ecosystem_listed_score_boosts_a_directory_listed_domain(
     assert artifact_priority.ecosystem_listed_score("https://unrelated.example.com/") == 0.0
 
 
+def test_ecosystem_listed_score_boosts_a_known_domains_entry_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checking only ecosystem_listed_domains() (2026-08-26 root-caused bug) missed every chain-silent service hardcoded in score_page's own KNOWN_DOMAINS list -- exactly the class this bonus exists to protect. sealed.channel is in KNOWN_DOMAINS but deliberately NOT in ecosystem_listed_domains() here, to prove the union, not just the first registry, is what earns the bonus."""
+    from app.core import config as cfg
+    from app.modules.newspaper import artifact_priority
+
+    monkeypatch.setattr(cfg, "ARTIFACT_ECOSYSTEM_LISTED_BOOST", 5.0)
+    monkeypatch.setattr(
+        "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains",
+        lambda: frozenset(),
+    )
+
+    assert artifact_priority.ecosystem_listed_score("https://sealed.channel/") == 5.0
+
+
 def test_ecosystem_listed_score_fails_open_to_zero_on_lookup_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
