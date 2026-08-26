@@ -8,17 +8,34 @@ sweep beat (`sweep_artifact_priorities`, still called from
 `tasks/artifact_tasks.py`) imports it from here now too -- same functions,
 one location.
 
-Note on `ecosystem_listed_score` specifically: its directory-listed bonus
-depends on workers-only crawler/classifier modules
-(`app.modules.crawler.domain_tracker`, `app.modules.crawler.ecosystem_sync`,
-`app.modules.search.classifier.score`), which don't exist in backend's
-codebase. It already fails open to 0.0 on any import error (a pre-existing
-defensive pattern, not new here), so a backend-computed preview shows this
-component as 0 rather than raising -- an accepted, documented gap (the
-preview route's own docstring already notes its recomputed total is a live
-estimate that can drift from the stored value) rather than a full
-centralization of the ecosystem-directory machinery, which is out of scope
-for this move.
+Note on `ecosystem_listed_score` specifically (2026-08-26, closed): its
+directory-listed bonus used to hard-depend on workers-only crawler/classifier
+modules (`app.modules.crawler.domain_tracker`, `app.modules.crawler.
+ecosystem_sync`, `app.modules.search.classifier.score`), which don't exist in
+backend's codebase -- so a backend-computed preview always showed this
+component as an uncomputed 0.0 (see `ecosystem_scoring_available` below,
+added first as a way to at least LABEL the gap). Each real dependency has
+since been made genuinely satisfiable from either process:
+
+  - `KNOWN_DOMAINS`/`keyword_hits` are pure text/data with zero workers-only
+    dependency -- moved to `algorand_shared.keyword_relevance` (score.py
+    re-exports them for its own use, unchanged).
+  - `ecosystem_listed_domains()`'s directory registry is a straightforward
+    read of the `domain_tracking` table both services already reach via their
+    own `app.core.cassandra` -- the read half now also lives in
+    `algorand_shared.ecosystem_directory`, ported byte-for-byte from
+    `ecosystem_sync`'s own cache/query (the WRITE/sync side -- fetching
+    directories, approving domains into the frontier -- stays workers-only,
+    out of scope here).
+  - `domain_from_url` already has a parity-tested twin in backend
+    (`app.modules.registry.sources.domain_from_url`, guarded by
+    `test_domain_from_url_parity.py` in both services) -- an established
+    pattern predating this fix, reused rather than re-centralized.
+
+`ecosystem_listed_score` tries each workers-only import first (preserving
+workers' exact existing behavior, including which dotted path its own tests
+monkeypatch) and only falls back to the portable equivalent on `ImportError`
+-- so `ecosystem_scoring_available()` now reports True in backend too.
 
 Architected as `priority = sum(component_score(artifact, content) for
 component_score in SCORE_COMPONENTS)` so a future signal (sentiment, on-chain
@@ -196,22 +213,25 @@ def ecosystem_listed_score(url: str | None, content: str = "") -> float:
     no subdomain-suffix matching needed here the way score.py's own
     `_domain_signal` needs it against raw hostnames.
 
-    Workers-only bonus (see module docstring): the crawler/classifier modules
-    this depends on don't exist in backend, so this fails open to 0.0 there.
-    See `ecosystem_scoring_available` just below for a way to tell THAT case
-    apart from a genuine, computed 0.0 -- this function's own return type
-    stays a plain float on purpose (its real caller, `sweep_artifact_priorities`,
-    just needs a number to sum, always, and must keep failing open the same
-    way it always has).
+    Both real dependencies now have a portable fallback (see module
+    docstring), so this genuinely computes the bonus in backend too --
+    `ecosystem_scoring_available` just below still exists (as a way to tell a
+    genuine, computed 0.0 apart from an outright import failure), but should
+    now report True in every real deployment. This function's own return
+    type stays a plain float regardless (its real caller,
+    `sweep_artifact_priorities`, just needs a number to sum, always, and must
+    keep failing open the same way it always has if something unforeseen
+    still breaks).
     """
     from app.core.config import ARTIFACT_ECOSYSTEM_LISTED_BOOST
+
+    from algorand_shared.keyword_relevance import KNOWN_DOMAINS, keyword_hits
 
     if not url:
         return 0.0
     try:
-        from app.modules.crawler.domain_tracker import domain_from_url
-        from app.modules.crawler.ecosystem_sync import ecosystem_listed_domains
-        from app.modules.search.classifier.score import KNOWN_DOMAINS, keyword_hits
+        domain_from_url = _resolve_domain_from_url()
+        ecosystem_listed_domains = _resolve_ecosystem_listed_domains()
 
         domain = domain_from_url(url)
         if not domain:
@@ -225,14 +245,36 @@ def ecosystem_listed_score(url: str | None, content: str = "") -> float:
     return 0.0
 
 
-def ecosystem_scoring_available() -> bool:
-    """Capability probe (2026-08-27): True when `ecosystem_listed_score`'s real, workers-only dependencies are importable in THIS process, False when it can only ever fail open to 0.0 here.
+def _resolve_domain_from_url() -> Callable[[str], str]:
+    """`domain_from_url`, preferring workers' own live implementation (`app.modules.crawler.domain_tracker`, the one workers' existing tests exercise/patch) and falling back to backend's independently-maintained, parity-tested twin (`app.modules.registry.sources.domain_from_url`, guarded by `test_domain_from_url_parity.py` in both services -- an established pattern predating this fix, reused rather than re-centralized) when the workers-only module can't be imported at all."""
+    try:
+        from app.modules.crawler.domain_tracker import domain_from_url
+    except ImportError:
+        from app.modules.registry.sources import domain_from_url
+    return domain_from_url
 
-    Does the exact same import `ecosystem_listed_score` itself does -- and
-    nothing else (no domain lookup, no registry read, no Cassandra) -- so it
-    stays cheap enough to call once per preview/breakdown build. Always
-    `True` in workers (where those crawler/classifier modules live), always
-    `False` in backend (where they don't exist at all).
+
+def _resolve_ecosystem_listed_domains() -> Callable[[], frozenset[str]]:
+    """`ecosystem_listed_domains`, preferring workers' own live sync cache (`app.modules.crawler.ecosystem_sync`, the one workers' existing tests monkeypatch) and falling back to `algorand_shared.ecosystem_directory`'s read-only port of the same query/cache when the workers-only sync module can't be imported at all (backend, which has no crawler package whatsoever)."""
+    try:
+        from app.modules.crawler.ecosystem_sync import ecosystem_listed_domains
+    except ImportError:
+        from algorand_shared.ecosystem_directory import ecosystem_listed_domains
+    return ecosystem_listed_domains
+
+
+def ecosystem_scoring_available() -> bool:
+    """Capability probe (2026-08-27): True when `ecosystem_listed_score`'s real dependencies are resolvable in THIS process, False when it can only ever fail open to 0.0 here.
+
+    Does the exact same resolution `ecosystem_listed_score` itself does (via
+    the same two `_resolve_*` helpers) -- and nothing else (no domain lookup,
+    no registry read, no Cassandra) -- so it stays cheap enough to call once
+    per preview/breakdown build, and can never drift from what that function
+    actually tries. Closed 2026-08-26 (see module docstring): now `True` in
+    BOTH workers (native imports) and backend (the portable fallbacks) --
+    only False if something neither process provides is missing (e.g.
+    `algorand_shared` itself broken, or a genuinely unforeseen third
+    environment with neither implementation available).
 
     This exists because `ecosystem_listed_score`'s own return type is a
     plain float that fails open the same way for BOTH "genuinely computed a
@@ -244,12 +286,13 @@ def ecosystem_scoring_available() -> bool:
     a 0.0 that looks like a real measured absence of a bonus.
     """
     try:
-        from app.modules.crawler.domain_tracker import domain_from_url  # noqa: F401
-        from app.modules.crawler.ecosystem_sync import ecosystem_listed_domains  # noqa: F401
-        from app.modules.search.classifier.score import (  # noqa: F401
+        from algorand_shared.keyword_relevance import (  # noqa: F401
             KNOWN_DOMAINS,
             keyword_hits,
         )
+
+        _resolve_domain_from_url()
+        _resolve_ecosystem_listed_domains()
     except Exception:
         return False
     return True

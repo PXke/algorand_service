@@ -27,6 +27,7 @@ from algorand_shared.chain_statements import CHAIN_CONDUIT_HEAD, CHAIN_TXNS_BY_R
 from algorand_shared.platform_statements import (
     CLASSIFIER_FEEDBACK_INSERT_BY_TIME,
     DOMAIN_TRACKING_INSERT,
+    DOMAIN_TRACKING_LIST,
     GLOSSARY_UPDATE_TRANSLATIONS,
     PAGE_SNAPSHOT_GET_LATEST,
     PAGE_SNAPSHOT_INSERT,
@@ -199,10 +200,7 @@ class DomainTrackingStmts:
         "FROM algorand_platform.domain_tracking WHERE domain = ?"
     )
     INSERT = DOMAIN_TRACKING_INSERT
-    LIST = _Stmt(
-        "SELECT domain, frontier_status, is_relevant, metadata "
-        "FROM algorand_platform.domain_tracking LIMIT ?"
-    )
+    LIST = DOMAIN_TRACKING_LIST
     UPDATE_METADATA = _Stmt(
         "UPDATE algorand_platform.domain_tracking SET metadata = ? WHERE domain = ?"
     )

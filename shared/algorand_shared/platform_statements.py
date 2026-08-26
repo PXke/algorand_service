@@ -95,6 +95,19 @@ DOMAIN_TRACKING_INSERT = _Stmt(
     ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
+# Byte-identical to workers' own DomainTrackingStmts.LIST (that class now
+# assigns its LIST attribute from this constant, same dedup as INSERT above).
+# Added 2026-08-26 for algorand_shared.ecosystem_directory's read-only
+# ecosystem_listed_domains() -- the one query
+# algorand_shared.artifact_priority.ecosystem_listed_score needs from
+# workers' domain_tracking-backed registry, extracted so backend (which has
+# no app.modules.crawler.ecosystem_sync at all) can run the identical read
+# itself instead of always failing open to 0.0.
+DOMAIN_TRACKING_LIST = _Stmt(
+    "SELECT domain, frontier_status, is_relevant, metadata "
+    "FROM algorand_platform.domain_tracking LIMIT ?"
+)
+
 # --------------------------------------------------------------------------- #
 # classifier_feedback_by_time
 # --------------------------------------------------------------------------- #

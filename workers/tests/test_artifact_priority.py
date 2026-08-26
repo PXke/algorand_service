@@ -265,13 +265,77 @@ def test_ecosystem_scoring_available_true_when_deps_importable() -> None:
 def test_ecosystem_scoring_available_false_when_a_dependency_import_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Simulates the backend situation: one of ecosystem_listed_score's real deps genuinely can't be imported (not just a lookup call failing at runtime -- an actual ImportError), so the probe must report False rather than True."""
+    """A partial simulation of backend, deliberately incomplete: `app.modules.crawler.domain_tracker` is blocked, but nothing stands in for backend's real `app.modules.registry.sources` fallback (which genuinely doesn't exist in workers' own codebase either) -- so the probe correctly still reports False here. This pins the fail-open floor: if NEITHER the native NOR the portable path is available, the probe must not lie and say True."""
     import sys
 
     monkeypatch.setitem(sys.modules, "app.modules.crawler.domain_tracker", None)
     from algorand_shared.artifact_priority import ecosystem_scoring_available
 
     assert ecosystem_scoring_available() is False
+
+
+def test_ecosystem_scoring_available_and_score_genuinely_work_via_shared_fallback_when_native_deps_are_all_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2026-08-26 gap-closure proof, run from workers' own test suite: simulates backend's actual missing-module reality (`app.modules.crawler.domain_tracker`/`ecosystem_sync` and `app.modules.search.classifier.score` all genuinely unimportable -- the exact same three deps the old, now-superseded version of this test blocked) PLUS a stand-in for backend's real `app.modules.registry.sources.domain_from_url` (injected here since workers' own codebase doesn't have that package -- backend genuinely does, parity-tested against workers' domain_tracker.domain_from_url by test_domain_from_url_parity.py in both services).
+
+    Before this session's fix, `ecosystem_scoring_available()` had no fallback
+    at all and would report False the instant any one of these imports failed
+    -- exactly what `test_ecosystem_scoring_available_false_when_a_dependency_
+    import_fails` above still pins for the case where NEITHER path is
+    available. Here, with the portable half of the picture also present (as
+    it genuinely is in backend), the probe must report True, and
+    `ecosystem_listed_score` must compute the real boost -- not fail open to
+    0.0 -- via `algorand_shared.keyword_relevance` (KNOWN_DOMAINS/
+    keyword_hits, no fallback needed -- pure text/data, importable
+    regardless) and `algorand_shared.ecosystem_directory` (the Cassandra read
+    fallback for `ecosystem_listed_domains`).
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    import algorand_shared.ecosystem_directory as ecosystem_directory
+
+    from app.core import config as cfg
+
+    monkeypatch.setitem(sys.modules, "app.modules.crawler.domain_tracker", None)
+    monkeypatch.setitem(sys.modules, "app.modules.crawler.ecosystem_sync", None)
+    monkeypatch.setitem(sys.modules, "app.modules.search.classifier.score", None)
+
+    # Stand-in for backend's real app.modules.registry.sources module (workers
+    # has no such package at all) -- same domain_from_url behavior that
+    # matters here (eTLD+1 collapse), not a full reimplementation.
+    fake_registry_sources = types.ModuleType("app.modules.registry.sources")
+    fake_registry_sources.domain_from_url = lambda url: url.split("//")[-1].split("/")[0]  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "app.modules.registry", types.ModuleType("app.modules.registry"))
+    monkeypatch.setitem(sys.modules, "app.modules.registry.sources", fake_registry_sources)
+
+    monkeypatch.setattr(
+        ecosystem_directory, "_cache", {"at": 0.0, "domains": frozenset()}
+    )
+    session = MagicMock()
+    session.execute.return_value = [
+        types.SimpleNamespace(
+            domain="hesabpay.com", metadata={"ecosystem_listed": "true"}, is_relevant=True
+        )
+    ]
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: session)
+    monkeypatch.setattr("app.core.cassandra.prepare_cached", lambda cql: cql)
+    monkeypatch.setattr(cfg, "ARTIFACT_ECOSYSTEM_LISTED_BOOST", 5.0)
+
+    from algorand_shared.artifact_priority import (
+        ecosystem_listed_score,
+        ecosystem_scoring_available,
+    )
+
+    assert ecosystem_scoring_available() is True
+
+    on_topic = "HesabPay runs its rails on Algorand mainnet for cross-border settlement."
+    assert ecosystem_listed_score("https://hesabpay.com/blog/post", on_topic) == 5.0
+    # Same content-gate as ever: a directory-only listing with zero on-topic
+    # keyword hits still earns nothing, even through the fallback path.
+    assert ecosystem_listed_score("https://hesabpay.com/blog/post", "nothing on topic") == 0.0
 
 
 # --------------------------------------------------------------------------- #
