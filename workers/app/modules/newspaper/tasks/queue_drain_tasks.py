@@ -632,6 +632,14 @@ def reap_stale_translation_sessions() -> dict[str, int]:
     return _reap()
 
 
+@celery_app.task(name="app.tasks.newspaper.reap_orphaned_browser_processes")
+def reap_orphaned_browser_processes() -> dict[str, object]:
+    """Maintenance beat: SIGKILL any Playwright/Chromium process tree with no live celery worker ancestor (see browser_reaper.py's module docstring for the root cause -- a forceful worker kill, e.g. a hard time_limit or a deploy's SIGQUIT cold shutdown, never signals the browser subprocess at all)."""
+    from app.modules.scraper.core.browser_reaper import reap_orphaned_browser_processes as _reap
+
+    return _reap(min_age_seconds=config.BROWSER_REAP_MIN_AGE_SECONDS)
+
+
 def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
     """Release ONE admin-approved article that was held because the daily feed cap was already reached (status='backlog'), interest order.
 

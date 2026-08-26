@@ -249,6 +249,18 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.newspaper.reap_stale_translation_sessions",
         "schedule": float(os.getenv("TRANSLATION_SESSION_REAP_SECONDS", "3600")),
     }
+    # OS-level companion to the two DB-row reapers above (root-caused
+    # 2026-08-26, see browser_reaper.py's module docstring): a forceful
+    # worker kill -- hard time_limit SIGKILL, a deploy's SIGQUIT cold
+    # shutdown, an admin revoke(terminate=True) -- never signals the
+    # Playwright driver/Chromium process at all, so it survives as an
+    # orphan burning CPU/RAM until something kills it. Frequent (5min
+    # default) and cheap (one `ps` call); the min-age floor inside the
+    # reaper itself is what keeps it from ever touching a live session.
+    schedule["reap-orphaned-browser-processes"] = {
+        "task": "app.tasks.newspaper.reap_orphaned_browser_processes",
+        "schedule": float(os.getenv("BROWSER_REAP_SECONDS", "300")),
+    }
     # Editorial-room artifacts: recomputes priority for every PENDING
     # artifact once a day, feeding drain-to-compose's daily selection above.
     # Runs unconditionally (no AUTO_COMPOSE_PAUSED-style gate) -- scoring is

@@ -20,6 +20,16 @@ _BROWSER_UA = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
+# PlaywrightSession.capture_screenshot's own context only -- deliberately NOT
+# applied to the shared self._context every other method uses (fetch/click/
+# type/interactive all just read text/DOM state, and never benefit from a
+# bigger/denser render). Still a fixed, modest "what a visitor sees" size,
+# not the maximum Chromium supports -- retina (2x) resolution at 1280x720's
+# default is already a meaningful sharpness jump without ballooning capture
+# cost/memory the way a much larger canvas at 2x would.
+_SCREENSHOT_VIEWPORT = {"width": 1280, "height": 720}
+_SCREENSHOT_DEVICE_SCALE_FACTOR = 2
+
 _LOGIN_MARKERS = (
     "log in",
     "login",
@@ -816,15 +826,36 @@ class PlaywrightSession:
         article" usually wants. full_page=True captures the whole
         scrollable page, for something like a long leaderboard a single
         viewport can't show.
+
+        Uses its OWN short-lived browser CONTEXT (not a new browser/driver
+        process -- just another context inside this session's already-running
+        Chromium, closed again immediately after) at 2x device_scale_factor
+        (retina), instead of the shared self._context every other method
+        here uses. Root-caused 2026-08-26: captured screenshots looked
+        low-resolution because no context anywhere in this file ever set a
+        device_scale_factor, silently defaulting to Playwright's own 1x.
+        Bumping the SHARED context instead would apply the extra render cost
+        to every fetch/click/type call in the session too, for zero benefit
+        -- those only ever read text/DOM state, never pixels.
         """
         timeout = timeout_ms if timeout_ms is not None else config.BROWSER_TIMEOUT_MS
-        page = self._context.new_page()
+        context_kwargs: dict = {
+            "user_agent": _BROWSER_UA,
+            "viewport": _SCREENSHOT_VIEWPORT,
+            "device_scale_factor": _SCREENSHOT_DEVICE_SCALE_FACTOR,
+        }
+        state_path = config.BROWSER_STORAGE_STATE_PATH
+        if state_path and Path(state_path).is_file():
+            context_kwargs["storage_state"] = state_path
+        context = self._browser.new_context(**context_kwargs)
         try:
+            page = context.new_page()
             self._goto_and_settle(page, url, timeout)
             _expand_collapsed_content(page)
             return page.screenshot(full_page=full_page, type="png")
         finally:
-            page.close()
+            with contextlib.suppress(Exception):
+                context.close()
 
     def interactive_open(self, url: str, *, timeout_ms: int | None = None) -> BrowserPageResult:
         """Start a play_interactive exploration session: open url on a page that stays alive across subsequent interactive_click/type/read calls. Closes any previously-open interactive page first -- only one at a time."""
