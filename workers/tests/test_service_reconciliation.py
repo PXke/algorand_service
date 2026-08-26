@@ -436,6 +436,104 @@ def test_reconcile_folds_duplicates_to_exactly_one_pending_artifact(
     assert "newer crawl of the pera wallet homepage" in merged_content.content
 
 
+def test_reconcile_folds_three_duplicates_to_one_with_all_three_contents_present(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """A worse version of the same incident: THREE pending artifacts land on one service_id (e.g. two successive raw repoints), not just two. The fold must still converge to exactly one survivor, and none of the three original contents may be dropped along the way -- an oldest-first two-at-a-time fold is an easy place to accidentally lose the middle one."""
+    from app.modules.newspaper.artifact_store import (
+        PENDING,
+        get_artifact_content,
+        insert_artifact,
+        list_pending_artifacts,
+    )
+
+    id_1, _ = insert_artifact(
+        service_id="temp-a", url="https://x.example/", channel="crawler", content="version one", title="V1"
+    )
+    id_2, _ = insert_artifact(
+        service_id="temp-b", url="https://x.example/", channel="crawler", content="version two", title="V2"
+    )
+    id_3, _ = insert_artifact(
+        service_id="temp-c", url="https://x.example/", channel="crawler", content="version three", title="V3"
+    )
+    for aid in (id_1, id_2, id_3):
+        fake_artifact_session.artifacts[aid]["service_id"] = "triple-dup-svc"
+        for row in fake_artifact_session.pending.values():
+            if str(row["artifact_id"]) == aid:
+                row["service_id"] = "triple-dup-svc"
+
+    result = reconcile_duplicate_pending_artifacts()
+
+    assert len(result["merged"]) == 1
+    finding = result["merged"][0]
+    assert finding["service_id"] == "triple-dup-svc"
+    assert set(finding["artifact_ids"]) == {id_1, id_2, id_3}
+    survivor_id = finding["survivor"]
+
+    still_pending = [a for a in list_pending_artifacts() if a.service_id == "triple-dup-svc"]
+    assert [a.artifact_id for a in still_pending] == [survivor_id]
+    assert fake_artifact_session.artifacts[survivor_id]["status"] == PENDING
+
+    merged_content = get_artifact_content(survivor_id)
+    assert merged_content is not None
+    assert "version one" in merged_content.content
+    assert "version two" in merged_content.content
+    assert "version three" in merged_content.content
+    # Latest arrival's own title wins, never a stale earlier one.
+    assert merged_content.title == "V3"
+    # Full three-entry provenance trail: two folded-away segments plus the
+    # survivor's own top-level content accounts for the third.
+    assert len(merged_content.metadata["segments"]) == 2
+
+
+def test_reconcile_three_duplicate_fold_preserves_venue_service_id_from_any_duplicate(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """Only ONE of three duplicates ever got venue_service_id backfilled (plausible after a partial historical backfill or an inconsistent repoint) -- the fold must not silently lose it just because a later fold step happens to re-insert a duplicate that itself carries None."""
+    from app.modules.newspaper.artifact_store import get_artifact, insert_artifact
+
+    id_1, _ = insert_artifact(
+        service_id="temp-a", url=None, channel="bluesky", content="v1", venue_service_id=None
+    )
+    id_2, _ = insert_artifact(
+        service_id="temp-b", url=None, channel="bluesky", content="v2", venue_service_id="real-venue"
+    )
+    id_3, _ = insert_artifact(
+        service_id="temp-c", url=None, channel="bluesky", content="v3", venue_service_id=None
+    )
+    for aid in (id_1, id_2, id_3):
+        fake_artifact_session.artifacts[aid]["service_id"] = "triple-dup-venue"
+        for row in fake_artifact_session.pending.values():
+            if str(row["artifact_id"]) == aid:
+                row["service_id"] = "triple-dup-venue"
+
+    result = reconcile_duplicate_pending_artifacts()
+
+    survivor_id = result["merged"][0]["survivor"]
+    survivor = get_artifact(survivor_id)
+    assert survivor is not None
+    assert survivor.venue_service_id == "real-venue"
+
+
+def test_reconcile_survivor_priority_is_freshly_zeroed_not_a_stale_carryover(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """insert_artifact always starts a brand-new row at priority 0.0 -- the fold must go through that exact path, so a merged survivor is never left carrying one of the discarded duplicates' own stale (possibly high) priority. A real priority sweep picks it back up on its own next pass; this only checks it isn't left with something WRONG in the meantime."""
+    from app.modules.newspaper.artifact_store import get_artifact, update_artifact_priority
+
+    _older_id, newer_id = _seed_duplicate_pending(fake_artifact_session)
+    # Give the about-to-be-discarded duplicate an artificially high priority,
+    # as if a stale sweep had already scored it before the repoint happened.
+    update_artifact_priority(newer_id, 9.5)
+
+    result = reconcile_duplicate_pending_artifacts()
+    survivor_id = result["merged"][0]["survivor"]
+
+    survivor = get_artifact(survivor_id)
+    assert survivor is not None
+    assert survivor.priority == 0.0
+
+
 def test_reconcile_is_a_noop_when_nothing_is_duplicated(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
