@@ -122,6 +122,80 @@
     }
   }
 
+  // Per-channel detail rendering: `metadata` is a channel-specific JSON blob
+  // (see 077_artifacts.cql), so every lookup below is defensive — falls
+  // back to '' / null rather than throwing on an unexpected shape. None of
+  // this needs new backend fields: the video id comes straight out of the
+  // artifact's own YouTube watch URL, the bsky handle comes out of its own
+  // bsky.app post URL, and the forum lane already attributes each post as
+  // "@author: body" in its content (see forum_poll_tasks.py's
+  // fetch_topic_text) — these just parse what's already there.
+  function metaPayload(d: ArtifactDetail): Record<string, unknown> {
+    const payload = (d.metadata as Record<string, unknown> | undefined)?.payload
+    return payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+  }
+
+  function metaString(d: ArtifactDetail, key: string): string {
+    const v = (d.metadata as Record<string, unknown> | undefined)?.[key]
+    return typeof v === 'string' ? v : ''
+  }
+
+  function metaPayloadString(d: ArtifactDetail, key: string): string {
+    const v = metaPayload(d)[key]
+    return typeof v === 'string' ? v : ''
+  }
+
+  // YouTube's watch_url is always "https://www.youtube.com/watch?v=<id>"
+  // (see youtube_scraper.py's ChannelVideo.watch_url) — parsed rather than
+  // trusted as opaque so a malformed/legacy url just falls back to null
+  // instead of throwing.
+  function youtubeVideoId(url: string | null): string | null {
+    if (!url) return null
+    try {
+      const u = new URL(url)
+      const v = u.searchParams.get('v')
+      if (v) return v
+      if (u.hostname === 'youtu.be') return u.pathname.slice(1) || null
+    } catch {
+      return null
+    }
+    return null
+  }
+
+  // Prefer the real fetched thumbnail (payload.og_image, from the channel's
+  // own RSS <media:thumbnail>) and only fall back to YouTube's predictable
+  // thumbnail CDN path when that's missing.
+  function youtubeThumbnail(d: ArtifactDetail, videoId: string | null): string {
+    const og = metaPayloadString(d, 'og_image')
+    if (og) return og
+    return videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : ''
+  }
+
+  // Bluesky's web_url is always "https://bsky.app/profile/<handle>/post/
+  // <rkey>" (see bluesky_scraper.py's BlueskyPost.web_url).
+  function blueskyHandle(url: string | null): string {
+    if (!url) return ''
+    const m = url.match(/bsky\.app\/profile\/([^/]+)\/post\//)
+    return m ? m[1] : ''
+  }
+
+  type ForumPost = { author: string; body: string }
+
+  // Splits the "@author: body" paragraphs fetch_topic_text already joins
+  // with blank lines back into individual posts for display. A paragraph
+  // that doesn't match the pattern (shouldn't happen, but content is a
+  // free-text blob) is still shown, just without an attributed author.
+  function forumPosts(content: string): ForumPost[] {
+    if (!content) return []
+    return content
+      .split('\n\n')
+      .map((block): ForumPost => {
+        const m = block.match(/^@(\S+):\s*([\s\S]*)$/)
+        return m ? { author: m[1], body: m[2] } : { author: '', body: block }
+      })
+      .filter((p) => p.body.trim().length > 0)
+  }
+
   // Section 3: approved & awaiting paced release — still a live, distinct
   // concept (not part of the old lane/status system).
   let backlog: Array<Record<string, unknown>> = $state([])
@@ -268,12 +342,92 @@
             <p class="admin-muted small meta">
               {[d.channel, d.service_id, d.status].filter(Boolean).join(' · ')}
             </p>
-            {#if d.url}
-              <p class="small detail-url">
-                <a href={d.url} target="_blank" rel="noopener noreferrer">{d.url}</a>
-              </p>
+            {#if d.channel === 'youtube'}
+              {@const videoId = youtubeVideoId(d.url)}
+              {@const thumb = youtubeThumbnail(d, videoId)}
+              {@const transcript = metaPayloadString(d, 'transcript_text')}
+              <div class="kind-head">
+                <span class="kind-badge kind-youtube">▶ YouTube video</span>
+                {#if d.url}
+                  <a class="kind-link" href={d.url} target="_blank" rel="noopener noreferrer"
+                    >Watch on YouTube ↗</a
+                  >
+                {/if}
+              </div>
+              <div class="youtube-card">
+                {#if thumb}
+                  <a
+                    class="youtube-thumb-link"
+                    href={d.url ?? undefined}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <img class="youtube-thumb" src={thumb} alt="" loading="lazy" />
+                    <span class="youtube-play" aria-hidden="true">▶</span>
+                  </a>
+                {/if}
+                <div class="youtube-body">
+                  <strong class="youtube-title">{d.title || '(untitled video)'}</strong>
+                  {#if transcript}
+                    <p class="admin-muted small kind-subhead">Transcript</p>
+                    <pre class="artifact-content">{transcript}</pre>
+                  {:else}
+                    <p class="admin-muted small kind-subhead">Description</p>
+                    <pre class="artifact-content">{d.content || '(no description)'}</pre>
+                  {/if}
+                </div>
+              </div>
+            {:else if d.channel === 'bluesky'}
+              {@const handle = blueskyHandle(d.url)}
+              {@const displayName = metaString(d, 'display_name')}
+              <div class="kind-head">
+                <span class="kind-badge kind-bluesky">🦋 Bluesky post</span>
+                {#if d.url}
+                  <a class="kind-link" href={d.url} target="_blank" rel="noopener noreferrer"
+                    >View on Bluesky ↗</a
+                  >
+                {/if}
+              </div>
+              <div class="bluesky-card">
+                <div class="bluesky-author">
+                  {#if handle}<strong>@{handle}</strong>{/if}
+                  {#if displayName && displayName.toLowerCase() !== handle.toLowerCase()}
+                    <span class="admin-muted small">{displayName}</span>
+                  {/if}
+                </div>
+                <blockquote class="bluesky-text">{d.content || d.title || '(no text)'}</blockquote>
+              </div>
+            {:else if d.channel === 'forum'}
+              {@const posts = forumPosts(d.content)}
+              <div class="kind-head">
+                <span class="kind-badge kind-forum">💬 Forum thread</span>
+                {#if d.url}
+                  <a class="kind-link" href={d.url} target="_blank" rel="noopener noreferrer"
+                    >Open thread ↗</a
+                  >
+                {/if}
+              </div>
+              <strong class="forum-title">{d.title || '(untitled thread)'}</strong>
+              {#if posts.length}
+                <div class="forum-posts">
+                  {#each posts as post, i (i)}
+                    <div class="forum-post">
+                      {#if post.author}<span class="forum-author">@{post.author}</span>{/if}
+                      <p class="forum-post-body">{post.body}</p>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <pre class="artifact-content">{d.content || '(no content)'}</pre>
+              {/if}
+            {:else}
+              {#if d.url}
+                <p class="small detail-url">
+                  <a href={d.url} target="_blank" rel="noopener noreferrer">{d.url}</a>
+                </p>
+              {/if}
+              <pre class="artifact-content">{d.content || '(no content)'}</pre>
             {/if}
-            <pre class="artifact-content">{d.content || '(no content)'}</pre>
           {/if}
         </div>
       {/if}
@@ -545,6 +699,130 @@
   }
   .detail-url a {
     word-break: break-all;
+  }
+
+  /* Per-channel detail rendering (youtube/bluesky/forum) — kind-badge/
+     kind-link mirror the pill shape already used by .pool-badge, so a
+     channel-specific header reads as part of the same design language
+     rather than a bolted-on block. */
+  .kind-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .kind-badge {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+    border: 1px solid color-mix(in srgb, var(--primary) 40%, transparent);
+    color: var(--primary);
+  }
+  .kind-link {
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+  .kind-subhead {
+    margin: 4px 0 0;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 0.72rem;
+    font-weight: 700;
+  }
+  .youtube-card {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .youtube-thumb-link {
+    position: relative;
+    flex: 0 0 auto;
+    display: block;
+    width: 180px;
+    max-width: 100%;
+    border-radius: var(--radius-thumb, 8px);
+    overflow: hidden;
+    line-height: 0;
+  }
+  .youtube-thumb {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    display: block;
+    background: var(--panel);
+  }
+  .youtube-play {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4rem;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.25);
+  }
+  .youtube-body {
+    flex: 1;
+    min-width: 200px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .youtube-title {
+    font-size: 0.95rem;
+  }
+  .bluesky-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .bluesky-author {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .bluesky-text {
+    margin: 0;
+    padding: 10px 12px;
+    border-left: 3px solid color-mix(in srgb, var(--primary) 45%, var(--border));
+    border-radius: 0 8px 8px 0;
+    background: var(--panel);
+    font-size: 1rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .forum-title {
+    font-size: 0.95rem;
+  }
+  .forum-posts {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .forum-post {
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+  }
+  .forum-author {
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--primary);
+    margin-bottom: 2px;
+  }
+  .forum-post-body {
+    margin: 0;
+    font-size: 0.9rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
   .artifact-content {
     margin: 0;
