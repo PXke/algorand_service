@@ -84,8 +84,15 @@
   let platformPicks: PreviewItem[] = $derived(
     items.filter((item) => item.selected_lane === 'platform')
   )
+  // The human-picked artifact for `day`, pulled out on its own so a pin
+  // doesn't get lost scrolling past everything else in the ranked pool
+  // below (root-caused 2026-08-26: a pin at priority 19.75 sat at #29 of
+  // 140+ candidates, technically visible but effectively unfindable).
+  let humanPick: PreviewItem | undefined = $derived(
+    items.find((item) => item.selected_lane === 'human')
+  )
   let otherItems: PreviewItem[] = $derived(
-    items.filter((item) => item.selected_lane !== 'platform')
+    items.filter((item) => item.selected_lane !== 'platform' && item.selected_lane !== 'human')
   )
   let pinningId = $state<string | null>(null)
   let pinError = $state<string | null>(null)
@@ -572,6 +579,30 @@
     {#if pinError}
       <p class="admin-err">{pinError}</p>
     {/if}
+
+    <!-- Section 1b: the human-picked artifact for {day}, pulled out on its
+         own so it's immediately visible instead of requiring a scroll
+         through the full ranked pool below to spot it. -->
+    <section class="stack">
+      <div class="section-head">
+        <h3>Human pick for {day}</h3>
+      </div>
+      <p class="admin-muted small">
+        Forecast only, recomputed live — the artifact currently pinned as the human slot for
+        {day}, if any. Pinning still only happens from the "Pin for tomorrow" button in the
+        ranked list below.
+      </p>
+      {#if !humanPick}
+        <div class="admin-panel empty">
+          <strong>No human pick pinned for {day} yet.</strong>
+          <p class="admin-muted">
+            Pin one from the ranked list below to lock in the human slot.
+          </p>
+        </div>
+      {:else}
+        {@render artifactRow(humanPick)}
+      {/if}
+    </section>
 
     <!-- Section 2a: platform picks pulled out on their own, isolated from
          the full ranked pool below -- these are what would currently fill
