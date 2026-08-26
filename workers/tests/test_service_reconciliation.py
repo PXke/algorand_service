@@ -4,11 +4,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from conftest import FakeArtifactSession
 
 from app.modules.newspaper.service_reconciliation import (
     backfill_missing_venue_service_ids,
     find_domain_registry_duplicates,
+    find_duplicate_pending_artifacts,
     reconcile_domain_duplicates,
+    reconcile_duplicate_pending_artifacts,
 )
 
 
@@ -349,3 +352,96 @@ def test_backfill_leaves_plain_web_crawl_artifacts_alone(monkeypatch: pytest.Mon
 
     assert result == {"backfilled": [], "flagged": []}
     assert calls == []
+
+
+# --------------------------------------------------------------------------- #
+# find_duplicate_pending_artifacts / reconcile_duplicate_pending_artifacts
+# --------------------------------------------------------------------------- #
+
+
+def _seed_duplicate_pending(session: FakeArtifactSession) -> tuple[str, str]:
+    """Two genuinely separate inserts, then a raw service_id repoint on the second -- exactly how the real pera-wallet incident happened (a direct Cassandra UPDATE bypassing insert_artifact's own dedup check), not something insert_artifact itself could ever produce on its own."""
+    from app.modules.newspaper.artifact_store import insert_artifact
+
+    older_id, _ = insert_artifact(
+        service_id="pera-wallet", url="https://perawallet.app", channel="crawler",
+        content="older crawl of the pera wallet homepage", title="Pera Wallet (older)",
+    )
+    newer_id, _ = insert_artifact(
+        service_id="some-other-temp-id", url="https://perawallet.app/", channel="crawler",
+        content="newer crawl of the pera wallet homepage", title="Pera Wallet (newer)",
+    )
+    # Simulate the raw repoint: directly mutate service_id, bypassing insert_artifact.
+    session.artifacts[newer_id]["service_id"] = "pera-wallet"
+    for row in session.pending.values():
+        if str(row["artifact_id"]) == newer_id:
+            row["service_id"] = "pera-wallet"
+    return older_id, newer_id
+
+
+def test_find_duplicate_pending_artifacts_detects_the_violation(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """Two pending artifacts sharing one service_id (via a raw repoint, not insert_artifact) are found as a duplicate."""
+    older_id, newer_id = _seed_duplicate_pending(fake_artifact_session)
+
+    dupes = find_duplicate_pending_artifacts()
+
+    assert dupes.keys() == {"pera-wallet"}
+    assert set(dupes["pera-wallet"]) == {older_id, newer_id}
+
+
+def test_find_duplicate_pending_artifacts_ignores_healthy_services(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """Each service_id here has exactly one pending artifact -- no duplicates found."""
+    from app.modules.newspaper.artifact_store import insert_artifact
+
+    insert_artifact(service_id="svc-a", url=None, channel="crawler", content="x")
+    insert_artifact(service_id="svc-b", url=None, channel="crawler", content="y")
+
+    assert find_duplicate_pending_artifacts() == {}
+
+
+def test_reconcile_folds_duplicates_to_exactly_one_pending_artifact(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """The fold uses insert_artifact's own concatenation path -- both discarded originals' content survive in the merged survivor, and only one PENDING artifact remains for the service_id afterward."""
+    from app.modules.newspaper.artifact_store import (
+        DISCARDED,
+        PENDING,
+        get_artifact_content,
+        list_pending_artifacts,
+    )
+
+    older_id, newer_id = _seed_duplicate_pending(fake_artifact_session)
+
+    result = reconcile_duplicate_pending_artifacts()
+
+    assert result["merged"][0]["service_id"] == "pera-wallet"
+    assert set(result["merged"][0]["artifact_ids"]) == {older_id, newer_id}
+    survivor_id = result["merged"][0]["survivor"]
+
+    # Both originals are gone from pending; exactly one pera-wallet artifact remains.
+    still_pending = [a for a in list_pending_artifacts() if a.service_id == "pera-wallet"]
+    assert [a.artifact_id for a in still_pending] == [survivor_id]
+
+    assert fake_artifact_session.artifacts[older_id]["status"] == DISCARDED
+    assert fake_artifact_session.artifacts[newer_id]["status"] == DISCARDED
+    assert fake_artifact_session.artifacts[survivor_id]["status"] == PENDING
+
+    merged_content = get_artifact_content(survivor_id)
+    assert merged_content is not None
+    assert "older crawl of the pera wallet homepage" in merged_content.content
+    assert "newer crawl of the pera wallet homepage" in merged_content.content
+
+
+def test_reconcile_is_a_noop_when_nothing_is_duplicated(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """No duplicates exist, so the sweep merges nothing."""
+    from app.modules.newspaper.artifact_store import insert_artifact
+
+    insert_artifact(service_id="svc-a", url=None, channel="crawler", content="x")
+
+    assert reconcile_duplicate_pending_artifacts() == {"merged": []}

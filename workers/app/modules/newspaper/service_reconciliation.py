@@ -124,7 +124,11 @@ def reconcile_domain_duplicates() -> dict[str, object]:
     """
     from app.core.cassandra import get_cassandra_session
     from app.core.statements import ServiceRegistryStmts
-    from app.modules.newspaper.service_sources import add_web_source, merge_services, service_for_domain
+    from app.modules.newspaper.service_sources import (
+        add_web_source,
+        merge_services,
+        service_for_domain,
+    )
 
     session = get_cassandra_session()
     rows = list(session.execute(ServiceRegistryStmts.LIST_ALL))
@@ -192,7 +196,10 @@ def backfill_missing_venue_service_ids() -> dict[str, object]:
     """
     from app.core import config
     from app.modules.chain_tail.registry_cache import load_enabled_services
-    from app.modules.newspaper.artifact_store import list_pending_artifacts, set_artifact_venue_service_id
+    from app.modules.newspaper.artifact_store import (
+        list_pending_artifacts,
+        set_artifact_venue_service_id,
+    )
 
     enabled_ids = {entry.service_id for entry in load_enabled_services()}
 
@@ -231,3 +238,77 @@ def backfill_missing_venue_service_ids() -> dict[str, object]:
             flagged.append(finding)
 
     return {"backfilled": backfilled, "flagged": flagged}
+
+
+# --------------------------------------------------------------------------- #
+# Bug class 3 -- duplicate PENDING artifacts for the same service_id
+# --------------------------------------------------------------------------- #
+
+
+def find_duplicate_pending_artifacts() -> dict[str, list[str]]:
+    """service_id -> artifact_ids, for every service_id with more than one PENDING artifact -- a violation of insert_artifact's own dedup invariant ("at most one PENDING artifact per service_id").
+
+    Structurally impossible via the normal insert_artifact path (it always
+    finds and folds any existing pending row for the same service_id before
+    creating a new one) -- this only happens when something writes
+    `artifacts.service_id` directly, bypassing that check (e.g. a one-off
+    Cassandra repoint of an artifact's service_id during a service merge,
+    root-caused 2026-08-26: pera-wallet/perawallet-app).
+    """
+    from collections import defaultdict
+
+    from app.modules.newspaper.artifact_store import list_pending_artifacts
+
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for artifact in list_pending_artifacts():
+        if artifact.service_id:
+            grouped[artifact.service_id].append(artifact.artifact_id)
+    return {sid: ids for sid, ids in grouped.items() if len(ids) > 1}
+
+
+def reconcile_duplicate_pending_artifacts() -> dict[str, object]:
+    """Fold every service_id's duplicate PENDING artifacts down to one, via the SAME concatenate-on-repeat-insert path `insert_artifact` already runs on a normal repeat crawl -- never a bespoke merge routine of this function's own.
+
+    Oldest-first fold: keeps the oldest duplicate as the running survivor;
+    for each newer duplicate, discards it and re-inserts its own content via
+    `insert_artifact(service_id=...)`, which finds the current survivor
+    (the only pending row left for that service_id at that moment),
+    concatenates the two via the exact same code path a real second crawl
+    of that service would take, discards the survivor, and returns a fresh
+    merged artifact_id -- which becomes the survivor for the next fold.
+    Always converges to exactly one pending artifact per service_id,
+    regardless of how many duplicates exist.
+    """
+    from app.modules.newspaper.artifact_store import (
+        DISCARDED,
+        get_artifact_content,
+        insert_artifact,
+        list_pending_artifacts,
+        mark_artifact_status,
+    )
+
+    dupes = find_duplicate_pending_artifacts()
+    merged: list[dict[str, object]] = []
+    for service_id, artifact_ids in dupes.items():
+        by_id = {a.artifact_id: a for a in list_pending_artifacts() if a.artifact_id in artifact_ids}
+        ordered = sorted(by_id.values(), key=lambda a: a.created_at)
+
+        survivor_id = ordered[0].artifact_id
+        for row in ordered[1:]:
+            content = get_artifact_content(row.artifact_id)
+            mark_artifact_status(row.artifact_id, DISCARDED)
+            if content is None:
+                continue
+            survivor_id, _created = insert_artifact(
+                service_id=service_id,
+                url=row.url,
+                channel=row.channel,
+                content=content.content,
+                title=content.title,
+                metadata=content.metadata,
+                event_date=row.event_date,
+                venue_service_id=row.venue_service_id,
+            )
+        merged.append({"service_id": service_id, "artifact_ids": artifact_ids, "survivor": survivor_id})
+
+    return {"merged": merged}
