@@ -40,7 +40,16 @@ scale and its own four components:
                                approaching (never reaching) a floor > 0.
   3. ecosystem_listed_score -- flat bonus for a URL whose domain is in the
                                SAME ecosystem_listed directory registry the
-                               crawler-discovery scorer already uses.
+                               crawler-discovery scorer already uses (or the
+                               hardcoded chain-silent KNOWN_DOMAINS anchor
+                               list, which is exempt from the next clause).
+                               2026-08-26: for the directory registry (not
+                               KNOWN_DOMAINS) also requires the artifact's
+                               OWN content to clear keyword_hits() > 0 --  a
+                               domain's directory listing is history, not
+                               proof today's scored content is still
+                               on-topic (see ecosystem_listed_score's own
+                               docstring, root-caused on ulam.io).
   4. skip_count_score       -- (2026-08-27) direct linear reward for how many
                                times this service's pending artifact has been
                                superseded-by-concatenation without ever being
@@ -102,6 +111,23 @@ def timeliness_score(
     reachable "except when we have nothing else to report". At age=0 this
     returns the max score; as age -> infinity it approaches (never reaches)
     the floor, halving every ARTIFACT_TIMELINESS_HALF_LIFE_DAYS.
+
+    Known limitation (documented, not fixed -- 2026-08-26, ulam.io): the
+    `created_at` fallback assumes it reflects a real discovery/update event,
+    but a row restored from a Cassandra backup (e.g. after the article-table
+    incident recovery) gets `created_at` re-stamped at RESTORE time, not at
+    whatever real event originally produced the content -- so a purely
+    static, undateable page can score "fresh as yesterday" just because its
+    artifact row happened to be recreated recently. There is currently no
+    tracking anywhere in this codebase of an artifact's original vs.
+    restored `created_at` (no `original_created_at`/`restored_at`-style
+    field, checked before writing this note), and backup/restore is a rare,
+    manual, whole-keyspace operation rather than a routine code path -- so
+    this isn't fixed here rather than invent new schema/tracking for what is
+    so far a one-off incident. If restore-induced timestamp resets turn out
+    to recur, the fix would be to have the restore process itself preserve
+    (or explicitly null out) the true original `created_at`/`event_date`
+    instead of teaching this function to guess.
     """
     from app.core.config import (
         ARTIFACT_TIMELINESS_FLOOR,
@@ -123,8 +149,39 @@ def timeliness_score(
     return round(ARTIFACT_TIMELINESS_FLOOR + decayed, 4)
 
 
-def ecosystem_listed_score(url: str | None) -> float:
-    """Flat ARTIFACT_ECOSYSTEM_LISTED_BOOST when the artifact's URL domain is directory-listed in EITHER `ecosystem_listed_domains()` (the curated directory registry) OR `KNOWN_DOMAINS` (score_page's own hardcoded anchor list), else 0.0. An artifact with no URL (a brief, a mail message) never earns this bonus.
+def ecosystem_listed_score(url: str | None, content: str = "") -> float:
+    """Flat ARTIFACT_ECOSYSTEM_LISTED_BOOST when the artifact's URL domain is directory-listed, else 0.0. An artifact with no URL (a brief, a mail message) never earns this bonus.
+
+    Two different registries back this, and they are trusted differently:
+
+    - `KNOWN_DOMAINS` (score_page's hardcoded anchor list) is a small,
+      human-curated set maintained SPECIFICALLY because each entry is
+      chain-silent on its own pages (sealed.channel, hesab.af, lofty.ai,
+      zerosignal.ai, dark-coin.com/.io, sowandreap.in) -- see the
+      2026-08-26 fix note below. Membership here is itself the verified
+      relevance signal, so it grants the full bonus unconditionally,
+      regardless of what today's fetched `content` says (or doesn't say).
+    - `ecosystem_listed_domains()` (the curated directory registry, synced
+      from sources like awesome-algorand and algorand.co/case-studies) is
+      much broader and unreviewed per-entry: a domain lands there because it
+      was *once* linked from a directory or case study, not because a human
+      verified it's still an Algorand service today. Companies pivot, and
+      the crawler-coverage gap that motivated this fix (ulam.io, 2026-08-26)
+      showed the aggregate that actually gets scored can drift to a
+      generic, off-topic page even when the domain itself once had a
+      genuinely relevant page. So for THIS registry only, the bonus also
+      requires the artifact's own content to show at least one on-topic
+      keyword hit (`keyword_hits`, word-boundary matched RELEVANCE_KEYWORDS)
+      -- some minimal evidence that what's being scored today, not just the
+      domain's history, is still about Algorand. Zero hits => 0.0, not a
+      reduced bonus: a page that says nothing on-topic is exactly the
+      failure mode being fixed, and a partial bonus would still let a fully
+      drifted page outrank genuinely on-topic ones.
+
+    This asymmetry is the point: it must NOT become a bare "requires the
+    word algorand" gate, which would break exactly what `KNOWN_DOMAINS`
+    exists to protect (content that legitimately never mentions the chain).
+    The content check only ever applies to the weaker, unreviewed registry.
 
     Checking only `ecosystem_listed_domains()` (2026-08-26 fix) missed every
     chain-silent service that's hardcoded in `KNOWN_DOMAINS` specifically
@@ -149,10 +206,14 @@ def ecosystem_listed_score(url: str | None) -> float:
     try:
         from app.modules.crawler.domain_tracker import domain_from_url
         from app.modules.crawler.ecosystem_sync import ecosystem_listed_domains
-        from app.modules.search.classifier.score import KNOWN_DOMAINS
+        from app.modules.search.classifier.score import KNOWN_DOMAINS, keyword_hits
 
         domain = domain_from_url(url)
-        if domain and (domain in ecosystem_listed_domains() or domain in KNOWN_DOMAINS):
+        if not domain:
+            return 0.0
+        if domain in KNOWN_DOMAINS:
+            return float(ARTIFACT_ECOSYSTEM_LISTED_BOOST)
+        if domain in ecosystem_listed_domains() and keyword_hits(content or "") > 0:
             return float(ARTIFACT_ECOSYSTEM_LISTED_BOOST)
     except Exception:
         return 0.0
@@ -202,8 +263,8 @@ def _timeliness_component(artifact: Artifact, _content: ArtifactContent | None) 
     return timeliness_score(artifact.event_date, artifact.created_at)
 
 
-def _ecosystem_component(artifact: Artifact, _content: ArtifactContent | None) -> float:
-    return ecosystem_listed_score(artifact.url)
+def _ecosystem_component(artifact: Artifact, content: ArtifactContent | None) -> float:
+    return ecosystem_listed_score(artifact.url, content.content if content else "")
 
 
 def _skip_count_component(_artifact: Artifact, content: ArtifactContent | None) -> float:

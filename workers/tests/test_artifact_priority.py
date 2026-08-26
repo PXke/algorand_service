@@ -157,10 +157,10 @@ def test_ecosystem_listed_score_zero_for_no_url() -> None:
     assert ecosystem_listed_score("") == 0.0
 
 
-def test_ecosystem_listed_score_boosts_a_directory_listed_domain(
+def test_ecosystem_listed_score_boosts_a_directory_listed_domain_with_on_topic_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reuses the SAME ecosystem_listed_domains() registry the crawler-discovery scorer uses for the identical chain-silent-but-important-service problem, rather than a second registry."""
+    """Reuses the SAME ecosystem_listed_domains() registry the crawler-discovery scorer uses for the identical chain-silent-but-important-service problem, rather than a second registry -- but (2026-08-26) only when the artifact's OWN content actually clears keyword_hits() > 0, since this registry (unlike KNOWN_DOMAINS) isn't curated per-entry for chain-silence."""
     from algorand_shared import artifact_priority
 
     from app.core import config as cfg
@@ -171,14 +171,53 @@ def test_ecosystem_listed_score_boosts_a_directory_listed_domain(
         lambda: frozenset({"hesabpay.com"}),
     )
 
-    assert artifact_priority.ecosystem_listed_score("https://hesabpay.com/blog/post") == 5.0
-    assert artifact_priority.ecosystem_listed_score("https://unrelated.example.com/") == 0.0
+    on_topic = "HesabPay runs its rails on Algorand mainnet for cross-border settlement."
+    assert (
+        artifact_priority.ecosystem_listed_score("https://hesabpay.com/blog/post", on_topic) == 5.0
+    )
+    assert (
+        artifact_priority.ecosystem_listed_score("https://unrelated.example.com/", on_topic) == 0.0
+    )
 
 
-def test_ecosystem_listed_score_boosts_a_known_domains_entry_too(
+def test_ecosystem_listed_score_zero_for_directory_listed_domain_with_off_topic_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Checking only ecosystem_listed_domains() (2026-08-26 root-caused bug) missed every chain-silent service hardcoded in score_page's own KNOWN_DOMAINS list -- exactly the class this bonus exists to protect. sealed.channel is in KNOWN_DOMAINS but deliberately NOT in ecosystem_listed_domains() here, to prove the union, not just the first registry, is what earns the bonus."""
+    """Regression test (2026-08-26, ulam.io): a domain that is ONLY in ecosystem_listed_domains() (not the curated chain-silent KNOWN_DOMAINS list) must NOT get the bonus once the actual fetched content has drifted completely off-topic -- ulam.io is a real historical ecosystem-directory listing (Ulam Labs built Pact), but the artifact scored today was its plain homepage, 858 words of generic MedTech marketing copy with zero Algorand/blockchain/crypto keyword hits. Trusting the domain's directory membership forever let a stale listing keep inflating priority long after the specific content being scored had nothing to do with Algorand."""
+    from algorand_shared import artifact_priority
+
+    from app.core import config as cfg
+
+    monkeypatch.setattr(cfg, "ARTIFACT_ECOSYSTEM_LISTED_BOOST", 5.0)
+    monkeypatch.setattr(
+        "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains",
+        lambda: frozenset({"ulam.io"}),
+    )
+
+    off_topic_medtech_copy = (
+        "ULAM LABS helps founders, CTOs, and product teams build secure, "
+        "scalable, production-ready software for complex healthcare "
+        "environments, meeting NHS, ISO 27001, and HIPAA/GDPR requirements."
+    )
+    assert (
+        artifact_priority.ecosystem_listed_score("https://ulam.io/", off_topic_medtech_copy) == 0.0
+    )
+    # No content at all (never fetched, or empty) is the same "no evidence" case.
+    assert artifact_priority.ecosystem_listed_score("https://ulam.io/") == 0.0
+    assert artifact_priority.ecosystem_listed_score("https://ulam.io/", "") == 0.0
+
+
+def test_ecosystem_listed_score_boosts_a_known_domains_entry_regardless_of_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checking only ecosystem_listed_domains() (2026-08-26 root-caused bug) missed every chain-silent service hardcoded in score_page's own KNOWN_DOMAINS list -- exactly the class this bonus exists to protect. sealed.channel is in KNOWN_DOMAINS but deliberately NOT in ecosystem_listed_domains() here, to prove the union, not just the first registry, is what earns the bonus.
+
+    Also proves the 2026-08-26 content-signal requirement does NOT apply to
+    KNOWN_DOMAINS: a chain-silent service's own pages may legitimately never
+    say "algorand" (that's the entire reason it's hardcoded here), so the
+    bonus must survive even when content has zero keyword hits -- the exact
+    case the ulam.io fix must not regress.
+    """
     from algorand_shared import artifact_priority
 
     from app.core import config as cfg
@@ -189,7 +228,13 @@ def test_ecosystem_listed_score_boosts_a_known_domains_entry_too(
         lambda: frozenset(),
     )
 
+    chain_silent_content = "Sealed is a private, end-to-end encrypted messenger for teams."
     assert artifact_priority.ecosystem_listed_score("https://sealed.channel/") == 5.0
+    assert (
+        artifact_priority.ecosystem_listed_score("https://sealed.channel/", chain_silent_content)
+        == 5.0
+    )
+    assert artifact_priority.ecosystem_listed_score("https://sealed.channel/", "") == 5.0
 
 
 def test_ecosystem_listed_score_fails_open_to_zero_on_lookup_error(

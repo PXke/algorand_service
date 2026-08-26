@@ -394,7 +394,9 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
         breakdown = {
             "word_count": word_count_score(content.content if content else ""),
             "timeliness": timeliness_score(artifact.event_date, artifact.created_at),
-            "ecosystem_listed": ecosystem_listed_score(artifact.url),
+            "ecosystem_listed": ecosystem_listed_score(
+                artifact.url, content.content if content else ""
+            ),
         }
         if human_pick is not None and artifact.artifact_id == human_pick.artifact_id:
             lane: str | None = "human"
