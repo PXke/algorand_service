@@ -12,6 +12,7 @@ from app.modules.crawler.tasks.url_queue_tasks import (
     _sample_domain_pages,
     classify_pending_domains,
     deep_classify_domain,
+    reclassify_gray_zone_domains,
 )
 from app.modules.scraper.core.base import ScrapeResult
 
@@ -709,3 +710,60 @@ def test_deep_classify_domain_approves_via_external_corroboration(
     # Registers the monitored source at the domain's OWN landing page, not
     # the outside corroborating URL (a Reddit post isn't on this domain).
     assert service_calls == [("chainsilent.example", {"scrape_url": "https://chainsilent.example"})]
+
+
+# --------------------------------------------------------------------------- #
+# reclassify_gray_zone_domains -- the gray-zone-approved-domain beat task
+# --------------------------------------------------------------------------- #
+
+
+def test_reclassify_gray_zone_domains_is_a_noop_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Off by default: the master flag must gate the task itself too, not just the beat schedule entry, so a direct/manual trigger before the feature is deliberately enabled still no-ops."""
+    monkeypatch.setattr("app.core.config.FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED", False)
+    called = []
+    monkeypatch.setattr(
+        "app.modules.crawler.gray_zone_reconciliation.dispatch_gray_zone_deep_classify",
+        lambda **kw: called.append(kw) or {},
+    )
+
+    out = reclassify_gray_zone_domains()
+
+    assert out == {"status": "skipped", "reason": "gray_zone_reclassify_disabled"}
+    assert called == []
+
+
+def test_reclassify_gray_zone_domains_dispatches_for_real_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When enabled, calls dispatch_gray_zone_deep_classify with dry_run=False (this is the live beat path, not a dry preview) and the configured default limit."""
+    monkeypatch.setattr("app.core.config.FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED", True)
+    monkeypatch.setattr("app.core.config.FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT", 5)
+    called = []
+    monkeypatch.setattr(
+        "app.modules.crawler.gray_zone_reconciliation.dispatch_gray_zone_deep_classify",
+        lambda **kw: called.append(kw) or {"dispatched_count": 5},
+    )
+
+    out = reclassify_gray_zone_domains()
+
+    assert out == {"dispatched_count": 5}
+    assert called == [{"limit": 5, "dry_run": False}]
+
+
+def test_reclassify_gray_zone_domains_explicit_limit_overrides_the_configured_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit `limit` kwarg (e.g. a coordinating session running a manual small chunk) wins over the env-configured default."""
+    monkeypatch.setattr("app.core.config.FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED", True)
+    monkeypatch.setattr("app.core.config.FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT", 5)
+    called = []
+    monkeypatch.setattr(
+        "app.modules.crawler.gray_zone_reconciliation.dispatch_gray_zone_deep_classify",
+        lambda **kw: called.append(kw) or {},
+    )
+
+    reclassify_gray_zone_domains(limit=2)
+
+    assert called == [{"limit": 2, "dry_run": False}]

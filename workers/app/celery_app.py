@@ -191,6 +191,31 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.crawler.reevaluate_pending_domains",
         "schedule": float(os.getenv("PENDING_REEVALUATE_SECONDS", "86400")),
     }
+    # One-time gray-zone reconciliation (2026-08-26 audit, see
+    # gray_zone_reconciliation.py's module docstring): companion to
+    # reevaluate-pending-domains above, but for domains already
+    # frontier_status="approved" whose content_relevance never actually
+    # cleared FRONTIER_CONTENT_PROMOTE_SCORE — a bucket reevaluate-pending-
+    # domains's own pending-only scan never touches. OFF by default (same
+    # opt-in shape as scan-editorial-brief-schedule below) and deliberately
+    # small/slow when on: unlike every other read-mostly sweep on this
+    # schedule, each domain this dispatches fires a REAL deep_classify_domain
+    # crawl on the scrape queue, so it must stay a small throttled trickle —
+    # the resource-contention incident this whole design avoids repeating was
+    # exactly a big batch of classify_pending_domains chunks fired at once,
+    # saturating the concurrency=4 scrape worker pool and starving unrelated
+    # admin/routine tasks.
+    if os.getenv("FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        schedule["reclassify-gray-zone-domains"] = {
+            "task": "app.tasks.crawler.reclassify_gray_zone_domains",
+            "schedule": float(os.getenv("FRONTIER_GRAY_ZONE_RECLASSIFY_SECONDS", "1800")),
+            "kwargs": {"limit": int(os.getenv("FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT", "5"))},
+        }
     # Editorial-room compose trigger (2026-08-25): replaces
     # drain_standard_publish_queue as the live selection/compose mechanism --
     # see queue_drain_tasks.py's module docstring for the full picture. Same
