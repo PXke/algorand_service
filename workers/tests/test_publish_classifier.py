@@ -57,6 +57,40 @@ def test_score_content_for_storage_never_goes_negative() -> None:
     assert score_content_for_storage(text) == 0.0
 
 
+def test_score_content_for_storage_does_not_penalize_legitimate_casino_mention() -> None:
+    """A real web3 casino/gaming project's own product description must not be penalized just for using the word "casino" once with no spam framing (rantlabs.xyz, root-caused 2026-08-26): the bare bcasino word-boundary pattern fired on the topic word alone, dragging a legitimate site's score toward 0 the same way the bitnation.co fix targeted actual spam."""
+    text = (
+        "Rantlabs is a web3 casino platform built on Algorand, offering "
+        "provably fair games. Algorand mainnet ASA defi testnet algod ppos microalgo"
+    )
+    organic_text = (
+        "Rantlabs is a web3 gaming platform built on Algorand, offering "
+        "provably fair games. Algorand mainnet ASA defi testnet algod ppos microalgo"
+    )
+    assert score_content_for_storage(text) == score_content_for_storage(organic_text)
+
+
+def test_score_content_for_storage_still_catches_casino_spam_phrasing() -> None:
+    """Genuine gambling-affiliate spam phrasing ("online casino", "casino bonuses") must still be penalized even though the bare topic word no longer is on its own."""
+    spam_text = (
+        "Top Online Casino Sites Accepting Algorand ALGO in 2026 - Crypto "
+        "Casino Bonuses, Free Spins and No Deposit Offers. "
+        "Algorand mainnet ASA defi testnet algod ppos microalgo"
+    )
+    organic_text = "Algorand mainnet ASA defi testnet algod ppos microalgo Algorand Algorand"
+    assert score_content_for_storage(spam_text) < score_content_for_storage(organic_text)
+
+
+def test_score_content_for_storage_bitnation_price_prediction_unaffected() -> None:
+    """The original bitnation.co-shaped price-prediction spam that motivated the 2026-08-26 penalty fix is untouched by the casino-pattern precision fix (no "casino" mention at all)."""
+    spam_text = (
+        "Algorand (ALGO) Price Prediction 2024, 2025-2030. Is Algorand a "
+        "good investment? Should you buy Algorand now? How to buy Algorand. "
+        "Algorand mainnet ASA defi testnet algod ppos microalgo"
+    )
+    assert score_content_for_storage(spam_text) == 0.0
+
+
 def test_score_content_for_storage_uses_explorer_link() -> None:
     """An outbound Algorand-explorer link also lifts the storage-scoring score."""
     text = "A private, encrypted AI protocol. No email, no logging."

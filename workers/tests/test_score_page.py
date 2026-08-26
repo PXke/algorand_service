@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.modules.search.classifier.score import score_page
+from app.modules.search.classifier.score import score_page, seo_spam_hits
 
 
 def test_outbound_explorer_link_clears_threshold_with_no_keyword_text() -> None:
@@ -65,3 +65,19 @@ def test_repeated_keyword_scores_higher_than_single_mention() -> None:
     assert repeated.score > single.score
     assert not single.in_scope
     assert repeated.in_scope
+
+
+def test_seo_spam_hits_ignores_bare_casino_topic_mention() -> None:
+    """A single, unadorned mention of "casino" as a legitimate product category (rantlabs.xyz: "a web3 casino platform ... provably fair games") must not count as an SEO-spam signal."""
+    text = (
+        "Rantlabs is a web3 casino platform built on Algorand, offering "
+        "provably fair games."
+    )
+    assert seo_spam_hits(text) == 0
+
+
+def test_seo_spam_hits_still_catches_casino_affiliate_phrasing() -> None:
+    """Genuine gambling-affiliate spam phrasing around "casino" (bonuses, free spins, "online casino" listicle framing) still counts as an SEO-spam signal."""
+    assert seo_spam_hits("Top Online Casino Sites for Crypto Users") > 0
+    assert seo_spam_hits("Best Crypto Casino Bonuses - Play Now and Win Big!") > 0
+    assert seo_spam_hits("No Deposit Casino Bonus Codes 2026") > 0

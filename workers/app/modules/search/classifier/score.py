@@ -117,7 +117,23 @@ SEO_SPAM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"price\s+(prediction|forecast)", re.IGNORECASE),
     re.compile(r"\b20\d{2}\s*[-–—,]\s*20\d{2}\b"),
     re.compile(r"how\s+to\s+buy\b", re.IGNORECASE),
-    re.compile(r"\bcasino", re.IGNORECASE),
+    # Gambling-affiliate spam phrasing, not the bare topic word. A real
+    # web3 casino/gaming project (rantlabs.xyz) legitimately says "casino"
+    # once in an otherwise ordinary product description ("web3 casino
+    # platform ... provably fair games") with none of this framing anywhere
+    # near it; root-caused 2026-08-26 after the bare `\bcasino` pattern (every
+    # other entry in this list is a genuine spam PHRASE, not a single
+    # topic-adjacent keyword) dragged its storage score toward 0 for that one
+    # incidental mention. Genuine crypto-casino listicles reliably pair
+    # "casino" with promotional/affiliate language instead — bonuses, free
+    # spins, "online casino" as a listicle category, or a review/list framing
+    # — and the sibling `best\s+crypto\s+...\s+casino` pattern below still
+    # catches the "best crypto casino" shape on its own.
+    re.compile(
+        r"online\s+casino|casino\s+(bonus(es)?|no\s*deposit|free\s*spins?"
+        r"|sites?\s+(review|list)|games?\s+list)",
+        re.IGNORECASE,
+    ),
     re.compile(r"best\s+crypto\s+(exchange|wallet|app|casino|saving)", re.IGNORECASE),
     re.compile(r"is\s+it\s+a\s+good\s+investment", re.IGNORECASE),
     re.compile(r"should\s+you\s+(buy|invest)", re.IGNORECASE),
