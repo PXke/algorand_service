@@ -193,7 +193,7 @@ class DomainTrackingStmts:
         "FROM algorand_platform.domain_tracking WHERE domain = ?"
     )
     GET_FOR_UPDATE = _Stmt(
-        "SELECT last_online_at, category, is_relevant, metadata, frontier_status "
+        "SELECT last_online_at, category, is_relevant, metadata, frontier_status, relevance_score "
         "FROM algorand_platform.domain_tracking WHERE domain = ?"
     )
     INSERT = DOMAIN_TRACKING_INSERT
