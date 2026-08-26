@@ -23,7 +23,7 @@ from app.celery_app import celery_app
 @celery_app.task(name="app.tasks.newspaper.sweep_artifact_priorities")
 def sweep_artifact_priorities() -> dict[str, int]:
     """Daily beat: recompute `priority` for every PENDING artifact. Pure shadow computation -- see artifact_priority.py for the formula."""
-    from app.modules.newspaper.artifact_priority import (
+    from algorand_shared.artifact_priority import (
         sweep_artifact_priorities as _sweep,
     )
 
@@ -33,7 +33,7 @@ def sweep_artifact_priorities() -> dict[str, int]:
 @celery_app.task(name="app.tasks.newspaper.preview_to_compose_for_day")
 def preview_to_compose_for_day(day: str) -> dict[str, object]:
     """On-demand, read-only: what select_to_compose_for_day(day) currently would pick. Never mutates artifact status or writes to `to_compose` -- see to_compose_selection.preview_to_compose_for_day. Dispatched by the admin shadow-selection dashboard's GET endpoint."""
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.to_compose_selection import (
         preview_to_compose_for_day as _preview,
     )
 
@@ -43,7 +43,7 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
 @celery_app.task(name="app.tasks.newspaper.list_to_compose_for_day")
 def list_to_compose_for_day(day: str) -> list[dict[str, object]]:
     """On-demand, read-only: the REAL persisted `to_compose` lineup for `day` -- what select_to_compose_for_day(day) actually picked the last time the daily beat ran, not a forecast. See to_compose_selection.list_to_compose_for_day. Dispatched by the admin dashboard's "selected for tomorrow" GET endpoint. Empty until select_to_compose_for_today_task has fired at least once for `day`."""
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.to_compose_selection import (
         list_to_compose_for_day as _list_selected,
     )
 
@@ -53,7 +53,7 @@ def list_to_compose_for_day(day: str) -> list[dict[str, object]]:
 @celery_app.task(name="app.tasks.newspaper.reset_and_reselect_to_compose_for_day")
 def reset_and_reselect_to_compose_for_day(day: str) -> dict[str, object]:
     """On-demand write: the admin "Redo today's picks" action -- clear `day`'s locked-in `to_compose` selection, revert any still-SELECTED artifact it picked back to pending, then immediately re-run selection over the widened pool. See to_compose_selection.reset_and_reselect_for_day (and reset_to_compose_for_day's own docstring) for the full guard: an artifact that already progressed past SELECTED (composed or discarded) is left alone and reported in the reset half's `skipped` list, never silently reverted."""
-    from app.modules.newspaper.to_compose_selection import reset_and_reselect_for_day
+    from algorand_shared.to_compose_selection import reset_and_reselect_for_day
 
     return reset_and_reselect_for_day(day)
 
@@ -61,7 +61,7 @@ def reset_and_reselect_to_compose_for_day(day: str) -> dict[str, object]:
 @celery_app.task(name="app.tasks.newspaper.pin_artifact_for_tomorrow")
 def pin_artifact_for_tomorrow(artifact_id: str) -> dict[str, object]:
     """On-demand write: pin one artifact as tomorrow's human pick -- see to_compose_selection.pin_for_tomorrow. Dispatched by the admin shadow-selection dashboard's "pin for tomorrow" button. Writes only to the new shadow `artifacts`/`artifacts_pending`/`to_compose` tables, which nothing in the live compose/publish path reads yet."""
-    from app.modules.newspaper.to_compose_selection import pin_for_tomorrow
+    from algorand_shared.to_compose_selection import pin_for_tomorrow
 
     ok = pin_for_tomorrow(artifact_id)
     return {"ok": ok, "artifact_id": artifact_id}
@@ -74,20 +74,13 @@ def get_artifact_detail(artifact_id: str) -> dict[str, object] | None:
     Returns None for an unknown OR malformed artifact_id (both get_artifact
     and get_artifact_content already fail closed to None on a bad uuid) --
     the admin route turns that into a clean 404.
-    """
-    from app.modules.newspaper.artifact_store import get_artifact, get_artifact_content
 
-    artifact = get_artifact(artifact_id)
-    content = get_artifact_content(artifact_id)
-    if artifact is None and content is None:
-        return None
-    return {
-        "artifact_id": artifact_id,
-        "title": content.title if content else "",
-        "content": content.content if content else "",
-        "metadata": content.metadata if content else {},
-        "service_id": artifact.service_id if artifact else None,
-        "url": artifact.url if artifact else None,
-        "channel": artifact.channel if artifact else "",
-        "status": artifact.status if artifact else "",
-    }
+    2026-08-26: backend's own admin_get_artifact_content route now calls
+    algorand_shared.artifact_store.get_artifact_detail directly instead of
+    dispatching here over Celery -- this task delegates to the exact same
+    function so any other worker-side caller of this task name keeps
+    getting an identical response.
+    """
+    from algorand_shared.artifact_store import get_artifact_detail as _get_detail
+
+    return _get_detail(artifact_id)

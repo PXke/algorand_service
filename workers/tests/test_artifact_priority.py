@@ -20,7 +20,7 @@ from conftest import FakeArtifactSession
 
 def test_word_count_score_zero_for_empty_content() -> None:
     """Empty (or whitespace-only) content scores zero."""
-    from app.modules.newspaper.artifact_priority import word_count_score
+    from algorand_shared.artifact_priority import word_count_score
 
     assert word_count_score("") == 0.0
     assert word_count_score("   ") == 0.0
@@ -28,7 +28,7 @@ def test_word_count_score_zero_for_empty_content() -> None:
 
 def test_word_count_score_increases_with_more_words() -> None:
     """More substantial content scores higher."""
-    from app.modules.newspaper.artifact_priority import word_count_score
+    from algorand_shared.artifact_priority import word_count_score
 
     short = word_count_score(" ".join(["word"] * 50))
     medium = word_count_score(" ".join(["word"] * 300))
@@ -38,7 +38,7 @@ def test_word_count_score_increases_with_more_words() -> None:
 
 def test_word_count_score_diminishing_returns_not_linear(monkeypatch: pytest.MonkeyPatch) -> None:
     """Doubling word count must not double the score (diminishing returns, per the sqrt curve) -- going from 300 to 600 words gains less than going from 0 to 300 did."""
-    from app.modules.newspaper.artifact_priority import word_count_score
+    from algorand_shared.artifact_priority import word_count_score
 
     monkeypatch.setattr("app.core.config.ARTIFACT_WORD_COUNT_CAP", 1200)
     s300 = word_count_score(" ".join(["w"] * 300))
@@ -52,7 +52,7 @@ def test_word_count_score_caps_past_the_configured_word_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A huge wall of text past the cap must not keep buying more priority purely on size."""
-    from app.modules.newspaper.artifact_priority import word_count_score
+    from algorand_shared.artifact_priority import word_count_score
 
     monkeypatch.setattr("app.core.config.ARTIFACT_WORD_COUNT_CAP", 500)
     monkeypatch.setattr("app.core.config.ARTIFACT_WORD_COUNT_MAX_SCORE", 10.0)
@@ -69,7 +69,7 @@ def test_word_count_score_caps_past_the_configured_word_count(
 
 def test_timeliness_score_max_at_zero_age() -> None:
     """An artifact whose event just happened scores the configured max."""
-    from app.modules.newspaper.artifact_priority import timeliness_score
+    from algorand_shared.artifact_priority import timeliness_score
 
     now = datetime(2026, 8, 25, tzinfo=UTC)
     assert timeliness_score(now, now, today=now) == pytest.approx(10.0)
@@ -77,7 +77,7 @@ def test_timeliness_score_max_at_zero_age() -> None:
 
 def test_timeliness_score_decays_smoothly_as_it_ages() -> None:
     """Strictly decreasing with age -- no cliff, no plateau."""
-    from app.modules.newspaper.artifact_priority import timeliness_score
+    from algorand_shared.artifact_priority import timeliness_score
 
     now = datetime(2026, 8, 25, tzinfo=UTC)
     scores = [
@@ -89,7 +89,7 @@ def test_timeliness_score_decays_smoothly_as_it_ages() -> None:
 
 def test_timeliness_score_never_hits_a_hard_floor_of_zero() -> None:
     """Explicit owner instruction: old-but-real content must stay theoretically reachable ('except when we have nothing else to report') -- even a 100-year-old artifact scores strictly above zero."""
-    from app.modules.newspaper.artifact_priority import timeliness_score
+    from algorand_shared.artifact_priority import timeliness_score
 
     now = datetime(2026, 8, 25, tzinfo=UTC)
     ancient = timeliness_score(now - timedelta(days=365 * 100), now, today=now)
@@ -100,8 +100,9 @@ def test_timeliness_score_never_drops_below_configured_floor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """However old the artifact, the score must never fall below the configured floor -- at astronomically large ages the exponential term rounds away to (but never legitimately below) that floor."""
+    from algorand_shared.artifact_priority import timeliness_score
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_priority import timeliness_score
 
     monkeypatch.setattr(cfg, "ARTIFACT_TIMELINESS_FLOOR", 2.0)
     monkeypatch.setattr(cfg, "ARTIFACT_TIMELINESS_MAX_SCORE", 10.0)
@@ -120,8 +121,9 @@ def test_timeliness_score_never_drops_below_configured_floor(
 
 def test_timeliness_score_half_life_is_the_true_midpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     """At exactly one half-life, the score sits exactly halfway between max and floor."""
+    from algorand_shared.artifact_priority import timeliness_score
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_priority import timeliness_score
 
     monkeypatch.setattr(cfg, "ARTIFACT_TIMELINESS_FLOOR", 0.0)
     monkeypatch.setattr(cfg, "ARTIFACT_TIMELINESS_MAX_SCORE", 10.0)
@@ -133,7 +135,7 @@ def test_timeliness_score_half_life_is_the_true_midpoint(monkeypatch: pytest.Mon
 
 def test_timeliness_score_falls_back_to_created_at_when_no_event_date() -> None:
     """No extractable event_date falls back to created_at as the freshness anchor, per the artifacts-table fallback rule."""
-    from app.modules.newspaper.artifact_priority import timeliness_score
+    from algorand_shared.artifact_priority import timeliness_score
 
     now = datetime(2026, 8, 25, tzinfo=UTC)
     created_at = now - timedelta(days=10)
@@ -149,7 +151,7 @@ def test_timeliness_score_falls_back_to_created_at_when_no_event_date() -> None:
 
 def test_ecosystem_listed_score_zero_for_no_url() -> None:
     """No URL (a brief, a mail message) never earns the ecosystem-listed bonus."""
-    from app.modules.newspaper.artifact_priority import ecosystem_listed_score
+    from algorand_shared.artifact_priority import ecosystem_listed_score
 
     assert ecosystem_listed_score(None) == 0.0
     assert ecosystem_listed_score("") == 0.0
@@ -159,8 +161,9 @@ def test_ecosystem_listed_score_boosts_a_directory_listed_domain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reuses the SAME ecosystem_listed_domains() registry the crawler-discovery scorer uses for the identical chain-silent-but-important-service problem, rather than a second registry."""
+    from algorand_shared import artifact_priority
+
     from app.core import config as cfg
-    from app.modules.newspaper import artifact_priority
 
     monkeypatch.setattr(cfg, "ARTIFACT_ECOSYSTEM_LISTED_BOOST", 5.0)
     monkeypatch.setattr(
@@ -176,8 +179,9 @@ def test_ecosystem_listed_score_boosts_a_known_domains_entry_too(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Checking only ecosystem_listed_domains() (2026-08-26 root-caused bug) missed every chain-silent service hardcoded in score_page's own KNOWN_DOMAINS list -- exactly the class this bonus exists to protect. sealed.channel is in KNOWN_DOMAINS but deliberately NOT in ecosystem_listed_domains() here, to prove the union, not just the first registry, is what earns the bonus."""
+    from algorand_shared import artifact_priority
+
     from app.core import config as cfg
-    from app.modules.newspaper import artifact_priority
 
     monkeypatch.setattr(cfg, "ARTIFACT_ECOSYSTEM_LISTED_BOOST", 5.0)
     monkeypatch.setattr(
@@ -192,7 +196,7 @@ def test_ecosystem_listed_score_fails_open_to_zero_on_lookup_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Cassandra-unreachable registry lookup fails open to 0.0, never raises."""
-    from app.modules.newspaper import artifact_priority
+    from algorand_shared import artifact_priority
 
     def _boom() -> frozenset[str]:
         raise RuntimeError("cassandra unreachable")
@@ -208,7 +212,7 @@ def test_ecosystem_listed_score_fails_open_to_zero_on_lookup_error(
 
 def test_skip_count_score_zero_with_no_segments() -> None:
     """A fresh artifact (never concatenated) has no metadata["segments"] entry at all -- scores zero, same as an explicit empty list or None metadata."""
-    from app.modules.newspaper.artifact_priority import skip_count_score
+    from algorand_shared.artifact_priority import skip_count_score
 
     assert skip_count_score(None) == 0.0
     assert skip_count_score({}) == 0.0
@@ -219,8 +223,9 @@ def test_skip_count_score_increases_linearly_with_segment_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unlike word_count_score's sqrt curve, this component is linear -- each additional ignored cycle buys the SAME increment, not a shrinking one, so it keeps differentiating "ignored a lot" from "ignored a whole lot" instead of flattening out."""
+    from algorand_shared.artifact_priority import skip_count_score
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_priority import skip_count_score
 
     monkeypatch.setattr(cfg, "ARTIFACT_SKIP_COUNT_CAP", 10)
     monkeypatch.setattr(cfg, "ARTIFACT_SKIP_COUNT_MAX_SCORE", 10.0)
@@ -236,8 +241,9 @@ def test_skip_count_score_caps_past_configured_segment_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A service concatenated far more times than the cap doesn't keep buying unbounded priority purely on neglect count."""
+    from algorand_shared.artifact_priority import skip_count_score
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_priority import skip_count_score
 
     monkeypatch.setattr(cfg, "ARTIFACT_SKIP_COUNT_CAP", 5)
     monkeypatch.setattr(cfg, "ARTIFACT_SKIP_COUNT_MAX_SCORE", 6.0)
@@ -255,7 +261,7 @@ def test_skip_count_score_caps_past_configured_segment_count(
 
 def test_compute_artifact_priority_sums_all_score_components(monkeypatch: pytest.MonkeyPatch) -> None:
     """Priority = sum(component(artifact, content) for component in SCORE_COMPONENTS) -- pins the additive architecture so a future 4th signal only needs to append to the tuple."""
-    from app.modules.newspaper import artifact_priority
+    from algorand_shared import artifact_priority
 
     fake_components = (lambda _a, _c: 1.0, lambda _a, _c: 2.0, lambda _a, _c: 3.0)
     monkeypatch.setattr(artifact_priority, "SCORE_COMPONENTS", fake_components)
@@ -271,8 +277,8 @@ def test_sweep_updates_priority_for_every_pending_artifact(
     fake_artifact_session: FakeArtifactSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The sweep recomputes and persists a real priority for each pending artifact, and a more substantial one outscores a near-empty one."""
-    from app.modules.newspaper.artifact_priority import sweep_artifact_priorities
-    from app.modules.newspaper.artifact_store import insert_artifact
+    from algorand_shared.artifact_priority import sweep_artifact_priorities
+    from algorand_shared.artifact_store import insert_artifact
 
     monkeypatch.setattr(
         "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
@@ -319,16 +325,17 @@ def test_priority_keeps_rising_after_word_count_score_plateaus_via_skip_count(
     total priority keeps climbing for every additional ignored cycle even
     once word_count_score alone has gone flat.
     """
-    from app.core import config as cfg
-    from app.modules.newspaper.artifact_priority import (
+    from algorand_shared.artifact_priority import (
         compute_artifact_priority,
         word_count_score,
     )
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         get_artifact,
         get_artifact_content,
         insert_artifact,
     )
+
+    from app.core import config as cfg
 
     monkeypatch.setattr(
         "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
@@ -386,8 +393,8 @@ def test_sweep_never_touches_non_pending_artifacts(
     fake_artifact_session: FakeArtifactSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A composed/selected/discarded artifact's priority is left exactly as-is by the sweep -- only PENDING artifacts are ever touched."""
-    from app.modules.newspaper.artifact_priority import sweep_artifact_priorities
-    from app.modules.newspaper.artifact_store import COMPOSED, insert_artifact, mark_artifact_status
+    from algorand_shared.artifact_priority import sweep_artifact_priorities
+    from algorand_shared.artifact_store import COMPOSED, insert_artifact, mark_artifact_status
 
     monkeypatch.setattr(
         "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()

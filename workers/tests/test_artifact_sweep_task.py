@@ -22,7 +22,7 @@ def test_sweep_task_delegates_to_sweep_artifact_priorities(monkeypatch: pytest.M
         return {"status": "ok", "swept": 0, "updated": 0}
 
     monkeypatch.setattr(
-        "app.modules.newspaper.artifact_priority.sweep_artifact_priorities", _fake_sweep
+        "algorand_shared.artifact_priority.sweep_artifact_priorities", _fake_sweep
     )
     result = artifact_tasks.sweep_artifact_priorities.run()
 

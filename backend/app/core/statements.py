@@ -24,6 +24,8 @@ from algorand_shared.article_statements import (
     ARTICLE_VERSION_INSERT,
     ARTICLE_VERSION_LATEST,
 )
+from algorand_shared.artifact_statements import ArtifactStmts as ArtifactStmts
+from algorand_shared.artifact_statements import ToComposeStmts as ToComposeStmts
 from algorand_shared.chain_statements import CHAIN_CONDUIT_HEAD, CHAIN_TXNS_BY_ROUND
 from algorand_shared.platform_statements import (
     CLASSIFIER_FEEDBACK_INSERT_BY_TIME,

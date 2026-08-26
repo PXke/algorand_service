@@ -1,10 +1,9 @@
 """admin_reset_to_compose_for_day: the "Redo today's picks" admin action -- clears `day`'s locked-in `to_compose` selection and immediately re-selects.
 
-Same cross-service dispatch shape as the preview/selected routes (backend has
-no direct import of the workers codebase): send_task + a short synchronous
-.get() on app.tasks.newspaper.reset_and_reselect_to_compose_for_day. These
-tests fake `celery.Celery` the same way test_admin_artifacts_to_compose_selected.py
-does, so no real broker/worker is involved.
+2026-08-26: calls algorand_shared.to_compose_selection.reset_and_reselect_for_day
+directly instead of dispatching into a worker over Celery. These tests
+monkeypatch that function directly. The old broker-unavailable/timeout
+(502/504) test cases are moot for a direct function call and are dropped.
 """
 
 from __future__ import annotations
@@ -32,30 +31,6 @@ def _req(
         path_params=path_params or {},
         body=body,
     )
-
-
-class _FakeAsyncResult:
-    def __init__(self, value: Any) -> None:  # noqa: ANN401
-        self._value = value
-
-    def get(self, timeout: float) -> Any:  # noqa: ANN401, ARG002
-        return self._value
-
-
-class _FakeCelery:
-    """Captures the dispatched task name/args and returns a canned result."""
-
-    last_name: str | None = None
-    last_args: list | None = None
-    result: Any = None
-
-    def __init__(self, *, broker: str, backend: str) -> None:
-        pass
-
-    def send_task(self, name: str, *, args: list, queue: str) -> _FakeAsyncResult:  # noqa: ARG002
-        _FakeCelery.last_name = name
-        _FakeCelery.last_args = args
-        return _FakeAsyncResult(_FakeCelery.result)
 
 
 @pytest.fixture(autouse=True)
@@ -89,29 +64,44 @@ def _canned_result(day: str) -> dict:
 
 
 def test_reset_defaults_day_to_tomorrow(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No ?day= given -> dispatches for (real today + 1 day), matching the preview/selected routes' own default."""
+    """No ?day= given -> calls reset_and_reselect_for_day for (real today + 1 day), matching the preview/selected routes' own default."""
     from datetime import UTC, datetime, timedelta
 
     expected_day = (datetime.now(tz=UTC).date() + timedelta(days=1)).isoformat()
-    _FakeCelery.result = _canned_result(expected_day)
-    monkeypatch.setattr("celery.Celery", _FakeCelery)
+    canned = _canned_result(expected_day)
+    called = {}
+
+    def _fake_reset(day: str) -> dict:
+        called["day"] = day
+        return canned
+
+    monkeypatch.setattr(
+        "algorand_shared.to_compose_selection.reset_and_reselect_for_day", _fake_reset
+    )
 
     resp = admin_routes.admin_reset_to_compose_for_day(_req())
 
-    assert _FakeCelery.last_name == "app.tasks.newspaper.reset_and_reselect_to_compose_for_day"
-    assert _FakeCelery.last_args == [expected_day]
-    assert resp == _FakeCelery.result
+    assert called["day"] == expected_day
+    assert resp == canned
 
 
 def test_reset_uses_the_given_day(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An explicit ?day= is passed through verbatim as the Celery task arg."""
-    _FakeCelery.result = _canned_result("2026-08-26")
-    monkeypatch.setattr("celery.Celery", _FakeCelery)
+    """An explicit ?day= is passed through verbatim."""
+    canned = _canned_result("2026-08-26")
+    called = {}
+
+    def _fake_reset(day: str) -> dict:
+        called["day"] = day
+        return canned
+
+    monkeypatch.setattr(
+        "algorand_shared.to_compose_selection.reset_and_reselect_for_day", _fake_reset
+    )
 
     resp = admin_routes.admin_reset_to_compose_for_day(_req(query_params={"day": "2026-08-26"}))
 
-    assert _FakeCelery.last_args == ["2026-08-26"]
-    assert resp == _FakeCelery.result
+    assert called["day"] == "2026-08-26"
+    assert resp == canned
 
 
 def test_reset_surfaces_skipped_already_progressed_picks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,8 +110,10 @@ def test_reset_surfaces_skipped_already_progressed_picks(monkeypatch: pytest.Mon
     result["reset"]["reverted_to_pending"] = ["a-1"]
     result["reset"]["skipped"] = [{"artifact_id": "a-2", "status": "composed"}]
     result["reset"]["fully_reverted"] = False
-    _FakeCelery.result = result
-    monkeypatch.setattr("celery.Celery", _FakeCelery)
+
+    monkeypatch.setattr(
+        "algorand_shared.to_compose_selection.reset_and_reselect_for_day", lambda _day: result
+    )
 
     resp = admin_routes.admin_reset_to_compose_for_day(_req(query_params={"day": "2026-08-26"}))
 
@@ -130,45 +122,13 @@ def test_reset_surfaces_skipped_already_progressed_picks(monkeypatch: pytest.Mon
 
 
 def test_reset_400s_on_malformed_day(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ?day= that isn't a valid YYYY-MM-DD date 400s cleanly instead of dispatching garbage."""
-    monkeypatch.setattr("celery.Celery", _FakeCelery)
+    """A ?day= that isn't a valid YYYY-MM-DD date 400s cleanly instead of calling through with garbage."""
+
+    def _boom(_day: str) -> dict:
+        raise AssertionError("must not be called for a malformed day")
+
+    monkeypatch.setattr("algorand_shared.to_compose_selection.reset_and_reselect_for_day", _boom)
 
     resp = admin_routes.admin_reset_to_compose_for_day(_req(query_params={"day": "not-a-date"}))
 
     assert resp.status_code == 400
-
-
-def test_reset_502s_when_broker_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A broker connection failure surfaces as a clean 502, not an unhandled exception."""
-
-    class _BrokenCelery:
-        def __init__(self, *, broker: str, backend: str) -> None:  # noqa: ARG002
-            raise RuntimeError("no broker")
-
-    monkeypatch.setattr("celery.Celery", _BrokenCelery)
-
-    resp = admin_routes.admin_reset_to_compose_for_day(_req())
-
-    assert resp.status_code == 502
-
-
-def test_reset_504s_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A worker that takes too long to answer surfaces as a clean 504, not a hang."""
-    from celery.exceptions import TimeoutError as CeleryTimeoutError
-
-    class _SlowAsyncResult:
-        def get(self, timeout: float) -> Any:  # noqa: ANN401, ARG002
-            raise CeleryTimeoutError
-
-    class _SlowCelery:
-        def __init__(self, *, broker: str, backend: str) -> None:
-            pass
-
-        def send_task(self, name: str, *, args: list, queue: str) -> _SlowAsyncResult:  # noqa: ARG002
-            return _SlowAsyncResult()
-
-    monkeypatch.setattr("celery.Celery", _SlowCelery)
-
-    resp = admin_routes.admin_reset_to_compose_for_day(_req())
-
-    assert resp.status_code == 504

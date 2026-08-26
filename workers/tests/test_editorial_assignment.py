@@ -81,7 +81,7 @@ def test_assign_editorial_brief_forces_relevance_and_enqueues(
 
     captured_artifact_kwargs = {}
     monkeypatch.setattr(
-        "app.modules.newspaper.artifact_store.insert_artifact",
+        "algorand_shared.artifact_store.insert_artifact",
         lambda **kw: (captured_artifact_kwargs.update(kw), ("artifact-id-1", True))[1],
     )
     compose_now_calls = []
@@ -106,7 +106,7 @@ def test_assign_editorial_brief_disabled_flag(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr("app.core.config.WRITER_EDITORIAL_BRIEFS_ENABLED", False)
     called = []
     monkeypatch.setattr(
-        "app.modules.newspaper.artifact_store.insert_artifact",
+        "algorand_shared.artifact_store.insert_artifact",
         lambda **kw: called.append(kw),
     )
 
@@ -155,7 +155,7 @@ def test_refresh_edits_existing_article_and_bumps_last_run(monkeypatch: pytest.M
 
     captured_artifact_kwargs = {}
     monkeypatch.setattr(
-        "app.modules.newspaper.artifact_store.insert_artifact",
+        "algorand_shared.artifact_store.insert_artifact",
         lambda **kw: (captured_artifact_kwargs.update(kw), ("artifact-id-2", True))[1],
     )
 

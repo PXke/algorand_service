@@ -21,12 +21,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from celery.exceptions import SoftTimeLimitExceeded
-
-from app.celery_app import celery_app
-from app.core import config
-from app.modules.ai.mistral_credit_guard import is_credit_exhausted
-from app.modules.newspaper.artifact_store import (
+from algorand_shared.artifact_store import (
     COMPOSED,
     DISCARDED,
     PENDING,
@@ -37,6 +32,15 @@ from app.modules.newspaper.artifact_store import (
     get_artifact_content,
     mark_artifact_status,
 )
+from algorand_shared.to_compose_selection import (
+    list_to_compose_for_day,
+    select_to_compose_for_day,
+)
+from celery.exceptions import SoftTimeLimitExceeded
+
+from app.celery_app import celery_app
+from app.core import config
+from app.modules.ai.mistral_credit_guard import is_credit_exhausted
 from app.modules.newspaper.publish_policy import (
     PublishKind,
     PublishTier,
@@ -46,10 +50,6 @@ from app.modules.newspaper.publish_policy import (
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow, is_terminal_outcome
 from app.modules.newspaper.publish_schedule import record_standard_publish
 from app.modules.newspaper.tasks.publish_tasks import publish_from_queued_row
-from app.modules.newspaper.to_compose_selection import (
-    list_to_compose_for_day,
-    select_to_compose_for_day,
-)
 
 logger = logging.getLogger(__name__)
 

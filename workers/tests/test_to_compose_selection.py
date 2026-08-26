@@ -23,8 +23,8 @@ from conftest import FakeArtifactSession
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_human_slot_stays_empty_when_no_pin_by_cutoff() -> None:
     """Explicit owner decision: if nobody pinned an artifact for the day, slot 0 stays UNFILLED -- the platform must never backfill it to avoid overcomposing."""
-    from app.modules.newspaper.artifact_store import insert_artifact
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
@@ -42,8 +42,8 @@ def test_human_slot_stays_empty_when_no_pin_by_cutoff() -> None:
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_human_pin_fills_slot_zero() -> None:
     """A pinned artifact takes slot 0 with lane='human'."""
-    from app.modules.newspaper.artifact_store import insert_artifact, pin_artifact_for_day
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
@@ -65,8 +65,8 @@ def test_human_pin_fills_slot_zero() -> None:
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_list_to_compose_for_day_isoformats_picked_at() -> None:
     """picked_at comes back as an ISO string, not a raw datetime -- required so this is safe to hand straight to a JSON-serializing transport (Celery's default JSON serializer wraps a raw datetime in a `{"__type__": ...}` envelope, which would otherwise leak into the admin API response)."""
-    from app.modules.newspaper.artifact_store import insert_artifact, pin_artifact_for_day
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
@@ -85,8 +85,8 @@ def test_list_to_compose_for_day_isoformats_picked_at() -> None:
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_a_pin_for_a_different_day_is_not_used() -> None:
     """A pin set for some OTHER day must not accidentally fill today's/tomorrow's human slot."""
-    from app.modules.newspaper.artifact_store import insert_artifact, pin_artifact_for_day
-    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import select_to_compose_for_day
 
     picked_id, _ = insert_artifact(
         service_id="svc-picked", url=None, channel="brief", content="picked"
@@ -100,12 +100,13 @@ def test_a_pin_for_a_different_day_is_not_used() -> None:
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_platform_fills_n_minus_1_slots_by_priority(monkeypatch: pytest.MonkeyPatch) -> None:
     """With no human pick, N-1 platform slots go to the top-priority pending artifacts."""
-    from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
+
+    from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # N=3 -> 2 platform slots
 
@@ -132,12 +133,13 @@ def test_platform_fills_n_minus_1_slots_by_priority(monkeypatch: pytest.MonkeyPa
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_platform_fill_respects_one_pending_per_service_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two DIFFERENT artifacts can never coexist pending for the same service_id (insert_artifact's own dedup already guarantees this), so the platform fill naturally never double-picks one service -- this pins that guarantee end to end through selection."""
-    from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
+
+    from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 4)  # N=4 -> 3 platform slots
 
@@ -162,16 +164,17 @@ def test_platform_fill_respects_one_pending_per_service_dedup(monkeypatch: pytes
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_platform_fill_excludes_the_human_picks_own_service(monkeypatch: pytest.MonkeyPatch) -> None:
     """'N-1 platform slots ... excluding whatever the human already picked' -- a second pending artifact for the SAME service_id as the human pick must not also take a platform slot."""
-    from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         insert_artifact,
         pin_artifact_for_day,
         update_artifact_priority,
     )
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
+
+    from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)
 
@@ -196,9 +199,10 @@ def test_selected_artifacts_leave_the_pending_lane(
     fake_artifact_session: FakeArtifactSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Both the human pick and every platform pick transition pending -> selected and drop out of the pending index."""
+    from algorand_shared.artifact_store import SELECTED, insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import SELECTED, insert_artifact, pin_artifact_for_day
-    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)
 
@@ -216,9 +220,10 @@ def test_selected_artifacts_leave_the_pending_lane(
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_platform_slots_available_floors_at_zero_when_cap_is_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """N=1 (the minimum allowed cap) leaves zero platform slots -- must not go negative or (an earlier bug caught by this test) admit one extra artifact via an off-by-one in the fill loop's break check."""
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import insert_artifact
-    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 1)
     insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
@@ -231,8 +236,8 @@ def test_platform_slots_available_floors_at_zero_when_cap_is_one(monkeypatch: py
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_pin_for_tomorrow_uses_day_after_today() -> None:
     """pin_for_tomorrow resolves "tomorrow" relative to the given `today` and pins for that exact compose day."""
-    from app.modules.newspaper.artifact_store import insert_artifact
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import (
         pin_for_tomorrow,
         select_to_compose_for_day,
     )
@@ -258,12 +263,12 @@ def test_preview_never_mutates_pending_artifacts_or_to_compose(
     monkeypatch.setattr(
         "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
     )
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         PENDING,
         insert_artifact,
         list_pending_artifacts,
     )
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         preview_to_compose_for_day,
     )
@@ -285,17 +290,18 @@ def test_preview_matches_what_select_would_actually_pick(monkeypatch: pytest.Mon
     monkeypatch.setattr(
         "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
     )
-    from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         insert_artifact,
         pin_artifact_for_day,
         update_artifact_priority,
     )
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         preview_to_compose_for_day,
         select_to_compose_for_day,
     )
+
+    from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # N=3 -> 2 platform slots
 
@@ -333,8 +339,8 @@ def test_preview_includes_priority_breakdown_and_title(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
     )
-    from app.modules.newspaper.artifact_store import insert_artifact
-    from app.modules.newspaper.to_compose_selection import preview_to_compose_for_day
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import preview_to_compose_for_day
 
     insert_artifact(
         service_id="svc-a", url=None, channel="brief", content="hello world", title="A Title"
@@ -355,8 +361,8 @@ def test_preview_flags_the_pin_for_the_requested_day_only(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
     )
-    from app.modules.newspaper.artifact_store import insert_artifact, pin_artifact_for_day
-    from app.modules.newspaper.to_compose_selection import preview_to_compose_for_day
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import preview_to_compose_for_day
 
     picked_id, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
     pin_artifact_for_day(picked_id, "2026-08-26")
@@ -384,7 +390,7 @@ def test_preview_flags_the_pin_for_the_requested_day_only(monkeypatch: pytest.Mo
 def _mock_coverage(monkeypatch: pytest.MonkeyPatch, covered: set[str]) -> None:
     """Make service_has_article return True only for service_ids in `covered` -- everything else reads as a never-covered (new_service pool) service."""
     monkeypatch.setattr(
-        "app.modules.newspaper.article_matching.service_has_article",
+        "algorand_shared.article_matching.service_has_article",
         lambda sid: sid in covered,
     )
 
@@ -395,8 +401,8 @@ def test_new_service_detection_reflects_service_has_article(
 ) -> None:
     """The pool label itself: an artifact whose service_id has a prior published article is 'update', one that doesn't is 'new_service' -- the exact signal preview surfaces per item."""
     _mock_coverage(monkeypatch, covered={"svc-covered"})
-    from app.modules.newspaper.artifact_store import insert_artifact
-    from app.modules.newspaper.to_compose_selection import preview_to_compose_for_day
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import preview_to_compose_for_day
 
     insert_artifact(service_id="svc-covered", url=None, channel="crawler", content="update diff")
     insert_artifact(service_id="svc-fresh", url=None, channel="crawler", content="first ever diff")
@@ -414,8 +420,8 @@ def test_pool_detection_prefers_venue_service_id_over_literal_service_id(
 ) -> None:
     """Bug-class-2 fix: a per-item lane artifact (forum-topic:<id>, one per hot thread) whose literal service_id has never itself been published must still read as 'update' when its VENUE (the forum) has -- otherwise every single item from that lane would permanently occupy the guaranteed new-service floor even though the venue is well covered."""
     _mock_coverage(monkeypatch, covered={"algorand-forum"})
-    from app.modules.newspaper.artifact_store import insert_artifact
-    from app.modules.newspaper.to_compose_selection import preview_to_compose_for_day
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import preview_to_compose_for_day
 
     insert_artifact(
         service_id="forum-topic:15288",
@@ -438,8 +444,8 @@ def test_pool_detection_falls_back_to_service_id_when_no_venue_set(
 ) -> None:
     """An artifact with no venue_service_id (a plain web crawl diff) is unaffected by the fix -- pool classification still keys on its own literal service_id, exactly as before."""
     _mock_coverage(monkeypatch, covered={"svc-covered"})
-    from app.modules.newspaper.artifact_store import insert_artifact
-    from app.modules.newspaper.to_compose_selection import preview_to_compose_for_day
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import preview_to_compose_for_day
 
     insert_artifact(service_id="svc-covered", url=None, channel="crawler", content="update diff")
     insert_artifact(service_id="svc-fresh", url=None, channel="crawler", content="first ever diff")
@@ -457,9 +463,10 @@ def test_rank_platform_picks_dedup_still_keys_on_literal_service_id(
 ) -> None:
     """Explicit non-goal: the venue fix changes POOL classification only, never the 1-pending-per-service dedup in _rank_platform_picks, which must stay keyed on the literal per-item service_id -- two different forum threads sharing the same venue are still two distinct dedup candidates, both eligible for a slot."""
     _mock_coverage(monkeypatch, covered={"algorand-forum"})
+    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
-    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # platform_n = 2
 
@@ -492,9 +499,10 @@ def test_new_service_pool_gets_its_guaranteed_floor_even_at_lower_priority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The core guarantee: with plenty of candidates in both pools, the new-service pool still gets its floor share of platform slots even when every new-service candidate is lower priority than every update candidate -- otherwise a saturating established service would starve new-service coverage entirely."""
+    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
-    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # platform_n = 4
     monkeypatch.setattr(cfg, "ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)  # floor 2 / 2
@@ -539,9 +547,10 @@ def test_thin_new_service_pool_is_backfilled_from_update_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the new-service pool doesn't have enough eligible candidates to fill its own floor, the leftover slot(s) backfill from the update pool rather than leaving a platform slot empty."""
+    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
-    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # platform_n = 4
     monkeypatch.setattr(cfg, "ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)  # floor 2 / 2
@@ -583,9 +592,10 @@ def test_thin_update_pool_is_backfilled_from_new_service_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Symmetric to the new-service-pool-thin case: when the UPDATE pool is what's thin, its shortfall backfills from the new-service pool instead."""
+    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
-    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # platform_n = 4
     monkeypatch.setattr(cfg, "ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)  # floor 2 / 2
@@ -612,9 +622,10 @@ def test_surplus_slot_beyond_the_floor_goes_to_next_highest_priority_regardless_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Floors are a MINIMUM, not a partition: once both pools' floors are satisfied, a leftover slot (here, from odd platform_n not dividing evenly) goes to whichever pool has the next-highest-priority remaining candidate -- an already-covered service's second-best update can still win it over a weak new-service candidate. This is the explicit owner carve-out: "if some project did a big rework, the big rework would probably [earn] priority"."""
+    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.to_compose_selection import select_to_compose_for_day
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
-    from app.modules.newspaper.to_compose_selection import select_to_compose_for_day
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 4)  # platform_n = 3 (odd -> 1 surplus)
     monkeypatch.setattr(cfg, "ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)  # floor 1 / 1
@@ -657,8 +668,8 @@ def test_surplus_slot_beyond_the_floor_goes_to_next_highest_priority_regardless_
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_reset_clears_to_compose_rows_for_the_day() -> None:
     """After a reset, the day's to_compose partition is fully empty."""
-    from app.modules.newspaper.artifact_store import insert_artifact
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         reset_to_compose_for_day,
         select_to_compose_for_day,
@@ -679,8 +690,8 @@ def test_reset_reverts_still_selected_artifacts_to_pending(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """Every artifact a prior select_to_compose_for_day run picked (and left SELECTED) goes back to PENDING and is reported in reverted_to_pending."""
-    from app.modules.newspaper.artifact_store import PENDING, SELECTED, insert_artifact
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.artifact_store import PENDING, SELECTED, insert_artifact
+    from algorand_shared.to_compose_selection import (
         reset_to_compose_for_day,
         select_to_compose_for_day,
     )
@@ -704,12 +715,12 @@ def test_reset_does_not_revert_an_already_composed_artifact(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """An artifact that progressed past SELECTED to COMPOSED (drain_to_compose already ran) between the original selection and the reset must be left alone -- reported in `skipped`, never resurrected."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         COMPOSED,
         insert_artifact,
         mark_artifact_status,
     )
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.to_compose_selection import (
         reset_to_compose_for_day,
         select_to_compose_for_day,
     )
@@ -732,12 +743,12 @@ def test_reset_does_not_revert_an_already_discarded_artifact(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """Symmetric to the composed case: an artifact a pre-compose gate permanently DISCARDED after selection is also left alone, not resurrected."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         DISCARDED,
         insert_artifact,
         mark_artifact_status,
     )
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.to_compose_selection import (
         reset_to_compose_for_day,
         select_to_compose_for_day,
     )
@@ -755,8 +766,8 @@ def test_reset_does_not_revert_an_already_discarded_artifact(
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_reset_still_clears_to_compose_even_when_a_pick_was_skipped() -> None:
     """The to_compose rows are cleared unconditionally -- a skipped (already-progressed) artifact only blocks its OWN status revert, not the partition clear."""
-    from app.modules.newspaper.artifact_store import COMPOSED, insert_artifact, mark_artifact_status
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.artifact_store import COMPOSED, insert_artifact, mark_artifact_status
+    from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         reset_to_compose_for_day,
         select_to_compose_for_day,
@@ -776,7 +787,7 @@ def test_reset_on_a_day_with_nothing_selected_is_a_clean_noop(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """Resetting a day that was never selected (an empty to_compose partition) doesn't error -- zero cleared, zero reverted, fully_reverted True."""
-    from app.modules.newspaper.to_compose_selection import reset_to_compose_for_day
+    from algorand_shared.to_compose_selection import reset_to_compose_for_day
 
     result = reset_to_compose_for_day("2026-08-26")
 
@@ -791,17 +802,18 @@ def test_reset_and_reselect_produces_a_fresh_valid_selection(
     fake_artifact_session: FakeArtifactSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The combined one-button action: after reset_and_reselect_for_day, the day has a brand-new to_compose lineup drawn from the widened (reverted) pending pool -- exercising the idempotency the module docstring calls out (clearing to_compose first is what makes a second select_to_compose_for_day call for the same day safe)."""
-    from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         SELECTED,
         insert_artifact,
         update_artifact_priority,
     )
-    from app.modules.newspaper.to_compose_selection import (
+    from algorand_shared.to_compose_selection import (
         list_to_compose_for_day,
         reset_and_reselect_for_day,
         select_to_compose_for_day,
     )
+
+    from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)
 
@@ -837,9 +849,10 @@ def test_preview_pool_field_present_for_every_pending_item_not_just_selected(
     monkeypatch.setattr(
         "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
     )
+    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.to_compose_selection import preview_to_compose_for_day
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
-    from app.modules.newspaper.to_compose_selection import preview_to_compose_for_day
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)  # platform_n = 1
     _mock_coverage(monkeypatch, covered={"svc-covered"})

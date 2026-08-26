@@ -266,3 +266,38 @@ def _apply_algod_token_file(s: Settings) -> Settings:
 
 
 settings = _apply_algod_token_file(_load())
+
+
+# --------------------------------------------------------------------------- #
+# Module-level mirrors of workers' env-driven constants (workers/app/core/
+# config.py is UPPER_CASE module constants, not `Settings` fields -- see that
+# file's own docstring). Needed because `algorand_shared.to_compose_selection`
+# / `algorand_shared.artifact_priority` (moved from workers 2026-08-26 so
+# backend's admin to-compose/artifact routes can call them directly instead
+# of a Celery round-trip) read these via `from app.core import config as cfg`,
+# so they behave identically regardless of which service imports them. Same
+# env var names/defaults as workers/app/core/config.py -- keep both in sync.
+# --------------------------------------------------------------------------- #
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    return int(raw) if raw not in (None, "") else default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    return float(raw) if raw not in (None, "") else default
+
+
+# Mirror of the worker's NEWS_MAX_ARTICLES_PER_DAY -- see also this module's
+# own `news_max_articles_per_day` Settings field (the pre-existing admin-
+# facing mirror); `to_compose_selection` needs the plain module constant.
+NEWS_MAX_ARTICLES_PER_DAY = min(max(1, _env_int("NEWS_MAX_ARTICLES_PER_DAY", 3)), 7)
+ARTIFACT_WORD_COUNT_CAP = _env_int("ARTIFACT_WORD_COUNT_CAP", 1200)
+ARTIFACT_WORD_COUNT_MAX_SCORE = _env_float("ARTIFACT_WORD_COUNT_MAX_SCORE", 10.0)
+ARTIFACT_TIMELINESS_MAX_SCORE = _env_float("ARTIFACT_TIMELINESS_MAX_SCORE", 10.0)
+ARTIFACT_TIMELINESS_FLOOR = _env_float("ARTIFACT_TIMELINESS_FLOOR", 1.0)
+ARTIFACT_TIMELINESS_HALF_LIFE_DAYS = _env_float("ARTIFACT_TIMELINESS_HALF_LIFE_DAYS", 21.0)
+ARTIFACT_ECOSYSTEM_LISTED_BOOST = _env_float("ARTIFACT_ECOSYSTEM_LISTED_BOOST", 5.0)
+ARTIFACT_NEW_SERVICE_MIN_SHARE = _env_float("ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)
+ARTIFACT_SKIP_COUNT_CAP = _env_int("ARTIFACT_SKIP_COUNT_CAP", 10)
+ARTIFACT_SKIP_COUNT_MAX_SCORE = _env_float("ARTIFACT_SKIP_COUNT_MAX_SCORE", 6.0)

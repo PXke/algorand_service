@@ -36,7 +36,8 @@ def test_drain_skips_review_bound_row_in_cooldown(monkeypatch: pytest.MonkeyPatc
     """Regression: a domain in its multi-day cooldown must NOT be composed into the review queue. The cooldown check has to run BEFORE the review branch, which previously composed + continued past it (so re-coverage slipped through e.g. explorer.perawallet.app a couple days after a perawallet.app article). Exercised against drain_to_compose (2026-08-25 successor to drain_standard_publish_queue) — _domain_in_cooldown itself is unchanged, reused as-is against an artifact-backed row."""
     from datetime import UTC, datetime
 
-    from app.modules.newspaper.artifact_store import SELECTED, Artifact, ArtifactContent
+    from algorand_shared.artifact_store import SELECTED, Artifact, ArtifactContent
+
     from app.modules.newspaper.tasks import queue_drain_tasks as q
 
     artifact = Artifact(

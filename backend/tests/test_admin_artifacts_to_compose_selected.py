@@ -1,10 +1,13 @@
 """admin_artifacts_to_compose_selected: the REAL, persisted `to_compose` lineup for a day, as opposed to admin_artifacts_to_compose_preview's live forecast.
 
-Same cross-service dispatch shape as the preview route (backend has no direct
-import of the workers codebase): send_task + a short synchronous .get() on
-app.tasks.newspaper.list_to_compose_for_day. These tests fake `celery.Celery`
-the same way test_admin_artifacts_to_compose_preview.py does, so no real
-broker/worker is involved.
+2026-08-26: calls algorand_shared.to_compose_selection.list_to_compose_for_day
+directly (no more Celery round-trip into a worker process -- that shape was
+purely an artifact of the underlying query living in workers/, and became a
+real production liability once a heavy background job filling the shared
+queue could make this read-only route time out). These tests monkeypatch
+that function directly, the same seam-swap style the old Celery-mocking
+tests used, just one hop shorter. The old broker-unavailable/timeout (502/
+504) test cases are moot for a direct function call and are dropped.
 """
 
 from __future__ import annotations
@@ -34,30 +37,6 @@ def _req(
     )
 
 
-class _FakeAsyncResult:
-    def __init__(self, value: Any) -> None:  # noqa: ANN401
-        self._value = value
-
-    def get(self, timeout: float) -> Any:  # noqa: ANN401, ARG002
-        return self._value
-
-
-class _FakeCelery:
-    """Captures the dispatched task name/args and returns a canned result."""
-
-    last_name: str | None = None
-    last_args: list | None = None
-    result: Any = None
-
-    def __init__(self, *, broker: str, backend: str) -> None:
-        pass
-
-    def send_task(self, name: str, *, args: list, queue: str) -> _FakeAsyncResult:  # noqa: ARG002
-        _FakeCelery.last_name = name
-        _FakeCelery.last_args = args
-        return _FakeAsyncResult(_FakeCelery.result)
-
-
 @pytest.fixture(autouse=True)
 def _admin_allowed() -> Any:  # noqa: ANN401
     with patch.object(admin_routes, "require_admin_wallet", return_value=None):
@@ -65,23 +44,27 @@ def _admin_allowed() -> Any:  # noqa: ANN401
 
 
 def test_selected_defaults_day_to_tomorrow(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No ?day= given -> dispatches for (real today + 1 day), not today itself."""
+    """No ?day= given -> calls list_to_compose_for_day for (real today + 1 day), not today itself."""
     from datetime import UTC, datetime, timedelta
 
-    _FakeCelery.result = []
-    monkeypatch.setattr("celery.Celery", _FakeCelery)
+    called = {}
+
+    def _fake_list(day: str) -> list:
+        called["day"] = day
+        return []
+
+    monkeypatch.setattr("algorand_shared.to_compose_selection.list_to_compose_for_day", _fake_list)
 
     resp = admin_routes.admin_artifacts_to_compose_selected(_req())
 
     expected_day = (datetime.now(tz=UTC).date() + timedelta(days=1)).isoformat()
-    assert _FakeCelery.last_name == "app.tasks.newspaper.list_to_compose_for_day"
-    assert _FakeCelery.last_args == [expected_day]
+    assert called["day"] == expected_day
     assert resp == {"compose_day": expected_day, "items": []}
 
 
 def test_selected_uses_the_given_day(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An explicit ?day= is passed through verbatim as the Celery task arg."""
-    _FakeCelery.result = [
+    """An explicit ?day= is passed through verbatim."""
+    items = [
         {
             "slot": 0,
             "artifact_id": "abc-123",
@@ -90,22 +73,29 @@ def test_selected_uses_the_given_day(monkeypatch: pytest.MonkeyPatch) -> None:
             "picked_at": "2026-08-26T00:05:00",
         }
     ]
-    monkeypatch.setattr("celery.Celery", _FakeCelery)
+    called = {}
+
+    def _fake_list(day: str) -> list:
+        called["day"] = day
+        return items
+
+    monkeypatch.setattr("algorand_shared.to_compose_selection.list_to_compose_for_day", _fake_list)
 
     resp = admin_routes.admin_artifacts_to_compose_selected(
         _req(query_params={"day": "2026-08-26"})
     )
 
-    assert _FakeCelery.last_args == ["2026-08-26"]
-    assert resp == {"compose_day": "2026-08-26", "items": _FakeCelery.result}
+    assert called["day"] == "2026-08-26"
+    assert resp == {"compose_day": "2026-08-26", "items": items}
 
 
 def test_selected_returns_empty_items_when_nothing_locked_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An empty `to_compose` table (the daily beat hasn't fired yet) surfaces as items: [], not an error."""
-    _FakeCelery.result = []
-    monkeypatch.setattr("celery.Celery", _FakeCelery)
+    monkeypatch.setattr(
+        "algorand_shared.to_compose_selection.list_to_compose_for_day", lambda _day: []
+    )
 
     resp = admin_routes.admin_artifacts_to_compose_selected(
         _req(query_params={"day": "2026-08-26"})
@@ -115,47 +105,15 @@ def test_selected_returns_empty_items_when_nothing_locked_in(
 
 
 def test_selected_400s_on_malformed_day(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ?day= that isn't a valid YYYY-MM-DD date 400s cleanly instead of dispatching garbage."""
-    monkeypatch.setattr("celery.Celery", _FakeCelery)
+    """A ?day= that isn't a valid YYYY-MM-DD date 400s cleanly instead of calling through with garbage."""
+
+    def _boom(_day: str) -> list:
+        raise AssertionError("must not be called for a malformed day")
+
+    monkeypatch.setattr("algorand_shared.to_compose_selection.list_to_compose_for_day", _boom)
 
     resp = admin_routes.admin_artifacts_to_compose_selected(
         _req(query_params={"day": "not-a-date"})
     )
 
     assert resp.status_code == 400
-
-
-def test_selected_502s_when_broker_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A broker connection failure surfaces as a clean 502, not an unhandled exception."""
-
-    class _BrokenCelery:
-        def __init__(self, *, broker: str, backend: str) -> None:  # noqa: ARG002
-            raise RuntimeError("no broker")
-
-    monkeypatch.setattr("celery.Celery", _BrokenCelery)
-
-    resp = admin_routes.admin_artifacts_to_compose_selected(_req())
-
-    assert resp.status_code == 502
-
-
-def test_selected_504s_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A worker that takes too long to answer surfaces as a clean 504, not a hang."""
-    from celery.exceptions import TimeoutError as CeleryTimeoutError
-
-    class _SlowAsyncResult:
-        def get(self, timeout: float) -> Any:  # noqa: ANN401, ARG002
-            raise CeleryTimeoutError
-
-    class _SlowCelery:
-        def __init__(self, *, broker: str, backend: str) -> None:
-            pass
-
-        def send_task(self, name: str, *, args: list, queue: str) -> _SlowAsyncResult:  # noqa: ARG002
-            return _SlowAsyncResult()
-
-    monkeypatch.setattr("celery.Celery", _SlowCelery)
-
-    resp = admin_routes.admin_artifacts_to_compose_selected(_req())
-
-    assert resp.status_code == 504

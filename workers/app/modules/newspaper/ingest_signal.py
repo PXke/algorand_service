@@ -488,8 +488,9 @@ def _insert_artifact_for_signal(
     """Create (or replace-for-this-service) the editorial-room artifact for one publish signal."""
     from datetime import UTC, datetime
 
+    from algorand_shared.artifact_store import insert_artifact
+
     from app.modules.gatekeeper.fact_align import event_anchor_date
-    from app.modules.newspaper.artifact_store import insert_artifact
 
     event_date = None
     anchor = event_anchor_date(published_at=published_at, page_title=page_title, page_text=page_text)
