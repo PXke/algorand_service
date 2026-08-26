@@ -124,6 +124,15 @@ class ToComposeStmts:
         "FROM algorand_platform.to_compose WHERE compose_day = ?"
     )
     DELETE_FOR_DAY = _Stmt("DELETE FROM algorand_platform.to_compose WHERE compose_day = ?")
+    # Targeted single-slot delete (compose_day, slot IS the full primary key
+    # -- see migration 077's CREATE TABLE) for reclaim_stale_selected_
+    # artifacts: clears just the one stale slot a reclaimed artifact
+    # occupied, leaving any OTHER slot for that same day (still-valid
+    # picks, or a different artifact's own historical record) untouched --
+    # unlike DELETE_FOR_DAY, which wipes the whole day's partition.
+    DELETE_SLOT = _Stmt(
+        "DELETE FROM algorand_platform.to_compose WHERE compose_day = ? AND slot = ?"
+    )
     # Unfiltered full-table scan -- no WHERE clause, so no ALLOW FILTERING
     # needed even though compose_day is the partition key. Safe: this table
     # holds at most NEWS_MAX_ARTICLES_PER_DAY rows per day, forever, so even

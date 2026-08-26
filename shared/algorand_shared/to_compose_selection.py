@@ -394,6 +394,7 @@ def find_stale_selected_artifacts(*, today: str | None = None) -> list[dict[str,
                 {
                     "artifact_id": artifact_id,
                     "compose_day": row.compose_day,
+                    "slot": row.slot,
                     "lane": row.lane,
                     "service_id": row.service_id,
                 }
@@ -415,12 +416,25 @@ def reclaim_stale_selected_artifacts(
     match will ever equal it) but confusing leftover state to see on an
     otherwise-ordinary pending artifact.
 
+    2026-08-26: also deletes the stale slot's own `to_compose` row
+    (`ToComposeStmts.DELETE_SLOT`, keyed on the exact (compose_day, slot)
+    primary key) once the revert succeeds -- root-caused live: the admin
+    "Selected for today" view reads `to_compose` directly, so leaving that
+    historical row in place made an already-reclaimed (back-to-pending)
+    artifact keep showing as if still locked in for a day that will now
+    never compose it. Deliberately per-slot, not `DELETE_FOR_DAY` -- must
+    never touch any OTHER slot on that same day (a still-genuinely-selected
+    pick, or another day's own historical record).
+
     `dry_run=True` by default, mirroring every other act-on-live-data
     function in this codebase added this session (`gray_zone_
     reconciliation.dispatch_gray_zone_deep_classify`, `browser_reaper.
     reap_orphaned_browser_processes`) -- reports what WOULD be reclaimed
     without writing anything until a caller opts in.
     """
+    from app.core.cassandra import get_cassandra_session
+
+    from algorand_shared.artifact_statements import ToComposeStmts
     from algorand_shared.artifact_store import clear_artifact_pin, revert_artifact_to_pending
 
     stale = find_stale_selected_artifacts(today=today)
@@ -433,6 +447,8 @@ def reclaim_stale_selected_artifacts(
         if revert_artifact_to_pending(artifact_id):
             if finding["lane"] == "human":
                 clear_artifact_pin(artifact_id)
+            session = get_cassandra_session()
+            session.execute(ToComposeStmts.DELETE_SLOT, (finding["compose_day"], finding["slot"]))
             reclaimed.append(finding)
 
     return {"dry_run": dry_run, "reclaimed_count": len(reclaimed), "reclaimed": reclaimed}

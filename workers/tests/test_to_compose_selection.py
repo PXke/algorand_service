@@ -916,6 +916,7 @@ def test_find_stale_selected_finds_a_platform_pick_stuck_past_its_day(
     assert len(stale) == 1
     assert stale[0]["artifact_id"] == aid
     assert stale[0]["compose_day"] == "2026-08-25"
+    assert stale[0]["slot"] == 0
     assert stale[0]["lane"] == "platform"
 
 
@@ -999,6 +1000,69 @@ def test_reclaim_stale_selected_reverts_platform_pick_to_pending(
     assert fake_artifact_session.artifacts[aid]["status"] == PENDING
     pending_ids = {str(r["artifact_id"]) for r in fake_artifact_session.pending.values()}
     assert aid in pending_ids
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_deletes_the_stale_slots_own_to_compose_row() -> None:
+    """A real reclaim also clears the reclaimed artifact's own (compose_day, slot) row -- otherwise the admin "Selected for {day}" view (which reads to_compose directly) keeps showing an artifact as still locked in for a day that will now never compose it, even though its live status has already moved back to pending."""
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import (
+        list_to_compose_for_day,
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-25")
+    assert list_to_compose_for_day("2026-08-25") != []
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
+
+    assert result["reclaimed_count"] == 1
+    assert list_to_compose_for_day("2026-08-25") == []
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_dry_run_leaves_the_to_compose_row_untouched() -> None:
+    """dry_run=True must not delete anything from to_compose either -- it's a pure report."""
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import (
+        list_to_compose_for_day,
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-25")
+
+    reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=True)
+
+    assert list_to_compose_for_day("2026-08-25") != []
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_only_deletes_the_reclaimed_slot_not_the_whole_day() -> None:
+    """A stale slot's deletion must never touch a SIBLING slot for the same day -- e.g. a human pick reclaimed alongside a platform pick that's already progressed to COMPOSED must leave the composed slot's own to_compose row alone."""
+    from algorand_shared.artifact_store import COMPOSED, insert_artifact, mark_artifact_status
+    from algorand_shared.to_compose_selection import (
+        list_to_compose_for_day,
+        pin_for_tomorrow,
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    human_id, _ = insert_artifact(service_id="svc-human", url=None, channel="brief", content="a")
+    platform_id, _ = insert_artifact(service_id="svc-platform", url=None, channel="brief", content="b")
+    pin_for_tomorrow(human_id, today=dt.date(2026, 8, 24))
+    select_to_compose_for_day("2026-08-25")
+    mark_artifact_status(platform_id, COMPOSED)  # the platform slot already composed successfully
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
+
+    assert result["reclaimed_count"] == 1  # only the still-stuck human pick
+    remaining = list_to_compose_for_day("2026-08-25")
+    assert len(remaining) == 1
+    assert remaining[0]["artifact_id"] == platform_id
 
 
 @pytest.mark.usefixtures("fake_artifact_session")

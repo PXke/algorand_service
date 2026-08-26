@@ -198,6 +198,7 @@ class FakeArtifactSession:
             _artifact_cql(ToComposeStmts, "LIST_FOR_DAY"): self._list_to_compose,
             _artifact_cql(ToComposeStmts, "DELETE_FOR_DAY"): self._delete_to_compose_day,
             _artifact_cql(ToComposeStmts, "LIST_ALL"): self._list_all_to_compose,
+            _artifact_cql(ToComposeStmts, "DELETE_SLOT"): self._delete_to_compose_slot,
         }
 
     def prepare(self, cql: str) -> str:
@@ -373,6 +374,10 @@ class FakeArtifactSession:
 
     def _list_all_to_compose(self, _p: tuple) -> _ArtifactRows:
         return _artifact_rows([SimpleNamespace(**r) for r in self.to_compose.values()])
+
+    def _delete_to_compose_slot(self, p: tuple) -> None:
+        compose_day, slot = p
+        self.to_compose.pop((compose_day, slot), None)
 
     def _delete_to_compose_day(self, p: tuple) -> None:
         (compose_day,) = p
