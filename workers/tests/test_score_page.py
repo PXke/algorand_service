@@ -81,3 +81,68 @@ def test_seo_spam_hits_still_catches_casino_affiliate_phrasing() -> None:
     assert seo_spam_hits("Top Online Casino Sites for Crypto Users") > 0
     assert seo_spam_hits("Best Crypto Casino Bonuses - Play Now and Win Big!") > 0
     assert seo_spam_hits("No Deposit Casino Bonus Codes 2026") > 0
+
+
+def test_generic_multichain_docs_do_not_reach_the_promote_threshold() -> None:
+    """A multi-chain-docs page shaped like calnix.gitbook.io — heavy on generic testnet/mainnet/defi/indexer/walletconnect vocabulary, zero Algorand-specific signal — must land below FRONTIER_CONTENT_PROMOTE_SCORE."""
+    # Root-caused 2026-08-26: calnix.gitbook.io (real Aave/Ethereum
+    # documentation, zero Algorand mentions on live fetch) scored exactly
+    # 0.500 — precisely FRONTIER_CONTENT_PROMOTE_SCORE — purely from
+    # generic "defi"/"testnet"/"mainnet"-family keyword overlap that applies
+    # equally to any chain's own docs. reevaluate_pending_domains' daily
+    # beat auto-promotes anything >= that score to an actively monitored
+    # service, so this family must never carry a page there alone.
+    from app.core.config import FRONTIER_CONTENT_PROMOTE_SCORE
+
+    text = (
+        "Deploy your contracts to testnet before mainnet. Connect your wallet "
+        "via WalletConnect to interact with the DeFi protocol. Testnet faucets "
+        "are available for mainnet parity testing. The indexer tracks all "
+        "onchain events across testnet and mainnet deployments. This DeFi "
+        "documentation covers lending, borrowing, and liquidation flows on "
+        "both testnet and mainnet, with WalletConnect used throughout for "
+        "signing. Read the indexer API reference for querying DeFi positions."
+    )
+    result = score_page(url="https://calnix.gitbook.io/docs/", text=text)
+    assert result.score < FRONTIER_CONTENT_PROMOTE_SCORE
+    assert not result.in_scope
+
+
+def test_generic_bitcoin_custody_guide_does_not_reach_the_promote_threshold() -> None:
+    """A generic Bitcoin-custody-guide page shaped like protegecoin.com.br — same generic-keyword-family shape, zero Algorand-specific signal — must land below FRONTIER_CONTENT_PROMOTE_SCORE."""
+    from app.core.config import FRONTIER_CONTENT_PROMOTE_SCORE
+
+    text = (
+        "Learn how to secure your Bitcoin wallet. Test your setup on testnet "
+        "before moving funds to mainnet. Our DeFi custody guide explains "
+        "multisig, cold storage, and mainnet best practices. Use WalletConnect "
+        "to pair your hardware wallet, and check the blockchain indexer to "
+        "confirm your testnet and mainnet transactions."
+    )
+    result = score_page(url="https://protegecoin.com.br/guia-de-custodia", text=text)
+    assert result.score < FRONTIER_CONTENT_PROMOTE_SCORE
+    assert not result.in_scope
+
+
+def test_explorer_link_only_page_still_clears_in_scope_after_the_generic_split() -> None:
+    """quantoz.com/EURQ-shaped page (explorer link, no chain keywords at all) must still clear in-scope after separating generic from Algorand-specific keyword weight — the explorer-link signal alone is untouched by the split."""
+    text = "Digital euros and dollars for global commerce. No chain names here."
+    result = score_page(
+        url="https://quantoz.com/products/eurq-usdq",
+        text=text,
+        outbound_links=("https://allo.info/asset/2768422954/token",),
+    )
+    assert result.in_scope
+    assert result.score >= 0.5
+
+
+def test_genuinely_algorand_page_is_unaffected_by_the_generic_split() -> None:
+    """A page that directly mentions 'algorand' alongside generic infra terms is unaffected by splitting generic keywords out of the weighted family — it still clears in-scope comfortably."""
+    text = (
+        "Algorand mainnet ASA governance staking update for the Algorand "
+        "ecosystem, covering testnet deployments and DeFi integrations."
+    )
+    result = score_page(url="https://example-algorand-news.test", text=text)
+    assert result.in_scope
+    assert any(r.startswith("keywords:") for r in result.reasons)
+    assert any(r == "exact:algorand" for r in result.reasons)
