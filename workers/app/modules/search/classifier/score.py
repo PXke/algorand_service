@@ -82,13 +82,32 @@ GENERIC_KEYWORDS: tuple[str, ...] = (
     "indexer",
 )
 
-# Terms specific enough to Algorand itself (its name/ticker, its ASA/ARC/
-# PPoS/algod technical vocabulary, and named ecosystem projects) to count as
-# genuine signal at full weight.
-ALGORAND_KEYWORDS: tuple[str, ...] = (
-    "algorand",
+# "algo" and "asa" are Algorand's own name/ticker and asset-type abbreviation
+# -- but, word-boundaries or not, both are ALSO ordinary standalone words in
+# other languages ("algo" = "something" in Spanish/Portuguese; "asa" = "wing"
+# in Portuguese, a name in several others). Proper \b-boundary matching (see
+# _compile_keyword_pattern) already fixed the FRAGMENT-collision bug (matching
+# inside "casa"/"algorithmically"/"algorand" itself) — it can't fix a page
+# that's simply written in a language where these are real, common,
+# completely unrelated words. protegecoin.com.br (Portuguese-language Bitcoin
+# content) still landed a real, boundary-correct 0.26 purely from genuine
+# "algo"/"asa" hits with zero Algorand relevance (root-caused 2026-08-26,
+# alongside the fragment-matching fix -- capping the family's ceiling there
+# was the first pass, this is the second: don't trust these two words at the
+# same weight as an unambiguous term in the first place). Kept in their own
+# tier, capped like GENERIC_KEYWORDS, rather than folded into either family.
+AMBIGUOUS_KEYWORDS: tuple[str, ...] = (
     "algo",
     "asa",
+)
+
+# Terms specific enough to Algorand itself (its full name, its ARC/PPoS/algod
+# technical vocabulary, and named ecosystem projects) that a genuine hit is
+# real signal, not a same-spelling word in an unrelated language -- full
+# weight. "algorand" itself also earns a separate flat exact-mention bonus
+# below, on top of whatever it contributes here.
+ALGORAND_KEYWORDS: tuple[str, ...] = (
+    "algorand",
     "arc-",
     "microalgo",
     "algod",
@@ -110,7 +129,7 @@ ALGORAND_KEYWORDS: tuple[str, ...] = (
 # Back-compat combined list — content_categorizer's fallback category guesser
 # just wants "does this page look Algorand-ish at all" (presence-based, not
 # weighted), so it's fine for it to keep seeing the full family here.
-POSITIVE_KEYWORDS: tuple[str, ...] = ALGORAND_KEYWORDS + GENERIC_KEYWORDS
+POSITIVE_KEYWORDS: tuple[str, ...] = ALGORAND_KEYWORDS + GENERIC_KEYWORDS + AMBIGUOUS_KEYWORDS
 
 
 def _compile_keyword_pattern(keyword: str) -> re.Pattern[str]:
@@ -158,6 +177,9 @@ _ALGORAND_KEYWORD_RE: tuple[re.Pattern[str], ...] = tuple(
 )
 _GENERIC_KEYWORD_RE: tuple[re.Pattern[str], ...] = tuple(
     _compile_keyword_pattern(kw) for kw in GENERIC_KEYWORDS
+)
+_AMBIGUOUS_KEYWORD_RE: tuple[re.Pattern[str], ...] = tuple(
+    _compile_keyword_pattern(kw) for kw in AMBIGUOUS_KEYWORDS
 )
 
 
@@ -342,7 +364,20 @@ def score_page(
     generic_hit_count = sum(
         min(len(pat.findall(lowered)), _KEYWORD_FAMILY_CAP) for pat in _GENERIC_KEYWORD_RE
     )
-    keyword_hit_count = algorand_hit_count + generic_hit_count
+    # "algo"/"asa" are Algorand's own name/ticker, but also ordinary standalone
+    # words in other languages (Spanish/Portuguese "algo" = "something",
+    # Portuguese "asa" = "wing") -- word-boundary matching only rules out
+    # matching INSIDE another word, not a page simply being written in a
+    # language where these are real, unrelated vocabulary. Scored in their own
+    # tier, capped the same as GENERIC_KEYWORDS, so genuine hits on these two
+    # words alone can never carry a page into scope the way an unambiguous
+    # term can (root-caused 2026-08-26, protegecoin.com.br: a real,
+    # boundary-correct 0.26 from "algo"/"asa" hits in ordinary Portuguese
+    # prose with zero Algorand relevance).
+    ambiguous_hit_count = sum(
+        min(len(pat.findall(lowered)), _KEYWORD_FAMILY_CAP) for pat in _AMBIGUOUS_KEYWORD_RE
+    )
+    keyword_hit_count = algorand_hit_count + generic_hit_count + ambiguous_hit_count
     if algorand_hit_count:
         # 0.10/hit, not 0.08: fixing the fragment-match bug above (see
         # _compile_keyword_pattern) removed an unintentional boost that a
@@ -358,6 +393,9 @@ def score_page(
     if generic_hit_count:
         score += min(0.15, generic_hit_count * 0.03)
         reasons.append(f"generic_keywords:{generic_hit_count}")
+    if ambiguous_hit_count:
+        score += min(0.15, ambiguous_hit_count * 0.03)
+        reasons.append(f"ambiguous_keywords:{ambiguous_hit_count}")
 
     for delta, reason in (_reject_signal(text, keyword_hit_count), _spam_signal(text)):
         if reason:

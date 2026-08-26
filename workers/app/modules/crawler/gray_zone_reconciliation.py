@@ -75,7 +75,23 @@ if TYPE_CHECKING:
 
 
 def _gray_zone_rows(session: CassandraSession, scan_limit: int) -> list[tuple[str, dict, float]]:
-    """(domain, metadata, content_relevance) for every domain in the scan window that is `frontier_status="approved"` with a `content_relevance` score inside `[FRONTIER_CONTENT_REJECT_SCORE, FRONTIER_CONTENT_PROMOTE_SCORE)` -- the exact gray-zone definition from the audit this module answers. Domain-sorted (not score- or token-order) purely so successive calls with the same `scan_limit` see a stable, deterministic ordering -- since a dispatched domain flips to `frontier_status="pending"` and drops out of this scan, that stability is what lets repeat `dispatch_gray_zone_deep_classify` calls fan out across the backlog instead of colliding on the same handful of rows.
+    """(domain, metadata, content_relevance) for every domain in the scan window that is `frontier_status="approved"` with a `content_relevance` score inside `[FRONTIER_CONTENT_REJECT_SCORE, FRONTIER_CONTENT_PROMOTE_SCORE)` -- the exact gray-zone definition from the audit this module answers. Domain-sorted (not score- or token-order) purely so successive calls with the same `scan_limit` see a stable, deterministic ordering.
+
+    Excludes any row already carrying `deep_classify_queued="true"` in
+    metadata -- 2026-08-26 fix: `frontier_status` is its own real Cassandra
+    COLUMN (see `DomainTrackingStmts.LIST`'s own SELECT), but
+    `dispatch_gray_zone_deep_classify` only ever writes via
+    `UPDATE_METADATA` (metadata map only, never the column). Stuffing
+    `"frontier_status": "pending"` into metadata therefore never changes
+    what this function's own `row.frontier_status or meta.get(...)` check
+    sees -- the real column stays "approved" -- so a dispatched domain
+    would otherwise keep reappearing in every future scan forever, forever
+    reporting all ~700 as "still gray-zone" even as they get worked
+    through. `deep_classify_queued` IS a metadata-only flag by design
+    (mirrors `_classify_and_store_domain`'s own escalation bookkeeping) and
+    reads back correctly, so filtering on it here is what actually makes
+    the backlog visibly shrink across repeat calls -- not the inert
+    frontier_status write, which callers should not rely on.
 
     A row with no parseable `content_relevance` at all (never scored, or a
     stray non-numeric value) is skipped, not treated as gray-zone -- this
@@ -95,6 +111,8 @@ def _gray_zone_rows(session: CassandraSession, scan_limit: int) -> list[tuple[st
         status = row.frontier_status or meta.get("frontier_status")
         if status != "approved" or row.is_relevant is False:
             continue
+        if meta.get("deep_classify_queued") == "true":
+            continue
         try:
             score = float(meta.get("content_relevance", ""))
         except (TypeError, ValueError):
@@ -109,7 +127,14 @@ def _gray_zone_rows(session: CassandraSession, scan_limit: int) -> list[tuple[st
 def find_gray_zone_domains(
     limit: int | None = None, *, scan_limit: int = 5000
 ) -> list[dict[str, object]]:
-    """Read-only report: every `frontier_status="approved"` domain whose `content_relevance` sits in the genuine gray zone, with enough bookkeeping included to tell an already-in-flight domain from one that's just sitting there. Makes NO Cassandra writes and dispatches NOTHING -- safe to call as often as wanted, including to confirm the real current count before ever calling `dispatch_gray_zone_deep_classify`.
+    """Read-only report: every `frontier_status="approved"` domain whose `content_relevance` sits in the genuine gray zone AND isn't already queued for a real deep-classify. Makes NO Cassandra writes and dispatches NOTHING -- safe to call as often as wanted, including to confirm the real current count before ever calling `dispatch_gray_zone_deep_classify`.
+
+    Already-`deep_classify_queued` domains are excluded by `_gray_zone_rows`
+    itself (see that function's own docstring for why) -- this report and
+    `dispatch_gray_zone_deep_classify` therefore always agree on what's
+    genuinely still outstanding, and the count returned here visibly shrinks
+    as domains get worked through rather than staying pinned at the
+    original backlog size forever.
 
     `scan_limit` bounds the underlying `domain_tracking` table scan (mirrors
     the 5000-row scan `reevaluate_pending_domains` already runs for its own
@@ -127,7 +152,6 @@ def find_gray_zone_domains(
             "domain": domain,
             "content_relevance": score,
             "pending_url": meta.get("pending_url") or meta.get("content_relevance_url") or "",
-            "deep_classify_queued": meta.get("deep_classify_queued") == "true",
         }
         for domain, meta, score in rows
     ]
@@ -156,16 +180,19 @@ def dispatch_gray_zone_deep_classify(
     caller can inspect the exact batch a real run would touch first.
 
     When `dry_run=False`, each dispatched domain's metadata is updated
-    BEFORE the Celery call -- `deep_classify_queued="true"` and
-    `frontier_status="pending"` -- identical to the bookkeeping
-    `_classify_and_store_domain` writes for its own shallow-sample
-    escalations. This has two effects, both deliberate: (1) the domain
-    drops out of THIS function's own `frontier_status="approved"` scan, so
-    a repeat call naturally advances to a different slice of the backlog
-    rather than re-dispatching the same handful forever; and (2) the
-    existing `deep_classify_queued` dedup guard means a domain already
-    queued -- by this function or by an ordinary `classify_pending_domains`
-    escalation -- is skipped here, never double-dispatched.
+    BEFORE the Celery call with `deep_classify_queued="true"` -- identical
+    to the bookkeeping `_classify_and_store_domain` writes for its own
+    shallow-sample escalations. `_gray_zone_rows` excludes any domain
+    already carrying that flag (see its own docstring), so a repeat call
+    naturally advances to a different slice of the backlog rather than
+    re-dispatching the same handful forever, and a domain already queued --
+    by this function or by an ordinary `classify_pending_domains`
+    escalation -- is never double-dispatched. (2026-08-26: this used to
+    also write `"frontier_status": "pending"` into metadata, but
+    `frontier_status` is a real Cassandra COLUMN this function only ever
+    updates via `UPDATE_METADATA` -- metadata-only -- so that write was
+    silently inert and has been removed; `deep_classify_queued` is the one
+    flag that actually does the exclusion work.)
 
     `seed_url` for each dispatch is the domain's own `pending_url` if one
     was recorded, else the page that produced its shallow verdict
@@ -178,8 +205,7 @@ def dispatch_gray_zone_deep_classify(
     from app.core.statements import DomainTrackingStmts
 
     session = get_cassandra_session()
-    rows = _gray_zone_rows(session, scan_limit)
-    candidates = [(d, m, s) for d, m, s in rows if m.get("deep_classify_queued") != "true"]
+    candidates = _gray_zone_rows(session, scan_limit)
     batch = candidates[:limit]
 
     dispatched: list[dict[str, object]] = []
@@ -188,7 +214,7 @@ def dispatch_gray_zone_deep_classify(
             meta.get("pending_url") or meta.get("content_relevance_url") or f"https://{domain}"
         )
         if not dry_run:
-            new_meta = {**meta, "deep_classify_queued": "true", "frontier_status": "pending"}
+            new_meta = {**meta, "deep_classify_queued": "true"}
             session.execute(DomainTrackingStmts.UPDATE_METADATA, (new_meta, domain))
             _celery_app.send_task(
                 "app.tasks.crawler.deep_classify_domain",

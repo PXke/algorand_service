@@ -146,3 +146,29 @@ def test_genuinely_algorand_page_is_unaffected_by_the_generic_split() -> None:
     assert result.in_scope
     assert any(r.startswith("keywords:") for r in result.reasons)
     assert any(r == "exact:algorand" for r in result.reasons)
+
+
+def test_ambiguous_algo_asa_alone_do_not_reach_the_promote_threshold() -> None:
+    """Repeated, word-boundary-correct hits on "algo"/"asa" alone -- with zero "algorand" mention, zero domain anchor, zero explorer link -- must not carry a page into scope. Both words are real, unrelated vocabulary in other languages (Spanish/Portuguese "algo" = "something", Portuguese "asa" = "wing"), so genuine hits on them alone are weak evidence, not full-weight Algorand signal."""
+    from app.core.config import FRONTIER_CONTENT_PROMOTE_SCORE
+
+    text = (
+        "Preciso de algo para consertar a asa do aviao. Tenho algo em mente, "
+        "mas nao sei se essa asa vai funcionar. Talvez algo diferente, uma "
+        "asa nova, resolva o problema. Algo assim seria ideal para essa asa."
+    )
+    result = score_page(url="https://example-portuguese-aviation.test", text=text)
+    assert result.score < FRONTIER_CONTENT_PROMOTE_SCORE
+    assert not result.in_scope
+    assert any(r.startswith("ambiguous_keywords:") for r in result.reasons)
+    assert not any(r.startswith("keywords:") for r in result.reasons)
+    assert not any(r == "exact:algorand" for r in result.reasons)
+
+
+def test_algorand_exact_mention_is_unaffected_by_the_ambiguous_split() -> None:
+    """A genuine 'algorand' mention keeps its own full-weight signal and exact-mention bonus regardless of the algo/asa ambiguous-tier split -- 'algorand' itself has no cross-language collision risk."""
+    text = "Algorand Algorand Algorand — built for real-world finance."
+    result = score_page(url="https://example-algorand.test", text=text)
+    assert result.in_scope
+    assert any(r.startswith("keywords:") for r in result.reasons)
+    assert any(r == "exact:algorand" for r in result.reasons)

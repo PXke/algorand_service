@@ -71,10 +71,10 @@ def test_find_gray_zone_domains_matches_the_exact_audit_definition(
     assert domains == {"grayzone-low.example", "grayzone-mid.example", "grayzone-high.example"}
 
 
-def test_find_gray_zone_domains_reports_seed_url_fallback_and_queued_flag(
+def test_find_gray_zone_domains_reports_seed_url_fallback_and_excludes_queued(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """pending_url wins over content_relevance_url when both are present; deep_classify_queued is surfaced so a caller can distinguish an already-in-flight domain from a fresh one."""
+    """pending_url wins over content_relevance_url when both are present; an already-`deep_classify_queued` domain is excluded entirely (2026-08-26 fix), not just flagged, since frontier_status is a real column this module never actually updates -- the queued flag is the only thing that reliably means "already in flight"."""
     monkeypatch.setattr("app.core.config.FRONTIER_CONTENT_REJECT_SCORE", 0.2)
     monkeypatch.setattr("app.core.config.FRONTIER_CONTENT_PROMOTE_SCORE", 0.5)
     rows = [
@@ -115,8 +115,8 @@ def test_find_gray_zone_domains_reports_seed_url_fallback_and_queued_flag(
         == "https://only-relevance-url.example/page"
     )
     assert findings["no-url-at-all.example"]["pending_url"] == ""
-    assert findings["already-queued.example"]["deep_classify_queued"] is True
-    assert findings["has-pending-url.example"]["deep_classify_queued"] is False
+    assert "already-queued.example" not in findings
+    assert "deep_classify_queued" not in findings["has-pending-url.example"]
 
 
 def test_find_gray_zone_domains_limit_trims_after_the_full_scan(
@@ -201,7 +201,7 @@ def test_dispatch_dry_run_default_makes_no_writes_and_no_dispatch(
 def test_dispatch_real_run_writes_metadata_and_sends_the_real_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """dry_run=False writes deep_classify_queued=true + frontier_status=pending (merged with existing metadata, nothing dropped) BEFORE calling send_task against the real deep_classify_domain task on the scrape queue."""
+    """dry_run=False writes deep_classify_queued=true (merged with existing metadata, nothing dropped) BEFORE calling send_task against the real deep_classify_domain task on the scrape queue. Does NOT write frontier_status into metadata (2026-08-26 fix: that column is never read from there, so the write was inert -- see _gray_zone_rows' docstring)."""
     rows = [
         _row(
             "gz.example",
@@ -223,7 +223,7 @@ def test_dispatch_real_run_writes_metadata_and_sends_the_real_task(
     new_meta, domain = writes[0]
     assert domain == "gz.example"
     assert new_meta["deep_classify_queued"] == "true"
-    assert new_meta["frontier_status"] == "pending"
+    assert "frontier_status" not in new_meta
     assert new_meta["some_other_field"] == "preserved"  # merge, not overwrite
 
     assert len(sent) == 1
@@ -273,6 +273,34 @@ def test_dispatch_skips_domains_already_queued_for_deep_classify(
     assert result["dispatched"][0]["domain"] == "fresh.example"
     assert len(sent) == 1
     assert sent[0][1]["domain"] == "fresh.example"
+
+
+def test_dispatch_then_rescan_no_longer_shows_the_dispatched_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end regression for the 2026-08-26 fix: applying the REAL metadata write dispatch produces (not a synthetic one) to the row, then calling find_gray_zone_domains again against that updated row excludes it -- proving the backlog actually shrinks across repeat calls, not just that the write happens."""
+    row = _row("gz.example", metadata={"content_relevance": "0.35"})
+    executed, _sent = _patch_dispatch(monkeypatch, [row])
+
+    # Confirm it starts out visible to the read-only report (same session
+    # _patch_dispatch already wired -- re-monkeypatching here would swap in a
+    # session that doesn't track `executed`, silently breaking the write
+    # capture below).
+    assert [f["domain"] for f in find_gray_zone_domains()] == ["gz.example"]
+
+    result = dispatch_gray_zone_deep_classify(limit=5, dry_run=False)
+    assert result["dispatched_count"] == 1
+
+    # Apply the actual write dispatch produced (not a hand-rolled one) to the
+    # row, the way a real Cassandra UPDATE would -- this is the crux of the
+    # regression: the write must be one that _gray_zone_rows' own read path
+    # actually reacts to.
+    new_meta, domain = next(p for p in executed if len(p) == 2)
+    assert domain == "gz.example"
+    row.metadata = new_meta
+
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: _fake_session([row]))
+    assert find_gray_zone_domains() == []
 
 
 def test_dispatch_falls_back_through_content_relevance_url_then_bare_https(
