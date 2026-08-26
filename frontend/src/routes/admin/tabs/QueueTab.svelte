@@ -18,7 +18,12 @@
     created_at: string | null
     event_date: string | null
     priority: number
-    priority_breakdown: { word_count: number; timeliness: number; ecosystem_listed: number }
+    priority_breakdown: {
+      word_count: number
+      timeliness: number
+      ecosystem_listed: number
+      skip_count: number
+    }
     human_pick_day: string | null
     is_pinned_for_day: boolean
     selected_lane: 'human' | 'platform' | null
@@ -67,6 +72,11 @@
   let humanPicked = $state(false)
   let platformSlotsFilled = $state(0)
   let platformSlotsAvailable = $state(0)
+  // True only for a backend-computed preview (2026-08-27): ecosystem_listed's
+  // real crawler/classifier deps don't exist in backend, so every item's
+  // `ecosystem_listed: 0.0` below is "not computed here", not a real measured
+  // absence of the bonus. See algorand_shared.to_compose_selection.
+  let ecosystemScoringUnavailable = $state(false)
 
   // Platform-forecast picks pulled out of the ranked pool so they're
   // immediately visible on their own, rather than needing to be spotted
@@ -218,6 +228,7 @@
       humanPicked = Boolean(res.human_picked)
       platformSlotsFilled = Number(res.platform_slots_filled ?? 0)
       platformSlotsAvailable = Number(res.platform_slots_available ?? 0)
+      ecosystemScoringUnavailable = Boolean(res.ecosystem_scoring_unavailable)
       selected = Array.isArray(sel.items) ? (sel.items as SelectedItem[]) : []
       backlog = Array.isArray(b.items) ? (b.items as Array<Record<string, unknown>>) : []
     } catch (e) {
@@ -516,9 +527,17 @@
           <div class="breakdown-grid mono">
             <span>word count</span><span>{item.priority_breakdown.word_count.toFixed(2)}</span>
             <span>timeliness</span><span>{item.priority_breakdown.timeliness.toFixed(2)}</span>
-            <span>ecosystem listed</span><span
-              >{item.priority_breakdown.ecosystem_listed.toFixed(2)}</span
-            >
+            <span>ecosystem listed</span>
+            {#if ecosystemScoringUnavailable}
+              <span
+                class="admin-muted"
+                title="This preview was computed in the backend process, which doesn't have the crawler/classifier lookups ecosystem-listed scoring needs -- this isn't a real measured zero, it just couldn't be computed here."
+                >n/a (backend preview)</span
+              >
+            {:else}
+              <span>{item.priority_breakdown.ecosystem_listed.toFixed(2)}</span>
+            {/if}
+            <span>skip count</span><span>{item.priority_breakdown.skip_count.toFixed(2)}</span>
           </div>
         </div>
         {@render artifactDetail(item.artifact_id)}

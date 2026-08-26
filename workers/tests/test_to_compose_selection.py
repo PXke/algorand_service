@@ -335,7 +335,7 @@ def test_preview_matches_what_select_would_actually_pick(monkeypatch: pytest.Mon
 
 @pytest.mark.usefixtures("fake_artifact_session")
 def test_preview_includes_priority_breakdown_and_title(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each preview item carries its title (from artifact_content) and the three named score components, summing to the reported total priority."""
+    """Each preview item carries its title (from artifact_content) and all four named score components, summing to the reported total priority."""
     monkeypatch.setattr(
         "app.modules.crawler.ecosystem_sync.ecosystem_listed_domains", lambda: frozenset()
     )
@@ -351,8 +351,31 @@ def test_preview_includes_priority_breakdown_and_title(monkeypatch: pytest.Monke
 
     assert item["title"] == "A Title"
     breakdown = item["priority_breakdown"]
-    assert set(breakdown) == {"word_count", "timeliness", "ecosystem_listed"}
+    assert set(breakdown) == {"word_count", "timeliness", "ecosystem_listed", "skip_count"}
     assert item["priority"] == pytest.approx(sum(breakdown.values()), abs=0.0001)
+    # This process (workers) has ecosystem_listed_score's real deps, so the
+    # preview never needs to flag itself as degraded.
+    assert "ecosystem_scoring_unavailable" not in preview
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_preview_flags_ecosystem_scoring_unavailable_when_deps_unimportable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Simulates a backend-computed preview: ecosystem_listed_score's real crawler/classifier deps genuinely can't be imported, so the top-level payload must say so instead of letting every item's `ecosystem_listed: 0.0` read as a real measured zero."""
+    import sys
+
+    from algorand_shared.artifact_store import insert_artifact
+    from algorand_shared.to_compose_selection import preview_to_compose_for_day
+
+    insert_artifact(service_id="svc-a", url=None, channel="brief", content="hello world")
+
+    monkeypatch.setitem(sys.modules, "app.modules.crawler.domain_tracker", None)
+    preview = preview_to_compose_for_day("2026-08-26")
+
+    assert preview["ecosystem_scoring_unavailable"] is True
+    (item,) = preview["items"]
+    assert item["priority_breakdown"]["ecosystem_listed"] == 0.0
 
 
 @pytest.mark.usefixtures("fake_artifact_session")

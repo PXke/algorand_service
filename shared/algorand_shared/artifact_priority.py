@@ -198,6 +198,11 @@ def ecosystem_listed_score(url: str | None, content: str = "") -> float:
 
     Workers-only bonus (see module docstring): the crawler/classifier modules
     this depends on don't exist in backend, so this fails open to 0.0 there.
+    See `ecosystem_scoring_available` just below for a way to tell THAT case
+    apart from a genuine, computed 0.0 -- this function's own return type
+    stays a plain float on purpose (its real caller, `sweep_artifact_priorities`,
+    just needs a number to sum, always, and must keep failing open the same
+    way it always has).
     """
     from app.core.config import ARTIFACT_ECOSYSTEM_LISTED_BOOST
 
@@ -218,6 +223,36 @@ def ecosystem_listed_score(url: str | None, content: str = "") -> float:
     except Exception:
         return 0.0
     return 0.0
+
+
+def ecosystem_scoring_available() -> bool:
+    """Capability probe (2026-08-27): True when `ecosystem_listed_score`'s real, workers-only dependencies are importable in THIS process, False when it can only ever fail open to 0.0 here.
+
+    Does the exact same import `ecosystem_listed_score` itself does -- and
+    nothing else (no domain lookup, no registry read, no Cassandra) -- so it
+    stays cheap enough to call once per preview/breakdown build. Always
+    `True` in workers (where those crawler/classifier modules live), always
+    `False` in backend (where they don't exist at all).
+
+    This exists because `ecosystem_listed_score`'s own return type is a
+    plain float that fails open the same way for BOTH "genuinely computed a
+    real 0.0" and "couldn't even try" -- fine for its real caller
+    (`sweep_artifact_priorities`, which just needs a number to sum and must
+    keep failing open unconditionally), but not enough for a caller that
+    wants to tell the two cases apart, like `to_compose_selection`'s
+    admin-facing breakdown, which needs to say so rather than silently show
+    a 0.0 that looks like a real measured absence of a bonus.
+    """
+    try:
+        from app.modules.crawler.domain_tracker import domain_from_url  # noqa: F401
+        from app.modules.crawler.ecosystem_sync import ecosystem_listed_domains  # noqa: F401
+        from app.modules.search.classifier.score import (  # noqa: F401
+            KNOWN_DOMAINS,
+            keyword_hits,
+        )
+    except Exception:
+        return False
+    return True
 
 
 def skip_count_score(metadata: dict[str, Any] | None) -> float:

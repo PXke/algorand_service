@@ -355,25 +355,44 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
 
     Returns every PENDING artifact (not just the selected ones), each with
     a freshly recomputed priority breakdown (word_count/timeliness/
-    ecosystem_listed -- the same pure functions the daily sweep uses), which
-    lane (if any) this preview would put it in, and which pool (new_service
-    vs update -- see _artifact_pool) its own service belongs to, independent
-    of whether it was actually selected. The recomputed total can drift
-    slightly above/below the artifact's stored `priority` between sweeps
-    (the sweep runs roughly every 24h; timeliness decays continuously) --
-    that's intentional, showing the score as of right now rather than as of
-    the last sweep. Ordering, however, follows list_pending_artifacts()'s
+    ecosystem_listed/skip_count -- the same pure functions the daily sweep
+    uses, all four of SCORE_COMPONENTS), which lane (if any) this preview
+    would put it in, and which pool (new_service vs update -- see
+    _artifact_pool) its own service belongs to, independent of whether it
+    was actually selected. The recomputed total can drift slightly above/
+    below the artifact's stored `priority` between sweeps (the sweep runs
+    roughly every 24h; timeliness decays continuously) -- that's
+    intentional, showing the score as of right now rather than as of the
+    last sweep. Ordering, however, follows list_pending_artifacts()'s
     stored-priority order, matching what a real (unmutated) selection run
     would actually pick, not this preview's own live recompute.
+
+    2026-08-27: when this process can't actually run ecosystem_listed_score's
+    real logic (every backend-computed preview -- see
+    ecosystem_scoring_available's docstring), the top-level result also
+    carries `"ecosystem_scoring_unavailable": True` so a caller (the admin
+    UI) can tell every item's `ecosystem_listed: 0.0` apart from a genuinely
+    computed zero, rather than silently showing a number that looks measured
+    but wasn't. Absent when this process CAN compute it (i.e. always absent
+    in workers).
     """
     from app.core import config as cfg
 
     from algorand_shared.artifact_priority import (
         ecosystem_listed_score,
+        ecosystem_scoring_available,
+        skip_count_score,
         timeliness_score,
         word_count_score,
     )
     from algorand_shared.artifact_store import get_artifact_content
+
+    # Probed once per preview build (not once per item -- it's a pure
+    # capability check, the answer can't differ between artifacts within the
+    # same process). See ecosystem_scoring_available's own docstring: always
+    # False in backend (workers-only crawler/classifier deps don't exist
+    # there), always True in workers.
+    ecosystem_available = ecosystem_scoring_available()
 
     pending = list_pending_artifacts()
     human_pick = next((a for a in pending if a.human_pick_day == day), None)
@@ -397,6 +416,7 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
             "ecosystem_listed": ecosystem_listed_score(
                 artifact.url, content.content if content else ""
             ),
+            "skip_count": skip_count_score(content.metadata if content else None),
         }
         if human_pick is not None and artifact.artifact_id == human_pick.artifact_id:
             lane: str | None = "human"
@@ -422,7 +442,7 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
             }
         )
 
-    return {
+    result: dict[str, object] = {
         "status": "ok",
         "compose_day": day,
         "human_picked": human_pick is not None,
@@ -431,3 +451,11 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
         "platform_pool_counts": pool_counts,
         "items": items,
     }
+    if not ecosystem_available:
+        # Present (and only ever True) when this process couldn't actually
+        # run ecosystem_listed_score's real logic -- i.e. every backend-
+        # computed preview -- so every item's `ecosystem_listed: 0.0` above
+        # reads as "not computed here", not "measured and found to be zero".
+        # Absent entirely in workers, where the real dependencies exist.
+        result["ecosystem_scoring_unavailable"] = True
+    return result

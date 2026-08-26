@@ -251,6 +251,30 @@ def test_ecosystem_listed_score_fails_open_to_zero_on_lookup_error(
 
 
 # --------------------------------------------------------------------------- #
+# ecosystem_scoring_available
+# --------------------------------------------------------------------------- #
+
+
+def test_ecosystem_scoring_available_true_when_deps_importable() -> None:
+    """In workers (this test suite's own environment) the real crawler/classifier deps exist, so the probe reports True."""
+    from algorand_shared.artifact_priority import ecosystem_scoring_available
+
+    assert ecosystem_scoring_available() is True
+
+
+def test_ecosystem_scoring_available_false_when_a_dependency_import_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Simulates the backend situation: one of ecosystem_listed_score's real deps genuinely can't be imported (not just a lookup call failing at runtime -- an actual ImportError), so the probe must report False rather than True."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "app.modules.crawler.domain_tracker", None)
+    from algorand_shared.artifact_priority import ecosystem_scoring_available
+
+    assert ecosystem_scoring_available() is False
+
+
+# --------------------------------------------------------------------------- #
 # skip_count_score
 # --------------------------------------------------------------------------- #
 
