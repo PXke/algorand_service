@@ -87,9 +87,8 @@ GENERIC_KEYWORDS: tuple[str, ...] = (
 # genuine signal at full weight.
 ALGORAND_KEYWORDS: tuple[str, ...] = (
     "algorand",
-    "algo ",
-    " algo",
-    "asa ",
+    "algo",
+    "asa",
     "arc-",
     "microalgo",
     "algod",
@@ -112,6 +111,54 @@ ALGORAND_KEYWORDS: tuple[str, ...] = (
 # just wants "does this page look Algorand-ish at all" (presence-based, not
 # weighted), so it's fine for it to keep seeing the full family here.
 POSITIVE_KEYWORDS: tuple[str, ...] = ALGORAND_KEYWORDS + GENERIC_KEYWORDS
+
+
+def _compile_keyword_pattern(keyword: str) -> re.Pattern[str]:
+    """Word-boundary regex for one POSITIVE_KEYWORDS-family entry.
+
+    The original list matched with plain ``str.count`` substring search, with
+    a couple of entries (" algo", "algo ") leaning on a leading/trailing
+    space as a cheap boundary approximation. That approximation only checked
+    ONE side, so it silently matched keyword FRAGMENTS inside unrelated
+    words: " algo" (leading space, no trailing check) matched the "algo" in
+    "determined algorithmically", and "ppos" matched inside "opposed" — both
+    live on calnix.gitbook.io's real Aave/Ethereum documentation pages,
+    root-caused 2026-08-26 alongside the generic-keyword-family fix above.
+    The same gap bit "asa " and " algo" on protegecoin.com.br's Portuguese
+    text, where "asa" is a substring of "casa" (house) and "algo" is itself
+    an ordinary Portuguese word ("something") — proper word boundaries on
+    both sides reject the "casa" collision (no boundary between 'c' and
+    'asa') and correctly still match a real standalone Portuguese "algo",
+    same as RELEVANCE_KEYWORDS/_RELEVANCE_KEYWORD_RE below already does for
+    the separate crude hit-counter.
+
+    "algo"/"asa" are now each a SINGLE list entry (the old " algo"/"algo "
+    pair used to double-count one standalone "algo" mention on purpose, to
+    reward repetition) — collapsing that duplication matters here specifically
+    because "algo" and "asa" are both real, unremarkable words in Portuguese
+    ("something" and "wing"), so a non-English off-topic page can rack up
+    genuine, boundary-correct hits on them with zero Algorand relevance
+    (protegecoin.com.br, above). Halving that family's ceiling keeps such a
+    page well clear of both this function's DEFAULT_THRESHOLD and
+    FRONTIER_CONTENT_PROMOTE_SCORE instead of merely below the latter by a
+    slim, crawl-to-crawl-fragile margin.
+    """
+    stripped = keyword.strip()
+    if stripped == "arc-":
+        # ARC citations are always "ARC-<digits>" (arc-3, arc-4, arc-200...);
+        # require the leading boundary so this doesn't fire inside compound
+        # words ending "...arc-", but don't demand a boundary on the right
+        # since there's no natural one right after the hyphen.
+        return re.compile(r"\barc-", re.IGNORECASE)
+    return re.compile(rf"\b{re.escape(stripped)}\b", re.IGNORECASE)
+
+
+_ALGORAND_KEYWORD_RE: tuple[re.Pattern[str], ...] = tuple(
+    _compile_keyword_pattern(kw) for kw in ALGORAND_KEYWORDS
+)
+_GENERIC_KEYWORD_RE: tuple[re.Pattern[str], ...] = tuple(
+    _compile_keyword_pattern(kw) for kw in GENERIC_KEYWORDS
+)
 
 
 def _ecosystem_listed() -> frozenset[str]:
@@ -273,11 +320,24 @@ def score_page(
     # FRONTIER_CONTENT_PROMOTE_SCORE (0.5) — and can never by itself carry a
     # page into scope. Only the Algorand-specific family keeps the full 0.5
     # weight budget.
-    algorand_hit_count = sum(min(lowered.count(kw), _KEYWORD_FAMILY_CAP) for kw in ALGORAND_KEYWORDS)
-    generic_hit_count = sum(min(lowered.count(kw), _KEYWORD_FAMILY_CAP) for kw in GENERIC_KEYWORDS)
+    algorand_hit_count = sum(
+        min(len(pat.findall(lowered)), _KEYWORD_FAMILY_CAP) for pat in _ALGORAND_KEYWORD_RE
+    )
+    generic_hit_count = sum(
+        min(len(pat.findall(lowered)), _KEYWORD_FAMILY_CAP) for pat in _GENERIC_KEYWORD_RE
+    )
     keyword_hit_count = algorand_hit_count + generic_hit_count
     if algorand_hit_count:
-        score += min(0.5, algorand_hit_count * 0.08)
+        # 0.10/hit, not 0.08: fixing the fragment-match bug above (see
+        # _compile_keyword_pattern) removed an unintentional boost that a
+        # genuinely on-topic page used to get for free — " algo" used to
+        # also match as a false prefix of every "algorand" mention, so a
+        # page saying "Algorand" twice in body copy (and nothing else)
+        # cleared DEFAULT_THRESHOLD partly on that bug. 0.10/hit restores
+        # the same real-world outcome (two clean, genuine "algorand"
+        # mentions + the exact-mention bonus below still clears 0.35)
+        # without resurrecting the fragment-matching itself.
+        score += min(0.5, algorand_hit_count * 0.10)
         reasons.append(f"keywords:{algorand_hit_count}")
     if generic_hit_count:
         score += min(0.15, generic_hit_count * 0.03)
