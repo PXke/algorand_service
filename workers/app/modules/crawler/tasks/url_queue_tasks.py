@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -349,6 +350,13 @@ def deep_classify_domain(
                 "frontier_status": "approved",
                 "content_relevance": f"{score_result.score:.3f}",
                 "content_relevance_reasons": "; ".join(score_result.reasons),
+                # Structured counterpart of content_relevance_reasons above —
+                # each fired signal's actual numeric contribution, for the
+                # admin Domains tab's relevance breakdown (see
+                # ClassifierResult.components' own docstring). JSON-encoded
+                # since domain_tracking.metadata is a Cassandra
+                # map<text, text>, not a nested-map column.
+                "content_relevance_components": json.dumps(score_result.components),
                 "content_relevance_url": found_url,
                 "deep_classified": "true",
                 "deep_classify_pages_fetched": str(fetched),
@@ -555,6 +563,9 @@ def _classify_and_store_domain(
         # score_page() and thrown away, so a reviewer had a number
         # with no explanation (owner feedback 2026-07-12).
         "content_relevance_reasons": "; ".join(score_result.reasons),
+        # Structured counterpart of content_relevance_reasons above — see
+        # the same note on deep_classify_domain's approve branch.
+        "content_relevance_components": json.dumps(score_result.components),
         # Which sampled page actually produced the score — no longer
         # always the landing page now that a domain is judged on its
         # best page, not just the first one.

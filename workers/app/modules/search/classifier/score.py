@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 KNOWN_DOMAINS: frozenset[str] = frozenset(
@@ -303,11 +303,26 @@ def keyword_hits(text: str) -> float:
 
 @dataclass(frozen=True)
 class ClassifierResult:
-    """One page's keyword-relevance scoring result."""
+    """One page's keyword-relevance scoring result.
+
+    ``components`` is the structured counterpart of ``reasons``: the same
+    signals, but as their actual numeric contribution to ``score`` rather
+    than a flattened human-readable tag. Only keys for signals that actually
+    fired are present (mirroring how ``reasons`` only lists tags for things
+    that fired) -- e.g. a page with no outbound explorer link and no
+    domain-directory match never gets a ``links_to_explorer``/
+    ``domain_listed`` key at all, rather than an explicit 0.0. Added
+    2026-08-26 so the admin Domains tab can render a real breakdown (like
+    the artifact-priority breakdown already does) instead of just the
+    flattened ``reasons`` tag line -- purely additive, exposing already-
+    computed intermediate values with zero change to ``score``/``in_scope``/
+    ``reasons`` themselves.
+    """
 
     score: float
     in_scope: bool
     reasons: tuple[str, ...]
+    components: dict[str, float] = field(default_factory=dict)
 
 
 def _hostname(url: str) -> str:
@@ -364,14 +379,22 @@ def score_page(
 ) -> ClassifierResult:
     """Score a crawled page's relevance and decide whether it's in-scope for the frontier."""
     reasons: list[str] = []
+    components: dict[str, float] = {}
     score = 0.0
     host = _hostname(url)
     lowered = text.lower()
 
-    for delta, reason in (_explorer_link_signal(outbound_links), _domain_signal(host)):
+    # Keys line up positionally with the two signals below: explorer-link
+    # first, domain-directory second -- see ClassifierResult.components.
+    for key, (delta, reason) in zip(
+        ("links_to_explorer", "domain_listed"),
+        (_explorer_link_signal(outbound_links), _domain_signal(host)),
+        strict=True,
+    ):
         if reason:
             score += delta
             reasons.append(reason)
+            components[key] = delta
 
     # Weighted like keyword_hits() below: each phrase contributes its
     # occurrence count (capped so one repeated phrase can't dominate), not
@@ -417,26 +440,40 @@ def score_page(
         # the same real-world outcome (two clean, genuine "algorand"
         # mentions + the exact-mention bonus below still clears 0.35)
         # without resurrecting the fragment-matching itself.
-        score += min(0.5, algorand_hit_count * 0.10)
+        delta = min(0.5, algorand_hit_count * 0.10)
+        score += delta
         reasons.append(f"keywords:{algorand_hit_count}")
+        components["algorand_keywords"] = delta
     if generic_hit_count:
-        score += min(0.15, generic_hit_count * 0.03)
+        delta = min(0.15, generic_hit_count * 0.03)
+        score += delta
         reasons.append(f"generic_keywords:{generic_hit_count}")
+        components["generic_keywords"] = delta
     if ambiguous_hit_count:
-        score += min(0.15, ambiguous_hit_count * 0.03)
+        delta = min(0.15, ambiguous_hit_count * 0.03)
+        score += delta
         reasons.append(f"ambiguous_keywords:{ambiguous_hit_count}")
+        components["ambiguous_keywords"] = delta
 
-    for delta, reason in (_reject_signal(text, keyword_hit_count), _spam_signal(text)):
+    for key, (delta, reason) in zip(
+        ("reject_noise", "seo_spam"),
+        (_reject_signal(text, keyword_hit_count), _spam_signal(text)),
+        strict=True,
+    ):
         if reason:
             score += delta
             reasons.append(reason)
+            components[key] = delta
 
     if "algorand" in lowered:
         score += 0.15
         reasons.append("exact:algorand")
+        components["exact_mention"] = 0.15
 
     score = max(0.0, min(1.0, score))
     in_scope = score >= threshold
     if not in_scope and not reasons:
         reasons.append("below_threshold")
-    return ClassifierResult(score=round(score, 3), in_scope=in_scope, reasons=tuple(reasons))
+    return ClassifierResult(
+        score=round(score, 3), in_scope=in_scope, reasons=tuple(reasons), components=components
+    )

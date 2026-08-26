@@ -172,3 +172,37 @@ def test_algorand_exact_mention_is_unaffected_by_the_ambiguous_split() -> None:
     assert result.in_scope
     assert any(r.startswith("keywords:") for r in result.reasons)
     assert any(r == "exact:algorand" for r in result.reasons)
+
+
+def test_components_expose_the_actual_numeric_contribution_per_signal() -> None:
+    """`result.components` mirrors `reasons` structurally -- same signals, but as their real numeric score contribution, not a flattened tag string. Only keys for signals that actually fired should be present."""
+    text = (
+        "Algorand mainnet ASA governance staking update for the Algorand "
+        "ecosystem, covering testnet deployments and DeFi integrations."
+    )
+    result = score_page(url="https://example-algorand-news.test", text=text)
+    # "algorand" appears twice -> min(0.5, 2 * 0.10); "mainnet"/"testnet"/"defi"
+    # each hit once -> min(0.15, 3 * 0.03); "asa" (ambiguous tier, not the
+    # Algorand-specific family) hits once -> min(0.15, 1 * 0.03).
+    assert result.components["algorand_keywords"] == min(0.5, 2 * 0.10)
+    assert result.components["generic_keywords"] == min(0.15, 3 * 0.03)
+    assert result.components["ambiguous_keywords"] == min(0.15, 1 * 0.03)
+    assert result.components["exact_mention"] == 0.15
+    # No explorer link, no domain-directory match, no off-topic/spam
+    # penalties fired for this text -- those keys must be absent, not 0.0.
+    assert "links_to_explorer" not in result.components
+    assert "domain_listed" not in result.components
+    assert "reject_noise" not in result.components
+    assert "seo_spam" not in result.components
+    assert round(sum(result.components.values()), 3) == result.score
+
+
+def test_ambiguous_algo_asa_components_show_only_the_ambiguous_tier() -> None:
+    """A page whose only signal is repeated 'algo'/'asa' hits in ordinary (non-Algorand) prose shows a components dict with just the ambiguous_keywords key -- no algorand_keywords, no exact_mention."""
+    text = (
+        "Preciso de algo para consertar a asa do aviao. Tenho algo em mente, "
+        "mas nao sei se essa asa vai funcionar. Talvez algo diferente, uma "
+        "asa nova, resolva o problema. Algo assim seria ideal para essa asa."
+    )
+    result = score_page(url="https://example-portuguese-aviation.test", text=text)
+    assert result.components == {"ambiguous_keywords": 0.15}

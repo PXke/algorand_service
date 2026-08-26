@@ -699,6 +699,27 @@ def _domain_sort_key(it: dict) -> tuple:
     return (order.get(it["frontier_status"], 2), tier, tie_break)
 
 
+def _parse_relevance_components(raw: str) -> dict[str, float]:
+    """Best-effort JSON-decode of content_relevance_components -- {} for domains scored before this field existed, or any malformed/non-dict value, so a single bad row never 500s the whole Domains tab list."""
+    if not raw:
+        return {}
+    try:
+        import json
+
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key, value in parsed.items():
+        try:
+            result[str(key)] = float(value)
+        except (ValueError, TypeError):
+            continue
+    return result
+
+
 def _admin_domains_full_list(status: str) -> list[dict]:
     """The metadata scan+sort — one query, cheap. Cached under a FIXED key (no page/page_size in it) so the existing exact-match _invalidate_domains_cache() still busts it correctly after a domain is set/cleared; pagination and the per-domain page-count queries happen fresh on every request, outside this cache, since they're now scoped to a single page instead of the whole ~500-row set and are cheap enough not to need caching."""
     from app.core.cassandra import get_cassandra_session
@@ -768,6 +789,16 @@ def _admin_domains_full_list(status: str) -> list[dict]:
                 # UI instead of a bare unexplained number (owner feedback
                 # 2026-07-12). Empty for domains scored before this existed.
                 "content_relevance_reasons": meta.get("content_relevance_reasons", ""),
+                # Structured counterpart of content_relevance_reasons above —
+                # score_page()'s actual per-signal numeric contribution (see
+                # workers' ClassifierResult.components docstring), for the
+                # admin Domains tab's relevance breakdown. JSON-decoded from
+                # the metadata map<text,text> column; {} for domains scored
+                # before this existed or on any malformed value, so an old
+                # row never crashes this endpoint.
+                "content_relevance_components": _parse_relevance_components(
+                    meta.get("content_relevance_components", "")
+                ),
                 # Full Site / Single Page reviewer nudge (suggest_full_site in
                 # domain_tracker.py) — advisory only, never decides. None
                 # (not False) when this domain predates the feature and hasn't

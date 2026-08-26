@@ -61,6 +61,32 @@
     return parts.join(', ')
   }
 
+  // Fixed display order + labels for score_page()'s structured relevance
+  // components (see workers' ClassifierResult.components docstring) --
+  // mirrors humanizeRelevanceReasons' tag->label mapping above, but keyed
+  // structurally instead of parsed out of a flattened string. Only keys
+  // present in a given domain's content_relevance_components are actually
+  // rendered (see relevanceComponentEntries below), same "only what fired"
+  // rule the underlying reasons list already follows.
+  const RELEVANCE_COMPONENT_LABELS: Record<string, string> = {
+    links_to_explorer: 'explorer link',
+    domain_listed: 'domain listed',
+    algorand_keywords: 'algorand keywords',
+    generic_keywords: 'generic keywords',
+    ambiguous_keywords: 'ambiguous (algo/asa)',
+    reject_noise: 'reject noise',
+    seo_spam: 'seo spam',
+    exact_mention: 'exact mention',
+  }
+
+  function relevanceComponentEntries(raw: unknown): Array<[string, number]> {
+    if (!raw || typeof raw !== 'object') return []
+    const components = raw as Record<string, unknown>
+    return Object.keys(RELEVANCE_COMPONENT_LABELS)
+      .filter((key) => typeof components[key] === 'number')
+      .map((key) => [key, components[key] as number])
+  }
+
   function relevanceColor(score: number): string {
     if (score >= 0.4) return '#2E7D32'
     if (score >= 0.2) return '#B7791F'
@@ -257,6 +283,7 @@
       {@const contentRel = item.content_relevance != null ? Number(item.content_relevance) : null}
       {@const reasons = String(item.content_relevance_reasons ?? '')}
       {@const humanReasons = humanizeRelevanceReasons(reasons)}
+      {@const componentEntries = relevanceComponentEntries(item.content_relevance_components)}
       {@const pendingUrl = String(item.pending_url ?? '')}
       {@const category = String(item.category ?? item.category_admin ?? '')}
       {@const pagesCrawled = Number(item.pages_crawled ?? 0)}
@@ -298,7 +325,22 @@
           <span class="frontier-status admin-muted">{String(item.frontier_status ?? '')}</span>
         </div>
 
-        {#if humanReasons}
+        {#if componentEntries.length > 0}
+          <!-- Structured relevance breakdown (score_page()'s actual
+               per-signal numeric contribution) -- same pattern as the
+               artifact-priority breakdown in QueueTab.svelte. Only shown
+               when this domain has a components dict at all; older rows
+               scored before this existed fall back to the flattened
+               humanReasons line below. -->
+          <div class="breakdown-block">
+            <strong>Relevance breakdown</strong>
+            <div class="breakdown-grid mono">
+              {#each componentEntries as [key, value] (key)}
+                <span>{RELEVANCE_COMPONENT_LABELS[key]}</span><span>{value.toFixed(2)}</span>
+              {/each}
+            </div>
+          </div>
+        {:else if humanReasons}
           <p class="reasons admin-muted">{humanReasons}</p>
         {/if}
 
@@ -540,6 +582,34 @@
   .reasons {
     font-size: 11px;
     margin: 0;
+  }
+
+  .breakdown-block {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--surface);
+  }
+  .breakdown-block strong {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: var(--subtle);
+  }
+  .breakdown-grid {
+    display: grid;
+    grid-template-columns: auto auto;
+    gap: 2px 12px;
+    font-size: 0.85rem;
+    justify-content: start;
+  }
+  .breakdown-grid span:nth-child(odd) {
+    color: var(--muted);
+  }
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
 
   .preview-title {
