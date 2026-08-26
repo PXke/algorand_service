@@ -27,7 +27,7 @@ This module's only job is to get gray-zone domains INTO that machinery,
 without ever running the crawl itself and without ever dispatching more than
 a handful at once.
 
-Two functions, cleanly split by side effect:
+Three functions, cleanly split by side effect:
 
   - `find_gray_zone_domains` is read-only reporting: what's out there, right
     now, with no Cassandra writes and no Celery dispatch. Safe to call as
@@ -53,14 +53,37 @@ Two functions, cleanly split by side effect:
     concurrency=4 scrape pool and starving unrelated admin/routine tasks) to
     recur through.
 
-Flipping a domain's `frontier_status` to "pending" the moment it's dispatched
-is also what makes repeat calls safe without any extra bookkeeping table:
-a dispatched domain no longer matches this module's own
-`frontier_status="approved"` scan, so the NEXT call naturally picks up a
-different slice of the backlog, and the existing `deep_classify_queued`
-dedup guard (shared with the ordinary escalation path) means a domain
-already in flight -- whether queued by this module or by an ordinary
-`classify_pending_domains` run -- is never double-dispatched.
+  - `find_stale_gray_zone_dispatches` is read-only reporting again, for the
+    failure mode the other two don't cover: `deep_classify_domain` runs with
+    Celery's default early-ack (see its own `@celery_app.task` site -- no
+    `acks_late`, unlike e.g. `publish_tasks.py`'s deliberate opt-in for
+    exactly this reason), and this codebase has two separate precedents for
+    a dispatched task simply never running to completion (a misplaced-
+    decorator bug that silently dropped every call, root-caused
+    2026-08-25 in `deep_classify_domain`'s own docstring; a separate early-
+    ack bug that silently lost ~52 translation tasks). When that happens
+    here, `deep_classify_queued="true"` is stuck forever with nothing to
+    clear it, and the domain vanishes from every future `find_gray_zone_
+    domains` / `dispatch_gray_zone_deep_classify` report -- permanently,
+    since neither function ever looks past that flag. `find_stale_gray_
+    zone_dispatches` finds exactly those domains (queued, still approved,
+    past a generous timeout) without touching anything, so there's a way to
+    notice the gap short of a raw CQL query. See its own docstring for why
+    a domain that DID complete -- approved or rejected -- is not a false
+    positive here.
+
+`deep_classify_queued="true"`, written into metadata the moment a domain is
+dispatched, is what makes repeat calls safe without any extra bookkeeping
+table: a dispatched domain no longer matches `_gray_zone_rows`' own
+`deep_classify_queued` exclusion check (see that function's docstring for
+why the write is metadata-only, not the `frontier_status` column -- an
+earlier version of this module wrote `frontier_status="pending"` into
+metadata as the exclusion mechanism, but `_gray_zone_rows` reads the real
+column, never metadata, for that check, so the write was inert and has
+since been removed), so the NEXT call naturally picks up a different slice
+of the backlog, and the same guard -- shared with the ordinary escalation
+path -- means a domain already in flight, whether queued by this module or
+by an ordinary `classify_pending_domains` run, is never double-dispatched.
 """
 
 from __future__ import annotations
@@ -194,11 +217,26 @@ def dispatch_gray_zone_deep_classify(
     silently inert and has been removed; `deep_classify_queued` is the one
     flag that actually does the exclusion work.)
 
+    The same write also stamps `deep_classify_queued_at` with the dispatch
+    time (UTC, `datetime.isoformat()`) -- nothing reads it on the happy
+    path (a completed `deep_classify_domain` run either flips
+    `frontier_status` away from "approved" on reject, or overwrites
+    `content_relevance` with a real promote-range score on approve, so the
+    domain falls out of `_gray_zone_rows` on its own regardless of this
+    flag or timestamp). It exists solely for `find_stale_gray_zone_
+    dispatches` to detect the OTHER case: a dispatch whose task never ran
+    to completion at all (dropped message, crashed worker -- see that
+    function's own docstring), which leaves `deep_classify_queued="true"`
+    and `frontier_status="approved"` both stuck forever with nothing else
+    to date them by.
+
     `seed_url` for each dispatch is the domain's own `pending_url` if one
     was recorded, else the page that produced its shallow verdict
     (`content_relevance_url`), else a bare `https://{domain}` guess --
     same fallback order `classify_pending_domains` itself uses for `url`.
     """
+    from datetime import UTC, datetime
+
     from app.celery_app import celery_app as _celery_app
     from app.core.cassandra import get_cassandra_session
     from app.core.config import FRONTIER_DEEP_CLASSIFY_MAX_PAGES
@@ -214,7 +252,11 @@ def dispatch_gray_zone_deep_classify(
             meta.get("pending_url") or meta.get("content_relevance_url") or f"https://{domain}"
         )
         if not dry_run:
-            new_meta = {**meta, "deep_classify_queued": "true"}
+            new_meta = {
+                **meta,
+                "deep_classify_queued": "true",
+                "deep_classify_queued_at": datetime.now(tz=UTC).isoformat(),
+            }
             session.execute(DomainTrackingStmts.UPDATE_METADATA, (new_meta, domain))
             _celery_app.send_task(
                 "app.tasks.crawler.deep_classify_domain",
@@ -233,3 +275,96 @@ def dispatch_gray_zone_deep_classify(
         "dispatched_count": len(dispatched),
         "remaining_candidates": max(len(candidates) - len(batch), 0),
     }
+
+
+def find_stale_gray_zone_dispatches(
+    staleness_seconds: int = 7200, *, scan_limit: int = 5000
+) -> list[dict[str, object]]:
+    """Read-only report: domains `dispatch_gray_zone_deep_classify` queued for a real `deep_classify_domain` run that never actually resolved -- `deep_classify_queued` is still "true", `frontier_status` is STILL "approved" (never flipped by a completed run either way), and `deep_classify_queued_at` is older than `staleness_seconds`. Makes NO Cassandra writes and dispatches NOTHING, mirroring `find_gray_zone_domains`.
+
+    Why "still approved" is the load-bearing second condition, not just an
+    old timestamp: `deep_classify_domain` (see its own docstring in
+    `tasks/url_queue_tasks.py`) never clears `deep_classify_queued` on
+    completion -- `update_domain_status` MERGES metadata, it never removes
+    keys -- but a domain that actually ran to completion doesn't need the
+    flag cleared to stop looking gray-zone:
+
+      - Rejected (`dead_end`): `frontier_status_override="dead_end"` moves
+        the real column off "approved", so `_gray_zone_rows`' own
+        `status != "approved"` check already excludes it. Correctly
+        resolved, not stale.
+      - Approved (in-domain hit or external corroboration): `frontier_status`
+        stays "approved", but `content_relevance` is overwritten with the
+        real verdict score, which for an approve is always in the promote
+        range -- `_gray_zone_rows`' score-range check excludes it on its
+        own even though the flag and an old timestamp are both still
+        sitting there. Also correctly resolved, not stale.
+
+    So a stuck flag alone is not evidence of anything wrong -- most
+    completed dispatches leave one behind permanently and that's fine. The
+    genuine failure mode this catches is narrower and worse: the task never
+    ran to completion AT ALL (message dropped, worker crashed mid-crawl,
+    pool restarted) -- see this module's own top-of-file docstring for two
+    precedents of exactly that (a misplaced-decorator bug that silently
+    broke every call, and a separate early-ack bug that silently lost ~52
+    translation tasks; `deep_classify_domain` itself still runs under
+    Celery's default early-ack, no `acks_late`). Only then does
+    `frontier_status` stay "approved" with nothing having ever touched
+    `content_relevance` again, which is exactly what the three conditions
+    together detect.
+
+    `staleness_seconds` defaults to 7200 (2 hours): `deep_classify_domain`
+    stops at the first relevant hit, so a real approve is usually fast, but
+    a genuine reject pays the full `FRONTIER_DEEP_CLASSIFY_MAX_PAGES`-page
+    crawl (200 by default) plus a SearXNG corroboration call before it
+    resolves -- generously budgeted, even a slow multi-second-per-page
+    crawl plus queueing behind other `scrape`-queue work should finish
+    within, at most, tens of minutes. Two hours leaves a wide margin above
+    any realistic completion time while still surfacing a genuinely dropped
+    task the same day, rather than requiring a raw CQL query to ever notice
+    it.
+
+    A row with a missing or malformed `deep_classify_queued_at` (e.g. one
+    written before this field existed) is skipped, not reported -- there is
+    no way to judge staleness without a timestamp, and this function is
+    pure visibility, not a place to guess.
+    """
+    from datetime import UTC, datetime
+
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import DomainTrackingStmts
+
+    session = get_cassandra_session()
+    now = datetime.now(tz=UTC)
+
+    findings: list[dict[str, object]] = []
+    for row in session.execute(DomainTrackingStmts.LIST, (scan_limit,)):
+        meta = dict(row.metadata or {})
+        status = row.frontier_status or meta.get("frontier_status")
+        if status != "approved":
+            continue
+        if meta.get("deep_classify_queued") != "true":
+            continue
+        queued_at_raw = meta.get("deep_classify_queued_at")
+        if not queued_at_raw:
+            continue
+        try:
+            queued_at = datetime.fromisoformat(queued_at_raw)
+        except (TypeError, ValueError):
+            continue
+        if queued_at.tzinfo is None:
+            queued_at = queued_at.replace(tzinfo=UTC)
+        age_seconds = (now - queued_at).total_seconds()
+        if age_seconds < staleness_seconds:
+            continue
+        findings.append(
+            {
+                "domain": row.domain,
+                "deep_classify_queued_at": queued_at_raw,
+                "age_seconds": age_seconds,
+                "content_relevance": meta.get("content_relevance", ""),
+            }
+        )
+
+    findings.sort(key=lambda item: item["domain"])
+    return findings

@@ -9,6 +9,7 @@ import pytest
 from app.modules.crawler.gray_zone_reconciliation import (
     dispatch_gray_zone_deep_classify,
     find_gray_zone_domains,
+    find_stale_gray_zone_dispatches,
 )
 
 
@@ -225,6 +226,12 @@ def test_dispatch_real_run_writes_metadata_and_sends_the_real_task(
     assert new_meta["deep_classify_queued"] == "true"
     assert "frontier_status" not in new_meta
     assert new_meta["some_other_field"] == "preserved"  # merge, not overwrite
+    # 2026-08-26 staleness-detection fix: a timestamp is stamped alongside
+    # the flag so find_stale_gray_zone_dispatches has something to judge
+    # staleness by later -- must parse as a real ISO8601 datetime.
+    from datetime import datetime
+
+    datetime.fromisoformat(new_meta["deep_classify_queued_at"])
 
     assert len(sent) == 1
     name, kwargs, queue = sent[0]
@@ -339,4 +346,149 @@ def test_dispatch_is_a_noop_when_the_backlog_is_empty(monkeypatch: pytest.Monkey
         "remaining_candidates": 0,
     }
     assert all(len(p) == 1 for p in executed)  # only the read-only scan ran
+    assert sent == []
+
+
+# --------------------------------------------------------------------------- #
+# find_stale_gray_zone_dispatches
+# --------------------------------------------------------------------------- #
+
+
+def _iso_ago(seconds: float) -> str:
+    from datetime import UTC, datetime, timedelta
+
+    return (datetime.now(tz=UTC) - timedelta(seconds=seconds)).isoformat()
+
+
+def test_find_stale_gray_zone_dispatches_flags_an_old_still_approved_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Queued long ago, still frontier_status="approved", flag still set -- exactly the "task never ran to completion" gap this function exists to surface."""
+    rows = [
+        _row(
+            "dropped.example",
+            metadata={
+                "content_relevance": "0.35",
+                "deep_classify_queued": "true",
+                "deep_classify_queued_at": _iso_ago(10_000),
+            },
+        )
+    ]
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: _fake_session(rows))
+
+    findings = find_stale_gray_zone_dispatches(staleness_seconds=7200)
+
+    assert [f["domain"] for f in findings] == ["dropped.example"]
+    assert findings[0]["age_seconds"] >= 10_000
+
+
+def test_find_stale_gray_zone_dispatches_ignores_a_recent_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Queued recently, under the staleness threshold -- still plausibly in flight, not a finding yet."""
+    rows = [
+        _row(
+            "just-dispatched.example",
+            metadata={
+                "content_relevance": "0.35",
+                "deep_classify_queued": "true",
+                "deep_classify_queued_at": _iso_ago(30),
+            },
+        )
+    ]
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: _fake_session(rows))
+
+    assert find_stale_gray_zone_dispatches(staleness_seconds=7200) == []
+
+
+def test_find_stale_gray_zone_dispatches_ignores_a_domain_that_already_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """frontier_status has moved off "approved" (e.g. deep_classify_domain rejected it to dead_end) even though the flag and an old timestamp are both still sitting in metadata -- update_domain_status merges metadata and never clears the flag on completion, so a stuck flag alone must NOT be treated as stale; only frontier_status staying "approved" means the task never actually finished."""
+    rows = [
+        _row(
+            "resolved-dead-end.example",
+            frontier_status="dead_end",
+            metadata={
+                "deep_classify_queued": "true",
+                "deep_classify_queued_at": _iso_ago(10_000),
+                "deep_classified": "true",
+            },
+        ),
+    ]
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: _fake_session(rows))
+
+    assert find_stale_gray_zone_dispatches(staleness_seconds=7200) == []
+
+
+def test_find_stale_gray_zone_dispatches_ignores_unqueued_or_unflagged_domains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Still approved and old is not enough on its own -- the flag must actually be set, or this isn't a gray-zone dispatch at all."""
+    rows = [
+        _row("never-dispatched.example", metadata={"content_relevance": "0.35"}),
+        _row(
+            "flag-cleared-somehow.example",
+            metadata={
+                "deep_classify_queued": "false",
+                "deep_classify_queued_at": _iso_ago(10_000),
+            },
+        ),
+    ]
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: _fake_session(rows))
+
+    assert find_stale_gray_zone_dispatches(staleness_seconds=7200) == []
+
+
+def test_find_stale_gray_zone_dispatches_skips_missing_or_malformed_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rows that predate the deep_classify_queued_at field (or carry a corrupt value) must be skipped, not crash the whole scan -- there is no way to judge staleness without a real timestamp."""
+    rows = [
+        _row(
+            "no-timestamp.example",
+            metadata={"deep_classify_queued": "true"},
+        ),
+        _row(
+            "garbage-timestamp.example",
+            metadata={"deep_classify_queued": "true", "deep_classify_queued_at": "not-a-date"},
+        ),
+        _row(
+            "genuinely-stale.example",
+            metadata={
+                "deep_classify_queued": "true",
+                "deep_classify_queued_at": _iso_ago(10_000),
+            },
+        ),
+    ]
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: _fake_session(rows))
+
+    findings = find_stale_gray_zone_dispatches(staleness_seconds=7200)
+
+    assert [f["domain"] for f in findings] == ["genuinely-stale.example"]
+
+
+def test_find_stale_gray_zone_dispatches_makes_no_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Purely read-only, mirroring find_gray_zone_domains -- no write-shaped execute call, no Celery dispatch."""
+    rows = [
+        _row(
+            "stale.example",
+            metadata={
+                "deep_classify_queued": "true",
+                "deep_classify_queued_at": _iso_ago(10_000),
+            },
+        )
+    ]
+    executed: list = []
+    monkeypatch.setattr(
+        "app.core.cassandra.get_cassandra_session", lambda: _fake_session(rows, executed)
+    )
+    sent = []
+    monkeypatch.setattr(
+        "app.celery_app.celery_app.send_task", lambda *a, **kw: sent.append((a, kw))
+    )
+
+    find_stale_gray_zone_dispatches(staleness_seconds=7200)
+
+    assert executed == [(5000,)]
     assert sent == []
