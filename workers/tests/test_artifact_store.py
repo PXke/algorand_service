@@ -396,6 +396,45 @@ def test_no_service_id_artifacts_never_concatenate(
     assert content_b.content == "brief two"
 
 
+def test_concatenation_venue_service_id_survives_repeated_cycles(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """A real per-item lane (forum/xgov/youtube/bluesky) passes the same venue_service_id on every insert for a given service_id -- confirm it's still correctly carried through 3 concatenation cycles in a row, ending on the latest call's own value."""
+    from app.modules.newspaper.artifact_store import get_artifact, insert_artifact
+
+    insert_artifact(
+        service_id="svc-venue", url=None, channel="youtube", content="v1", venue_service_id="algorand-yt"
+    )
+    insert_artifact(
+        service_id="svc-venue", url=None, channel="youtube", content="v2", venue_service_id="algorand-yt"
+    )
+    third_id, _ = insert_artifact(
+        service_id="svc-venue", url=None, channel="youtube", content="v3", venue_service_id="algorand-yt"
+    )
+
+    artifact = get_artifact(third_id)
+    assert artifact is not None
+    assert artifact.venue_service_id == "algorand-yt"
+
+
+def test_concatenation_preserves_venue_service_id_when_a_later_call_omits_it(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """venue_service_id identifies the SERVICE, not one update event, so it must never regress from set to unset just because a later call in the concatenation chain doesn't pass one -- unlike title (which deliberately always takes the latest). This is exactly the shape reconcile_duplicate_pending_artifacts's fold can hit when only one of several duplicates ever got backfilled (see test_service_reconciliation.py)."""
+    from app.modules.newspaper.artifact_store import get_artifact, insert_artifact
+
+    insert_artifact(
+        service_id="svc-venue2", url=None, channel="bluesky", content="v1", venue_service_id="acct-bsky"
+    )
+    second_id, _ = insert_artifact(
+        service_id="svc-venue2", url=None, channel="bluesky", content="v2", venue_service_id=None
+    )
+
+    artifact = get_artifact(second_id)
+    assert artifact is not None
+    assert artifact.venue_service_id == "acct-bsky"
+
+
 # --------------------------------------------------------------------------- #
 # revert_artifact_to_pending (2026-08-26) -- the reverse of mark_artifact_status's
 # pending -> non-pending move, used by to_compose_selection.reset_to_compose_for_day

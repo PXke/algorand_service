@@ -108,7 +108,12 @@ def insert_artifact(
     per-item `service_id`. None for everything else. Purely a read signal
     for `to_compose_selection._artifact_pool`; never part of the dedup match
     below, which stays keyed on the literal per-item `service_id` exactly as
-    before.
+    before. When this call's own arg is falsy but an existing pending
+    artifact is found and concatenated onto (below), that row's own
+    venue_service_id is inherited rather than overwritten with None -- it
+    identifies the service itself, not this one update, so it must never
+    regress from set to unset partway through a chain of concatenation
+    cycles.
 
     Dedup invariant: at most one PENDING artifact per service_id. When
     `service_id` is truthy and an existing pending artifact for it is found,
@@ -162,6 +167,20 @@ def insert_artifact(
                         new_content=content,
                         new_metadata=metadata or {},
                     )
+                # venue_service_id identifies the underlying VENUE, a stable
+                # property of the service_id, not of any one update event --
+                # unlike title (which deliberately always takes the latest),
+                # this must never regress from set to unset just because one
+                # particular call in a chain of concatenation cycles happened
+                # not to supply it. Falls back to the row being superseded
+                # here when this call's own arg is falsy. Matters most for
+                # service_reconciliation.reconcile_duplicate_pending_artifacts,
+                # whose multi-duplicate fold re-inserts each duplicate's own
+                # (possibly inconsistent) venue_service_id in turn -- without
+                # this fallback, a later fold step for a duplicate that never
+                # got backfilled could silently wipe out an earlier one that
+                # had already been recovered.
+                venue_service_id = venue_service_id or (getattr(row, "venue_service_id", None) or None)
                 _delete_pending_row(
                     session,
                     status=row.status,
