@@ -243,6 +243,12 @@
     pinError = null
     try {
       await admin.pinArtifactForTomorrow(artifactId)
+      // The pin always targets the real tomorrow regardless of which day
+      // is currently shown (see the button's own note below) -- jump the
+      // view there too, or a pin made while browsing any other date reloads
+      // into a day that never shows it, looking exactly like nothing
+      // happened even though the write succeeded (root-caused 2026-08-26).
+      day = tomorrowIso()
       onmessage?.('Pinned as tomorrow’s human pick')
       await load()
     } catch (e) {
