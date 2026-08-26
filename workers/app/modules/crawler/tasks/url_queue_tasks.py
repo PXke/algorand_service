@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from app.celery_app import celery_app
 from app.core.config import URL_QUEUE_ENABLED
 from app.modules.crawler.url_queue import dequeue_url, pending_url_count
 from app.modules.scraper.crawlers.web_crawler import WebCrawlerDriver
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from cassandra.cluster import Session as CassandraSession
@@ -363,6 +366,36 @@ def deep_classify_domain(
         # for the discovery path, reintroduced here since this task was added
         # after that fix and was never wired to it — root-caused 2026-08-25).
         ensure_monitored_service(domain, scrape_url=found_url)
+        # Feed found_url into the ordinary crawl frontier too (root-caused
+        # 2026-08-26, ulam.io): when a curated ecosystem-directory sync
+        # (ecosystem_sync.py) already registered this domain's service
+        # pointed at the bare landing page BEFORE this task ran,
+        # ensure_monitored_service above is a no-op ("never overwrites an
+        # existing row") — the one page that actually proves the domain's
+        # relevance is then recorded only as a metadata pointer
+        # (content_relevance_url) and never fetched again. The service's
+        # aggregated context (service_context.build_service_context) is built
+        # entirely from `crawled_pages_by_domain`, which this task never
+        # writes to (`_deep_crawl_for_relevance` fetches pages through its
+        # own throwaway in-memory crawl, not the queue-backed frontier) — so
+        # without this, the confirmed-relevant page is discovered once and
+        # then permanently invisible to every future aggregate/priority
+        # computation, which falls back to whatever thin/off-topic content
+        # the landing page itself happens to have. Enqueuing here is what
+        # actually gets it fetched-and-stored via the normal
+        # web_crawler.scrape_from_queue_item -> index_crawled_page path.
+        # Harmless when ensure_monitored_service DID adopt found_url as the
+        # entry URL too (enqueue_url's own pending-dedup makes a repeat
+        # enqueue a no-op). Best-effort: a queueing failure here must not
+        # fail the classification verdict that was already persisted above.
+        try:
+            from app.modules.crawler.url_queue import enqueue_url
+
+            enqueue_url(found_url, source="deep_classify_relevant_page", priority=20)
+        except Exception:
+            logger.warning(
+                "failed to enqueue deep-classify relevant page %s", found_url, exc_info=True
+            )
         return {
             "status": "ok",
             "domain": domain,

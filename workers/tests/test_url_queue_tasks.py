@@ -309,6 +309,73 @@ def test_deep_classify_domain_approves_on_first_relevant_page(
     ]
 
 
+def test_deep_classify_domain_enqueues_the_found_page_into_the_crawl_frontier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test (root-caused 2026-08-26, ulam.io): when ensure_monitored_service is a no-op because a curated ecosystem-directory sync already registered this domain's service pointed at the bare landing page, the confirmed-relevant page this task found must still be queued into the ordinary crawl frontier -- else it is fetched once here, recorded only as a metadata pointer, and never harvested into `crawled_pages_by_domain`, so it can never enter the service's aggregated context (service_context.build_service_context) or feed the priority sweep.
+
+    Mirrors ulam.io exactly: ecosystem_sync's `_ingest_domain` had already
+    called `ensure_monitored_service(domain, scrape_url="https://ulam.io/")`
+    before this task ran, so this task's own
+    `ensure_monitored_service(domain, scrape_url=found_url)` returned False
+    (owner already set) -- yet `ulam.io/case-studies/pact-fi` (the page that
+    actually proves the domain's relevance) was never queued anywhere and
+    stayed permanently unharvested.
+    """
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    # The relevant page must be reachable via the frontier's own link
+    # discovery (not the landing page itself), same as a real deep crawl.
+    driver = _FakeDriver(
+        {
+            "https://svc.example": _result(
+                "https://svc.example",
+                "landing page, nothing chain-related" * 5,
+                '<a href="/case-studies/pact-fi">Pact case study</a>',
+            ),
+            "https://svc.example/case-studies/pact-fi": _result(
+                "https://svc.example/case-studies/pact-fi",
+                "algorand mainnet asa testnet" * 5,
+                "",
+            ),
+        }
+    )
+    # Simulate ecosystem_sync having already claimed this domain for a
+    # different (bare landing page) URL -- ensure_monitored_service is a
+    # real no-op in that case, but _patch_common's stub always returns True,
+    # so return False explicitly here to match production.
+    service_calls: list[tuple] = []
+    monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: driver)
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.update_domain_status", lambda _domain, **_kw: None
+    )
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.ensure_monitored_service",
+        lambda domain, **kw: service_calls.append((domain, kw)) or False,
+    )
+    enqueue_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "app.modules.crawler.url_queue.enqueue_url",
+        lambda url, **kw: enqueue_calls.append((url, kw)) or ("qid", True),
+    )
+
+    out = deep_classify_domain(domain="svc.example", max_pages=200)
+
+    assert out["verdict"] == "approved"
+    assert out["found_at"] == "https://svc.example/case-studies/pact-fi"
+    # ensure_monitored_service really was a no-op (production shape).
+    assert service_calls == [
+        ("svc.example", {"scrape_url": "https://svc.example/case-studies/pact-fi"})
+    ]
+    assert enqueue_calls == [
+        (
+            "https://svc.example/case-studies/pact-fi",
+            {"source": "deep_classify_relevant_page", "priority": 20},
+        )
+    ]
+
+
 def test_deep_classify_domain_rejects_when_nothing_found_within_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
