@@ -42,6 +42,11 @@ _FEED_FULL_CONTENT_LIMIT = 20  # newest items carry full content:encoded HTML
 _SITEMAP_LIMIT = 5000
 _SITEMAP_CACHE_TTL = 900
 _RSS_CACHE_TTL = 900
+# llms-full.txt inlines the WHOLE corpus (not just the newest N like the RSS
+# feed's full-content window) -- generous headroom over the live article
+# count so the file doesn't silently start truncating as the corpus grows.
+_LLMS_FULL_CONTENT_LIMIT = 500
+_LLMS_FULL_CACHE_TTL = 3600
 
 
 def _cached_sitemap_build() -> sitemap.SitemapBuild:
@@ -651,6 +656,28 @@ def llms_txt(request: Request) -> Response:
     return _text_response(sitemap.llms_txt(), "text/plain; charset=utf-8", "public, max-age=3600")
 
 
+def llms_full_txt(request: Request) -> Response:
+    """llms-full.txt: the llms.txt companion inlining every published article's full markdown text in one file. Cached longer than the RSS feed (_LLMS_FULL_CACHE_TTL) since this is a full-corpus rebuild, not a newest-N-items refresh -- freshness matters far less than for the reader-facing feed."""
+    from app.core.cache import cached_bytes
+
+    _ = request
+
+    def compute() -> bytes:
+        items = news.list_feed(limit=_LLMS_FULL_CONTENT_LIMIT)
+        bodies: dict[str, str] = {}
+        try:
+            details = news.get_articles([item.article_id for item in items])
+            for article_id, detail in details.items():
+                if detail.body:
+                    bodies[article_id] = detail.body
+        except Exception:
+            pass
+        return sitemap.llms_full_txt(items, bodies).encode("utf-8")
+
+    text = cached_bytes("seo:llms-full-txt", _LLMS_FULL_CACHE_TTL, compute).decode("utf-8")
+    return _text_response(text, "text/plain; charset=utf-8", "public, max-age=3600")
+
+
 def sitemap_root(request: Request) -> Response:
     """Root sitemap index."""
     _ = request
@@ -745,6 +772,7 @@ def register_seo_routes(app: Router) -> None:
     app.get("/feed.xml")(rss_feed)
     app.get("/feed/topic/:tag")(topic_rss_feed)
     app.get("/llms.txt")(llms_txt)
+    app.get("/llms-full.txt")(llms_full_txt)
     app.get("/sitemap.xml")(sitemap_root)
     app.get("/sitemap-pages.xml")(sitemap_pages)
     app.get("/sitemap-articles-:part")(sitemap_articles_part)
@@ -772,6 +800,7 @@ def register_seo_routes(app: Router) -> None:
         ("/feed.xml", rss_feed),
         ("/feed/topic/:tag", topic_rss_feed),
         ("/llms.txt", llms_txt),
+        ("/llms-full.txt", llms_full_txt),
         ("/sitemap.xml", sitemap_root),
         ("/sitemap-pages.xml", sitemap_pages),
         ("/sitemap-articles-:part", sitemap_articles_part),

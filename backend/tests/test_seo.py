@@ -938,9 +938,79 @@ def test_llms_txt_lists_feed_and_topics() -> None:
     assert "/topics" in txt
     assert "/feed/topic/" in txt
     assert "/section/" not in txt
+    assert "llms-full.txt" in txt
 
     # API preconnect removed: feed/markets/auth are deferred; early preconnect
     # triggered Lighthouse "unused preconnect" and competed with WASM on boot.
+
+
+def test_llms_full_txt_inlines_every_article_body() -> None:
+    """Each item with a body gets its title/url/date/tags header plus the raw markdown body, in order, divided by a rule."""
+    from app.modules.news.models.schemas import ArticleFeedItem
+
+    items = [
+        ArticleFeedItem(
+            article_id="a1",
+            service_id="svc-1",
+            title="First Story",
+            slug="first-story",
+            summary="s1",
+            tags=["defi", "algorand"],
+            published_at_epoch=1735689600,
+        ),
+        ArticleFeedItem(
+            article_id="a2",
+            service_id="svc-2",
+            title="Second Story",
+            slug="second-story",
+            summary="s2",
+            tags=[],
+            published_at_epoch=1735776000,
+        ),
+    ]
+    bodies = {"a1": "# Heading\n\nBody one.", "a2": "Body two, no heading."}
+
+    txt = sitemap.llms_full_txt(items, bodies)
+
+    assert txt.startswith("# PXke Algorand")
+    assert "## First Story" in txt
+    assert "## Second Story" in txt
+    assert "first-story" in txt
+    assert "Tags: defi, algorand" in txt
+    assert "Body one." in txt
+    assert "Body two, no heading." in txt
+    assert "---" in txt
+    # Order preserved: First Story's block appears before Second Story's.
+    assert txt.index("First Story") < txt.index("Second Story")
+
+
+def test_llms_full_txt_skips_items_with_no_body() -> None:
+    """An item with no fetched body (e.g. a store error) is silently skipped, not rendered as an empty section."""
+    from app.modules.news.models.schemas import ArticleFeedItem
+
+    items = [
+        ArticleFeedItem(
+            article_id="a1",
+            service_id="svc-1",
+            title="Has Body",
+            slug="has-body",
+            summary="s",
+            tags=[],
+            published_at_epoch=1735689600,
+        ),
+        ArticleFeedItem(
+            article_id="a2",
+            service_id="svc-2",
+            title="No Body",
+            slug="no-body",
+            summary="s",
+            tags=[],
+            published_at_epoch=1735689600,
+        ),
+    ]
+    txt = sitemap.llms_full_txt(items, {"a1": "Content."})
+    assert "Has Body" in txt
+    assert "No Body" not in txt
 
 
 # --- title length budget + SSR visibility -------------------------------------

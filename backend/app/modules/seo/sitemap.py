@@ -125,8 +125,40 @@ def llms_txt() -> str:
         "any topic slug — one feed per writer tag",
         f"- [About]({absolute('/about')}): editorial and AI-authorship disclosure",
         f"- [Contact]({absolute('/contact')}): corrections, tips and feedback form",
+        f"- [Full corpus]({absolute('/llms-full.txt')}): every article's complete "
+        "text inline, one plain-text file, no link-following required",
     ]
     return "\n".join(lines) + "\n"
+
+
+def llms_full_txt(items: list[ArticleFeedItem], bodies: dict[str, str]) -> str:
+    """llms-full.txt (llmstxt.org convention): the llms.txt companion that inlines every article's full text directly, so an LLM can ingest the whole corpus without following links. `bodies` maps article_id -> raw markdown body (unlike llms_txt's linked RSS feed, this is plain markdown, not HTML — a lighter, more directly LLM-readable format for a file that exists purely for ingestion, never rendered as a webpage)."""
+    lines = [
+        f"# {settings.site_name} — full corpus",
+        "",
+        f"> Every published article from {settings.site_name}, complete text, "
+        "one file. Rebuilt periodically; article count and order may shift as "
+        "new stories publish. See /llms.txt for the site guide and canonical "
+        "links.",
+        "",
+    ]
+    for item in items:
+        body = bodies.get(item.article_id)
+        if not body:
+            continue
+        url = absolute(article_path(item.article_id, item.slug))
+        lines.append(f"## {item.title}")
+        lines.append("")
+        lines.append(f"URL: {url}")
+        lines.append(f"Published: {_iso_date(item.published_at_epoch)}")
+        if item.tags:
+            lines.append(f"Tags: {', '.join(item.tags)}")
+        lines.append("")
+        lines.append(body.strip())
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _iso_date(epoch: int) -> str:
