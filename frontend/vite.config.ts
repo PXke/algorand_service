@@ -82,6 +82,14 @@ export default defineConfig({
           /^\/og\//,
           // robots.txt, llms.txt and the IndexNow key file, all root-level.
           /^\/[^/]+\.txt$/,
+          // Writer-captured screenshots and any other nginx-served static
+          // media (see deploy/nginx/algorand-platform.conf's /media/
+          // alias) — same "curl sees it fine, a browser navigation gets
+          // the SPA shell" bug as feed.xml above, hit 2026-08-26 when a
+          // captured screenshot's own image_url 404'd (SPA "not found")
+          // on direct navigation despite the file existing and nginx
+          // serving it correctly.
+          /^\/media\//,
         ],
         runtimeCaching: [
           {
