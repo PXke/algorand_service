@@ -177,7 +177,9 @@ def reconcile_domain_duplicates() -> dict[str, object]:
 
 
 def backfill_missing_venue_service_ids() -> dict[str, object]:
-    """Scan PENDING artifacts (same scope as the priority sweep -- non-pending artifacts never reach `_artifact_pool` again) for the per-item lanes and backfill `venue_service_id` on the DETERMINISTIC, unambiguous cases only:
+    """Scan PENDING artifacts (same scope as the priority sweep -- non-pending artifacts never reach `_artifact_pool` again) for the per-item lanes and backfill `venue_service_id` on the DETERMINISTIC, unambiguous cases only.
+
+    Cases handled:
 
       - channel == "forum" -> config.FORUM_VENUE_SERVICE_ID (a fixed
         constant; forum.algorand.co has exactly one venue).
@@ -194,12 +196,13 @@ def backfill_missing_venue_service_ids() -> dict[str, object]:
     logged via `logger.warning` for manual review -- never guessed at, per
     this module's own conservative-by-design rule.
     """
-    from app.core import config
-    from app.modules.chain_tail.registry_cache import load_enabled_services
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         list_pending_artifacts,
         set_artifact_venue_service_id,
     )
+
+    from app.core import config
+    from app.modules.chain_tail.registry_cache import load_enabled_services
 
     enabled_ids = {entry.service_id for entry in load_enabled_services()}
 
@@ -257,7 +260,7 @@ def find_duplicate_pending_artifacts() -> dict[str, list[str]]:
     """
     from collections import defaultdict
 
-    from app.modules.newspaper.artifact_store import list_pending_artifacts
+    from algorand_shared.artifact_store import list_pending_artifacts
 
     grouped: dict[str, list[str]] = defaultdict(list)
     for artifact in list_pending_artifacts():
@@ -279,7 +282,7 @@ def reconcile_duplicate_pending_artifacts() -> dict[str, object]:
     Always converges to exactly one pending artifact per service_id,
     regardless of how many duplicates exist.
     """
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         DISCARDED,
         get_artifact_content,
         insert_artifact,

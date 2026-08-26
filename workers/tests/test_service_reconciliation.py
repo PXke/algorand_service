@@ -245,11 +245,11 @@ def _patch_backfill(
     monkeypatch: pytest.MonkeyPatch, *, pending: list, enabled_ids: set[str]
 ) -> list[tuple[str, str]]:
     monkeypatch.setattr(
-        "app.modules.newspaper.artifact_store.list_pending_artifacts", lambda: pending
+        "algorand_shared.artifact_store.list_pending_artifacts", lambda: pending
     )
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        "app.modules.newspaper.artifact_store.set_artifact_venue_service_id",
+        "algorand_shared.artifact_store.set_artifact_venue_service_id",
         lambda artifact_id, venue: calls.append((artifact_id, venue)) or True,
     )
     monkeypatch.setattr(
@@ -361,7 +361,7 @@ def test_backfill_leaves_plain_web_crawl_artifacts_alone(monkeypatch: pytest.Mon
 
 def _seed_duplicate_pending(session: FakeArtifactSession) -> tuple[str, str]:
     """Two genuinely separate inserts, then a raw service_id repoint on the second -- exactly how the real pera-wallet incident happened (a direct Cassandra UPDATE bypassing insert_artifact's own dedup check), not something insert_artifact itself could ever produce on its own."""
-    from app.modules.newspaper.artifact_store import insert_artifact
+    from algorand_shared.artifact_store import insert_artifact
 
     older_id, _ = insert_artifact(
         service_id="pera-wallet", url="https://perawallet.app", channel="crawler",
@@ -395,7 +395,7 @@ def test_find_duplicate_pending_artifacts_ignores_healthy_services(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """Each service_id here has exactly one pending artifact -- no duplicates found."""
-    from app.modules.newspaper.artifact_store import insert_artifact
+    from algorand_shared.artifact_store import insert_artifact
 
     insert_artifact(service_id="svc-a", url=None, channel="crawler", content="x")
     insert_artifact(service_id="svc-b", url=None, channel="crawler", content="y")
@@ -407,7 +407,7 @@ def test_reconcile_folds_duplicates_to_exactly_one_pending_artifact(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """The fold uses insert_artifact's own concatenation path -- both discarded originals' content survive in the merged survivor, and only one PENDING artifact remains for the service_id afterward."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         DISCARDED,
         PENDING,
         get_artifact_content,
@@ -440,7 +440,7 @@ def test_reconcile_is_a_noop_when_nothing_is_duplicated(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """No duplicates exist, so the sweep merges nothing."""
-    from app.modules.newspaper.artifact_store import insert_artifact
+    from algorand_shared.artifact_store import insert_artifact
 
     insert_artifact(service_id="svc-a", url=None, channel="crawler", content="x")
 

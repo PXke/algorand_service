@@ -1,5 +1,16 @@
 """Cassandra-backed store for the editorial-room `artifacts` table.
 
+Moved here from `workers/app/modules/newspaper/artifact_store.py` (2026-08-26)
+so backend's admin artifact/to-compose routes (list-to-compose-selected,
+get-artifact-content, to-compose-preview, pin-for-tomorrow, reset-to-compose)
+can read (and, for pin/reset, write) these tables directly instead of a
+synchronous Celery round-trip into a worker process -- see the shared-module
+convention already established by `article_transitions.py` for the same
+"both services perform the exact same table operations" shape. Workers still
+does everything it always did with this module (ingest lanes calling
+`insert_artifact`, the daily priority sweep, `service_reconciliation.py`'s
+dedup/backfill passes) -- it just imports these functions from here now.
+
 This replaced `publish_queue` as the compose/publish selection mechanism
 (cut over 2026-08-25 -- see
 `app.modules.newspaper.tasks.queue_drain_tasks.drain_to_compose`).
@@ -25,9 +36,9 @@ own shape closely on purpose, and still does structurally:
     compound across cycles instead of the earlier ones being silently
     discarded.
 
-See `app.modules.newspaper.artifact_priority` for the priority sweep that
+See `algorand_shared.artifact_priority` for the priority sweep that
 updates `priority`/`priority_computed_at` on these rows, and
-`app.modules.newspaper.to_compose_selection` for the day-ahead selection
+`algorand_shared.to_compose_selection` for the day-ahead selection
 logic that reads them.
 """
 
@@ -138,7 +149,8 @@ def insert_artifact(
     should be about what's newest, not a merge of every accumulated title.
     """
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArtifactStmts
+
+    from algorand_shared.artifact_statements import ArtifactStmts
 
     session = get_cassandra_session()
     now = now or datetime.now(tz=UTC)
@@ -300,7 +312,7 @@ def _concatenate_with_pending(
 def _delete_pending_row(
     session: object, *, status: str, priority: float, created_at: datetime, artifact_id: uuid.UUID
 ) -> None:
-    from app.core.statements import ArtifactStmts
+    from algorand_shared.artifact_statements import ArtifactStmts
 
     session.execute(
         ArtifactStmts.DELETE_PENDING,
@@ -327,7 +339,8 @@ def _row_to_artifact(row: object) -> Artifact:
 def list_pending_artifacts(*, limit: int = 2000) -> list[Artifact]:
     """Load pending artifacts from the pending index, priority DESC, created_at ASC (the index's own clustering order)."""
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArtifactStmts
+
+    from algorand_shared.artifact_statements import ArtifactStmts
 
     session = get_cassandra_session()
     return [
@@ -351,7 +364,8 @@ def list_pending_artifacts(*, limit: int = 2000) -> list[Artifact]:
 def get_artifact(artifact_id: str) -> Artifact | None:
     """Load one artifact by id regardless of status."""
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArtifactStmts
+
+    from algorand_shared.artifact_statements import ArtifactStmts
 
     try:
         aid = uuid.UUID(str(artifact_id))
@@ -367,7 +381,8 @@ def get_artifact(artifact_id: str) -> Artifact | None:
 def get_artifact_content(artifact_id: str) -> ArtifactContent | None:
     """Load one artifact's raw content by id."""
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArtifactStmts
+
+    from algorand_shared.artifact_statements import ArtifactStmts
 
     try:
         aid = uuid.UUID(str(artifact_id))
@@ -392,7 +407,8 @@ def get_artifact_content(artifact_id: str) -> ArtifactContent | None:
 def update_artifact_priority(artifact_id: str, priority: float, *, now: datetime | None = None) -> None:
     """Persist a freshly-swept priority on an artifact and re-key its pending-index row (priority is part of that index's clustering key, so this is delete-old + insert-new, not an UPDATE -- only reindexes when the artifact is still pending)."""
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArtifactStmts
+
+    from algorand_shared.artifact_statements import ArtifactStmts
 
     try:
         aid = uuid.UUID(str(artifact_id))
@@ -436,7 +452,8 @@ def update_artifact_priority(artifact_id: str, priority: float, *, now: datetime
 def mark_artifact_status(artifact_id: str, status: str) -> None:
     """Move an artifact out of (or within) the pending lane: selected / composed / discarded. Removes its pending-index row whenever the new status isn't "pending"."""
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArtifactStmts
+
+    from algorand_shared.artifact_statements import ArtifactStmts
 
     try:
         aid = uuid.UUID(str(artifact_id))
@@ -472,7 +489,8 @@ def revert_artifact_to_pending(artifact_id: str) -> bool:
     other than SELECTED; True when it actually reverted.
     """
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArtifactStmts
+
+    from algorand_shared.artifact_statements import ArtifactStmts
 
     try:
         aid = uuid.UUID(str(artifact_id))
@@ -507,7 +525,7 @@ def _set_pending_index_pin(
     session: object, aid: uuid.UUID, status_row: object, day: str | None
 ) -> None:
     """Mirror a human_pick_day change onto the pending-index row, when the artifact is currently pending. human_pick_day isn't part of that table's primary key, so this is a plain UPDATE (unlike the priority delete+reinsert dance)."""
-    from app.core.statements import ArtifactStmts
+    from algorand_shared.artifact_statements import ArtifactStmts
 
     if status_row.status == PENDING and status_row.created_at is not None:
         session.execute(
@@ -519,7 +537,8 @@ def _set_pending_index_pin(
 def pin_artifact_for_day(artifact_id: str, day: str) -> bool:
     """Admin-facing hook: pin an artifact as tomorrow's (or any future day's) human pick. Returns False for an unknown id."""
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArtifactStmts
+
+    from algorand_shared.artifact_statements import ArtifactStmts
 
     try:
         aid = uuid.UUID(str(artifact_id))
@@ -537,7 +556,8 @@ def pin_artifact_for_day(artifact_id: str, day: str) -> bool:
 def clear_artifact_pin(artifact_id: str) -> None:
     """Clear a spent (or superseded) human pin."""
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArtifactStmts
+
+    from algorand_shared.artifact_statements import ArtifactStmts
 
     try:
         aid = uuid.UUID(str(artifact_id))
@@ -553,7 +573,8 @@ def clear_artifact_pin(artifact_id: str) -> None:
 def set_artifact_venue_service_id(artifact_id: str, venue_service_id: str) -> bool:
     """Backfill `venue_service_id` on an existing artifact -- the write side of the ongoing bug-class-2 reconciliation sweep (see `service_reconciliation.backfill_missing_venue_service_ids`), a safety net for a per-item artifact that landed without one (inserted before the lane fix deployed, or by a future lane that forgets to pass it). Mirrors pin_artifact_for_day's shape: update `artifacts`, then mirror onto the pending-index row when still pending (not part of that table's key, so a plain UPDATE). Returns False for an unknown id."""
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArtifactStmts
+
+    from algorand_shared.artifact_statements import ArtifactStmts
 
     try:
         aid = uuid.UUID(str(artifact_id))
@@ -570,3 +591,25 @@ def set_artifact_venue_service_id(artifact_id: str, venue_service_id: str) -> bo
             (venue_service_id, PENDING, status_row.priority, status_row.created_at, aid),
         )
     return True
+
+
+def get_artifact_detail(artifact_id: str) -> dict[str, Any] | None:
+    """Full title/content/url/metadata for one artifact, assembled from get_artifact + get_artifact_content -- what would actually get fed to the writer/composer. Shared by backend's admin_get_artifact_content route and workers' get_artifact_detail Celery task (still used by other worker-side callers), so both return the exact same shape.
+
+    Returns None for an unknown OR malformed artifact_id (both get_artifact
+    and get_artifact_content already fail closed to None on a bad uuid).
+    """
+    artifact = get_artifact(artifact_id)
+    content = get_artifact_content(artifact_id)
+    if artifact is None and content is None:
+        return None
+    return {
+        "artifact_id": artifact_id,
+        "title": content.title if content else "",
+        "content": content.content if content else "",
+        "metadata": content.metadata if content else {},
+        "service_id": artifact.service_id if artifact else None,
+        "url": artifact.url if artifact else None,
+        "channel": artifact.channel if artifact else "",
+        "status": artifact.status if artifact else "",
+    }

@@ -1,12 +1,24 @@
 """Day-ahead compose selection for the editorial-room `to_compose` table.
 
+Moved here from `workers/app/modules/newspaper/to_compose_selection.py`
+(2026-08-26) alongside `artifact_store.py` / `artifact_priority.py`, so
+backend's admin artifacts routes (to-compose-selected, to-compose-preview,
+to-compose-reset, pin-for-tomorrow) can call this logic directly instead of a
+synchronous Celery round-trip into a worker process -- the round-trip was
+found to be the sole reason those purely-read-only (or, for pin/reset,
+lightweight-write) routes could time out when an unrelated heavy job filled
+the shared Celery queue. Workers' own beats
+(`queue_drain_tasks.select_to_compose_for_today_task`,
+`tasks/artifact_tasks.py`'s five on-demand tasks) import this module's
+functions from here now.
+
 LIVE (2026-08-25): `select_to_compose_for_day` is called once daily by
 `app.modules.newspaper.tasks.queue_drain_tasks.select_to_compose_for_today_task`
 (a beat), and `drain_to_compose` (a tighter-cadence beat in the same module)
 composes from its output. `preview_to_compose_for_day` remains the read-only
-admin-dashboard forecast, called directly (not on a beat). See
-artifact_store.py for the human-pin mechanism and artifact_priority.py for
-the priority this reads.
+admin-dashboard forecast, now called directly by the admin route instead of
+via Celery. See artifact_store.py for the human-pin mechanism and
+artifact_priority.py for the priority this reads.
 
 2026-08-26: platform slots are no longer filled from one undifferentiated
 priority-ranked pool. They're split into a NEW_SERVICE_POOL (services this
@@ -24,7 +36,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
-from app.modules.newspaper.artifact_store import (
+from algorand_shared.artifact_store import (
     SELECTED,
     Artifact,
     list_pending_artifacts,
@@ -76,7 +88,7 @@ def _artifact_pool(artifact: Artifact, *, cache: dict[str, str]) -> str:
     pending item AND once more inside _rank_platform_picks, so the cache
     avoids a second Cassandra round-trip for the same service/venue.
     """
-    from app.modules.newspaper.article_matching import service_has_article
+    from algorand_shared.article_matching import service_has_article
 
     key = artifact.venue_service_id or artifact.service_id or ""
     if key in cache:
@@ -179,7 +191,8 @@ def select_to_compose_for_day(day: str, *, now: datetime | None = None) -> dict[
     """
     from app.core import config as cfg
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ToComposeStmts
+
+    from algorand_shared.artifact_statements import ToComposeStmts
 
     now = now or datetime.now(tz=UTC)
     session = get_cassandra_session()
@@ -231,7 +244,7 @@ def select_to_compose_for_day(day: str, *, now: datetime | None = None) -> dict[
 def _insert_slot(
     session: object, *, day: str, slot: int, artifact: Artifact, lane: str, now: datetime
 ) -> None:
-    from app.core.statements import ToComposeStmts
+    from algorand_shared.artifact_statements import ToComposeStmts
 
     session.execute(  # type: ignore[attr-defined]
         ToComposeStmts.INSERT,
@@ -241,16 +254,14 @@ def _insert_slot(
 
 
 def list_to_compose_for_day(day: str) -> list[dict[str, object]]:
-    """Read back the REAL, persisted selection for a compose day, slot-ordered -- what select_to_compose_for_day(day) actually picked the last time it ran (empty until then), not a forecast. Used directly in tests and (via the `list_to_compose_for_day` Celery task) by the admin dashboard's "selected for tomorrow" section.
+    """Read back the REAL, persisted selection for a compose day, slot-ordered -- what select_to_compose_for_day(day) actually picked the last time it ran (empty until then), not a forecast. Used directly in tests and by the admin dashboard's "selected for tomorrow" section.
 
     `picked_at` is isoformatted (not a raw datetime) so this is safe to hand
-    straight to a JSON-serializing transport -- Celery's default JSON
-    serializer (kombu) wraps a raw datetime in a `{"__type__": ...}` envelope
-    rather than a plain ISO string, which would leak into the admin API
-    response.
+    straight to a JSON-serializing transport.
     """
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ToComposeStmts
+
+    from algorand_shared.artifact_statements import ToComposeStmts
 
     session = get_cassandra_session()
     out = [
@@ -287,8 +298,9 @@ def reset_to_compose_for_day(day: str) -> dict[str, object]:
     "Redo today's picks" route actually calls.
     """
     from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ToComposeStmts
-    from app.modules.newspaper.artifact_store import get_artifact, revert_artifact_to_pending
+
+    from algorand_shared.artifact_statements import ToComposeStmts
+    from algorand_shared.artifact_store import get_artifact, revert_artifact_to_pending
 
     rows = list_to_compose_for_day(day)
 
@@ -355,12 +367,13 @@ def preview_to_compose_for_day(day: str) -> dict[str, object]:
     would actually pick, not this preview's own live recompute.
     """
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_priority import (
+
+    from algorand_shared.artifact_priority import (
         ecosystem_listed_score,
         timeliness_score,
         word_count_score,
     )
-    from app.modules.newspaper.artifact_store import get_artifact_content
+    from algorand_shared.artifact_store import get_artifact_content
 
     pending = list_pending_artifacts()
     human_pick = next((a for a in pending if a.human_pick_day == day), None)

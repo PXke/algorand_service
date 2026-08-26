@@ -24,7 +24,7 @@ def test_insert_artifact_creates_pending_row_and_content(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """A fresh insert lands in `artifacts`, `artifacts_pending`, and `artifact_content`."""
-    from app.modules.newspaper.artifact_store import PENDING, insert_artifact
+    from algorand_shared.artifact_store import PENDING, insert_artifact
 
     artifact_id, created = insert_artifact(
         service_id="svc-1",
@@ -43,7 +43,7 @@ def test_second_diff_for_same_service_replaces_pending_row_but_concatenates_cont
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """Dedup invariant: at most one PENDING artifact ROW per service_id -- a new diff for a service_id that already has one pending still REPLACES the row (delete-old + insert-new), mirroring publish_queue_store.enqueue_publish's identical rule for the row. 2026-08-26: unlike that rule, the CONTENT is no longer replaced outright -- it's concatenated (old + new), so the second insert's stored content contains BOTH versions, not just the latest."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         DISCARDED,
         PENDING,
         get_artifact_content,
@@ -83,7 +83,7 @@ def test_artifacts_with_no_service_id_never_dedup_against_each_other(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """A service_id-less artifact (a brief, an unlinked mail message) must never be treated as a duplicate of another service_id-less artifact."""
-    from app.modules.newspaper.artifact_store import insert_artifact
+    from algorand_shared.artifact_store import insert_artifact
 
     id_a, _ = insert_artifact(service_id=None, url=None, channel="brief", content="brief one")
     id_b, _ = insert_artifact(service_id=None, url=None, channel="brief", content="brief two")
@@ -94,7 +94,7 @@ def test_artifacts_with_no_service_id_never_dedup_against_each_other(
 
 def test_dedup_scoped_to_matching_service_only(fake_artifact_session: FakeArtifactSession) -> None:
     """A diff for a DIFFERENT service_id must not disturb an unrelated service's pending artifact."""
-    from app.modules.newspaper.artifact_store import insert_artifact
+    from algorand_shared.artifact_store import insert_artifact
 
     id_a, _ = insert_artifact(service_id="svc-a", url="https://a.io/", channel="crawler", content="a")
     id_b, _ = insert_artifact(service_id="svc-b", url="https://b.io/", channel="crawler", content="b")
@@ -113,7 +113,7 @@ def test_list_pending_artifacts_orders_by_priority_desc(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """Pending artifacts come back highest-priority first."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         insert_artifact,
         list_pending_artifacts,
         update_artifact_priority,
@@ -132,7 +132,7 @@ def test_mark_artifact_status_removes_from_pending_index(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """Moving an artifact to a terminal status drops its pending-index row."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         COMPOSED,
         insert_artifact,
         list_pending_artifacts,
@@ -150,7 +150,7 @@ def test_update_artifact_priority_reindexes_pending_row(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """Priority is part of artifacts_pending's clustering key -- a re-score must delete the old pending-index row and insert a fresh one, not silently desync it."""
-    from app.modules.newspaper.artifact_store import insert_artifact, update_artifact_priority
+    from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
 
     artifact_id, _ = insert_artifact(service_id="svc-1", url=None, channel="brief", content="x")
     assert len(fake_artifact_session.pending) == 1
@@ -167,7 +167,7 @@ def test_get_artifact_content_round_trips_metadata_json(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """Content metadata round-trips through JSON encode/decode intact."""
-    from app.modules.newspaper.artifact_store import get_artifact_content, insert_artifact
+    from algorand_shared.artifact_store import get_artifact_content, insert_artifact
 
     artifact_id, _ = insert_artifact(
         service_id=None,
@@ -191,7 +191,7 @@ def test_pin_artifact_for_day_sets_both_artifacts_and_pending_row(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """Pinning updates human_pick_day on both the artifacts row and its pending-index row."""
-    from app.modules.newspaper.artifact_store import insert_artifact, pin_artifact_for_day
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
 
     artifact_id, _ = insert_artifact(service_id="svc-1", url=None, channel="brief", content="x")
     ok = pin_artifact_for_day(artifact_id, "2026-08-26")
@@ -208,14 +208,14 @@ def test_pin_artifact_for_day_unknown_id_returns_false(
     """An artifact_id with no matching row returns False rather than raising."""
     import uuid
 
-    from app.modules.newspaper.artifact_store import pin_artifact_for_day
+    from algorand_shared.artifact_store import pin_artifact_for_day
 
     assert pin_artifact_for_day(str(uuid.uuid4()), "2026-08-26") is False
 
 
 def test_clear_artifact_pin_clears_both_rows(fake_artifact_session: FakeArtifactSession) -> None:
     """Clearing a pin nulls human_pick_day on both the artifacts row and its pending-index row."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         clear_artifact_pin,
         insert_artifact,
         pin_artifact_for_day,
@@ -241,7 +241,7 @@ def test_concatenation_title_stays_the_latest_updates_own_title(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """Design decision: `title` is NOT merged/concatenated -- it stays the newest update's own title (the simplest option, and the right one for a compose step's headline anchor). The old title is still preserved inside the concatenated BODY's "Earlier update" heading, just not in the `title` field itself."""
-    from app.modules.newspaper.artifact_store import get_artifact_content, insert_artifact
+    from algorand_shared.artifact_store import get_artifact_content, insert_artifact
 
     insert_artifact(
         service_id="svc-t", url=None, channel="crawler", content="old body", title="Old Headline"
@@ -261,7 +261,7 @@ def test_concatenation_merges_metadata_into_a_segments_trail(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """The new artifact's OWN top-level metadata wins (so existing readers of e.g. metadata["dual_write_queue_id"] keep reading the LATEST signal's value), and the old artifact's full metadata is preserved verbatim as one entry in metadata["segments"] rather than being dropped."""
-    from app.modules.newspaper.artifact_store import get_artifact_content, insert_artifact
+    from algorand_shared.artifact_store import get_artifact_content, insert_artifact
 
     insert_artifact(
         service_id="svc-m",
@@ -298,7 +298,7 @@ def test_concatenation_chains_across_three_unaddressed_updates(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """A service updated three times with nobody composing in between accumulates ALL THREE versions in the final pending row's content, and the segments trail grows by one each cycle -- the owner's explicit "3 small unaddressed updates should read as more substantial" pressure-release."""
-    from app.modules.newspaper.artifact_store import get_artifact_content, insert_artifact
+    from algorand_shared.artifact_store import get_artifact_content, insert_artifact
 
     insert_artifact(service_id="svc-chain", url=None, channel="crawler", content="update one")
     insert_artifact(service_id="svc-chain", url=None, channel="crawler", content="update two")
@@ -324,8 +324,9 @@ def test_concatenation_caps_accumulated_old_content_and_keeps_newest_intact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ARTIFACT_CONCAT_MAX_OLD_CHARS bounds the ACCUMULATED-OLD portion so a service updating constantly without ever composing can't grow the row without bound. The cap trims from the FRONT (oldest first) -- the newest content passed to insert_artifact is never trimmed."""
+    from algorand_shared.artifact_store import get_artifact_content, insert_artifact
+
     from app.core import config as cfg
-    from app.modules.newspaper.artifact_store import get_artifact_content, insert_artifact
 
     monkeypatch.setattr(cfg, "ARTIFACT_CONCAT_MAX_OLD_CHARS", 50)
 
@@ -349,7 +350,7 @@ def test_concatenation_new_event_date_and_created_at_track_the_newest_update(
     """Design decision: event_date/created_at are NOT widened into a range across concatenated segments -- the merged row simply carries THIS call's own (newest) event_date/created_at, so timeliness_score reflects how fresh the most recent activity is. word_count_score (over the now-longer concatenated content) is what reflects the accumulation instead."""
     import datetime as dt
 
-    from app.modules.newspaper.artifact_store import get_artifact, insert_artifact
+    from algorand_shared.artifact_store import get_artifact, insert_artifact
 
     old_event = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
     new_event = dt.datetime(2026, 8, 20, tzinfo=dt.UTC)
@@ -383,7 +384,7 @@ def test_no_service_id_artifacts_never_concatenate(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """service_id-less artifacts (a brief, an unlinked mail message) never dedup against each other (existing invariant), so they never trigger concatenation either -- each keeps its own standalone content untouched."""
-    from app.modules.newspaper.artifact_store import get_artifact_content, insert_artifact
+    from algorand_shared.artifact_store import get_artifact_content, insert_artifact
 
     id_a, _ = insert_artifact(service_id=None, url=None, channel="brief", content="brief one")
     id_b, _ = insert_artifact(service_id=None, url=None, channel="brief", content="brief two")
@@ -407,7 +408,7 @@ def test_revert_artifact_to_pending_moves_selected_back_and_reindexes(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """A SELECTED artifact reverts to PENDING status and gets a fresh artifacts_pending row (it was removed when mark_artifact_status moved it to SELECTED in the first place)."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         PENDING,
         SELECTED,
         insert_artifact,
@@ -435,7 +436,7 @@ def test_revert_artifact_to_pending_is_a_noop_for_composed(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """A COMPOSED artifact (already turned into a real article) must never be silently resurrected back to pending -- returns False and leaves it untouched."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         COMPOSED,
         insert_artifact,
         mark_artifact_status,
@@ -456,7 +457,7 @@ def test_revert_artifact_to_pending_is_a_noop_for_discarded(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """A DISCARDED artifact (a pre-compose gate permanently dropped it) must also never be silently resurrected -- same guard as the composed case."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         DISCARDED,
         insert_artifact,
         mark_artifact_status,
@@ -476,7 +477,7 @@ def test_revert_artifact_to_pending_is_a_noop_for_already_pending(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """An artifact that's already PENDING (never selected) is left alone -- no duplicate pending-index row."""
-    from app.modules.newspaper.artifact_store import insert_artifact, revert_artifact_to_pending
+    from algorand_shared.artifact_store import insert_artifact, revert_artifact_to_pending
 
     artifact_id, _ = insert_artifact(service_id="svc-1", url=None, channel="brief", content="x")
 
@@ -492,7 +493,7 @@ def test_revert_artifact_to_pending_unknown_id_returns_false(
     """An artifact_id with no matching row returns False rather than raising."""
     import uuid
 
-    from app.modules.newspaper.artifact_store import revert_artifact_to_pending
+    from algorand_shared.artifact_store import revert_artifact_to_pending
 
     assert revert_artifact_to_pending(str(uuid.uuid4())) is False
 
@@ -501,7 +502,7 @@ def test_revert_artifact_to_pending_malformed_id_returns_false(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """A non-UUID artifact_id fails closed to False rather than raising, matching pin_artifact_for_day's own contract for a bad id."""
-    from app.modules.newspaper.artifact_store import revert_artifact_to_pending
+    from algorand_shared.artifact_store import revert_artifact_to_pending
 
     assert revert_artifact_to_pending("not-a-uuid") is False
 
@@ -516,7 +517,7 @@ def test_insert_artifact_stores_venue_service_id(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """venue_service_id round-trips through both the artifacts row and its pending-index row -- both list_pending_artifacts and get_artifact must be able to read it back."""
-    from app.modules.newspaper.artifact_store import get_artifact, insert_artifact, list_pending_artifacts
+    from algorand_shared.artifact_store import get_artifact, insert_artifact, list_pending_artifacts
 
     artifact_id, _ = insert_artifact(
         service_id="forum-topic:15288",
@@ -542,7 +543,7 @@ def test_insert_artifact_venue_service_id_defaults_to_none(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """A plain web crawl diff (no venue distinct from its own service_id) leaves venue_service_id unset."""
-    from app.modules.newspaper.artifact_store import insert_artifact, list_pending_artifacts
+    from algorand_shared.artifact_store import insert_artifact, list_pending_artifacts
 
     insert_artifact(service_id="svc-1", url=None, channel="crawler", content="x")
 
@@ -554,7 +555,7 @@ def test_update_artifact_priority_preserves_venue_service_id_on_reindex(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """Re-scoring an artifact deletes+reinserts its pending-index row (priority is part of that index's clustering key) -- venue_service_id must survive that round trip, not silently drop."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         insert_artifact,
         list_pending_artifacts,
         update_artifact_priority,
@@ -578,7 +579,7 @@ def test_set_artifact_venue_service_id_backfills_existing_pending_artifact(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
     """The reconciliation safety net's write path: backfilling venue_service_id on an artifact that landed without one updates both the artifacts row and, while still pending, its pending-index row."""
-    from app.modules.newspaper.artifact_store import (
+    from algorand_shared.artifact_store import (
         insert_artifact,
         list_pending_artifacts,
         set_artifact_venue_service_id,
@@ -600,6 +601,6 @@ def test_set_artifact_venue_service_id_unknown_id_returns_false(
     fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
 ) -> None:
     """An unknown/malformed artifact_id is a no-op, not an exception."""
-    from app.modules.newspaper.artifact_store import set_artifact_venue_service_id
+    from algorand_shared.artifact_store import set_artifact_venue_service_id
 
     assert set_artifact_venue_service_id("not-a-real-uuid", "algorand-forum") is False

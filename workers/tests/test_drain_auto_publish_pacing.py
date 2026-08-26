@@ -23,8 +23,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from algorand_shared.artifact_store import SELECTED, Artifact, ArtifactContent
 
-from app.modules.newspaper.artifact_store import SELECTED, Artifact, ArtifactContent
 from app.modules.newspaper.publish_queue_store import TERMINAL_OUTCOMES
 from app.modules.newspaper.tasks import queue_drain_tasks as qdt
 

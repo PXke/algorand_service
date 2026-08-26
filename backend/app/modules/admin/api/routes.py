@@ -1622,20 +1622,23 @@ def admin_investigation_findings(request: Request) -> Response:
 
 
 def admin_artifacts_to_compose_preview(request: Request) -> Response | dict:
-    """Read-only: what the editorial-room `artifacts`/`to_compose` selection (see workers/app/modules/newspaper/to_compose_selection.py) currently would pick for `day` (default: tomorrow) — the human-pin slot (if pinned) plus the top-priority platform picks, with each pending artifact's live priority breakdown.
+    """Read-only: what the editorial-room `artifacts`/`to_compose` selection (see algorand_shared.to_compose_selection) currently would pick for `day` (default: tomorrow) — the human-pin slot (if pinned) plus the top-priority platform picks, with each pending artifact's live priority breakdown.
 
     2026-08-25: this selection is LIVE -- select_to_compose_for_today_task
     (a daily beat) and drain_to_compose (the compose trigger) both read the
     same `to_compose` table this preview is forecasting. This endpoint
     itself is still read-only and side-effect-free either way.
 
-    Backend has no direct import of the workers codebase (separate
-    services/venvs, same as every other admin trigger in this file), so this
-    dispatches into worker's preview_to_compose_for_day via Celery and waits
-    on the result — same shape as admin_interrogate_compose_session. Unlike
-    that route's underlying work, this is a handful of Cassandra reads plus
-    some pure-function scoring, so a much shorter timeout than the 90s LLM
-    call there is enough headroom.
+    2026-08-26: calls algorand_shared.to_compose_selection.preview_to_compose_for_day
+    directly instead of dispatching into a worker over Celery. The
+    selection/priority logic lived only in workers/ purely because that's
+    where it was originally written, not because it needed anything
+    workers-only -- it's a handful of Cassandra reads plus pure-function
+    scoring, the same shape as the Domains tab's admin_list_domains, which
+    already reads `domain_tracking` directly. The Celery round-trip this
+    replaced was also a real production liability: a heavy background job
+    filling the shared queue could make this read-only route time out
+    waiting for a worker slot alongside unrelated work.
 
     Never mutates artifact status or writes to `to_compose` (unlike
     select_to_compose_for_day itself) — safe to call on every dashboard load.
@@ -1655,28 +1658,9 @@ def admin_artifacts_to_compose_preview(request: Request) -> Response | dict:
         except ValueError:
             return json_error_response(400, "invalid_request", "day must be YYYY-MM-DD")
 
-    try:
-        from celery import Celery
-        from celery.exceptions import TimeoutError as CeleryTimeoutError
+    from algorand_shared.to_compose_selection import preview_to_compose_for_day
 
-        from app.core.config import settings
-
-        async_result = Celery(
-            broker=settings.celery_broker_url, backend=settings.redis_result_url
-        ).send_task(
-            "app.tasks.newspaper.preview_to_compose_for_day",
-            args=[day],
-            queue="pipeline",
-        )
-        try:
-            result = async_result.get(timeout=30)
-        except CeleryTimeoutError:
-            return json_error_response(
-                504, "timeout", "the shadow-selection preview took too long"
-            )
-    except Exception as exc:
-        return json_error_response(502, "broker_unavailable", str(exc))
-    return result
+    return preview_to_compose_for_day(day)
 
 
 def admin_artifacts_to_compose_selected(request: Request) -> Response | dict:
@@ -1690,11 +1674,10 @@ def admin_artifacts_to_compose_selected(request: Request) -> Response | dict:
     admin UI keeps them in visually separate sections for exactly that
     reason.
 
-    Same cross-service dispatch shape as the preview route (backend has no
-    direct import of the workers codebase), but the underlying work
-    (to_compose_selection.list_to_compose_for_day) is a single already-
-    prepared Cassandra SELECT with no scoring/computation, so a materially
-    shorter timeout than the preview route's is plenty.
+    2026-08-26: calls algorand_shared.to_compose_selection.list_to_compose_for_day
+    directly -- a single already-prepared Cassandra SELECT with no scoring/
+    computation, the same trivial shape as the Domains tab's own direct
+    Cassandra reads -- instead of a Celery round-trip into a worker process.
     """
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -1711,33 +1694,17 @@ def admin_artifacts_to_compose_selected(request: Request) -> Response | dict:
         except ValueError:
             return json_error_response(400, "invalid_request", "day must be YYYY-MM-DD")
 
-    try:
-        from celery import Celery
-        from celery.exceptions import TimeoutError as CeleryTimeoutError
+    from algorand_shared.to_compose_selection import list_to_compose_for_day
 
-        from app.core.config import settings
-
-        async_result = Celery(
-            broker=settings.celery_broker_url, backend=settings.redis_result_url
-        ).send_task(
-            "app.tasks.newspaper.list_to_compose_for_day",
-            args=[day],
-            queue="pipeline",
-        )
-        try:
-            result = async_result.get(timeout=10)
-        except CeleryTimeoutError:
-            return json_error_response(504, "timeout", "the to-compose lookup took too long")
-    except Exception as exc:
-        return json_error_response(502, "broker_unavailable", str(exc))
-    return {"compose_day": day, "items": result}
+    items = list_to_compose_for_day(day)
+    return {"compose_day": day, "items": items}
 
 
 def admin_reset_to_compose_for_day(request: Request) -> Response | dict:
     """"Redo today's picks": clear `day`'s (default: tomorrow, matching the sibling to-compose routes and the Queue tab's own day field) locked-in `to_compose` selection and immediately re-run selection over the widened pool -- the fix for a bad automatic pick, or forcing a re-pick after correcting an upstream priority/pool bug, without waiting for the next daily beat.
 
-    2026-08-26: dispatches into worker's reset_and_reselect_to_compose_for_day
-    (see to_compose_selection.reset_and_reselect_for_day), which clears
+    2026-08-26: calls algorand_shared.to_compose_selection.reset_and_reselect_for_day
+    directly instead of dispatching into a worker over Celery. It clears
     `to_compose` for `day`, reverts any artifact it had selected back to
     PENDING -- but ONLY when that artifact is still in SELECTED status; one
     already progressed to composed (a real article now exists) or discarded
@@ -1746,13 +1713,6 @@ def admin_reset_to_compose_for_day(request: Request) -> Response | dict:
     select_to_compose_for_day(day) again, so the caller gets a freshly
     re-picked lineup in one round trip rather than two separate admin
     actions.
-
-    Same cross-service dispatch shape as the other artifact routes (backend
-    has no direct import of the workers codebase): send_task + a short
-    synchronous .get(). This does real Cassandra reads/writes plus a fresh
-    selection pass (comparable cost to the preview route's live recompute),
-    so it gets the same timeout headroom as admin_artifacts_to_compose_preview
-    rather than the selected/pin routes' much shorter ones.
     """
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -1769,39 +1729,22 @@ def admin_reset_to_compose_for_day(request: Request) -> Response | dict:
         except ValueError:
             return json_error_response(400, "invalid_request", "day must be YYYY-MM-DD")
 
-    try:
-        from celery import Celery
-        from celery.exceptions import TimeoutError as CeleryTimeoutError
+    from algorand_shared.to_compose_selection import reset_and_reselect_for_day
 
-        from app.core.config import settings
-
-        async_result = Celery(
-            broker=settings.celery_broker_url, backend=settings.redis_result_url
-        ).send_task(
-            "app.tasks.newspaper.reset_and_reselect_to_compose_for_day",
-            args=[day],
-            queue="pipeline",
-        )
-        try:
-            result = async_result.get(timeout=30)
-        except CeleryTimeoutError:
-            return json_error_response(504, "timeout", "the picks reset took too long")
-    except Exception as exc:
-        return json_error_response(502, "broker_unavailable", str(exc))
-    return result
+    return reset_and_reselect_for_day(day)
 
 
 def admin_pin_artifact_for_tomorrow(request: Request) -> Response | dict:
-    """Pin one editorial-room artifact as tomorrow's human pick (see workers' artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow).
+    """Pin one editorial-room artifact as tomorrow's human pick (see algorand_shared.artifact_store.pin_artifact_for_day / algorand_shared.to_compose_selection.pin_for_tomorrow).
 
     2026-08-25: this is the LIVE human-pick mechanism -- the pinned artifact
     is picked up by the next select_to_compose_for_today_task run and
     composed by drain_to_compose (see queue_drain_tasks.py). Writes to
     `artifacts` / `artifacts_pending` / `to_compose`, never to publish_queue.
 
-    Same Celery-dispatch-and-wait shape as the preview route above and as
-    admin_interrogate_compose_session — a single targeted UPDATE plus a
-    pending-index reindex, so a short timeout is plenty.
+    2026-08-26: calls pin_for_tomorrow directly -- a single targeted UPDATE
+    plus a pending-index reindex -- instead of dispatching into a worker
+    over Celery.
     """
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -1811,39 +1754,23 @@ def admin_pin_artifact_for_tomorrow(request: Request) -> Response | dict:
     if not artifact_id:
         return json_error_response(400, "invalid_request", "artifact_id is required")
 
-    try:
-        from celery import Celery
-        from celery.exceptions import TimeoutError as CeleryTimeoutError
+    from algorand_shared.to_compose_selection import pin_for_tomorrow
 
-        from app.core.config import settings
-
-        async_result = Celery(
-            broker=settings.celery_broker_url, backend=settings.redis_result_url
-        ).send_task(
-            "app.tasks.newspaper.pin_artifact_for_tomorrow",
-            args=[artifact_id],
-            queue="pipeline",
-        )
-        try:
-            result = async_result.get(timeout=10)
-        except CeleryTimeoutError:
-            return json_error_response(504, "timeout", "the pin action took too long")
-    except Exception as exc:
-        return json_error_response(502, "broker_unavailable", str(exc))
-
-    if not result.get("ok"):
+    ok = pin_for_tomorrow(artifact_id)
+    if not ok:
         return json_error_response(404, "not_found", "unknown artifact_id")
-    return result
+    return {"ok": ok, "artifact_id": artifact_id}
 
 
 def admin_get_artifact_content(request: Request) -> Response | dict:
     """Full title/content/url/metadata for one editorial-room artifact -- the raw text that would actually get fed to the writer/composer, plus its source URL. Fetched on demand when an admin expands a Queue-tab row to inspect it, never on the list/preview poll (which stays title-only, to keep that response small).
 
-    Same cross-service dispatch shape as the other artifact routes above
-    (backend has no direct import of the workers codebase): send_task +
-    a short synchronous .get() on app.tasks.newspaper.get_artifact_detail,
-    which is a single-partition point read against `artifacts` +
-    `artifact_content` by primary key -- a short timeout is plenty.
+    2026-08-26: calls algorand_shared.artifact_store.get_artifact_detail
+    directly -- a single-partition point read against `artifacts` +
+    `artifact_content` by primary key -- instead of dispatching into a
+    worker over Celery. Same assembly shared with workers' own
+    get_artifact_detail Celery task (still used elsewhere), so the response
+    shape is unchanged.
     """
     denied = require_admin_wallet(request)
     if denied is not None:
@@ -1853,28 +1780,9 @@ def admin_get_artifact_content(request: Request) -> Response | dict:
     if not artifact_id:
         return json_error_response(400, "invalid_request", "artifact_id is required")
 
-    try:
-        from celery import Celery
-        from celery.exceptions import TimeoutError as CeleryTimeoutError
+    from algorand_shared.artifact_store import get_artifact_detail
 
-        from app.core.config import settings
-
-        async_result = Celery(
-            broker=settings.celery_broker_url, backend=settings.redis_result_url
-        ).send_task(
-            "app.tasks.newspaper.get_artifact_detail",
-            args=[artifact_id],
-            queue="pipeline",
-        )
-        try:
-            result = async_result.get(timeout=10)
-        except CeleryTimeoutError:
-            return json_error_response(
-                504, "timeout", "the artifact content lookup took too long"
-            )
-    except Exception as exc:
-        return json_error_response(502, "broker_unavailable", str(exc))
-
+    result = get_artifact_detail(artifact_id)
     if result is None:
         return json_error_response(404, "not_found", "unknown artifact_id")
     return result

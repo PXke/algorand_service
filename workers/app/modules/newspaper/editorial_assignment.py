@@ -127,7 +127,7 @@ def _insert_artifact_for_brief(
     brief: EditorialBrief, *, scrape_url: str, payload: dict[str, Any]
 ) -> str:
     """Create/replace this brief's editorial-room artifact -- the sole write for an editorial assignment (publish_queue's dual-write was dropped once the artifact path proved stable in prod). Left unguarded (no try/except): a failure here must propagate, not be silently swallowed. Returns the new artifact_id."""
-    from app.modules.newspaper.artifact_store import insert_artifact
+    from algorand_shared.artifact_store import insert_artifact
 
     artifact_id, _created = insert_artifact(
         service_id=f"editorial-brief:{brief.brief_id}",

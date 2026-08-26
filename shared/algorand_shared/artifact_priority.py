@@ -1,4 +1,24 @@
-"""Priority scoring for editorial-room `artifacts` -- feeds the LIVE day-ahead to_compose selection (see to_compose_selection.py / queue_drain_tasks.select_to_compose_for_today_task).
+"""Priority scoring for editorial-room `artifacts` -- feeds the LIVE day-ahead to_compose selection (see algorand_shared.to_compose_selection / workers' queue_drain_tasks.select_to_compose_for_today_task).
+
+Moved here from `workers/app/modules/newspaper/artifact_priority.py`
+(2026-08-26) alongside `artifact_store.py` / `to_compose_selection.py`, so
+backend's admin to-compose preview route can recompute the same per-artifact
+priority breakdown it displays without a Celery round-trip. Workers' daily
+sweep beat (`sweep_artifact_priorities`, still called from
+`tasks/artifact_tasks.py`) imports it from here now too -- same functions,
+one location.
+
+Note on `ecosystem_listed_score` specifically: its directory-listed bonus
+depends on workers-only crawler/classifier modules
+(`app.modules.crawler.domain_tracker`, `app.modules.crawler.ecosystem_sync`,
+`app.modules.search.classifier.score`), which don't exist in backend's
+codebase. It already fails open to 0.0 on any import error (a pre-existing
+defensive pattern, not new here), so a backend-computed preview shows this
+component as 0 rather than raising -- an accepted, documented gap (the
+preview route's own docstring already notes its recomputed total is a live
+estimate that can drift from the stored value) rather than a full
+centralization of the ecosystem-directory machinery, which is out of scope
+for this move.
 
 Architected as `priority = sum(component_score(artifact, content) for
 component_score in SCORE_COMPONENTS)` so a future signal (sentiment, on-chain
@@ -44,7 +64,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from app.modules.newspaper.artifact_store import Artifact, ArtifactContent
+from algorand_shared.artifact_store import Artifact, ArtifactContent
 
 
 def word_count_score(content: str) -> float:
@@ -118,6 +138,9 @@ def ecosystem_listed_score(url: str | None) -> float:
     domain, so a plain membership check against both sets is sufficient --
     no subdomain-suffix matching needed here the way score.py's own
     `_domain_signal` needs it against raw hostnames.
+
+    Workers-only bonus (see module docstring): the crawler/classifier modules
+    this depends on don't exist in backend, so this fails open to 0.0 there.
     """
     from app.core.config import ARTIFACT_ECOSYSTEM_LISTED_BOOST
 
@@ -207,8 +230,8 @@ def compute_artifact_priority(artifact: Artifact, content: ArtifactContent | Non
 
 
 def sweep_artifact_priorities() -> dict[str, int]:
-    """Recompute and persist `priority` for every PENDING artifact -- the body of the daily beat task (see tasks/artifact_tasks.py). Pure function: safe to call directly from a test or a manual trigger."""
-    from app.modules.newspaper.artifact_store import (
+    """Recompute and persist `priority` for every PENDING artifact -- the body of the daily beat task (see workers' tasks/artifact_tasks.py). Pure function: safe to call directly from a test or a manual trigger."""
+    from algorand_shared.artifact_store import (
         get_artifact_content,
         list_pending_artifacts,
         update_artifact_priority,

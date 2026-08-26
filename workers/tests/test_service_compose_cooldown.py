@@ -38,7 +38,8 @@ def test_drain_skips_row_when_service_in_cooldown(monkeypatch: pytest.MonkeyPatc
     """A service already in its cooldown must not be composed at all this run — even when its registrable domain differs from whatever domain last composed for the same service_id (multi-domain project case). Exercised against drain_to_compose (2026-08-25 successor to drain_standard_publish_queue) — _service_in_cooldown itself is unchanged, reused as-is against an artifact-backed row."""
     from datetime import UTC, datetime
 
-    from app.modules.newspaper.artifact_store import SELECTED, Artifact, ArtifactContent
+    from algorand_shared.artifact_store import SELECTED, Artifact, ArtifactContent
+
     from app.modules.newspaper.tasks import queue_drain_tasks as q
 
     artifact = Artifact(
