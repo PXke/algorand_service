@@ -5,7 +5,7 @@ same `/chat/completions` JSON wire format -- the differences between them are
 data (base URL, API key, model name) plus a handful of small overridable
 quirk hooks (`_reasoning_payload_extra`, `_effective_max_tokens`,
 `_max_tokens_field_name`, `_supports_temperature`, `_supports_prompt_cache_key`,
-`_tool_reasoning_effort_override`), not control flow. So rather than
+`_tool_reasoning_effort_override`, `_supports_vision`), not control flow. So rather than
 reimplementing retry/backoff, the credit-exhaustion breaker, context-window
 trimming, and the agentic tool-calling round loop once per provider,
 `OpenAICompatibleProvider` is that one shared implementation (physically
@@ -270,6 +270,55 @@ def _ensure_tool_call_ids(tool_calls: list[dict[str, Any]]) -> None:
             call["type"] = "function"
 
 
+def _tool_result_image_url(result: Any) -> str | None:  # noqa: ANN401 -- arbitrary tool-result shape
+    """The public image_url a tool result carries, if any.
+
+    Currently only ``_tool_capture_screenshot``'s shape
+    (``{"url": ..., "image_url": ..., "full_page": ...}``) has this key.
+    None for every other tool result -- including the dedup/call-cap
+    refusal placeholders and error dicts _run_tool_call can also produce,
+    none of which carry this field -- so this is a plain, cheap check with
+    no false positives to guard against.
+    """
+    if isinstance(result, dict):
+        url = result.get("image_url")
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+    return None
+
+
+def _vision_followup_message(
+    *, tool_name: str, tool_call_id: str, image_url: str, result: dict[str, Any]
+) -> dict[str, Any]:
+    """A separate user-role message carrying an actual image content block, appended right after the tool-role message it illustrates -- what lets a vision-capable model (see OpenAICompatibleProvider._supports_vision) genuinely see a screenshot instead of just knowing a URL string exists.
+
+    Can't fold the image into the tool-role message's own `content` --
+    DeepSeek's API (documented 2026-08-21 alongside the vision-exp release,
+    following the same convention OpenAI's own vision+tool-calling guides
+    describe) accepts image content blocks in `user`-role messages only;
+    anything else (system/assistant, and by the same restriction almost
+    certainly `tool`) 400s outright. So the tool-role message keeps its
+    existing plain-string content completely unchanged (see
+    `_run_tool_call`), and this extra turn -- not a substitute for it -- is
+    what actually shows the model the pixels.
+    """
+    page_url = result.get("url") or image_url
+    return {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    f"[Image from the `{tool_name}` tool call above "
+                    f"(tool_call_id={tool_call_id}), a screenshot of {page_url}. "
+                    "Look at it before continuing.]"
+                ),
+            },
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ],
+    }
+
+
 def _for_conversation_history(message: dict[str, Any]) -> dict[str, Any]:
     """A copy of an assistant message safe to append to `convo` for resending in later rounds — strips `reasoning_content` (DeepSeek's separate thinking-trace field, sibling to `content`).
 
@@ -336,8 +385,9 @@ class OpenAICompatibleProvider(LLMProvider):
     Provider-specific quirks are the small set of overridable hook methods
     (`_reasoning_payload_extra`, `_effective_max_tokens`,
     `_max_tokens_field_name`, `_supports_temperature`,
-    `_supports_prompt_cache_key`, `_tool_reasoning_effort_override`), not
-    conditionals on `self._provider` inside this class's own logic.
+    `_supports_prompt_cache_key`, `_tool_reasoning_effort_override`,
+    `_supports_vision`), not conditionals on `self._provider` inside this
+    class's own logic.
     """
 
     def __init__(
@@ -397,6 +447,10 @@ class OpenAICompatibleProvider(LLMProvider):
 
     def _supports_prompt_cache_key(self) -> bool:
         """Whether to send `prompt_cache_key` on every request. Mistral's own API documents this as the opt-in that pins a growing, shared-prefix conversation to the same server-side cache entry (90% off cached input) -- added 2026-08-14 after finding the agentic writer/research loop was paying full price on every round's already-seen context. Defaults False: DeepSeek, OpenAI, and Kimi already cache automatically with no request-side flag (confirmed 2026-08-14), and sending an unrecognized extra field to a stricter API is a real risk not worth taking for zero benefit -- only MistralProvider overrides this to True."""
+        return False
+
+    def _supports_vision(self) -> bool:
+        """Whether this instance's model actually looks at image content blocks. False by default -- every model this connector has served historically (Mistral, plain DeepSeek, GPT-5.6, Kimi, GLM) is text-only, and DeepSeek's own docs are explicit that images in anything but a `user`-role message 400 outright. A tool result shaped like capture_screenshot's (an `image_url` key) is otherwise left exactly as before: a JSON string with a URL in it, never actually seen. Only a provider that ships a real vision-capable model (DeepSeekProvider, when routed to deepseek-v4-flash-vision-exp) overrides this to True, and only for that specific model -- see its own docstring."""
         return False
 
     def usage_totals(self) -> dict[str, int]:
@@ -795,8 +849,15 @@ class OpenAICompatibleProvider(LLMProvider):
         tool_call_counts: dict[str, int],
         require_tool: str | None,
         trace: list[dict[str, Any]] | None,
-    ) -> tuple[dict[str, Any], bool]:
-        """Execute one model-requested tool call (or refuse/nudge past a cap or exact repeat this session), record it to the trace, and return (tool_result_message, satisfied_require_tool). A StorySpikedError (the writer aborting the article) is recorded to the trace then re-raised uncaught — every other tool failure is caught and fed back as an error result."""
+    ) -> tuple[dict[str, Any], bool, dict[str, Any] | None]:
+        """Execute one model-requested tool call (or refuse/nudge past a cap or exact repeat this session), record it to the trace, and return (tool_result_message, satisfied_require_tool, vision_followup_message_or_None). A StorySpikedError (the writer aborting the article) is recorded to the trace then re-raised uncaught — every other tool failure is caught and fed back as an error result.
+
+        The third element is only ever non-None when this instance's model
+        actually supports vision (`_supports_vision`) AND the result carries
+        an `image_url` (currently only capture_screenshot's shape) -- every
+        other call, on every other provider/model, gets None here exactly
+        like before this was added.
+        """
         fn = call.get("function") or {}
         name = fn.get("name", "")
         try:
@@ -881,7 +942,24 @@ class OpenAICompatibleProvider(LLMProvider):
             # old blind json.dumps(result)[:4000].
             "content": serialize_tool_result(result, LLM_TOOL_RESULT_MAX_CHARS),
         }
-        return message, satisfied_require_tool
+        vision_followup = self._maybe_vision_followup(name, call, result)
+        return message, satisfied_require_tool, vision_followup
+
+    def _maybe_vision_followup(
+        self, name: str, call: dict[str, Any], result: Any  # noqa: ANN401 -- arbitrary tool-result shape
+    ) -> dict[str, Any] | None:
+        """The vision followup message for this tool call's result, or None -- split out of `_run_tool_call` purely to keep that method's branching simple; see `_supports_vision`/`_tool_result_image_url` for the actual gating."""
+        if not self._supports_vision():
+            return None
+        image_url = _tool_result_image_url(result)
+        if image_url is None:
+            return None
+        return _vision_followup_message(
+            tool_name=name,
+            tool_call_id=call.get("id", ""),
+            image_url=image_url,
+            result=result,
+        )
 
     def _tool_round_payload(
         self,
@@ -1019,8 +1097,16 @@ class OpenAICompatibleProvider(LLMProvider):
                 debug["salvaged"] = True
             return salvaged, required_satisfied
         convo.append(_for_conversation_history(msg))
+        # Every tool_call in this round gets its tool-role response appended
+        # here, in order, before anything else -- the API expects each
+        # assistant tool_calls turn immediately followed by exactly one
+        # tool-role message per call_id, contiguously. Any vision followups
+        # (see _run_tool_call) are collected separately and appended only
+        # AFTER that full contiguous run, so a strict provider never sees a
+        # user-role turn interleaved between two tool-role ones.
+        vision_followups: list[dict[str, Any]] = []
         for call in tool_calls:
-            tool_message, satisfied = self._run_tool_call(
+            tool_message, satisfied, vision_followup = self._run_tool_call(
                 call,
                 handlers=handlers,
                 seen_calls=seen_calls,
@@ -1031,6 +1117,9 @@ class OpenAICompatibleProvider(LLMProvider):
             if satisfied:
                 required_satisfied = True
             convo.append(tool_message)
+            if vision_followup is not None:
+                vision_followups.append(vision_followup)
+        convo.extend(vision_followups)
         return None, required_satisfied
 
     @staticmethod
@@ -1267,6 +1356,10 @@ class DeepSeekProvider(OpenAICompatibleProvider):
         """Floor at DEEPSEEK_MAX_TOKENS -- not a replacement, a FLOOR. Several real callers pass a small EXPLICIT cap tuned for Mistral's assumption that max_tokens is pure answer content (e.g. the LLM quality rubric's max_tokens=800: a short JSON scorecard, no reasoning overhead expected). DeepSeek's thinking mode spends real, sometimes-large token counts on reasoning_content out of that SAME budget -- root-caused 2026-08-06: the rubric silently failed on every real DeepSeek session with a generic fallback score (2/5, boilerplate issues) because 800 tokens was entirely consumed by reasoning before any JSON could be written. Raising the cap costs nothing by itself (billing is on tokens actually used, not the ceiling) so there's no downside to flooring every DeepSeek call at the same generous ceiling as the article-write call."""
         base = requested if requested is not None else LLM_MAX_TOKENS
         return max(base, DEEPSEEK_MAX_TOKENS)
+
+    def _supports_vision(self) -> bool:
+        """True only when this instance's resolved model is the vision-capable variant (deepseek-v4-flash-vision-exp, released 2026-08-21 -- same text/tool-calling capability and token pricing as deepseek-chat, plus real image understanding, up to 384 input tokens/image). Checked on `self._model` rather than blanket-True for the whole provider: DEEPSEEK_MODEL_DIGEST/DEEPSEEK_MODEL_TRANSLATE/DEEPSEEK_MODEL_RUBRIC still default to plain deepseek-chat, and DeepSeek's own docs are explicit that a non-vision model call with image content in it is undefined/rejected -- this must stay precise per-model, not per-provider. Substring match (not an exact-name allowlist) so a future dated vision variant (e.g. a "-2026-09" pinned snapshot) is picked up without a code change."""
+        return "vision" in self._model.lower()
 
 
 class OpenAIProvider(OpenAICompatibleProvider):

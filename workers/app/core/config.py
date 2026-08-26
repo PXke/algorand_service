@@ -162,6 +162,17 @@ BROWSER_WAIT_MS = env_int("BROWSER_WAIT_MS", 2500)
 BROWSER_CHANNEL = env_str("BROWSER_CHANNEL", "")
 BROWSER_STORAGE_STATE_PATH = env_str("BROWSER_STORAGE_STATE_PATH", "")
 
+# Orphaned-process reaper (root-caused 2026-08-26, see browser_reaper.py's
+# module docstring): a forceful worker kill -- hard time_limit SIGKILL, a
+# deploy's SIGQUIT cold shutdown, an admin revoke(terminate=True) -- leaves
+# any in-flight Playwright driver/Chromium process with nothing to signal it,
+# since it's never a member of the killed process's process group. This beat
+# is the mitigation: kill any such tree with no live celery worker ancestor,
+# once it's been around longer than BROWSER_REAP_MIN_AGE_SECONDS (generous,
+# so it never races a process that's simply mid-launch).
+BROWSER_REAP_SECONDS = env_int("BROWSER_REAP_SECONDS", 300)
+BROWSER_REAP_MIN_AGE_SECONDS = env_int("BROWSER_REAP_MIN_AGE_SECONDS", 120)
+
 # capture_screenshot tool (2026-08-11): where captured PNGs are saved on disk
 # and the public URL prefix nginx serves them under. STORAGE_DIR must be
 # OUTSIDE any release dir -- releases get replaced wholesale on every deploy,
@@ -309,8 +320,16 @@ MISTRAL_REASONING_EFFORT = env_str("MISTRAL_REASONING_EFFORT", "high")
 # `model` string.
 DEEPSEEK_API_KEY = env_str("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_BASE = env_str("DEEPSEEK_API_BASE", "https://api.deepseek.com").rstrip("/")
-DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-chat")
-DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-chat")
+# Writer and research both get real tool access to capture_screenshot (see
+# writer_tools.all_tools -- the same toolset backs the research loop, the
+# revision pass, and the legacy single-loop path), so both default to the
+# vision-capable variant (released 2026-08-21, same token pricing as
+# deepseek-chat -- see llm_openai_compatible.OpenAICompatibleProvider's
+# _supports_vision hook for where the image actually gets embedded). Digest
+# and translate never see a tool result with an image, so they stay on the
+# plain text model.
+DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-v4-flash-vision-exp")
+DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-v4-flash-vision-exp")
 DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-chat")
 DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-chat")
 # Per-language override: languages in this list translate via DeepSeek

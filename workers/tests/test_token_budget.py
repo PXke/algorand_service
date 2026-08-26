@@ -72,3 +72,26 @@ def test_fit_noop_when_under_budget() -> None:
     snapshot = [dict(m) for m in convo]
     fit_messages_to_budget(convo, budget_tokens=10_000)
     assert convo == snapshot
+
+
+def test_estimate_message_tokens_counts_multimodal_image_blocks() -> None:
+    """A vision followup message (see llm_openai_compatible._vision_followup_message) has list-shaped `content`: a text block plus an image_url block. The image is flat-rated at _IMAGE_TOKENS (DeepSeek's documented per-image ceiling) since there's no tokenizer available to do better -- this must ADD to the estimate, never silently count as zero (which would let a screenshot-heavy session overflow the real context window unnoticed)."""
+    text_only = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+    with_image = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hello"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}},
+            ],
+        }
+    ]
+    assert estimate_message_tokens(with_image) > estimate_message_tokens(text_only)
+    # The added cost is exactly the documented per-image ceiling.
+    assert estimate_message_tokens(with_image) - estimate_message_tokens(text_only) == 384
+
+
+def test_estimate_message_tokens_string_content_unaffected() -> None:
+    """Regression: the overwhelming majority of messages still have plain string `content` -- the new list-content branch must not change their estimate at all."""
+    convo = [{"role": "user", "content": "hello world"}]
+    assert estimate_message_tokens(convo) == 4 + estimate_tokens("hello world")

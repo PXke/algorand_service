@@ -23,6 +23,13 @@ _CHARS_PER_TOKEN = 3.2
 # Per-message envelope (role, delimiters, tool_call ids) the API counts on top of
 # the content itself.
 _MESSAGE_OVERHEAD_TOKENS = 4
+# DeepSeek's vision-exp docs cap every embedded image at this many input
+# tokens regardless of resolution -- used as a flat per-image estimate below
+# (a multimodal `content` list's image_url blocks) since there's no way to
+# derive the real count without the provider's own tokenizer. Deliberately
+# the documented CEILING, in keeping with this module's over-count-not-under
+# philosophy.
+_IMAGE_TOKENS = 384
 
 _ELIDED = json.dumps({"note": "[earlier tool result elided to fit the context window]"})
 
@@ -48,6 +55,19 @@ def estimate_message_tokens(messages: list[dict[str, Any]]) -> int:
         content = m.get("content")
         if isinstance(content, str):
             total += estimate_tokens(content)
+        elif isinstance(content, list):
+            # A multimodal content-blocks list (see llm_openai_compatible's
+            # vision followup messages): text blocks count normally, an
+            # image_url block is flat-rated at _IMAGE_TOKENS regardless of
+            # size (no tokenizer available to do better -- see its own
+            # comment).
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "image_url":
+                    total += _IMAGE_TOKENS
+                else:
+                    total += estimate_tokens(str(block.get("text", "")))
         for tc in m.get("tool_calls") or []:
             fn = tc.get("function") or {}
             total += estimate_tokens(str(fn.get("name", "")))

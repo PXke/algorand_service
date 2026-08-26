@@ -37,10 +37,10 @@ def test_mistral_provider_defaults_to_mistral_config() -> None:
 
 
 def test_deepseek_provider_defaults_to_deepseek_config() -> None:
-    """DeepSeekProvider resolves its api_key/api_base/model from DeepSeek's own config."""
+    """DeepSeekProvider resolves its api_key/api_base/model from DeepSeek's own config -- DEEPSEEK_MODEL_WRITER, now the vision-capable variant (2026-08-21, see test_vision_tool_result_embedding.py)."""
     provider = DeepSeekProvider()
     assert provider.provider == "deepseek"
-    assert provider.model == "deepseek-chat"
+    assert provider.model == "deepseek-v4-flash-vision-exp"
 
 
 def test_openai_provider_defaults_to_openai_config() -> None:
