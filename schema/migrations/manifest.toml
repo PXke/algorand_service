@@ -725,3 +725,11 @@ file = "backend/schema/migrations/app/082_drop_article_history.cql"
 tier = "prod"
 status = "active"
 description = "drop article_history (migration 067): the article-table consolidation's version-trail replacement for article_versions whose cutover never finished -- zero live code reads or writes it (fresh grep of backend/workers/shared app code and both test suites 2026-08-27 found only comments and the one-off scratch backfill script), it sat 4 rows behind the still-live article_versions (672 vs 676 on prod at drop time), and the richer columns it existed for (compose model / session_id) are not captured anywhere in the current write path so finishing the cutover is not feasible; owner approved the drop -- article_versions remains the live version trail"
+
+[[migrations]]
+stream = "app"
+version = "083"
+file = "backend/schema/migrations/app/083_url_queue_twcs.cql"
+tier = "prod"
+status = "active"
+description = "switch url_queue / url_queue_by_url compaction from STCS to TimeWindowCompactionStrategy (1-day windows), paired with the same change's new URL_QUEUE_ROW_TTL_SECONDS knob (USING TTL ? on every url_queue write incl. the status UPDATE, shipped disabled/0 -- CQL treats TTL 0 as no-TTL): terminal done/failed rows have zero functional role (enqueue dedupe only matches status='pending', recrawl cooldown lives in Redis) yet ~145k had accumulated with nothing deleting them -- once the TTL is flipped on, TWCS drops whole expired SSTables per window instead of accumulating scannable tombstones; url_queue_pending deliberately stays STCS (delete-per-dequeue status index, out-of-order tombstones are TWCS's worst case, gc_grace=3600 from migration 033 already reaps it) though its inserts carry the same TTL so orphaned pending rows expire too; gc_grace_seconds unchanged on all three"

@@ -295,19 +295,25 @@ class ToolInsightStmts:
 class UrlQueueStmts:
     """Prepared statements for the crawl frontier URL queue."""
 
+    # All writes bind a trailing TTL param (config.URL_QUEUE_ROW_TTL_SECONDS)
+    # so terminal rows can expire instead of accumulating forever. Binding 0 is
+    # the documented CQL "no TTL" value — identical to the pre-TTL statements —
+    # so one statement shape serves both the enabled and disabled config.
+    # Mirrors workers' UrlQueueStmts (whose UPDATE_STATUS carries the same
+    # TTL) — keep the TTL treatment in sync across both services.
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.url_queue ("
         "queue_id, url, source, priority, enqueued_at, status, metadata"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL ?"
     )
     INSERT_BY_URL = _Stmt(
         "INSERT INTO algorand_platform.url_queue_by_url (url, queue_id, enqueued_at, status) "
-        "VALUES (?, ?, ?, ?)"
+        "VALUES (?, ?, ?, ?) USING TTL ?"
     )
     INSERT_PENDING = _Stmt(
         "INSERT INTO algorand_platform.url_queue_pending ("
         "status, priority, enqueued_at, queue_id, url, source"
-        ") VALUES (?, ?, ?, ?, ?, ?)"
+        ") VALUES (?, ?, ?, ?, ?, ?) USING TTL ?"
     )
 
 

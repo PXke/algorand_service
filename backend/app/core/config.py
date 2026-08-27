@@ -300,4 +300,10 @@ ARTIFACT_TIMELINESS_HALF_LIFE_DAYS = _env_float("ARTIFACT_TIMELINESS_HALF_LIFE_D
 ARTIFACT_ECOSYSTEM_LISTED_BOOST = _env_float("ARTIFACT_ECOSYSTEM_LISTED_BOOST", 5.0)
 ARTIFACT_NEW_SERVICE_MIN_SHARE = _env_float("ARTIFACT_NEW_SERVICE_MIN_SHARE", 0.5)
 ARTIFACT_SKIP_COUNT_CAP = _env_int("ARTIFACT_SKIP_COUNT_CAP", 10)
+# Row TTL (seconds) bound to url_queue / url_queue_by_url / url_queue_pending
+# writes (USING TTL ?) — backend only writes these on the frontier-approval
+# seed insert (_seed_domain_crawl). 0 = disabled (CQL treats TTL 0 as "no
+# TTL"). Mirror of workers/app/core/config.py's URL_QUEUE_ROW_TTL_SECONDS —
+# same env var name/default, keep both in sync.
+URL_QUEUE_ROW_TTL_SECONDS = _env_int("URL_QUEUE_ROW_TTL_SECONDS", 0)
 ARTIFACT_SKIP_COUNT_MAX_SCORE = _env_float("ARTIFACT_SKIP_COUNT_MAX_SCORE", 6.0)

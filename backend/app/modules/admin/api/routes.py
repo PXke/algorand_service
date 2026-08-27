@@ -1275,6 +1275,7 @@ def _seed_domain_crawl(
     """
     import uuid as uuid_mod
 
+    from app.core import config
     from app.core.statements import UrlQueueStmts
 
     seed_url = pending_url or f"https://{domain}"
@@ -1287,14 +1288,25 @@ def _seed_domain_crawl(
     # links — fetch exactly the one URL and stop, never spider the rest of
     # the site (see web_crawler.py's no_follow check).
     queue_metadata = {"no_follow_links": "true"} if single_page_only else {}
+    # Row TTL matching workers' enqueue_url (0 = CQL's documented "no TTL").
+    ttl = max(0, config.URL_QUEUE_ROW_TTL_SECONDS)
     session.execute(
         UrlQueueStmts.INSERT,
-        (queue_id, seed_url, "frontier_approval", seed_priority, now, "pending", queue_metadata),
+        (
+            queue_id,
+            seed_url,
+            "frontier_approval",
+            seed_priority,
+            now,
+            "pending",
+            queue_metadata,
+            ttl,
+        ),
     )
-    session.execute(UrlQueueStmts.INSERT_BY_URL, (seed_url, queue_id, now, "pending"))
+    session.execute(UrlQueueStmts.INSERT_BY_URL, (seed_url, queue_id, now, "pending", ttl))
     session.execute(
         UrlQueueStmts.INSERT_PENDING,
-        ("pending", seed_priority, now, queue_id, seed_url, "frontier_approval"),
+        ("pending", seed_priority, now, queue_id, seed_url, "frontier_approval", ttl),
     )
     return True, seed_url
 

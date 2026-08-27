@@ -65,6 +65,20 @@ def mark_url_crawled(url: str) -> None:
         logger.warning("failed to mark url crawled: %s", normalized, exc_info=True)
 
 
+def _row_ttl_seconds() -> int:
+    """Configured url_queue row TTL, bound to every queue write (0 = no TTL).
+
+    Cassandra treats `USING TTL 0` as "insert/update without expiring" — the
+    documented no-TTL value — so the disabled default binds 0 rather than
+    needing a second TTL-less statement shape. Read via the config module (not
+    a from-import) at call time so tests and live env flips see the current
+    value.
+    """
+    from app.core import config
+
+    return max(0, config.URL_QUEUE_ROW_TTL_SECONDS)
+
+
 def enqueue_url(
     url: str,
     *,
@@ -100,14 +114,15 @@ def enqueue_url(
     status = "pending"
     meta = dict(metadata or {})
 
+    ttl = _row_ttl_seconds()
     session.execute(
         UrlQueueStmts.INSERT,
-        (queue_id, normalized, source, priority, now, status, meta),
+        (queue_id, normalized, source, priority, now, status, meta, ttl),
     )
-    session.execute(UrlQueueStmts.INSERT_BY_URL, (normalized, queue_id, now))
+    session.execute(UrlQueueStmts.INSERT_BY_URL, (normalized, queue_id, now, ttl))
     session.execute(
         UrlQueueStmts.INSERT_PENDING,
-        (status, priority, now, queue_id, normalized, source),
+        (status, priority, now, queue_id, normalized, source, ttl),
     )
     return str(queue_id), True
 
@@ -142,7 +157,7 @@ def dequeue_url() -> dict[str, Any] | None:
         return None
 
     queue_id = row.queue_id
-    session.execute(UrlQueueStmts.UPDATE_STATUS, ("processing", queue_id))
+    session.execute(UrlQueueStmts.UPDATE_STATUS, (_row_ttl_seconds(), "processing", queue_id))
     session.execute(
         UrlQueueStmts.DELETE_PENDING,
         ("pending", row.priority, row.enqueued_at, queue_id),
@@ -168,7 +183,9 @@ def mark_url_done(queue_id: str, *, status: str = "done") -> None:
         qid = uuid.UUID(queue_id)
     except ValueError:
         return
-    session.execute(UrlQueueStmts.UPDATE_STATUS, (status, qid))
+    # Same TTL as the insert path: TTLs are per-cell, so a TTL-less status
+    # update would leave a cell that outlives the row's other cells.
+    session.execute(UrlQueueStmts.UPDATE_STATUS, (_row_ttl_seconds(), status, qid))
 
 
 def pending_url_count() -> int:

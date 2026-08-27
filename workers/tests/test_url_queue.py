@@ -117,3 +117,69 @@ def test_mark_url_done_updates_status(fake_cassandra_session: MagicMock) -> None
     """Marking a queue item done issues exactly one Cassandra status-update write."""
     mark_url_done("00000000-0000-4000-8000-000000000001", status="skipped")
     fake_cassandra_session.execute.assert_called_once()
+
+
+def test_enqueue_url_binds_configured_row_ttl(
+    monkeypatch: pytest.MonkeyPatch, fake_cassandra_session: MagicMock
+) -> None:
+    """All three enqueue inserts bind URL_QUEUE_ROW_TTL_SECONDS as their trailing USING TTL param."""
+    monkeypatch.setattr("app.core.config.URL_QUEUE_ENABLED", True)
+    monkeypatch.setattr("app.core.config.URL_QUEUE_ROW_TTL_SECONDS", 2_592_000)
+    fake_cassandra_session.execute.return_value = MagicMock(one=MagicMock(return_value=None))
+    _, created = enqueue_url("https://ttl.example.com", source="chain", priority=10)
+    assert created is True
+    # Call order: BY_URL dedupe lookup, then INSERT / INSERT_BY_URL /
+    # INSERT_PENDING — the TTL is each write statement's last bind marker.
+    inserts = fake_cassandra_session.execute.call_args_list[-3:]
+    assert [call.args[1][-1] for call in inserts] == [2_592_000, 2_592_000, 2_592_000]
+
+
+def test_enqueue_url_disabled_ttl_binds_zero(
+    monkeypatch: pytest.MonkeyPatch, fake_cassandra_session: MagicMock
+) -> None:
+    """With the TTL knob at its 0 default, the writes bind TTL 0 — CQL's documented no-TTL value."""
+    monkeypatch.setattr("app.core.config.URL_QUEUE_ENABLED", True)
+    monkeypatch.setattr("app.core.config.URL_QUEUE_ROW_TTL_SECONDS", 0)
+    fake_cassandra_session.execute.return_value = MagicMock(one=MagicMock(return_value=None))
+    _, created = enqueue_url("https://nottl.example.com", source="chain", priority=10)
+    assert created is True
+    inserts = fake_cassandra_session.execute.call_args_list[-3:]
+    assert [call.args[1][-1] for call in inserts] == [0, 0, 0]
+
+
+def test_dequeue_url_status_update_binds_row_ttl(
+    monkeypatch: pytest.MonkeyPatch, fake_cassandra_session: MagicMock
+) -> None:
+    """Dequeue's status='processing' UPDATE binds the same row TTL (leading USING TTL param)."""
+    # TTLs are per-cell: a TTL-less status UPDATE would leave a cell outliving
+    # the insert's cells, surfacing a phantom queue_id+status row later.
+    monkeypatch.setattr("app.core.config.URL_QUEUE_ENABLED", True)
+    monkeypatch.setattr("app.core.config.URL_QUEUE_ROW_TTL_SECONDS", 604_800)
+    pending = MagicMock(
+        queue_id="q-ttl",
+        url="https://ttl.example.com",
+        source="chain",
+        priority=50,
+        enqueued_at=MagicMock(),
+    )
+    fake_cassandra_session.execute.side_effect = [
+        [pending],
+        MagicMock(),
+        MagicMock(),
+        MagicMock(one=MagicMock(return_value=MagicMock(metadata={}))),
+    ]
+    assert dequeue_url() is not None
+    update_call = fake_cassandra_session.execute.call_args_list[1]
+    assert update_call.args[1] == (604_800, "processing", "q-ttl")
+
+
+def test_mark_url_done_binds_row_ttl(
+    monkeypatch: pytest.MonkeyPatch, fake_cassandra_session: MagicMock
+) -> None:
+    """mark_url_done's UPDATE binds (ttl, status, queue_id) in statement order."""
+    monkeypatch.setattr("app.core.config.URL_QUEUE_ROW_TTL_SECONDS", 2_592_000)
+    mark_url_done("00000000-0000-4000-8000-000000000001", status="done")
+    params = fake_cassandra_session.execute.call_args.args[1]
+    assert params[0] == 2_592_000
+    assert params[1] == "done"
+    assert str(params[2]) == "00000000-0000-4000-8000-000000000001"

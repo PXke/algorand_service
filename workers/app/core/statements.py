@@ -101,19 +101,26 @@ class UrlQueueStmts:
 
     BY_URL = _Stmt("SELECT queue_id, status FROM algorand_platform.url_queue_by_url WHERE url = ?")
     GET_STATUS = _Stmt("SELECT status FROM algorand_platform.url_queue WHERE queue_id = ?")
+    # All writes bind a trailing/leading TTL param (URL_QUEUE_ROW_TTL_SECONDS)
+    # so terminal rows can expire instead of accumulating forever. Binding 0 is
+    # the documented CQL "no TTL" value — identical to the pre-TTL statements —
+    # so one statement shape serves both the enabled and disabled config.
+    # UPDATE_STATUS carries the same TTL: Cassandra TTLs are per-cell, so a
+    # status update without one would leave a cell outliving the insert's
+    # cells, surfacing a phantom queue_id+status row after the rest expires.
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.url_queue ("
         "queue_id, url, source, priority, enqueued_at, status, metadata"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL ?"
     )
     INSERT_BY_URL = _Stmt(
         "INSERT INTO algorand_platform.url_queue_by_url (url, queue_id, enqueued_at) "
-        "VALUES (?, ?, ?)"
+        "VALUES (?, ?, ?) USING TTL ?"
     )
     INSERT_PENDING = _Stmt(
         "INSERT INTO algorand_platform.url_queue_pending ("
         "status, priority, enqueued_at, queue_id, url, source"
-        ") VALUES (?, ?, ?, ?, ?, ?)"
+        ") VALUES (?, ?, ?, ?, ?, ?) USING TTL ?"
     )
     PEEK_PENDING = _Stmt(
         "SELECT queue_id, url, source, priority, enqueued_at "
@@ -127,7 +134,9 @@ class UrlQueueStmts:
         "SELECT queue_id, url, source, priority, enqueued_at "
         "FROM algorand_platform.url_queue_pending WHERE status = ? LIMIT ?"
     )
-    UPDATE_STATUS = _Stmt("UPDATE algorand_platform.url_queue SET status = ? WHERE queue_id = ?")
+    UPDATE_STATUS = _Stmt(
+        "UPDATE algorand_platform.url_queue USING TTL ? SET status = ? WHERE queue_id = ?"
+    )
     DELETE_PENDING = _Stmt(
         "DELETE FROM algorand_platform.url_queue_pending "
         "WHERE status = ? AND priority = ? AND enqueued_at = ? AND queue_id = ?"
