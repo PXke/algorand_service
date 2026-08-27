@@ -1,9 +1,12 @@
 """flush_pending_views (workers/app/modules/newspaper/view_counts.py).
 
 Drains the "news:views:pending:{article_id}" Redis keys backend's record_view
-INCRs on every article page view (see backend/tests/test_view_counts.py) into
-Cassandra's article_view_counts counter table, on a 10-minute Celery beat
-(celery_app.py's "flush-pending-view-counts").
+INCRs on every article page view (see backend/tests/test_view_counts.py) onto
+articles.views (migration 084 -- a plain int column, replacing the old
+article_view_counts counter table) on a 10-minute Celery beat
+(celery_app.py's "flush-pending-view-counts"). Since it's a plain column, not
+a counter, each flush is read-current-total + add-delta + write-back via
+article_store.get_article_views/update_article_views.
 """
 
 from __future__ import annotations
@@ -60,49 +63,75 @@ def _key(article_id: UUID) -> str:
     return f"{view_counts.VIEW_PENDING_PREFIX}{article_id}"
 
 
-def test_flush_pending_views_applies_delta_and_clears_redis(
-    fake_cassandra_session: MagicMock, monkeypatch: pytest.MonkeyPatch
+def _patch_article_store(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    current: dict[UUID, int | None] | None = None,
+    update_ok: bool = True,
+    update_error: bool = False,
+) -> MagicMock:
+    """Stub get_article_views/update_article_views as flush_pending_views imports them."""
+    current = current or {}
+    update_mock = MagicMock()
+
+    def fake_get(raw_id: str) -> int | None:
+        return current.get(UUID(raw_id), 0)
+
+    def fake_update(raw_id: str, views: int) -> bool:
+        if update_error:
+            raise ConnectionError("cassandra down")
+        update_mock(raw_id, views)
+        return update_ok
+
+    import app.modules.newspaper.article_store as article_store
+
+    monkeypatch.setattr(article_store, "get_article_views", fake_get)
+    monkeypatch.setattr(article_store, "update_article_views", fake_update)
+    return update_mock
+
+
+def test_flush_pending_views_applies_delta_onto_current_total(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pending key's accumulated count is applied as one batched Cassandra bump, then cleared from Redis."""
+    """A pending key's accumulated count is added to the article's current tally and written back, then cleared from Redis."""
     aid = uuid4()
     fake_redis = FakeFlushRedis({_key(aid): "3"})
     monkeypatch.setattr(view_counts, "_redis_client", lambda: fake_redis)
+    update_mock = _patch_article_store(monkeypatch, current={aid: 7})
 
     result = view_counts.flush_pending_views()
 
     assert result == {"applied": 1, "skipped": 0}
     assert fake_redis.store == {}
-    from app.core.statements import ViewCountStmts
-
-    fake_cassandra_session.execute.assert_called_once_with(ViewCountStmts.BUMP, (3, aid))
+    update_mock.assert_called_once_with(str(aid), 10)
 
 
 def test_flush_pending_views_applies_each_of_several_articles(
-    fake_cassandra_session: MagicMock, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every distinct pending key in the scan gets its own Cassandra bump."""
+    """Every distinct pending key in the scan gets its own read-current + write-back."""
     a1, a2 = uuid4(), uuid4()
     fake_redis = FakeFlushRedis({_key(a1): "5", _key(a2): "1"})
     monkeypatch.setattr(view_counts, "_redis_client", lambda: fake_redis)
+    update_mock = _patch_article_store(monkeypatch, current={a1: 0, a2: 0})
 
     result = view_counts.flush_pending_views()
 
     assert result == {"applied": 2, "skipped": 0}
     assert fake_redis.store == {}
-    assert fake_cassandra_session.execute.call_count == 2
+    assert update_mock.call_count == 2
 
 
-def test_flush_pending_views_no_pending_keys_is_a_noop(
-    fake_cassandra_session: MagicMock, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_flush_pending_views_no_pending_keys_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty scan touches Cassandra zero times."""
     fake_redis = FakeFlushRedis({})
     monkeypatch.setattr(view_counts, "_redis_client", lambda: fake_redis)
+    update_mock = _patch_article_store(monkeypatch)
 
     result = view_counts.flush_pending_views()
 
     assert result == {"applied": 0, "skipped": 0}
-    fake_cassandra_session.execute.assert_not_called()
+    update_mock.assert_not_called()
 
 
 def test_flush_pending_views_swallows_redis_scan_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,7 +144,7 @@ def test_flush_pending_views_swallows_redis_scan_error(monkeypatch: pytest.Monke
 
 
 def test_flush_pending_views_drops_malformed_key_without_jamming_the_cycle(
-    fake_cassandra_session: MagicMock, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A key that somehow isn't a valid UUID suffix is deleted outright (so it can't jam every future cycle) and the rest of the batch still applies."""
     good = uuid4()
@@ -123,24 +152,49 @@ def test_flush_pending_views_drops_malformed_key_without_jamming_the_cycle(
         {f"{view_counts.VIEW_PENDING_PREFIX}not-a-uuid": "7", _key(good): "2"}
     )
     monkeypatch.setattr(view_counts, "_redis_client", lambda: fake_redis)
+    update_mock = _patch_article_store(monkeypatch, current={good: 0})
 
     result = view_counts.flush_pending_views()
 
     assert result == {"applied": 1, "skipped": 1}
     assert fake_redis.store == {}
-    fake_cassandra_session.execute.assert_called_once()
+    update_mock.assert_called_once()
 
 
 def test_flush_pending_views_one_cassandra_failure_does_not_lose_other_keys(
-    fake_cassandra_session: MagicMock, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A per-key Cassandra failure is skipped without aborting the rest of the batch already in flight."""
     a1, a2 = uuid4(), uuid4()
     fake_redis = FakeFlushRedis({_key(a1): "4", _key(a2): "9"})
     monkeypatch.setattr(view_counts, "_redis_client", lambda: fake_redis)
-    fake_cassandra_session.execute.side_effect = [ConnectionError("cassandra down"), MagicMock()]
+
+    import app.modules.newspaper.article_store as article_store
+
+    def fake_get(raw_id: str) -> int | None:
+        if UUID(raw_id) == a1:
+            raise ConnectionError("cassandra down")
+        return 0
+
+    monkeypatch.setattr(article_store, "get_article_views", fake_get)
+    monkeypatch.setattr(article_store, "update_article_views", lambda *_a: True)
 
     result = view_counts.flush_pending_views()
 
     assert result == {"applied": 1, "skipped": 1}
-    assert fake_cassandra_session.execute.call_count == 2
+
+
+def test_flush_pending_views_drops_delta_for_a_fully_purged_article(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_article_views returning None (no such article any more) drops the delta instead of re-parking it, so it can't jam every future cycle."""
+    aid = uuid4()
+    fake_redis = FakeFlushRedis({_key(aid): "6"})
+    monkeypatch.setattr(view_counts, "_redis_client", lambda: fake_redis)
+    update_mock = _patch_article_store(monkeypatch, current={aid: None})
+
+    result = view_counts.flush_pending_views()
+
+    assert result == {"applied": 0, "skipped": 1}
+    assert fake_redis.store == {}
+    update_mock.assert_not_called()

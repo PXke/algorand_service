@@ -295,6 +295,12 @@ def insert_stored_article(
             datetime.now(tz=UTC),  # status_updated_at: the first-ever status assignment
             interest_score,
             approved_at,
+            # views: a reused article_id (recompose-under-review overwriting
+            # its own row) carries the old row's tally forward -- the old
+            # counter table survived recomposes (keyed by article_id alone),
+            # so the folded-in column must too. Fresh inserts start NULL
+            # (reads treat NULL as 0).
+            getattr(old_row, "views", None) if old_row is not None else None,
         ),
     )
     # articles_by_tag dual-write (migration 073): covers both branches this
@@ -683,6 +689,65 @@ def update_article_image(article_id: str, image_url: str) -> bool:
     except Exception:
         logger.warning("articles dual-write image update failed for %s", aid, exc_info=True)
     invalidate_feed_first_page()
+    return True
+
+
+def get_article_views(article_id: str) -> int | None:
+    """Current view tally for an article (NULL column reads as 0), or None when no such article exists.
+
+    Single fresh SAI lookup on articles.views (migration 084) -- the read
+    half of flush_pending_views' read-current-total-then-patch cycle.
+    """
+    from algorand_shared.article_statements import ArticlesStmts
+
+    from app.core.cassandra import get_cassandra_session
+
+    try:
+        aid = UUID(article_id)
+    except (ValueError, TypeError):
+        return None
+    row = get_cassandra_session().execute(ArticlesStmts.GET_VIEWS_BY_ID, (aid,)).one()
+    if row is None:
+        return None
+    return int(row.views) if row.views is not None else 0
+
+
+def update_article_views(article_id: str, views: int) -> bool:
+    """Set an article's absolute view tally on the `articles` row.
+
+    Same shape as update_article_image: read the row's CURRENT partition/
+    clustering key fresh (published_at is part of the key and moves on a
+    recompose re-publish), then patch just the one column with that fresh
+    key. Patching with a stale/cached key would upsert a phantom row at a
+    partition nothing reads -- the exact bug class that bit articles_feed
+    twice. Sole caller today is flush_pending_views (a single periodic
+    beat, so no concurrent read-modify-write on the same article).
+
+    No feed-cache invalidation here (unlike update_article_image): view
+    counts are joined onto feed items at read time via get_views_bulk, not
+    baked into the cached feed page, and the old counter bump never
+    invalidated anything either.
+    """
+    from algorand_shared.article_statements import ArticlesStmts
+
+    from app.core.cassandra import get_cassandra_session
+
+    try:
+        aid = UUID(article_id)
+    except (ValueError, TypeError):
+        return False
+    session = get_cassandra_session()
+    new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+    if new_row is None or new_row.published_at is None:
+        return False
+    try:
+        session.execute(
+            ArticlesStmts.UPDATE_VIEWS,
+            (views, new_row.status, new_row.year, new_row.published_at, aid),
+        )
+    except Exception:
+        logger.warning("articles views update failed for %s", aid, exc_info=True)
+        return False
     return True
 
 

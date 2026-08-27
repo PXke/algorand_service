@@ -5,7 +5,7 @@ backend's _buffer_pending_analytics INCRs for six deferred pageview-analytics
 dimensions (geo, campaign, hour, language, referrer_path, referrer_url) into
 their Cassandra counter tables, on a 10-minute Celery beat
 (celery_app.py's "flush-pending-analytics"). Same shape as
-test_view_counts_flush.py for article_view_counts.
+test_view_counts_flush.py for the articles.views tally.
 """
 
 from __future__ import annotations

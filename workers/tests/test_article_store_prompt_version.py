@@ -21,7 +21,7 @@ _PROMPT_VERSION_INDEX = 17
 # every prepared statement resolves through a bare MagicMock session whose
 # .prepare(...) return value is the same mock object for any cql string,
 # making every statement `is`-equal to every other.
-_INSERT_PARAM_COUNT = 23
+_INSERT_PARAM_COUNT = 24  # +1 for `views` (migration 084)
 
 
 def _article_insert_params(fake_cassandra_session: MagicMock) -> tuple:

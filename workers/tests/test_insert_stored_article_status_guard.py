@@ -23,7 +23,7 @@ _STATUS_INDEX = 0
 # See test_article_store_prompt_version.py for why param-tuple length (23
 # bound columns), not statement identity, picks the article INSERT out of the
 # fake session's calls.
-_INSERT_PARAM_COUNT = 23
+_INSERT_PARAM_COUNT = 24  # +1 for `views` (migration 084)
 
 
 def _article_insert_params(fake_cassandra_session: MagicMock) -> tuple:

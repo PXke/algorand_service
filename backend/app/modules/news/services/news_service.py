@@ -315,10 +315,11 @@ class NewsService:
         view_future = None
         try:
             if settings.news_store.strip().lower() == "cassandra":
-                from app.core.cassandra import execute_async
-                from app.core.statements import ViewCountStmts
+                from algorand_shared.article_statements import ArticlesStmts
 
-                view_future = execute_async(ViewCountStmts.GET, (UUID(article_id),))
+                from app.core.cassandra import execute_async
+
+                view_future = execute_async(ArticlesStmts.GET_VIEWS_BY_ID, (UUID(article_id),))
         except Exception:
             view_future = None
 

@@ -733,3 +733,11 @@ file = "backend/schema/migrations/app/083_url_queue_twcs.cql"
 tier = "prod"
 status = "active"
 description = "switch url_queue / url_queue_by_url compaction from STCS to TimeWindowCompactionStrategy (1-day windows), paired with the same change's new URL_QUEUE_ROW_TTL_SECONDS knob (USING TTL ? on every url_queue write incl. the status UPDATE, shipped disabled/0 -- CQL treats TTL 0 as no-TTL): terminal done/failed rows have zero functional role (enqueue dedupe only matches status='pending', recrawl cooldown lives in Redis) yet ~145k had accumulated with nothing deleting them -- once the TTL is flipped on, TWCS drops whole expired SSTables per window instead of accumulating scannable tombstones; url_queue_pending deliberately stays STCS (delete-per-dequeue status index, out-of-order tombstones are TWCS's worst case, gc_grace=3600 from migration 033 already reaps it) though its inserts carry the same TTL so orphaned pending rows expire too; gc_grace_seconds unchanged on all three"
+
+[[migrations]]
+stream = "app"
+version = "084"
+file = "backend/schema/migrations/app/084_articles_views.cql"
+tier = "prod"
+status = "active"
+description = "add articles.views (plain int, NULL reads as 0): folds the per-article view tally into the consolidated articles table, replacing the separate article_view_counts COUNTER table (migration 026) -- counters can't share a table with regular columns, but the tally's only writer since 2026-08-25 is the 10-minute flush_pending_views beat (the hot path only INCRs a Redis pending key), which can afford read-current-total + add-delta + write-back via the update_article_image-shaped read-current-key-then-patch pattern (fresh GET_VIEWS_BY_ID read, so the patch lands on the row's CURRENT partition even after a recompose re-stamps published_at); views is carried through transition_article_status/_ARTICLES_COLUMNS so status transitions and recompose re-publishes preserve the tally like every other column; historical counter values are copied over additively by the one-off workers/scratch/backfill_article_views.py run once after the cutover deploy; article_view_counts is dropped by a separate later migration once the backfill is verified, keeping this deploy rollback-safe"

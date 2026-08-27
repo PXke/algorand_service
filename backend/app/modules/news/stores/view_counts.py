@@ -1,7 +1,10 @@
-"""Per-article read tally (Cassandra counter, fed by a Redis pending-increment buffer).
+"""Per-article read tally (articles.views, fed by a Redis pending-increment buffer).
 
-Decoupled from the ArticleStore Protocol: a no-op when the API runs the
-in-memory store (dev/tests), so endpoints can always call record_view safely.
+The tally lives on the consolidated `articles` table as a plain int column
+(migration 084, replacing the old article_view_counts counter table -- NULL
+reads as 0). Decoupled from the ArticleStore Protocol: a no-op when the API
+runs the in-memory store (dev/tests), so endpoints can always call
+record_view safely.
 """
 
 from __future__ import annotations
@@ -48,13 +51,11 @@ def _as_uuid(article_id: str) -> UUID | None:
 def record_view(article_id: str) -> None:
     """Best-effort +1; never raises into the request path.
 
-    Increments a pending-count key in Redis instead of writing Cassandra's
-    article_view_counts counter table directly (2026-08-25): counter-column
-    writes are Cassandra's own separate write path (can't batch with normal
-    writes) and get worse as the cluster grows, so the hot article-page-view
-    path no longer touches Cassandra at all. A workers/ Celery beat task
-    (flush_pending_views, every 10 minutes) drains these Redis increments
-    into the real counter -- see workers/app/modules/newspaper/view_counts.py.
+    Increments a pending-count key in Redis instead of writing Cassandra
+    directly (2026-08-25): the hot article-page-view path never touches
+    Cassandra at all. A workers/ Celery beat task (flush_pending_views,
+    every 10 minutes) drains these Redis increments onto articles.views
+    (migration 084) -- see workers/app/modules/newspaper/view_counts.py.
     Both services read the same REDIS_URL, so a key written here is visible
     to that job.
     """
@@ -70,18 +71,25 @@ def record_view(article_id: str) -> None:
 
 
 def get_views_bulk(article_ids: list[str]) -> dict[str, int]:
-    """Read tallies for many articles in one parallel sweep. Missing counters (never-viewed articles) and any Cassandra hiccup read as 0 — ranking is a best-effort view, never an error source."""
+    """Read tallies for many articles in one parallel sweep. Missing counters (never-viewed articles) and any Cassandra hiccup read as 0 — ranking is a best-effort view, never an error source.
+
+    articles.views (migration 084) replaced the old counter table's `IN ?`
+    partition-key read -- article_id is an SAI-indexed column on `articles`,
+    not its partition key, so this fans out one point-lookup per id in
+    parallel instead. Callers already cap article_ids to a small window.
+    """
     if not _cassandra_enabled() or not article_ids:
         return {}
     pairs = [(raw, aid) for raw in article_ids if (aid := _as_uuid(raw)) is not None]
     if not pairs:
         return {}
     try:
+        from algorand_shared.article_statements import ArticlesStmts
+
         from app.core.cassandra import execute_parallel_with_args
-        from app.core.statements import ViewCountStmts
 
         results = execute_parallel_with_args(
-            ViewCountStmts.GET, [(aid,) for _, aid in pairs], raise_on_error=False
+            ArticlesStmts.GET_VIEWS_BY_ID, [(aid,) for _, aid in pairs], raise_on_error=False
         )
     except Exception:
         logger.warning("bulk view-count read failed", exc_info=True)
@@ -104,10 +112,11 @@ def get_views(article_id: str) -> int:
     if aid is None:
         return 0
     try:
-        from app.core.cassandra import get_cassandra_session
-        from app.core.statements import ViewCountStmts
+        from algorand_shared.article_statements import ArticlesStmts
 
-        row = get_cassandra_session().execute(ViewCountStmts.GET, (aid,)).one()
+        from app.core.cassandra import get_cassandra_session
+
+        row = get_cassandra_session().execute(ArticlesStmts.GET_VIEWS_BY_ID, (aid,)).one()
     except Exception:
         return 0
     return int(row.views) if row and row.views is not None else 0

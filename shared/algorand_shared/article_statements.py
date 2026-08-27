@@ -103,8 +103,8 @@ class ArticlesStmts:
         "status, year, published_at, article_id, service_id, title, summary, body, "
         "image_url, tags, source_url, trigger_txid, trigger_round, slug, translations, "
         "first_published_at, updated_at, prompt_version, composed_by_model, deleted_at, "
-        "status_updated_at, interest_score, approved_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "status_updated_at, interest_score, approved_at, views"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Feed listing: `articles` doubles as the feed projection for
     # status='published' (see the plan) -- year is the partition granularity
@@ -199,8 +199,25 @@ class ArticlesStmts:
         "SELECT status, year, published_at, article_id, service_id, title, summary, body, "
         "image_url, tags, source_url, trigger_txid, trigger_round, slug, translations, "
         "first_published_at, updated_at, prompt_version, composed_by_model, deleted_at, "
-        "status_updated_at, interest_score, approved_at "
+        "status_updated_at, interest_score, approved_at, views "
         "FROM algorand_platform.articles WHERE article_id = ?"
+    )
+    # views (migration 084): the per-article view tally, folded in from the
+    # old article_view_counts counter table. GET_VIEWS_BY_ID deliberately
+    # also selects the row's partition/clustering key (status/year/
+    # published_at) so the flush path's read-then-patch runs off ONE fresh
+    # SAI lookup: published_at moves on recompose/re-publish, and patching
+    # with a stale key would upsert a phantom row at a partition nothing
+    # reads (the exact articles_feed bug class this codebase has hit twice).
+    # UPDATE_VIEWS mirrors UPDATE_IMAGE's shape for the same reason -- only
+    # ever executed with a key read fresh in the same call.
+    GET_VIEWS_BY_ID = _Stmt(
+        "SELECT status, year, published_at, views "
+        "FROM algorand_platform.articles WHERE article_id = ?"
+    )
+    UPDATE_VIEWS = _Stmt(
+        "UPDATE algorand_platform.articles SET views = ? "
+        "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"
     )
     # article-table consolidation Phase 4: replaces pending_feed_queue's
     # (interest_score DESC, approved_at ASC) clustering order -- `articles`

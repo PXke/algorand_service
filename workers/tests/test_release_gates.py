@@ -152,6 +152,7 @@ def test_release_drain_invokes_gates_before_feed_insert(monkeypatch: pytest.Monk
         interest_score=pending_row.interest_score,
         approved_at=pending_row.approved_at,
         published_at=None,
+        views=None,
     )
 
     backlog_row = SimpleNamespace(
