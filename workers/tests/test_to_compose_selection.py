@@ -105,7 +105,6 @@ def test_platform_fills_n_minus_1_slots_by_priority(monkeypatch: pytest.MonkeyPa
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # N=3 -> 2 platform slots
@@ -138,7 +137,6 @@ def test_platform_fill_respects_one_pending_per_service_dedup(monkeypatch: pytes
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 4)  # N=4 -> 3 platform slots
@@ -173,7 +171,6 @@ def test_platform_fill_excludes_the_human_picks_own_service(monkeypatch: pytest.
         list_to_compose_for_day,
         select_to_compose_for_day,
     )
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)
@@ -201,7 +198,6 @@ def test_selected_artifacts_leave_the_pending_lane(
     """Both the human pick and every platform pick transition pending -> selected and drop out of the pending index."""
     from algorand_shared.artifact_store import SELECTED, insert_artifact, pin_artifact_for_day
     from algorand_shared.to_compose_selection import select_to_compose_for_day
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)
@@ -222,7 +218,6 @@ def test_platform_slots_available_floors_at_zero_when_cap_is_one(monkeypatch: py
     """N=1 (the minimum allowed cap) leaves zero platform slots -- must not go negative or (an earlier bug caught by this test) admit one extra artifact via an off-by-one in the fill loop's break check."""
     from algorand_shared.artifact_store import insert_artifact
     from algorand_shared.to_compose_selection import select_to_compose_for_day
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 1)
@@ -300,7 +295,6 @@ def test_preview_matches_what_select_would_actually_pick(monkeypatch: pytest.Mon
         preview_to_compose_for_day,
         select_to_compose_for_day,
     )
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # N=3 -> 2 platform slots
@@ -488,7 +482,6 @@ def test_rank_platform_picks_dedup_still_keys_on_literal_service_id(
     _mock_coverage(monkeypatch, covered={"algorand-forum"})
     from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
     from algorand_shared.to_compose_selection import select_to_compose_for_day
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 3)  # platform_n = 2
@@ -524,7 +517,6 @@ def test_new_service_pool_gets_its_guaranteed_floor_even_at_lower_priority(
     """The core guarantee: with plenty of candidates in both pools, the new-service pool still gets its floor share of platform slots even when every new-service candidate is lower priority than every update candidate -- otherwise a saturating established service would starve new-service coverage entirely."""
     from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
     from algorand_shared.to_compose_selection import select_to_compose_for_day
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # platform_n = 4
@@ -572,7 +564,6 @@ def test_thin_new_service_pool_is_backfilled_from_update_pool(
     """When the new-service pool doesn't have enough eligible candidates to fill its own floor, the leftover slot(s) backfill from the update pool rather than leaving a platform slot empty."""
     from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
     from algorand_shared.to_compose_selection import select_to_compose_for_day
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # platform_n = 4
@@ -617,7 +608,6 @@ def test_thin_update_pool_is_backfilled_from_new_service_pool(
     """Symmetric to the new-service-pool-thin case: when the UPDATE pool is what's thin, its shortfall backfills from the new-service pool instead."""
     from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
     from algorand_shared.to_compose_selection import select_to_compose_for_day
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 5)  # platform_n = 4
@@ -647,7 +637,6 @@ def test_surplus_slot_beyond_the_floor_goes_to_next_highest_priority_regardless_
     """Floors are a MINIMUM, not a partition: once both pools' floors are satisfied, a leftover slot (here, from odd platform_n not dividing evenly) goes to whichever pool has the next-highest-priority remaining candidate -- an already-covered service's second-best update can still win it over a weak new-service candidate. This is the explicit owner carve-out: "if some project did a big rework, the big rework would probably [earn] priority"."""
     from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
     from algorand_shared.to_compose_selection import select_to_compose_for_day
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 4)  # platform_n = 3 (odd -> 1 surplus)
@@ -835,7 +824,6 @@ def test_reset_and_reselect_produces_a_fresh_valid_selection(
         reset_and_reselect_for_day,
         select_to_compose_for_day,
     )
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)
@@ -874,7 +862,6 @@ def test_preview_pool_field_present_for_every_pending_item_not_just_selected(
     )
     from algorand_shared.artifact_store import insert_artifact, update_artifact_priority
     from algorand_shared.to_compose_selection import preview_to_compose_for_day
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "NEWS_MAX_ARTICLES_PER_DAY", 2)  # platform_n = 1
@@ -1101,3 +1088,83 @@ def test_reclaim_stale_selected_does_not_clear_pin_for_an_unreclaimed_platform_p
     # No exception, no crash touching a human_pick_day that was never set.
     result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
     assert result["reclaimed_count"] == 1
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_selecting_an_artifact_purges_its_stale_to_compose_row_from_another_day(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """Root-caused 2026-08-27.
+
+    An artifact that goes unselected stays a normal pending candidate and
+    can legitimately be re-picked on a LATER day -- but if its OLD day's
+    to_compose row was never cleaned up (e.g. a dangling row from before
+    this fix), re-selecting it must purge that old row, not leave two
+    days' rows pointing at the same artifact_id (the exact aliasing that
+    corrupted two real prod artifacts).
+    """
+    from algorand_shared.artifact_store import insert_artifact, revert_artifact_to_pending
+    from algorand_shared.to_compose_selection import select_to_compose_for_day
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-25")
+    assert ("2026-08-25", 0) in fake_artifact_session.to_compose
+
+    # Simulate the pre-fix world: the artifact goes back to pending WITHOUT
+    # its old to_compose row being cleaned up.
+    revert_artifact_to_pending(aid)
+    assert ("2026-08-25", 0) in fake_artifact_session.to_compose  # still dangling
+
+    select_to_compose_for_day("2026-08-28")
+
+    assert ("2026-08-25", 0) not in fake_artifact_session.to_compose
+    assert ("2026-08-28", 0) in fake_artifact_session.to_compose
+    assert str(fake_artifact_session.to_compose[("2026-08-28", 0)]["artifact_id"]) == aid
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_never_reverts_an_artifact_that_is_also_currently_selected_elsewhere(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """Root-caused 2026-08-27 (two real prod artifacts corrupted this way).
+
+    A stale to_compose row from a PAST day pointing at an artifact that is
+    ALSO, separately, legitimately SELECTED for a CURRENT/future day must
+    not have its status reverted -- only the stale row itself is garbage.
+    Constructs the aliasing directly (bypassing the insert-time purge fix)
+    to test reclaim's own defense-in-depth guard in isolation, in case a
+    dangling row predates that fix.
+    """
+    from algorand_shared.artifact_store import SELECTED, insert_artifact
+    from algorand_shared.to_compose_selection import (
+        find_stale_selected_artifacts,
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    select_to_compose_for_day("2026-08-28")
+    assert fake_artifact_session.artifacts[aid]["status"] == SELECTED
+
+    # Inject a stale PAST-day row aliased to the SAME artifact_id directly --
+    # what a leftover pre-fix dangling row looks like.
+    fake_artifact_session.to_compose[("2026-08-25", 0)] = {
+        "compose_day": "2026-08-25",
+        "slot": 0,
+        "artifact_id": aid,
+        "lane": "platform",
+        "service_id": "svc-a",
+        "picked_at": None,
+    }
+
+    stale = find_stale_selected_artifacts(today="2026-08-26")
+    assert len(stale) == 1
+    assert stale[0]["has_current_reference"] is True
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
+
+    assert result["reclaimed"][0]["action"] == "stale_row_deleted_only"
+    assert ("2026-08-25", 0) not in fake_artifact_session.to_compose
+    # The CURRENT selection is completely untouched.
+    assert fake_artifact_session.artifacts[aid]["status"] == SELECTED
+    assert ("2026-08-28", 0) in fake_artifact_session.to_compose

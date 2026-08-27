@@ -241,11 +241,35 @@ def select_to_compose_for_day(day: str, *, now: datetime | None = None) -> dict[
     }
 
 
+def _purge_other_to_compose_rows(session: object, artifact_id: str) -> None:
+    """Delete every `to_compose` row referencing `artifact_id` on a day OTHER than the one about to be written.
+
+    Root-caused 2026-08-27 (live prod, two separate artifacts corrupted by
+    this): an artifact that goes unselected for a day stays a normal
+    PENDING candidate, so it can legitimately be picked again on a LATER
+    day. Nothing ever cleaned up its OLD day's `to_compose` row when that
+    happened -- so the same artifact_id ends up referenced by to_compose
+    rows on MULTIPLE different days at once (one current/valid, one stale).
+    `reclaim_stale_selected_artifacts` then finds the stale OLD row, sees
+    the artifact's (legitimately, currently) SELECTED status, and reverts
+    it wholesale -- silently breaking the CURRENT day's real selection it
+    had nothing to do with. Purging every other day's row for this
+    artifact_id at the moment it's freshly selected removes the aliasing
+    at its source, rather than trying to detect/repair it after the fact.
+    """
+    from algorand_shared.artifact_statements import ToComposeStmts
+
+    for row in session.execute(ToComposeStmts.LIST_ALL):  # type: ignore[attr-defined]
+        if str(row.artifact_id) == artifact_id:
+            session.execute(ToComposeStmts.DELETE_SLOT, (row.compose_day, row.slot))  # type: ignore[attr-defined]
+
+
 def _insert_slot(
     session: object, *, day: str, slot: int, artifact: Artifact, lane: str, now: datetime
 ) -> None:
     from algorand_shared.artifact_statements import ToComposeStmts
 
+    _purge_other_to_compose_rows(session, artifact.artifact_id)
     session.execute(  # type: ignore[attr-defined]
         ToComposeStmts.INSERT,
         (day, slot, uuid.UUID(artifact.artifact_id), lane, artifact.service_id, now),
@@ -370,6 +394,16 @@ def find_stale_selected_artifacts(*, today: str | None = None) -> list[dict[str,
     report/act pairs work. `to_compose` has no per-day index to query
     against, so this does a full-table scan (`ToComposeStmts.LIST_ALL`) --
     safe, since the table holds at most a handful of rows per day, forever.
+
+    Each finding also carries `has_current_reference`: True when the SAME
+    artifact_id also has a `to_compose` row for a day >= `today` (root-
+    caused live 2026-08-27: the same artifact can legitimately be re-picked
+    on a LATER day after going unselected once, and nothing before
+    `_insert_slot`'s own 2026-08-27 fix ever cleaned up its OLD day's row
+    when that happened -- so a genuinely-current, correctly-SELECTED
+    artifact could ALSO still be referenced by a stale old row here. Acting
+    on such a finding must delete the stale row without touching the
+    artifact's status -- see `reclaim_stale_selected_artifacts`.
     """
     from app.core.cassandra import get_cassandra_session
 
@@ -379,9 +413,12 @@ def find_stale_selected_artifacts(*, today: str | None = None) -> list[dict[str,
     today = today or datetime.now(tz=UTC).date().isoformat()
     session = get_cassandra_session()
 
+    all_rows = list(session.execute(ToComposeStmts.LIST_ALL))
+    current_artifact_ids = {str(row.artifact_id) for row in all_rows if row.compose_day >= today}
+
     stale: list[dict[str, object]] = []
     seen: set[str] = set()
-    for row in session.execute(ToComposeStmts.LIST_ALL):
+    for row in all_rows:
         if row.compose_day >= today:
             continue
         artifact_id = str(row.artifact_id)
@@ -397,6 +434,7 @@ def find_stale_selected_artifacts(*, today: str | None = None) -> list[dict[str,
                     "slot": row.slot,
                     "lane": row.lane,
                     "service_id": row.service_id,
+                    "has_current_reference": artifact_id in current_artifact_ids,
                 }
             )
     return stale
@@ -426,6 +464,17 @@ def reclaim_stale_selected_artifacts(
     never touch any OTHER slot on that same day (a still-genuinely-selected
     pick, or another day's own historical record).
 
+    2026-08-27: a finding with `has_current_reference=True` is handled
+    differently -- the stale row is deleted (still genuinely garbage), but
+    the artifact's status is left completely alone. Root-caused live: the
+    SAME artifact_id had been legitimately re-selected for a CURRENT day
+    via its own valid `to_compose` row, while an OLD day's row (never
+    cleaned up before `_insert_slot`'s matching 2026-08-27 fix) still
+    pointed at it too. Reverting the artifact's status here -- as this
+    function used to do unconditionally -- silently broke that other,
+    genuinely-current selection; two real prod artifacts were corrupted
+    this way the same night this was found.
+
     `dry_run=True` by default, mirroring every other act-on-live-data
     function in this codebase added this session (`gray_zone_
     reconciliation.dispatch_gray_zone_deep_classify`, `browser_reaper.
@@ -444,12 +493,18 @@ def reclaim_stale_selected_artifacts(
         if dry_run:
             reclaimed.append(finding)
             continue
+        session = get_cassandra_session()
+        if finding.get("has_current_reference"):
+            # Stale row only -- the artifact is legitimately SELECTED
+            # elsewhere for a current/future day. Never touch its status.
+            session.execute(ToComposeStmts.DELETE_SLOT, (finding["compose_day"], finding["slot"]))
+            reclaimed.append({**finding, "action": "stale_row_deleted_only"})
+            continue
         if revert_artifact_to_pending(artifact_id):
             if finding["lane"] == "human":
                 clear_artifact_pin(artifact_id)
-            session = get_cassandra_session()
             session.execute(ToComposeStmts.DELETE_SLOT, (finding["compose_day"], finding["slot"]))
-            reclaimed.append(finding)
+            reclaimed.append({**finding, "action": "reverted_to_pending"})
 
     return {"dry_run": dry_run, "reclaimed_count": len(reclaimed), "reclaimed": reclaimed}
 
