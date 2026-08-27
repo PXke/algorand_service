@@ -79,6 +79,43 @@ def test_custom_chart_data() -> None:
     assert out["chart"]["series"][0]["y"] == [4.5, 0.001]
 
 
+def test_custom_chart_data_grounded_by_a_trace_entry_appended_after_binding() -> None:
+    """Reproduces the real production lifecycle (2026-08-27 regression).
+
+    The caller binds an EMPTY list at the start of a compose session, then
+    appends tool-call entries to that SAME list object round by round as
+    the session progresses -- it is never re-bound with a fresh, already-
+    populated list the way every other test in this file sets it up.
+
+    Root-caused live 2026-08-27: `chart_data_session_trace` used to bind
+    `trace or None` -- since an empty list is falsy, this discarded the
+    real list at the moment it was still empty and bound `None` forever
+    (a ContextVar holds an object reference, not a live view of a variable
+    the caller keeps mutating). Every subsequent `trace.append(...)` still
+    mutated the real list, but the check never saw it -- every custom chart
+    in every real compose session was rejected as "not grounded" regardless
+    of whether the data was genuinely real, discovered when a live session
+    fabricated-looking rejection turned out to name numbers that WERE
+    real (algoanna.com's lending-platform loan counts).
+    """
+    trace: list[dict] = []
+    with chart_data_session_trace(trace):
+        # Simulates later rounds' tool calls appending to the SAME list
+        # object the context was entered with -- not a fresh, re-bound one.
+        trace.append({"tool": "get_fee_estimate", "arguments": {"chain": "legacy"}, "result": {"fee_usd": 4.50}})
+        trace.append({"tool": "get_fee_estimate", "arguments": {"chain": "algorand"}, "result": {"fee_usd": 0.001}})
+
+        out = _tool_chart_data(
+            dataset="custom",
+            chart_type="bar",
+            title="Fees saved",
+            x=["Legacy", "Algorand"],
+            series=[{"name": "USD", "y": [4.50, 0.001]}],
+        )
+    assert "error" not in out
+    assert out["chart"]["series"][0]["y"] == [4.5, 0.001]
+
+
 def test_custom_chart_data_rejects_ungrounded_value() -> None:
     """A custom value with no anchor anywhere in this session's trace is rejected.
 

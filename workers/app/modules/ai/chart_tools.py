@@ -45,14 +45,27 @@ _session_trace: ContextVar[list[dict[str, Any]] | None] = ContextVar(
 def chart_data_session_trace(trace: list[dict[str, Any]] | None) -> Iterator[None]:
     """Bind ``trace`` for a later ``chart_data(dataset='custom', ...)`` call to verify against.
 
-    ``trace`` is this compose session's tool-call trace so far; the later call
-    can then check its numbers were actually seen somewhere earlier in THIS
-    session, not invented. No-op if trace is falsy — the provenance check then
+    ``trace`` is this compose session's tool-call trace so far -- passed in
+    as the SAME list object the caller keeps appending to round by round
+    (it starts empty and is mutated in place), not a fresh snapshot per
+    call. The later call can then check its numbers were actually seen
+    somewhere earlier in THIS session, not invented. Binds ``None`` only
+    when the caller explicitly passes ``None`` -- the provenance check then
     fails closed (see ``_custom_series_ungrounded``), which is correct: no
     trace means no evidence, and a custom chart's whole premise is "numbers
     you already verified via other tools."
+
+    Root-caused 2026-08-27, live in prod the same night this shipped: this
+    used to bind ``trace or None``, which discards the list at the moment
+    it's still empty (an empty list is falsy) and binds ``None`` instead --
+    permanently, since a ContextVar holds an object reference, not a live
+    view of whatever variable the caller happens to reassign later. Every
+    subsequent ``trace.append(...)`` still mutated the REAL list the caller
+    held, but the ContextVar never referenced it, so every custom chart in
+    every compose session was rejected as "not grounded" regardless of
+    whether the data was real -- a blanket block, not a fabrication check.
     """
-    token = _session_trace.set(trace or None)
+    token = _session_trace.set(trace)
     try:
         yield
     finally:
