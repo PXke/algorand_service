@@ -495,8 +495,32 @@ def _drain_one_to_compose_slot(
 
 @celery_app.task(name="app.tasks.newspaper.select_to_compose_for_today")
 def select_to_compose_for_today_task() -> dict[str, object]:
-    """Daily beat: pick today's `to_compose` slate -- the human pin an admin set yesterday via "pin for tomorrow" (see artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow) plus N-1 top-priority platform picks. See to_compose_selection.select_to_compose_for_day for the full selection rule (including why an unpinned human slot is left empty, never backfilled)."""
-    return select_to_compose_for_day(_today_str())
+    """Daily beat: pick today's `to_compose` slate -- the human pin an admin set yesterday via "pin for tomorrow" (see artifact_store.pin_artifact_for_day / to_compose_selection.pin_for_tomorrow) plus N-1 top-priority platform picks. See to_compose_selection.select_to_compose_for_day for the full selection rule (including why an unpinned human slot is left empty, never backfilled).
+
+    Guarded to be a no-op if `day`'s slate is already populated -- e.g. by
+    an admin "Redo"/pin action taken for tomorrow before this beat rolls
+    over into it. `select_to_compose_for_day` itself only DELETEs+re-picks
+    (it does not revert already-SELECTED artifacts the way
+    `reset_and_reselect_for_day` does), so calling it unconditionally on an
+    already-populated day would silently drop the day's human pin (the
+    selection scan only looks at PENDING artifacts) and strand its
+    platform picks as SELECTED-with-no-to_compose-row -- invisible to both
+    a later Redo (which only reverts what the day's *current* rows
+    reference) and to `reclaim_stale_selected_artifacts` (which only scans
+    `to_compose` rows). Root-caused 2026-08-27 after a review of this exact
+    beat found it would have clobbered a live pin+platform slate the same
+    night. Mirrors `_ensure_today_selected`'s existing no-op check.
+    """
+    day = _today_str()
+    existing = list_to_compose_for_day(day)
+    if existing:
+        return {
+            "status": "skipped",
+            "reason": "already_selected",
+            "compose_day": day,
+            "existing_slots": len(existing),
+        }
+    return select_to_compose_for_day(day)
 
 
 @celery_app.task(name="app.tasks.newspaper.reclaim_stale_selected_artifacts")
