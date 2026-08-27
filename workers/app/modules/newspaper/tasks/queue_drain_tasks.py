@@ -825,28 +825,32 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
             # art.published_at was stamped at compose time, not release time,
             # so it must be re-stamped now on the `articles` row itself.
             released_at = datetime.now(tz=UTC)
+            # Article.publish() (2026-08-27): does the same backlog->published
+            # transition + slug claim this used to do by hand
+            # (transition_article_status + _claim_slug_for_feed), PLUS the
+            # one thing that was missing -- refuses if a DIFFERENT article_id
+            # already owns a live published article for this service_id
+            # (e.g. a same-service article went live from a different path
+            # while this one sat in backlog). See algorand_shared.article's
+            # own docstring for the incident this closes.
+            from algorand_shared.article import Article, DuplicateArticleError
+
             try:
-                # `articles` table backlog -> published status transition
-                # (article-table consolidation Phase 5: this is now the sole
-                # write, articles_feed/articles_by_id's old dual-write halves
-                # were dropped once every read moved onto `articles`).
-                from app.modules.newspaper.article_store import transition_article_status
-
-                try:
-                    transition_article_status(
-                        art.article_id, new_status="published", new_published_at=released_at
-                    )
-                except Exception:
+                article = Article.load(art.article_id)
+                if article is None:
                     logger.warning(
-                        "articles dual-write transition failed for %s", art.article_id,
-                        exc_info=True,
+                        "backlog release: %s vanished between read and publish", art.article_id
                     )
-                # Permanent URL slug, claimed at release rather than at compose:
-                # a held draft that never ships must not hold the clean slug.
-                # Self-contained and non-raising, so it cannot fail the publish.
-                from app.modules.newspaper.article_store import _claim_slug_for_feed
-
-                _claim_slug_for_feed(art.article_id, art.title, released_at, status="published")
+                    release_publish_slot(tier=PublishTier.STANDARD)
+                    break
+                article.publish(new_published_at=released_at)
+            except DuplicateArticleError:
+                # A genuine business-rule refusal, not a store failure --
+                # hand the slot back and stop this run without crashing the
+                # beat; the next run will pick a different backlog row (or
+                # the same one, if an admin resolves the conflict first).
+                release_publish_slot(tier=PublishTier.STANDARD)
+                break
             except Exception:
                 # The article never became visible — hand the slot back so
                 # the day's budget isn't burned by a failed write.

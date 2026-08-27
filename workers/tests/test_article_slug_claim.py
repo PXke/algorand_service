@@ -27,11 +27,11 @@ def test_publish_path_claims_a_slug() -> None:
     # never takes a slug it may never use.
     assert store.index("if publish_to_feed:") < store.index(claim)
 
-    # The queue drain is how most articles actually go live.
-    assert (
-        '_claim_slug_for_feed(art.article_id, art.title, released_at, status="published")'
-        in drain
-    )
+    # The queue drain is how most articles actually go live -- migrated
+    # 2026-08-27 onto Article.publish() (which claims a slug internally via
+    # ensure_slug()), so the source-shape check now looks for that call
+    # instead of the old direct _claim_slug_for_feed invocation.
+    assert "article.publish(new_published_at=released_at)" in drain
 
 
 def test_slug_claim_never_raises(monkeypatch) -> None:  # noqa: ANN001

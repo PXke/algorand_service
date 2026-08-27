@@ -40,9 +40,18 @@ class _Result:
 class _FakeSession:
     """Mirrors the pattern in workers/tests/test_domain_status_sticky.py: prepare() returns the raw CQL so execute() can branch on query text."""
 
-    def __init__(self, *, pending_rows: list[_PendingRow], article_row: Any) -> None:  # noqa: ANN401 -- duck-typed Cassandra row/result
+    def __init__(
+        self,
+        *,
+        pending_rows: list[_PendingRow],
+        article_row: Any,  # noqa: ANN401 -- duck-typed Cassandra row/result
+        service_id_rows: list | None = None,
+    ) -> None:
         self._pending_rows = pending_rows
         self._article_row = article_row
+        # Rows FIND_BY_SERVICE_ID would return -- the conflict check
+        # Article.publish() runs before every transition. Empty by default.
+        self._service_id_rows = service_id_rows if service_id_rows is not None else []
         self.articles_inserts: list[tuple] = []
         self.articles_deletes: list[tuple] = []
 
@@ -52,6 +61,8 @@ class _FakeSession:
 
     def execute(self, query: str, params: tuple = ()) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
         q = " ".join(str(query).split())
+        if q.startswith("SELECT") and "FROM algorand_platform.articles WHERE service_id = ?" in q:
+            return self._service_id_rows
         if q.startswith("SELECT") and "status = 'backlog'" in q:
             # list_backlog_articles() -- the pending_feed_queue rows re-shaped
             # as the `articles` status='backlog' rows it now reads instead.
@@ -184,3 +195,36 @@ def test_release_deletes_the_pre_release_partition_before_inserting(
         "published_at"
     ]
     assert new_published_at != compose_time
+
+
+def test_backlog_release_refuses_a_duplicate_service_and_returns_the_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2026-08-27 Article.publish() migration.
+
+    A backlog-held article must not be released if a DIFFERENT article_id
+    already went live for the same service_id while it waited -- the slot
+    is handed back (not burned) and the run ends cleanly, no crash.
+    """
+    article_id = uuid4()
+    existing_id = uuid4()
+    compose_time = datetime.now(tz=UTC) - timedelta(hours=5)
+    fake = _FakeSession(
+        pending_rows=[_PendingRow(article_id)],
+        article_row=_article_row(article_id, published_at=compose_time),
+        service_id_rows=[SimpleNamespace(article_id=existing_id, status="published")],
+    )
+    _patch_common(monkeypatch, fake)
+    released_slots: list[str] = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.publish_daily_guard.release_publish_slot",
+        lambda **_kw: released_slots.append("released"),
+    )
+
+    result = queue_drain_tasks.drain_approved_feed_queue()
+
+    assert result["status"] == "ok"
+    assert result["published"] == 0
+    assert fake.articles_inserts == []
+    assert fake.articles_deletes == []
+    assert released_slots == ["released"]
