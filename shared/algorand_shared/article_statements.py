@@ -31,10 +31,11 @@ rather than silently unified:
 - `EditorialBriefStmts` LIST/GET: backend's include `wallet_address`,
   `created_at`, `updated_at`; workers' don't need them for compose.
 
-This module will grow the NEW `articles`/`article_id_lookup`/`article_history`
-statement classes once the consolidated schema lands (see the article
-data-model consolidation plan); today it only deduplicates existing CQL
-against the current 11-table schema, with zero schema change.
+This module also holds the NEW `articles`/`article_id_lookup` statement
+classes from the consolidated schema (migration 067; see the article
+data-model consolidation plan). The plan's `article_history` companion table
+was dropped in migration 082 -- its cutover never finished and
+`article_versions` (above) stayed the live version trail.
 
 Names are flat module-level constants, NOT nested in classes. `_Stmt` is a
 data descriptor -- accessing it through a class (`SomeClass.ATTR`) invokes
@@ -85,14 +86,14 @@ ARTICLE_VERSION_INSERT = _Stmt(
 )
 
 # --------------------------------------------------------------------------- #
-# articles / article_history -- the NEW consolidated schema (migration 067).
+# articles -- the NEW consolidated schema (migration 067).
 # Unlike everything above (legacy-table dedup), these are the actual long-term
 # interface both services use going forward, so they're proper classes (not
 # flat constants) -- nothing here gets re-assigned into another class's body,
 # so the _Stmt descriptor's lazy-prepare-on-access behavior is unaffected.
-# Cutover is incremental (see the article-table-consolidation plan, step 5):
-# this starts with the CREATE path only (insert_stored_article dual-write);
-# UPDATE/status-transition/read cutover follow as their own later steps.
+# (067's companion article_history table was dropped in migration 082: its
+# cutover from article_versions never finished, so article_versions -- above
+# -- stayed the live version trail.)
 # --------------------------------------------------------------------------- #
 class ArticlesStmts:
     """Prepared statements for the new `articles` table."""

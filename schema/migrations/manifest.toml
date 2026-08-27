@@ -717,3 +717,11 @@ file = "backend/schema/migrations/app/081_drop_dead_telemetry_tables.cql"
 tier = "prod"
 status = "active"
 description = "drop pageview_path_daily / pageview_bot_daily (migrations 035/039) and gatekeeper_decisions / gatekeeper_audit (migration 031): schema audit 2026-08-26/27 confirmed all four have zero live rows on prod and zero code or test references (dynamic name construction checked too) -- pageview_path_daily was superseded by pageview_path_kind_daily (037), pageview_bot_daily never got a writer, and the MTTH gatekeeper's telemetry streams never received a row because its Celery wiring never landed (the gatekeeper model code itself is untouched and can recreate telemetry tables in a fresh migration if it ships)"
+
+[[migrations]]
+stream = "app"
+version = "082"
+file = "backend/schema/migrations/app/082_drop_article_history.cql"
+tier = "prod"
+status = "active"
+description = "drop article_history (migration 067): the article-table consolidation's version-trail replacement for article_versions whose cutover never finished -- zero live code reads or writes it (fresh grep of backend/workers/shared app code and both test suites 2026-08-27 found only comments and the one-off scratch backfill script), it sat 4 rows behind the still-live article_versions (672 vs 676 on prod at drop time), and the richer columns it existed for (compose model / session_id) are not captured anywhere in the current write path so finishing the cutover is not feasible; owner approved the drop -- article_versions remains the live version trail"
