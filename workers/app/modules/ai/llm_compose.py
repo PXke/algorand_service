@@ -3075,6 +3075,12 @@ def _compose_via_writer_tools_locked(
     ]
     if WRITER_TOOLS_ENABLED:
         playwright_session = None
+        # Bound below to `trace` (chart_data_session_trace) so the chart_data
+        # tool can check a custom chart's numbers against THIS session's own
+        # tool-call trace so far, not the whole system's history. Declared here
+        # (before `trace` exists) so the `finally` below can always close it,
+        # even on a failure before that point.
+        _chart_trace_scope = contextlib.ExitStack()
         try:
             from app.core.config import (
                 LLM_MAX_TOOL_ROUNDS,
@@ -3116,6 +3122,9 @@ def _compose_via_writer_tools_locked(
             }
             tool_schemas, tool_handlers = all_tools(context=tool_context)
             trace: list = []
+            from app.modules.ai.chart_tools import chart_data_session_trace
+
+            _chart_trace_scope.enter_context(chart_data_session_trace(trace))
             debug: dict = {}
             # Set once at the "writing" checkpoint (the research digest is only
             # known once stage 1 finishes) and read by EVERY later upsert in
@@ -3293,6 +3302,7 @@ def _compose_via_writer_tools_locked(
             with contextlib.suppress(Exception):
                 _checkpoint("fallback")
         finally:
+            _chart_trace_scope.close()
             if playwright_session is not None:
                 with contextlib.suppress(Exception):
                     playwright_session.close()
