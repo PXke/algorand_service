@@ -322,23 +322,27 @@ DEEPSEEK_API_KEY = env_str("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_BASE = env_str("DEEPSEEK_API_BASE", "https://api.deepseek.com").rstrip("/")
 # Writer and research both get real tool access to capture_screenshot (see
 # writer_tools.all_tools -- the same toolset backs the research loop, the
-# revision pass, and the legacy single-loop path), so both default to the
+# revision pass, and the legacy single-loop path), so both need the
 # vision-capable variant (released 2026-08-21, same token pricing as
 # deepseek-chat -- see llm_openai_compatible.OpenAICompatibleProvider's
-# _supports_vision hook for where the image actually gets embedded). Digest
-# and translate never see a tool result with an image, so they stay on the
-# plain text model.
+# _supports_vision hook for where the image actually gets embedded).
+#
+# 2026-08-27: digest/translate/rubric moved onto the SAME model too, even
+# though none of them ever produce an image tool result -- one model string
+# means every call this pipeline makes shares one cache pool instead of
+# splitting traffic (and therefore cache hit rate) across two. No cost
+# penalty either way (vision-exp is priced identically to the plain models
+# it replaces here). The one known wrinkle: a rare DeepSeek failure mode
+# (a reasoning-to-answer collapse returning a body-less completion) was
+# observed once on this model under a very large ~180k-token revision-scale
+# writer prompt -- digest/translate/rubric prompts are far smaller (a single
+# article, not an accumulated research transcript), so the exposure here is
+# expected to be much lower, but it's the same underlying model, worth
+# knowing if a similar empty-response failure ever shows up on these paths.
 DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-v4-flash-vision-exp")
 DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-v4-flash-vision-exp")
-DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-chat")
-# "deepseek-chat" is a legacy alias DeepSeek's current docs no longer list
-# (still resolves as of 2026-08-26, but the local->DeepSeek translation
-# switch below is about to send 7x the translate call volume this account
-# has ever sent through it -- not worth relying on an undocumented alias at
-# that scale). Pinned to the same dated model string DEEPSEEK_MODEL_WRITER/
-# RESEARCH already use (minus the vision variant -- translate never sees an
-# image tool result, see the comment above those two).
-DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-v4-flash")
+DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-v4-flash-vision-exp")
+DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-v4-flash-vision-exp")
 # Per-language override: languages in this list translate via DeepSeek
 # (translate_article) instead of the local CPU engines, independent
 # of LLM_PROVIDER_TRANSLATE's global mistral/deepseek routing. Multi-article
@@ -377,7 +381,7 @@ DEEPSEEK_TRANSLATE_LANGS = frozenset(
 # to one provider while keeping the rubric on another (e.g. DeepSeek's extra
 # research depth is worth it, but Mistral's rubric grading is trusted more
 # while DeepSeek's is newer/less proven).
-DEEPSEEK_MODEL_RUBRIC = env_str("DEEPSEEK_MODEL_RUBRIC", "deepseek-chat")
+DEEPSEEK_MODEL_RUBRIC = env_str("DEEPSEEK_MODEL_RUBRIC", "deepseek-v4-flash-vision-exp")
 # DeepSeek's thinking mode returns reasoning in a separate reasoning_content
 # field, but BOTH reasoning_content and content draw from the same max_tokens
 # budget (visible as usage.completion_tokens_details.reasoning_tokens) —
@@ -787,6 +791,15 @@ URL_QUEUE_DRAIN_BATCH = env_int("URL_QUEUE_DRAIN_BATCH", 10)
 # always the single front-of-queue row — see dequeue_url() for why. 1 restores
 # strict priority/enqueued_at order.
 URL_QUEUE_RANDOM_PICK_POOL = env_int("URL_QUEUE_RANDOM_PICK_POOL", 100)
+# Row TTL (seconds) bound to every url_queue / url_queue_by_url /
+# url_queue_pending write (USING TTL ?). Terminal done/failed rows have no
+# functional role (enqueue-dedupe only matches status='pending', the recrawl
+# cooldown lives in Redis) so they can expire instead of accumulating forever.
+# 0 = disabled: CQL treats `USING TTL 0` as "no TTL", i.e. the write never
+# expires — identical to the pre-TTL statements. Default 0 (ships dark);
+# suggested live value 2592000 (30 days). Same env var exists in backend's
+# config.py for its frontier-approval seed insert — keep both in sync.
+URL_QUEUE_ROW_TTL_SECONDS = env_int("URL_QUEUE_ROW_TTL_SECONDS", 0)
 # When the writer's fetch_url tool successfully reads a page during compose,
 # enqueue it for a full harvest (crawled_pages + Typesense) — high-signal URLs
 # the model explicitly chose to investigate.

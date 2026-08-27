@@ -98,20 +98,21 @@ def test_writer_and_research_default_to_the_vision_model() -> None:
     assert DEEPSEEK_MODEL_RESEARCH == "deepseek-v4-flash-vision-exp"
 
 
-def test_digest_translate_and_rubric_stay_on_the_plain_text_model() -> None:
-    """None of these three ever run a tool-calling loop with image-producing tools (digest/translate are plain completions; rubric grades an already-finished draft) -- they must NOT move onto the vision-capable model just because writer/research did.
+def test_digest_translate_and_rubric_also_default_to_the_vision_model() -> None:
+    """All DeepSeek call sites share one model string (2026-08-27), even though digest/translate/rubric never produce an image tool result themselves.
 
-    DEEPSEEK_MODEL_TRANSLATE moved off the "deepseek-chat" legacy alias to a
-    dated "deepseek-v4-flash" pin (2026-08-26, ahead of the local->DeepSeek
-    translation switch sending 7x the call volume through it) -- still the
-    plain text (non-vision) model, just no longer the undocumented alias.
-    Digest and rubric are untouched by that change and stay on
-    "deepseek-chat".
+    Consolidating onto one model string means every call this pipeline
+    makes shares one cache pool instead of splitting traffic (and cache hit
+    rate) across two -- no cost penalty either way, vision-exp is priced
+    identically to the plain models it replaced here. `_supports_vision()`
+    reading True for these three is harmless: it only gates OPTIONAL image
+    embedding when a tool result actually carries an image_url, which
+    digest/translate/rubric never produce regardless of what the model can
+    see.
     """
-    assert DEEPSEEK_MODEL_DIGEST == "deepseek-chat"
-    assert DEEPSEEK_MODEL_TRANSLATE == "deepseek-v4-flash"
-    assert DEEPSEEK_MODEL_RUBRIC == "deepseek-chat"
-    assert not DeepSeekProvider(api_key="k", model=DEEPSEEK_MODEL_TRANSLATE)._supports_vision()
+    assert DEEPSEEK_MODEL_DIGEST == "deepseek-v4-flash-vision-exp"
+    assert DEEPSEEK_MODEL_TRANSLATE == "deepseek-v4-flash-vision-exp"
+    assert DEEPSEEK_MODEL_RUBRIC == "deepseek-v4-flash-vision-exp"
 
 
 # --------------------------------------------------------------------------- #
