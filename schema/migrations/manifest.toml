@@ -741,3 +741,11 @@ file = "backend/schema/migrations/app/084_articles_views.cql"
 tier = "prod"
 status = "active"
 description = "add articles.views (plain int, NULL reads as 0): folds the per-article view tally into the consolidated articles table, replacing the separate article_view_counts COUNTER table (migration 026) -- counters can't share a table with regular columns, but the tally's only writer since 2026-08-25 is the 10-minute flush_pending_views beat (the hot path only INCRs a Redis pending key), which can afford read-current-total + add-delta + write-back via the update_article_image-shaped read-current-key-then-patch pattern (fresh GET_VIEWS_BY_ID read, so the patch lands on the row's CURRENT partition even after a recompose re-stamps published_at); views is carried through transition_article_status/_ARTICLES_COLUMNS so status transitions and recompose re-publishes preserve the tally like every other column; historical counter values are copied over additively by the one-off workers/scratch/backfill_article_views.py run once after the cutover deploy; article_view_counts is dropped by a separate later migration once the backfill is verified, keeping this deploy rollback-safe"
+
+[[migrations]]
+stream = "app"
+version = "085"
+file = "backend/schema/migrations/app/085_drop_article_view_counts.cql"
+tier = "prod"
+status = "active"
+description = "drop article_view_counts (migration 026, COUNTER table): fully superseded by articles.views (migration 084) -- cutover code deployed and live-verified 2026-08-27 (all read/write call sites, including the previously-missed news_service._fetch_detail one, moved to articles.views), workers/scratch/backfill_article_views.py already ran against prod and copied every nonzero counter value over, spot-checked exact match against the source table before this drop; the now-dead ViewCountStmts classes in both services' app/core/statements.py were removed in the same change"
