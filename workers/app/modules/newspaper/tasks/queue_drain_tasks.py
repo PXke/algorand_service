@@ -36,8 +36,6 @@ from algorand_shared.to_compose_selection import (
     list_to_compose_for_day,
     select_to_compose_for_day,
 )
-from celery.exceptions import SoftTimeLimitExceeded
-
 from app.celery_app import celery_app
 from app.core import config
 from app.modules.ai.mistral_credit_guard import is_credit_exhausted
@@ -50,6 +48,7 @@ from app.modules.newspaper.publish_policy import (
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow, is_terminal_outcome
 from app.modules.newspaper.publish_schedule import record_standard_publish
 from app.modules.newspaper.tasks.publish_tasks import publish_from_queued_row
+from celery.exceptions import SoftTimeLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +94,6 @@ def _row_needs_review(row: QueuedPublishRow) -> bool:
 def _pending_feed_backlog_full() -> bool:
     """True when the backlog (articles.status='backlog') already holds PENDING_FEED_MAX_DEPTH+ approved articles awaiting paced release. Composing further ahead than that only burns budget to publish staler content later — the auto-approve → backlog path bypasses the 1-slot review throttle, so without this check hourly drains composed all night (2026-07-16: six articles / two days of inventory queued overnight). Fails open: a Cassandra blip must not stop the pipeline."""
     from algorand_shared.article_transitions import list_backlog_articles
-
     from app.core import config as cfg
 
     try:
@@ -203,7 +201,17 @@ _PRE_COMPOSE_GATES: tuple[_DrainGate, ...] = (
     # First: an assignment for a brief that's since been archived must never
     # compose — cheap, decisive, and drops the stale row out of pending.
     _DrainGate("brief_archived", _brief_archived, mark_status="expired"),
-    _DrainGate("domain_capped", _domain_capped, mark_status="deferred"),
+    # No mark_status (unlike brief_archived/novelty_collapsed): a domain-cap
+    # collision is transient by definition -- it clears at midnight, not
+    # because anything about the artifact was wrong. Discarding it here used
+    # to drop its accumulated content outright (supersede-concatenation only
+    # merges from PENDING artifacts, so a future crawl of the same domain
+    # would start a fresh artifact from scratch). Leaving it SELECTED costs
+    # nothing (later runs today just re-hit the same cap check cheaply) and
+    # lets the midnight `reclaim_stale_selected_artifacts` beat recycle it
+    # back to PENDING once its day has passed, so it re-competes normally
+    # instead of being permanently lost (root-caused 2026-08-27).
+    _DrainGate("domain_capped", _domain_capped),
     _DrainGate("domain_cooldown", _domain_in_cooldown),
     _DrainGate("service_cooldown", _service_in_cooldown),
     _DrainGate("novelty_collapsed", _novelty_collapsed, mark_status="expired"),
@@ -392,7 +400,7 @@ def _resolve_artifact_ignoring_row(
 
 
 def _record_pre_compose_gate_artifact(artifact_id: str, fired: _DrainGate) -> dict:
-    """Artifact-native twin of the old `_record_pre_compose_gate`: a gate with a `mark_status` (domain_capped/brief_archived/novelty_collapsed) is a permanent drop for today's slate -- DISCARD. A cooldown gate (`mark_status=None`) leaves the artifact SELECTED/retriable -- nothing to persist beyond this run's results entry."""
+    """Artifact-native twin of the old `_record_pre_compose_gate`: a gate with a `mark_status` (brief_archived/novelty_collapsed) is a permanent drop for today's slate -- DISCARD. A gate with no `mark_status` (domain_cooldown/service_cooldown/domain_capped) leaves the artifact SELECTED/retriable -- nothing to persist beyond this run's results entry; domain_capped specifically relies on this to let the midnight reclaim beat recycle it to PENDING once its day passes, rather than losing it outright."""
     if fired.mark_status:
         mark_artifact_status(artifact_id, DISCARDED)
     return {"artifact_id": artifact_id, "status": fired.name}
@@ -564,14 +572,18 @@ def drain_to_compose() -> dict[str, object]:
     at most ONE fresh non-review compose per run, paced by
     evaluate_standard_publish's own is_standard_publish_due() check (so N
     articles are never fired simultaneously the moment they're selected).
-    A slot a gate defers (cooldown) or that hits review_queue_full stays
-    SELECTED and is retried on a later run within the same day; a slot a
-    gate permanently drops (domain_capped/novelty_collapsed/brief_archived)
-    is DISCARDED and — matching to_compose_selection's own no-backfill
-    design for an unused human slot — is NOT replaced by the next-best
-    pending artifact this run; that slot is simply lost for the day. This
-    mirrors an existing, deliberate limitation of the (already-built,
-    already-tested) selection design, not a new gap introduced here.
+    A slot a gate defers (cooldown, or domain_capped -- transient, clears
+    at midnight) or that hits review_queue_full stays SELECTED and is
+    retried on a later run within the same day (domain_capped specifically
+    relies on staying SELECTED past midnight too, so the reclaim beat can
+    recycle it to PENDING once its day passes rather than losing it
+    outright); a slot a gate permanently drops (novelty_collapsed/
+    brief_archived) is DISCARDED and — matching to_compose_selection's own
+    no-backfill design for an unused human slot — is NOT replaced by the
+    next-best pending artifact this run; that slot is simply lost for the
+    day. This mirrors an existing, deliberate limitation of the
+    (already-built, already-tested) selection design, not a new gap
+    introduced here.
     """
     if config.AUTO_COMPOSE_PAUSED:
         return {"status": "skipped", "reason": "auto_compose_paused", "published": 0}
@@ -706,7 +718,6 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
 
     from algorand_shared.article_statements import ArticlesStmts
     from algorand_shared.article_transitions import list_backlog_articles
-
     from app.core.cassandra import get_cassandra_session
 
     session = get_cassandra_session()

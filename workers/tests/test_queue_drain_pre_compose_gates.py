@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from typing import Never
 
 import pytest
-
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow
 from app.modules.newspaper.tasks import queue_drain_tasks as qdt
 
@@ -29,16 +28,64 @@ def test_gate_order_and_names() -> None:
     ]
 
 
-def test_mark_status_only_for_cap_and_novelty() -> None:
-    """Only the brief_archived, domain_capped, and novelty_collapsed gates set a mark_status."""
+def test_mark_status_only_for_permanent_drops() -> None:
+    """Only brief_archived and novelty_collapsed set a mark_status (permanent DISCARD).
+
+    domain_capped deliberately carries none (2026-08-27): a daily-cap
+    collision is transient, not a reason to permanently drop the artifact's
+    accumulated content. Leaving it unmarked keeps it SELECTED so the
+    midnight `reclaim_stale_selected_artifacts` beat can recycle it back to
+    PENDING once its day passes, same as the cooldown gates.
+    """
     marks = {g.name: g.mark_status for g in qdt._PRE_COMPOSE_GATES}
     assert marks == {
         "brief_archived": "expired",
-        "domain_capped": "deferred",
+        "domain_capped": None,
         "domain_cooldown": None,
         "service_cooldown": None,
         "novelty_collapsed": "expired",
     }
+
+
+def test_domain_capped_leaves_the_artifact_selected_not_discarded(
+    fake_artifact_session,  # noqa: ANN001 -- conftest.FakeArtifactSession, untyped to avoid an import cycle in this file
+) -> None:
+    """domain_capped firing must NOT discard the artifact (2026-08-27 fix).
+
+    A daily-cap collision is transient, so the artifact needs to stay
+    SELECTED past midnight for reclaim_stale_selected_artifacts to recycle
+    it back to PENDING -- discarding it here used to lose its accumulated
+    content outright.
+    """
+    from algorand_shared.artifact_store import SELECTED, insert_artifact, mark_artifact_status
+
+    artifact_id, _ = insert_artifact(service_id="svc-capped", url=None, channel="crawler", content="x")
+    mark_artifact_status(artifact_id, SELECTED)
+    capped_gate = next(g for g in qdt._PRE_COMPOSE_GATES if g.name == "domain_capped")
+
+    qdt._record_pre_compose_gate_artifact(artifact_id, capped_gate)
+
+    assert fake_artifact_session.artifacts[artifact_id]["status"] == SELECTED
+
+
+def test_brief_archived_still_discards_the_artifact(
+    fake_artifact_session,  # noqa: ANN001 -- conftest.FakeArtifactSession, untyped to avoid an import cycle in this file
+) -> None:
+    """Contrast case: a gate that DOES carry a mark_status (brief_archived) still permanently discards, unchanged by the domain_capped fix."""
+    from algorand_shared.artifact_store import (
+        DISCARDED,
+        SELECTED,
+        insert_artifact,
+        mark_artifact_status,
+    )
+
+    artifact_id, _ = insert_artifact(service_id="svc-archived", url=None, channel="crawler", content="x")
+    mark_artifact_status(artifact_id, SELECTED)
+    archived_gate = next(g for g in qdt._PRE_COMPOSE_GATES if g.name == "brief_archived")
+
+    qdt._record_pre_compose_gate_artifact(artifact_id, archived_gate)
+
+    assert fake_artifact_session.artifacts[artifact_id]["status"] == DISCARDED
 
 
 def test_gates_wrap_the_real_checks() -> None:

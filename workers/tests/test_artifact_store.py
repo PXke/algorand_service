@@ -92,6 +92,31 @@ def test_artifacts_with_no_service_id_never_dedup_against_each_other(
     assert len(fake_artifact_session.pending) == 2
 
 
+def test_supersede_carries_forward_the_old_rows_human_pin(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """A pin on a pending artifact must survive a routine re-crawl that supersedes it (2026-08-27 fix).
+
+    Before this fix, insert_artifact's dedup-supersede path hardcoded the
+    successor's human_pick_day to None, so a pin died silently the moment
+    the same service was re-crawled before the day's select beat ran --
+    with no error, since selection only scans PENDING rows and the pinned
+    row was gone.
+    """
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+
+    first_id, _ = insert_artifact(service_id="svc-pin", url="https://x.io/", channel="crawler", content="v1")
+    pin_artifact_for_day(first_id, "2026-08-28")
+
+    second_id, _ = insert_artifact(service_id="svc-pin", url="https://x.io/", channel="crawler", content="v2")
+
+    assert second_id != first_id
+    assert fake_artifact_session.artifacts[second_id]["human_pick_day"] == "2026-08-28"
+    (row,) = fake_artifact_session.pending.values()
+    assert str(row["artifact_id"]) == second_id
+    assert row["human_pick_day"] == "2026-08-28"
+
+
 def test_dedup_scoped_to_matching_service_only(fake_artifact_session: FakeArtifactSession) -> None:
     """A diff for a DIFFERENT service_id must not disturb an unrelated service's pending artifact."""
     from algorand_shared.artifact_store import insert_artifact
@@ -213,6 +238,53 @@ def test_pin_artifact_for_day_unknown_id_returns_false(
     assert pin_artifact_for_day(str(uuid.uuid4()), "2026-08-26") is False
 
 
+def test_pin_artifact_for_day_rejects_a_non_pending_artifact(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """Pinning anything but a PENDING artifact must fail, not silently no-op (2026-08-27 fix).
+
+    Selection only ever scans PENDING artifacts, so a pin on a
+    selected/composed/discarded row could never be honored -- previously
+    this returned True anyway, leaving an admin believing a pick was set
+    when it never would take effect.
+    """
+    from algorand_shared.artifact_store import (
+        SELECTED,
+        insert_artifact,
+        mark_artifact_status,
+        pin_artifact_for_day,
+    )
+
+    artifact_id, _ = insert_artifact(service_id="svc-1", url=None, channel="brief", content="x")
+    mark_artifact_status(artifact_id, SELECTED)
+
+    assert pin_artifact_for_day(artifact_id, "2026-08-28") is False
+    assert fake_artifact_session.artifacts[artifact_id]["human_pick_day"] is None
+
+
+def test_pin_artifact_for_day_clears_a_prior_pin_for_the_same_day(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """At most one live pin per day (2026-08-27 fix).
+
+    Pinning a second artifact for a day that already has a pin clears the
+    first one, rather than leaving two pending artifacts both claiming the
+    same day (selection's "first pending match wins" used to silently pick
+    between them, and the loser's pin lingered forever, unexplained).
+    """
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+
+    first_id, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    second_id, _ = insert_artifact(service_id="svc-b", url=None, channel="brief", content="b")
+    pin_artifact_for_day(first_id, "2026-08-28")
+
+    ok = pin_artifact_for_day(second_id, "2026-08-28")
+
+    assert ok is True
+    assert fake_artifact_session.artifacts[first_id]["human_pick_day"] is None
+    assert fake_artifact_session.artifacts[second_id]["human_pick_day"] == "2026-08-28"
+
+
 def test_clear_artifact_pin_clears_both_rows(fake_artifact_session: FakeArtifactSession) -> None:
     """Clearing a pin nulls human_pick_day on both the artifacts row and its pending-index row."""
     from algorand_shared.artifact_store import (
@@ -325,7 +397,6 @@ def test_concatenation_caps_accumulated_old_content_and_keeps_newest_intact(
 ) -> None:
     """ARTIFACT_CONCAT_MAX_OLD_CHARS bounds the ACCUMULATED-OLD portion so a service updating constantly without ever composing can't grow the row without bound. The cap trims from the FRONT (oldest first) -- the newest content passed to insert_artifact is never trimmed."""
     from algorand_shared.artifact_store import get_artifact_content, insert_artifact
-
     from app.core import config as cfg
 
     monkeypatch.setattr(cfg, "ARTIFACT_CONCAT_MAX_OLD_CHARS", 50)

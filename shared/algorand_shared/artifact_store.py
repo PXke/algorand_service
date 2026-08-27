@@ -131,7 +131,13 @@ def insert_artifact(
     that old artifact's ROW is superseded -- deleted from the pending index,
     marked DISCARDED -- but its CONTENT is never silently dropped: the new
     artifact's content is the old content plus this new content, concatenated
-    (see `_concatenate_with_pending`), not the new content alone. This is a
+    (see `_concatenate_with_pending`), not the new content alone. A pending
+    `human_pick_day` on the superseded row is likewise carried forward onto
+    the successor (root-caused 2026-08-27: a pin died silently the moment a
+    routine re-crawl of the same service superseded the pinned artifact
+    before the day's select beat ran -- the successor's `human_pick_day`
+    defaulted to unset, and selection only scans PENDING rows, so the pin
+    vanished with no trace and no error). This is a
     2026-08-26 change from the original replace-outright rule (mirroring
     publish_queue_store.enqueue_publish's identical rule): a service that
     gets small updates nobody's composed about yet should have its
@@ -162,10 +168,12 @@ def insert_artifact(
 
     final_content = content
     final_metadata = dict(metadata or {})
+    carried_human_pick_day: str | None = None
 
     if service_id:
         for row in session.execute(ArtifactStmts.LIST_PENDING, (PENDING, 2000)):
             if row.service_id == service_id:
+                carried_human_pick_day = getattr(row, "human_pick_day", None) or None
                 old_content_row = session.execute(ArtifactStmts.GET_CONTENT, (row.artifact_id,)).one()
                 if old_content_row is not None:
                     final_content, final_metadata = _concatenate_with_pending(
@@ -218,7 +226,7 @@ def insert_artifact(
             priority,
             None,
             PENDING,
-            None,
+            carried_human_pick_day,
         ),
     )
     session.execute(
@@ -233,7 +241,7 @@ def insert_artifact(
             channel,
             url,
             event_date,
-            None,
+            carried_human_pick_day,
         ),
     )
     session.execute(
@@ -554,7 +562,21 @@ def _set_pending_index_pin(
 
 
 def pin_artifact_for_day(artifact_id: str, day: str) -> bool:
-    """Admin-facing hook: pin an artifact as tomorrow's (or any future day's) human pick. Returns False for an unknown id."""
+    """Admin-facing hook: pin an artifact as tomorrow's (or any future day's) human pick.
+
+    Returns False for an unknown id, or for an artifact that isn't PENDING
+    -- a pin on anything else (selected/composed/discarded) can never be
+    honored, since selection only ever scans PENDING artifacts
+    (`to_compose_selection.select_to_compose_for_day`); silently accepting
+    it left an admin believing a pick was set when it never would take
+    effect (root-caused 2026-08-27).
+
+    At most one pin per `day` is enforced here rather than left to
+    selection time: any OTHER pending artifact already pinned for the same
+    `day` has its pin cleared first, so selection's own "first pending
+    match wins" never has to silently arbitrate between two live pins for
+    the same day (the loser's pin used to linger forever, unexplained).
+    """
     from app.core.cassandra import get_cassandra_session
 
     from algorand_shared.artifact_statements import ArtifactStmts
@@ -565,8 +587,12 @@ def pin_artifact_for_day(artifact_id: str, day: str) -> bool:
         return False
     session = get_cassandra_session()
     status_row = session.execute(ArtifactStmts.GET_STATUS_ROW, (aid,)).one()
-    if status_row is None:
+    if status_row is None or status_row.status != PENDING:
         return False
+    aid_str = str(aid)
+    for other in list_pending_artifacts():
+        if other.human_pick_day == day and other.artifact_id != aid_str:
+            clear_artifact_pin(other.artifact_id)
     session.execute(ArtifactStmts.SET_HUMAN_PICK, (day, aid))
     _set_pending_index_pin(session, aid, status_row, day)
     return True
