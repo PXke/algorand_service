@@ -709,3 +709,11 @@ file = "backend/schema/migrations/app/080_artifact_venue_service_id.cql"
 tier = "prod"
 status = "active"
 description = "add artifacts.venue_service_id / artifacts_pending.venue_service_id: nullable stable venue id for per-item ingest lanes (forum hot-topics, xGov proposal phases, YouTube videos, Bluesky posts) that mint a synthetic service_id per item and so can never literal-match a prior published article's service_id even when the underlying venue is well covered -- root-caused in the new-service-lane audit alongside the domain-registry duplicate bug (service_sources reverse-index gap in seed_service_registry.py, fixed the same change); set at insert time by the four lanes via ingest_signal.ingest_publish_signal's venue_service_id kwarg, read by to_compose_selection._artifact_pool as service_has_article(artifact.venue_service_id or artifact.service_id)"
+
+[[migrations]]
+stream = "app"
+version = "081"
+file = "backend/schema/migrations/app/081_drop_dead_telemetry_tables.cql"
+tier = "prod"
+status = "active"
+description = "drop pageview_path_daily / pageview_bot_daily (migrations 035/039) and gatekeeper_decisions / gatekeeper_audit (migration 031): schema audit 2026-08-26/27 confirmed all four have zero live rows on prod and zero code or test references (dynamic name construction checked too) -- pageview_path_daily was superseded by pageview_path_kind_daily (037), pageview_bot_daily never got a writer, and the MTTH gatekeeper's telemetry streams never received a row because its Celery wiring never landed (the gatekeeper model code itself is untouched and can recreate telemetry tables in a fresh migration if it ships)"
