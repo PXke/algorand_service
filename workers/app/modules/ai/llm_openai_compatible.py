@@ -1135,8 +1135,25 @@ class OpenAICompatibleProvider(LLMProvider):
         return None, required_satisfied
 
     @staticmethod
-    def _fire_on_round(on_round: Callable[[], None] | None) -> None:
-        """Best-effort invoke chat_with_tools' per-round callback — a checkpoint failure must never abort the compose loop."""
+    def _fire_on_round(
+        on_round: Callable[[], None] | None, *, debug: dict[str, Any] | None, round_idx: int
+    ) -> None:
+        """Best-effort invoke chat_with_tools' per-round callback — a checkpoint failure must never abort the compose loop.
+
+        Also updates ``debug["rounds"]`` to the round just completed BEFORE
+        firing the callback. Root-caused 2026-08-27 (live admin observation):
+        every other exit path in this loop only wrote ``debug["rounds"]``
+        once the WHOLE multi-round call finished (out of rounds, no more
+        tool calls, or a salvaged final article) — so a live checkpoint
+        fired by ``on_round`` mid-research always persisted `rounds: 0`
+        regardless of how many rounds had genuinely completed, even though
+        the sibling `tool_calls` count (derived from `len(trace)`) updated
+        correctly every round. Writing it here too makes `rounds` live and
+        consistent with `tool_calls`, matching `on_round`'s own stated
+        purpose in this method's caller's docstring.
+        """
+        if debug is not None:
+            debug["rounds"] = round_idx + 1
         if on_round is None:
             return
         try:
@@ -1234,7 +1251,7 @@ class OpenAICompatibleProvider(LLMProvider):
                     debug=debug,
                 )
                 if should_continue:
-                    self._fire_on_round(on_round)
+                    self._fire_on_round(on_round, debug=debug, round_idx=round_idx)
                     continue
                 return final
             salvaged, required_satisfied = self._process_tool_calls_round(
@@ -1252,7 +1269,7 @@ class OpenAICompatibleProvider(LLMProvider):
             )
             if salvaged is not None:
                 return salvaged
-            self._fire_on_round(on_round)
+            self._fire_on_round(on_round, debug=debug, round_idx=round_idx)
         # Out of rounds: ask once more without tools for a final write-up.
         if debug is not None:
             debug["rounds"] = rounds
