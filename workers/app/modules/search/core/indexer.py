@@ -67,6 +67,16 @@ ARTICLES_SCHEMA = {
         {"name": "summary", "type": "string"},
         {"name": "body", "type": "string"},
         {"name": "tokens", "type": "string[]", "optional": True},
+        # Permanent URL slug (see article_store.ensure_article_slug). Optional
+        # so patching this into an existing live collection (same
+        # `_ensure_*_field` pattern as tokens/translation/glossary_slugs
+        # below) doesn't choke on documents indexed before this field
+        # existed -- those just lack it until the one-off backfill script
+        # (workers/scratch/backfill_typesense_slugs.py) re-upserts them.
+        # Root-caused 2026-08-27: this field never existed at all, so every
+        # indexed article had no slug and the frontend fell back to a raw
+        # UUID in every search result's URL.
+        {"name": "slug", "type": "string", "optional": True},
         {"name": "service_id", "type": "string", "facet": True},
         {"name": "published_at", "type": "int64", "sort": True},
         # Slugs of glossary terms this article links (English body + every
@@ -107,7 +117,18 @@ def _ensure_collection(client: typesense.Client, schema: dict[str, object]) -> N
     if name == ARTICLES_COLLECTION:
         _ensure_translation_fields(client)
         _ensure_glossary_slugs_field(client)
+        _ensure_slug_field(client)
         _ensure_article_search_synonyms(client)
+
+
+def _ensure_slug_field(client: typesense.Client) -> None:
+    """Add the optional slug field to collections created before it existed (same patch pattern as tokens/translation/glossary_slugs fields)."""
+    try:
+        client.collections[ARTICLES_COLLECTION].update(
+            {"fields": [{"name": "slug", "type": "string", "optional": True}]}
+        )
+    except Exception:
+        logger.debug("slug field patch skipped", exc_info=True)
 
 
 def _ensure_translation_fields(client: typesense.Client) -> None:
@@ -180,6 +201,7 @@ def upsert_article_document(
     published_at_epoch: int,
     tags: list[str] | tuple[str, ...] | None = None,
     translations: dict[str, str] | None = None,
+    slug: str | None = None,
 ) -> dict[str, str]:
     """Upsert an article's searchable fields into the Typesense articles collection.
 
@@ -191,6 +213,14 @@ def upsert_article_document(
     lands LATER goes through `upsert_article_translation` instead, which
     merges into the existing document without needing the English fields
     again.
+
+    `slug` (the article's permanent URL slug, from `ArticleDetail.slug`) is
+    included when present. IMPORTANT: `documents.upsert()` is a full
+    document REPLACE, not a merge -- every caller of this function that has
+    access to the article's current slug MUST pass it, every time, or a
+    later full reindex (edit, recompose, the periodic `reindex_articles`
+    beat, or a re-run of a backfill script) will silently wipe a
+    previously-backfilled slug back out of the index.
     """
     if not is_typesense_configured():
         return {"status": "skipped", "reason": "typesense_not_configured"}
@@ -215,6 +245,8 @@ def upsert_article_document(
                 body, *(v for k, v in translation_fields.items() if k.startswith("body_"))
             ),
         }
+        if slug:
+            document["slug"] = slug
         document.update(translation_fields)
         client.collections[ARTICLES_COLLECTION].documents.upsert(document)
         return {"status": "indexed", "collection": ARTICLES_COLLECTION, "id": article_id}
@@ -311,6 +343,7 @@ def _fallback_full_reindex(article_id: str) -> dict[str, str]:
         published_at_epoch=detail.published_at_epoch,
         tags=list(detail.tags or []),
         translations=detail.translations,
+        slug=detail.slug,
     )
 
 

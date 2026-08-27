@@ -166,6 +166,11 @@ class SearchHit(msgspec.Struct, kw_only=True):
     # Typesense highlight snippet (HTML <mark> tags) around the matched terms.
     snippet: str | None = None
     title_highlight: str | None = None
+    # Permanent URL slug. None for a document indexed before the slug field
+    # existed and not yet backfilled -- the frontend falls back to a raw
+    # article_id URL in that case (see frontend/src/lib/seo.ts
+    # articleCanonicalPath).
+    slug: str | None = None
 
 
 class SearchResponse(msgspec.Struct, kw_only=True):

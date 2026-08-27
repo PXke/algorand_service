@@ -133,6 +133,7 @@ class SearchService:
                     published_at_epoch=int(doc["published_at"])
                     if doc.get("published_at") is not None
                     else None,
+                    slug=doc.get("slug") or None,
                 )
             )
         return hits[:limit]
@@ -181,6 +182,7 @@ class SearchService:
                     score=_text_match_score(found),
                     snippet=snippet,
                     title_highlight=title_hl,
+                    slug=doc.get("slug") or None,
                 )
             )
 

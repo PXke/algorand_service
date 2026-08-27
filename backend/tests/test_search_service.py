@@ -199,6 +199,105 @@ def test_search_typesense_parses_highlights(monkeypatch: pytest.MonkeyPatch) -> 
     assert result.items[0].snippet == "the <mark>governance</mark> proposal passed"
 
 
+def test_search_typesense_surfaces_slug_on_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Typesense document carrying a `slug` field surfaces it on the SearchHit, so the frontend builds a proper slug URL instead of falling back to the raw article_id.
+
+    Root-caused 2026-08-26: the `articles` collection schema never declared
+    a `slug` field at all, so every indexed document (including the
+    "Goana" article, which has a perfectly good slug in Cassandra) had no
+    slug key whatsoever, and every search result silently fell back to a
+    raw-UUID URL.
+    """
+
+    class _FakeDocuments:
+        def search(self, _params: dict) -> dict:
+            return {
+                "hits": [
+                    {
+                        "document": {
+                            "id": "9f0a5e92-0220-486c-8c50-3d25d1d19b96",
+                            "title": "Al Goanna launches NFT-backed loans",
+                            "summary": "Summary",
+                            "service_id": "svc",
+                            "published_at": 1700000000,
+                            "slug": "al-goanna-launches-nft-backed-loans-and-40-000-algo-staking-battles",
+                        },
+                        "text_match": 99,
+                    }
+                ]
+            }
+
+    class _FakeCollection:
+        documents = _FakeDocuments()
+
+    class _FakeCollections:
+        def __getitem__(self, _name: str) -> _FakeCollection:
+            return _FakeCollection()
+
+    class _FakeClient:
+        collections = _FakeCollections()
+
+    monkeypatch.setattr(
+        "app.modules.search.services.search_service.get_typesense_client",
+        lambda: _FakeClient(),
+    )
+    monkeypatch.setattr(
+        "app.modules.search.services.search_service.ensure_articles_collection",
+        lambda: True,
+    )
+    result = SearchService(news_service=NewsService(store=InMemoryArticleStore())).search("goana")
+    assert result.engine == "typesense"
+    assert len(result.items) == 1
+    assert (
+        result.items[0].slug
+        == "al-goanna-launches-nft-backed-loans-and-40-000-algo-staking-battles"
+    )
+
+
+def test_search_typesense_slug_is_none_when_document_lacks_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document indexed before the slug backfill (no `slug` key at all) surfaces slug=None rather than an empty string or KeyError."""
+
+    class _FakeDocuments:
+        def search(self, _params: dict) -> dict:
+            return {
+                "hits": [
+                    {
+                        "document": {
+                            "id": "abc",
+                            "title": "Some article",
+                            "summary": "Summary",
+                            "service_id": "svc",
+                            "published_at": 1700000000,
+                        },
+                        "text_match": 1,
+                    }
+                ]
+            }
+
+    class _FakeCollection:
+        documents = _FakeDocuments()
+
+    class _FakeCollections:
+        def __getitem__(self, _name: str) -> _FakeCollection:
+            return _FakeCollection()
+
+    class _FakeClient:
+        collections = _FakeCollections()
+
+    monkeypatch.setattr(
+        "app.modules.search.services.search_service.get_typesense_client",
+        lambda: _FakeClient(),
+    )
+    monkeypatch.setattr(
+        "app.modules.search.services.search_service.ensure_articles_collection",
+        lambda: True,
+    )
+    result = SearchService(news_service=NewsService(store=InMemoryArticleStore())).search("some")
+    assert result.items[0].slug is None
+
+
 def test_list_by_glossary_slug_filters_and_sorts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Queries the glossary_slugs field (not term text), newest first -- the "referenced in" list on a glossary term page."""
 

@@ -94,6 +94,120 @@ def test_index_article_reads_tags_from_article_detail(monkeypatch: pytest.Monkey
     assert captured["tags"] == ["defi", "payments"]
 
 
+def test_index_article_reads_slug_from_article_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reads an article's permanent slug off its ArticleDetail before indexing it (root-caused 2026-08-26: this field never reached Typesense at all, so every search result fell back to a raw-UUID URL)."""
+    from app.modules.newspaper.article_store import ArticleDetail
+    from app.modules.search.tasks import index_tasks
+
+    captured: dict = {}
+
+    def fake_get_article(article_id: str) -> ArticleDetail:
+        assert article_id == "a1"
+        return ArticleDetail(
+            article_id="a1",
+            service_id="svc",
+            title="Title",
+            summary="Summary",
+            body="Body",
+            published_at_epoch=1,
+            trigger_txid="",
+            trigger_round=0,
+            source_url="https://example.com",
+            slug="al-goanna-launches-nft-backed-loans",
+        )
+
+    def fake_upsert(**kwargs: object) -> dict:
+        captured.update(kwargs)
+        return {"status": "indexed"}
+
+    monkeypatch.setattr(index_tasks, "get_article", fake_get_article)
+    monkeypatch.setattr(index_tasks, "upsert_article_document", fake_upsert)
+
+    outcome = index_tasks.index_article(
+        article_id="a1",
+        title="Title",
+        summary="Summary",
+        body="Body",
+        service_id="svc",
+        published_at_epoch=1,
+    )
+    assert outcome["status"] == "indexed"
+    assert captured["slug"] == "al-goanna-launches-nft-backed-loans"
+
+
+def test_upsert_article_document_writes_slug_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A newly-indexed article's Typesense document carries its `slug` field."""
+    from app.modules.search.core import indexer
+
+    captured: dict = {}
+
+    class _FakeDocuments:
+        def upsert(self, document: dict) -> None:
+            captured.update(document)
+
+    class _FakeCollection:
+        documents = _FakeDocuments()
+
+    class _FakeCollections:
+        def __getitem__(self, _name: str) -> _FakeCollection:
+            return _FakeCollection()
+
+    class _FakeClient:
+        collections = _FakeCollections()
+
+    monkeypatch.setattr(indexer, "is_typesense_configured", lambda: True)
+    monkeypatch.setattr(indexer, "build_typesense_client", lambda: _FakeClient())
+    monkeypatch.setattr(indexer, "_ensure_collection", lambda *_a, **_k: None)
+
+    outcome = indexer.upsert_article_document(
+        article_id="a1",
+        title="Title",
+        summary="Summary",
+        body="Body",
+        service_id="svc",
+        published_at_epoch=1,
+        slug="al-goanna-launches-nft-backed-loans",
+    )
+    assert outcome["status"] == "indexed"
+    assert captured["slug"] == "al-goanna-launches-nft-backed-loans"
+
+
+def test_upsert_article_document_omits_slug_key_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No `slug` kwarg (e.g. an article somehow missing one) sends no `slug` key at all, rather than an explicit null the optional schema field might reject."""
+    from app.modules.search.core import indexer
+
+    captured: dict = {}
+
+    class _FakeDocuments:
+        def upsert(self, document: dict) -> None:
+            captured.update(document)
+
+    class _FakeCollection:
+        documents = _FakeDocuments()
+
+    class _FakeCollections:
+        def __getitem__(self, _name: str) -> _FakeCollection:
+            return _FakeCollection()
+
+    class _FakeClient:
+        collections = _FakeCollections()
+
+    monkeypatch.setattr(indexer, "is_typesense_configured", lambda: True)
+    monkeypatch.setattr(indexer, "build_typesense_client", lambda: _FakeClient())
+    monkeypatch.setattr(indexer, "_ensure_collection", lambda *_a, **_k: None)
+
+    outcome = indexer.upsert_article_document(
+        article_id="a1",
+        title="Title",
+        summary="Summary",
+        body="Body",
+        service_id="svc",
+        published_at_epoch=1,
+    )
+    assert outcome["status"] == "indexed"
+    assert "slug" not in captured
+
+
 def test_upsert_article_document_computes_glossary_slugs(monkeypatch: pytest.MonkeyPatch) -> None:
     """The document written to Typesense carries glossary_slugs extracted from the English body AND every translated body, unioned."""
     import json

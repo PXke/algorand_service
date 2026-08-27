@@ -112,6 +112,7 @@ def main() -> None:
             published_at_epoch=detail.published_at_epoch,
             tags=list(detail.tags or []),
             translations=detail.translations,
+            slug=detail.slug,
         )
         status = outcome.get("status", "")
         if status == "indexed":

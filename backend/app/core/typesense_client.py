@@ -69,6 +69,13 @@ ARTICLES_SCHEMA = {
         {"name": "summary", "type": "string"},
         {"name": "body", "type": "string"},
         {"name": "tokens", "type": "string[]", "optional": True},
+        # Permanent URL slug (see article_store.ensure_article_slug in
+        # workers). Optional so patching this into an existing live
+        # collection (same `_ensure_*_field` pattern as tokens/translation/
+        # glossary_slugs below) doesn't choke on documents indexed before
+        # this field existed. Keep in sync with
+        # workers/app/modules/search/core/indexer.py.
+        {"name": "slug", "type": "string", "optional": True},
         {"name": "service_id", "type": "string", "facet": True},
         {"name": "published_at", "type": "int64", "sort": True},
         # Slugs of glossary terms this article links (English body + every
@@ -157,6 +164,7 @@ def ensure_articles_collection() -> bool:
         _ensure_tokens_field(client)
         _ensure_translation_fields(client)
         _ensure_glossary_slugs_field(client)
+        _ensure_slug_field(client)
         ensure_article_search_synonyms(client)
     return True
 
@@ -194,6 +202,16 @@ def _ensure_glossary_slugs_field(client: typesense.Client) -> None:
         )
     except Exception:
         logger.debug("glossary_slugs field patch skipped", exc_info=True)
+
+
+def _ensure_slug_field(client: typesense.Client) -> None:
+    """Add the optional slug field to collections created before it existed (same patch pattern as tokens/translation/glossary_slugs fields)."""
+    try:
+        client.collections[ARTICLES_COLLECTION].update(
+            {"fields": [{"name": "slug", "type": "string", "optional": True}]}
+        )
+    except Exception:
+        logger.debug("slug field patch skipped", exc_info=True)
 
 
 def _translation_document_fields(translations: dict[str, str] | None) -> dict[str, str]:
@@ -261,6 +279,7 @@ def upsert_article_document(
     service_id: str,
     published_at_epoch: int,
     translations: dict[str, str] | None = None,
+    slug: str | None = None,
 ) -> None:
     """Upsert an article's searchable fields directly from the backend (admin restore-from-draft/edit/publish paths). Best-effort -- never raises. Workers' upsert_article_document (search/core/indexer.py) is the primary write path and additionally computes the `tokens` field; that field is optional, so a doc written from here just ranks by title/summary/body/synonyms until the article is next edited/recomposed, which re-indexes it with tokens from the workers side.
 
@@ -269,6 +288,12 @@ def upsert_article_document(
     present, so an admin edit/draft-toggle/publish carries forward whatever
     is already translated instead of dropping it from the index until the
     next reindex.
+
+    `slug` (the article's permanent URL slug, from `ArticleDetail.slug`)
+    MUST be passed by every caller that has it: `documents.upsert()` is a
+    full document REPLACE, not a merge, so omitting it here would silently
+    wipe a previously-indexed slug back out on the next admin edit/draft
+    toggle/publish of this article.
     """
     client = get_typesense_client()
     if client is None:
@@ -287,6 +312,8 @@ def upsert_article_document(
                 body, *(v for k, v in translation_fields.items() if k.startswith("body_"))
             ),
         }
+        if slug:
+            document["slug"] = slug
         document.update(translation_fields)
         client.collections[ARTICLES_COLLECTION].documents.upsert(document)
     except Exception:

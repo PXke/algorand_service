@@ -180,14 +180,15 @@
 
   {#each items as item, i (String(item.article_id ?? item.title ?? ''))}
     {@const id = String(item.article_id ?? '')}
+    {@const slug = item.slug ? String(item.slug) : null}
     <a
       class="hit enter"
       style="--enter-delay: {staggerMs(i)}ms"
-      href={id ? articleHref(id) : undefined}
+      href={id ? articleHref(id, undefined, slug) : undefined}
       onclick={(e) => {
         if (!id) return
         e.preventDefault()
-        navigate(articleHref(id))
+        navigate(articleHref(id, undefined, slug))
       }}
     >
       <span class="hit-copy">
