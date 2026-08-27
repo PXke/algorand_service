@@ -1223,13 +1223,38 @@ class AdminCassandraStore:
             transition_article_status(
                 aid, new_status="published", new_published_at=published_at
             )
-            if row.slug:
+            # Claim a slug if this draft never had one -- root-caused live
+            # 2026-08-27 (Al Goanna recompose): this used to only COPY an
+            # EXISTING slug forward across the publish-time re-stamp
+            # (`if row.slug: ...`), never CLAIM one when there wasn't one
+            # yet. A review/held draft never has a slug claimed for it --
+            # slugs are only ever claimed at PUBLISH time, and this review-
+            # approval transition IS this article's first publish -- so
+            # every review-approved article silently went live with
+            # slug=NULL, falling back to a bare-UUID URL search engines
+            # never index cleanly. ensure_article_slug is a no-op read when
+            # a slug already exists, matching the old behavior exactly for
+            # that case.
+            from algorand_shared.slugs import ensure_article_slug
+
+            slug = ensure_article_slug(aid, row.title)
+            if slug:
                 new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
                 if new_row is not None:
                     session.execute(
                         ArticlesStmts.SET_SLUG,
-                        (row.slug, new_row.status, new_row.year, new_row.published_at, aid),
+                        (slug, new_row.status, new_row.year, new_row.published_at, aid),
                     )
+                    full_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
+                    if full_row is not None:
+                        from algorand_shared.article_tag_index import set_slug_in_tag_index
+
+                        set_slug_in_tag_index(
+                            aid,
+                            tags=list(full_row.tags or []),
+                            published_at=new_row.published_at,
+                            slug=slug,
+                        )
         # A service_id match key used to be registered here too, purely to
         # patch service_has_article()'s blindness to review-approved articles
         # (workers only registered match keys on their direct-publish path,
@@ -1244,6 +1269,7 @@ class AdminCassandraStore:
         # findable in site search immediately, instead of waiting on the
         # once-daily reindex_articles safety net. Best-effort, never blocks
         # the publish.
+        published = None
         with contextlib.suppress(Exception):
             from app.core.typesense_client import upsert_article_document
 
@@ -1261,10 +1287,14 @@ class AdminCassandraStore:
                 )
         # The article just became publicly visible — notify IndexNow, same as
         # the workers' direct-publish path does. Best-effort, never blocks.
+        # Uses the freshly-fetched `published.slug` above, NOT the `row.slug`
+        # captured before this function's own transition ran -- `row` is a
+        # pre-publish snapshot, so for a first-time-published draft its slug
+        # is always stale/None even after the claim above just set a real one.
         with contextlib.suppress(Exception):
             from app.modules.seo.indexnow import ping_article
 
-            ping_article(article_id, slug=row.slug)
+            ping_article(article_id, slug=published.slug if published is not None else row.slug)
         return True
 
     @staticmethod

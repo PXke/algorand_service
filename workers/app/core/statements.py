@@ -77,14 +77,10 @@ class ArticleStmts:
     new recipe against `articles`' own `translations` map column.
     """
 
-    # Slug claim (migration 056): a lightweight transaction (IF NOT EXISTS)
-    # against the reverse index, so two workers racing on the same title
-    # cannot both take one slug.
-    SLUG_TAKEN = _Stmt("SELECT article_id FROM algorand_platform.articles_by_slug WHERE slug = ?")
-    CLAIM_SLUG = _Stmt(
-        "INSERT INTO algorand_platform.articles_by_slug (slug, article_id, claimed_at) "
-        "VALUES (?, ?, ?) IF NOT EXISTS"
-    )
+    # Slug claim (migration 056) moved to
+    # algorand_shared.article_statements.ArticlesStmts (2026-08-27), shared
+    # with backend's review-approval publish path -- see
+    # algorand_shared.slugs.ensure_article_slug.
 
 
 class ServiceEventStmts:

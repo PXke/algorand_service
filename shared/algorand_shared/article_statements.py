@@ -146,6 +146,17 @@ class ArticlesStmts:
         "UPDATE algorand_platform.articles SET slug = ? "
         "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"
     )
+    # Reverse index for slug uniqueness/claiming (shared 2026-08-27 -- was
+    # workers-only `app.core.statements.ArticleStmts.SLUG_TAKEN`/`CLAIM_SLUG`;
+    # moved here alongside `ensure_article_slug` so backend's review-approval
+    # publish path can claim a slug too, not just workers' direct-publish
+    # path -- see `algorand_shared.slugs.ensure_article_slug`'s own docstring
+    # for the incident this fixes).
+    SLUG_TAKEN = _Stmt("SELECT article_id FROM algorand_platform.articles_by_slug WHERE slug = ?")
+    CLAIM_SLUG = _Stmt(
+        "INSERT INTO algorand_platform.articles_by_slug (slug, article_id, claimed_at) "
+        "VALUES (?, ?, ?) IF NOT EXISTS"
+    )
     # article_id alone doesn't locate a row (status/year/published_at are the
     # real partition/clustering key) -- the SAI index on article_id makes this
     # a direct single-round-trip lookup anyway (benchmarked, see the plan).

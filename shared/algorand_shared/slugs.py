@@ -11,9 +11,14 @@ only ever proposes one for a slug that has no owner yet.
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from collections.abc import Callable
+from datetime import UTC, datetime
+from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 # Long enough to stay descriptive, short enough that the URL survives being
 # pasted into a chat client without wrapping. Cut on a word boundary.
@@ -79,3 +84,54 @@ def unique_slug(title: str, *, fallback: str, is_taken: Callable[[str], bool]) -
             return candidate
     # 998 articles sharing one title is not a collision, it is a bug upstream.
     raise ValueError(f"could not find a free slug for {base!r} after 998 attempts")
+
+
+def ensure_article_slug(article_id: str | UUID, title: str) -> str | None:
+    """Claim a permanent URL slug for an article, or return the one it already has.
+
+    Shared 2026-08-27 (was workers-only, `article_store.py`): the backend's
+    review-approval publish path (`_publish_article_to_feed`) transitions a
+    held/review draft straight to `status='published'` without ever going
+    through workers' own direct-publish path -- and a review draft never had
+    a slug claimed for it in the first place (slugs are claimed at PUBLISH
+    time, not draft-creation time). `_publish_article_to_feed` used to only
+    ever COPY an existing slug forward across the publish-time re-stamp
+    (`if row.slug: ...`), never CLAIM one when there wasn't one yet -- so
+    every review-approved article silently published with `slug=NULL`,
+    falling back to a bare-UUID URL that search engines never index cleanly.
+    Root-caused live 2026-08-27 (Al Goanna recompose). Both services now call
+    this exact function so the claim logic can never diverge between them
+    again.
+
+    Idempotent and safe under concurrency: the claim is a lightweight
+    transaction (IF NOT EXISTS), so two callers racing on the same title
+    cannot both take one slug — the loser tries the next suffix.
+    """
+    from algorand_shared.article_statements import ArticlesStmts
+
+    from app.core.cassandra import get_cassandra_session
+
+    aid = article_id if isinstance(article_id, UUID) else UUID(str(article_id))
+    session = get_cassandra_session()
+
+    existing = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
+    if existing and existing.slug:
+        return existing.slug
+
+    base = slugify(title) or str(aid)
+    for _attempt in range(50):
+        candidate = unique_slug(
+            title,
+            fallback=str(aid),
+            is_taken=lambda s: session.execute(ArticlesStmts.SLUG_TAKEN, (s,)).one() is not None,
+        )
+        applied = session.execute(
+            ArticlesStmts.CLAIM_SLUG, (candidate, aid, datetime.now(tz=UTC))
+        ).one()
+        # LWT returns [applied] — False means another caller took it first.
+        # The reverse-index claim above is the durable part; writing the slug
+        # back onto the owning `articles` row is the caller's job.
+        if applied is None or getattr(applied, "applied", True):
+            return candidate
+    logger.warning("could not claim a slug for %s (base=%s)", aid, base)
+    return None

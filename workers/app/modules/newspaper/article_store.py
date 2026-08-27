@@ -10,6 +10,9 @@ from uuid import UUID
 
 from algorand_shared.article_transitions import transition_article_status
 from algorand_shared.feed_cache import invalidate_feed_first_page
+from algorand_shared.slugs import (
+    ensure_article_slug,
+)
 
 from app.core.config import NEWS_FEED_BUCKET
 
@@ -628,53 +631,9 @@ def _claim_slug_for_feed(
         logger.warning("slug claim failed for %s: %s", article_id, exc)
 
 
-def ensure_article_slug(article_id: str | UUID, title: str) -> str | None:
-    """Claim a permanent URL slug for an article, or return the one it already has.
-
-    Called at publish. Without this, articles created after migration 056 have
-    no slug and fall back to a uuid URL — which does not break anything visibly,
-    so the migration would have quietly stopped applying to new stories.
-
-    Idempotent and safe under concurrency: the claim is a lightweight
-    transaction (IF NOT EXISTS), so two workers racing on the same title cannot
-    both take one slug — the loser tries the next suffix.
-    """
-    from algorand_shared.article_statements import ArticlesStmts
-    from algorand_shared.slugs import slugify, unique_slug
-
-    from app.core.cassandra import get_cassandra_session
-    from app.core.statements import ArticleStmts
-
-    aid = article_id if isinstance(article_id, UUID) else UUID(str(article_id))
-    session = get_cassandra_session()
-
-    # 2026-08-24: reads `articles` directly (was `articles_by_id`). SLUG_TAKEN
-    # / CLAIM_SLUG below hit `articles_by_slug`, a separate reverse-index
-    # table untouched by this migration -- only the "does THIS article
-    # already have a slug" check moved.
-    existing = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
-    if existing and existing.slug:
-        return existing.slug
-
-    base = slugify(title) or str(aid)
-    for _attempt in range(50):
-        candidate = unique_slug(
-            title,
-            fallback=str(aid),
-            is_taken=lambda s: session.execute(ArticleStmts.SLUG_TAKEN, (s,)).one() is not None,
-        )
-        applied = session.execute(
-            ArticleStmts.CLAIM_SLUG, (candidate, aid, datetime.now(tz=UTC))
-        ).one()
-        # LWT returns [applied] — False means another worker took it first.
-        # The reverse-index claim above is the durable part; writing the slug
-        # back onto the owning `articles` row is the caller's job (every
-        # caller either IS _claim_slug_for_feed, which does that write right
-        # after, or runs strictly after it already has for this article).
-        if applied is None or getattr(applied, "applied", True):
-            return candidate
-    logger.warning("could not claim a slug for %s (base=%s)", aid, base)
-    return None
+# ensure_article_slug moved to algorand_shared.slugs (2026-08-27) and
+# re-exported above -- backend's review-approval publish path needed the
+# exact same claim logic, not a second copy that could drift.
 
 
 def update_article_image(article_id: str, image_url: str) -> bool:

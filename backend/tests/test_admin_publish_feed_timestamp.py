@@ -164,13 +164,59 @@ def test_publish_article_to_feed_indexes_the_article_in_typesense(
     }
 
 
-def test_publish_article_to_feed_skips_slug_write_when_article_has_none(
+def test_publish_article_to_feed_claims_a_slug_when_the_draft_never_had_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No slug write at all for an article that never claimed one — nothing to carry, and no accidental empty-string slug landing in `articles`."""
+    """A held/review draft going live for the first time must CLAIM a slug, not silently skip.
+
+    Root-caused live 2026-08-27 (Al Goanna recompose): a review/held draft
+    never has a slug claimed for it -- slugs are only ever claimed at
+    PUBLISH time, and this review-approval transition IS an article's
+    first publish. This function used to only ever COPY an EXISTING slug
+    forward across the release re-stamp; when there wasn't one yet (every
+    review-approved article, always), it silently published with
+    slug=NULL, falling back to a bare-UUID URL search engines never index
+    cleanly.
+    """
     article_id = uuid4()
     row = _article_row(
         article_id, published_at=datetime.now(tz=UTC) - timedelta(hours=5), slug=None
+    )
+    row.title = "A Fresh Headline"
+    fake = _FakeSession(row)
+    _patch(monkeypatch, fake)
+    pinged: list[dict] = []
+    monkeypatch.setattr(
+        "app.modules.seo.indexnow.ping_article",
+        lambda *a, **kw: pinged.append({"args": a, "kwargs": kw}),
+    )
+    published_article = SimpleNamespace(
+        article_id=str(article_id),
+        title="A Fresh Headline",
+        summary="Summary",
+        body="",
+        service_id="svc",
+        published_at_epoch=1234,
+        translations=None,
+        slug="a-fresh-headline",
+    )
+    monkeypatch.setattr(AdminCassandraStore, "get_article", lambda self, aid: published_article)  # noqa: ARG005
+
+    store = AdminCassandraStore()
+    assert store._publish_article_to_feed(str(article_id)) is True
+
+    assert len(fake.slug_updates) == 1
+    assert fake.slug_updates[0][0] == "a-fresh-headline"
+    assert pinged[0]["kwargs"]["slug"] == "a-fresh-headline"
+
+
+def test_publish_article_to_feed_preserves_an_existing_slug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A draft that already has a slug (the ordinary re-stamp case) is unaffected by the fix -- ensure_article_slug's existing-slug check is a plain read, no new claim attempted."""
+    article_id = uuid4()
+    row = _article_row(
+        article_id, published_at=datetime.now(tz=UTC) - timedelta(hours=5), slug="already-set"
     )
     fake = _FakeSession(row)
     _patch(monkeypatch, fake)
@@ -178,4 +224,5 @@ def test_publish_article_to_feed_skips_slug_write_when_article_has_none(
 
     store = AdminCassandraStore()
     assert store._publish_article_to_feed(str(article_id)) is True
-    assert fake.slug_updates == []
+    assert len(fake.slug_updates) == 1
+    assert fake.slug_updates[0][0] == "already-set"
