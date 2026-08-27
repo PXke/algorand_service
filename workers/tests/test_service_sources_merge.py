@@ -138,6 +138,29 @@ def test_venue_owner_for_url_is_a_noop_when_the_domain_owns_itself(
     assert venue_owner_for_url("https://algorand.co/blog/post", own_service_id="algorand-co") == ""
 
 
+def test_venue_owner_for_url_does_not_fall_through_to_parent_when_exact_host_self_owns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deliberate subdomain carve-out (exact host self-owned) must NOT fall through to the
+    collapsed parent domain's own, unrelated owner -- even when that parent has no history at
+    all (the museum.datahistory.org regression: falling through repointed an already-correct,
+    already-published venue to a zero-history parent id, flipping UPDATE into a false
+    NEW_SERVICE)."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.service_sources.service_for_domain",
+        lambda domain: {
+            "museum.datahistory.org": "museum-datahistory-org",
+            "datahistory.org": "datahistory-org",
+        }.get(domain, ""),
+    )
+    assert (
+        venue_owner_for_url(
+            "https://museum.datahistory.org/exhibit", own_service_id="museum-datahistory-org"
+        )
+        == ""
+    )
+
+
 def test_venue_owner_for_url_is_a_noop_when_the_domain_is_unclaimed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

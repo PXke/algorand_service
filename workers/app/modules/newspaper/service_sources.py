@@ -113,6 +113,17 @@ def venue_owner_for_url(url: str, *, own_service_id: str) -> str:
     (unrelated) owner ever being consulted; checking the collapsed domain
     second is what makes this fall back correctly for the ordinary
     (unclaimed-subdomain) case. See `domain_tracker.full_host_from_url`.
+
+    Crucially, the exact host's claim (once it HAS one) is final -- even
+    when that claim is `own_service_id` itself -- and the collapsed parent
+    domain is never consulted in that case. Falling through to the parent
+    whenever the exact host happens to be self-owned would let an
+    unrelated parent-domain owner override a deliberate, already-correct
+    subdomain claim (root-caused 2026-08-27: museum.datahistory.org
+    self-owns its exact host and already has a published article under
+    its own service_id, but a fall-through bug here repointed it to the
+    parent domain's owner, which has none -- flipping a correct UPDATE
+    into a false NEW_SERVICE, the very bug this function exists to fix).
     """
     from app.modules.crawler.domain_tracker import domain_from_url, full_host_from_url
 
@@ -120,8 +131,8 @@ def venue_owner_for_url(url: str, *, own_service_id: str) -> str:
         return ""
     for candidate in dict.fromkeys(d for d in (full_host_from_url(url), domain_from_url(url)) if d):
         owner = service_for_domain(candidate)
-        if owner and owner != own_service_id:
-            return owner
+        if owner:
+            return owner if owner != own_service_id else ""
     return ""
 
 
