@@ -1257,28 +1257,33 @@ class AdminCassandraStore:
         # draft's published_at is stamped at compose time, not release time,
         # so it must be re-stamped now on the `articles` row itself.
         published_at = datetime.now(tz=UTC)
-        # `articles` table dual-write: review-approval is a status
-        # transition to 'published' with published_at re-stamped (same as
-        # workers' backlog-release path). Best-effort.
-        with contextlib.suppress(Exception):
-            from algorand_shared.article_transitions import transition_article_status
+        # `Article.publish()` (2026-08-27): does the same status transition +
+        # slug claim this used to do by hand (transition_article_status +
+        # _ensure_slug_on_live_row), PLUS the one thing that was missing --
+        # refuses outright if a DIFFERENT article_id already owns a live
+        # published article for this service_id. This exact function is
+        # what went live 3 times as a duplicate (HesabPay 08-22, AlgoRank
+        # 08-26, Al Goanna 08-27) before that check existed.
+        #
+        # DuplicateArticleError deliberately propagates -- it must NOT be
+        # caught by a blanket suppress (contextlib.suppress(Exception) would
+        # swallow it too, since it IS an Exception subclass; this is why the
+        # transition is its own try/except rather than reusing that pattern).
+        # Bugsnag already picks up the `logger.error` Article.publish() fires
+        # before raising, so an admin approving a would-be duplicate both
+        # sees a failed request and pages someone. Any OTHER error here is
+        # still best-effort, matching this function's existing posture.
+        from algorand_shared.article import Article, DuplicateArticleError
 
-            transition_article_status(
-                aid, new_status="published", new_published_at=published_at
-            )
-            # Claim a slug if this draft never had one -- root-caused live
-            # 2026-08-27 (Al Goanna recompose): this used to only COPY an
-            # EXISTING slug forward across the publish-time re-stamp
-            # (`if row.slug: ...`), never CLAIM one when there wasn't one
-            # yet. A review/held draft never has a slug claimed for it --
-            # slugs are only ever claimed at PUBLISH time, and this review-
-            # approval transition IS this article's first publish -- so
-            # every review-approved article silently went live with
-            # slug=NULL, falling back to a bare-UUID URL search engines
-            # never index cleanly. ensure_article_slug is a no-op read when
-            # a slug already exists, matching the old behavior exactly for
-            # that case.
-            self._ensure_slug_on_live_row(aid, row.title)
+        article = Article.load(aid)
+        if article is None:
+            return False
+        try:
+            article.publish(new_published_at=published_at)
+        except DuplicateArticleError:
+            raise
+        except Exception:
+            logger.warning("_publish_article_to_feed: publish failed for %s", aid, exc_info=True)
         # A service_id match key used to be registered here too, purely to
         # patch service_has_article()'s blindness to review-approved articles
         # (workers only registered match keys on their direct-publish path,

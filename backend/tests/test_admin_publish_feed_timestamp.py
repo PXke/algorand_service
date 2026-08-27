@@ -31,8 +31,13 @@ class _Result:
 class _FakeSession:
     """The statement registry resolves *Stmts.* by calling get_cassandra_session().prepare(cql); return the CQL text so execute() can branch on it (SELECT vs INSERT vs UPDATE), matching the pattern already used in workers/tests/test_domain_status_sticky.py."""
 
-    def __init__(self, article_row: Any) -> None:  # noqa: ANN401 -- duck-typed Cassandra row
+    def __init__(
+        self, article_row: Any, *, service_id_rows: list | None = None  # noqa: ANN401 -- duck-typed Cassandra row
+    ) -> None:
         self._article_row = article_row
+        # Rows FIND_BY_SERVICE_ID would return -- the conflict check Article.publish()
+        # runs before every transition. Empty by default (no conflict).
+        self._service_id_rows = service_id_rows if service_id_rows is not None else []
         self.articles_inserts: list[tuple] = []
         self.articles_deletes: list[tuple] = []
         self.slug_updates: list[tuple] = []
@@ -44,6 +49,8 @@ class _FakeSession:
         q = " ".join(str(query).split())
         if q.startswith("SELECT") and "FROM algorand_platform.articles WHERE article_id = ?" in q:
             return _Result(self._article_row)
+        if q.startswith("SELECT") and "FROM algorand_platform.articles WHERE service_id = ?" in q:
+            return self._service_id_rows
         if q.startswith("INSERT INTO algorand_platform.articles ("):
             self.articles_inserts.append(tuple(params))
         elif q.startswith("DELETE FROM algorand_platform.articles "):
@@ -226,3 +233,30 @@ def test_publish_article_to_feed_preserves_an_existing_slug(
     assert store._publish_article_to_feed(str(article_id)) is True
     assert len(fake.slug_updates) == 1
     assert fake.slug_updates[0][0] == "already-set"
+
+
+def test_publish_article_to_feed_refuses_a_duplicate_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The actual point of the 2026-08-27 Article.publish() migration.
+
+    A DIFFERENT article_id already published for this service_id must abort
+    the transition entirely, not silently create a duplicate (the exact
+    shape of the HesabPay/AlgoRank/Al Goanna incidents).
+    """
+    from algorand_shared.article import DuplicateArticleError
+
+    article_id = uuid4()
+    existing_id = uuid4()
+    row = _article_row(article_id, published_at=datetime.now(tz=UTC) - timedelta(hours=5), slug=None)
+    fake = _FakeSession(
+        row,
+        service_id_rows=[SimpleNamespace(article_id=existing_id, status="published")],
+    )
+    _patch(monkeypatch, fake)
+
+    store = AdminCassandraStore()
+    with pytest.raises(DuplicateArticleError):
+        store._publish_article_to_feed(str(article_id))
+
+    # No transition was attempted -- the old row must not move at all.
+    assert fake.articles_inserts == []
+    assert fake.articles_deletes == []
