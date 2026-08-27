@@ -7,7 +7,14 @@
 # sources are polled by the reddit crawler (requires CRAWLER_REDDIT_ENABLED=1).
 
 [[services]]
-service_id = "algorand-foundation-blog"
+# service_id was "algorand-foundation-blog" until 2026-08-27 -- corrected to
+# match the service_id a real article about algorand.co was ALREADY
+# published under ("Algorand's post-quantum v5.0.0 nears mainnet...").
+# Minting a fresh id here made every subsequent algorand.co artifact
+# resolve its venue to an identity with zero publish history, so it kept
+# wrongly winning the to-compose "new service" floor slot instead of
+# competing as an update to already-covered content.
+service_id = "algorand-co"
 display_name = "Algorand Foundation — Blog"
 match_kind = "domain"
 match_value = "algorand.co"
