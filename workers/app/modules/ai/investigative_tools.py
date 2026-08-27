@@ -33,6 +33,18 @@ def _get(url: str, *, headers: dict | None = None, params: dict | None = None) -
     return r.json() if "json" in ct else r.text
 
 
+def _guarded_get(
+    url: str, *, headers: dict | None = None, params: dict | None = None, timeout: float = _TIMEOUT
+) -> Any:  # noqa: ANN401 -- httpx.Response, kept loosely typed to avoid an import just for a type hint
+    """Like _get but returns the raw response without raise_for_status -- for callers that need to branch on status_code (e.g. a 404 meaning "not registered" rather than a real failure)."""
+    from app.core.net_guard import guarded_get
+
+    h = {"User-Agent": _UA}
+    if headers:
+        h.update(headers)
+    return guarded_get(url, headers=h, params=params, timeout=timeout)
+
+
 def _resolve_ips(host: str, timeout: float = 5.0) -> list[str]:
     """Bounded DNS resolution. socket.getaddrinfo has no native timeout and can block for tens of seconds on a slow resolver — which would violate this module's timeout-bounded contract — so run it in a thread we can abandon."""
     import concurrent.futures
@@ -46,8 +58,68 @@ def _resolve_ips(host: str, timeout: float = 5.0) -> list[str]:
 
 
 # --- Provenance ------------------------------------------------------------
-def fetch_archive_snapshot(url: str, target_date: str = "") -> dict[str, Any]:
-    """Wayback Machine closest snapshot — proves a page existed/said something on a date, even if later edited or deleted. target_date: YYYYMMDD. Returns ONE snapshot's archive_url/timestamp, not a coverage history; for a URL's first/last-seen dates across all of Wayback's history, use lookup_wayback_snapshots (research_tools.py) instead."""
+# fetch_archive_text (below) used to be three separate schemas --
+# lookup_wayback_snapshots (research_tools.py), fetch_archive_snapshot and
+# fetch_archive_text (both here) -- added ~6 weeks apart. Merged 2026-08-27:
+# they're one Wayback Machine workflow (find the coverage window -> find a
+# snapshot near a date -> read that snapshot's text), not independent
+# capabilities, and the writer routinely could not tell which of the three to
+# reach for (the "wayback"/"archive" suggest_tool alias could only ever point
+# at one). `action` picks the step; each step's return shape is unchanged
+# from its original standalone tool.
+_ARCHIVE_ACTIONS = ("dates", "snapshot", "text")
+
+
+def _wayback_capture_date(resp: Any) -> str | None:  # noqa: ANN401 -- httpx.Response, kept loose to avoid an import just for a type hint
+    """The capture date (YYYY-MM-DD) from a CDX API response's single data row, or None — row 0 is always a header, not data."""
+    try:
+        rows = resp.json()
+    except Exception:
+        return None
+    if not isinstance(rows, list) or len(rows) < 2:
+        return None
+    ts = rows[1][1] if isinstance(rows[1], list) and len(rows[1]) > 1 else None
+    if not isinstance(ts, str) or len(ts) < 8:
+        return None
+    return f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}"
+
+
+def _archive_dates(url: str) -> dict[str, Any]:
+    """action='dates': first and most recent known Internet Archive snapshot DATES for a URL (a coverage window, not content), via the Wayback Machine's CDX API (free, no key). Use to check how long a site has actually existed, or whether its content changed recently, instead of trusting a fetch_url's current state as the whole history — root-caused 2026-08-06: a compose tried to fetch archive.ph directly for exactly this kind of check and hit a 429, with no fallback. Was the standalone lookup_wayback_snapshots tool before the 2026-08-27 merge."""
+    from app.core.net_guard import guarded_get
+
+    raw = (url or "").strip()
+    if not raw:
+        return {"error": "url is required"}
+    try:
+        first_resp = guarded_get(
+            "https://web.archive.org/cdx/search/cdx",
+            headers={"User-Agent": _UA},
+            params={"url": raw, "output": "json", "limit": "1"},
+            timeout=20.0,
+        )
+        last_resp = guarded_get(
+            "https://web.archive.org/cdx/search/cdx",
+            headers={"User-Agent": _UA},
+            params={"url": raw, "output": "json", "limit": "-1"},
+            timeout=20.0,
+        )
+    except Exception as exc:
+        return {"url": raw, "error": str(exc)[:200]}
+    if first_resp.status_code != 200 or last_resp.status_code != 200:
+        return {
+            "url": raw,
+            "error": f"wayback CDX {first_resp.status_code}/{last_resp.status_code}",
+        }
+    first_seen = _wayback_capture_date(first_resp)
+    last_seen = _wayback_capture_date(last_resp)
+    if first_seen is None and last_seen is None:
+        return {"url": raw, "found": False, "error": "no archive.org snapshots found"}
+    return {"url": raw, "found": True, "first_seen": first_seen, "last_seen": last_seen}
+
+
+def _archive_snapshot(url: str, target_date: str = "") -> dict[str, Any]:
+    """action='snapshot': Wayback Machine closest snapshot — proves a page existed/said something on a date, even if later edited or deleted. target_date: YYYYMMDD. Returns ONE snapshot's archive_url/timestamp, not a coverage history. Was the standalone fetch_archive_snapshot tool before the 2026-08-27 merge."""
     try:
         ts = "".join(ch for ch in target_date if ch.isdigit())[:8]
         data = _get(
@@ -67,12 +139,12 @@ def fetch_archive_snapshot(url: str, target_date: str = "") -> dict[str, Any]:
         return {"error": str(exc)}
 
 
-def fetch_archive_text(url: str, target_date: str = "", max_chars: int = 6000) -> dict[str, Any]:
-    """Read the actual TEXT of a Wayback Machine snapshot — not just prove it existed, but extract the archived page's title and body so you can quote titles/dates/content from a deleted or rewritten page. target_date: YYYYMMDD (closest snapshot on/near it). Use after fetch_archive_snapshot when you need what the page SAID, not just that it was captured."""
+def _archive_text(url: str, target_date: str = "", max_chars: int = 6000) -> dict[str, Any]:
+    """action='text' (default): read the actual TEXT of a Wayback Machine snapshot — not just prove it existed, but extract the archived page's title and body so you can quote titles/dates/content from a deleted or rewritten page. target_date: YYYYMMDD (closest snapshot on/near it). Was the standalone fetch_archive_text tool's body before the 2026-08-27 merge (same name kept for the merged tool)."""
     from app.core.net_guard import guarded_get
     from app.modules.scraper.core.web_fetch import html_to_plain_text
 
-    snap = fetch_archive_snapshot(url, target_date)
+    snap = _archive_snapshot(url, target_date)
     if snap.get("error") or not snap.get("found"):
         return snap if snap.get("error") else {"found": False, "url": url}
     archive_url = snap.get("archive_url") or ""
@@ -106,6 +178,32 @@ def fetch_archive_text(url: str, target_date: str = "", max_chars: int = 6000) -
         "chars": len(text),
         "truncated": len(text) > cap,
     }
+
+
+def fetch_archive_text(
+    url: str, action: str = "text", target_date: str = "", max_chars: int = 6000
+) -> dict[str, Any]:
+    """Internet Archive (Wayback Machine) lookups for a URL — one tool, three related jobs picked by `action` (merged 2026-08-27 from three near-duplicate tools; see the module comment above the ``action`` docstrings for why).
+
+    action='dates': first/last known snapshot DATES (a coverage window, not
+    content) — how long a site has existed, or whether it changed recently.
+    action='snapshot': the CLOSEST single snapshot to target_date (YYYYMMDD,
+    optional — omit for the latest capture) — proves a page existed/said
+    something on/near a date without reading it; archive_url/timestamp/status
+    only.
+    action='text' (default): that closest snapshot's actual TEXT (title +
+    body) — quote titles/dates/content from a deleted or rewritten page,
+    not just prove it was captured. Use after action='snapshot' when you
+    need what the page SAID, not just that it was captured.
+    """
+    act = (action or "text").strip().lower()
+    if act == "dates":
+        return _archive_dates(url)
+    if act == "snapshot":
+        return _archive_snapshot(url, target_date)
+    if act == "text":
+        return _archive_text(url, target_date, max_chars)
+    return {"error": f"action must be one of {_ARCHIVE_ACTIONS}, got {action!r}"}
 
 
 def extract_document_metadata(file_url: str) -> dict[str, Any]:
@@ -162,38 +260,99 @@ def extract_document_metadata(file_url: str) -> dict[str, Any]:
 
 
 # --- Identity --------------------------------------------------------------
-def resolve_domain_infrastructure(domain: str) -> dict[str, Any]:
-    """WHOIS-equivalent (RDAP) + DNS A records + IP geolocation/host. Finds the physical servers and registration behind a site. Broader than lookup_domain_registration (research_tools.py), which covers only the RDAP registration/expiration/registrar fields with no hosting/DNS/IP detail -- use that one instead if all you need is a quick "how old is this domain" check."""
-    out: dict[str, Any] = {"domain": domain}
-    d = domain.strip().lower().removeprefix("http://").removeprefix("https://").split("/")[0]
-    out["domain"] = d
+def _rdap_registrar_name(entities: list[Any]) -> str | None:
+    for e in entities:
+        if not isinstance(e, dict) or "registrar" not in (e.get("roles") or []):
+            continue
+        for field in e.get("vcardArray") or []:
+            if not isinstance(field, list) or len(field) != 2:
+                continue
+            for entry in field[1:]:
+                if isinstance(entry, list) and len(entry) == 4 and entry[0] == "fn":
+                    return entry[3]
+    return None
+
+
+def _normalize_domain(domain: str) -> str:
+    import re
+
+    raw = (domain or "").strip().lower()
+    raw = re.sub(r"^https?://", "", raw).split("/")[0]
+    return re.sub(r"^www\.", "", raw)
+
+
+def _hosting_lookup(host: str) -> dict[str, Any]:
+    """DNS A records + the first IP's geolocation/hosting org, tolerant of either step failing independently."""
+    out: dict[str, Any] = {}
     try:
-        ips = _resolve_ips(d)
-        out["ip_addresses"] = ips
-        if ips:
-            try:
-                geo = _get(f"http://ip-api.com/json/{ips[0]}")
-                out["host"] = {
-                    "country": geo.get("country"),
-                    "org": geo.get("org"),
-                    "isp": geo.get("isp"),
-                    "city": geo.get("city"),
-                }
-            except Exception:
-                logger.debug("ip geolocation lookup failed for %s", ips[0], exc_info=True)
+        ips = _resolve_ips(host)
     except Exception as exc:
         out["dns_error"] = str(exc)
+        return out
+    out["ip_addresses"] = ips
+    if not ips:
+        return out
     try:
-        rdap = _get(f"https://rdap.org/domain/{d}")
-        events = {e.get("eventAction"): e.get("eventDate") for e in (rdap.get("events") or [])}
-        out["registration"] = {
-            "registered": events.get("registration"),
-            "expires": events.get("expiration"),
-            "last_changed": events.get("last changed"),
-            "nameservers": [ns.get("ldhName") for ns in (rdap.get("nameservers") or [])],
+        geo = _get(f"http://ip-api.com/json/{ips[0]}")
+        out["host"] = {
+            "country": geo.get("country"),
+            "org": geo.get("org"),
+            "isp": geo.get("isp"),
+            "city": geo.get("city"),
         }
     except Exception:
-        out["rdap"] = "unavailable"
+        logger.debug("ip geolocation lookup failed for %s", ips[0], exc_info=True)
+    return out
+
+
+def _rdap_lookup(host: str, *, include_hosting: bool) -> dict[str, Any]:
+    """Registration fields (found/error, or registered_at/expires_at/last_changed_at/registrar), plus nameservers when include_hosting."""
+    try:
+        resp = _guarded_get(f"https://rdap.org/domain/{host}", timeout=15.0)
+    except Exception as exc:
+        return {"found": False, "error": str(exc)[:200]}
+    if resp.status_code == 404:
+        return {
+            "found": False,
+            "error": "no RDAP record (unregistered, or a ccTLD RDAP.org doesn't route)",
+        }
+    if resp.status_code != 200:
+        return {"found": False, "error": f"RDAP {resp.status_code}"}
+    try:
+        data = resp.json()
+    except Exception:
+        return {"found": False, "error": "unexpected RDAP response"}
+    events = {e.get("eventAction"): e.get("eventDate") for e in data.get("events") or []}
+    out: dict[str, Any] = {
+        "found": True,
+        "registered_at": events.get("registration"),
+        "expires_at": events.get("expiration"),
+        "last_changed_at": events.get("last changed"),
+        "registrar": _rdap_registrar_name(data.get("entities") or []),
+    }
+    if include_hosting:
+        out["nameservers"] = [ns.get("ldhName") for ns in (data.get("nameservers") or [])]
+    return out
+
+
+def resolve_domain_infrastructure(domain: str, include_hosting: bool = False) -> dict[str, Any]:
+    """RDAP domain registration (date/expiry/registrar), optionally plus WHOIS-equivalent hosting detail: DNS A records + IP geolocation/host + nameservers. Merged 2026-08-27 from two tools that both hit rdap.org for the same registration data via separate code paths (the former standalone lookup_domain_registration in research_tools.py, and this tool's own registration lookup) -- ``include_hosting`` now picks the depth instead of picking a different tool name.
+
+    include_hosting=False (default): the lightweight, registration-only
+    check -- is a project's site brand-new or established -- one RDAP call,
+    no DNS/IP lookups.
+    include_hosting=True: additionally resolves DNS A records, the first
+    IP's geolocation/hosting org/ISP, and the domain's nameservers -- who
+    actually runs the physical infrastructure behind it, not just who
+    registered the name.
+    """
+    host = _normalize_domain(domain)
+    if not host or "." not in host:
+        return {"error": "a valid domain is required, e.g. example.com"}
+    out: dict[str, Any] = {"domain": host}
+    if include_hosting:
+        out.update(_hosting_lookup(host))
+    out.update(_rdap_lookup(host, include_hosting=include_hosting))
     return out
 
 
@@ -380,40 +539,38 @@ ARCHIVE_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "fetch_archive_snapshot",
-            "description": (
-                "Wayback Machine snapshot of a URL near a date — proves what a page "
-                "said before edits/deletion. Returns one snapshot's archive_url/"
-                "timestamp; for a URL's first/last archived DATES instead of one "
-                "snapshot, use lookup_wayback_snapshots."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string"},
-                    "target_date": {"type": "string", "description": "YYYYMMDD, optional"},
-                },
-                "required": ["url"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "fetch_archive_text",
             "description": (
-                "Read the TEXT of a Wayback snapshot (title + body) to quote "
-                "titles/dates/content from a deleted or rewritten page — not just "
-                "prove it existed."
+                "Internet Archive (Wayback Machine) lookups for a URL, one of three "
+                "jobs picked by `action` (merged 2026-08-27 from three "
+                "near-duplicate tools -- lookup_wayback_snapshots, "
+                "fetch_archive_snapshot, fetch_archive_text -- into this single "
+                "schema): action='dates' for first/last known snapshot DATES (a "
+                "coverage window, not content) -- how long a site has existed, or "
+                "whether it changed recently; action='snapshot' for the CLOSEST "
+                "single snapshot to target_date (YYYYMMDD, optional) -- proves a "
+                "page existed/said something on/near a date, archive_url/"
+                "timestamp/status only, no content; action='text' (default) to "
+                "read that closest snapshot's actual TEXT (title + body) -- quote "
+                "titles/dates/content from a deleted or rewritten page, not just "
+                "prove it was captured."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {"type": "string"},
-                    "target_date": {"type": "string", "description": "YYYYMMDD, optional"},
+                    "action": {
+                        "type": "string",
+                        "enum": ["dates", "snapshot", "text"],
+                        "description": "'dates' (coverage window), 'snapshot' (metadata near a date), or 'text' (default -- read that snapshot's content)",
+                    },
+                    "target_date": {
+                        "type": "string",
+                        "description": "YYYYMMDD, optional -- used by action='snapshot'/'text' only",
+                    },
                     "max_chars": {
                         "type": "integer",
-                        "description": "cap on returned text, default 6000",
+                        "description": "cap on returned text, default 6000 -- used by action='text' only",
                     },
                 },
                 "required": ["url"],
@@ -439,14 +596,26 @@ ARCHIVE_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "resolve_domain_infrastructure",
             "description": (
-                "WHOIS/RDAP + DNS + IP host/geo behind a domain — who registered it "
-                "and where it is hosted. For just the registration date/expiry/"
-                "registrar (no hosting/DNS detail), lookup_domain_registration is "
-                "the lighter-weight option."
+                "Domain registration date/expiry/registrar via RDAP (WHOIS "
+                "successor, no key needed) -- the default, lightweight check for "
+                "whether a project's site is brand-new or established. Merged "
+                "2026-08-27 from two tools that both hit rdap.org for the same "
+                "registration data (the former lookup_domain_registration is "
+                "now this tool's default, include_hosting=false behavior). Pass "
+                "include_hosting=true to additionally resolve DNS A records, the "
+                "server IP's geolocation/hosting org/ISP, and the domain's "
+                "nameservers -- who actually runs the physical infrastructure "
+                "behind it, not just who registered the name."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"domain": {"type": "string"}},
+                "properties": {
+                    "domain": {"type": "string"},
+                    "include_hosting": {
+                        "type": "boolean",
+                        "description": "true for DNS/IP/geo/nameservers on top of registration data, default false",
+                    },
+                },
                 "required": ["domain"],
             },
         },
@@ -544,7 +713,6 @@ ENTITY_OSINT_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 ARCHIVE_HANDLERS: dict[str, Any] = {
-    "fetch_archive_snapshot": fetch_archive_snapshot,
     "fetch_archive_text": fetch_archive_text,
     "extract_document_metadata": extract_document_metadata,
     "resolve_domain_infrastructure": resolve_domain_infrastructure,
