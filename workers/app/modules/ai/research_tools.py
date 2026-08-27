@@ -794,7 +794,7 @@ def _tool_github_repository_search(query: str, limit: int = 5) -> dict[str, Any]
 
 
 def _tool_search_token_listings(asset_id: int | str) -> dict[str, Any]:
-    """Whether an Algorand ASA is actually listed/tradeable on the two biggest Algorand DEXs (Tinyman, Pact) — real liquidity, price, and 24h/7d volume in USD, or confirmation it's NOT listed anywhere. Use this instead of assuming a token trades just because it exists; a real supply with zero listings is itself a notable fact worth reporting."""
+    """Whether an Algorand ASA is actually listed/tradeable on the two biggest Algorand DEXs (Tinyman, Pact) — real liquidity, price, and 24h/7d volume in USD, or confirmation it's NOT listed anywhere. Use this instead of assuming a token trades just because it exists; a real supply with zero listings is itself a notable fact worth reporting. For a single cross-DEX aggregate price/volume/market-cap/TVL number instead of a per-DEX breakdown, use lookup_asset_market_data instead."""
     aid = str(asset_id).strip()
     if not aid.isdigit():
         return {"error": "asset_id must be a numeric ASA id"}
@@ -1809,7 +1809,7 @@ def _tool_get_defi_tvl(protocol: str = "") -> dict[str, Any]:
 # server and prod; api.vestigelabs.org is the real host the live vestige.fi
 # frontend actually calls (found via its JS bundle) and it works.
 def _tool_lookup_asset_market_data(asset_ids: str) -> dict[str, Any]:
-    """Live price, 24h/7d volume, market cap and total pool liquidity (TVL) for one or more Algorand ASAs, via Vestige's aggregator API. The only source here for a real per-token liquidity/volume/TVL number — get_defi_tvl only covers protocol-level TVL, never a specific coin. Use this for ANY liquidity, volume, or market-cap claim about a named token instead of estimating or inventing a number."""
+    """Live price, 24h/7d volume, market cap and total pool liquidity (TVL) for one or more Algorand ASAs, via Vestige's aggregator API (a single cross-DEX aggregate number per token) — get_defi_tvl only covers protocol-level TVL, never a specific coin. Use this for ANY liquidity, volume, or market-cap claim about a named token instead of estimating or inventing a number. For a per-DEX breakdown (is it actually listed on Tinyman/Pact specifically, verified status, or confirmation it's not listed anywhere), use search_token_listings instead or in addition."""
     ids = [s.strip() for s in str(asset_ids).split(",") if s.strip()]
     if not ids:
         return {"error": "asset_ids required — comma-separated ASA ids, e.g. '2200000000'"}
@@ -1862,11 +1862,14 @@ _ASSET_MARKET_DATA_SCHEMA = {
         "name": "lookup_asset_market_data",
         "description": (
             "Live price, 24h/7d volume, market cap, and total pool liquidity (TVL) "
-            "for one or more Algorand ASAs, via Vestige's aggregator API. The only "
-            "source here for a real per-token liquidity/volume/TVL number — "
+            "for one or more Algorand ASAs, via Vestige's aggregator API (one "
+            "cross-DEX aggregate number per token) — "
             "get_defi_tvl only covers protocol-level TVL, never a specific coin. "
             "Use for ANY liquidity, volume, or market-cap claim about a named "
-            "token instead of estimating or inventing a number."
+            "token instead of estimating or inventing a number. For a per-DEX "
+            "breakdown (is it actually listed on Tinyman/Pact specifically, "
+            "verified status, or confirmed not listed anywhere), use "
+            "search_token_listings instead or in addition."
         ),
         "parameters": {
             "type": "object",
@@ -2582,7 +2585,7 @@ def _rdap_registrar_name(entities: list[Any]) -> str | None:
 
 
 def _tool_lookup_domain_registration(domain: str) -> dict[str, Any]:
-    """Registration/expiration date and registrar for a domain, via RDAP (the standardized, free WHOIS successor — rdap.org auto-routes to the correct registry, no key needed). A domain registered weeks ago vs. years ago is a real legitimacy/maturity signal a reader deserves, and this is the on-the-record source for it rather than guessing from how polished a site looks."""
+    """Registration/expiration date and registrar for a domain, via RDAP (the standardized, free WHOIS successor — rdap.org auto-routes to the correct registry, no key needed). A domain registered weeks ago vs. years ago is a real legitimacy/maturity signal a reader deserves, and this is the on-the-record source for it rather than guessing from how polished a site looks. For hosting/DNS/IP-geolocation on top of this same registration data, see resolve_domain_infrastructure (investigative_tools.py) instead."""
     import re
 
     raw = (domain or "").strip().lower()
@@ -2626,7 +2629,11 @@ _DOMAIN_REGISTRATION_SCHEMA = {
             "via RDAP (the standardized WHOIS successor, no key needed). Use "
             "to check whether a project's site is brand-new or established — "
             "a domain registered weeks ago is a real, checkable signal, not "
-            "a guess from how the site looks."
+            "a guess from how the site looks. This is the lightweight, "
+            "registration-only lookup; for who actually HOSTS the domain "
+            "(DNS records, server IP, hosting org/ISP, geolocation) alongside "
+            "the same registration data, use resolve_domain_infrastructure "
+            "instead."
         ),
         "parameters": {
             "type": "object",
@@ -2657,7 +2664,7 @@ def _wayback_capture_date(resp: httpx.Response) -> str | None:
 
 
 def _tool_lookup_wayback_snapshots(url: str) -> dict[str, Any]:
-    """First and most recent known Internet Archive snapshot dates for a URL, via the Wayback Machine's CDX API (free, no key). Use to check how long a site has actually existed, or whether its content changed recently, instead of trusting a fetch_url's current state as the whole history — root-caused 2026-08-06: a compose tried to fetch archive.ph directly for exactly this kind of check and hit a 429, with no fallback."""
+    """First and most recent known Internet Archive snapshot DATES for a URL (a coverage window, not content), via the Wayback Machine's CDX API (free, no key). Use to check how long a site has actually existed, or whether its content changed recently, instead of trusting a fetch_url's current state as the whole history — root-caused 2026-08-06: a compose tried to fetch archive.ph directly for exactly this kind of check and hit a 429, with no fallback. This does not fetch a snapshot's actual content -- once you have a date of interest, use fetch_archive_snapshot (get one snapshot's archive_url near a date) and fetch_archive_text (read that snapshot's real text) instead."""
     raw = (url or "").strip()
     if not raw:
         return {"error": "url is required"}
@@ -2692,10 +2699,13 @@ _WAYBACK_SNAPSHOTS_SCHEMA = {
         "name": "lookup_wayback_snapshots",
         "description": (
             "First and most recent Internet Archive (Wayback Machine) "
-            "snapshot dates for a URL, free and no key needed. Use to check "
+            "snapshot DATES for a URL (a coverage window, not the page's "
+            "content), free and no key needed. Use to check "
             "how long a site has actually existed, or to catch that its "
             "content changed recently, instead of relying only on what it "
-            "shows right now."
+            "shows right now. Does not fetch the snapshot's actual content -- "
+            "once you have a date of interest, use fetch_archive_snapshot / "
+            "fetch_archive_text to read what the page actually said then."
         ),
         "parameters": {
             "type": "object",

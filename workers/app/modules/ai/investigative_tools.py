@@ -47,7 +47,7 @@ def _resolve_ips(host: str, timeout: float = 5.0) -> list[str]:
 
 # --- Provenance ------------------------------------------------------------
 def fetch_archive_snapshot(url: str, target_date: str = "") -> dict[str, Any]:
-    """Wayback Machine closest snapshot — proves a page existed/said something on a date, even if later edited or deleted. target_date: YYYYMMDD."""
+    """Wayback Machine closest snapshot — proves a page existed/said something on a date, even if later edited or deleted. target_date: YYYYMMDD. Returns ONE snapshot's archive_url/timestamp, not a coverage history; for a URL's first/last-seen dates across all of Wayback's history, use lookup_wayback_snapshots (research_tools.py) instead."""
     try:
         ts = "".join(ch for ch in target_date if ch.isdigit())[:8]
         data = _get(
@@ -163,7 +163,7 @@ def extract_document_metadata(file_url: str) -> dict[str, Any]:
 
 # --- Identity --------------------------------------------------------------
 def resolve_domain_infrastructure(domain: str) -> dict[str, Any]:
-    """WHOIS-equivalent (RDAP) + DNS A records + IP geolocation/host. Finds the physical servers and registration behind a site."""
+    """WHOIS-equivalent (RDAP) + DNS A records + IP geolocation/host. Finds the physical servers and registration behind a site. Broader than lookup_domain_registration (research_tools.py), which covers only the RDAP registration/expiration/registrar fields with no hosting/DNS/IP detail -- use that one instead if all you need is a quick "how old is this domain" check."""
     out: dict[str, Any] = {"domain": domain}
     d = domain.strip().lower().removeprefix("http://").removeprefix("https://").split("/")[0]
     out["domain"] = d
@@ -383,7 +383,9 @@ ARCHIVE_SCHEMAS: list[dict[str, Any]] = [
             "name": "fetch_archive_snapshot",
             "description": (
                 "Wayback Machine snapshot of a URL near a date — proves what a page "
-                "said before edits/deletion."
+                "said before edits/deletion. Returns one snapshot's archive_url/"
+                "timestamp; for a URL's first/last archived DATES instead of one "
+                "snapshot, use lookup_wayback_snapshots."
             ),
             "parameters": {
                 "type": "object",
@@ -438,7 +440,9 @@ ARCHIVE_SCHEMAS: list[dict[str, Any]] = [
             "name": "resolve_domain_infrastructure",
             "description": (
                 "WHOIS/RDAP + DNS + IP host/geo behind a domain — who registered it "
-                "and where it is hosted."
+                "and where it is hosted. For just the registration date/expiry/"
+                "registrar (no hosting/DNS detail), lookup_domain_registration is "
+                "the lighter-weight option."
             ),
             "parameters": {
                 "type": "object",

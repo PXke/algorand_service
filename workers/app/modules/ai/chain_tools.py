@@ -1734,7 +1734,9 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
                 "An Algorand application (smart contract) by id: its creator and DECODED "
                 "global state — the live on-chain variables it exposes (governance proposal/"
                 "vote tallies, admin addresses, parameters). Point it at a governance app id "
-                "to verify what executed on-chain rather than relying on a forum post."
+                "to verify what executed on-chain rather than relying on a forum post. This "
+                "(with lookup_account and lookup_asset) is how you query algod/the indexer "
+                "directly — there is no separate raw 'algod' tool."
             ),
             "parameters": {
                 "type": "object",
