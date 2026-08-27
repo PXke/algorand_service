@@ -68,3 +68,23 @@ def test_flush_pending_analytics_interval_configurable(monkeypatch: pytest.Monke
     monkeypatch.setenv("ANALYTICS_FLUSH_SECONDS", "180")
     schedule = celery_app._build_beat_schedule()
     assert schedule["flush-pending-analytics"]["schedule"] == 180.0
+
+
+def test_discard_dead_pending_sources_scheduled_hourly_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dead-source sweep (arima.io incident, 2026-08-27) runs unconditionally (no feature flag), every hour by default -- see source_liveness.py for why the pace stays slow."""
+    monkeypatch.delenv("DEAD_SOURCE_SWEEP_SECONDS", raising=False)
+    schedule = celery_app._build_beat_schedule()
+    assert (
+        schedule["discard-dead-pending-sources"]["task"]
+        == "app.tasks.newspaper.discard_dead_pending_sources"
+    )
+    assert schedule["discard-dead-pending-sources"]["schedule"] == 3600.0
+
+
+def test_discard_dead_pending_sources_interval_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweep interval is overridable via DEAD_SOURCE_SWEEP_SECONDS."""
+    monkeypatch.setenv("DEAD_SOURCE_SWEEP_SECONDS", "1800")
+    schedule = celery_app._build_beat_schedule()
+    assert schedule["discard-dead-pending-sources"]["schedule"] == 1800.0

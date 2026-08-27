@@ -36,6 +36,8 @@ from algorand_shared.to_compose_selection import (
     list_to_compose_for_day,
     select_to_compose_for_day,
 )
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.celery_app import celery_app
 from app.core import config
 from app.modules.ai.mistral_credit_guard import is_credit_exhausted
@@ -48,7 +50,6 @@ from app.modules.newspaper.publish_policy import (
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow, is_terminal_outcome
 from app.modules.newspaper.publish_schedule import record_standard_publish
 from app.modules.newspaper.tasks.publish_tasks import publish_from_queued_row
-from celery.exceptions import SoftTimeLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ def _row_needs_review(row: QueuedPublishRow) -> bool:
 def _pending_feed_backlog_full() -> bool:
     """True when the backlog (articles.status='backlog') already holds PENDING_FEED_MAX_DEPTH+ approved articles awaiting paced release. Composing further ahead than that only burns budget to publish staler content later — the auto-approve → backlog path bypasses the 1-slot review throttle, so without this check hourly drains composed all night (2026-07-16: six articles / two days of inventory queued overnight). Fails open: a Cassandra blip must not stop the pipeline."""
     from algorand_shared.article_transitions import list_backlog_articles
+
     from app.core import config as cfg
 
     try:
@@ -167,6 +169,25 @@ def _novelty_collapsed(row: QueuedPublishRow) -> bool:
     return max(title_sim, content_sim) >= config.NOVELTY_MAX_SIMILARITY
 
 
+def _source_dead(row: QueuedPublishRow) -> bool:
+    """True when the row's own source URL now reads as a parked/expired registrar page -- catches a source that died in the window between selection and compose (which can be hours to days: to_compose is a fixed daily slate, and compose is currently paused platform-wide).
+
+    Complements, not duplicates, `defunct_entity_gate` (which checks DNS
+    resolution of LINKS INSIDE THE WRITTEN BODY, after a full compose pass)
+    and `domain_probe` (writer-enrichment, advisory-only, doesn't catch a
+    parked page since it returns a normal 200/HTTPS). Root-caused
+    2026-08-27: arima.io's registration expired after being crawled with
+    real content, and nothing would have stopped it from being composed as
+    if the project were still current. Runs LAST in the gate order
+    deliberately -- unlike every other gate here, this one makes a real
+    network call, so it should only ever run after every cheaper local
+    check has had a chance to veto first.
+    """
+    from app.modules.newspaper.source_liveness import is_source_parked_or_expired
+
+    return bool(row.scrape_url and is_source_parked_or_expired(row.scrape_url))
+
+
 def _brief_archived(row: QueuedPublishRow) -> bool:
     """True when this row is an editorial-brief assignment whose brief is no longer active (archived/deactivated since it was enqueued). Archiving a brief does NOT purge its already-queued assignment, so without this a retired brief still composes once when the drain reaches its stale row — 2026-07-20: an archived duplicate wallet brief drained and AUTO-PUBLISHED a wrong article. Fails open (compose) on any lookup error — a transient blip must not silently drop legitimate assignments."""
     payload = row.payload or {}
@@ -195,8 +216,11 @@ class _DrainGate:
 
 # Evaluated in order, first match wins. The order is load-bearing:
 # cooldown checks MUST run before the review branch in the drain loop (a
-# review draft still re-covers the same project), and novelty runs last so a
-# capped/cooling row doesn't spend a Typesense query.
+# review draft still re-covers the same project), novelty runs before the
+# one real network call in this list so a capped/cooling row doesn't spend a
+# Typesense query, and source_dead runs LAST of all -- it's the only gate
+# here that makes a live HTTP request, so every cheaper local check gets a
+# chance to veto first.
 _PRE_COMPOSE_GATES: tuple[_DrainGate, ...] = (
     # First: an assignment for a brief that's since been archived must never
     # compose — cheap, decisive, and drops the stale row out of pending.
@@ -215,6 +239,9 @@ _PRE_COMPOSE_GATES: tuple[_DrainGate, ...] = (
     _DrainGate("domain_cooldown", _domain_in_cooldown),
     _DrainGate("service_cooldown", _service_in_cooldown),
     _DrainGate("novelty_collapsed", _novelty_collapsed, mark_status="expired"),
+    # A parked/expired domain isn't coming back on its own -- permanent
+    # discard, same as brief_archived/novelty_collapsed above.
+    _DrainGate("source_dead", _source_dead, mark_status="expired"),
 )
 
 
@@ -400,7 +427,7 @@ def _resolve_artifact_ignoring_row(
 
 
 def _record_pre_compose_gate_artifact(artifact_id: str, fired: _DrainGate) -> dict:
-    """Artifact-native twin of the old `_record_pre_compose_gate`: a gate with a `mark_status` (brief_archived/novelty_collapsed) is a permanent drop for today's slate -- DISCARD. A gate with no `mark_status` (domain_cooldown/service_cooldown/domain_capped) leaves the artifact SELECTED/retriable -- nothing to persist beyond this run's results entry; domain_capped specifically relies on this to let the midnight reclaim beat recycle it to PENDING once its day passes, rather than losing it outright."""
+    """Artifact-native twin of the old `_record_pre_compose_gate`: a gate with a `mark_status` (brief_archived/novelty_collapsed/source_dead) is a permanent drop for today's slate -- DISCARD. A gate with no `mark_status` (domain_cooldown/service_cooldown/domain_capped) leaves the artifact SELECTED/retriable -- nothing to persist beyond this run's results entry; domain_capped specifically relies on this to let the midnight reclaim beat recycle it to PENDING once its day passes, rather than losing it outright."""
     if fired.mark_status:
         mark_artifact_status(artifact_id, DISCARDED)
     return {"artifact_id": artifact_id, "status": fired.name}
@@ -554,6 +581,33 @@ def reclaim_stale_selected_artifacts_task() -> dict[str, object]:
     return reclaim_stale_selected_artifacts(dry_run=False)
 
 
+@celery_app.task(name="app.tasks.newspaper.discard_dead_pending_sources")
+def discard_dead_pending_sources_task() -> dict[str, object]:
+    """Beat: discard PENDING crawler-channel artifacts whose source has since become a parked/expired-registration page (see `source_liveness` module docstring).
+
+    Catches this class of dead artifact BEFORE it can ever be selected --
+    `_source_dead` (the pre-compose gate, `_PRE_COMPOSE_GATES`) only catches
+    it AFTER selection, in the narrower window between a day's slate being
+    picked and drain actually reaching that slot. Both exist because either
+    alone leaves a gap: this beat never runs on an artifact once it's
+    SELECTED (selection has moved on), and the gate never runs on an
+    artifact that's never selected at all.
+
+    A small `scan_limit` per run (unlike most other reconciliation sweeps in
+    this codebase) is deliberate: each check is a REAL network fetch with an
+    8s timeout, on a box that also runs other latency-sensitive services
+    (see project notes on shared-box CPU/network contention) -- this must
+    stay a slow trickle across many runs, not a one-shot sweep of the whole
+    pending pool. Runs dry_run=False -- this beat's entire purpose is to
+    actually discard, not just report; call
+    `source_liveness.find_dead_pending_artifacts` directly for a read-only
+    preview first if you want to see what a run would touch.
+    """
+    from app.modules.newspaper.source_liveness import discard_dead_pending_artifacts
+
+    return discard_dead_pending_artifacts(scan_limit=15, dry_run=False)
+
+
 @celery_app.task(
     name="app.tasks.newspaper.drain_to_compose",
     soft_time_limit=config.COMPOSE_TASK_SOFT_TIME_LIMIT,
@@ -578,7 +632,7 @@ def drain_to_compose() -> dict[str, object]:
     relies on staying SELECTED past midnight too, so the reclaim beat can
     recycle it to PENDING once its day passes rather than losing it
     outright); a slot a gate permanently drops (novelty_collapsed/
-    brief_archived) is DISCARDED and — matching to_compose_selection's own
+    brief_archived/source_dead) is DISCARDED and — matching to_compose_selection's own
     no-backfill design for an unused human slot — is NOT replaced by the
     next-best pending artifact this run; that slot is simply lost for the
     day. This mirrors an existing, deliberate limitation of the
@@ -718,6 +772,7 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
 
     from algorand_shared.article_statements import ArticlesStmts
     from algorand_shared.article_transitions import list_backlog_articles
+
     from app.core.cassandra import get_cassandra_session
 
     session = get_cassandra_session()

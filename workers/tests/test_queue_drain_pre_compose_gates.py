@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import Never
 
 import pytest
+
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow
 from app.modules.newspaper.tasks import queue_drain_tasks as qdt
 
@@ -18,24 +19,32 @@ def _row() -> SimpleNamespace:
 
 
 def test_gate_order_and_names() -> None:
-    """Pins the pre-compose gate list's exact order and names."""
+    """Pins the pre-compose gate list's exact order and names.
+
+    source_dead is last deliberately -- it's the only gate here that makes
+    a live HTTP request, so every cheaper local check gets a chance to
+    veto first (2026-08-27).
+    """
     assert [g.name for g in qdt._PRE_COMPOSE_GATES] == [
         "brief_archived",
         "domain_capped",
         "domain_cooldown",
         "service_cooldown",
         "novelty_collapsed",
+        "source_dead",
     ]
 
 
 def test_mark_status_only_for_permanent_drops() -> None:
-    """Only brief_archived and novelty_collapsed set a mark_status (permanent DISCARD).
+    """Only brief_archived, novelty_collapsed, and source_dead set a mark_status (permanent DISCARD).
 
     domain_capped deliberately carries none (2026-08-27): a daily-cap
     collision is transient, not a reason to permanently drop the artifact's
     accumulated content. Leaving it unmarked keeps it SELECTED so the
     midnight `reclaim_stale_selected_artifacts` beat can recycle it back to
-    PENDING once its day passes, same as the cooldown gates.
+    PENDING once its day passes, same as the cooldown gates. source_dead
+    (also 2026-08-27) DOES carry one -- a parked/expired domain isn't
+    coming back on its own the way a daily cap clears at midnight.
     """
     marks = {g.name: g.mark_status for g in qdt._PRE_COMPOSE_GATES}
     assert marks == {
@@ -44,6 +53,7 @@ def test_mark_status_only_for_permanent_drops() -> None:
         "domain_cooldown": None,
         "service_cooldown": None,
         "novelty_collapsed": "expired",
+        "source_dead": "expired",
     }
 
 
@@ -97,7 +107,34 @@ def test_gates_wrap_the_real_checks() -> None:
         qdt._domain_in_cooldown,
         qdt._service_in_cooldown,
         qdt._novelty_collapsed,
+        qdt._source_dead,
     ]
+
+
+def test_source_dead_true_when_url_parked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate fires when the row's scrape_url reads as a parked/expired domain."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.source_liveness.is_source_parked_or_expired",
+        lambda _url: True,
+    )
+    assert qdt._source_dead(_row()) is True
+
+
+def test_source_dead_false_when_url_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate does not fire for a live source."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.source_liveness.is_source_parked_or_expired",
+        lambda _url: False,
+    )
+    assert qdt._source_dead(_row()) is False
+
+
+def test_source_dead_false_when_row_has_no_scrape_url() -> None:
+    """No scrape_url (e.g. a brief/editorial-assignment row) -- never fires, never even calls the checker."""
+    row = SimpleNamespace(
+        queue_id="q1", service_id="svc", scrape_url="", payload={"page_title": "t", "page_text": "x"}
+    )
+    assert qdt._source_dead(row) is False
 
 
 def _assignment_row(

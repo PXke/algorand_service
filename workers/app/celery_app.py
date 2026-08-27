@@ -274,6 +274,20 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.newspaper.reclaim_stale_selected_artifacts",
         "schedule": float(os.getenv("STALE_SELECTION_REAP_SECONDS", "3600")),
     }
+    # Root-caused 2026-08-27 (arima.io): a pending artifact's source can go
+    # dark -- domain registration expires, page becomes a registrar parking
+    # template -- while it sits unselected, with nothing re-checking before
+    # it could later be selected/composed as if the project were still
+    # current (see source_liveness.py's module docstring; the pre-compose
+    # gate in queue_drain_tasks.py catches the narrower AFTER-selection
+    # window, this catches it before that). Deliberately slow and small
+    # (15/run, hourly default): each check is a real network fetch with an
+    # 8s timeout, and this box also runs other latency-sensitive services --
+    # a slow trickle across many runs, never a one-shot sweep.
+    schedule["discard-dead-pending-sources"] = {
+        "task": "app.tasks.newspaper.discard_dead_pending_sources",
+        "schedule": float(os.getenv("DEAD_SOURCE_SWEEP_SECONDS", "3600")),
+    }
     # Editorial-room artifacts: recomputes priority for every PENDING
     # artifact once a day, feeding drain-to-compose's daily selection above.
     # Runs unconditionally (no AUTO_COMPOSE_PAUSED-style gate) -- scoring is
