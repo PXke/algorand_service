@@ -2959,6 +2959,17 @@ def recompose_published(
         trigger_round=0,
         source_url=source_url,
         publish_to_feed=False,
+        # on_hold, same as recompose_review's drafts: this row is an unlisted
+        # candidate until apply_recomposed_article swaps its CONTENT onto the
+        # live article -- the draft row itself must never be publicly visible.
+        # Root-caused live 2026-08-27: this call site was the ONE unlisted-
+        # draft writer still relying on insert_stored_article's status default
+        # ("published"), harmless while the feed was a separate projection but
+        # live-wrong once `articles.status` became feed membership itself
+        # (2026-08-24 consolidation) -- every archive-refresh recompose left a
+        # stray slug-less duplicate of the live article ON the public feed
+        # (HesabPay 08-22, AlgoRank 08-26, Al Goanna 08-27).
+        status="on_hold",
         image_url=image_field,
         tags=tags,
         prompt_version=getattr(composed, "prompt_version", ""),

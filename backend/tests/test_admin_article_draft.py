@@ -191,3 +191,61 @@ def test_list_draft_articles_returns_empty_with_no_drafts(monkeypatch: pytest.Mo
 
     assert AdminCassandraStore().list_draft_articles() == []
 
+
+
+def test_restore_claims_a_slug_when_the_row_never_had_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un-drafting a row with slug=NULL claims one on the way back to status='published' -- a row that reached 'draft' without ever being slugged (a pre-fix slug=NULL victim, or a never-published row toggled via the raw API) must not go onto the public feed serving a bare-UUID URL (the 2026-08-27 bug class)."""
+    article_id = uuid4()
+    row = _feed_row(article_id, status="draft", slug=None)
+    fake = _FakeSession(row)
+    slug_sets: list[tuple] = []
+    orig_execute = fake.execute
+
+    def execute(query: str, params: tuple = ()) -> Any:  # noqa: ANN401
+        q = " ".join(str(query).split())
+        if q.startswith("UPDATE algorand_platform.articles SET slug = ?"):
+            slug_sets.append(tuple(params))
+        return orig_execute(query, params)
+
+    fake.execute = execute  # type: ignore[method-assign]
+    _patch(monkeypatch, fake)
+    monkeypatch.setattr("app.modules.seo.indexnow.ping_article", lambda *a, **kw: None)  # noqa: ARG005
+    monkeypatch.setattr(
+        "app.core.typesense_client.upsert_article_document", lambda **kw: None  # noqa: ARG005
+    )
+    monkeypatch.setattr(AdminCassandraStore, "get_article", lambda self, aid: object())  # noqa: ARG005
+
+    AdminCassandraStore().set_article_draft(str(article_id), False)
+
+    # The real slugify ran against the fake session: "Title" -> "title",
+    # written onto the `articles` row via ArticlesStmts.SET_SLUG.
+    assert [p[0] for p in slug_sets] == ["title"]
+
+
+def test_restore_leaves_an_existing_slug_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Un-drafting a previously-published row is a no-op for slugs -- the permanent URL is never recomputed."""
+    article_id = uuid4()
+    row = _feed_row(article_id, status="draft", slug="a-slug")
+    fake = _FakeSession(row)
+    slug_sets: list[tuple] = []
+    orig_execute = fake.execute
+
+    def execute(query: str, params: tuple = ()) -> Any:  # noqa: ANN401
+        q = " ".join(str(query).split())
+        if q.startswith("UPDATE algorand_platform.articles SET slug = ?"):
+            slug_sets.append(tuple(params))
+        return orig_execute(query, params)
+
+    fake.execute = execute  # type: ignore[method-assign]
+    _patch(monkeypatch, fake)
+    monkeypatch.setattr("app.modules.seo.indexnow.ping_article", lambda *a, **kw: None)  # noqa: ARG005
+    monkeypatch.setattr(
+        "app.core.typesense_client.upsert_article_document", lambda **kw: None  # noqa: ARG005
+    )
+    monkeypatch.setattr(AdminCassandraStore, "get_article", lambda self, aid: object())  # noqa: ARG005
+
+    AdminCassandraStore().set_article_draft(str(article_id), False)
+
+    assert slug_sets == []

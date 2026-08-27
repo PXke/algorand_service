@@ -229,6 +229,26 @@ def insert_stored_article(
     from app.core.cassandra import get_cassandra_session
     from app.modules.newspaper.glossary_linker import auto_link_glossary_terms
 
+    if not publish_to_feed and status == "published":
+        # `articles.status` IS public-feed membership since the 2026-08-24
+        # consolidation, so "unlisted draft" + status='published' is a
+        # contradiction that puts a slug-less draft row straight onto the
+        # live feed as a duplicate of the real article. Exactly this bit
+        # live three times (HesabPay 08-22, AlgoRank 08-26, Al Goanna
+        # 08-27): recompose_published stored its draft with
+        # publish_to_feed=False but relied on this parameter's "published"
+        # default. Fail SAFE rather than loud -- the compose that produced
+        # this draft is minutes of LLM work, and an article wrongly parked
+        # on_hold is recoverable from the admin UI, while a stray draft on
+        # the public feed is a live incident.
+        logger.error(
+            "insert_stored_article: publish_to_feed=False with status='published' "
+            "for %s -- contradictory, coercing to status='on_hold' (caller must "
+            "pass the real destination status explicitly)",
+            article_id,
+        )
+        status = "on_hold"
+
     body = auto_link_glossary_terms(body)
     article_id = article_id or uuid.uuid4()
     published_at = datetime.now(tz=UTC)

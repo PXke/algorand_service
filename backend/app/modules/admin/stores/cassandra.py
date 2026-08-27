@@ -387,6 +387,20 @@ class AdminCassandraStore:
 
             transition_article_status(aid, new_status="draft" if draft else "published")
 
+        if not draft:
+            # Restoring visibility must leave the row slugged: normally a
+            # no-op (a previously-published row already owns its slug), but a
+            # row that reached 'draft' without ever being slugged -- a pre-fix
+            # slug=NULL victim, or a never-published row draft-toggled via the
+            # raw API -- would otherwise go (back) onto the public feed with a
+            # bare-UUID URL, the exact 2026-08-27 bug class. Best-effort, same
+            # as every other side effect here; runs BEFORE get_article below
+            # so Typesense/IndexNow see the fresh slug.
+            with contextlib.suppress(Exception):
+                row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
+                if row is not None and not row.slug:
+                    self._ensure_slug_on_live_row(aid, row.title or "")
+
         updated = self.get_article(article_id)
 
         # Site search must not be able to find (or show a snippet of) a
@@ -1195,6 +1209,35 @@ class AdminCassandraStore:
             if include_resolved or not r.resolved
         ]
 
+    def _ensure_slug_on_live_row(self, aid: UUID, title: str) -> None:
+        """Claim the permanent URL slug for a row that is (or is becoming) publicly visible, then write it onto the `articles` row and its articles_by_tag index rows. No-op when the row already owns a slug (ensure_article_slug just returns it). Shared by review-approval publish and the un-draft restore -- every backend transition INTO status='published' must leave the row slugged, or it serves a bare-UUID URL forever (the 2026-08-27 slug=NULL bug class)."""
+        from algorand_shared.article_statements import ArticlesStmts
+        from algorand_shared.slugs import ensure_article_slug
+
+        from app.core.cassandra import get_cassandra_session
+
+        session = get_cassandra_session()
+        slug = ensure_article_slug(aid, title)
+        if not slug:
+            return
+        new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
+        if new_row is None:
+            return
+        session.execute(
+            ArticlesStmts.SET_SLUG,
+            (slug, new_row.status, new_row.year, new_row.published_at, aid),
+        )
+        full_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
+        if full_row is not None:
+            from algorand_shared.article_tag_index import set_slug_in_tag_index
+
+            set_slug_in_tag_index(
+                aid,
+                tags=list(full_row.tags or []),
+                published_at=new_row.published_at,
+                slug=slug,
+            )
+
     def _publish_article_to_feed(self, article_id: str) -> bool:
         from uuid import UUID
 
@@ -1235,26 +1278,7 @@ class AdminCassandraStore:
             # never index cleanly. ensure_article_slug is a no-op read when
             # a slug already exists, matching the old behavior exactly for
             # that case.
-            from algorand_shared.slugs import ensure_article_slug
-
-            slug = ensure_article_slug(aid, row.title)
-            if slug:
-                new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
-                if new_row is not None:
-                    session.execute(
-                        ArticlesStmts.SET_SLUG,
-                        (slug, new_row.status, new_row.year, new_row.published_at, aid),
-                    )
-                    full_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
-                    if full_row is not None:
-                        from algorand_shared.article_tag_index import set_slug_in_tag_index
-
-                        set_slug_in_tag_index(
-                            aid,
-                            tags=list(full_row.tags or []),
-                            published_at=new_row.published_at,
-                            slug=slug,
-                        )
+            self._ensure_slug_on_live_row(aid, row.title)
         # A service_id match key used to be registered here too, purely to
         # patch service_has_article()'s blindness to review-approved articles
         # (workers only registered match keys on their direct-publish path,
