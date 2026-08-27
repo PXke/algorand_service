@@ -714,3 +714,116 @@ def test_set_artifact_venue_service_id_unknown_id_returns_false(
     from algorand_shared.artifact_store import set_artifact_venue_service_id
 
     assert set_artifact_venue_service_id("not-a-real-uuid", "algorand-forum") is False
+
+
+# --------------------------------------------------------------------------- #
+# Artifact instance methods (2026-08-27) -- thin delegates to this module's
+# own free functions, for one obvious way to act on an artifact you already
+# hold instead of every caller re-importing mark_artifact_status/etc.
+# --------------------------------------------------------------------------- #
+
+
+def test_artifact_load_is_an_alias_for_get_artifact(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """Artifact.load is a classmethod alias for the module-level get_artifact."""
+    from algorand_shared.artifact_store import Artifact, insert_artifact
+
+    artifact_id, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+
+    loaded = Artifact.load(artifact_id)
+
+    assert loaded is not None
+    assert loaded.artifact_id == artifact_id
+    assert fake_artifact_session.artifacts[artifact_id]["status"] == loaded.status
+
+
+def test_artifact_mark_composed(fake_artifact_session: FakeArtifactSession) -> None:
+    """.mark_composed() transitions the artifact to COMPOSED."""
+    from algorand_shared.artifact_store import COMPOSED, Artifact, insert_artifact
+
+    artifact_id, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    artifact = Artifact.load(artifact_id)
+
+    artifact.mark_composed()
+
+    assert fake_artifact_session.artifacts[artifact_id]["status"] == COMPOSED
+
+
+def test_artifact_mark_discarded(fake_artifact_session: FakeArtifactSession) -> None:
+    """.mark_discarded() transitions the artifact to DISCARDED."""
+    from algorand_shared.artifact_store import DISCARDED, Artifact, insert_artifact
+
+    artifact_id, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    artifact = Artifact.load(artifact_id)
+
+    artifact.mark_discarded()
+
+    assert fake_artifact_session.artifacts[artifact_id]["status"] == DISCARDED
+
+
+def test_artifact_revert_to_pending_only_takes_effect_when_selected(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """.revert_to_pending() moves a SELECTED artifact back to PENDING and returns True."""
+    from algorand_shared.artifact_store import (
+        PENDING,
+        SELECTED,
+        Artifact,
+        insert_artifact,
+        mark_artifact_status,
+    )
+
+    artifact_id, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    mark_artifact_status(artifact_id, SELECTED)
+    artifact = Artifact.load(artifact_id)
+
+    reverted = artifact.revert_to_pending()
+
+    assert reverted is True
+    assert fake_artifact_session.artifacts[artifact_id]["status"] == PENDING
+
+
+def test_artifact_pin_for_day_refuses_a_non_pending_artifact(
+    fake_artifact_session: FakeArtifactSession,  # noqa: ARG001 -- activates the fixture's monkeypatch
+) -> None:
+    """.pin_for_day() refuses a non-PENDING artifact -- a pin on it could never be honored."""
+    from algorand_shared.artifact_store import (
+        SELECTED,
+        Artifact,
+        insert_artifact,
+        mark_artifact_status,
+    )
+
+    artifact_id, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    mark_artifact_status(artifact_id, SELECTED)
+    artifact = Artifact.load(artifact_id)
+
+    assert artifact.pin_for_day("2026-08-28") is False
+
+
+def test_artifact_pin_and_clear_pin(fake_artifact_session: FakeArtifactSession) -> None:
+    """.pin_for_day() sets human_pick_day; .clear_pin() nulls it again."""
+    from algorand_shared.artifact_store import Artifact, insert_artifact
+
+    artifact_id, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    artifact = Artifact.load(artifact_id)
+
+    assert artifact.pin_for_day("2026-08-28") is True
+    assert fake_artifact_session.artifacts[artifact_id]["human_pick_day"] == "2026-08-28"
+
+    artifact.clear_pin()
+    assert fake_artifact_session.artifacts[artifact_id]["human_pick_day"] is None
+
+
+def test_artifact_set_venue_service_id(fake_artifact_session: FakeArtifactSession) -> None:
+    """.set_venue_service_id() backfills venue_service_id on the artifacts row."""
+    from algorand_shared.artifact_store import Artifact, insert_artifact
+
+    artifact_id, _ = insert_artifact(
+        service_id="xgov-proposal:101:voting", url=None, channel="crawler", content="proposal"
+    )
+    artifact = Artifact.load(artifact_id)
+
+    assert artifact.set_venue_service_id("xgov-algorand-co") is True
+    assert fake_artifact_session.artifacts[artifact_id]["venue_service_id"] == "xgov-algorand-co"

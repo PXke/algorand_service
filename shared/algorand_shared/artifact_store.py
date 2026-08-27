@@ -88,6 +88,43 @@ class Artifact:
         """`event_date` when extractable, else the fallback `created_at` (per the design's explicit fallback rule)."""
         return self.event_date or self.created_at
 
+    # -- convenience instance methods (2026-08-27) -------------------------
+    # Thin delegates to this module's own free functions -- one obvious way
+    # to act on an artifact you already hold, instead of every caller
+    # re-importing `mark_artifact_status`/etc. and passing `self.artifact_id`
+    # by hand. `Artifact` stays frozen (a point-in-time snapshot): none of
+    # these mutate `self` -- call `Artifact.load`/`get_artifact` again after
+    # if you need a fresh instance reflecting the new state.
+
+    def mark_composed(self) -> None:
+        """Transition to COMPOSED -- this artifact became a real article."""
+        mark_artifact_status(self.artifact_id, COMPOSED)
+
+    def mark_discarded(self) -> None:
+        """Transition to DISCARDED -- a gate permanently dropped this artifact."""
+        mark_artifact_status(self.artifact_id, DISCARDED)
+
+    def revert_to_pending(self) -> bool:
+        """Move back to PENDING -- only takes effect if currently SELECTED. Returns True iff it actually reverted."""
+        return revert_artifact_to_pending(self.artifact_id)
+
+    def pin_for_day(self, day: str) -> bool:
+        """Pin as the human pick for `day`. Refuses (returns False) unless this artifact is PENDING; clears any other pending artifact already pinned for the same day first."""
+        return pin_artifact_for_day(self.artifact_id, day)
+
+    def clear_pin(self) -> None:
+        """Clear a spent or superseded human pin."""
+        clear_artifact_pin(self.artifact_id)
+
+    def set_venue_service_id(self, venue_service_id: str) -> bool:
+        """Backfill this artifact's venue_service_id. Returns False for an unknown id."""
+        return set_artifact_venue_service_id(self.artifact_id, venue_service_id)
+
+    @classmethod
+    def load(cls, artifact_id: str) -> Artifact | None:
+        """Load one artifact by id, regardless of status. Alias for the module-level `get_artifact`, given as a classmethod so `Article`/`Artifact` share the same loading convention."""
+        return get_artifact(artifact_id)
+
 
 @dataclass(frozen=True)
 class ArtifactContent:
