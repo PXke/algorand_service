@@ -336,7 +336,7 @@ def insert_stored_article(
         # Claim the permanent URL slug at go-live. Held drafts deliberately do
         # NOT claim one: they may never publish, and a draft holding the clean
         # slug would push the real article to -2.
-        _claim_slug_for_feed(article_id, title, published_at, status=status)
+        _claim_slug_for_feed(article_id, title, published_at)
         invalidate_feed_first_page()
         return str(article_id), True
     return str(article_id), False
@@ -619,13 +619,17 @@ def _dual_write_recompose_transition(
         logger.warning("articles dual-write transition failed for %s", aid, exc_info=True)
 
 
-def _claim_slug_for_feed(
-    article_id: UUID, title: str, published_at: datetime, *, status: str = "published"
-) -> None:
-    """Assign a slug and set it on the `articles` row.
+def _claim_slug_for_feed(article_id: UUID, title: str, published_at: datetime) -> None:
+    """Assign a slug (ensure_article_slug now claims AND writes it onto `articles` in one step, 2026-08-27) and sync it onto the articles_by_tag index.
 
     Never raises: a missing slug degrades to a uuid URL, which still resolves,
-    so slug assignment must not be able to fail a publish.
+    so slug assignment must not be able to fail a publish. The articles_by_tag
+    dual-write remains this function's own job: tag-index rows for this
+    article (written by sync_tag_index at insert/transition time, BEFORE a
+    slug existed) need the same back-fill, or a tag-filtered feed page would
+    show this article with a permanently missing slug even after the main
+    feed already has it. slug is a non-key column on articles_by_tag, so this
+    is a plain per-tag UPDATE, not a delete+insert.
     """
     from algorand_shared.article_statements import ArticlesStmts
 
@@ -633,26 +637,16 @@ def _claim_slug_for_feed(
 
     try:
         slug = ensure_article_slug(article_id, title)
-        if slug:
-            session = get_cassandra_session()
-            session.execute(
-                ArticlesStmts.SET_SLUG,
-                (slug, status, published_at.year, published_at, article_id),
-            )
-            # articles_by_tag dual-write: the tag-index rows for this article
-            # (written by sync_tag_index at insert/transition time, BEFORE a
-            # slug existed) need the same back-fill, or a tag-filtered feed
-            # page would show this article with a permanently missing slug
-            # even after the main feed already has it. slug is a non-key
-            # column on articles_by_tag, so this is a plain per-tag UPDATE,
-            # not a delete+insert.
-            row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (article_id,)).one()
-            if row is not None:
-                from algorand_shared.article_tag_index import set_slug_in_tag_index
+        if not slug:
+            return
+        session = get_cassandra_session()
+        row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (article_id,)).one()
+        if row is not None:
+            from algorand_shared.article_tag_index import set_slug_in_tag_index
 
-                set_slug_in_tag_index(
-                    article_id, tags=list(row.tags or []), published_at=published_at, slug=slug
-                )
+            set_slug_in_tag_index(
+                article_id, tags=list(row.tags or []), published_at=published_at, slug=slug
+            )
     except Exception as exc:
         logger.warning("slug claim failed for %s: %s", article_id, exc)
 

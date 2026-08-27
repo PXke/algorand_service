@@ -15,7 +15,6 @@ import logging
 import re
 import unicodedata
 from collections.abc import Callable
-from datetime import UTC, datetime
 from uuid import UUID
 
 logger = logging.getLogger(__name__)
@@ -66,7 +65,8 @@ def _clamp(slug: str) -> str:
 def unique_slug(title: str, *, fallback: str, is_taken: Callable[[str], bool]) -> str:
     """A slug for `title` that no other article owns.
 
-    `is_taken` is the lookup against articles_by_slug. The base slug is tried
+    `is_taken` is the caller's own uniqueness lookup (currently a direct SAI
+    query against `articles.slug`, see `ensure_article_slug`). The base slug is tried
     first, then `-2`, `-3`, ... — one-based counting from the SECOND claimant,
     so the first article to use a title keeps the bare slug forever and later
     ones queue behind it. `fallback` (the article id) is used when the title
@@ -87,7 +87,7 @@ def unique_slug(title: str, *, fallback: str, is_taken: Callable[[str], bool]) -
 
 
 def ensure_article_slug(article_id: str | UUID, title: str) -> str | None:
-    """Claim a permanent URL slug for an article, or return the one it already has.
+    """Claim a permanent URL slug for an article AND write it onto the `articles` row, or return the one it already has. Returns None only if the article doesn't exist.
 
     Shared 2026-08-27 (was workers-only, `article_store.py`): the backend's
     review-approval publish path (`_publish_article_to_feed`) transitions a
@@ -103,35 +103,52 @@ def ensure_article_slug(article_id: str | UUID, title: str) -> str | None:
     this exact function so the claim logic can never diverge between them
     again.
 
-    Idempotent and safe under concurrency: the claim is a lightweight
-    transaction (IF NOT EXISTS), so two callers racing on the same title
-    cannot both take one slug — the loser tries the next suffix.
-    """
-    from algorand_shared.article_statements import ArticlesStmts
+    2026-08-27 (second change the same day): this used to only CLAIM a slug
+    in a separate `articles_by_slug` reverse-index table via an atomic
+    IF NOT EXISTS insert, leaving every one of its ~3 callers (`article_store.
+    _claim_slug_for_feed`, `admin/stores/cassandra._ensure_slug_on_live_row`,
+    `Article.ensure_slug`) independently responsible for re-reading the row
+    and writing the slug back onto it -- three separate copies of the same
+    write-back, any one of which could be skipped by a crash between the
+    claim and its own write-back, orphaning the claim forever (the exact
+    "no ORM, so nothing enforces the second half of a two-step write" pattern
+    behind this whole night's incidents). `articles_by_slug` is now gone
+    (migration 086) -- this checks uniqueness directly against `articles`
+    (SAI-indexed on `slug`) and does the write-back itself, in the SAME
+    call, using the row it already read to decide whether a slug was needed
+    at all. There is no longer a separate claim to lose track of. Callers
+    that still need to sync `articles_by_tag`'s denormalized slug copy do
+    their own follow-up read for that (a different concern -- a secondary,
+    self-healing index copy, not the canonical slug itself).
 
+    Trades away atomicity for simplicity: two callers racing on the exact
+    same slug text within the narrow window between the uniqueness check and
+    the write could theoretically both win. Accepted deliberately -- this
+    pipeline composes and publishes one article at a time (single compose
+    slot, 1-slot review queue, per-service cooldown), so that race is not a
+    real exposure here.
+    """
     from app.core.cassandra import get_cassandra_session
+
+    from algorand_shared.article_statements import ArticlesStmts
 
     aid = article_id if isinstance(article_id, UUID) else UUID(str(article_id))
     session = get_cassandra_session()
 
     existing = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
-    if existing and existing.slug:
+    if existing is None:
+        logger.warning("ensure_article_slug: no such article %s", aid)
+        return None
+    if existing.slug:
         return existing.slug
 
-    base = slugify(title) or str(aid)
-    for _attempt in range(50):
-        candidate = unique_slug(
-            title,
-            fallback=str(aid),
-            is_taken=lambda s: session.execute(ArticlesStmts.SLUG_TAKEN, (s,)).one() is not None,
-        )
-        applied = session.execute(
-            ArticlesStmts.CLAIM_SLUG, (candidate, aid, datetime.now(tz=UTC))
-        ).one()
-        # LWT returns [applied] — False means another caller took it first.
-        # The reverse-index claim above is the durable part; writing the slug
-        # back onto the owning `articles` row is the caller's job.
-        if applied is None or getattr(applied, "applied", True):
-            return candidate
-    logger.warning("could not claim a slug for %s (base=%s)", aid, base)
-    return None
+    candidate = unique_slug(
+        title,
+        fallback=str(aid),
+        is_taken=lambda s: session.execute(ArticlesStmts.GET_BY_SLUG, (s,)).one() is not None,
+    )
+    session.execute(
+        ArticlesStmts.SET_SLUG,
+        (candidate, existing.status, existing.year, existing.published_at, aid),
+    )
+    return candidate

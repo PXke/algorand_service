@@ -114,6 +114,7 @@ def test_publish_article_to_feed_stamps_release_time_not_compose_time(
     assert values["status"] == "published"
     assert values["published_at"] != compose_time
     assert before <= values["published_at"] <= after
+    assert values["slug"] == "a-real-slug"
     # The row's OLD (compose-time) partition is deleted, not left dangling.
     assert fake.articles_deletes == [("backlog", compose_time.year, compose_time, article_id)]
 
@@ -121,10 +122,12 @@ def test_publish_article_to_feed_stamps_release_time_not_compose_time(
     # an admin-approved article's row never carried its slug forward at
     # release at all, so IndexNow and the homepage fell back to the raw
     # uuid for every such article. The slug must be carried on release, and
-    # threaded through to the IndexNow ping.
-    assert len(fake.slug_updates) == 1
-    assert fake.slug_updates[0][0] == "a-real-slug"
-    assert fake.slug_updates[0][-1] == article_id
+    # threaded through to the IndexNow ping. 2026-08-27: ensure_article_slug
+    # no longer issues a separate UPDATE for an already-set slug (no claim
+    # needed, see its own docstring) -- the value is carried forward by the
+    # transition's own full-row INSERT (asserted above), so no slug_updates
+    # call is expected here.
+    assert fake.slug_updates == []
     assert pinged[0]["kwargs"]["slug"] == "a-real-slug"
 
 
@@ -220,7 +223,7 @@ def test_publish_article_to_feed_claims_a_slug_when_the_draft_never_had_one(
 def test_publish_article_to_feed_preserves_an_existing_slug(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A draft that already has a slug (the ordinary re-stamp case) is unaffected by the fix -- ensure_article_slug's existing-slug check is a plain read, no new claim attempted."""
+    """A draft that already has a slug (the ordinary re-stamp case) is unaffected by the fix -- ensure_article_slug's existing-slug check is a plain read, no new claim attempted, and (2026-08-27) no redundant write either: the value is carried forward by the transition's own full-row INSERT."""
     article_id = uuid4()
     row = _article_row(
         article_id, published_at=datetime.now(tz=UTC) - timedelta(hours=5), slug="already-set"
@@ -231,8 +234,9 @@ def test_publish_article_to_feed_preserves_an_existing_slug(
 
     store = AdminCassandraStore()
     assert store._publish_article_to_feed(str(article_id)) is True
-    assert len(fake.slug_updates) == 1
-    assert fake.slug_updates[0][0] == "already-set"
+    values = dict(zip(_ARTICLES_COLUMNS, fake.articles_inserts[0], strict=True))
+    assert values["slug"] == "already-set"
+    assert fake.slug_updates == []
 
 
 def test_publish_article_to_feed_refuses_a_duplicate_service(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1210,31 +1210,23 @@ class AdminCassandraStore:
         ]
 
     def _ensure_slug_on_live_row(self, aid: UUID, title: str) -> None:
-        """Claim the permanent URL slug for a row that is (or is becoming) publicly visible, then write it onto the `articles` row and its articles_by_tag index rows. No-op when the row already owns a slug (ensure_article_slug just returns it). Shared by review-approval publish and the un-draft restore -- every backend transition INTO status='published' must leave the row slugged, or it serves a bare-UUID URL forever (the 2026-08-27 slug=NULL bug class)."""
+        """Claim the permanent URL slug for a row that is (or is becoming) publicly visible (ensure_article_slug now writes it onto the `articles` row itself, 2026-08-27), then sync it onto the articles_by_tag index rows. No-op when the row already owns a slug (ensure_article_slug just returns it). Shared by review-approval publish and the un-draft restore -- every backend transition INTO status='published' must leave the row slugged, or it serves a bare-UUID URL forever (the 2026-08-27 slug=NULL bug class)."""
         from algorand_shared.article_statements import ArticlesStmts
         from algorand_shared.slugs import ensure_article_slug
 
         from app.core.cassandra import get_cassandra_session
 
-        session = get_cassandra_session()
         slug = ensure_article_slug(aid, title)
         if not slug:
             return
-        new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
-        if new_row is None:
-            return
-        session.execute(
-            ArticlesStmts.SET_SLUG,
-            (slug, new_row.status, new_row.year, new_row.published_at, aid),
-        )
-        full_row = session.execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
+        full_row = get_cassandra_session().execute(ArticlesStmts.GET_FULL_BY_ID, (aid,)).one()
         if full_row is not None:
             from algorand_shared.article_tag_index import set_slug_in_tag_index
 
             set_slug_in_tag_index(
                 aid,
                 tags=list(full_row.tags or []),
-                published_at=new_row.published_at,
+                published_at=full_row.published_at,
                 slug=slug,
             )
 

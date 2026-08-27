@@ -363,20 +363,6 @@ class ClassifierReviewStmts:
 
 
 # --------------------------------------------------------------------------- #
-# News article store (articles_by_id / articles_feed) — the read/write path the
-# public feed uses.
-# --------------------------------------------------------------------------- #
-class NewsStmts:
-    """Prepared statements for reader-facing article reads."""
-
-    # Slug -> article id. A single-partition read on the reverse index, never a
-    # scan of articles_by_id.
-    ID_BY_SLUG = _Stmt(
-        "SELECT article_id FROM algorand_platform.articles_by_slug WHERE slug = ?"
-    )
-
-
-# --------------------------------------------------------------------------- #
 # Chain tables written by the Conduit exporter (read-only here)
 # --------------------------------------------------------------------------- #
 class ChainStmts:

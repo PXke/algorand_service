@@ -174,7 +174,7 @@ class Article:
         )
 
     def ensure_slug(self) -> str | None:
-        """Claim a permanent slug if this article doesn't already have one. No-op read when it does."""
+        """Claim a permanent slug if this article doesn't already have one (ensure_article_slug writes it onto the `articles` row itself, 2026-08-27), then sync it onto the articles_by_tag index. No-op read when it already has one."""
         from app.core.cassandra import get_cassandra_session
 
         from algorand_shared.article_statements import ArticlesStmts
@@ -183,18 +183,15 @@ class Article:
         slug = ensure_article_slug(self.article_id, self.title)
         if not slug:
             return None
-        session = get_cassandra_session()
-        current = session.execute(ArticlesStmts.GET_BY_ID, (self.article_id,)).one()
-        if current is None:
-            return slug
-        session.execute(
-            ArticlesStmts.SET_SLUG,
-            (slug, current.status, current.year, current.published_at, self.article_id),
-        )
-        from algorand_shared.article_tag_index import set_slug_in_tag_index
+        full_row = get_cassandra_session().execute(ArticlesStmts.GET_FULL_BY_ID, (self.article_id,)).one()
+        if full_row is not None:
+            from algorand_shared.article_tag_index import set_slug_in_tag_index
 
-        set_slug_in_tag_index(
-            self.article_id, tags=list(self.tags or []), published_at=current.published_at, slug=slug
-        )
+            set_slug_in_tag_index(
+                self.article_id,
+                tags=list(self.tags or []),
+                published_at=full_row.published_at,
+                slug=slug,
+            )
         self.slug = slug
         return slug

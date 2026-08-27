@@ -147,17 +147,23 @@ class ArticlesStmts:
         "UPDATE algorand_platform.articles SET slug = ? "
         "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"
     )
-    # Reverse index for slug uniqueness/claiming (shared 2026-08-27 -- was
-    # workers-only `app.core.statements.ArticleStmts.SLUG_TAKEN`/`CLAIM_SLUG`;
-    # moved here alongside `ensure_article_slug` so backend's review-approval
-    # publish path can claim a slug too, not just workers' direct-publish
-    # path -- see `algorand_shared.slugs.ensure_article_slug`'s own docstring
-    # for the incident this fixes).
-    SLUG_TAKEN = _Stmt("SELECT article_id FROM algorand_platform.articles_by_slug WHERE slug = ?")
-    CLAIM_SLUG = _Stmt(
-        "INSERT INTO algorand_platform.articles_by_slug (slug, article_id, claimed_at) "
-        "VALUES (?, ?, ?) IF NOT EXISTS"
-    )
+    # Slug lookup/uniqueness check, direct against `articles` (migration 086 --
+    # replaces the separate articles_by_slug reverse-index table + its atomic
+    # IF NOT EXISTS claim). Same precedent 067_articles_consolidated.cql set
+    # for GET_FULL_BY_ID/article_id above: SAI supports point queries that
+    # don't include the partition key, so this is a direct single-round-trip
+    # lookup with no second table to keep in sync. Trades away
+    # articles_by_slug's one real advantage -- a genuinely atomic claim, so
+    # two concurrent writers could never both win the same slug text -- for
+    # removing an entire class of write-back drift (a claim recorded but
+    # never written back onto the owning article, orphaning it behind a
+    # future -2 suffix): accepted deliberately, since this pipeline composes
+    # and publishes one article at a time (single compose slot, 1-slot
+    # review queue, per-service cooldown), so two writers racing on the
+    # literal same slug text is not a real exposure here. Used both as
+    # ensure_article_slug's own is_taken check and as the public slug ->
+    # article_id URL resolver (was backend-only `NewsStmts.ID_BY_SLUG`).
+    GET_BY_SLUG = _Stmt("SELECT article_id FROM algorand_platform.articles WHERE slug = ?")
     # article_id alone doesn't locate a row (status/year/published_at are the
     # real partition/clustering key) -- the SAI index on article_id makes this
     # a direct single-round-trip lookup anyway (benchmarked, see the plan).

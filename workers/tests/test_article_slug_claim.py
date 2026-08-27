@@ -21,7 +21,7 @@ def test_publish_path_claims_a_slug() -> None:
     drain = Path(queue_drain_tasks.__file__).read_text(encoding="utf-8")
 
     # insert_stored_article claims only inside the publish_to_feed branch.
-    claim = "_claim_slug_for_feed(article_id, title, published_at, status=status)"
+    claim = "_claim_slug_for_feed(article_id, title, published_at)"
     assert claim in store
     # The claim must come AFTER the publish_to_feed guard, so a held draft
     # never takes a slug it may never use.

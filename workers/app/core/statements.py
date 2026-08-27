@@ -59,30 +59,8 @@ class _Stmt:
 
 
 # --------------------------------------------------------------------------- #
-# articles_by_slug / service_events
+# service_events
 # --------------------------------------------------------------------------- #
-class ArticleStmts:
-    """Prepared statements for articles_by_slug, the reverse slug-uniqueness index.
-
-    Article-table consolidation Phase 5: every read/write against
-    articles_by_id/articles_feed proper has moved onto the consolidated
-    `articles` table (see ArticlesStmts in algorand_shared.article_statements
-    and transition_article_status in algorand_shared.article_transitions),
-    and articles_by_id itself is dropped (migration 074). `articles_by_slug`
-    is a separate reverse-index table, untouched by that migration, still the
-    durable slug-uniqueness claim. The two former manual-tool translation-
-    clear statements that used to live here (workers/scratch/
-    backfill_stale_translations.py, fix_corrupted_pashto.py) targeted
-    articles_by_id and are gone with it -- a future similar incident needs a
-    new recipe against `articles`' own `translations` map column.
-    """
-
-    # Slug claim (migration 056) moved to
-    # algorand_shared.article_statements.ArticlesStmts (2026-08-27), shared
-    # with backend's review-approval publish path -- see
-    # algorand_shared.slugs.ensure_article_slug.
-
-
 class ServiceEventStmts:
     """Prepared statements for service-triggered events."""
 

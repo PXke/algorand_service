@@ -176,13 +176,14 @@ class CassandraArticleStore:
 
     def id_for_slug(self, slug: str) -> str | None:
         """Article id owning this permanent URL slug, or None."""
+        from algorand_shared.article_statements import ArticlesStmts
+
         from app.core.cassandra import get_cassandra_session
-        from app.core.statements import NewsStmts
 
         clean = (slug or "").strip().lower()
         if not clean:
             return None
-        row = get_cassandra_session().execute(NewsStmts.ID_BY_SLUG, (clean,)).one()
+        row = get_cassandra_session().execute(ArticlesStmts.GET_BY_SLUG, (clean,)).one()
         return str(row.article_id) if row and row.article_id else None
 
     def get(
