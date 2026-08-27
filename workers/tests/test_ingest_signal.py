@@ -1,6 +1,12 @@
 """Date-only content changes hash the same (must not trigger a re-publish)."""
 
-from app.modules.newspaper.ingest_signal import _stable_content_hash, _strip_repeating_row_blocks
+import pytest
+
+from app.modules.newspaper.ingest_signal import (
+    _insert_artifact_for_signal,
+    _stable_content_hash,
+    _strip_repeating_row_blocks,
+)
 
 _NFD_SALES_TABLE = """Recent sales
 The latest primary and secondary NFD sales
@@ -109,3 +115,111 @@ def test_strip_repeating_row_blocks_handles_variable_period_screener() -> None:
     )
     other_values = screener.replace("+6%", "+9%").replace("ORA", "ZETA").replace("10\n", "20\n")
     assert _stable_content_hash(screener) == _stable_content_hash(other_values)
+
+
+# --------------------------------------------------------------------------- #
+# _insert_artifact_for_signal -- crawler-channel venue_service_id resolution
+# --------------------------------------------------------------------------- #
+
+
+def _patch_insert_artifact(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "algorand_shared.artifact_store.insert_artifact",
+        lambda **kw: calls.append(kw) or ("new-artifact-id", True),
+    )
+    monkeypatch.setattr(
+        "app.modules.gatekeeper.fact_align.event_anchor_date", lambda **_kw: None
+    )
+    return calls
+
+
+def _insert_signal(**overrides: object) -> dict:
+    kwargs = {
+        "service_id": "forum-algorand-co",
+        "source_url": "https://forum.algorand.co/latest",
+        "page_title": "t",
+        "page_text": "body",
+        "source_kind": None,
+        "display_name": "Algorand Forum",
+        "match_kind": "domain",
+        "match_value": "forum.algorand.co",
+        "published_at": "",
+        "queue_payload": {},
+    }
+    kwargs.update(overrides)
+    _insert_artifact_for_signal(**kwargs)
+
+
+def test_crawler_channel_resolves_venue_from_an_established_domain_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression pin: a plain crawler-channel artifact minted from a fresh crawl of forum.algorand.co (service_id 'forum-algorand-co') must get venue_service_id populated with the domain's REAL, differently-named, established owner ('algorand-forum') at insert time -- no source_kind maps to the default 'crawler' channel."""
+    calls = _patch_insert_artifact(monkeypatch)
+    monkeypatch.setattr(
+        "app.modules.newspaper.service_sources.venue_owner_for_url",
+        lambda url, *, own_service_id: "algorand-forum"
+        if (url, own_service_id) == ("https://forum.algorand.co/latest", "forum-algorand-co")
+        else "",
+    )
+
+    _insert_signal()
+
+    assert len(calls) == 1
+    assert calls[0]["service_id"] == "forum-algorand-co"
+    assert calls[0]["venue_service_id"] == "algorand-forum"
+    assert calls[0]["channel"] == "crawler"
+
+
+def test_crawler_channel_stays_none_for_a_genuinely_new_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No regression: a domain with no established reverse-index owner (a real new-service discovery) still gets venue_service_id=None, exactly like before this fix."""
+    calls = _patch_insert_artifact(monkeypatch)
+    monkeypatch.setattr(
+        "app.modules.newspaper.service_sources.venue_owner_for_url", lambda *_a, **_kw: ""
+    )
+
+    _insert_signal(service_id="brand-new-project-example", source_url="https://brand-new-project.example/")
+
+    assert len(calls) == 1
+    assert calls[0]["venue_service_id"] is None
+
+
+def test_explicit_venue_service_id_is_never_overridden_by_the_domain_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lane that already passed its own venue_service_id (forum/xgov/youtube/bluesky) must win outright -- the generic domain-owner resolution only ever fills in an UNSET value, never second-guesses an explicit one."""
+    calls = _patch_insert_artifact(monkeypatch)
+    resolver_called = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.service_sources.venue_owner_for_url",
+        lambda *a, **kw: resolver_called.append((a, kw)) or "should-never-be-used",
+    )
+
+    _insert_signal(
+        service_id="forum-topic:15288",
+        source_kind="forum",
+        venue_service_id="algorand-forum",
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["venue_service_id"] == "algorand-forum"
+    assert resolver_called == []
+
+
+def test_non_crawler_channel_never_triggers_the_domain_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The domain-owner resolution is scoped to the generic 'crawler' channel only -- a channel like 'mail' with no venue_service_id set must not even call the resolver."""
+    calls = _patch_insert_artifact(monkeypatch)
+    resolver_called = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.service_sources.venue_owner_for_url",
+        lambda *a, **kw: resolver_called.append((a, kw)) or "unexpected",
+    )
+
+    _insert_signal(service_id="some-mail-service", source_kind="mail", source_url="")
+
+    assert len(calls) == 1
+    assert calls[0]["channel"] == "mail"
+    assert calls[0]["venue_service_id"] is None
+    assert resolver_called == []

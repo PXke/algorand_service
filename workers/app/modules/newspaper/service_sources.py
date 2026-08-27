@@ -75,6 +75,56 @@ def service_for_domain(domain: str) -> str:
     return str(row.service_id) if row and row.service_id else ""
 
 
+def venue_owner_for_url(url: str, *, own_service_id: str) -> str:
+    """The service_id that actually OWNS this URL's registrable domain per the by-domain reverse index -- but ONLY when that owner is a DIFFERENT service than `own_service_id` itself. Returns "" when the domain is unresolvable/unclaimed, or already owned by `own_service_id` (nothing to correct either way).
+
+    This is the artifact-level counterpart to `domain_tracker.
+    ensure_monitored_service`'s own registry-level dedup guard: that function
+    stops a SECOND `service_registry` row from being spawned for a domain
+    another service already owns, but only at the moment a domain is first
+    approved/registered. It can't retroactively fix an artifact whose own
+    `service_id` was already minted before the reverse index knew better (a
+    race, or a legacy/seeded service whose `add_web_source` claim never ran
+    -- see `service_reconciliation`'s bug-class-1 docstring), which is
+    exactly the shape of a plain "crawler"-channel artifact discovered
+    against a domain that turns out to already be a well-covered, distinctly
+    -named venue (root-caused 2026-08-2x: forum.algorand.co discovered
+    fresh as "forum-algorand-co" despite forum.algorand.co already being the
+    established "algorand-forum" venue).
+
+    Shared by two call sites that both need this exact same "is this
+    artifact's own domain secretly owned by someone else" check:
+    `ingest_signal._insert_artifact_for_signal` (at artifact-creation time,
+    for the generic "crawler" channel) and `service_reconciliation.
+    backfill_missing_venue_service_ids` (the periodic safety net for
+    anything that landed before that creation-time check existed, or before
+    the reverse index itself was corrected).
+
+    Checks the URL's EXACT host first, then its collapsed registrable
+    domain (`domain_from_url`'s eTLD+1) as a fallback -- in that order,
+    never the reverse. `domain_from_url`'s subdomain collapse is a generic
+    heuristic (it has no way to know forum.algorand.co is deliberately its
+    own distinct "algorand-forum" venue rather than part of "algorand.co"'s
+    own site), while a `service_registry` domain claim -- seeded or
+    admin-curated -- is keyed on whatever exact string that entry declared,
+    which for such a deliberate subdomain-carve-out IS the full host, not
+    the collapsed parent. Checking the exact host first means a real
+    override like that resolves correctly without the parent domain's own
+    (unrelated) owner ever being consulted; checking the collapsed domain
+    second is what makes this fall back correctly for the ordinary
+    (unclaimed-subdomain) case. See `domain_tracker.full_host_from_url`.
+    """
+    from app.modules.crawler.domain_tracker import domain_from_url, full_host_from_url
+
+    if not url or not own_service_id:
+        return ""
+    for candidate in dict.fromkeys(d for d in (full_host_from_url(url), domain_from_url(url)) if d):
+        owner = service_for_domain(candidate)
+        if owner and owner != own_service_id:
+            return owner
+    return ""
+
+
 def merge_services(*, target_service_id: str, source_service_ids: list[str]) -> dict:
     """Fold whole services into ``target_service_id``: their sources move over, their domains re-point, and the emptied services are DISABLED in the registry (not deleted — audit trail + snapshots keep their history). Mirrors the backend admin store's merge_services (kept in sync manually) — added here so the worker side can auto-merge a service whose scrape resolved to a domain a DIFFERENT service already owns (e.g. a rebrand redirect), not just the admin's manual "merge duplicates" action."""
     import contextlib

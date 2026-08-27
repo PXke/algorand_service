@@ -242,7 +242,11 @@ def _pending(artifact_id: str, service_id: str, channel: str, url: str = "", ven
 
 
 def _patch_backfill(
-    monkeypatch: pytest.MonkeyPatch, *, pending: list, enabled_ids: set[str]
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pending: list,
+    enabled_ids: set[str],
+    domain_owners: dict[str, str] | None = None,
 ) -> list[tuple[str, str]]:
     monkeypatch.setattr(
         "algorand_shared.artifact_store.list_pending_artifacts", lambda: pending
@@ -255,6 +259,13 @@ def _patch_backfill(
     monkeypatch.setattr(
         "app.modules.chain_tail.registry_cache.load_enabled_services",
         lambda: tuple(SimpleNamespace(service_id=sid) for sid in enabled_ids),
+    )
+    # Defaults to "no owner found for anything" -- the plain-crawler-channel
+    # domain-duplicate branch (see venue_owner_for_url) must stay a no-op for
+    # every test that doesn't explicitly care about it, exactly like today.
+    monkeypatch.setattr(
+        "app.modules.newspaper.service_sources.service_for_domain",
+        lambda domain: (domain_owners or {}).get(domain, ""),
     )
     return calls
 
@@ -344,7 +355,7 @@ def test_backfill_skips_artifacts_that_already_have_a_venue_service_id(
 
 
 def test_backfill_leaves_plain_web_crawl_artifacts_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A plain crawl diff has no venue distinct from its own service_id and no ':' in it -- not backfilled, not flagged."""
+    """A plain crawl diff whose domain is unclaimed (no reverse-index owner at all) has no venue distinct from its own service_id -- not backfilled, not flagged. No regression for a genuinely new domain/service."""
     pending = [_pending("a1", "algorand-co", "crawler", url="https://algorand.co/blog/post")]
     calls = _patch_backfill(monkeypatch, pending=pending, enabled_ids=set())
 
@@ -352,6 +363,66 @@ def test_backfill_leaves_plain_web_crawl_artifacts_alone(monkeypatch: pytest.Mon
 
     assert result == {"backfilled": [], "flagged": []}
     assert calls == []
+
+
+def test_backfill_leaves_a_self_owned_crawler_domain_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The URL's domain IS claimed in the reverse index, but by this same artifact's own service_id -- already correct, nothing to backfill."""
+    pending = [_pending("a1", "algorand-co", "crawler", url="https://algorand.co/blog/post")]
+    calls = _patch_backfill(
+        monkeypatch, pending=pending, enabled_ids=set(), domain_owners={"algorand.co": "algorand-co"}
+    )
+
+    result = backfill_missing_venue_service_ids()
+
+    assert result == {"backfilled": [], "flagged": []}
+    assert calls == []
+
+
+def test_backfill_crawler_channel_domain_duplicate_resolves_to_established_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression pin: a plain 'crawler'-channel artifact minted its own service_id from a fresh domain crawl (forum-algorand-co), but the domain is actually already owned by a distinctly-named, established venue (algorand-forum) in the reverse index -- bug class 1 leaking into bug class 2's blind spot. Backfilled to the real owner, not flagged, not left alone."""
+    pending = [
+        _pending("a1", "forum-algorand-co", "crawler", url="https://forum.algorand.co/latest")
+    ]
+    calls = _patch_backfill(
+        monkeypatch,
+        pending=pending,
+        enabled_ids=set(),
+        domain_owners={"forum.algorand.co": "algorand-forum"},
+    )
+
+    result = backfill_missing_venue_service_ids()
+
+    assert calls == [("a1", "algorand-forum")]
+    assert result["backfilled"] == [
+        {"artifact_id": "a1", "service_id": "forum-algorand-co", "venue_service_id": "algorand-forum"}
+    ]
+    assert result["flagged"] == []
+
+
+def test_backfill_xgov_url_shape_wins_over_the_generic_domain_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An xGov-shaped crawler URL is claimed by the xGov branch even when the generic domain-owner check would also have found (a different) owner -- branch order/precedence must not regress."""
+    from app.core import config
+
+    pending = [
+        _pending(
+            "a1", "xgov-proposal:42:funded", "crawler", url="https://xgov.algorand.co/proposals/42"
+        )
+    ]
+    calls = _patch_backfill(
+        monkeypatch,
+        pending=pending,
+        enabled_ids=set(),
+        domain_owners={"xgov.algorand.co": "some-other-id"},
+    )
+
+    result = backfill_missing_venue_service_ids()
+
+    assert calls == [("a1", config.XGOV_VENUE_SERVICE_ID)]
+    assert result["backfilled"][0]["venue_service_id"] == config.XGOV_VENUE_SERVICE_ID
 
 
 # --------------------------------------------------------------------------- #

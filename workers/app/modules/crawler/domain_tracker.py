@@ -294,17 +294,23 @@ def url_recently_rejected(url: str) -> bool:
         return False
 
 
-def domain_from_url(url: str) -> str:
-    """Registrable domain (eTLD+1) for a URL — collapses subdomains.
+def full_host_from_url(url: str) -> str:
+    """Exact hostname for a URL, with NO eTLD+1/platform-suffix collapsing -- shares domain_from_url's own URL-shape normalization (the browser:// SPA-engine prefix, a bare hostname with no scheme) but stops right after parsing the host, before any subdomain is folded into its registrable parent.
 
-    e.g. xgov.algorand.co / www.algorand.co / algorand.co -> "algorand.co".
-    Treating subdomains as one domain stops the frontier from spawning a
-    separate source per subdomain (xgov./specs./dev.algorand.co), which would
-    otherwise each compose its own near-duplicate article.
+    Needed because the registrable-domain collapse `domain_from_url` applies
+    below is a GENERIC heuristic, not authoritative: a `service_registry`
+    entry (seeded or admin-curated) can deliberately claim an exact
+    subdomain as its own distinct venue -- e.g. "forum.algorand.co" is its
+    own `algorand-forum` service, content-wise distinct from "algorand.co"'s
+    own marketing site, even though `domain_from_url`'s own suffix lists
+    have no way to know that and would otherwise collapse it into
+    "algorand.co". `service_sources.venue_owner_for_url` checks this exact
+    host FIRST (a deliberate override, when one exists, is always keyed on
+    it) before falling back to the collapsed domain for the ordinary case.
     """
     raw = url.strip()
     # SPA sources are registered as browser://https://… — strip the engine prefix
-    # so the eTLD+1 resolves to the real host (else urlparse reads it as "https").
+    # so the host resolves to the real one (else urlparse reads it as "https").
     low = raw.lower()
     if low.startswith("browser://http://") or low.startswith("browser://https://"):
         raw = raw[len("browser://") :]
@@ -320,8 +326,19 @@ def domain_from_url(url: str) -> str:
         # returning "" -- only strings that already look host-shaped gain a
         # scheme here.
         raw = f"https://{raw}"
-    parsed = urlparse(raw)
-    host = (parsed.hostname or "").lower().strip(".")
+    return (urlparse(raw).hostname or "").lower().strip(".")
+
+
+def domain_from_url(url: str) -> str:
+    """Registrable domain (eTLD+1) for a URL — collapses subdomains.
+
+    e.g. xgov.algorand.co / www.algorand.co / algorand.co -> "algorand.co".
+    Treating subdomains as one domain stops the frontier from spawning a
+    separate source per subdomain (xgov./specs./dev.algorand.co), which would
+    otherwise each compose its own near-duplicate article. See
+    `full_host_from_url` for the same URL parsed WITHOUT this collapse.
+    """
+    host = full_host_from_url(url)
     if not host:
         return ""
     labels = host.split(".")

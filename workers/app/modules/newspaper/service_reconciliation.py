@@ -20,6 +20,19 @@ _artifact_pool`). This module's `backfill_missing_venue_service_ids` is the
 safety net for anything that still lands without it (an artifact inserted
 before that fix deployed, or a future lane that forgets to pass it).
 
+2026-08-27: bug class 1 can also leak INTO bug class 2's blind spot for the
+generic "crawler" channel -- a domain crawl mints its OWN service_id (not a
+per-item one) straight from the domain, so it looks nothing like the
+per-item shapes above, but if the reverse index didn't yet know that domain
+belonged to a different, already-established venue (bug class 1's own
+precondition), the resulting artifact is just as misclassified as any
+per-item one. `ingest_signal._insert_artifact_for_signal` now checks
+`service_sources.venue_owner_for_url` at insert time so this can't happen
+for anything created from here on; `backfill_missing_venue_service_ids`
+gained the matching branch as the safety net for what already landed
+without it (root-caused 2026-08-2x: forum.algorand.co / "forum-algorand-co"
+vs the real "algorand-forum" -- see that function's own docstring).
+
 Both scans are read-mostly and cheap (bounded by the enabled service
 registry / the pending-artifact index, mirroring `artifact_priority.
 sweep_artifact_priorities`'s own scope), and every auto-action they take is
@@ -190,6 +203,21 @@ def backfill_missing_venue_service_ids() -> dict[str, object]:
       - channel in {"youtube", "bluesky"} AND the service_id splits as
         "<venue>:<item>" AND <venue> is itself a real, ENABLED
         service_registry row -> that <venue>.
+      - channel == "crawler" (anything not already claimed by the xGov case
+        above) AND the URL's registrable domain is owned, in the
+        service_sources by-domain reverse index, by a DIFFERENT service_id
+        -> that owner (see `service_sources.venue_owner_for_url`). This is
+        the bug-class-1-into-bug-class-2 case: a plain domain crawl minted
+        its own service_id before the reverse index knew the domain was
+        already an established, differently-named venue (root-caused
+        2026-08-2x: forum.algorand.co / "forum-algorand-co" vs the real
+        "algorand-forum"). `ingest_signal._insert_artifact_for_signal`
+        now resolves this at INSERT time for anything created from here on;
+        this branch is the safety net for whatever landed before that
+        existed (like the live forum-algorand-co artifact itself) -- it
+        only backfills once the reverse index has actually been corrected
+        (e.g. by re-seeding the legacy service's own domain claim), never
+        guesses at one.
 
     Anything else that still looks like it might need one (a service_id
     containing ":" on a channel not covered above) is left untouched and
@@ -203,6 +231,7 @@ def backfill_missing_venue_service_ids() -> dict[str, object]:
 
     from app.core import config
     from app.modules.chain_tail.registry_cache import load_enabled_services
+    from app.modules.newspaper.service_sources import venue_owner_for_url
 
     enabled_ids = {entry.service_id for entry in load_enabled_services()}
 
@@ -226,6 +255,8 @@ def backfill_missing_venue_service_ids() -> dict[str, object]:
             candidate = service_id.rsplit(":", 1)[0]
             if candidate in enabled_ids:
                 venue = candidate
+        elif channel == "crawler":
+            venue = venue_owner_for_url(artifact.url or "", own_service_id=service_id) or None
 
         if venue:
             set_artifact_venue_service_id(artifact.artifact_id, venue)

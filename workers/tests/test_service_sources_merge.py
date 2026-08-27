@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.modules.newspaper.service_sources import merge_services
+from app.modules.newspaper.service_sources import merge_services, venue_owner_for_url
 
 
 def test_merge_moves_sources_and_repoints_domain(fake_cassandra_session: MagicMock) -> None:
@@ -104,3 +104,60 @@ def test_merge_does_not_clobber_target_snapshot_that_already_exists(
         if c.args[0] is _FakeSnapshotStmts.INSERT
     ]
     assert insert_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# venue_owner_for_url -- the artifact-creation-time domain-duplicate check
+# --------------------------------------------------------------------------- #
+
+
+def test_venue_owner_for_url_resolves_to_a_different_established_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The URL's domain is owned, in the reverse index, by a DIFFERENT service than the caller's own -- that owner is the real venue (the forum.algorand.co / algorand-forum regression pin)."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.service_sources.service_for_domain",
+        lambda domain: "algorand-forum" if domain == "forum.algorand.co" else "",
+    )
+    assert (
+        venue_owner_for_url(
+            "https://forum.algorand.co/latest", own_service_id="forum-algorand-co"
+        )
+        == "algorand-forum"
+    )
+
+
+def test_venue_owner_for_url_is_a_noop_when_the_domain_owns_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller's own service_id already IS the reverse-index owner -- nothing to correct."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.service_sources.service_for_domain",
+        lambda domain: "algorand-co" if domain == "algorand.co" else "",
+    )
+    assert venue_owner_for_url("https://algorand.co/blog/post", own_service_id="algorand-co") == ""
+
+
+def test_venue_owner_for_url_is_a_noop_when_the_domain_is_unclaimed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely new, never-before-seen domain has no reverse-index owner at all -- no regression for real new-service discovery."""
+    monkeypatch.setattr("app.modules.newspaper.service_sources.service_for_domain", lambda _d: "")
+    assert (
+        venue_owner_for_url("https://brand-new-project.example/", own_service_id="brand-new-project-example")
+        == ""
+    )
+
+
+def test_venue_owner_for_url_handles_missing_url_or_service_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No URL or no own service_id -- nothing to resolve, and service_for_domain must never even be called."""
+    calls = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.service_sources.service_for_domain",
+        lambda d: calls.append(d) or "",
+    )
+    assert venue_owner_for_url("", own_service_id="some-service") == ""
+    assert venue_owner_for_url("https://example.com/", own_service_id="") == ""
+    assert calls == []

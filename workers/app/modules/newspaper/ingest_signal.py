@@ -254,7 +254,10 @@ def ingest_publish_signal(
     a well-covered venue is correctly pool-classified as UPDATE_POOL rather
     than permanently occupying the guaranteed NEW_SERVICE_POOL floor. None
     (the default) for every other lane, whose own ``service_id`` already IS
-    its venue.
+    its venue -- except the generic "crawler" channel, which resolves its
+    own venue automatically at insert time when the domain reverse index
+    disagrees with this call's own ``service_id`` (see
+    ``_insert_artifact_for_signal`` / ``service_sources.venue_owner_for_url``).
     """
     from app.modules.ai.content_signals import compute_content_signals
     from app.modules.crawler.domain_tracker import url_recently_rejected
@@ -497,11 +500,38 @@ def _insert_artifact_for_signal(
     if anchor is not None:
         event_date = datetime(anchor.year, anchor.month, anchor.day, tzinfo=UTC)
 
+    channel = _channel_for_source_kind(source_kind)
+    # Bug-class-1-into-bug-class-2 fix (2026-08-27): the per-item lanes
+    # (forum/xgov/youtube/bluesky) already pass their own venue_service_id
+    # explicitly above -- this only ever fires when a caller left it unset.
+    # The generic "crawler" channel (a plain domain crawl/service-watch
+    # diff) never has a per-item id problem, but it CAN have a duplicate-
+    # domain problem: `domain_tracker.ensure_monitored_service`'s own dedup
+    # guard only stops a SECOND `service_registry` row from being minted for
+    # an already-owned domain when the reverse index (service_sources.
+    # service_for_domain) was actually populated at approval time. A legacy/
+    # seeded service whose own `add_web_source` claim never ran (see
+    # service_reconciliation's bug-class-1 docstring) leaves that domain
+    # looking unclaimed, so a later fresh crawl of the SAME real-world venue
+    # mints a third, differently-named service_id for content that's
+    # already well covered under another name -- root-caused 2026-08-2x:
+    # forum.algorand.co discovered fresh as "forum-algorand-co" despite
+    # forum.algorand.co already being the established "algorand-forum"
+    # venue. Checking the reverse index again here, at artifact-creation
+    # time, catches that case (and any future one shaped like it) as soon as
+    # the index is correct, without needing to touch
+    # `to_compose_selection._artifact_pool` itself -- see
+    # `service_sources.venue_owner_for_url`.
+    if not venue_service_id and channel == "crawler":
+        from app.modules.newspaper.service_sources import venue_owner_for_url
+
+        venue_service_id = venue_owner_for_url(source_url, own_service_id=service_id) or None
+
     insert_artifact(
         service_id=service_id or None,
         venue_service_id=venue_service_id or None,
         url=source_url or None,
-        channel=_channel_for_source_kind(source_kind),
+        channel=channel,
         content=page_text,
         title=page_title,
         metadata={
