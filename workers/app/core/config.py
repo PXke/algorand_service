@@ -331,7 +331,14 @@ DEEPSEEK_API_BASE = env_str("DEEPSEEK_API_BASE", "https://api.deepseek.com").rst
 DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-v4-flash-vision-exp")
 DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-v4-flash-vision-exp")
 DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-chat")
-DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-chat")
+# "deepseek-chat" is a legacy alias DeepSeek's current docs no longer list
+# (still resolves as of 2026-08-26, but the local->DeepSeek translation
+# switch below is about to send 7x the translate call volume this account
+# has ever sent through it -- not worth relying on an undocumented alias at
+# that scale). Pinned to the same dated model string DEEPSEEK_MODEL_WRITER/
+# RESEARCH already use (minus the vision variant -- translate never sees an
+# image tool result, see the comment above those two).
+DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-v4-flash")
 # Per-language override: languages in this list translate via DeepSeek
 # (translate_article) instead of the local CPU engines, independent
 # of LLM_PROVIDER_TRANSLATE's global mistral/deepseek routing. Multi-article
@@ -344,8 +351,25 @@ DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-chat")
 # usage that day totaled 16 cents), so there's no cost reason to keep a
 # language on a confirmed-broken local path. Comma-separated language codes;
 # empty entries ignored.
+#
+# Widened to all 8 languages (2026-08-26 investigation): measured
+# side-by-side on the live corpus, DeepSeek beat local MiLMMT-46-4B-v1.0 on
+# structural quality (fewer ungrounded digits/missing links, perfect
+# block-alignment vs local's mismatches) at ~4 min/article vs ~40 min, with
+# near-zero local CPU freed up on a box that shares hardware with a mainnet
+# Algorand node (447-528% CPU contention observed). Real DeepSeek cost is
+# ~$0.0385/article/language at peak-hour pricing, ~$0.0192 off-peak (DeepSeek
+# bills off-peak at exactly half) -- see peak_hours-gated
+# _run_deepseek_translations in publish_tasks.py, which confines this
+# provider's translation calls to off-peak hours specifically to lock in the
+# cheaper rate (owner condition for approving this switch). The local engines
+# stay fully wired and ungated -- removing a language from this set (or
+# emptying it via env) routes it straight back to MiLMMT with no other code
+# change, so this remains a real fallback, not a one-way door.
 DEEPSEEK_TRANSLATE_LANGS = frozenset(
-    lang.strip() for lang in env_str("DEEPSEEK_TRANSLATE_LANGS", "ps").split(",") if lang.strip()
+    lang.strip()
+    for lang in env_str("DEEPSEEK_TRANSLATE_LANGS", "ps,ar,fa,ru,zh,hi,es,fr").split(",")
+    if lang.strip()
 )
 # The LLM quality rubric (article_quality_llm.py) shares the research-tier
 # Mistral model but gets its OWN provider knob, separate from research's

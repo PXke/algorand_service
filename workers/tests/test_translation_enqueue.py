@@ -110,6 +110,11 @@ def test_translate_batch_task_persists_and_pings_per_language(
     """The task's on_language_done callback writes to Cassandra and fires the IndexNow ping per language -- same two side effects the retired per-language task had, now reached from inside the batch."""
     from app.modules.ai import local_translate
 
+    # Pin to the local engine specifically -- DEEPSEEK_TRANSLATE_LANGS now
+    # defaults to all 8 languages (2026-08-26), so fa/ru would otherwise
+    # route to DeepSeek instead of the local_translate stub this test wires.
+    monkeypatch.setattr("app.core.config.DEEPSEEK_TRANSLATE_LANGS", frozenset())
+
     written: list[tuple[str, dict]] = []
     pinged: list[str] = []
 
@@ -151,6 +156,10 @@ def test_translate_batch_task_tracks_session_lifecycle_per_language(
 ) -> None:
     """The task starts a translation_session before each language and finishes it 'ok'/'error' to match -- the session store's stale-reaper depends on every started row eventually being closed by the SAME task that opened it."""
     from app.modules.ai import local_translate
+
+    # Pin to the local engine specifically -- see the same note in
+    # test_translate_batch_task_persists_and_pings_per_language above.
+    monkeypatch.setattr("app.core.config.DEEPSEEK_TRANSLATE_LANGS", frozenset())
 
     def _fake_batch(
         *,
@@ -264,6 +273,10 @@ def test_translate_batch_task_reports_partial_on_any_failure(
     """Status is "partial", not "ok", when the batch's failed dict is non-empty."""
     from app.modules.ai import local_translate
 
+    # Pin to the local engine specifically -- see the same note in
+    # test_translate_batch_task_persists_and_pings_per_language above.
+    monkeypatch.setattr("app.core.config.DEEPSEEK_TRANSLATE_LANGS", frozenset())
+
     monkeypatch.setattr(
         local_translate,
         "translate_article_batch",
@@ -277,3 +290,102 @@ def test_translate_batch_task_reports_partial_on_any_failure(
     result = pt.translate_article_batch_task("article-1", ["fa", "ru"])
     assert result["status"] == "partial"
     assert result["failed"] == {"ru": "translation_error"}
+
+
+def test_translate_batch_task_defers_deepseek_langs_when_peak_hours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DeepSeek-routed languages are deferred (not attempted, not persisted, not marked failed) when is_off_peak_now() is False, mirroring _require_off_peak's "stays missing, retried next time" semantics -- local languages in the SAME batch proceed regardless of time of day."""
+    from app.modules.ai import local_translate
+
+    monkeypatch.setattr("app.core.config.DEEPSEEK_TRANSLATE_LANGS", frozenset({"ps", "ar"}))
+    monkeypatch.setattr(pt, "is_off_peak_now", lambda: False)
+
+    def _fail_if_called(**_kw: object) -> dict[str, str]:
+        raise AssertionError("DeepSeek must not be called while peak-hours-deferred")
+
+    monkeypatch.setattr(pt, "_translate_one_lang_via_deepseek", _fail_if_called)
+    monkeypatch.setattr(
+        local_translate,
+        "translate_article_batch",
+        lambda *, target_languages, **_kw: {"ok": list(target_languages), "failed": {}},
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.get_article",
+        lambda _id: SimpleNamespace(title="T", summary="S", body="B", translations={}),
+    )
+    written: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.update_article_translations",
+        lambda article_id, translations: written.append((article_id, translations)),
+    )
+
+    result = pt.translate_article_batch_task("article-1", ["fa", "ps", "ar"])
+    assert result["status"] == "partial"
+    assert result["ok"] == ["fa"]
+    assert result["failed"] == {}
+    assert set(result["deferred_peak_hours"]) == {"ps", "ar"}
+    assert not any("ps" in translations or "ar" in translations for _id, translations in written)
+
+
+def test_translate_batch_task_runs_deepseek_langs_when_off_peak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DeepSeek-routed languages run normally, with nothing deferred, once is_off_peak_now() is True."""
+    from app.modules.ai import local_translate
+
+    monkeypatch.setattr("app.core.config.DEEPSEEK_TRANSLATE_LANGS", frozenset({"ps"}))
+    monkeypatch.setattr(pt, "is_off_peak_now", lambda: True)
+    monkeypatch.setattr(
+        pt,
+        "_translate_one_lang_via_deepseek",
+        lambda **_kw: {"title": "t", "summary": "s", "body": "b"},
+    )
+    monkeypatch.setattr(
+        local_translate,
+        "translate_article_batch",
+        lambda *, target_languages, **_kw: {"ok": list(target_languages), "failed": {}},
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.get_article",
+        lambda _id: SimpleNamespace(title="T", summary="S", body="B", translations={}),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.update_article_translations", lambda *_a, **_k: None
+    )
+
+    result = pt.translate_article_batch_task("article-1", ["fa", "ps"])
+    assert result["status"] == "ok"
+    assert set(result["ok"]) == {"fa", "ps"}
+    assert result["deferred_peak_hours"] == []
+
+
+def test_translate_batch_task_local_only_batch_ignores_peak_hours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch with no DeepSeek-routed languages never even consults is_off_peak_now -- local translation has no cost-driven reason to wait and must never be gated by DeepSeek's billing schedule."""
+    from app.modules.ai import local_translate
+
+    monkeypatch.setattr("app.core.config.DEEPSEEK_TRANSLATE_LANGS", frozenset())
+
+    def _fail_if_called() -> bool:
+        raise AssertionError("a local-only batch must not consult the peak-hours gate at all")
+
+    monkeypatch.setattr(pt, "is_off_peak_now", _fail_if_called)
+    monkeypatch.setattr(
+        local_translate,
+        "translate_article_batch",
+        lambda *, target_languages, **_kw: {"ok": list(target_languages), "failed": {}},
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.get_article",
+        lambda _id: SimpleNamespace(title="T", summary="S", body="B", translations={}),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.update_article_translations", lambda *_a, **_k: None
+    )
+
+    result = pt.translate_article_batch_task("article-1", ["fa", "ru"])
+    assert result["status"] == "ok"
+    assert set(result["ok"]) == {"fa", "ru"}
+    assert result["deferred_peak_hours"] == []

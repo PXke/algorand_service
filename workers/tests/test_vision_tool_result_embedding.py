@@ -99,10 +99,19 @@ def test_writer_and_research_default_to_the_vision_model() -> None:
 
 
 def test_digest_translate_and_rubric_stay_on_the_plain_text_model() -> None:
-    """None of these three ever run a tool-calling loop with image-producing tools (digest/translate are plain completions; rubric grades an already-finished draft) -- they must NOT move off deepseek-chat just because writer/research did."""
+    """None of these three ever run a tool-calling loop with image-producing tools (digest/translate are plain completions; rubric grades an already-finished draft) -- they must NOT move onto the vision-capable model just because writer/research did.
+
+    DEEPSEEK_MODEL_TRANSLATE moved off the "deepseek-chat" legacy alias to a
+    dated "deepseek-v4-flash" pin (2026-08-26, ahead of the local->DeepSeek
+    translation switch sending 7x the call volume through it) -- still the
+    plain text (non-vision) model, just no longer the undocumented alias.
+    Digest and rubric are untouched by that change and stay on
+    "deepseek-chat".
+    """
     assert DEEPSEEK_MODEL_DIGEST == "deepseek-chat"
-    assert DEEPSEEK_MODEL_TRANSLATE == "deepseek-chat"
+    assert DEEPSEEK_MODEL_TRANSLATE == "deepseek-v4-flash"
     assert DEEPSEEK_MODEL_RUBRIC == "deepseek-chat"
+    assert not DeepSeekProvider(api_key="k", model=DEEPSEEK_MODEL_TRANSLATE)._supports_vision()
 
 
 # --------------------------------------------------------------------------- #

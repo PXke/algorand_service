@@ -433,6 +433,10 @@ class OpenAICompatibleProvider(LLMProvider):
         """Extra payload fields for deep reasoning beyond the flat reasoning_effort field most providers share. Default: nothing extra. DeepSeekProvider overrides this — its actual v4 API additionally wants an explicit thinking block and stream:false alongside reasoning_effort=high (owner-supplied 2026-08-05)."""
         return {}
 
+    def _reasoning_effort_enabled(self) -> bool:
+        """Whether THIS INSTANCE wants reasoning_effort sent at all, independent of whether the target model supports it (that's `_reasoning_effort_unsupported`, a model-capability fact discovered from live metadata). Default True for every existing caller (writer/research/digest/rubric all still get reasoning). DeepSeekProvider overrides this per-instance via its `enable_thinking` constructor flag (2026-08-26) so a translate-role instance can skip it: translation is mechanical block-aligned localization with no editorial judgment (see translate_article's own docstring) and gets zero benefit from deep reasoning, only extra reasoning_content tokens billed out of the same budget as the answer."""
+        return True
+
     def _effective_max_tokens(self, requested: int | None) -> int:
         """The max_tokens to actually send: `requested`, or LLM_MAX_TOKENS when the caller didn't pass one. Subclasses whose provider spends real, sometimes-large token counts on reasoning out of this SAME budget (DeepSeek, Kimi) override this to floor it higher — see their own docstrings for the root-caused incidents that motivated it."""
         return requested if requested is not None else LLM_MAX_TOKENS
@@ -669,7 +673,11 @@ class OpenAICompatibleProvider(LLMProvider):
             payload["temperature"] = temperature
         if self._supports_prompt_cache_key():
             payload["prompt_cache_key"] = self._prompt_cache_key
-        if MISTRAL_REASONING_EFFORT and not self._reasoning_effort_unsupported:
+        if (
+            MISTRAL_REASONING_EFFORT
+            and not self._reasoning_effort_unsupported
+            and self._reasoning_effort_enabled()
+        ):
             payload["reasoning_effort"] = MISTRAL_REASONING_EFFORT
         payload.update(self._reasoning_payload_extra())
         if json_object:
@@ -989,7 +997,11 @@ class OpenAICompatibleProvider(LLMProvider):
             payload["temperature"] = temperature
         if self._supports_prompt_cache_key():
             payload["prompt_cache_key"] = self._prompt_cache_key
-        if MISTRAL_REASONING_EFFORT and not self._reasoning_effort_unsupported:
+        if (
+            MISTRAL_REASONING_EFFORT
+            and not self._reasoning_effort_unsupported
+            and self._reasoning_effort_enabled()
+        ):
             payload["reasoning_effort"] = MISTRAL_REASONING_EFFORT
         forced = self._tool_reasoning_effort_override()
         if forced is not None:
@@ -1339,8 +1351,21 @@ class DeepSeekProvider(OpenAICompatibleProvider):
         timeout: float | None = None,
         api_key: str | None = None,
         api_base: str | None = None,
+        enable_thinking: bool = True,
     ) -> None:
-        """Wire credentials/model/timeout, defaulting to DeepSeek's own config."""
+        """Wire credentials/model/timeout, defaulting to DeepSeek's own config.
+
+        `enable_thinking=False` (2026-08-26) turns this specific instance's
+        thinking mode off entirely -- no `thinking` payload block, no
+        `stream` field, and no `reasoning_effort` field either (see
+        `_reasoning_effort_enabled` override below). Writer/research/digest/
+        rubric callers all leave this at the default True; the translate
+        path (`_translate_one_lang_via_deepseek` in publish_tasks.py) passes
+        False because translation is mechanical block-aligned localization
+        with a hard structural contract, not editorial judgment -- deep
+        reasoning buys nothing there, only extra reasoning_content tokens
+        billed out of the same budget as the actual translated text.
+        """
         super().__init__(
             api_key=api_key if api_key is not None else DEEPSEEK_API_KEY,
             api_base=api_base if api_base is not None else DEEPSEEK_API_BASE,
@@ -1348,9 +1373,15 @@ class DeepSeekProvider(OpenAICompatibleProvider):
             timeout=timeout,
             provider="deepseek",
         )
+        self._enable_thinking = enable_thinking
 
     def _reasoning_payload_extra(self) -> dict[str, object]:
+        if not self._enable_thinking:
+            return {}
         return {"thinking": {"type": "enabled"}, "stream": False}
+
+    def _reasoning_effort_enabled(self) -> bool:
+        return self._enable_thinking
 
     def _effective_max_tokens(self, requested: int | None) -> int:
         """Floor at DEEPSEEK_MAX_TOKENS -- not a replacement, a FLOOR. Several real callers pass a small EXPLICIT cap tuned for Mistral's assumption that max_tokens is pure answer content (e.g. the LLM quality rubric's max_tokens=800: a short JSON scorecard, no reasoning overhead expected). DeepSeek's thinking mode spends real, sometimes-large token counts on reasoning_content out of that SAME budget -- root-caused 2026-08-06: the rubric silently failed on every real DeepSeek session with a generic fallback score (2/5, boilerplate issues) because 800 tokens was entirely consumed by reasoning before any JSON could be written. Raising the cap costs nothing by itself (billing is on tokens actually used, not the ceiling) so there's no downside to flooring every DeepSeek call at the same generous ceiling as the article-write call."""

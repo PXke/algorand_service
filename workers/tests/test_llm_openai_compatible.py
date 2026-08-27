@@ -99,6 +99,50 @@ def test_mistral_provider_has_no_reasoning_quirk() -> None:
     assert provider._reasoning_payload_extra() == {}
 
 
+def test_deepseek_provider_defaults_to_thinking_enabled() -> None:
+    """enable_thinking defaults to True -- every existing caller (writer/research/digest/rubric) that doesn't pass it keeps today's behavior unchanged."""
+    provider = DeepSeekProvider()
+    assert provider._reasoning_effort_enabled() is True
+    assert provider._reasoning_payload_extra() == {"thinking": {"type": "enabled"}, "stream": False}
+
+
+def test_deepseek_provider_enable_thinking_false_disables_both_hooks() -> None:
+    """enable_thinking=False (2026-08-26, the translate call path) must suppress BOTH the "thinking" payload block AND the reasoning_effort field -- disabling only one still pays for DeepSeek's thinking mode via the other."""
+    provider = DeepSeekProvider(enable_thinking=False)
+    assert provider._reasoning_effort_enabled() is False
+    assert provider._reasoning_payload_extra() == {}
+
+
+def test_deepseek_provider_thinking_disabled_omits_reasoning_effort_from_real_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: chat_completion's actual payload must carry neither "reasoning_effort" nor "thinking"/"stream" when enable_thinking=False, even though MISTRAL_REASONING_EFFORT (the shared knob) is set."""
+    import app.modules.ai.llm_openai_compatible as oc
+
+    monkeypatch.setattr(oc, "MISTRAL_REASONING_EFFORT", "high")
+    provider = DeepSeekProvider(api_key="test-key", enable_thinking=False)
+    captured: dict = {}
+
+    def _fake_post(payload: dict) -> dict:
+        captured.update(payload)
+        return {"choices": [{"message": {"content": "{}"}}], "usage": {}}
+
+    monkeypatch.setattr(provider, "_post", _fake_post)
+    provider.chat_completion([{"role": "user", "content": "hi"}])
+
+    assert "reasoning_effort" not in captured
+    assert "thinking" not in captured
+    assert "stream" not in captured
+
+
+def test_other_providers_unaffected_by_reasoning_effort_enabled_hook() -> None:
+    """The new _reasoning_effort_enabled hook defaults True for every provider that doesn't override it -- Mistral, Kimi, GLM, OpenAI all keep sending reasoning_effort exactly as before."""
+    assert MistralProvider()._reasoning_effort_enabled() is True
+    assert KimiProvider()._reasoning_effort_enabled() is True
+    assert GLMProvider()._reasoning_effort_enabled() is True
+    assert OpenAIProvider()._reasoning_effort_enabled() is True
+
+
 def test_openai_provider_uses_max_completion_tokens_field() -> None:
     """Confirmed live 2026-08-14: GPT-5.6 rejects "max_tokens" outright (400 unsupported_parameter) and wants "max_completion_tokens" instead -- only OpenAIProvider overrides this, no other provider needs it."""
     provider = OpenAIProvider()

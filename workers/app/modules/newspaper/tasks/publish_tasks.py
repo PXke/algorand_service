@@ -26,6 +26,7 @@ from app.modules.newspaper.article_store import insert_article
 from app.modules.newspaper.article_tags import derive_article_tags, order_reader_tags
 from app.modules.newspaper.compose_lock import COMPOSE_LOCK_KEY, ComposeBusyError
 from app.modules.newspaper.ingest_signal import ingest_publish_signal
+from app.modules.newspaper.peak_hours import is_off_peak_now
 from app.modules.newspaper.publish_policy import PublishKind, PublishTier, PublishTopic
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow
 from app.modules.newspaper.writer_enrichment import enrichment_block_for_row
@@ -2369,8 +2370,15 @@ def _translate_one_lang_via_deepseek(
     from app.modules.ai.llm_compose import translate_article
     from app.modules.ai.llm_openai_compatible import DeepSeekProvider
 
+    # enable_thinking=False: translation is mechanical block-aligned
+    # localization, not editorial judgment -- DeepSeek's thinking mode
+    # inflates cost/latency for zero benefit here (see DeepSeekProvider's
+    # own docstring).
     client = DeepSeekProvider(
-        api_key=DEEPSEEK_API_KEY, api_base=DEEPSEEK_API_BASE, model=DEEPSEEK_MODEL_TRANSLATE
+        api_key=DEEPSEEK_API_KEY,
+        api_base=DEEPSEEK_API_BASE,
+        model=DEEPSEEK_MODEL_TRANSLATE,
+        enable_thinking=False,
     )
     return translate_article(
         english_title=english_title,
@@ -2412,6 +2420,22 @@ def _run_deepseek_translations(
         ok.append(lang)
         on_done(lang, result)
     return ok, failed
+
+
+def _defer_deepseek_langs_if_peak_hours(
+    deepseek_pending: list[str], *, article_id: str
+) -> tuple[list[str], list[str]]:
+    """Split `deepseek_pending` into (still_pending, deferred) against DeepSeek's peak/off-peak billing gate -- (deepseek_pending, []) unchanged when off-peak or empty, ([], deepseek_pending) when peak hours are blocking. Split out purely to keep translate_article_batch_task's own cyclomatic complexity down, mirroring _run_deepseek_translations' own reason for existing as a separate function."""
+    if not deepseek_pending or is_off_peak_now():
+        return deepseek_pending, []
+    logger.info(
+        "translate_article_batch_task: deferring %d DeepSeek language(s) to off-peak "
+        "hours for %s: %s",
+        len(deepseek_pending),
+        article_id,
+        deepseek_pending,
+    )
+    return [], deepseek_pending
 
 
 # Kept registered (not deleted) as a shim: a stale enqueue from before this
@@ -2476,6 +2500,26 @@ def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
     load/unload cost); everything else still goes through
     app.modules.ai.local_translate.translate_article_batch's engine
     grouping / load-once / explicit-unload logic.
+
+    DeepSeek's portion is additionally confined to off-peak hours (owner
+    condition for approving the local->DeepSeek translation switch,
+    2026-08-26: translation is inherently latency-tolerant, so there's no
+    reason not to lock in DeepSeek's off-peak rate, exactly half the peak
+    rate). Mirrors `article_composer._require_off_peak`'s own semantics
+    (checked here, the single funnel both the batch task and any future
+    caller of `_run_deepseek_translations` go through) but does NOT raise --
+    a raised PeakHoursBlockedError would abort the WHOLE task, including the
+    local languages this gate must never touch. Instead, any DeepSeek-routed
+    language pending when this check runs is left out of this call entirely
+    (never attempted, never persisted, never marked failed) and reported
+    under "deferred_peak_hours" in the result -- it stays missing from the
+    article's translations map exactly like a genuine translation failure
+    would, so the next call to enqueue_missing_article_translations (a fresh
+    publish-time enqueue, or a backfill sweep) picks it up again, the same
+    "stays missing, retried next time" contract translate_article's own
+    TranslationAlignmentError already relies on. Local languages are NEVER
+    gated by this check -- they already run locally regardless of time of
+    day, with no cost-driven reason to wait.
     """
     import json
 
@@ -2542,6 +2586,13 @@ def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
         deepseek_pending = [lang for lang in pending if lang in DEEPSEEK_TRANSLATE_LANGS]
         local_pending = [lang for lang in pending if lang not in DEEPSEEK_TRANSLATE_LANGS]
 
+        # DeepSeek billing gate (owner condition, 2026-08-26): only the
+        # DeepSeek-routed languages wait for off-peak -- local_pending above
+        # is untouched by this check and always proceeds immediately.
+        deepseek_pending, deferred_peak_hours = _defer_deepseek_langs_if_peak_hours(
+            deepseek_pending, article_id=article_id
+        )
+
         ok, failed = _run_deepseek_translations(
             article=article,
             article_id=article_id,
@@ -2564,8 +2615,14 @@ def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
             ok.extend(outcome["ok"])
             failed.update(outcome["failed"])
 
-        status = "ok" if not failed else "partial"
-        return {"status": status, "article_id": article_id, "ok": ok, "failed": failed}
+        status = "ok" if not failed and not deferred_peak_hours else "partial"
+        return {
+            "status": status,
+            "article_id": article_id,
+            "ok": ok,
+            "failed": failed,
+            "deferred_peak_hours": deferred_peak_hours,
+        }
     except Exception as e:
         logger.error(f"Failed to batch-translate article {article_id}: {e}", exc_info=True)
         return {"status": "error", "reason": str(e)}
@@ -2588,6 +2645,31 @@ def backfill_article_translations_task(limit: int = 500) -> dict:
         "articles": articles_touched,
         "tasks_queued": tasks_queued,
     }
+
+
+@celery_app.task(name="app.tasks.newspaper.backfill_deepseek_translations")
+def backfill_deepseek_translations_task(
+    *, limit: int = 20, dry_run: bool = True, scan_limit: int = 500
+) -> dict:
+    """Celery-callable wrapper around translation_backfill.dispatch_deepseek_translation_backfill -- the fast-path backfill for the 2026-08-26 88-of-115-articles DeepSeek-translation gap (see that module's own docstring for the full design: why it's safe to route these dispatches to the ordinary concurrency=4 `pipeline` queue instead of the single-language-at-a-time `translate` queue, and why real dispatches self-gate on `is_off_peak_now()`).
+
+    Exists purely so a coordinating session/admin can trigger the real
+    backfill by Celery task name (`celery_app.send_task(...)`) without
+    needing direct Python import access to the underlying module --
+    mirrors `reclassify_gray_zone_domains`'s own thin-wrapper shape around
+    `dispatch_gray_zone_deep_classify`.
+
+    `dry_run=True` by default (same default as the function it wraps) --
+    calling this with no arguments is always a safe preview. NOT on any
+    beat schedule: unlike `reclassify_gray_zone_domains` (opt-in but
+    recurring once enabled), this is a one-shot backfill for a known,
+    bounded backlog -- it is triggered explicitly, as many times as needed
+    with `dry_run=False`, until `remaining_candidates` reaches 0, not run
+    forever in the background.
+    """
+    from app.modules.newspaper.translation_backfill import dispatch_deepseek_translation_backfill
+
+    return dispatch_deepseek_translation_backfill(limit=limit, dry_run=dry_run, scan_limit=scan_limit)
 
 
 def _recompose_published_source_text(
