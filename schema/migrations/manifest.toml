@@ -757,3 +757,11 @@ file = "backend/schema/migrations/app/086_drop_articles_by_slug.cql"
 tier = "prod"
 status = "active"
 description = "add articles_slug_sai (SAI on articles.slug) and drop articles_by_slug: same precedent 067_articles_consolidated.cql set for article_id -- SAI supports point queries without the partition key, so slug uniqueness/lookup moves fully onto articles itself, closing the write-back-drift class (a claim recorded in articles_by_slug that never got written back onto the owning article) by construction instead of needing a reconciliation beat to detect it. Trades away articles_by_slug's atomic IF NOT EXISTS claim -- accepted deliberately since this pipeline composes/publishes one article at a time (single compose slot, 1-slot review queue, per-service cooldown), so two writers racing on the identical slug text is not a real exposure; ensure_article_slug (shared/algorand_shared/slugs.py) now does a single check-then-write directly against articles instead of a separate claim-then-write-back across two tables/three call sites"
+
+[[migrations]]
+stream = "app"
+version = "087"
+file = "backend/schema/migrations/app/087_articles_translated_titles.cql"
+tier = "prod"
+status = "active"
+description = "add translated_titles (map<text, text>) to articles and articles_by_tag: the feed/tag-listing queries (ArticlesStmts.LIST_PUBLISHED_PAGE, ArticleTagIndexStmts.LIST_PAGE/LIST_RECENT) were selecting the FULL per-language translations map -- title+summary+body per stored language -- even though a listing page only ever overlays a locale's title+summary onto a card or enumerates language codes, never a translated body (feed rows are body-less by design); a 2026-08-28 performance audit found this was shipping several MB of full translated article bodies per feed page just to render headlines. translated_titles is the lightweight lang -> JSON {title, summary} companion, written in the same UPDATE as translations everywhere a translation lands and cleared in the same DELETE everywhere translations is invalidated. Existing published articles need a one-off backfill from their current translations map: workers/scratch/backfill_translated_titles.py (not run against prod as part of this change)"

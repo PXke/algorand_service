@@ -340,14 +340,24 @@ def _localized_view(article: StoredArticle, lang: str | None) -> _LocalizedArtic
     """English view when `lang` is unset, or this article has no stored translation for it; otherwise a per-field localized view.
 
     The feed-scan fallback only runs when Typesense itself is unreachable,
-    but it still needs to search (and excerpt from) the locale's own text
-    rather than silently degrading to English mid-outage.
+    but it still needs to search (and excerpt from) the locale's own
+    title/summary rather than silently degrading to English mid-outage.
+
+    Reads `translated_titles` (lang -> JSON {title, summary}), not the full
+    `translations` map -- this fallback runs over `list_feed`'s feed-listing
+    rows, which since migration 087 only carry the lightweight column (see
+    ArticlesStmts.LIST_PUBLISHED_PAGE's own comment). `article.body` is
+    always "" here regardless (feed rows are body-less by design), so this
+    never had a translated body to fall back to for search/excerpt purposes
+    on THIS path -- Typesense (the normal, non-fallback search engine) is
+    still indexed with the full translated body via upsert_article_translation
+    and is unaffected.
     """
     body = str(getattr(article, "body", "") or "")
     if not lang:
         return _LocalizedArticleView(article.title, article.summary, body)
-    translations = getattr(article, "translations", None) or {}
-    raw = translations.get(lang)
+    translated_titles = getattr(article, "translated_titles", None) or {}
+    raw = translated_titles.get(lang)
     if not raw:
         return _LocalizedArticleView(article.title, article.summary, body)
     try:
@@ -358,11 +368,10 @@ def _localized_view(article: StoredArticle, lang: str | None) -> _LocalizedArtic
         return _LocalizedArticleView(article.title, article.summary, body)
     title = parsed.get("title") if isinstance(parsed.get("title"), str) else None
     summary = parsed.get("summary") if isinstance(parsed.get("summary"), str) else None
-    translated_body = parsed.get("body") if isinstance(parsed.get("body"), str) else None
     return _LocalizedArticleView(
         title or article.title,
         summary or article.summary,
-        translated_body or body,
+        body,
     )
 
 

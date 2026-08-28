@@ -258,8 +258,13 @@ class NewsService:
         articles, _ = self._store.list_feed_page(limit=limit)
         articles = [a for a in articles if a.service_id and a.title]
         items = [self._to_feed_item(a) for a in articles]
+        # Only language codes are needed (hreflang alternates), not content --
+        # translated_titles carries the same key set as the full translations
+        # map for any language actually stored (migration 087).
         translations = {
-            a.article_id: sorted(a.translations.keys()) for a in articles if a.translations
+            a.article_id: sorted(a.translated_titles.keys())
+            for a in articles
+            if a.translated_titles
         }
         return items, translations
 
@@ -429,13 +434,21 @@ class NewsService:
 
     @staticmethod
     def _to_feed_item(article: StoredArticle, lang: str | None = None) -> ArticleFeedItem:
+        """Build one feed card, optionally locale-overlaid.
+
+        Reads the lang overlay from `translated_titles` (lang -> JSON
+        {title, summary}), not the full `translations` map -- feed rows only
+        ever carry the lightweight column (migration 087); `translations`
+        itself is unset on a StoredArticle built from a feed/tag listing.
+        """
         tags = list(article.tags or [])
 
         title = article.title
         summary = article.summary
-        if lang and getattr(article, "translations", None) and lang in article.translations:
+        translated_titles = getattr(article, "translated_titles", None)
+        if lang and translated_titles and lang in translated_titles:
             try:
-                t = serialization.loads(article.translations[lang])
+                t = serialization.loads(translated_titles[lang])
                 if t.get("title"):
                     title = t["title"]
                 if t.get("summary"):

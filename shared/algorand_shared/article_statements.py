@@ -102,18 +102,32 @@ class ArticlesStmts:
         "INSERT INTO algorand_platform.articles ("
         "status, year, published_at, article_id, service_id, title, summary, body, "
         "image_url, tags, source_url, trigger_txid, trigger_round, slug, translations, "
-        "first_published_at, updated_at, prompt_version, composed_by_model, deleted_at, "
-        "status_updated_at, interest_score, approved_at, views"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "translated_titles, first_published_at, updated_at, prompt_version, composed_by_model, "
+        "deleted_at, status_updated_at, interest_score, approved_at, views"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Feed listing: `articles` doubles as the feed projection for
     # status='published' (see the plan) -- year is the partition granularity
     # here (not month, like the old articles_feed), since per-year partitions
     # comfortably hold this platform's real article volume (~7/day). Column
     # set matches the old feed projection's deliberately-body-less shape.
+    #
+    # 2026-08-28: selects `translated_titles` (lang -> JSON {title, summary}),
+    # NOT the full `translations` map (lang -> JSON {title, summary, body}).
+    # A listing page only ever overlays a locale's title+summary onto a card
+    # (NewsService._to_feed_item) or enumerates language codes (the
+    # multilingual sitemap, search_service's feed-scan fallback) -- it never
+    # reads a translated body, since feed rows are already body-less by
+    # design (see the comment above). Selecting the full map here was
+    # shipping every stored language's full translated BODY -- up to
+    # len(ARTICLE_TRANSLATION_LANGS) full articles -- per row, on every page
+    # of the public feed/sitemap/RSS just to render a headline (found in a
+    # 2026-08-28 performance audit). translated_titles is the lightweight
+    # companion column (migration 087), written/cleared in lockstep with
+    # translations everywhere a translation lands or is invalidated.
     LIST_PUBLISHED_PAGE = _Stmt(
         "SELECT article_id, service_id, title, summary, published_at, first_published_at, "
-        "updated_at, tags, slug, image_url, source_url, translations "
+        "updated_at, tags, slug, image_url, source_url, translated_titles "
         "FROM algorand_platform.articles "
         "WHERE status = 'published' AND year = ? AND published_at < ? LIMIT ?"
     )
@@ -183,12 +197,21 @@ class ArticlesStmts:
         "UPDATE algorand_platform.articles SET image_url = ? "
         "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"
     )
+    # Sets both maps in one statement so a language a caller just persisted
+    # can never drift between them -- translated_titles carries the same
+    # map shape (lang -> JSON string) but each value is only
+    # {"title", "summary"}, dropping body (migration 087; see
+    # LIST_PUBLISHED_PAGE's own comment for why the lightweight column
+    # exists).
     UPDATE_TRANSLATIONS = _Stmt(
-        "UPDATE algorand_platform.articles SET translations = translations + ? "
+        "UPDATE algorand_platform.articles SET translations = translations + ?, "
+        "translated_titles = translated_titles + ? "
         "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"
     )
+    # Clears both maps together -- they're always invalidated for the same
+    # reason (new prose, cleared content) and must never drift out of sync.
     CLEAR_TRANSLATIONS = _Stmt(
-        "DELETE translations FROM algorand_platform.articles "
+        "DELETE translations, translated_titles FROM algorand_platform.articles "
         "WHERE status = ? AND year = ? AND published_at = ? AND article_id = ?"
     )
     # In-place content edit where the partition key (status/year/published_at)
@@ -204,8 +227,8 @@ class ArticlesStmts:
     GET_FULL_BY_ID = _Stmt(
         "SELECT status, year, published_at, article_id, service_id, title, summary, body, "
         "image_url, tags, source_url, trigger_txid, trigger_round, slug, translations, "
-        "first_published_at, updated_at, prompt_version, composed_by_model, deleted_at, "
-        "status_updated_at, interest_score, approved_at, views "
+        "translated_titles, first_published_at, updated_at, prompt_version, composed_by_model, "
+        "deleted_at, status_updated_at, interest_score, approved_at, views "
         "FROM algorand_platform.articles WHERE article_id = ?"
     )
     # views (migration 084): the per-article view tally, folded in from the
@@ -276,8 +299,8 @@ class ArticleTagIndexStmts:
     INSERT = _Stmt(
         "INSERT INTO algorand_platform.articles_by_tag ("
         "tag, published_at, article_id, service_id, title, summary, image_url, "
-        "source_url, slug, translations, first_published_at, updated_at, tags"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "source_url, slug, translations, translated_titles, first_published_at, updated_at, tags"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     DELETE = _Stmt(
         "DELETE FROM algorand_platform.articles_by_tag "
@@ -293,10 +316,11 @@ class ArticleTagIndexStmts:
     )
     # Mirrors ArticlesStmts.LIST_PUBLISHED_PAGE's column set exactly, so both
     # feed a card through the same _feed_row_to_stored mapper on the backend
-    # side.
+    # side -- including the 2026-08-28 translations -> translated_titles
+    # swap (see that statement's own comment).
     LIST_PAGE = _Stmt(
         "SELECT article_id, service_id, title, summary, published_at, first_published_at, "
-        "updated_at, tags, slug, image_url, source_url, translations "
+        "updated_at, tags, slug, image_url, source_url, translated_titles "
         "FROM algorand_platform.articles_by_tag "
         "WHERE tag = ? AND published_at < ? LIMIT ?"
     )
@@ -305,7 +329,7 @@ class ArticleTagIndexStmts:
     # to paginate.
     LIST_RECENT = _Stmt(
         "SELECT article_id, service_id, title, summary, published_at, first_published_at, "
-        "updated_at, tags, slug, image_url, source_url, translations "
+        "updated_at, tags, slug, image_url, source_url, translated_titles "
         "FROM algorand_platform.articles_by_tag WHERE tag = ? LIMIT ?"
     )
     # Single-partition COUNT -- cheap and exact, unlike a cross-partition

@@ -57,6 +57,7 @@ def sync_tag_index(
     source_url: str | None = None,
     slug: str | None = None,
     translations: dict | None = None,
+    translated_titles: dict | None = None,
     first_published_at: datetime | None = None,
     updated_at: datetime | None = None,
 ) -> None:
@@ -94,6 +95,7 @@ def sync_tag_index(
                     source_url,
                     slug,
                     translations,
+                    translated_titles,
                     first_published_at,
                     updated_at,
                     list(new_tags or []),

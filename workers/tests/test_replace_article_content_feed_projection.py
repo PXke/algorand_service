@@ -36,7 +36,7 @@ _OLD_PUBLISHED_AT = datetime(2026, 6, 14, 18, 52, 10, 629000, tzinfo=UTC)
 _ARTICLES_COLUMNS = (
     "status", "year", "published_at", "article_id", "service_id", "title", "summary", "body",
     "image_url", "tags", "source_url", "trigger_txid", "trigger_round", "slug", "translations",
-    "first_published_at", "updated_at", "prompt_version", "composed_by_model",
+    "translated_titles", "first_published_at", "updated_at", "prompt_version", "composed_by_model",
     "deleted_at", "status_updated_at", "interest_score", "approved_at", "views",
 )  # fmt: skip
 
@@ -54,6 +54,7 @@ def _article_row(aid: UUID) -> MagicMock:
     row.trigger_round = 0
     row.prompt_version = ""
     row.translations = None
+    row.translated_titles = None
     row.tags = ["nft"]
     row.first_published_at = None  # never recomposed before
     row.slug = "old-title-slug"
@@ -134,9 +135,11 @@ def test_replace_inserts_complete_row_at_new_published_at(monkeypatch: pytest.Mo
     # First recompose: first_published_at is seeded with the ORIGINAL date.
     assert values["first_published_at"] == _OLD_PUBLISHED_AT
     # New content, cleared translations (a recompose invalidates every
-    # existing translation of the old prose).
+    # existing translation of the old prose -- title included, so
+    # translated_titles clears alongside the full translations map).
     assert values["title"] == "New title"
     assert values["translations"] is None
+    assert values["translated_titles"] is None
 
 
 def test_replace_restamps_published_at_to_apply_time(monkeypatch: pytest.MonkeyPatch) -> None:

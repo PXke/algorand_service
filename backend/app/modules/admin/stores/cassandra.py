@@ -310,6 +310,9 @@ class AdminCassandraStore:
                     source_url=old_row.source_url,
                     slug=old_row.slug,
                     translations=dict(old_row.translations) if old_row.translations else None,
+                    translated_titles=dict(old_row.translated_titles)
+                    if old_row.translated_titles
+                    else None,
                     first_published_at=old_row.first_published_at,
                     updated_at=old_row.updated_at,
                 )
@@ -1036,6 +1039,9 @@ class AdminCassandraStore:
                     source_url=old_row.source_url,
                     slug=old_row.slug,
                     translations=dict(old_row.translations) if old_row.translations else None,
+                    translated_titles=dict(old_row.translated_titles)
+                    if old_row.translated_titles
+                    else None,
                     first_published_at=old_row.first_published_at,
                     updated_at=old_row.updated_at,
                 )

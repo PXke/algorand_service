@@ -21,6 +21,15 @@ def _epoch(dt: datetime | None) -> int:
 
 
 def _feed_row_to_stored(row: Any) -> StoredArticle:
+    """Map a feed/tag-listing row (ArticlesStmts.LIST_PUBLISHED_PAGE or ArticleTagIndexStmts.LIST_PAGE/LIST_RECENT) to StoredArticle.
+
+    These queries select `translated_titles` (lang -> JSON {title, summary}),
+    not the full `translations` map -- migration 087, see
+    LIST_PUBLISHED_PAGE's own comment. `translations` is left unset here
+    (the row has no such attribute at all, since it isn't in the SELECT
+    list); only `_full_row_to_stored`/`_articles_row_to_stored` below, which
+    read a complete row, populate it.
+    """
     pub = row.published_at
     return StoredArticle(
         article_id=str(row.article_id),
@@ -33,7 +42,7 @@ def _feed_row_to_stored(row: Any) -> StoredArticle:
         image_url=getattr(row, "image_url", None),
         source_url=getattr(row, "source_url", None),
         slug=getattr(row, "slug", None),
-        translations=dict(row.translations) if row.translations else None,
+        translated_titles=dict(row.translated_titles) if getattr(row, "translated_titles", None) else None,
         updated_at_epoch=(_epoch(getattr(row, "updated_at", None)) or None),
         first_published_at_epoch=(_epoch(getattr(row, "first_published_at", None)) or None),
     )

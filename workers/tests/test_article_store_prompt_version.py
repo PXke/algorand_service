@@ -11,9 +11,10 @@ from app.modules.newspaper.article_store import get_article, insert_stored_artic
 # shared _ARTICLES_COLUMNS in algorand_shared.article_transitions): status,
 # year, published_at, article_id, service_id, title, summary, body,
 # image_url, tags, source_url, trigger_txid, trigger_round, slug,
-# translations, first_published_at, updated_at, prompt_version, ...
-_PROMPT_VERSION_INDEX = 17
-# The ArticlesStmts.INSERT call binds all 23 columns -- comfortably more than
+# translations, translated_titles, first_published_at, updated_at,
+# prompt_version, ...
+_PROMPT_VERSION_INDEX = 18  # +1 for `translated_titles` (migration 087)
+# The ArticlesStmts.INSERT call binds all 25 columns -- comfortably more than
 # any other statement insert_stored_article issues (GET_BY_ID's lookup binds
 # 1, the stale-partition DELETE binds 4), so param-tuple length reliably
 # picks it out. Identity comparison (`stmt is ArticlesStmts.INSERT`) is NOT
@@ -21,7 +22,7 @@ _PROMPT_VERSION_INDEX = 17
 # every prepared statement resolves through a bare MagicMock session whose
 # .prepare(...) return value is the same mock object for any cql string,
 # making every statement `is`-equal to every other.
-_INSERT_PARAM_COUNT = 24  # +1 for `views` (migration 084)
+_INSERT_PARAM_COUNT = 25  # +1 for `translated_titles` (migration 087)
 
 
 def _article_insert_params(fake_cassandra_session: MagicMock) -> tuple:

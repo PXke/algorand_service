@@ -23,6 +23,15 @@ class StoredArticle:
     image_url: str | None = None
     slug: str | None = None
     translations: dict[str, str] | None = None
+    # Lightweight lang -> JSON {title, summary} companion to `translations`
+    # (which also carries body). Populated on feed/tag-listing rows (which
+    # read `translated_titles` off Cassandra directly, migration 087) --
+    # NOT populated on a full single-article detail row (get/get_many),
+    # which continues to carry the complete `translations` map above and has
+    # no need for this lighter duplicate. NewsService._to_feed_item /
+    # list_feed_for_sitemap read this field, never `translations`, for
+    # anything sourced from a feed/tag listing.
+    translated_titles: dict[str, str] | None = None
     # Last content revision (edit/recompose); None = never revised.
     updated_at_epoch: int | None = None
     # Original first publication; differs from published_at_epoch only after

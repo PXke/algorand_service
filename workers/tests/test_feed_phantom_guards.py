@@ -103,24 +103,33 @@ def test_update_article_translations_dropped_when_article_missing(
     session = _session(monkeypatch)
     session.execute.return_value.one.return_value = None
 
-    assert not update_article_translations(str(aid), {"fr": "{}"})
+    assert not update_article_translations(str(aid), {"fr": "{}"}, {"fr": "{}"})
     assert _writes(session, "UPDATE algorand_platform.articles SET translations") == []
 
 
 def test_update_article_translations_writes_the_keyed_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Writes translations keyed on the row's own current status/year/published_at."""
+    """Writes translations + translated_titles keyed on the row's own current status/year/published_at."""
     from app.modules.newspaper.article_store import update_article_translations
 
     aid = uuid4()
     session = _session(monkeypatch)
     session.execute.return_value.one.return_value = _row(aid)
 
-    assert update_article_translations(str(aid), {"fr": "{}"})
+    assert update_article_translations(
+        str(aid), {"fr": "{}"}, {"fr": '{"title": "T", "summary": "S"}'}
+    )
 
     updates = _writes(session, "UPDATE algorand_platform.articles SET translations")
     assert len(updates) == 1
     _, params = updates[0]
-    assert params == ({"fr": "{}"}, "published", 2026, _PUBLISHED_AT, aid)
+    assert params == (
+        {"fr": "{}"},
+        {"fr": '{"title": "T", "summary": "S"}'},
+        "published",
+        2026,
+        _PUBLISHED_AT,
+        aid,
+    )
 
 
 def test_update_article_writes_complete_content_update(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,7 +164,9 @@ def test_update_article_appends_updated_tag(monkeypatch: pytest.MonkeyPatch) -> 
     session = _session(monkeypatch)
     session.execute.return_value.one.return_value = _row(aid)
 
-    assert update_article(article_id=str(aid), title="New", summary="NS", body="NB", tags=["algorand"])
+    assert update_article(
+        article_id=str(aid), title="New", summary="NS", body="NB", tags=["algorand"]
+    )
 
     _, params = _writes(session, "UPDATE algorand_platform.articles SET title")[0]
     tags = params[3]
