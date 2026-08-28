@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
+from conftest import FakeRedis
 
-from app.modules.crawler.url_queue import _normalize_url, dequeue_url, enqueue_url, mark_url_done
+from app.modules.crawler.url_queue import (
+    _normalize_url,
+    dequeue_url,
+    enqueue_url,
+    mark_url_done,
+    reclaim_stale_processing_urls,
+)
 
 
 def test_normalize_url_adds_scheme() -> None:
@@ -183,3 +192,161 @@ def test_mark_url_done_binds_row_ttl(
     assert params[0] == 2_592_000
     assert params[1] == "done"
     assert str(params[2]) == "00000000-0000-4000-8000-000000000001"
+
+
+# --------------------------------------------------------------------------- #
+# processing-start markers + reclaim_stale_processing_urls (W3-A)
+# --------------------------------------------------------------------------- #
+
+
+def test_dequeue_url_records_processing_start_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_cassandra_session: MagicMock,
+    patch_redis_from_url: FakeRedis,
+) -> None:
+    """A successful dequeue stamps a Redis processing-start marker, so reclaim_stale_processing_urls can find the row if its worker dies mid-fetch."""
+    monkeypatch.setattr("app.core.config.URL_QUEUE_ENABLED", True)
+    pending = MagicMock(
+        queue_id="q-mark",
+        url="https://mark.example.com",
+        source="chain",
+        priority=42,
+        enqueued_at=MagicMock(),
+    )
+    fake_cassandra_session.execute.side_effect = [
+        [pending],
+        MagicMock(),
+        MagicMock(),
+        MagicMock(one=MagicMock(return_value=MagicMock(metadata={}))),
+    ]
+    assert dequeue_url() is not None
+    marker = patch_redis_from_url.hashes["crawl:url_queue:processing"]["q-mark"]
+    data = json.loads(marker)
+    assert data["url"] == "https://mark.example.com"
+    assert data["source"] == "chain"
+    assert data["priority"] == 42
+    assert "started_at" in data
+
+
+def test_mark_url_done_clears_processing_marker(
+    fake_cassandra_session: MagicMock,  # noqa: ARG001 -- fixture patches get_cassandra_session as a seam, not asserted on here
+    patch_redis_from_url: FakeRedis,
+) -> None:
+    """Marking a queue item done removes its Redis processing-start marker."""
+    qid = "00000000-0000-4000-8000-000000000001"
+    patch_redis_from_url.hashes["crawl:url_queue:processing"] = {qid: "{}"}
+    mark_url_done(qid, status="done")
+    assert qid not in patch_redis_from_url.hashes.get("crawl:url_queue:processing", {})
+
+
+def test_reclaim_stale_processing_urls_resets_stale_row(
+    fake_cassandra_session: MagicMock, patch_redis_from_url: FakeRedis
+) -> None:
+    """Resets a row whose processing-start marker is older than the staleness threshold back to pending, re-inserting it into url_queue_pending with its original url/source/priority."""
+    qid = "00000000-0000-4000-8000-0000000000aa"
+    stale_started_at = datetime.now(tz=UTC).timestamp() - 3600  # 1h ago
+    patch_redis_from_url.hashes["crawl:url_queue:processing"] = {
+        qid: json.dumps(
+            {
+                "url": "https://stale.example.com",
+                "source": "chain",
+                "priority": 42,
+                "started_at": stale_started_at,
+            }
+        )
+    }
+    fake_cassandra_session.execute.side_effect = [
+        MagicMock(one=MagicMock(return_value=MagicMock(status="processing"))),  # GET_STATUS
+        MagicMock(),  # UPDATE_STATUS
+        MagicMock(),  # INSERT_PENDING
+    ]
+    out = reclaim_stale_processing_urls()
+    assert out["reclaimed"] == 1
+    assert out["reclaimed_ids"] == [qid]
+    update_call = fake_cassandra_session.execute.call_args_list[1]
+    assert update_call.args[1][1] == "pending"
+    assert str(update_call.args[1][2]) == qid
+    insert_call = fake_cassandra_session.execute.call_args_list[2]
+    params = insert_call.args[1]
+    assert params[0] == "pending"
+    assert params[1] == 42
+    assert str(params[3]) == qid
+    assert params[4] == "https://stale.example.com"
+    assert params[5] == "chain"
+    assert qid not in patch_redis_from_url.hashes.get("crawl:url_queue:processing", {})
+
+
+def test_reclaim_stale_processing_urls_skips_fresh_rows(
+    fake_cassandra_session: MagicMock, patch_redis_from_url: FakeRedis
+) -> None:
+    """A row whose marker is within the staleness window is left alone -- no Cassandra touch, no reclaim."""
+    qid = "00000000-0000-4000-8000-0000000000bb"
+    fresh_started_at = datetime.now(tz=UTC).timestamp() - 5  # 5s ago
+    patch_redis_from_url.hashes["crawl:url_queue:processing"] = {
+        qid: json.dumps(
+            {
+                "url": "https://fresh.example.com",
+                "source": "chain",
+                "priority": 42,
+                "started_at": fresh_started_at,
+            }
+        )
+    }
+    out = reclaim_stale_processing_urls()
+    assert out["reclaimed"] == 0
+    fake_cassandra_session.execute.assert_not_called()
+    assert qid in patch_redis_from_url.hashes["crawl:url_queue:processing"]
+
+
+def test_reclaim_stale_processing_urls_skips_already_finished_row(
+    fake_cassandra_session: MagicMock, patch_redis_from_url: FakeRedis
+) -> None:
+    """A row whose marker is stale but whose live Cassandra status has already moved past 'processing' (mark_url_done ran, the HDEL itself failed) is never reset -- only its stray marker is cleared, so a race never resurrects an already-completed row."""
+    qid = "00000000-0000-4000-8000-0000000000cc"
+    stale_started_at = datetime.now(tz=UTC).timestamp() - 3600
+    patch_redis_from_url.hashes["crawl:url_queue:processing"] = {
+        qid: json.dumps(
+            {
+                "url": "https://done.example.com",
+                "source": "chain",
+                "priority": 42,
+                "started_at": stale_started_at,
+            }
+        )
+    }
+    fake_cassandra_session.execute.side_effect = [
+        MagicMock(one=MagicMock(return_value=MagicMock(status="done"))),
+    ]
+    out = reclaim_stale_processing_urls()
+    assert out["reclaimed"] == 0
+    assert fake_cassandra_session.execute.call_count == 1
+    assert qid not in patch_redis_from_url.hashes.get("crawl:url_queue:processing", {})
+
+
+def test_reclaim_stale_processing_urls_fails_open_on_redis_error(
+    fake_cassandra_session: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Redis read failure degrades to a reported error, never a crash -- one Redis blip must not crash the beat (CLAUDE.md invariant 9)."""
+    import app.modules.crawler.url_queue as uq
+
+    def _boom() -> None:
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(uq, "_client", _boom)
+    out = reclaim_stale_processing_urls()
+    assert out["status"] == "error"
+    assert out["reclaimed"] == 0
+    fake_cassandra_session.execute.assert_not_called()
+
+
+def test_reclaim_stale_processing_urls_drops_corrupt_marker(
+    fake_cassandra_session: MagicMock, patch_redis_from_url: FakeRedis
+) -> None:
+    """A marker that fails to parse (malformed JSON, missing fields) is dropped without touching Cassandra, so it can't wedge every future sweep."""
+    qid = "00000000-0000-4000-8000-0000000000dd"
+    patch_redis_from_url.hashes["crawl:url_queue:processing"] = {qid: "not json"}
+    out = reclaim_stale_processing_urls()
+    assert out["dropped_corrupt_markers"] == 1
+    assert out["reclaimed"] == 0
+    fake_cassandra_session.execute.assert_not_called()
+    assert qid not in patch_redis_from_url.hashes.get("crawl:url_queue:processing", {})

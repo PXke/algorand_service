@@ -96,13 +96,36 @@ def _build_beat_schedule() -> dict:
     # by admin actions (approving/rejecting a review fires drain_to_compose;
     # approving a domain fires drain_url_queue + fetch_source). So these can be
     # spaced way out — workers stay idle until you accept something.
+    # Same value drives both the tick interval and the task-message expiry
+    # below -- a tick that's still sitting in the queue (worker pool busy)
+    # past its own interval is stale and should be dropped, not run late
+    # doubled-up with the tick right behind it.
+    _url_queue_drain_seconds = float(os.getenv("URL_QUEUE_DRAIN_SECONDS", "10"))
     schedule["drain-url-queue"] = {
         "task": "app.tasks.crawler.drain_url_queue",
         # Default 10 pages / 10s: clears a new domain's 20-page initial harvest
         # in one tick, and a large backlog (e.g. an admin-approval bulk
         # backfill) in minutes instead of hours (bumped from 1/tick 2026-07-21).
-        "schedule": float(os.getenv("URL_QUEUE_DRAIN_SECONDS", "10")),
+        "schedule": _url_queue_drain_seconds,
         "kwargs": {"max_items": int(os.getenv("URL_QUEUE_DRAIN_BATCH", "10"))},
+        # drain_url_queue is now single_flight-locked (CLAUDE.md invariant 5)
+        # so an overlapping tick just no-ops instead of double-draining --
+        # this `expires` is the companion half: a tick that never got picked
+        # up by a free worker within one drain interval is discarded by
+        # Celery itself rather than executing stale/backed-up later.
+        "options": {"expires": _url_queue_drain_seconds},
+    }
+    # Companion maintenance sweep: resets any url_queue row a worker died on
+    # mid-fetch (hard time_limit SIGKILL, a deploy's cold-shutdown SIGQUIT,
+    # an orphaned process) back to pending, since dequeue_url() hands a row
+    # to exactly one worker and nothing else ever un-sticks a stuck one. The
+    # 30-minute staleness threshold itself lives in url_queue.
+    # STALE_PROCESSING_SECONDS -- this interval is just how often the sweep
+    # checks, same shape as reap-stale-compose-sessions/reap-stale-
+    # translation-sessions above.
+    schedule["reclaim-stale-processing-urls"] = {
+        "task": "app.tasks.crawler.reclaim_stale_processing_urls",
+        "schedule": float(os.getenv("URL_QUEUE_PROCESSING_RECLAIM_SECONDS", "600")),
     }
     schedule["retrain-publish-classifier"] = {
         "task": "app.tasks.crawler.retrain_publish_classifier",
@@ -377,7 +400,9 @@ def _build_beat_schedule() -> dict:
 # (relative "celerybeat-schedule") when .env isn't a symlink, e.g. local dev.
 _env_symlink = Path(__file__).resolve().parent.parent / ".env"
 if _env_symlink.is_symlink():
-    celery_app.conf.beat_schedule_filename = str(_env_symlink.resolve().parent / "celerybeat-schedule")
+    celery_app.conf.beat_schedule_filename = str(
+        _env_symlink.resolve().parent / "celerybeat-schedule"
+    )
 
 celery_app.conf.beat_schedule = _build_beat_schedule()
 celery_app.conf.task_serializer = "json"
