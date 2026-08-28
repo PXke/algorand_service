@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -32,7 +33,10 @@ class _FakeSession:
     """The statement registry resolves *Stmts.* by calling get_cassandra_session().prepare(cql); return the CQL text so execute() can branch on it (SELECT vs INSERT vs UPDATE), matching the pattern already used in workers/tests/test_domain_status_sticky.py."""
 
     def __init__(
-        self, article_row: Any, *, service_id_rows: list | None = None  # noqa: ANN401 -- duck-typed Cassandra row
+        self,
+        article_row: Any,  # noqa: ANN401 -- duck-typed Cassandra row
+        *,
+        service_id_rows: list | None = None,
     ) -> None:
         self._article_row = article_row
         # Rows FIND_BY_SERVICE_ID would return -- the conflict check Article.publish()
@@ -97,11 +101,6 @@ def test_publish_article_to_feed_stamps_release_time_not_compose_time(
     row = _article_row(article_id, published_at=compose_time, slug="a-real-slug")
     fake = _FakeSession(row)
     _patch(monkeypatch, fake)
-    pinged: list[dict] = []
-    monkeypatch.setattr(
-        "app.modules.seo.indexnow.ping_article",
-        lambda *a, **kw: pinged.append({"args": a, "kwargs": kw}),
-    )
 
     store = AdminCassandraStore()
     before = datetime.now(tz=UTC)
@@ -118,60 +117,32 @@ def test_publish_article_to_feed_stamps_release_time_not_compose_time(
     # The row's OLD (compose-time) partition is deleted, not left dangling.
     assert fake.articles_deletes == [("backlog", compose_time.year, compose_time, article_id)]
 
-    # Root-caused live 2026-08-10 (Bing Webmaster Tools submitted-URL audit):
-    # an admin-approved article's row never carried its slug forward at
-    # release at all, so IndexNow and the homepage fell back to the raw
-    # uuid for every such article. The slug must be carried on release, and
-    # threaded through to the IndexNow ping. 2026-08-27: ensure_article_slug
-    # no longer issues a separate UPDATE for an already-set slug (no claim
-    # needed, see its own docstring) -- the value is carried forward by the
-    # transition's own full-row INSERT (asserted above), so no slug_updates
-    # call is expected here.
+    # 2026-08-27: ensure_article_slug no longer issues a separate UPDATE for
+    # an already-set slug (no claim needed, see its own docstring) -- the
+    # value is carried forward by the transition's own full-row INSERT
+    # (asserted above), so no slug_updates call is expected here.
     assert fake.slug_updates == []
-    assert pinged[0]["kwargs"]["slug"] == "a-real-slug"
 
 
-def test_publish_article_to_feed_indexes_the_article_in_typesense(
+def test_publish_article_to_feed_no_longer_reimplements_search_indexnow_fanout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A review-approved article going live must be indexed immediately, not wait on the once-daily reindex_articles safety net (backend has no Celery worker of its own to fire index_article.delay like workers' publish_tasks does, so this is a direct call)."""
+    """W4-A (2026-08-28): _publish_article_to_feed used to do its own Typesense upsert_article_document + IndexNow ping_article inline -- a fourth divergent copy of workers' "an article just went live" fanout. That fanout now goes through the shared app.tasks.newspaper.fanout_after_publish task (see _trigger_fanout_after_publish, exercised by test_publish_or_queue_article_triggers_shared_fanout_task below); _publish_article_to_feed itself must do ONLY the status transition."""
     article_id = uuid4()
     row = _article_row(
         article_id, published_at=datetime.now(tz=UTC) - timedelta(hours=5), slug="a-real-slug"
     )
     fake = _FakeSession(row)
     _patch(monkeypatch, fake)
-    monkeypatch.setattr("app.modules.seo.indexnow.ping_article", lambda *_a, **_kw: None)
-    typesense_calls: list[dict] = []
-    monkeypatch.setattr(
-        "app.core.typesense_client.upsert_article_document",
-        lambda **kw: typesense_calls.append(kw),
-    )
-    published_article = SimpleNamespace(
-        article_id=str(article_id),
-        title="Title",
-        summary="Summary",
-        body="",
-        service_id="svc",
-        published_at_epoch=1234,
-        translations=None,
-        slug="a-real-slug",
-    )
-    monkeypatch.setattr(AdminCassandraStore, "get_article", lambda self, aid: published_article)  # noqa: ARG005
+    ping_mock = MagicMock()
+    monkeypatch.setattr("app.modules.seo.indexnow.ping_article", ping_mock)
+    typesense_mock = MagicMock()
+    monkeypatch.setattr("app.core.typesense_client.upsert_article_document", typesense_mock)
 
     assert AdminCassandraStore()._publish_article_to_feed(str(article_id)) is True
 
-    assert len(typesense_calls) == 1
-    assert typesense_calls[0] == {
-        "article_id": str(article_id),
-        "title": "Title",
-        "summary": "Summary",
-        "body": "",
-        "service_id": "svc",
-        "published_at_epoch": 1234,
-        "translations": None,
-        "slug": "a-real-slug",
-    }
+    ping_mock.assert_not_called()
+    typesense_mock.assert_not_called()
 
 
 def test_publish_article_to_feed_claims_a_slug_when_the_draft_never_had_one(
@@ -195,29 +166,12 @@ def test_publish_article_to_feed_claims_a_slug_when_the_draft_never_had_one(
     row.title = "A Fresh Headline"
     fake = _FakeSession(row)
     _patch(monkeypatch, fake)
-    pinged: list[dict] = []
-    monkeypatch.setattr(
-        "app.modules.seo.indexnow.ping_article",
-        lambda *a, **kw: pinged.append({"args": a, "kwargs": kw}),
-    )
-    published_article = SimpleNamespace(
-        article_id=str(article_id),
-        title="A Fresh Headline",
-        summary="Summary",
-        body="",
-        service_id="svc",
-        published_at_epoch=1234,
-        translations=None,
-        slug="a-fresh-headline",
-    )
-    monkeypatch.setattr(AdminCassandraStore, "get_article", lambda self, aid: published_article)  # noqa: ARG005
 
     store = AdminCassandraStore()
     assert store._publish_article_to_feed(str(article_id)) is True
 
     assert len(fake.slug_updates) == 1
     assert fake.slug_updates[0][0] == "a-fresh-headline"
-    assert pinged[0]["kwargs"]["slug"] == "a-fresh-headline"
 
 
 def test_publish_article_to_feed_preserves_an_existing_slug(
@@ -230,7 +184,6 @@ def test_publish_article_to_feed_preserves_an_existing_slug(
     )
     fake = _FakeSession(row)
     _patch(monkeypatch, fake)
-    monkeypatch.setattr("app.modules.seo.indexnow.ping_article", lambda *_a, **_kw: None)
 
     store = AdminCassandraStore()
     assert store._publish_article_to_feed(str(article_id)) is True
@@ -239,7 +192,9 @@ def test_publish_article_to_feed_preserves_an_existing_slug(
     assert fake.slug_updates == []
 
 
-def test_publish_article_to_feed_refuses_a_duplicate_service(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_publish_article_to_feed_refuses_a_duplicate_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The actual point of the 2026-08-27 Article.publish() migration.
 
     A DIFFERENT article_id already published for this service_id must abort
@@ -250,7 +205,9 @@ def test_publish_article_to_feed_refuses_a_duplicate_service(monkeypatch: pytest
 
     article_id = uuid4()
     existing_id = uuid4()
-    row = _article_row(article_id, published_at=datetime.now(tz=UTC) - timedelta(hours=5), slug=None)
+    row = _article_row(
+        article_id, published_at=datetime.now(tz=UTC) - timedelta(hours=5), slug=None
+    )
     fake = _FakeSession(
         row,
         service_id_rows=[SimpleNamespace(article_id=existing_id, status="published")],
@@ -264,3 +221,76 @@ def test_publish_article_to_feed_refuses_a_duplicate_service(monkeypatch: pytest
     # No transition was attempted -- the old row must not move at all.
     assert fake.articles_inserts == []
     assert fake.articles_deletes == []
+
+
+def test_trigger_fanout_after_publish_sends_the_shared_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W4-A (2026-08-28): backend dispatches the post-publish fanout (search index, translations, IndexNow, distribution) via workers' shared app.tasks.newspaper.fanout_after_publish task, by name over the Celery broker -- not its own reimplementation."""
+    sent: dict[str, Any] = {}
+
+    class _FakeCelery:
+        def __init__(self, broker: str) -> None:
+            pass
+
+        def send_task(self, name: str, *, args: list, kwargs: dict, queue: str) -> None:
+            sent["name"] = name
+            sent["args"] = args
+            sent["kwargs"] = kwargs
+            sent["queue"] = queue
+
+    monkeypatch.setattr("celery.Celery", _FakeCelery)
+
+    AdminCassandraStore._trigger_fanout_after_publish("11111111-1111-1111-1111-111111111111")
+
+    assert sent["name"] == "app.tasks.newspaper.fanout_after_publish"
+    assert sent["args"] == ["11111111-1111-1111-1111-111111111111"]
+    assert sent["kwargs"] == {"distribute": True}
+    assert sent["queue"] == "pipeline"
+
+
+def test_trigger_fanout_after_publish_swallows_broker_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A broker hiccup dispatching the fanout must be logged, not raised -- the article is already durably published by the time this fires."""
+    import logging
+
+    class _BoomCelery:
+        def __init__(self, broker: str) -> None:
+            pass
+
+        def send_task(self, *_a: object, **_kw: object) -> None:
+            raise ConnectionError("broker unreachable")
+
+    monkeypatch.setattr("celery.Celery", _BoomCelery)
+
+    with caplog.at_level(logging.WARNING):
+        AdminCassandraStore._trigger_fanout_after_publish("aid")  # must not raise
+
+    assert any("failed to trigger fanout_after_publish" in rec.message for rec in caplog.records)
+
+
+def test_publish_or_queue_article_triggers_fanout_only_when_actually_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: _publish_or_queue_article must call _trigger_fanout_after_publish exactly when _publish_article_to_feed actually landed the article live, and never when the daily cap routes it to backlog instead."""
+    store = AdminCassandraStore()
+    monkeypatch.setattr(store, "_feed_count_today", lambda *_a, **_kw: 0)
+    monkeypatch.setattr(store, "_is_standard_publish_due", lambda: True)
+    monkeypatch.setattr(store, "_record_standard_publish", lambda: None)
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: SimpleNamespace())
+    fanout_calls: list[str] = []
+    monkeypatch.setattr(
+        AdminCassandraStore, "_trigger_fanout_after_publish", staticmethod(fanout_calls.append)
+    )
+
+    monkeypatch.setattr(store, "_publish_article_to_feed", lambda _aid: True)
+    result = store._publish_or_queue_article("aid-1")
+    assert result == "published"
+    assert fanout_calls == ["aid-1"]
+
+    fanout_calls.clear()
+    monkeypatch.setattr(store, "_publish_article_to_feed", lambda _aid: False)
+    result = store._publish_or_queue_article("aid-2")
+    assert result == "published"
+    assert fanout_calls == []

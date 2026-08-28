@@ -1,6 +1,7 @@
 """Task registry import: newspaper (compose/publish) Celery tasks."""
 
 from app.modules.ai.interrogate import interrogate_compose_session_task
+from app.modules.newspaper.publish_fanout import fanout_after_publish_task
 from app.modules.newspaper.tasks.analytics_flush_tasks import flush_pending_analytics_task
 from app.modules.newspaper.tasks.distribution_tasks import distribute_article
 from app.modules.newspaper.tasks.llm_diff_tasks import check_and_publish_llm_on_diff
@@ -29,6 +30,7 @@ __all__ = [
     "compose_artifact_now",
     "distribute_article",
     "drain_to_compose",
+    "fanout_after_publish_task",
     "flush_pending_analytics_task",
     "flush_pending_views_task",
     "interrogate_compose_session_task",

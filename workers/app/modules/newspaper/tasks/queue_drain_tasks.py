@@ -42,6 +42,7 @@ from app.celery_app import celery_app
 from app.core import config
 from app.core.redis_lock import single_flight
 from app.modules.ai.mistral_credit_guard import is_credit_exhausted
+from app.modules.newspaper.publish_fanout import fanout_after_publish
 from app.modules.newspaper.publish_policy import (
     PublishKind,
     PublishTier,
@@ -385,13 +386,17 @@ def _today_str() -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _artifact_to_queued_row(artifact: Artifact, content: ArtifactContent | None) -> QueuedPublishRow:
+def _artifact_to_queued_row(
+    artifact: Artifact, content: ArtifactContent | None
+) -> QueuedPublishRow:
     """Reconstruct the exact QueuedPublishRow-shape publish_from_queued_row (and every _PRE_COMPOSE_GATES check) expects, from an artifact + its stashed content. ``payload`` is the SAME dict ingest_signal.py/editorial_assignment.py built at signal time (content.metadata["payload"]). ``queue_id`` is set to the artifact_id itself -- it is only ever used as a single_flight lock key inside publish_from_queued_row (harmless to share a redis-key namespace with historical real queue_ids -- different UUID, never collides)."""
     meta = (content.metadata or {}) if content else {}
     payload = dict(meta.get("payload") or {})
     payload.setdefault("page_text", content.content if content else "")
     payload.setdefault("page_title", content.title if content else "")
-    display_name = str(meta.get("display_name") or (content.title if content else "") or artifact.service_id or "")
+    display_name = str(
+        meta.get("display_name") or (content.title if content else "") or artifact.service_id or ""
+    )
     created_at = artifact.created_at
     return QueuedPublishRow(
         queue_id=artifact.artifact_id,
@@ -451,9 +456,7 @@ def _resolve_artifact(artifact_id: str, outcome: dict) -> str:
     return status
 
 
-def _resolve_artifact_ignoring_row(
-    artifact_id: str, _row: QueuedPublishRow, outcome: dict
-) -> str:
+def _resolve_artifact_ignoring_row(artifact_id: str, _row: QueuedPublishRow, outcome: dict) -> str:
     """`_resolve_artifact` reshaped to the `Callable[[QueuedPublishRow, dict], str]` signature `_process_review_row`/`_publish_standard_row`'s `resolve` param expects -- drain_to_compose binds `artifact_id` via `functools.partial` once per slot, so each call only needs to pass (row, outcome). `_row` is unused: this resolver already knows which artifact it's resolving from the partial-bound argument, not from the row it's handed."""
     return _resolve_artifact(artifact_id, outcome)
 
@@ -909,36 +912,13 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
                 raise
             published += 1
             record_standard_publish()
-            from app.modules.newspaper.tasks.publish_tasks import (
-                enqueue_article_translations,
-            )
-
-            enqueue_article_translations(str(art.article_id))
-            # The article just became publicly visible — same IndexNow ping the
-            # direct-publish path sends. Best-effort, never blocks the release.
-            try:
-                from app.modules.newspaper.article_store import ensure_article_slug
-                from app.modules.newspaper.indexnow import ping_article
-
-                # ensure_article_slug is idempotent -- the slug was already
-                # claimed by _claim_slug_for_feed above, this just reads it
-                # back so IndexNow submits the permanent URL, not the id.
-                ping_article(
-                    str(art.article_id),
-                    slug=ensure_article_slug(art.article_id, art.title),
-                )
-            except Exception:
-                logger.warning(
-                    "IndexNow ping failed for backlog release %s", art.article_id, exc_info=True
-                )
-            try:
-                from app.modules.newspaper.tasks.distribution_tasks import distribute_article
-
-                distribute_article.delay(article_id=str(art.article_id))
-            except Exception:
-                logger.warning(
-                    "failed to queue distribution for article %s", art.article_id, exc_info=True
-                )
+            # Same "an article just went live" fanout the direct-publish path
+            # uses (search index, translations, IndexNow, distribution) --
+            # W4-A: this release path used to reimplement everything except
+            # the search-index step, so a backlog release silently never put
+            # the article into Typesense until the once-daily reindex safety
+            # net caught it.
+            fanout_after_publish(str(art.article_id), distribute=True)
     return {"status": "ok", "published": published, "slots": slots}
 
 

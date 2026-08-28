@@ -1,4 +1,10 @@
-"""apply_recomposed_article must not surface a DRAFTED live article back into search/IndexNow as a side effect of an approved recompose -- root-caused 2026-08-11 before it could bite live on the held-draft Lumi Rogue article."""
+"""apply_recomposed_article must not surface a DRAFTED live article back into search/IndexNow as a side effect of an approved recompose -- root-caused 2026-08-11 before it could bite live on the held-draft Lumi Rogue article.
+
+W4-A (2026-08-28): the actual fanout (index/translate/IndexNow/distribute)
+moved into the shared `fanout_after_publish` (publish_fanout.py) -- this test
+now asserts apply_recomposed_article calls (or, under the draft guard, does
+NOT call) that shared function, rather than poking at its individual steps.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +33,7 @@ def _fake_article(**overrides: object) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
-def _run_apply(monkeypatch: pytest.MonkeyPatch, *, live_is_drafted: bool) -> dict:
+def _run_apply(monkeypatch: pytest.MonkeyPatch, *, live_is_drafted: bool) -> tuple[dict, MagicMock]:
     live = _fake_article()
     draft = _fake_article(
         article_id=_DRAFT_ID, title="New title", summary="New summary", body="New body"
@@ -41,7 +47,9 @@ def _run_apply(monkeypatch: pytest.MonkeyPatch, *, live_is_drafted: bool) -> dic
         "app.modules.newspaper.article_store.replace_article_content",
         lambda **kw: datetime.now(tz=UTC),  # noqa: ARG005
     )
-    monkeypatch.setattr("app.modules.newspaper.article_version_store.save_article_version", MagicMock())
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_version_store.save_article_version", MagicMock()
+    )
 
     # Resolve _Stmt descriptors to their raw CQL so fake_execute's dispatch
     # below can tell the queries apart -- without this, ArticlesStmts.X
@@ -71,30 +79,26 @@ def _run_apply(monkeypatch: pytest.MonkeyPatch, *, live_is_drafted: bool) -> dic
     session.execute.side_effect = fake_execute
     monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: session)
 
-    index_mock = MagicMock()
-    monkeypatch.setattr(publish_tasks, "index_article", index_mock)
-    translate_mock = MagicMock()
-    monkeypatch.setattr(publish_tasks, "enqueue_article_translations", translate_mock)
-    ping_mock = MagicMock()
-    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", ping_mock)
+    fanout_mock = MagicMock(return_value={"status": "ok", "article_id": _LIVE_ID})
+    monkeypatch.setattr(publish_tasks, "fanout_after_publish", fanout_mock)
 
     result = publish_tasks.apply_recomposed_article(_DRAFT_ID, _LIVE_ID)
 
-    index_mock.delay.assert_not_called() if live_is_drafted else index_mock.delay.assert_called_once()
     if live_is_drafted:
-        translate_mock.assert_not_called()
-        ping_mock.assert_not_called()
+        fanout_mock.assert_not_called()
     else:
-        translate_mock.assert_called_once()
-        ping_mock.assert_called_once()
-    return result
+        # distribute=False -- reposting every refresh of already-published
+        # content would look repetitive to followers (see apply_recomposed_
+        # article's own docstring).
+        fanout_mock.assert_called_once_with(_LIVE_ID, distribute=False)
+    return result, fanout_mock
 
 
 def test_apply_recomposed_article_skips_fanout_when_live_is_drafted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A drafted live article gets its content swapped but no index/translate/IndexNow fanout."""
-    result = _run_apply(monkeypatch, live_is_drafted=True)
+    result, _fanout_mock = _run_apply(monkeypatch, live_is_drafted=True)
     assert result["status"] == "ok_draft_preserved"
     assert result["article_id"] == _LIVE_ID
 
@@ -102,7 +106,7 @@ def test_apply_recomposed_article_skips_fanout_when_live_is_drafted(
 def test_apply_recomposed_article_runs_fanout_when_live_is_published(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The normal (non-draft) case is unaffected -- full fanout still runs."""
-    result = _run_apply(monkeypatch, live_is_drafted=False)
+    """The normal (non-draft) case is unaffected -- full fanout still runs, distribute=False."""
+    result, _fanout_mock = _run_apply(monkeypatch, live_is_drafted=False)
     assert result["status"] == "ok"
     assert result["article_id"] == _LIVE_ID

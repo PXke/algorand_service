@@ -14,6 +14,7 @@ instead.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -224,3 +225,61 @@ def test_route_to_backlog_ignores_review_queue_full_as_before(
     )
 
     assert out["status"] == "approved_backlog"
+
+
+def test_hold_for_review_goes_through_shared_record_compose_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (W4-A): _hold_for_review must call the shared record_compose_cadence (publish_fanout.py) instead of its own copy of the record_domain_compose/record_service_compose/mark_brief_run block -- the same block _finalize_publish shares it with."""
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.has_pending_review_for_url",
+        lambda _url: False,
+    )
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.review_queue_full",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.insert_stored_article",
+        lambda **kw: ("aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000", True),  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.enqueue_classifier_review",
+        lambda **kw: "rid-1",  # noqa: ARG005
+    )
+    monkeypatch.setattr(pt, "_grade_and_gate", lambda *_a, **_kw: ({}, None, True))
+    cadence_mock = MagicMock()
+    monkeypatch.setattr(pt, "record_compose_cadence", cadence_mock)
+
+    row = SimpleNamespace(
+        queue_id="q1",
+        service_id="pixelcity-aetheralabs-es",
+        scrape_url="https://pixelcity.aetheralabs.es/gallery",
+    )
+    composed = ArticleComposeResult(title="T", summary="s", body="body", composer="deepseek")
+
+    out = pt._hold_for_review(
+        row,
+        {"txid": "", "round_num": 0, "source_kind": "editorial_assignment", "brief_id": "b7"},
+        composed,
+        topic=PublishTopic.GENERIC,
+        publish_kind=PublishKind.CONTENT_UPDATE,
+        compose_domain="aetheralabs.es",
+        clf_category="ecosystem",
+        clf_confidence=0.5,
+        signals=_signals(),
+        gate_enforced_review=False,
+        hold_reason="",
+        hero_image="",
+        image_field="",
+        route_to_backlog=False,
+        page_text_for_clf="page text",
+    )
+
+    cadence_mock.assert_called_once_with(
+        compose_domain="aetheralabs.es",
+        service_id="pixelcity-aetheralabs-es",
+        article_id=out["article_id"],
+        is_editorial_assignment=True,
+        brief_id="b7",
+    )
