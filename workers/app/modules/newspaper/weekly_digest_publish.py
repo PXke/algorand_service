@@ -10,10 +10,9 @@ import httpx
 from app.core import config
 from app.core.config import PRICE_ANALYSIS_ASSET_ID, PRICE_ANALYSIS_SERVICE_ID
 from app.modules.newspaper.article_composer import compose_weekly_digest
-from app.modules.newspaper.article_store import insert_article_if_absent
+from app.modules.newspaper.article_store import _sanitize_body, insert_article_if_absent
 from app.modules.newspaper.article_tags import derive_article_tags
 from app.modules.newspaper.price_analysis import PriceAnalysisError
-from app.modules.newspaper.security import sanitize_body
 from app.modules.newspaper.weekly_digest import (
     build_weekly_digest,
     digest_article_id,
@@ -58,7 +57,7 @@ def run_weekly_digest_publish(
 
     title = composed.title
     summary = composed.summary
-    body = sanitize_body(composed.body)
+    body = _sanitize_body(composed.body)
     source_url = f"https://www.coingecko.com/en/coins/{context.price.asset_id}"
 
     article_id, created = insert_article_if_absent(
