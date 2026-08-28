@@ -1053,11 +1053,11 @@ def test_reclaim_stale_selected_only_deletes_the_reclaimed_slot_not_the_whole_da
 
 
 @pytest.mark.usefixtures("fake_artifact_session")
-def test_reclaim_stale_selected_clears_a_reclaimed_humans_stale_pin(
+def test_reclaim_stale_selected_repins_a_stranded_human_pick_forward(
     fake_artifact_session: FakeArtifactSession,
 ) -> None:
-    """Reclaiming a stranded HUMAN pick also clears its stale human_pick_day -- otherwise it goes back to pending still carrying a pin for a day that has already passed, confusing leftover state on an otherwise-ordinary pending artifact."""
-    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+    """2026-08-28: a stranded HUMAN pick is carried forward -- re-pinned for the next actionable day -- not reverted to plain pending with its pin cleared. The human's specific choice must survive, not be dumped back into the undifferentiated pool."""
+    from algorand_shared.artifact_store import PENDING, insert_artifact, pin_artifact_for_day
     from algorand_shared.to_compose_selection import (
         reclaim_stale_selected_artifacts,
         select_to_compose_for_day,
@@ -1070,7 +1070,248 @@ def test_reclaim_stale_selected_clears_a_reclaimed_humans_stale_pin(
     result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
 
     assert result["reclaimed_count"] == 1
-    assert fake_artifact_session.artifacts[aid]["human_pick_day"] is None
+    assert result["reclaimed"][0]["action"] == "repinned_forward"
+    assert result["reclaimed"][0]["target_day"] == "2026-08-26"
+    # Reverted to pending (so it's eligible again)...
+    assert fake_artifact_session.artifacts[aid]["status"] == PENDING
+    # ...but re-pinned for the next actionable day, NOT cleared to None.
+    assert fake_artifact_session.artifacts[aid]["human_pick_day"] == "2026-08-26"
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_repin_lands_on_today_when_today_is_open(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """When `today` itself has no to_compose selection yet, the re-pin targets `today` directly -- eligible the very next time select_to_compose_for_day/select_to_compose_for_today_task actually processes it, not pushed needlessly further out."""
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import (
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    pin_artifact_for_day(aid, "2026-08-25")
+    select_to_compose_for_day("2026-08-25")
+    # Note: nothing has selected "2026-08-26" yet.
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
+
+    assert result["reclaimed"][0]["target_day"] == "2026-08-26"
+    assert fake_artifact_session.artifacts[aid]["human_pick_day"] == "2026-08-26"
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_repin_skips_a_day_already_locked_in(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """When `today` has already been selected (a real to_compose row exists for it), re-pinning for `today` would never be honored -- select_to_compose_for_today_task is a no-op once a day has any rows. The re-pin must skip forward to the next day that isn't locked in yet."""
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import (
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    stranded_id, _ = insert_artifact(
+        service_id="svc-stranded", url=None, channel="brief", content="a"
+    )
+    pin_artifact_for_day(stranded_id, "2026-08-25")
+    select_to_compose_for_day("2026-08-25")
+
+    # Today's own slate has already been locked in by an unrelated pick.
+    insert_artifact(service_id="svc-today", url=None, channel="brief", content="b")
+    select_to_compose_for_day("2026-08-26")
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
+
+    assert result["reclaimed"][0]["target_day"] == "2026-08-27"
+    assert fake_artifact_session.artifacts[stranded_id]["human_pick_day"] == "2026-08-27"
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_repin_does_not_steal_a_genuine_future_pin(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """A carried-forward re-pin must never clobber an unrelated, genuine admin pin already waiting for a future day -- it should skip past that day to the next open one instead."""
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import (
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    stranded_id, _ = insert_artifact(
+        service_id="svc-stranded", url=None, channel="brief", content="a"
+    )
+    pin_artifact_for_day(stranded_id, "2026-08-25")
+    select_to_compose_for_day("2026-08-25")
+
+    # A genuine, unrelated admin pin already waiting for "today".
+    future_pick_id, _ = insert_artifact(
+        service_id="svc-future", url=None, channel="brief", content="c"
+    )
+    pin_artifact_for_day(future_pick_id, "2026-08-26")
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
+
+    assert result["reclaimed"][0]["target_day"] == "2026-08-27"
+    # The genuine future pin is untouched.
+    assert fake_artifact_session.artifacts[future_pick_id]["human_pick_day"] == "2026-08-26"
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_two_stranded_human_picks_land_on_different_days(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """Multi-day-stale scenario: two separate human picks stranded on two different past days (e.g. several consecutive paused days) must each roll forward to a DIFFERENT day, never collide or clobber each other's pin."""
+    from algorand_shared.artifact_store import insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import (
+        list_to_compose_for_day,
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    first_id, _ = insert_artifact(service_id="svc-first", url=None, channel="brief", content="a")
+    pin_artifact_for_day(first_id, "2026-08-24")
+    select_to_compose_for_day("2026-08-24")
+
+    second_id, _ = insert_artifact(service_id="svc-second", url=None, channel="brief", content="b")
+    pin_artifact_for_day(second_id, "2026-08-25")
+    select_to_compose_for_day("2026-08-25")
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
+
+    assert result["reclaimed_count"] == 2
+    target_days = {r["target_day"] for r in result["reclaimed"]}
+    assert len(target_days) == 2  # never the same day twice
+    assert fake_artifact_session.artifacts[first_id]["human_pick_day"] in target_days
+    assert fake_artifact_session.artifacts[second_id]["human_pick_day"] in target_days
+    assert (
+        fake_artifact_session.artifacts[first_id]["human_pick_day"]
+        != fake_artifact_session.artifacts[second_id]["human_pick_day"]
+    )
+    # Neither original stale day's row survives.
+    assert list_to_compose_for_day("2026-08-24") == []
+    assert list_to_compose_for_day("2026-08-25") == []
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_repin_dry_run_reports_target_day_without_writing(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """dry_run=True must accurately preview WHICH day a human pick would be re-pinned to, without writing anything -- the whole point of a dry-run report under the new carry-forward design."""
+    from algorand_shared.artifact_store import SELECTED, insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import (
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    pin_artifact_for_day(aid, "2026-08-25")
+    select_to_compose_for_day("2026-08-25")
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=True)
+
+    assert result["reclaimed"][0]["action"] == "repinned_forward"
+    assert result["reclaimed"][0]["target_day"] == "2026-08-26"
+    # Nothing actually written: still SELECTED, still pinned for the old day.
+    assert fake_artifact_session.artifacts[aid]["status"] == SELECTED
+    assert fake_artifact_session.artifacts[aid]["human_pick_day"] == "2026-08-25"
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_platform_pick_gets_a_priority_boost(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """A stranded PLATFORM pick is reverted to pending like before, but now with its priority boosted strictly above the current top of the pending pool -- a real, not just theoretical, near-guarantee of winning a platform slot the very next selection run, since a direct in-place edit of an already-locked day's to_compose row is unsafe (see the function's own docstring)."""
+    from algorand_shared.artifact_store import (
+        PENDING,
+        insert_artifact,
+        update_artifact_priority,
+    )
+    from algorand_shared.to_compose_selection import (
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    stranded_id, _ = insert_artifact(
+        service_id="svc-stranded", url=None, channel="brief", content="a"
+    )
+    select_to_compose_for_day("2026-08-25")  # platform-fills the one platform slot
+
+    other_id, _ = insert_artifact(service_id="svc-other", url=None, channel="brief", content="b")
+    update_artifact_priority(other_id, 5.0)  # the current top of the pending pool
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
+
+    assert result["reclaimed_count"] == 1
+    entry = result["reclaimed"][0]
+    assert entry["action"] == "reverted_with_priority_boost"
+    assert entry["boosted_priority"] > 5.0
+    assert fake_artifact_session.artifacts[stranded_id]["status"] == PENDING
+    assert fake_artifact_session.artifacts[stranded_id]["priority"] == entry["boosted_priority"]
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_platform_boost_dry_run_makes_no_writes(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """dry_run=True must report the platform boost plan (action + boosted_priority) without actually reverting status or touching priority."""
+    from algorand_shared.artifact_store import SELECTED, insert_artifact
+    from algorand_shared.to_compose_selection import (
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    stranded_id, _ = insert_artifact(
+        service_id="svc-stranded", url=None, channel="brief", content="a"
+    )
+    select_to_compose_for_day("2026-08-25")
+    original_priority = fake_artifact_session.artifacts[stranded_id]["priority"]
+
+    result = reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=True)
+
+    entry = result["reclaimed"][0]
+    assert entry["action"] == "reverted_with_priority_boost"
+    assert "boosted_priority" in entry
+    assert fake_artifact_session.artifacts[stranded_id]["status"] == SELECTED
+    assert fake_artifact_session.artifacts[stranded_id]["priority"] == original_priority
+
+
+@pytest.mark.usefixtures("fake_artifact_session")
+def test_reclaim_stale_selected_human_pick_rolls_forward_across_several_paused_days(
+    fake_artifact_session: FakeArtifactSession,
+) -> None:
+    """End-to-end multi-day-stale simulation: several consecutive days pass with compose paused. Each day's own daily selection beat (unconditional, not gated on the pause) re-selects the still-pinned artifact into that day's human slot; each day's reclaim then carries it forward again. No duplicate/dangling to_compose rows must accumulate across the whole run."""
+    from algorand_shared.artifact_store import PENDING, insert_artifact, pin_artifact_for_day
+    from algorand_shared.to_compose_selection import (
+        list_to_compose_for_day,
+        reclaim_stale_selected_artifacts,
+        select_to_compose_for_day,
+    )
+
+    aid, _ = insert_artifact(service_id="svc-a", url=None, channel="brief", content="a")
+    pin_artifact_for_day(aid, "2026-08-24")
+    select_to_compose_for_day("2026-08-24")  # day 1: selected, never composed (paused)
+
+    # Day 2 rolls over: reclaim carries it forward to 2026-08-25, then that
+    # day's own (unconditional) selection beat locks it in again.
+    reclaim_stale_selected_artifacts(today="2026-08-25", dry_run=False)
+    assert fake_artifact_session.artifacts[aid]["status"] == PENDING
+    select_to_compose_for_day("2026-08-25")
+    assert fake_artifact_session.artifacts[aid]["human_pick_day"] == "2026-08-25"
+
+    # Day 3 rolls over: still paused, still never composed -- carried
+    # forward again.
+    reclaim_stale_selected_artifacts(today="2026-08-26", dry_run=False)
+    select_to_compose_for_day("2026-08-26")
+
+    # Only the CURRENT day's row survives -- no duplicate/dangling rows from
+    # any of the earlier days.
+    assert list_to_compose_for_day("2026-08-24") == []
+    assert list_to_compose_for_day("2026-08-25") == []
+    current = list_to_compose_for_day("2026-08-26")
+    assert len(current) == 1
+    assert current[0]["artifact_id"] == aid
+    assert current[0]["lane"] == "human"
 
 
 @pytest.mark.usefixtures("fake_artifact_session")
