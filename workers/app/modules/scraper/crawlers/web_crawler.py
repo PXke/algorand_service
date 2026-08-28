@@ -249,6 +249,14 @@ class WebCrawlerDriver:
                 mark_url_done(queue_id, status="failed")
             return {"status": "error", "url": url, "detail": str(exc)}
 
+        # Count this fetched page against the domain's rolling page budget
+        # regardless of the quality-gate verdict below — a low-quality page
+        # still cost a fetch, and a domain that keeps returning thin/off-topic
+        # pages must not get an effectively unlimited crawl budget just
+        # because none of those pages individually clear the content-quality
+        # floor.
+        record_domain_crawl(domain)
+
         if not admin_approved and not is_content_quality_sufficient(result.text):
             # A thin / off-topic page is a per-PAGE signal only. Drop the page, but
             # do NOT demote the domain or zero its score on one bad page — the
@@ -288,8 +296,6 @@ class WebCrawlerDriver:
                 )
             except Exception:
                 logger.warning("single-page compose failed for %s", url, exc_info=True)
-        # Count this fetched page against the domain's rolling page budget.
-        record_domain_crawl(domain)
         # Harvest: persist the crawled page (crawled_pages_by_domain + Typesense)
         # so it becomes searchable content and counts toward the domain's page
         # total (admin "pages crawled" view + the initial-harvest priority gate).
@@ -302,6 +308,8 @@ class WebCrawlerDriver:
                 title=result.title,
                 text=result.text,
                 service_id=service_id,
+                outbound_links=tuple(link.get("url", "") for link in result.links),
+                published_at=result.published_at,
             )
         except Exception:
             logger.warning("failed to enqueue crawled-page indexing for %s", url, exc_info=True)

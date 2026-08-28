@@ -1376,23 +1376,24 @@ def _register_domain_as_service(
         )
     if not owner:
         add_web_source(service_id, domain=domain, url=scrape_url)
-    # Event-driven: kick the crawl + scrape now so an approved domain is
-    # explored immediately instead of waiting for the (now hourly) beat.
-    try:
-        from celery import Celery
+    # Event-driven: kick the frontier crawl now so an approved domain is
+    # explored immediately instead of waiting for the (now hourly) beat. The
+    # actual scrape+compose for this service happens on run_llm_diff_check's
+    # own ~10min beat, which already picks up any never-scraped/never-
+    # throttled service promptly — no separate immediate-scrape trigger
+    # needed (fetch_source, which did that fire-and-forget with its result
+    # never read by any caller, was removed 2026-08-28).
+    if enqueued:
+        try:
+            from celery import Celery
 
-        from app.core.config import settings
+            from app.core.config import settings
 
-        celery_app = Celery(broker=settings.celery_broker_url)
-        if enqueued:
-            celery_app.send_task("app.tasks.crawler.drain_url_queue", queue="scrape")
-        celery_app.send_task(
-            "app.tasks.scrape.fetch_source", args=[service_id, scrape_url], queue="scrape"
-        )
-    except Exception:
-        logger.warning(
-            "failed to trigger crawl/scrape for approved domain %s", domain, exc_info=True
-        )
+            Celery(broker=settings.celery_broker_url).send_task(
+                "app.tasks.crawler.drain_url_queue", queue="scrape"
+            )
+        except Exception:
+            logger.warning("failed to trigger crawl for approved domain %s", domain, exc_info=True)
     return source_created
 
 

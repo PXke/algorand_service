@@ -94,6 +94,145 @@ def test_index_article_reads_tags_from_article_detail(monkeypatch: pytest.Monkey
     assert captured["tags"] == ["defi", "payments"]
 
 
+def _wire_index_crawled_page_storage(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Fake index_crawled_page's storage/indexing seams so a run never touches the network.
+
+    Returns the dict that upsert_page_document's kwargs get captured into.
+    """
+    from app.modules.crawler.crawled_page_store import CrawledPageRecord
+    from app.modules.search.tasks import index_tasks
+
+    def fake_upsert_crawled_page(**kwargs: object) -> CrawledPageRecord:
+        return CrawledPageRecord(
+            page_id="11111111-1111-1111-1111-111111111111",
+            url=str(kwargs["url"]),
+            domain="svc.example",
+            title=str(kwargs["title"]),
+            description="desc",
+            body=str(kwargs["body"]),
+            service_id=str(kwargs["service_id"]),
+            source=str(kwargs["source"]),
+            keywords=(),
+            classifier_score=float(kwargs["classifier_score"]),
+            crawled_at_epoch=0,
+        )
+
+    captured: dict = {}
+
+    def fake_upsert_page_document(**kwargs: object) -> dict:
+        captured.update(kwargs)
+        return {"status": "indexed"}
+
+    monkeypatch.setattr(index_tasks, "upsert_crawled_page", fake_upsert_crawled_page)
+    monkeypatch.setattr(index_tasks, "upsert_page_document", fake_upsert_page_document)
+    return captured
+
+
+def test_index_crawled_page_forwards_outbound_links_to_score_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """outbound_links passed into index_crawled_page reaches score_page.
+
+    Same explorer-link signal every other score_page caller (url_queue_tasks.py)
+    already gets — previously silently dropped.
+    """
+    from app.modules.search.tasks import index_tasks
+
+    _wire_index_crawled_page_storage(monkeypatch)
+    seen_links: list[tuple[str, ...]] = []
+
+    def fake_score_page(*, url: str, text: str, outbound_links: tuple[str, ...] = ()) -> object:  # noqa: ARG001
+        seen_links.append(outbound_links)
+        return type("R", (), {"in_scope": True, "score": 1.0})()
+
+    monkeypatch.setattr(index_tasks, "score_page", fake_score_page)
+
+    index_tasks.index_crawled_page(
+        url="https://svc.example/page",
+        title="Title",
+        text="algorand ecosystem partner",
+        service_id="svc",
+        outbound_links=("https://allo.info/asset/1/token",),
+    )
+    assert seen_links == [("https://allo.info/asset/1/token",)]
+
+
+def test_index_crawled_page_converts_published_at_iso_to_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page's own ISO-8601 published_at drives the indexed epoch.
+
+    Applies when no explicit published_at_epoch is given, instead of always
+    falling back to indexing time.
+    """
+    from app.modules.search.tasks import index_tasks
+
+    captured = _wire_index_crawled_page_storage(monkeypatch)
+    monkeypatch.setattr(
+        index_tasks, "score_page", lambda **_: type("R", (), {"in_scope": True, "score": 1.0})()
+    )
+
+    index_tasks.index_crawled_page(
+        url="https://svc.example/page",
+        title="Title",
+        text="algorand ecosystem partner",
+        service_id="svc",
+        published_at="2026-08-21T12:30:00Z",
+    )
+    assert captured["published_at_epoch"] == 1787315400
+
+
+def test_index_crawled_page_explicit_epoch_wins_over_published_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit published_at_epoch still wins over the raw published_at string.
+
+    e.g. a recompose re-stamping the same page.
+    """
+    from app.modules.search.tasks import index_tasks
+
+    captured = _wire_index_crawled_page_storage(monkeypatch)
+    monkeypatch.setattr(
+        index_tasks, "score_page", lambda **_: type("R", (), {"in_scope": True, "score": 1.0})()
+    )
+
+    index_tasks.index_crawled_page(
+        url="https://svc.example/page",
+        title="Title",
+        text="algorand ecosystem partner",
+        service_id="svc",
+        published_at="2026-08-21T12:30:00Z",
+        published_at_epoch=42,
+    )
+    assert captured["published_at_epoch"] == 42
+
+
+def test_index_crawled_page_falls_back_to_now_when_published_at_unparseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty/garbage published_at falls back to indexing time.
+
+    Matches behavior from before this fix (no page metadata found), rather
+    than erroring.
+    """
+    from app.modules.search.tasks import index_tasks
+
+    captured = _wire_index_crawled_page_storage(monkeypatch)
+    monkeypatch.setattr(
+        index_tasks, "score_page", lambda **_: type("R", (), {"in_scope": True, "score": 1.0})()
+    )
+    monkeypatch.setattr(index_tasks.time, "time", lambda: 1234567.0)
+
+    index_tasks.index_crawled_page(
+        url="https://svc.example/page",
+        title="Title",
+        text="algorand ecosystem partner",
+        service_id="svc",
+        published_at="not-a-date",
+    )
+    assert captured["published_at_epoch"] == 1234567
+
+
 def test_index_article_reads_slug_from_article_detail(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reads an article's permanent slug off its ArticleDetail before indexing it (root-caused 2026-08-26: this field never reached Typesense at all, so every search result fell back to a raw-UUID URL)."""
     from app.modules.newspaper.article_store import ArticleDetail
@@ -172,7 +311,9 @@ def test_upsert_article_document_writes_slug_field(monkeypatch: pytest.MonkeyPat
     assert captured["slug"] == "al-goanna-launches-nft-backed-loans"
 
 
-def test_upsert_article_document_omits_slug_key_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upsert_article_document_omits_slug_key_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """No `slug` kwarg (e.g. an article somehow missing one) sends no `slug` key at all, rather than an explicit null the optional schema field might reject."""
     from app.modules.search.core import indexer
 

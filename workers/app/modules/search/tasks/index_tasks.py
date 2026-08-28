@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from datetime import UTC, datetime
 
 from app.celery_app import celery_app
 from app.modules.crawler.crawled_page_store import upsert_crawled_page
@@ -44,6 +45,20 @@ def index_article(
     )
 
 
+def _epoch_from_iso(value: str) -> int | None:
+    """Best-effort ISO-8601 timestamp -> unix epoch seconds; None if unparseable/empty."""
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return int(dt.timestamp())
+
+
 @celery_app.task(name="app.tasks.search.index_crawled_page")
 def index_crawled_page(
     *,
@@ -51,6 +66,8 @@ def index_crawled_page(
     title: str,
     text: str,
     service_id: str,
+    outbound_links: tuple[str, ...] = (),
+    published_at: str = "",
     published_at_epoch: int | None = None,
 ) -> dict[str, str]:
     """Index scraped page text when the classifier marks it in-scope.
@@ -61,8 +78,17 @@ def index_crawled_page(
     partner's page can easily score 0.0 on — an explicit human relevance call
     shouldn't lose to that (root-caused 2026-07-21: dark-coin.com passed the
     storage gate after that fix but still never reached the search index).
+
+    outbound_links feeds score_page's explorer-link signal — without it, a
+    multi-chain service's own text can legitimately never say "algorand" while
+    still linking straight to its Algorand explorer entry, same gap fixed for
+    relevance_score/score_content_for_storage on 2026-07-22 (see
+    app/modules/ai/content_signals.py). The indexed epoch prefers an explicit
+    published_at_epoch, then falls back to parsing published_at (the page's
+    own ISO-8601 publish metadata), then to now() — so the search index sorts
+    on the page's actual publish date instead of always the crawl time.
     """
-    result = score_page(url=url, text=text)
+    result = score_page(url=url, text=text, outbound_links=outbound_links)
     if not result.in_scope:
         from app.modules.crawler.domain_tracker import domain_from_url, is_admin_approved_domain
 
@@ -72,7 +98,11 @@ def index_crawled_page(
                 "reason": "classifier_rejected",
                 "score": str(result.score),
             }
-    epoch = published_at_epoch if published_at_epoch is not None else int(time.time())
+    epoch = published_at_epoch
+    if epoch is None:
+        epoch = _epoch_from_iso(published_at)
+    if epoch is None:
+        epoch = int(time.time())
     stored = upsert_crawled_page(
         url=url,
         title=title,
