@@ -29,6 +29,64 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _homepage_url(url: str) -> str:
+    """The domain's homepage, derived from any of its crawled URLs -- the sensible place to START an interactive exploration regardless of which specific page happened to trigger the check (confirmed on lumirogue.com: the real interactive content -- the demo, About, Rankings -- all sits behind buttons on the homepage itself, not on any deep path)."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}/"
+
+
+def maybe_trigger_interactive_crawl(url: str, *, service_id: str) -> bool:
+    """Best-effort: if `url`'s domain looks like it needs interactive crawling (see needs_interactive_crawl) and hasn't had one within INTERACTIVE_CRAWL_COOLDOWN_DAYS, dispatch one asynchronously. Returns True if a crawl was dispatched.
+
+    Call site: index_tasks.index_crawled_page, right after a page is stored
+    -- that's exactly when a domain's diversity signal is freshest. The
+    Redis SET-NX-with-TTL below does double duty as BOTH the cooldown and
+    the "don't recompute the diversity signal on every single page store"
+    rate limit: one atomic claim covers both, so a busy domain doesn't pay
+    for a Cassandra scan on every page.
+
+    Never raises: an infra hiccup here must not fail the page-storage path
+    it's piggybacking on.
+    """
+    from app.core.config import INTERACTIVE_CRAWL_COOLDOWN_DAYS, INTERACTIVE_CRAWL_ENABLED
+
+    if not INTERACTIVE_CRAWL_ENABLED:
+        return False
+    try:
+        from app.core.redis_client import get_redis
+        from app.modules.crawler.crawled_page_store import (
+            domain_content_diversity,
+            needs_interactive_crawl,
+            normalize_domain,
+        )
+
+        domain = normalize_domain(url)
+        if not domain:
+            return False
+        claimed = get_redis().set(
+            f"crawler:interactive_crawl_claim:{domain}",
+            "1",
+            nx=True,
+            ex=INTERACTIVE_CRAWL_COOLDOWN_DAYS * 86_400,
+        )
+        if not claimed:
+            return False
+        diversity = domain_content_diversity(domain)
+        if not needs_interactive_crawl(diversity):
+            return False
+        from app.modules.crawler.tasks.interactive_crawl_tasks import run_interactive_crawl_task
+
+        run_interactive_crawl_task.delay(
+            entry_url=_homepage_url(url), service_id=service_id or domain
+        )
+        return True
+    except Exception:
+        logger.warning("maybe_trigger_interactive_crawl failed for %s", url, exc_info=True)
+        return False
+
+
 def _synthetic_click_url(entry_url: str, click_text: str) -> str:
     """A stable, inspectable pseudo-URL for a click result with no real URL of its own -- deterministic per (entry_url, click_text) so a repeat interactive crawl updates the SAME stored page (via page_id_for_url's hash-of-url identity) instead of accumulating a new row every run."""
     import re

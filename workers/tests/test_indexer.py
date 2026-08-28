@@ -71,6 +71,32 @@ def test_page_index_skips_soft_404s(monkeypatch: pytest.MonkeyPatch) -> None:
     assert outcome == {"status": "skipped", "reason": "soft_404"}
 
 
+def test_page_index_checks_interactive_crawl_trigger_on_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A domain-duplicate hit is exactly the signal needs_interactive_crawl exists to catch -- index_crawled_page must offer that domain up for the check right when it catches one, not just at read time."""
+    from app.modules.search.tasks import index_tasks
+
+    monkeypatch.setattr(
+        index_tasks,
+        "score_page",
+        lambda **_: type("R", (), {"in_scope": True, "score": 1.0})(),
+    )
+    monkeypatch.setattr(index_tasks, "domain_has_similar_content", lambda *_a, **_k: True)
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        "app.modules.crawler.interactive_crawl.maybe_trigger_interactive_crawl",
+        lambda url, **kw: calls.append((url, kw)) or False,
+    )
+    index_tasks.index_crawled_page(
+        url="https://lumirogue.com/?view=gungi",
+        title="Lumi Rogue",
+        text="LUMI ROGUE v0.21 Try the demo (tutorial)",
+        service_id="lumirogue-com",
+    )
+    assert calls == [("https://lumirogue.com/?view=gungi", {"service_id": "lumirogue-com"})]
+
+
 def test_page_index_skips_domain_duplicate_content(monkeypatch: pytest.MonkeyPatch) -> None:
     """Root-caused 2026-08-28 (Lumi Rogue): a client-rendered SPA served the SAME shell HTML for ~20 crawler-guessed URL variants. Content that byte-matches a page already crawled for the domain is skipped before storage, not just filtered later at aggregate-read time."""
     from app.modules.search.tasks import index_tasks

@@ -116,6 +116,13 @@ def index_crawled_page(
         return {"status": "skipped", "reason": "soft_404"}
     domain = normalize_domain(url)
     if domain_has_similar_content(domain, text):
+        # This IS the signal: a domain that keeps producing duplicate content
+        # under different URLs is exactly what needs_interactive_crawl exists
+        # to catch. Checking here (not on every successful store) means a
+        # healthy, genuinely-diverse domain never pays for the check at all.
+        from app.modules.crawler.interactive_crawl import maybe_trigger_interactive_crawl
+
+        maybe_trigger_interactive_crawl(url, service_id=service_id)
         return {"status": "skipped", "reason": "duplicate_content"}
     epoch = published_at_epoch
     if epoch is None:
