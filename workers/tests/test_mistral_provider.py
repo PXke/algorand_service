@@ -8,7 +8,7 @@ from typing import Any, Self
 import httpx
 import pytest
 
-from app.modules.ai.llm_openai_compatible import MistralProvider
+from app.modules.ai.llm_openai_compatible import DeepSeekProvider, MistralProvider
 from app.modules.ai.llm_provider import LLMCreditError, LLMError
 
 
@@ -219,7 +219,7 @@ def test_post_short_circuits_when_credit_already_marked_exhausted(
 
 def test_post_marks_exhausted_on_401() -> None:
     """A real 401 must flip the circuit breaker so subsequent calls (this process or any other worker sharing Redis) fail fast instead of also paying for their own doomed round trip."""
-    marked: list[bool] = []
+    marked: list[int | None] = []
 
     class FakeResponse:
         status_code = 401
@@ -243,7 +243,9 @@ def test_post_marks_exhausted_on_401() -> None:
     original_httpx = httpx.Client
     original_mark = compat_module.mark_credit_exhausted
     compat_module.httpx.Client = FakeClient
-    compat_module.mark_credit_exhausted = lambda _provider: marked.append(True)
+    compat_module.mark_credit_exhausted = lambda _provider, *, status_code=None: marked.append(
+        status_code
+    )
     try:
         client = MistralProvider(api_key="test-key")
         with pytest.raises(LLMCreditError):
@@ -252,7 +254,55 @@ def test_post_marks_exhausted_on_401() -> None:
         compat_module.httpx.Client = original_httpx
         compat_module.mark_credit_exhausted = original_mark
 
-    assert marked == [True]
+    assert marked == [401]
+
+
+def test_post_passes_status_code_so_deepseek_401_does_not_trip_the_breaker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end proof of the real call site, not just the guard function in isolation (see test_mistral_credit_guard.py for that): a DeepSeek 401 still raises LLMCreditError for THIS call, but must not set the Redis breaker flag -- mark_credit_exhausted needs the real status_code threaded through from _raise_for_error_status to make that distinction at all."""
+    from app.modules.ai import mistral_credit_guard
+
+    store: dict[str, str] = {}
+
+    class _FakeRedis:
+        def set(self, key: str, value: str, ex: int | None = None) -> None:  # noqa: ARG002
+            store[key] = value
+
+        def get(self, key: str) -> str | None:
+            return store.get(key)
+
+    monkeypatch.setattr("redis.from_url", lambda *_a, **_kw: _FakeRedis())
+
+    class FakeResponse:
+        status_code = 401
+        text = "unauthorized"
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def post(self, _url: str, headers: dict | None = None, json: dict | None = None) -> Any:  # noqa: ARG002, ANN401 -- name must match the real callee's keyword arg
+            return FakeResponse()
+
+    import app.modules.ai.llm_openai_compatible as compat_module
+
+    original_httpx = httpx.Client
+    compat_module.httpx.Client = FakeClient
+    try:
+        client = DeepSeekProvider(api_key="test-key")
+        with pytest.raises(LLMCreditError):
+            client.chat_completion([{"role": "user", "content": "hi"}])
+    finally:
+        compat_module.httpx.Client = original_httpx
+
+    assert mistral_credit_guard.is_credit_exhausted("deepseek") is False
 
 
 def test_exhausted_tool_loop_skips_final_completion_when_told(

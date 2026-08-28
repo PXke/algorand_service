@@ -531,7 +531,7 @@ class OpenAICompatibleProvider(LLMProvider):
     def _raise_for_error_status(self, resp: httpx.Response) -> None:
         """Raise the appropriate LLMError subtype for a non-retryable error status."""
         if resp.status_code in (401, 402):
-            mark_credit_exhausted(self._provider)
+            mark_credit_exhausted(self._provider, status_code=resp.status_code)
             raise LLMCreditError(f"{self._provider} API {resp.status_code}: {resp.text[:500]}")
         if resp.status_code >= 400:
             raise LLMError(f"{self._provider} API {resp.status_code}: {resp.text[:500]}")
