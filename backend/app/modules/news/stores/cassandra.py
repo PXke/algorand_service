@@ -42,7 +42,9 @@ def _feed_row_to_stored(row: Any) -> StoredArticle:
         image_url=getattr(row, "image_url", None),
         source_url=getattr(row, "source_url", None),
         slug=getattr(row, "slug", None),
-        translated_titles=dict(row.translated_titles) if getattr(row, "translated_titles", None) else None,
+        translated_titles=dict(row.translated_titles)
+        if getattr(row, "translated_titles", None)
+        else None,
         updated_at_epoch=(_epoch(getattr(row, "updated_at", None)) or None),
         first_published_at_epoch=(_epoch(getattr(row, "first_published_at", None)) or None),
     )
