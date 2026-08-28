@@ -127,6 +127,16 @@ def _build_beat_schedule() -> dict:
         "task": "app.tasks.crawler.reclaim_stale_processing_urls",
         "schedule": float(os.getenv("URL_QUEUE_PROCESSING_RECLAIM_SECONDS", "600")),
     }
+    # Same shape as reclaim-stale-processing-urls just above, for the other
+    # in-flight marker this module's own deep-classify escalation path can
+    # leave stuck: deep_classify_domain's try/finally (_clear_deep_classify_
+    # queued) already clears deep_classify_queued="true" on every exit path
+    # it reaches, but a hard SIGKILL past the task's own task_time_limit
+    # skips it -- see reap_stale_deep_classify_flags's own docstring.
+    schedule["reap-stale-deep-classify-flags"] = {
+        "task": "app.tasks.crawler.reap_stale_deep_classify_flags",
+        "schedule": float(os.getenv("DEEP_CLASSIFY_REAP_SECONDS", "600")),
+    }
     schedule["retrain-publish-classifier"] = {
         "task": "app.tasks.crawler.retrain_publish_classifier",
         "schedule": crontab(

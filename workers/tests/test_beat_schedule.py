@@ -133,3 +133,25 @@ def test_reclaim_stale_processing_urls_beat_interval_configurable(
     monkeypatch.setenv("URL_QUEUE_PROCESSING_RECLAIM_SECONDS", "120")
     schedule = celery_app._build_beat_schedule()
     assert schedule["reclaim-stale-processing-urls"]["schedule"] == 120.0
+
+
+def test_reap_stale_deep_classify_flags_beat_present_and_scheduled_every_ten_minutes_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deep-classify-flag reaper runs unconditionally (no feature flag) every 10 minutes by default, pointed at the real task name the beat dispatches by."""
+    monkeypatch.delenv("DEEP_CLASSIFY_REAP_SECONDS", raising=False)
+    schedule = celery_app._build_beat_schedule()
+    assert (
+        schedule["reap-stale-deep-classify-flags"]["task"]
+        == "app.tasks.crawler.reap_stale_deep_classify_flags"
+    )
+    assert schedule["reap-stale-deep-classify-flags"]["schedule"] == 600.0
+
+
+def test_reap_stale_deep_classify_flags_beat_interval_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reaper's interval is overridable via DEEP_CLASSIFY_REAP_SECONDS."""
+    monkeypatch.setenv("DEEP_CLASSIFY_REAP_SECONDS", "120")
+    schedule = celery_app._build_beat_schedule()
+    assert schedule["reap-stale-deep-classify-flags"]["schedule"] == 120.0
