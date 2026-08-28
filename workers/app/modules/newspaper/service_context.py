@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
+from app.modules.crawler.crawled_page_store import looks_like_soft_404
 from app.modules.pipeline.core.diffing import normalize_text
 
 
@@ -123,7 +124,7 @@ def _select_distinct_pages(
             break
         detail = result.one() if ok else None
         body = (detail.body if detail else "") or ""
-        if not body.strip() or _looks_like_soft_404(body):
+        if not body.strip() or looks_like_soft_404(body):
             continue
         content_key = normalize_text(body)
         if content_key in seen_content:
@@ -131,23 +132,6 @@ def _select_distinct_pages(
         seen_content.add(content_key)
         pages.append(ContextPage(url=url, title=title or detail.title or "", body=body))
     return pages
-
-
-# A client-side router's inline fallback ("Page Not Found") is characteristically
-# tiny compared to any real page on the same app (83 chars observed on Lumi
-# Rogue vs. 976-1484 for its real shell/homepage) -- length alone is too broad
-# a filter (a real page can legitimately be short), so this only fires on the
-# combination of short AND explicitly says not-found.
-_SOFT_404_MAX_CHARS = 200
-_SOFT_404_MARKERS = ("page not found", "404 not found", "could not be found")
-
-
-def _looks_like_soft_404(body: str) -> bool:
-    text = body.strip()
-    if len(text) > _SOFT_404_MAX_CHARS:
-        return False
-    lowered = text.lower()
-    return any(marker in lowered for marker in _SOFT_404_MARKERS)
 
 
 def _fair_share_by_host(

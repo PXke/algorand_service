@@ -11,7 +11,71 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
+from app.modules.pipeline.core.diffing import normalize_text
+
 logger = logging.getLogger(__name__)
+
+# A client-side router's inline fallback ("Page Not Found") is characteristically
+# tiny compared to any real page on the same app (83 chars observed on Lumi
+# Rogue vs. 976-1484 for its real shell/homepage) -- length alone is too broad
+# a filter (a real page can legitimately be short), so this only fires on the
+# combination of short AND explicitly says not-found.
+_SOFT_404_MAX_CHARS = 200
+_SOFT_404_MARKERS = ("page not found", "404 not found", "could not be found")
+
+
+def looks_like_soft_404(body: str) -> bool:
+    """Whether `body` reads like a client-side router's not-found fallback rather than real content -- shared by every write path into crawled_pages (service_context.py's aggregate selection, writer_fetch_enqueue.py's queue gate, index_tasks.py's storage gate) so a soft-404 never gets treated as discovered content anywhere in the pipeline."""
+    text = body.strip()
+    if len(text) > _SOFT_404_MAX_CHARS:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in _SOFT_404_MARKERS)
+
+
+def domain_has_similar_content(domain: str, body: str, *, sample_limit: int = 20) -> bool:
+    """Whether `body` (normalized) byte-matches a page already crawled for `domain` recently.
+
+    Root-caused 2026-08-28 (Lumi Rogue): a client-rendered SPA serves the SAME
+    shell HTML for any route the JS router doesn't recognize (routing never
+    executes for a non-browser fetch), so ~20 URL-variant guesses in one crawl
+    burst all produced byte-identical "new" pages -- each stored as if it were
+    genuinely distinct content. Checked at storage time (index_tasks.py), not
+    just at service_context.py's read-time selection, so the corpus itself
+    stops accumulating rows that can never be anything but noise.
+
+    Best-effort: any lookup failure returns False (an infra hiccup here must
+    never block a legitimate page from being stored) and the check only
+    samples the `sample_limit` most-recently-crawled pages -- a full-domain
+    scan isn't warranted for what's ultimately a defensive dedup check, not a
+    correctness-critical one.
+    """
+    if not domain or not (body or "").strip():
+        return False
+    target = normalize_text(body)
+    try:
+        from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
+        from app.core.statements import CrawledPageStmts
+
+        session = get_cassandra_session()
+        listing = session.execute(CrawledPageStmts.LIST_BY_DOMAIN, (domain, sample_limit))
+        page_ids = [row.page_id for row in listing]
+        if not page_ids:
+            return False
+        bodies = execute_parallel_with_args(CrawledPageStmts.GET_BODY, [(pid,) for pid in page_ids])
+        for ok, result in bodies:
+            if not ok:
+                continue
+            detail = result.one()
+            if detail is None:
+                continue
+            if normalize_text(detail.body or "") == target:
+                return True
+        return False
+    except Exception:
+        logger.debug("domain_has_similar_content lookup failed for %s", domain, exc_info=True)
+        return False
+
 
 _STOPWORDS = {
     "the",
@@ -62,7 +126,8 @@ class CrawledPageRecord:
     crawled_at_epoch: int
 
 
-def _normalize_domain(url: str) -> str:
+def normalize_domain(url: str) -> str:
+    """Raw lowercased netloc (e.g. "www.lumirogue.com") -- the exact domain key `upsert_crawled_page` stores under, distinct from `domain_tracker.domain_from_url`'s eTLD+1 collapse. Callers checking `domain_has_similar_content` against a not-yet-stored URL must use THIS, not the collapsed form, or the lookup misses everything already stored."""
     try:
         return (urlparse(url).netloc or "").strip().lower()
     except Exception:
@@ -118,7 +183,7 @@ def upsert_crawled_page(
     from app.core.statements import CrawledPageStmts
 
     now = crawled_at or datetime.now(tz=UTC)
-    domain = _normalize_domain(url)
+    domain = normalize_domain(url)
     if len(body) > CRAWLED_PAGE_BODY_MAX_CHARS:
         # A real page's readable text never gets remotely this large — almost
         # always non-text content misread as a page (root-caused 2026-08-06: a

@@ -53,6 +53,43 @@ def test_page_index_skips_when_classifier_rejects(monkeypatch: pytest.MonkeyPatc
     assert outcome["reason"] == "classifier_rejected"
 
 
+def test_page_index_skips_soft_404s(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client-router 'not found' fallback that classifies in-scope (it's real, substantial-looking text) is still skipped before storage -- it's never worth a Cassandra row or a Typesense document."""
+    from app.modules.search.tasks import index_tasks
+
+    monkeypatch.setattr(
+        index_tasks,
+        "score_page",
+        lambda **_: type("R", (), {"in_scope": True, "score": 1.0})(),
+    )
+    outcome = index_tasks.index_crawled_page(
+        url="https://lumirogue.com/gungi",
+        title="Lumi Rogue",
+        text='404 Page Not Found The page "gungi" could not be found in this application. Go Home',
+        service_id="lumirogue-com",
+    )
+    assert outcome == {"status": "skipped", "reason": "soft_404"}
+
+
+def test_page_index_skips_domain_duplicate_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Root-caused 2026-08-28 (Lumi Rogue): a client-rendered SPA served the SAME shell HTML for ~20 crawler-guessed URL variants. Content that byte-matches a page already crawled for the domain is skipped before storage, not just filtered later at aggregate-read time."""
+    from app.modules.search.tasks import index_tasks
+
+    monkeypatch.setattr(
+        index_tasks,
+        "score_page",
+        lambda **_: type("R", (), {"in_scope": True, "score": 1.0})(),
+    )
+    monkeypatch.setattr(index_tasks, "domain_has_similar_content", lambda *_a, **_k: True)
+    outcome = index_tasks.index_crawled_page(
+        url="https://lumirogue.com/?view=gungi",
+        title="Lumi Rogue",
+        text="LUMI ROGUE v0.21 Try the demo (tutorial) Rankings Need an Ankh?",
+        service_id="lumirogue-com",
+    )
+    assert outcome == {"status": "skipped", "reason": "duplicate_content"}
+
+
 def test_index_article_reads_tags_from_article_detail(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reads an article's tags off its ArticleDetail before indexing it."""
     from app.modules.newspaper.article_store import ArticleDetail

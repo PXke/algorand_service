@@ -8,7 +8,6 @@ import pytest
 from app.modules.ai.llm_openai_compatible import _parse_json_object
 from app.modules.newspaper.service_context import (
     ContextPage,
-    _looks_like_soft_404,
     _select_distinct_pages,
     build_service_context,
 )
@@ -113,14 +112,6 @@ def test_fair_share_selection_across_hosts() -> None:
     assert "forum.x.io" in hosts
     assert "docs.x.io" in hosts
     assert len(picked) == 6
-
-
-def test_soft_404_detection() -> None:
-    """Short client-router 'not found' fallbacks are flagged; real pages (even short ones) are not."""
-    assert _looks_like_soft_404('404 Page Not Found The page "gungi" could not be found. Go Home')
-    assert _looks_like_soft_404("Sorry, this page could not be found.")
-    assert not _looks_like_soft_404("A short real page with no error phrasing at all.")
-    assert not _looks_like_soft_404("w " * 200)  # long -- not a soft-404 regardless of content
 
 
 @dataclass

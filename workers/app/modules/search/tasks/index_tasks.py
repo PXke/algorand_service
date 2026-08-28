@@ -7,7 +7,12 @@ import uuid
 from datetime import UTC, datetime
 
 from app.celery_app import celery_app
-from app.modules.crawler.crawled_page_store import upsert_crawled_page
+from app.modules.crawler.crawled_page_store import (
+    domain_has_similar_content,
+    looks_like_soft_404,
+    normalize_domain,
+    upsert_crawled_page,
+)
 from app.modules.newspaper.article_store import get_article, list_feed_articles
 from app.modules.search.classifier.score import score_page
 from app.modules.search.core.indexer import upsert_article_document, upsert_page_document
@@ -98,6 +103,20 @@ def index_crawled_page(
                 "reason": "classifier_rejected",
                 "score": str(result.score),
             }
+    # Root-caused 2026-08-28 (Lumi Rogue): a client-rendered SPA serves the
+    # SAME shell HTML for any route its JS router doesn't recognize, so a
+    # writer hunting for a nonexistent page (or the crawler itself) can turn
+    # one dead end into a dozen "new" URLs that classify in-scope (real,
+    # substantial-looking text) but carry zero new information. Caught here,
+    # not just at service_context.py's read-time selection, so neither the
+    # crawled_pages corpus nor Typesense accumulates rows that can only ever
+    # be noise -- both `upsert_crawled_page` and `upsert_page_document` below
+    # are skipped, not just the aggregate read.
+    if looks_like_soft_404(text):
+        return {"status": "skipped", "reason": "soft_404"}
+    domain = normalize_domain(url)
+    if domain_has_similar_content(domain, text):
+        return {"status": "skipped", "reason": "duplicate_content"}
     epoch = published_at_epoch
     if epoch is None:
         epoch = _epoch_from_iso(published_at)

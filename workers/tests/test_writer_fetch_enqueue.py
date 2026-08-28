@@ -33,6 +33,30 @@ def test_enqueue_first_window(monkeypatch: pytest.MonkeyPatch) -> None:
     assert created[0][0] == "https://x.io/p"
 
 
+def test_enqueue_skips_soft_404s(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Root-caused 2026-08-28 (Lumi Rogue): a writer hunting for a route that turned out not to exist tried ~20 URL guesses via fetch_url; each of a client-side router's own 'not found' fallback pages is real text (passes the length floor) but must never be queued for a full crawl."""
+    created = []
+
+    def _fake_enqueue(url: str, **kw: object) -> tuple[str, bool]:
+        created.append((url, kw))
+        return url, True
+
+    monkeypatch.setattr("app.modules.crawler.url_queue.enqueue_url", _fake_enqueue)
+    monkeypatch.setattr("app.core.config.URL_QUEUE_ENABLED", True, raising=False)
+    monkeypatch.setattr("app.core.config.WRITER_FETCH_ENQUEUE_ENABLED", True, raising=False)
+
+    result = maybe_enqueue_writer_fetched_url(
+        {
+            "url": "https://lumirogue.com/gungi",
+            "text": '404 Page Not Found The page "gungi" could not be found in this application. Go Home',
+            "chunk_chars": 85,
+        },
+        is_continuation=False,
+    )
+    assert result is False
+    assert created == []
+
+
 def test_wrap_enqueue_skips_continue_reading(monkeypatch: pytest.MonkeyPatch) -> None:
     """The fetch_url tool wrapper marks a continue_reading call as a continuation."""
     calls = []
