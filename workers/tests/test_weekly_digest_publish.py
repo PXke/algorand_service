@@ -194,6 +194,78 @@ def test_run_skips_cleanly_when_mistral_unavailable(monkeypatch: pytest.MonkeyPa
     assert result["week"] == "2026-W23"
 
 
+def test_run_publishes_new_digest_sanitizes_body_with_real_nh3_sanitizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W1-B: this was the last weekly-digest write path still calling security.sanitize_body -- a regex-only <script>-tag stripper with no on*= handler / javascript:/data: URL stripping. It now uses the real nh3 allowlist sanitizer (article_store._sanitize_body), the same one insert_stored_article itself re-applies -- proving THIS call runs the real sanitizer, not just that the redundant internal one does.
+
+    insert_article_if_absent is mocked here (matching test_run_publishes_new_digest
+    above), so this exercises the real _sanitize_body call in
+    run_weekly_digest_publish, not insert_stored_article's own internal pass.
+    """
+    import app.core.config as config
+
+    monkeypatch.setattr(config, "PRICE_ANALYSIS_ENABLED", True)
+    ctx = WeeklyDigestContext(
+        week_key="2026-W23",
+        week_label="2026-06-02",
+        price=WeeklyPriceSnapshot(
+            asset_id="algorand",
+            asset_name="Algorand",
+            currency="USD",
+            price_usd=1.0,
+            week_open_usd=1.0,
+            week_high_usd=1.0,
+            week_low_usd=1.0,
+            week_change_pct=0.0,
+            as_of=datetime(2026, 6, 2, tzinfo=UTC),
+        ),
+        articles=(),
+    )
+
+    malicious_body = (
+        '<p onclick="alert(1)">Hello</p>'
+        "<script>alert(2)</script>"
+        '<a href="javascript:alert(3)">click</a>'
+        '<img src="x" onerror="alert(4)">'
+        " world"
+    )
+
+    def _fake_compose_malicious(_ctx: WeeklyDigestContext) -> Any:  # noqa: ANN401
+        return type(
+            "R",
+            (),
+            {"title": "T", "summary": "S", "body": malicious_body, "composer": "template"},
+        )()
+
+    monkeypatch.setattr(weekly_digest_publish, "build_weekly_digest", lambda **_kw: ctx)
+    monkeypatch.setattr(weekly_digest_publish, "compose_weekly_digest", _fake_compose_malicious)
+    monkeypatch.setattr(weekly_digest_publish.index_article, "delay", lambda **_kw: None)
+    monkeypatch.setattr(
+        "app.modules.newspaper.tasks.publish_tasks.enqueue_article_translations",
+        lambda _article_id: None,
+    )
+
+    captured_insert_kwargs: dict = {}
+
+    def fake_insert(**kwargs: object) -> tuple[str, bool]:
+        captured_insert_kwargs.update(kwargs)
+        return str(kwargs["article_id"]), True
+
+    monkeypatch.setattr(weekly_digest_publish, "insert_article_if_absent", fake_insert)
+    result = weekly_digest_publish.run_weekly_digest_publish()
+
+    assert result["status"] == "published"
+    stored_body = captured_insert_kwargs["body"]
+    assert "<script" not in stored_body
+    assert "alert(2)" not in stored_body
+    assert "onclick" not in stored_body
+    assert "onerror" not in stored_body
+    assert "javascript:" not in stored_body
+    assert "Hello" in stored_body
+    assert "world" in stored_body
+
+
 def test_run_skips_cleanly_during_peak_hours(monkeypatch: pytest.MonkeyPatch) -> None:
     """The weekly-digest path is one of the 9 real compose-triggering task paths -- a PeakHoursBlockedError (owner decision 2026-08-15: no exceptions) must be reported as a routine skip, not logged/returned as a Mistral failure."""
     import app.core.config as config

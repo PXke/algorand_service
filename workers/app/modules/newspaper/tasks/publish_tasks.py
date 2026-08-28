@@ -22,7 +22,7 @@ from app.core import config as worker_config
 from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
 from app.core.redis_lock import single_flight
 from app.modules.newspaper.article_composer import ArticleComposeResult, compose_scrape_article
-from app.modules.newspaper.article_store import insert_article
+from app.modules.newspaper.article_store import _sanitize_body, insert_article
 from app.modules.newspaper.article_tags import derive_article_tags, order_reader_tags
 from app.modules.newspaper.compose_lock import COMPOSE_LOCK_KEY, ComposeBusyError
 from app.modules.newspaper.ingest_signal import ingest_publish_signal
@@ -276,11 +276,10 @@ def _stash_capped_compose_to_backlog(
     from datetime import UTC, datetime
 
     from app.modules.newspaper.article_store import insert_stored_article
-    from app.modules.newspaper.security import sanitize_body
 
     title, summary = composed.title, composed.summary
     body = _with_hero_image(
-        sanitize_body(composed.body), hero_image, title, source_url=row.scrape_url
+        _sanitize_body(composed.body), hero_image, title, source_url=row.scrape_url
     )
     tags = _merge_tags(
         derive_article_tags(
@@ -1235,7 +1234,6 @@ def _hold_for_review(
         has_pending_review_for_url,
     )
     from app.modules.newspaper.article_store import insert_stored_article
-    from app.modules.newspaper.security import sanitize_body
 
     # has_pending_review_for_url() is ALSO checked upstream, before compose
     # starts (_pending_review_veto), specifically to avoid burning a Mistral
@@ -1297,7 +1295,7 @@ def _hold_for_review(
         title=held_title,
         summary=held_summary,
         body=_with_hero_image(
-            sanitize_body(composed.body), hero_image, held_title, source_url=row.scrape_url
+            _sanitize_body(composed.body), hero_image, held_title, source_url=row.scrape_url
         ),
         trigger_txid=str(payload.get("txid", "")),
         trigger_round=int(payload.get("round_num", 0)),
@@ -1438,9 +1436,8 @@ def _finalize_publish(
 ) -> dict[str, str]:
     """Publish the composed draft straight to the live feed: insert, index, distribute, ping IndexNow, register match keys, record compose cadence, and enqueue translations."""
     from app.modules.newspaper.publish_daily_guard import release_publish_slot
-    from app.modules.newspaper.security import sanitize_body
 
-    title, summary, body = composed.title, composed.summary, sanitize_body(composed.body)
+    title, summary, body = composed.title, composed.summary, _sanitize_body(composed.body)
     body = _with_hero_image(body, hero_image, title, source_url=row.scrape_url)
     source_kind = _source_kind_from_url(row.scrape_url)
     try:
@@ -2130,7 +2127,6 @@ def recompose_review(review_id: str) -> dict[str, str]:
         enqueue_classifier_review,
     )
     from app.modules.newspaper.article_store import insert_stored_article
-    from app.modules.newspaper.security import sanitize_body
 
     try:
         rid = UUID(review_id)
@@ -2218,7 +2214,7 @@ def recompose_review(review_id: str) -> dict[str, str]:
         title=composed.title,
         summary=composed.summary,
         body=_with_hero_image(
-            sanitize_body(composed.body), og_image, composed.title, source_url=url
+            _sanitize_body(composed.body), og_image, composed.title, source_url=url
         ),
         trigger_txid=f"recompose-{review_id[:12]}",
         trigger_round=0,
@@ -2875,7 +2871,6 @@ def recompose_published(
         has_pending_review_for_url,
     )
     from app.modules.newspaper.article_store import get_article, insert_stored_article
-    from app.modules.newspaper.security import sanitize_body
 
     existing = get_article(article_id)
     if existing is None:
@@ -2968,7 +2963,7 @@ def recompose_published(
         title=composed.title,
         summary=composed.summary,
         body=_with_hero_image(
-            sanitize_body(composed.body), og_image, composed.title, source_url=source_url
+            _sanitize_body(composed.body), og_image, composed.title, source_url=source_url
         ),
         trigger_txid=f"recompose-{article_id[:12]}",
         trigger_round=0,
