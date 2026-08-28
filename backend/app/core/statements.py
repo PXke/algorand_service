@@ -413,10 +413,21 @@ class SuggestionStmts:
         "SELECT suggestion_id, wallet_address, title, body, submission_txid, created_at "
         "FROM algorand_platform.suggestions_by_status WHERE status = ? LIMIT 200"
     )
+    # suggestions_by_id (migration 089): suggestion_id -> full row lookup
+    # table, dual-written alongside every INSERT above. Replaces
+    # `WHERE status = ? AND suggestion_id = ? ALLOW FILTERING` against
+    # suggestions_by_status -- suggestion_id is the second clustering column
+    # (after created_at), so filtering on it alone skipped a clustering
+    # column and forced ALLOW FILTERING even though the read was scoped to
+    # a single partition -- with a direct partition-key point lookup.
     GET = _Stmt(
         "SELECT suggestion_id, wallet_address, title, body, submission_txid, created_at, status "
-        "FROM algorand_platform.suggestions_by_status "
-        "WHERE status = ? AND suggestion_id = ? ALLOW FILTERING"
+        "FROM algorand_platform.suggestions_by_id WHERE suggestion_id = ?"
+    )
+    INSERT_BY_ID = _Stmt(
+        "INSERT INTO algorand_platform.suggestions_by_id ("
+        "suggestion_id, status, created_at, wallet_address, title, body, submission_txid"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
     # suggestions_by_txid (migration 087): submission_txid -> suggestion_id
     # lookup table, dual-written alongside every INSERT above. Replaces a
