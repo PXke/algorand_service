@@ -374,15 +374,6 @@ def ingest_publish_signal(
     if not enqueue_decision.allowed:
         return _skip(enqueue_decision.reason)
 
-    insert_snapshot(
-        source_id=snapshot_source_id,
-        service_id=service_id,
-        url=source_url,
-        content_hash=content_hash,
-        title=page_title,
-        body=page_text,
-    )
-
     mode_info = resolve_publish_mode(
         requested_mode=publish_mode,
         requested_article_id=linked_article_id,
@@ -429,6 +420,17 @@ def ingest_publish_signal(
     # failure here must propagate to the caller the same way an enqueue_publish
     # failure always did pre-cutover -- callers (e.g. mail_poll_tasks) rely on
     # the raise to leave the source item unseen/unacked for retry.
+    #
+    # Store before mark (CLAUDE.md sec. 2.2): this artifact write must land
+    # BEFORE insert_snapshot below. insert_snapshot is what makes the next
+    # poll's `previous[0] == content_hash` check at the top of this function
+    # short-circuit to "unchanged" -- if the snapshot were written first and
+    # this insert then raised, a retry of the exact same page would hash
+    # identically, read back the already-written snapshot, and silently skip
+    # forever without ever producing the artifact that was actually paid for
+    # (compute_content_signals / novelty lookups above). Writing the artifact
+    # first means a failure here leaves no snapshot row, so a retry replays
+    # this whole function and composes normally.
     _insert_artifact_for_signal(
         service_id=service_id,
         source_url=source_url,
@@ -441,6 +443,15 @@ def ingest_publish_signal(
         published_at=published_at,
         queue_payload=queue_payload,
         venue_service_id=venue_service_id,
+    )
+
+    insert_snapshot(
+        source_id=snapshot_source_id,
+        service_id=service_id,
+        url=source_url,
+        content_hash=content_hash,
+        title=page_title,
+        body=page_text,
     )
 
     return {"status": "enqueued", "txid": txid}
