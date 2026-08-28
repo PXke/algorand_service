@@ -56,6 +56,14 @@ def _install_no_sleep_guard() -> None:
 _install_no_sleep_guard()
 
 
+@pytest.fixture(autouse=True)
+def _clear_redis_client_cache() -> None:
+    """app.core.redis_client.get_redis() process-caches its Redis client (functools.lru_cache) so production dials Redis once per process, not once per call -- but under pytest-xdist (-n auto) that same process-lifetime cache would let one test's real or fake client leak into another test scheduled onto the same worker process. Cleared before every test so patch_redis_from_url / a direct monkeypatch of redis.from_url always sees a fresh call into get_redis()."""
+    from app.core.redis_client import get_redis
+
+    get_redis.cache_clear()
+
+
 class FakeRedis:
     """In-memory stand-in for the redis-py client, covering the get/set/incr/decr/expire/exists surface used across the crawl-budget, cooldown, and publish-cap modules.
 
@@ -264,7 +272,11 @@ class FakeArtifactSession:
         if not row:
             return _artifact_rows([])
         return _artifact_rows(
-            [SimpleNamespace(status=row["status"], priority=row["priority"], created_at=row["created_at"])]
+            [
+                SimpleNamespace(
+                    status=row["status"], priority=row["priority"], created_at=row["created_at"]
+                )
+            ]
         )
 
     def _update_status(self, p: tuple) -> None:
@@ -300,7 +312,9 @@ class FakeArtifactSession:
 
     # -- artifacts_pending ----------------------------------------------
     @staticmethod
-    def _pending_key(status: str, priority: float, created_at: object, artifact_id: object) -> tuple:
+    def _pending_key(
+        status: str, priority: float, created_at: object, artifact_id: object
+    ) -> tuple:
         return (status, priority, created_at, str(artifact_id))
 
     def _insert_pending(self, p: tuple) -> None:

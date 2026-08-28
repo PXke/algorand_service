@@ -10,18 +10,21 @@ from __future__ import annotations
 
 import contextlib
 import urllib.robotparser
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-import redis
+from app.core.config import CRAWLER_RESPECT_ROBOTS, CRAWLER_USER_AGENT
+from app.core.redis_client import get_redis
 
-from app.core.config import CRAWLER_RESPECT_ROBOTS, CRAWLER_USER_AGENT, REDIS_URL
+if TYPE_CHECKING:
+    import redis
 
 _CACHE_TTL = 86_400  # 24h
 _MISSING = "__NONE__"  # sentinel: host has no usable robots.txt (cache the absence)
 
 
 def _client() -> redis.Redis:
-    return redis.from_url(REDIS_URL, decode_responses=True)
+    return get_redis()
 
 
 def _key(netloc: str) -> str:

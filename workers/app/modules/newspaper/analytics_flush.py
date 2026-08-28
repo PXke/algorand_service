@@ -20,6 +20,7 @@ import contextlib
 import logging
 from typing import TYPE_CHECKING
 
+from app.core.redis_client import get_redis
 from app.core.statements import AnalyticsFlushStmts
 
 if TYPE_CHECKING:
@@ -52,11 +53,7 @@ _DIM_SPECS: dict[str, tuple[str, int, bool]] = {
 
 
 def _redis_client() -> redis.Redis:
-    import redis
-
-    from app.core.config import REDIS_URL
-
-    return redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=2)
+    return get_redis(socket_connect_timeout=2)
 
 
 def _decode_key(key: str) -> tuple[str, list[str]] | None:
@@ -102,9 +99,7 @@ def flush_pending_analytics() -> dict[str, int]:
         client = _redis_client()
         keys = list(client.scan_iter(match=_PENDING_MATCH, count=200))
     except Exception:
-        logger.warning(
-            "flush_pending_analytics: Redis unavailable, nothing flushed", exc_info=True
-        )
+        logger.warning("flush_pending_analytics: Redis unavailable, nothing flushed", exc_info=True)
         return {"applied": 0, "skipped": 0}
 
     if not keys:
@@ -134,9 +129,7 @@ def flush_pending_analytics() -> dict[str, int]:
         try:
             delta = client.getdel(key)
         except Exception:
-            logger.warning(
-                "flush_pending_analytics: failed to read/clear %s", key, exc_info=True
-            )
+            logger.warning("flush_pending_analytics: failed to read/clear %s", key, exc_info=True)
             skipped += 1
             continue
         if not delta:

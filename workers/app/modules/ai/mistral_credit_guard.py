@@ -26,10 +26,18 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
-from app.core.config import REDIS_URL
+from app.core.redis_client import get_redis
+
+if TYPE_CHECKING:
+    import redis
 
 logger = logging.getLogger(__name__)
+
+
+def _client() -> redis.Redis:
+    return get_redis()
 
 
 def _key(provider: str) -> str:
@@ -90,13 +98,9 @@ def mark_credit_exhausted(provider: str = "mistral", *, status_code: int | None 
         )
         return
     try:
-        import redis
-
-        client = redis.from_url(REDIS_URL, decode_responses=True)
+        client = _client()
         client.set(_key(provider), "1", ex=_ttl_seconds(provider))
-        logger.warning(
-            "%s credit exhausted — short-circuiting further calls until reset", provider
-        )
+        logger.warning("%s credit exhausted — short-circuiting further calls until reset", provider)
     except Exception:
         logger.warning("failed to set %s credit-exhausted flag", provider, exc_info=True)
 
@@ -104,9 +108,6 @@ def mark_credit_exhausted(provider: str = "mistral", *, status_code: int | None 
 def is_credit_exhausted(provider: str = "mistral") -> bool:
     """True if a prior call already confirmed `provider`'s credit is exhausted this cycle. Fails open (False) on any Redis error -- never blocks real work on a cache outage."""
     try:
-        import redis
-
-        client = redis.from_url(REDIS_URL, decode_responses=True)
-        return bool(client.get(_key(provider)))
+        return bool(_client().get(_key(provider)))
     except Exception:
         return False

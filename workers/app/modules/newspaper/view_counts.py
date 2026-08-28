@@ -21,6 +21,8 @@ import logging
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from app.core.redis_client import get_redis
+
 if TYPE_CHECKING:
     import redis
 
@@ -32,11 +34,7 @@ _VIEW_PENDING_MATCH = VIEW_PENDING_PREFIX + "*"
 
 
 def _redis_client() -> redis.Redis:
-    import redis
-
-    from app.core.config import REDIS_URL
-
-    return redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=2)
+    return get_redis(socket_connect_timeout=2)
 
 
 def flush_pending_views() -> dict[str, int]:

@@ -24,7 +24,8 @@ from __future__ import annotations
 import threading
 import time
 
-from app.core.config import LLM_MIN_REQUEST_INTERVAL_SECONDS, REDIS_URL
+from app.core.config import LLM_MIN_REQUEST_INTERVAL_SECONDS
+from app.core.redis_client import get_redis
 
 _KEY = "llm:ratelimit:next_slot"
 
@@ -51,9 +52,7 @@ _local_next = 0.0
 
 
 def _reserve_slot_redis(interval: float) -> float:
-    import redis
-
-    client = redis.from_url(REDIS_URL, decode_responses=True)
+    client = get_redis()
     now = time.time()
     slot = client.eval(_RESERVE_LUA, 1, _KEY, repr(now), repr(interval))
     return float(slot)

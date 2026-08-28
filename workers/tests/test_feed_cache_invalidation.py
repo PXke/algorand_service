@@ -174,10 +174,13 @@ class _BoomRedis:
 
 def test_invalidate_feed_first_page_swallows_redis_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     """A Redis blip during invalidation must never propagate into the caller -- the write it's cleaning up after is already committed to Cassandra by this point."""
-    import redis
+    from algorand_shared import feed_cache
     from algorand_shared.feed_cache import invalidate_feed_first_page
 
-    monkeypatch.setattr(redis, "from_url", lambda *_a, **_k: _BoomRedis())
+    # _client() is process-cached (lru_cache) -- patch the wrapper itself
+    # rather than redis.from_url, so this fake can't be shadowed by (or leak
+    # into) another test's cached client under the same xdist worker.
+    monkeypatch.setattr(feed_cache, "_client", lambda: _BoomRedis())
 
     invalidate_feed_first_page()  # must not raise
 

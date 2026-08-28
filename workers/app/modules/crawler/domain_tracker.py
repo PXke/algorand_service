@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+from app.core.redis_client import get_redis
+
 if TYPE_CHECKING:
     import redis
 
@@ -105,11 +107,7 @@ _PLATFORM_SUFFIXES = frozenset(
 
 
 def _crawl_budget_client() -> redis.Redis:
-    import redis
-
-    from app.core.config import REDIS_URL
-
-    return redis.from_url(REDIS_URL, decode_responses=True)
+    return get_redis()
 
 
 def _crawl_budget_key(domain: str) -> str:

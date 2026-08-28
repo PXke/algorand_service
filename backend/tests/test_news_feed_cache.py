@@ -62,13 +62,19 @@ def _item(article_id: str = "a1") -> ArticleFeedItem:
 
 @pytest.fixture
 def _fake_cache_redis(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
-    """Back both app.core.cache's client and feed_cache's redis.from_url() with the same in-memory store, so a write's invalidation is visible to a subsequent read in the same test."""
+    """Back both app.core.cache's client and feed_cache's client with the same in-memory store, so a write's invalidation is visible to a subsequent read in the same test.
+
+    feed_cache._client() is process-cached (lru_cache) -- patched directly
+    here rather than redis.from_url, so this test's fake can't be shadowed
+    by (or leak into) another test's cached client under the same xdist
+    worker.
+    """
     fake = FakeRedis()
     monkeypatch.setattr("app.core.cache._client", lambda: fake)
 
-    import redis
+    from algorand_shared import feed_cache
 
-    monkeypatch.setattr(redis, "from_url", lambda *_a, **_k: fake)
+    monkeypatch.setattr(feed_cache, "_client", lambda: fake)
     return fake
 
 

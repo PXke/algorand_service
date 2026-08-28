@@ -26,6 +26,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from app.core.redis_client import get_redis
 from app.core.redis_lock import acquire, release
 
 if TYPE_CHECKING:
@@ -60,11 +61,7 @@ class LocalTranslateBusyError(Exception):
 
 
 def _redis_client() -> redis.Redis:
-    import redis
-
-    from app.core.config import REDIS_URL
-
-    return redis.from_url(REDIS_URL, decode_responses=True)
+    return get_redis()
 
 
 def _current_task_id() -> str:
