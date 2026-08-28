@@ -20,6 +20,7 @@ def _bare_session() -> PlaywrightSession:
     session._browser = MagicMock()
     session._context = MagicMock()
     session._interactive_page = None
+    session._storage_state_path = None
     return session
 
 
@@ -31,8 +32,9 @@ def test_capture_screenshot_uses_a_fresh_context_not_the_shared_one() -> None:
     page = fresh_context.new_page.return_value
     page.screenshot.return_value = b"png-bytes"
 
-    with patch.object(session, "_goto_and_settle"), patch(
-        "app.modules.scraper.core.browser_scrape._expand_collapsed_content"
+    with (
+        patch.object(session, "_goto_and_settle"),
+        patch("app.modules.scraper.core.browser_scrape._expand_collapsed_content"),
     ):
         result = session.capture_screenshot("https://example.com")
 
@@ -50,9 +52,10 @@ def test_capture_screenshot_closes_its_context_even_on_failure() -> None:
     fresh_context = MagicMock()
     session._browser.new_context.return_value = fresh_context
 
-    with patch.object(
-        session, "_goto_and_settle", side_effect=BrowserScrapeError("nav timeout")
-    ), pytest.raises(BrowserScrapeError):
+    with (
+        patch.object(session, "_goto_and_settle", side_effect=BrowserScrapeError("nav timeout")),
+        pytest.raises(BrowserScrapeError),
+    ):
         session.capture_screenshot("https://example.com")
 
     fresh_context.close.assert_called_once()

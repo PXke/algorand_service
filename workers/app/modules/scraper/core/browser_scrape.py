@@ -789,7 +789,7 @@ class PlaywrightSession:
             "viewport": _SCREENSHOT_VIEWPORT,
             "device_scale_factor": _SCREENSHOT_DEVICE_SCALE_FACTOR,
         }
-        state_path = config.BROWSER_STORAGE_STATE_PATH
+        state_path = self._storage_state_path
         if state_path and Path(state_path).is_file():
             context_kwargs["storage_state"] = state_path
         context = self._browser.new_context(**context_kwargs)
