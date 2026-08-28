@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -228,3 +229,187 @@ def test_backlog_release_refuses_a_duplicate_service_and_returns_the_slot(
     assert fake.articles_inserts == []
     assert fake.articles_deletes == []
     assert released_slots == ["released"]
+
+
+def _backlog_row(article_id: object, *, interest_score: float) -> SimpleNamespace:
+    """Shape LIST_BACKLOG's own SELECT returns -- article_id/service_id/title/interest_score/approved_at only, see ArticlesStmts.LIST_BACKLOG."""
+    return SimpleNamespace(
+        article_id=article_id,
+        service_id="",
+        title="",
+        interest_score=interest_score,
+        approved_at=datetime.now(tz=UTC),
+    )
+
+
+class _FlakyByIdSession:
+    """Two DIFFERENT backlog article_ids: a dead one and a live one.
+
+    The by-id read for the dead one misses once then succeeds -- the
+    transient-consistency case W2-A(1)'s fix targets.
+    """
+
+    def __init__(self, *, missing_id: object, real_id: object, real_row: object) -> None:
+        self._missing_id = missing_id
+        self._real_id = real_id
+        self._real_row = real_row
+        self.articles_inserts: list[tuple] = []
+        self.articles_deletes: list[tuple] = []
+        self._missing_by_id_calls = 0
+
+    def prepare(self, cql: str) -> str:
+        return cql
+
+    def _backlog_rows(self) -> list[SimpleNamespace]:
+        discarded = {row[3] for row in self.articles_inserts if row[0] != "backlog"}
+        return [
+            _backlog_row(aid, interest_score=score)
+            for aid, score in ((self._missing_id, 99.0), (self._real_id, 1.0))
+            if aid not in discarded
+        ]
+
+    def _by_id(self, article_id: object) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
+        if article_id == self._real_id:
+            return _Result(self._real_row)
+        if article_id == self._missing_id:
+            self._missing_by_id_calls += 1
+            # First read (the one `_release_pending_feed_backlog` itself
+            # does) transiently misses; the retry inside
+            # transition_article_status finds it.
+            if self._missing_by_id_calls == 1:
+                return _Result(None)
+            return _Result(_article_row(self._missing_id, published_at=self._real_row.published_at))
+        return _Result(None)
+
+    def execute(self, query: str, params: tuple = ()) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
+        q = " ".join(str(query).split())
+        if q.startswith("SELECT") and "WHERE service_id = ?" in q:
+            return []
+        if q.startswith("SELECT") and "status = 'backlog'" in q:
+            return self._backlog_rows()
+        if q.startswith("SELECT") and "WHERE article_id = ?" in q:
+            (aid,) = params
+            return self._by_id(aid)
+        if q.startswith("INSERT INTO algorand_platform.articles ("):
+            self.articles_inserts.append(tuple(params))
+        elif q.startswith("DELETE FROM algorand_platform.articles "):
+            self.articles_deletes.append(tuple(params))
+        return _Result(None)
+
+
+def test_missing_article_row_is_transitioned_so_a_later_run_reaches_the_next_row(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """W2-A(1): a transient by-id miss on a dead backlog row must self-heal.
+
+    The by-id read `_release_pending_feed_backlog` uses to fetch the row it's
+    about to release can transiently miss a row `list_backlog_articles`'s own
+    (separate) partition scan just found -- e.g. a coordinator hitting a
+    differently-lagging replica on the second, unrelated read. Previously
+    this only logged and fell through, and since ``rows = backlog[:1]``
+    always re-selects the SAME (highest priority, never-changing) top row, a
+    persistently-missed row would jam every future run on the identical dead
+    row forever. The row must now be moved to a terminal status via the
+    shared `transition_article_status` helper (which performs its own fresh
+    by-id read) so it drops out of the next `status='backlog'` scan and a
+    later run reaches the next-best candidate.
+    """
+    missing_id = uuid4()
+    real_id = uuid4()
+    compose_time = datetime.now(tz=UTC) - timedelta(hours=5)
+    real_row = _article_row(real_id, published_at=compose_time)
+    fake = _FlakyByIdSession(missing_id=missing_id, real_id=real_id, real_row=real_row)
+    _patch_common(monkeypatch, fake)
+
+    with caplog.at_level(logging.WARNING):
+        first = queue_drain_tasks._release_pending_feed_backlog(slots=1)
+
+    assert first["published"] == 0
+    assert any("marked discarded_missing" in rec.message for rec in caplog.records)
+    # The dead row's own status transitioned to the terminal one instead of
+    # being left dangling as 'backlog' forever.
+    assert any(
+        row[0] == "discarded_missing" and row[3] == missing_id for row in fake.articles_inserts
+    )
+
+    # A later run now reaches the next-best backlog candidate instead of
+    # retrying the identical dead row.
+    second = queue_drain_tasks._release_pending_feed_backlog(slots=1)
+    assert second["published"] == 1
+
+
+class _AlwaysMissingSession:
+    """A backlog row whose by-id read misses on every attempt.
+
+    A persistently, not just transiently, missing article record.
+    """
+
+    def __init__(self, *, missing_id: object) -> None:
+        self._missing_id = missing_id
+
+    def prepare(self, cql: str) -> str:
+        return cql
+
+    def execute(self, query: str, _params: tuple = ()) -> Any:  # noqa: ANN401 -- duck-typed Cassandra row/result
+        q = " ".join(str(query).split())
+        if q.startswith("SELECT") and "WHERE service_id = ?" in q:
+            return []
+        if q.startswith("SELECT") and "status = 'backlog'" in q:
+            return [_backlog_row(self._missing_id, interest_score=99.0)]
+        return _Result(None)
+
+
+def test_missing_article_row_still_reports_stuck_when_transition_also_misses(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A permanently missing by-id read is a no-op, but must not be silent.
+
+    `transition_article_status`'s own internal read shares the same miss and
+    is a no-op -- the row stays 'backlog'. The warning has to say so plainly
+    so the stuck row is at least visible/alertable, matching this
+    codebase's fail-open-with-a-log-line posture elsewhere.
+    """
+    missing_id = uuid4()
+    fake = _AlwaysMissingSession(missing_id=missing_id)
+    _patch_common(monkeypatch, fake)
+
+    with caplog.at_level(logging.WARNING):
+        result = queue_drain_tasks._release_pending_feed_backlog(slots=1)
+
+    assert result["published"] == 0
+    assert any(
+        "transition_article_status ALSO found no row; still stuck" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_indexnow_ping_failure_is_logged_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """W2-A(5): an IndexNow ping failure must be logged, not swallowed.
+
+    A failed best-effort IndexNow ping on a backlog release must be logged
+    (with the traceback), not a bare `except Exception: pass` -- it must
+    also never fail the release itself.
+    """
+    article_id = uuid4()
+    compose_time = datetime.now(tz=UTC) - timedelta(hours=5)
+    fake = _FakeSession(
+        pending_rows=[_PendingRow(article_id)],
+        article_row=_article_row(article_id, published_at=compose_time),
+    )
+    _patch_common(monkeypatch, fake)
+
+    def _boom(*_a: object, **_kw: object) -> None:
+        raise RuntimeError("indexnow unreachable")
+
+    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        result = queue_drain_tasks.drain_approved_feed_queue()
+
+    assert result["status"] == "ok"
+    assert result["published"] == 1
+    matches = [rec for rec in caplog.records if "IndexNow ping failed" in rec.message]
+    assert matches
+    assert matches[0].exc_info is not None
