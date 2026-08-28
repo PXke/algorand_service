@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 
 _HIGHLIGHT_AFFIX_TOKENS = 12
 
+# Rows scanned by the feed-scan fallback, independent of the caller's
+# requested `limit` (which only caps how many results are RETURNED). This
+# path only runs when Typesense itself is unreachable -- exactly when load is
+# already spiking -- so a full-body-per-row Cassandra scan here piles more
+# read volume onto the database during an outage instead of less. Capped much
+# smaller than the old hardcoded 100: still enough to surface recent matches
+# (this is a "search the recent feed" degrade, not a full-corpus search), but
+# cheap enough not to make a Typesense outage worse.
+_FEED_SCAN_LIMIT = 25
+
 
 def _normalize_lang(lang: str | None) -> str | None:
     """A supported non-English locale, or None (meaning: English/default fields only)."""
@@ -200,8 +210,10 @@ class SearchService:
         terms = expanded_search_terms(q)
         items = []
         # Use the raw store so feed-scan can search full bodies (feed DTOs omit
-        # body text). This path only runs when Typesense is unavailable.
-        for article in self._news._store.list_feed(limit=100):
+        # body text). This path only runs when Typesense is unavailable, so the
+        # scan is capped independently of the caller's requested `limit` --
+        # see _FEED_SCAN_LIMIT.
+        for article in self._news._store.list_feed(limit=_FEED_SCAN_LIMIT):
             if service_id and article.service_id != service_id:
                 continue
             # A supported locale searches (and excerpts from) the article's
