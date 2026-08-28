@@ -11,19 +11,20 @@ import hashlib
 import json
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from app.core.redis_client import get_redis
+
+if TYPE_CHECKING:
+    import redis
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = 15.0
 
 
-def _redis_client():  # noqa: ANN202 -- lazy-imported redis.Redis, matching every other workers module's private _client()
-    import redis
-
-    from app.core.config import REDIS_URL
-
-    return redis.from_url(REDIS_URL, decode_responses=True)
+def _redis_client() -> redis.Redis:
+    return get_redis()
 
 
 def _cache_key(source: str, path: str, params: dict | None) -> str:
@@ -301,7 +302,9 @@ def _tool_lookup_asset(asset_id: int | str) -> dict[str, Any]:
     return result
 
 
-def _mainnet_idx_get(path: str, params: dict | None = None, *, cache_ttl: int = 0) -> dict[str, Any]:
+def _mainnet_idx_get(
+    path: str, params: dict | None = None, *, cache_ttl: int = 0
+) -> dict[str, Any]:
     """GET a path off the public MAINNET indexer (name-search capable, unlike algod). Returns parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}.
 
     cache_ttl > 0 caches a genuine successful body -- see _algod_get's
@@ -367,7 +370,9 @@ def _tool_lookup_asset_by_name(name: str, limit: int = 5) -> dict[str, Any]:
     n = max(1, min(int(limit), 20))
     from app.core.config import CHAIN_CACHE_TTL_SLOW
 
-    data = _mainnet_idx_get("/v2/assets", params={"unit": q, "limit": 100}, cache_ttl=CHAIN_CACHE_TTL_SLOW)
+    data = _mainnet_idx_get(
+        "/v2/assets", params={"unit": q, "limit": 100}, cache_ttl=CHAIN_CACHE_TTL_SLOW
+    )
     if not isinstance(data, dict):
         return {"error": "unexpected indexer response"}
     if data.get("error"):
@@ -1183,7 +1188,11 @@ def _tool_lookup_asset_holders(asset_id: int | str, limit: int = 10) -> dict[str
         # get_asset_holder_share now refuses to make, just computed by hand
         # instead. Surface the same warning here since this is the other tool
         # that hands out the raw ingredient for that computation.
-        **({"total_supply_warning": asset["total_supply_warning"]} if asset.get("total_is_no_cap_sentinel") else {}),
+        **(
+            {"total_supply_warning": asset["total_supply_warning"]}
+            if asset.get("total_is_no_cap_sentinel")
+            else {}
+        ),
         "holder_count_this_page": len(balances),
         "holder_count_is_complete": not data.get("next-token"),
         "top_holders": [
@@ -1221,7 +1230,10 @@ def _tool_trace_asset_creator(asset_id: int | str) -> dict[str, Any]:
         return asset
     creator = asset.get("creator")
     if not creator:
-        return {"asset_id": asset.get("asset_id"), "error": "asset has no creator address on record"}
+        return {
+            "asset_id": asset.get("asset_id"),
+            "error": "asset has no creator address on record",
+        }
 
     from app.modules.ai.research_tools import _tool_search_nfd_directory
 
@@ -1303,7 +1315,11 @@ def _boxes_get(base_url: str, token: str, app_id: str, *, cache_ttl: int = 0) ->
     """
     import httpx
 
-    key = _cache_key("boxes", f"{base_url}/v2/applications/{app_id}/boxes", None) if cache_ttl > 0 else ""
+    key = (
+        _cache_key("boxes", f"{base_url}/v2/applications/{app_id}/boxes", None)
+        if cache_ttl > 0
+        else ""
+    )
     if key:
         cached = _cache_get(key)
         if cached is not None:
@@ -1322,7 +1338,11 @@ def _boxes_get(base_url: str, token: str, app_id: str, *, cache_ttl: int = 0) ->
             data = r.json()
         except Exception:
             data = None
-        total = (data.get("data") or {}).get("total-boxes") if r.status_code == 400 and isinstance(data, dict) else None
+        total = (
+            (data.get("data") or {}).get("total-boxes")
+            if r.status_code == 400 and isinstance(data, dict)
+            else None
+        )
         if total is not None:
             result: dict[str, Any] = {"total_boxes": int(total), "boxes": None}
         else:
@@ -1457,7 +1477,9 @@ def _current_round() -> tuple[int | None, dict[str, Any] | None]:
 
     status = _algod_get("/v2/status", cache_ttl=CHAIN_CACHE_TTL_FAST)
     if not isinstance(status, dict) or status.get("error"):
-        return None, (status if isinstance(status, dict) else {"error": "unexpected algod response"})
+        return None, (
+            status if isinstance(status, dict) else {"error": "unexpected algod response"}
+        )
     hi = status.get("last-round", status.get("lastRound"))
     if not hi:
         return None, {"error": "could not read current round from algod status"}
@@ -1482,7 +1504,9 @@ def _date_to_nearest_round(date: str) -> dict[str, Any]:
         return err
 
     if target_ts >= hi_ts:
-        return _round_date_result(date, hi, hi_ts, "date is at/after the latest confirmed round; clamped to it")
+        return _round_date_result(
+            date, hi, hi_ts, "date is at/after the latest confirmed round; clamped to it"
+        )
     if target_ts <= lo_ts:
         return _round_date_result(date, lo, lo_ts, "date is at/before genesis; clamped to round 1")
 
@@ -1538,7 +1562,9 @@ def _tool_round_to_date(round_number: int | None = None, date: str | None = None
     return _date_to_nearest_round(date)
 
 
-def _testnet_idx_get(path: str, params: dict | None = None, *, cache_ttl: int = 0) -> dict[str, Any]:
+def _testnet_idx_get(
+    path: str, params: dict | None = None, *, cache_ttl: int = 0
+) -> dict[str, Any]:
     """GET a path off the public testnet INDEXER (history-capable, unlike algod).
 
     Returns parsed JSON, {"_status": 404} for a missing entity, or {"error": ...}.
@@ -1698,8 +1724,7 @@ CHAIN_SCHEMAS: list[dict[str, Any]] = [
                     "created_assets_offset": {
                         "type": "integer",
                         "description": (
-                            "Page offset into created_assets, 25 per page. "
-                            "Default 0 (first page)."
+                            "Page offset into created_assets, 25 per page. Default 0 (first page)."
                         ),
                     },
                 },

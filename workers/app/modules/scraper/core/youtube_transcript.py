@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from app.core.redis_client import get_redis
+
+if TYPE_CHECKING:
+    import redis
 
 logger = logging.getLogger(__name__)
 
 _USER_AGENT = "algorand-platform-newspaper/1.0 (+https://algorand.pxke.me)"
+
+
+def _client() -> redis.Redis:
+    return get_redis()
 
 
 def _attempt_key(video_id: str) -> str:
@@ -23,11 +32,7 @@ def transcript_attempted(video_id: str) -> bool:
     if not video_id:
         return False
     try:
-        import redis
-
-        from app.core.config import REDIS_URL
-
-        return bool(redis.from_url(REDIS_URL, decode_responses=True).exists(_attempt_key(video_id)))
+        return bool(_client().exists(_attempt_key(video_id)))
     except Exception:
         return False
 
@@ -37,13 +42,9 @@ def mark_transcript_attempted(video_id: str) -> None:
     if not video_id:
         return
     try:
-        import redis
+        from app.core.config import YOUTUBE_TRANSCRIPT_ATTEMPT_TTL
 
-        from app.core.config import REDIS_URL, YOUTUBE_TRANSCRIPT_ATTEMPT_TTL
-
-        redis.from_url(REDIS_URL, decode_responses=True).set(
-            _attempt_key(video_id), "1", ex=YOUTUBE_TRANSCRIPT_ATTEMPT_TTL
-        )
+        _client().set(_attempt_key(video_id), "1", ex=YOUTUBE_TRANSCRIPT_ATTEMPT_TTL)
     except Exception:
         logger.warning("failed to mark transcript attempted for %s", video_id, exc_info=True)
 

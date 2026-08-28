@@ -1,11 +1,19 @@
 """Exponential backoff schedule for the scrape cooldown (Reddit 429 storms)."""
 
+from typing import Never
+
+import pytest
+from conftest import FakeRedis
+
 from app.core import config
 from app.core.net_guard import UnsafeUrlError
+from app.modules.scraper.core import scrape_cooldown
 from app.modules.scraper.core.scrape_cooldown import (
     backoff_duration,
     cooldown_for_exception,
+    is_on_cooldown,
     is_permanent_failure,
+    record_scrape_failure,
 )
 
 
@@ -41,3 +49,34 @@ def test_transient_failure_uses_exponential() -> None:
     transient = RuntimeError("403 Forbidden")
     assert not is_permanent_failure(transient)
     assert cooldown_for_exception(transient) is None
+
+
+def test_is_on_cooldown_false_before_any_failure(patch_redis_from_url: FakeRedis) -> None:  # noqa: ARG001 -- name must match the real callee's keyword arg
+    """A service with no recorded failure is not on cooldown."""
+    assert is_on_cooldown("some-service") == (False, "")
+
+
+def test_is_on_cooldown_true_after_recorded_failure(patch_redis_from_url: FakeRedis) -> None:  # noqa: ARG001 -- name must match the real callee's keyword arg
+    """A freshly recorded failure puts the service on cooldown with a reason tag."""
+    record_scrape_failure("some-service")
+    on_cooldown, reason = is_on_cooldown("some-service")
+    assert on_cooldown is True
+    assert reason.startswith("cooldown_until_")
+
+
+def test_is_on_cooldown_fails_open_on_redis_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Redis error must never crash the scrape beat -- is_on_cooldown fails open (not on cooldown), like its scrape_throttled/mark_scraped siblings, and logs a warning instead of raising."""
+
+    def _boom() -> Never:
+        raise ConnectionError("redis unreachable")
+
+    monkeypatch.setattr(scrape_cooldown, "_client", _boom)
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        scrape_cooldown.logger, "warning", lambda msg, *args, **_kw: logged.append(msg % args)
+    )
+
+    assert is_on_cooldown("some-service") == (False, "")
+    assert logged
+    assert "some-service" in logged[0]

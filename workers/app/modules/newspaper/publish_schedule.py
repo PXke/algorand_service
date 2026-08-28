@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import TYPE_CHECKING
 
-import redis
+from app.core.config import NEWS_STANDARD_INTERVAL_HOURS
+from app.core.redis_client import get_redis
 
-from app.core.config import NEWS_STANDARD_INTERVAL_HOURS, REDIS_URL
+if TYPE_CHECKING:
+    import redis
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +18,7 @@ _REDIS_KEY_LAST_STANDARD = "news:last_standard_publish_epoch"
 
 
 def _redis_client() -> redis.Redis:
-    return redis.from_url(REDIS_URL, decode_responses=True)
+    return get_redis()
 
 
 def last_standard_publish_epoch() -> int | None:

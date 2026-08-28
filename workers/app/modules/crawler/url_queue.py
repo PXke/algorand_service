@@ -5,10 +5,19 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+from app.core.redis_client import get_redis
+
+if TYPE_CHECKING:
+    import redis
+
 logger = logging.getLogger(__name__)
+
+
+def _client() -> redis.Redis:
+    return get_redis()
 
 
 def _normalize_url(url: str) -> str:
@@ -38,12 +47,7 @@ def recently_crawled(url: str) -> bool:
     if not normalized:
         return False
     try:
-        import redis
-
-        from app.core.config import REDIS_URL
-
-        client = redis.from_url(REDIS_URL, decode_responses=True)
-        return bool(client.exists(_cooldown_key(normalized)))
+        return bool(_client().exists(_cooldown_key(normalized)))
     except Exception:
         return False
 
@@ -54,13 +58,9 @@ def mark_url_crawled(url: str) -> None:
     if not normalized:
         return
     try:
-        import redis
+        from app.core.config import CRAWL_URL_RECRAWL_COOLDOWN_SECONDS
 
-        from app.core.config import CRAWL_URL_RECRAWL_COOLDOWN_SECONDS, REDIS_URL
-
-        redis.from_url(REDIS_URL, decode_responses=True).set(
-            _cooldown_key(normalized), "1", ex=CRAWL_URL_RECRAWL_COOLDOWN_SECONDS
-        )
+        _client().set(_cooldown_key(normalized), "1", ex=CRAWL_URL_RECRAWL_COOLDOWN_SECONDS)
     except Exception:
         logger.warning("failed to mark url crawled: %s", normalized, exc_info=True)
 

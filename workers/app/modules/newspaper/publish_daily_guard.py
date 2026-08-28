@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-
-import redis
+from typing import TYPE_CHECKING
 
 from app.core import config
+from app.core.redis_client import get_redis
 from app.modules.newspaper.publish_policy import PublishTier
+
+if TYPE_CHECKING:
+    import redis
 
 logger = logging.getLogger(__name__)
 
 
 def _client() -> redis.Redis:
-    from app.core.config import REDIS_URL
-
-    return redis.from_url(REDIS_URL, decode_responses=True)
+    return get_redis()
 
 
 def _day_key(when: datetime | None = None) -> str:
@@ -146,7 +147,9 @@ def lanes_used_today() -> set[str]:
         raw = client.smembers(_lanes_key(_day_key()))
         return set(raw)
     except Exception:
-        logger.warning("lanes_used_today: Redis unavailable, treating as no lanes used", exc_info=True)
+        logger.warning(
+            "lanes_used_today: Redis unavailable, treating as no lanes used", exc_info=True
+        )
         return set()
 
 
@@ -164,4 +167,6 @@ def record_lane_used(lane: str) -> None:
         client.sadd(key, lane)
         client.expire(key, 90_000)
     except Exception:
-        logger.warning("record_lane_used(%s): Redis unavailable, lane not recorded", lane, exc_info=True)
+        logger.warning(
+            "record_lane_used(%s): Redis unavailable, lane not recorded", lane, exc_info=True
+        )

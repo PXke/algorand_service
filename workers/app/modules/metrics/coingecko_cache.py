@@ -13,16 +13,14 @@ import contextlib
 import json
 from typing import TYPE_CHECKING, Any
 
+from app.core.redis_client import get_redis
+
 if TYPE_CHECKING:
     import redis
 
 
 def _client() -> redis.Redis:
-    import redis
-
-    from app.core.config import REDIS_URL
-
-    return redis.from_url(REDIS_URL, decode_responses=True)
+    return get_redis()
 
 
 def get_json(key: str) -> dict[str, Any] | None:

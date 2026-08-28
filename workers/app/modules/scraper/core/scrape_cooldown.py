@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
+import logging
 import time
-
-import redis
+from typing import TYPE_CHECKING
 
 from app.core.config import (
     DEAD_HOST_COOLDOWN_SECONDS,
-    REDIS_URL,
     SCRAPE_BACKOFF_BASE_SECONDS,
     SCRAPE_BACKOFF_MAX_SECONDS,
     SCRAPE_BACKOFF_MULTIPLIER,
 )
 from app.core.net_guard import UnsafeUrlError
+from app.core.redis_client import get_redis
+
+if TYPE_CHECKING:
+    import redis
+
+logger = logging.getLogger(__name__)
 
 
 def _client() -> redis.Redis:
-    return redis.from_url(REDIS_URL, decode_responses=True)
+    return get_redis()
 
 
 def _key(service_id: str) -> str:
@@ -60,8 +65,21 @@ def cooldown_for_exception(exc: BaseException) -> int | None:
 
 
 def is_on_cooldown(service_id: str) -> tuple[bool, str]:
-    """Return whether the source is still cooling down, with a reason tag."""
-    raw = _client().get(_key(service_id))
+    """Return whether the source is still cooling down, with a reason tag.
+
+    Fails open (not on cooldown) on a Redis error, like its siblings below
+    (scrape_throttled, mark_scraped) -- a cooldown check must never crash the
+    scrape beat just because Redis blipped.
+    """
+    try:
+        raw = _client().get(_key(service_id))
+    except Exception:
+        logger.warning(
+            "is_on_cooldown(%s): Redis unavailable, treating as not on cooldown",
+            service_id,
+            exc_info=True,
+        )
+        return False, ""
     if not raw:
         return False, ""
     try:

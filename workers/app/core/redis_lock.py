@@ -23,6 +23,8 @@ import secrets
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from app.core.redis_client import get_redis
+
 if TYPE_CHECKING:
     import redis
 
@@ -38,11 +40,7 @@ end
 
 
 def _client() -> redis.Redis:
-    import redis
-
-    from app.core.config import REDIS_URL
-
-    return redis.from_url(REDIS_URL)
+    return get_redis(decode_responses=False)
 
 
 def acquire(key: str, ttl: int) -> str | None:

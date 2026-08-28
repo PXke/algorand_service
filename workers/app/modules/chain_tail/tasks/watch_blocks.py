@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import redis
-
 from app.celery_app import celery_app
-from app.core.config import (
-    CHAIN_TAIL_MAX_ROUNDS_PER_RUN,
-    REDIS_URL,
-)
+from app.core.config import CHAIN_TAIL_MAX_ROUNDS_PER_RUN
+from app.core.redis_client import get_redis
 from app.modules.chain_tail.chain_reader import (
     get_algod_head_round,
     get_conduit_head_round,
@@ -34,7 +30,7 @@ def process_new_rounds() -> dict[str, int | str | bool]:
             "matches_enqueued": 0,
         }
 
-    client = redis.from_url(REDIS_URL, decode_responses=True)
+    client = get_redis()
     last_processed = int(client.get(CHAIN_TAIL_LAST_PROCESSED_KEY) or 0)
 
     head = get_conduit_head_round()

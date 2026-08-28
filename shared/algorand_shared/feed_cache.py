@@ -24,6 +24,17 @@ workers as a module-level `REDIS_URL` constant. Both ultimately source the
 same `REDIS_URL` env var (confirmed against both services' core/config.py),
 so this is a distinction without a difference here.
 
+`_client()` process-caches its Redis client (one per interpreter, same
+one-client-per-process idea as backend/app/core/cache.py's `_client()` and
+workers/app/core/redis_client.py's `get_redis()`) instead of dialing a new
+one on every invalidation -- this module intentionally does NOT import
+either service's shared client for that (see the REDIS_URL note above: it
+must stay constructible with neither service's `app.core` on the path).
+Tests exercising this module directly should monkeypatch `_client` itself,
+not `redis.from_url`, since a cached client would otherwise outlive a
+per-test fake -- see workers/tests/test_feed_cache_invalidation.py and
+backend/tests/test_news_feed_cache.py.
+
 Fails OPEN, like every other best-effort Redis call in this codebase (see
 workers/app/modules/newspaper/publish_schedule.py's `record_standard_publish`):
 a write is already committed to Cassandra by the time this runs, so a Redis
@@ -35,6 +46,11 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import lru_cache
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import redis
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +58,18 @@ _CACHE_PREFIX = "algorand:cache:"
 _FEED_FIRST_PAGE_MATCH = _CACHE_PREFIX + "news:feed:first:*"
 
 
+@lru_cache(maxsize=1)
+def _client() -> redis.Redis:
+    import redis
+
+    url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+    return redis.from_url(url, decode_responses=True, socket_connect_timeout=2)
+
+
 def invalidate_feed_first_page() -> None:
     """Drop every cached feed first-page variant. Never raises."""
     try:
-        import redis
-
-        url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-        client = redis.from_url(url, decode_responses=True, socket_connect_timeout=2)
+        client = _client()
         keys = list(client.scan_iter(match=_FEED_FIRST_PAGE_MATCH, count=200))
         if keys:
             client.delete(*keys)
