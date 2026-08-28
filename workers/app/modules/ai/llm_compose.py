@@ -1686,19 +1686,46 @@ def _build_revision_prompt(
     )
 
 
+# The exact note_failure() reason strings for _attempt_revision's two
+# TECHNICAL failure modes -- distinguished from "revision call failed: <exc>"
+# (a real API/network error, possibly a sustained outage/rate limit already
+# exhausted upstream, not obviously a one-off). _attempt_revision_with_retry
+# matches these to decide whether a failed attempt is worth one retry
+# (2026-08-28 audit): the tool loop can burn its whole
+# WRITER_REVISION_TOOL_MAX_ROUNDS budget deep in research and never emit a
+# final JSON answer, or return a structurally-valid-but-blank completion --
+# both read as one-off completion glitches, not evidence revision won't work
+# here, unlike a real API problem.
+_REVISION_PARSE_FAILURE_REASON = "revision (tool-enabled) did not return a valid JSON object"
+_REVISION_EMPTY_BODY_REASON = "revision returned an empty body"
+_RETRYABLE_REVISION_FAILURES = frozenset(
+    {_REVISION_PARSE_FAILURE_REASON, _REVISION_EMPTY_BODY_REASON}
+)
+
+
 def _attempt_revision(
     llm: MistralProvider,
     gen_system: str,
     revise_user: str,
     *,
     temperature: float,
-    note_failure: Callable[[str], None],
+    note_failure: Callable[[str, str], None],
     tool_schemas: list[dict] | None = None,
     tool_handlers: dict | None = None,
     trace: list[dict] | None = None,
     debug: dict | None = None,
 ) -> dict | None:
     """Call the reviser. Returns the revised fields, or None — having already called note_failure — if the call failed or came back empty.
+
+    This builds only its OWN short turn (gen_system + revise_user) — it relies
+    on chat_with_tools' _merged_convo_with_prior_debug to prepend the shared
+    `debug["messages"]` transcript (Stage 1's research tool calls, Stage 2's
+    draft) ahead of it, the same mechanism every earlier stage of this same
+    compose already uses to keep one continuous conversation instead of each
+    stage replaying a fresh 2-message start. So this call already runs with
+    full memory of what the writer already found and wrote, provided `debug`
+    is the same dict object threaded through the whole compose (true for
+    every real caller — see `_compose_via_writer_tools_locked`).
 
     Used to also reject any revision that dropped more than ~25% of the word
     count (unless the draft was flagged too-long) on the theory that a
@@ -1743,16 +1770,83 @@ def _attempt_revision(
             )
             revised = _parse_json_object(raw)
             if revised is None:
-                note_failure("revision (tool-enabled) did not return a valid JSON object")
+                # Preserve what the model actually returned, not just the fixed
+                # reason string -- previously discarded entirely, leaving no way
+                # to diagnose WHY a parse failed after the fact (2026-08-28
+                # audit finding: the broken output itself was never saved).
+                note_failure(_REVISION_PARSE_FAILURE_REASON, raw)
                 return None
         else:
             revised = llm.chat_json_object(messages, temperature=temperature)
     except Exception as exc:
-        note_failure(f"revision call failed: {type(exc).__name__}: {exc}")
+        note_failure(f"revision call failed: {type(exc).__name__}: {exc}", "")
         return None
     if not str(revised.get("body", "") or "").strip():
-        note_failure("revision returned an empty body")
+        note_failure(_REVISION_EMPTY_BODY_REASON, "")
         return None
+    return revised
+
+
+def _attempt_revision_with_retry(
+    llm: MistralProvider,
+    gen_system: str,
+    revise_user: str,
+    *,
+    temperature: float,
+    note_failure: Callable[[str, str], None],
+    tool_schemas: list[dict] | None = None,
+    tool_handlers: dict | None = None,
+    trace: list[dict] | None = None,
+    debug: dict | None = None,
+) -> dict | None:
+    """_attempt_revision, with one immediate retry on a TECHNICAL failure.
+
+    The retry fires only when the only reason the call failed is one of
+    _RETRYABLE_REVISION_FAILURES (2026-08-28 audit): the tool-enabled
+    reviser's final output not parsing as JSON (the tool loop can burn its
+    whole WRITER_REVISION_TOOL_MAX_ROUNDS budget deep in research and never
+    emit a final JSON answer) or an empty body (a structurally valid
+    completion with nothing usable in it) -- both read as one-off completion
+    glitches, not evidence revision won't work here. A real "revision call
+    failed: <exc>" (API/network error -- may well be a sustained outage/rate
+    limit already exhausted upstream, not a one-off) is left as-is, same as
+    before this retry was added.
+
+    Both the original failure and, if it also fails, the retry are recorded
+    via note_failure — nothing here suppresses that visibility. The caller's
+    WRITER_REVISION_MAX_PASSES bookkeeping is untouched: this whole function
+    is one call from that budget's point of view, whether it took one attempt
+    or two.
+    """
+    seen_reasons: list[str] = []
+
+    def _capture(reason: str, raw: str) -> None:
+        seen_reasons.append(reason)
+        note_failure(reason, raw)
+
+    revised = _attempt_revision(
+        llm,
+        gen_system,
+        revise_user,
+        temperature=temperature,
+        note_failure=_capture,
+        tool_schemas=tool_schemas,
+        tool_handlers=tool_handlers,
+        trace=trace,
+        debug=debug,
+    )
+    if revised is None and seen_reasons and seen_reasons[-1] in _RETRYABLE_REVISION_FAILURES:
+        revised = _attempt_revision(
+            llm,
+            gen_system,
+            revise_user,
+            temperature=temperature,
+            note_failure=_capture,
+            tool_schemas=tool_schemas,
+            tool_handlers=tool_handlers,
+            trace=trace,
+            debug=debug,
+        )
     return revised
 
 
@@ -1806,11 +1900,15 @@ def _review_and_revise(
     # while grading with another (e.g. DeepSeek research, Mistral rubric).
     quality_llm = get_llm_rubric_client()
 
-    def _note_revision_failure(reason: str) -> None:
+    def _note_revision_failure(reason: str, raw: str = "") -> None:
         # Surface WHY the revision didn't happen instead of silently keeping the
         # weak draft — otherwise a rate-limited/failed revision is invisible and
         # looks like "the grade changed nothing".
-        result = {"error": reason[:300]}
+        result: dict = {"error": reason[:300]}
+        if raw:
+            # The model's actual (broken) output, not just the fact that it
+            # didn't parse -- previously discarded outright (2026-08-28 audit).
+            result["raw_output"] = raw[:2000]
         args = {"revision": "failed"}
         trace.append({"tool": "review_draft", "arguments": args, "result": result})
         _debug_tool_turn(debug, "review_draft", args, result)
@@ -1899,7 +1997,13 @@ def _review_and_revise(
         )
         gen_system = system + _STAGE2_GENERATION_GUIDANCE
 
-        revised = _attempt_revision(
+        # _attempt_revision_with_retry gives one immediate retry of this exact
+        # call on a technical failure (JSON-parse or empty-body) -- see its
+        # docstring. That retry doesn't touch revise_count below: it's
+        # recovering from a failed ATTEMPT, not spending one of the real
+        # WRITER_REVISION_MAX_PASSES passes, so a later genuinely-new
+        # revision pass still gets its own full budget.
+        revised = _attempt_revision_with_retry(
             llm,
             gen_system,
             revise_user,
