@@ -1,5 +1,6 @@
 """Global compose mutex — only one writer research loop at a time."""
 
+import os
 from datetime import UTC, datetime, timedelta
 from typing import Never
 from unittest.mock import MagicMock
@@ -101,6 +102,85 @@ def _fresh_meta(**overrides: object) -> dict:
 def test_holder_is_dead_false_without_task_id() -> None:
     """Never treats a lock as dead when its metadata carries no task_id to check."""
     assert not _holder_is_dead({"started_at": datetime.now(tz=UTC).isoformat()})
+
+
+def test_holder_is_dead_false_without_task_id_or_pid_even_when_old() -> None:
+    """No task_id AND no pid recorded at all -- nothing to check, never reclaimed, regardless of age."""
+    assert not _holder_is_dead(
+        {"started_at": (datetime.now(tz=UTC) - timedelta(seconds=999)).isoformat()}
+    )
+
+
+def test_holder_is_dead_true_for_bare_invocation_with_a_dead_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No task_id (a bare/manual script, not a real Celery task) but a recorded pid that's confirmed gone -- reclaimable via the same-host PID-liveness fallback."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.compose_lock._pid_is_dead", lambda _pid, _start: True
+    )
+    meta = {
+        "started_at": (datetime.now(tz=UTC) - timedelta(seconds=300)).isoformat(),
+        "pid": 999999,
+        "pid_start_ticks": 12345,
+    }
+    assert _holder_is_dead(meta)
+
+
+def test_holder_is_dead_false_for_bare_invocation_with_a_live_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded pid that's still confirmed alive is never reclaimed."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.compose_lock._pid_is_dead", lambda _pid, _start: False
+    )
+    meta = {
+        "started_at": (datetime.now(tz=UTC) - timedelta(seconds=300)).isoformat(),
+        "pid": 999999,
+        "pid_start_ticks": 12345,
+    }
+    assert not _holder_is_dead(meta)
+
+
+def test_pid_is_dead_true_when_process_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No process at all currently at that pid -- confirmed dead."""
+    from app.modules.newspaper.compose_lock import _pid_is_dead
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.compose_lock._proc_start_ticks", lambda _pid: None
+    )
+    assert _pid_is_dead(999999, 12345)
+
+
+def test_pid_is_dead_true_when_pid_reused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A process IS running at that pid, but its start time doesn't match what was recorded -- the pid was reused by something else, so the original holder is confirmed dead."""
+    from app.modules.newspaper.compose_lock import _pid_is_dead
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.compose_lock._proc_start_ticks", lambda _pid: 99999
+    )
+    assert _pid_is_dead(999999, 12345)
+
+
+def test_pid_is_dead_false_when_start_time_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same process (matching start time) is still running -- never reclaimed."""
+    from app.modules.newspaper.compose_lock import _pid_is_dead
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.compose_lock._proc_start_ticks", lambda _pid: 12345
+    )
+    assert not _pid_is_dead(999999, 12345)
+
+
+def test_pid_is_dead_false_when_no_start_time_was_ever_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process is running at that pid, but there's nothing to compare its start time against -- can't rule out it's the same process, so never reclaimed (uncertainty defaults to alive)."""
+    from app.modules.newspaper.compose_lock import _pid_is_dead
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.compose_lock._proc_start_ticks", lambda _pid: 12345
+    )
+    assert not _pid_is_dead(999999, None)
 
 
 def test_holder_is_dead_false_within_min_age(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,6 +288,43 @@ def test_compose_lock_still_raises_when_reclaim_fails(monkeypatch: pytest.Monkey
     with pytest.raises(ComposeBusyError) as exc_info, compose_lock():
         pass  # pragma: no cover
     assert exc_info.value.status["label"] == "https://slow-site.example/"
+
+
+def test_proc_start_ticks_reads_a_real_stable_value_for_this_process() -> None:
+    """Against the actual running test process (no mocking) -- a real /proc/<pid>/stat parse, called twice, must return the same value both times (a process's own start time never changes)."""
+    import os
+
+    from app.modules.newspaper.compose_lock import _proc_start_ticks
+
+    first = _proc_start_ticks(os.getpid())
+    second = _proc_start_ticks(os.getpid())
+    assert first is not None
+    assert first == second
+
+
+def test_proc_start_ticks_none_for_a_pid_that_cannot_exist() -> None:
+    """An absurdly large pid -- /proc/<pid>/stat can't exist -- returns None rather than raising."""
+    from app.modules.newspaper.compose_lock import _proc_start_ticks
+
+    assert _proc_start_ticks(2**30) is None
+
+
+def test_write_meta_records_pid_and_start_ticks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_write_meta captures this process's own pid/start-time unconditionally, not just for bare (empty-task_id) callers."""
+    from app.modules.newspaper.compose_lock import _write_meta
+
+    captured: dict = {}
+    fake_client = MagicMock()
+    fake_client.set.side_effect = lambda _key, value, ex=None: captured.update(  # noqa: ARG005
+        __import__("json").loads(value)
+    )
+    monkeypatch.setattr("app.modules.newspaper.compose_lock._redis_client", lambda: fake_client)
+
+    _write_meta("https://example.com/", "task-123")
+
+    assert captured["task_id"] == "task-123"
+    assert captured["pid"] == os.getpid()
+    assert captured["pid_start_ticks"] is not None
 
 
 def test_get_compose_lock_status_none_when_not_held(monkeypatch: pytest.MonkeyPatch) -> None:

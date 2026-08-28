@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -75,11 +76,44 @@ def _current_task_id() -> str:
     return ""
 
 
+def _proc_start_ticks(pid: int) -> int | None:
+    """This process's start time in clock ticks since boot, from /proc/<pid>/stat field 22 -- None if unreadable (no /proc, pid gone, permission denied). No psutil dependency, same convention as browser_reaper.py's ps-based process inspection -- Linux-only, which every other part of this codebase already assumes (ps-based reaper, journalctl, etc.)."""
+    try:
+        from pathlib import Path
+
+        raw = Path(f"/proc/{pid}/stat").read_text()
+        # comm (field 2) is parenthesized and can itself contain spaces or
+        # closing parens, so split on the LAST ")" to safely find the
+        # fixed-width fields that follow it -- field 22 (starttime) is
+        # then index 19 in that remainder (fields 3..22 zero-indexed).
+        _, _, rest = raw.rpartition(")")
+        return int(rest.split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _pid_is_dead(pid: int, recorded_start_ticks: int | None) -> bool:
+    """True only when positively confirmed: either no process is running at `pid` any more, or one is, but its start time doesn't match what was recorded when the lock was written -- meaning `pid` has since been reused by an unrelated process. Any uncertainty (can't read /proc at all, or no start time was ever recorded to compare against) returns False, matching `_holder_is_dead`'s own conservative contract."""
+    current = _proc_start_ticks(pid)
+    if current is None:
+        return True
+    if recorded_start_ticks is None:
+        return False
+    return current != recorded_start_ticks
+
+
 def _write_meta(label: str, task_id: str) -> None:
+    pid = os.getpid()
     meta = {
         "label": label,
         "task_id": task_id,
         "started_at": datetime.now(tz=UTC).isoformat(),
+        # Recorded unconditionally (not just for bare invocations) so
+        # _holder_is_dead has a same-host fallback ready the moment task_id
+        # is empty -- a real Celery task also has a pid, this costs nothing
+        # extra to capture for it.
+        "pid": pid,
+        "pid_start_ticks": _proc_start_ticks(pid),
     }
     with contextlib.suppress(Exception):
         _redis_client().set(_META_KEY, json.dumps(meta), ex=COMPOSE_LOCK_TTL)
@@ -104,10 +138,30 @@ def get_compose_lock_status() -> dict | None:
 
 
 def _holder_is_dead(meta: dict) -> bool:
-    """True ONLY when we can positively confirm the recorded holder task is no longer running. Any uncertainty at all (no task_id recorded, still within the minimum age floor, Celery inspect() failing or timing out) returns False — this must never reclaim on a hunch, since two writer loops running concurrently is exactly what this lock exists to prevent."""
-    task_id = meta.get("task_id")
+    """True ONLY when we can positively confirm the recorded holder is no longer running. Any uncertainty at all (still within the minimum age floor, Celery inspect() failing or timing out, /proc unreadable) returns False — this must never reclaim on a hunch, since two writer loops running concurrently is exactly what this lock exists to prevent.
+
+    Two independent ways to confirm death, depending on how the lock was
+    acquired:
+
+      - Held by a real Celery task (``task_id`` set): ask Celery's control
+        plane directly whether that task id is still active anywhere.
+
+      - Held by a one-off manual/SSH script (``task_id`` empty -- see
+        ``_current_task_id``'s own docstring for why that happens): Celery's
+        control plane has nothing to check, but the holder ran on THIS SAME
+        host, so a same-host PID-liveness check (with a start-time
+        comparison to rule out PID reuse, see ``_pid_is_dead``) is a valid
+        substitute under the identical conservative contract. Root-caused
+        2026-08-27/28: a bare-invoked recompose hung for hours (a Chromium
+        process reaped out from under it -- see browser_reaper.py -- turned
+        a mid-call Playwright wait into a permanent block) and its
+        empty-task_id lock could never be fast-reclaimed, only ever expiring
+        on the full 3-hour TTL. The practical fix is "never bare-script a
+        compose" (always ``send_task``), but this closes the gap for
+        whenever that rule gets broken again by someone else, or by mistake.
+    """
     started_at = meta.get("started_at")
-    if not task_id or not started_at:
+    if not started_at:
         return False
     try:
         age = (datetime.now(tz=UTC) - datetime.fromisoformat(started_at)).total_seconds()
@@ -115,17 +169,25 @@ def _holder_is_dead(meta: dict) -> bool:
         return False
     if age < _MIN_RECLAIM_AGE_SECONDS:
         return False
-    try:
-        from app.celery_app import celery_app
 
-        active = celery_app.control.inspect(timeout=5).active() or {}
-    except Exception:
-        return False  # inspect itself failed — do not guess, leave it alone
-    for tasks in active.values():
-        for t in tasks:
-            if t.get("id") == task_id:
-                return False  # confirmed still alive
-    return True  # inspect succeeded and the task id is nowhere — genuinely dead
+    task_id = meta.get("task_id")
+    if task_id:
+        try:
+            from app.celery_app import celery_app
+
+            active = celery_app.control.inspect(timeout=5).active() or {}
+        except Exception:
+            return False  # inspect itself failed — do not guess, leave it alone
+        for tasks in active.values():
+            for t in tasks:
+                if t.get("id") == task_id:
+                    return False  # confirmed still alive
+        return True  # inspect succeeded and the task id is nowhere — genuinely dead
+
+    pid = meta.get("pid")
+    if not isinstance(pid, int):
+        return False  # no task_id AND no pid recorded — nothing to check
+    return _pid_is_dead(pid, meta.get("pid_start_ticks"))
 
 
 def _try_reclaim() -> bool:
