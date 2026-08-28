@@ -85,17 +85,19 @@ MAINNET_INDEXER_URL = env_str("MAINNET_INDEXER_URL", "https://mainnet-idx.algono
 )
 NEWS_FEED_BUCKET = env_str("NEWS_FEED_BUCKET", "main")
 NEWS_MAX_ARTICLES_PER_DAY = min(max(1, env_int("NEWS_MAX_ARTICLES_PER_DAY", 3)), 7)
-NEWS_STRICT_DAILY_CAP = env_bool("NEWS_STRICT_DAILY_CAP", True)
 CRAWL_PAUSE_WHEN_PUBLISH_CAP_FULL = env_bool("CRAWL_PAUSE_WHEN_PUBLISH_CAP_FULL", True)
 
 # Crawler lanes — see crawler_config table + docs/modules/crawler-types.md
 # Env overrides DB when set. Legacy HTTP/BROWSER aliases still work.
+# CRAWLER_CHAIN_ENABLED / CRAWLER_METRICS_ENABLED are NOT module constants here:
+# crawler_registry.is_crawler_enabled() reads them dynamically via
+# os.getenv(f"CRAWLER_{type.upper()}_ENABLED") for every crawler type, chain and
+# metrics included, so there is nothing for a same-named constant in this file to
+# add — see crawler_registry.py's _env_override.
 CRAWLER_HTTP_ENABLED = env_bool("CRAWLER_HTTP_ENABLED", True)
 CRAWLER_BROWSER_ENABLED = env_bool("CRAWLER_BROWSER_ENABLED", False)
 CRAWLER_WEB_SPA_ENABLED = env_bool("CRAWLER_WEB_SPA_ENABLED", False)
 CRAWLER_MAIL_ENABLED = env_bool("CRAWLER_MAIL_ENABLED", True)
-CRAWLER_CHAIN_ENABLED = env_bool("CRAWLER_CHAIN_ENABLED", True)
-CRAWLER_METRICS_ENABLED = env_bool("CRAWLER_METRICS_ENABLED", True)
 # Respect robots.txt for frontier crawling (politeness). The robots.txt per host
 # is fetched once and cached; a disallowed URL is skipped before fetching.
 CRAWLER_RESPECT_ROBOTS = env_bool("CRAWLER_RESPECT_ROBOTS", True)
@@ -137,7 +139,15 @@ NEWS_REFORMAT_SIMILARITY = env_float("NEWS_REFORMAT_SIMILARITY", 0.85)
 # UNCAUGHT InvalidRequest, failing the whole index_crawled_page task. 500K
 # chars leaves ~32x headroom under that limit for the rest of the row.
 CRAWLED_PAGE_BODY_MAX_CHARS = env_int("CRAWLED_PAGE_BODY_MAX_CHARS", 500_000)
-PUBLISH_QUEUE_DRAIN_SECONDS = env_int("PUBLISH_QUEUE_DRAIN_SECONDS", 900)
+# drain-to-compose beat interval (celery_app.py._build_beat_schedule). Default
+# 3600 (1h), matching the value that has actually been driving the beat
+# schedule directly via its own os.getenv call -- this module-level constant
+# used to default to 900 while celery_app.py silently ran its own duplicate
+# os.getenv("PUBLISH_QUEUE_DRAIN_SECONDS", "3600") for the real beat entry, so
+# an unset env var was really running on 3600 the whole time despite what this
+# file claimed. Fixed 2026-08-28: celery_app.py now imports this constant
+# instead of re-reading the env var, so there is exactly one default again.
+PUBLISH_QUEUE_DRAIN_SECONDS = env_int("PUBLISH_QUEUE_DRAIN_SECONDS", 3600)
 
 OFFICIAL_MAIL_FROM_DOMAINS = env_str(
     "OFFICIAL_MAIL_FROM_DOMAINS",
@@ -402,18 +412,10 @@ DEEPSEEK_MAX_TOKENS = env_int("DEEPSEEK_MAX_TOKENS", 40000)
 OPENAI_API_KEY = env_str("OPENAI_API_KEY", "")
 OPENAI_API_BASE = env_str("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
 OPENAI_MODEL_WRITER = env_str("OPENAI_MODEL_WRITER", "gpt-5.6-luna")
-OPENAI_MODEL_RESEARCH = env_str("OPENAI_MODEL_RESEARCH", "gpt-5.6-luna")
-OPENAI_MODEL_DIGEST = env_str("OPENAI_MODEL_DIGEST", "gpt-5.6-luna")
-OPENAI_MODEL_TRANSLATE = env_str("OPENAI_MODEL_TRANSLATE", "gpt-5.6-luna")
-OPENAI_MODEL_RUBRIC = env_str("OPENAI_MODEL_RUBRIC", "gpt-5.6-luna")
 
 KIMI_API_KEY = env_str("KIMI_API_KEY", "")
 KIMI_API_BASE = env_str("KIMI_API_BASE", "https://api.moonshot.ai/v1").rstrip("/")
 KIMI_MODEL_WRITER = env_str("KIMI_MODEL_WRITER", "kimi-k2.7-code")
-KIMI_MODEL_RESEARCH = env_str("KIMI_MODEL_RESEARCH", "kimi-k2.7-code")
-KIMI_MODEL_DIGEST = env_str("KIMI_MODEL_DIGEST", "kimi-k2.7-code")
-KIMI_MODEL_TRANSLATE = env_str("KIMI_MODEL_TRANSLATE", "kimi-k2.7-code")
-KIMI_MODEL_RUBRIC = env_str("KIMI_MODEL_RUBRIC", "kimi-k2.7-code")
 # Same shape as DEEPSEEK_MAX_TOKENS above: confirmed live 2026-08-14 that
 # Kimi K3's thinking cannot be disabled at any setting, and its reasoning
 # tokens draw from the same completion budget as the visible answer -- a
@@ -425,10 +427,6 @@ KIMI_MAX_TOKENS = env_int("KIMI_MAX_TOKENS", 40000)
 GLM_API_KEY = env_str("GLM_API_KEY", "")
 GLM_API_BASE = env_str("GLM_API_BASE", "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
 GLM_MODEL_WRITER = env_str("GLM_MODEL_WRITER", "glm-5.2")
-GLM_MODEL_RESEARCH = env_str("GLM_MODEL_RESEARCH", "glm-5.2")
-GLM_MODEL_DIGEST = env_str("GLM_MODEL_DIGEST", "glm-5.2")
-GLM_MODEL_TRANSLATE = env_str("GLM_MODEL_TRANSLATE", "glm-5.2")
-GLM_MODEL_RUBRIC = env_str("GLM_MODEL_RUBRIC", "glm-5.2")
 
 # Gemini's native API is NOT OpenAI-compatible (contents/parts, functionCall,
 # role="model") -- GeminiProvider (llm_gemini_provider.py) translates to/from
@@ -438,10 +436,6 @@ GEMINI_API_BASE = env_str(
     "GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"
 ).rstrip("/")
 GEMINI_MODEL_WRITER = env_str("GEMINI_MODEL_WRITER", "gemini-3.7")
-GEMINI_MODEL_RESEARCH = env_str("GEMINI_MODEL_RESEARCH", "gemini-3.7")
-GEMINI_MODEL_DIGEST = env_str("GEMINI_MODEL_DIGEST", "gemini-3.7")
-GEMINI_MODEL_TRANSLATE = env_str("GEMINI_MODEL_TRANSLATE", "gemini-3.7")
-GEMINI_MODEL_RUBRIC = env_str("GEMINI_MODEL_RUBRIC", "gemini-3.7")
 
 # Anthropic's Messages API is also not OpenAI-compatible (top-level `system`
 # field separate from `messages`, tool_use/tool_result content blocks instead
@@ -452,10 +446,6 @@ GEMINI_MODEL_RUBRIC = env_str("GEMINI_MODEL_RUBRIC", "gemini-3.7")
 ANTHROPIC_API_KEY = env_str("ANTHROPIC_API_KEY", "")
 ANTHROPIC_API_BASE = env_str("ANTHROPIC_API_BASE", "https://api.anthropic.com/v1").rstrip("/")
 ANTHROPIC_MODEL_WRITER = env_str("ANTHROPIC_MODEL_WRITER", "claude-sonnet-5")
-ANTHROPIC_MODEL_RESEARCH = env_str("ANTHROPIC_MODEL_RESEARCH", "claude-sonnet-5")
-ANTHROPIC_MODEL_DIGEST = env_str("ANTHROPIC_MODEL_DIGEST", "claude-sonnet-5")
-ANTHROPIC_MODEL_TRANSLATE = env_str("ANTHROPIC_MODEL_TRANSLATE", "claude-sonnet-5")
-ANTHROPIC_MODEL_RUBRIC = env_str("ANTHROPIC_MODEL_RUBRIC", "claude-sonnet-5")
 
 # "synthesize" (default): Stage 1->2 handoff is an LLM-synthesized Research
 # Digest (llm_compose._synthesize_research_digest) — the only thing Stage
@@ -630,13 +620,13 @@ LLM_TEMP_RESEARCH = env_float("MISTRAL_TEMP_RESEARCH", 0.15)
 LLM_TEMP_WRITE = env_float("MISTRAL_TEMP_WRITE", 0.6)
 # Two-stage compose: after generation, the heuristic grader runs deterministically
 # (the warm pass has no tools, so the model can't call review_draft itself). A draft
-# graded below this triggers a revision pass with the issues fed back, up to
-# WRITER_REVISION_MAX_PASSES times — a pass that comes back clean stops early
-# (2026-07-13: raised 1 -> 2 after a real critical_distance regression on the one
-# allowed pass went unfixed; each extra pass costs one more Mistral revision call
-# + one more grading call, only spent when a draft is still flagged).
+# flagged by quality_needs_revision (WRITER_QUALITY_LLM_MIN_SCORE) triggers a
+# revision pass with the issues fed back, up to WRITER_REVISION_MAX_PASSES times —
+# a pass that comes back clean stops early (2026-07-13: raised 1 -> 2 after a real
+# critical_distance regression on the one allowed pass went unfixed; each extra
+# pass costs one more Mistral revision call + one more grading call, only spent
+# when a draft is still flagged).
 WRITER_REVIEW_ENABLED = env_bool("WRITER_REVIEW_ENABLED", True)
-WRITER_REVIEW_MIN_GRADE = env_float("WRITER_REVIEW_MIN_GRADE", 7.0)
 WRITER_REVISION_MAX_PASSES = env_int("WRITER_REVISION_MAX_PASSES", 2)
 # 2026-08-11 (owner request): the revision call used to be a plain no-tools
 # chat_json_object -- it could only reorganize/reword facts already sitting
@@ -785,7 +775,15 @@ def mistral_configured() -> bool:
 
 
 URL_QUEUE_ENABLED = env_bool("URL_QUEUE_ENABLED", True)
-URL_QUEUE_DRAIN_SECONDS = env_int("URL_QUEUE_DRAIN_SECONDS", 60)
+# drain-url-queue beat interval (celery_app.py._build_beat_schedule). Default
+# 10s, matching the value that has actually been driving the beat schedule
+# directly via its own os.getenv call -- this module-level constant used to
+# default to 60 while celery_app.py silently ran its own duplicate
+# os.getenv("URL_QUEUE_DRAIN_SECONDS", "10") for the real beat entry, so an
+# unset env var was really running on 10s the whole time despite what this
+# file claimed. Fixed 2026-08-28: celery_app.py now imports this constant
+# instead of re-reading the env var, so there is exactly one default again.
+URL_QUEUE_DRAIN_SECONDS = env_int("URL_QUEUE_DRAIN_SECONDS", 10)
 # How many URLs the drain crawls per tick. Paced by the beat interval — 10 per
 # tick with URL_QUEUE_DRAIN_SECONDS=10 clears a large backlog faster than the
 # old 1/tick default while still spacing requests out over the beat window.
@@ -1085,17 +1083,6 @@ PUBLISH_CLASSIFIER_MODEL_PATH = env_str(
     "PUBLISH_CLASSIFIER_MODEL_PATH",
     "data/models/publish_classifier.pkl",
 )
-# Learned article grader: logistic regression on the captured grade dimensions
-# → P(approved). Falls back to the heuristic weighted sum below the min-sample
-# threshold (cold start). Both classes must be present to train.
-GRADER_MODEL_PATH = env_str("GRADER_MODEL_PATH", "data/models/article_grader.pkl")
-GRADER_MIN_SAMPLES = env_int("GRADER_MIN_SAMPLES", 40)
-# The grader becomes text-aware (TF-IDF of the article body hstacked with the
-# heuristic subscores) only once at least this many labelled rows carry the
-# article text — below it, the text features would just memorise. Until then it
-# trains scalar-only. Article text is captured from the deploy on 2026-06-18, so
-# this ramps up as you label new reviews.
-GRADER_TEXT_MIN_SAMPLES = env_int("GRADER_TEXT_MIN_SAMPLES", 60)
 # Article length grading: the grader's length subscore is a Gaussian peaking at
 # LENGTH_TARGET_WORDS, width LENGTH_SIGMA_WORDS. Editorial preference is ~800-word
 # pieces, so both thin stubs and bloated walls score low (≈0.6 at ±sigma; with
@@ -1116,19 +1103,6 @@ WEB_LINK_DISCOVERY_ENABLED = env_bool("WEB_LINK_DISCOVERY_ENABLED", True)
 # Comma-separated extra dead-end domains for the frontier blocklist.
 FRONTIER_BLOCKLIST_EXTRA = env_str("FRONTIER_BLOCKLIST_EXTRA", "")
 
-# Probability that a newly discovered domain must be classified by an admin
-# before the crawler may explore it (1.0 = every new domain is held).
-FRONTIER_SAMPLING_THRESHOLD = float(os.getenv("FRONTIER_SAMPLING_THRESHOLD", "1.0"))
-# Pre-enqueue relevance gate: an unknown external domain whose link (URL +
-# anchor text) shows no crypto/Algorand signal is dropped outright — not even
-# previewed or held — so off-topic domains (realtor.com, jwplayer, ...) never
-# enter the frontier. Approved domains are unaffected.
-# DISABLED: pre-crawl relevance heuristics on URL/anchor/preview-meta wrongly
-# dead-ended real Algorand domains (pact.fi, perawallet, algorand.co) — a landing
-# page's metadata is a poor relevance signal. Relevance is now judged on the
-# CRAWLED page content (scrape_from_queue_item's classifier), never on preview.
-FRONTIER_LINK_RELEVANCE_GATE = env_bool("FRONTIER_LINK_RELEVANCE_GATE", False)
-FRONTIER_PREVIEW_AUTOREJECT = env_bool("FRONTIER_PREVIEW_AUTOREJECT", False)
 FRONTIER_PREVIEW_MIN_SCORE = env_float("FRONTIER_PREVIEW_MIN_SCORE", 1.0)
 # Content-based domain relevance (classify_pending_domains): a pending domain
 # whose CRAWLED page text scores below this is clearly off-topic. Used only when

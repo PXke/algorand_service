@@ -7,6 +7,8 @@ from celery import Celery
 from celery.schedules import crontab
 from celery.signals import worker_process_init
 
+from app.core import config
+from app.core.config import env_bool, env_int
 from app.modules.scraper.crawler_registry import is_crawler_enabled
 from app.modules.scraper.crawler_types import CrawlerType
 
@@ -100,14 +102,16 @@ def _build_beat_schedule() -> dict:
     # below -- a tick that's still sitting in the queue (worker pool busy)
     # past its own interval is stale and should be dropped, not run late
     # doubled-up with the tick right behind it.
-    _url_queue_drain_seconds = float(os.getenv("URL_QUEUE_DRAIN_SECONDS", "10"))
+    _url_queue_drain_seconds = float(
+        env_int("URL_QUEUE_DRAIN_SECONDS", config.URL_QUEUE_DRAIN_SECONDS)
+    )
     schedule["drain-url-queue"] = {
         "task": "app.tasks.crawler.drain_url_queue",
         # Default 10 pages / 10s: clears a new domain's 20-page initial harvest
         # in one tick, and a large backlog (e.g. an admin-approval bulk
         # backfill) in minutes instead of hours (bumped from 1/tick 2026-07-21).
         "schedule": _url_queue_drain_seconds,
-        "kwargs": {"max_items": int(os.getenv("URL_QUEUE_DRAIN_BATCH", "10"))},
+        "kwargs": {"max_items": env_int("URL_QUEUE_DRAIN_BATCH", config.URL_QUEUE_DRAIN_BATCH)},
         # drain_url_queue is now single_flight-locked (CLAUDE.md invariant 5)
         # so an overlapping tick just no-ops instead of double-draining --
         # this `expires` is the companion half: a tick that never got picked
@@ -140,8 +144,8 @@ def _build_beat_schedule() -> dict:
     schedule["retrain-publish-classifier"] = {
         "task": "app.tasks.crawler.retrain_publish_classifier",
         "schedule": crontab(
-            minute=int(os.getenv("CLASSIFIER_RETRAIN_CRON_MINUTE", "30")),
-            hour=int(os.getenv("CLASSIFIER_RETRAIN_CRON_HOUR", "3")),
+            minute=env_int("CLASSIFIER_RETRAIN_CRON_MINUTE", config.CLASSIFIER_RETRAIN_CRON_MINUTE),
+            hour=env_int("CLASSIFIER_RETRAIN_CRON_HOUR", config.CLASSIFIER_RETRAIN_CRON_HOUR),
         ),
     }
     schedule["llm-diff-publish"] = {
@@ -180,7 +184,7 @@ def _build_beat_schedule() -> dict:
     # rather than a live call path. run_x_search_weekly_sweep() re-checks
     # the same flag itself, so a manual/admin trigger of the task also stays
     # a no-op when the feature is off.
-    if os.getenv("X_SEARCH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}:
+    if env_bool("X_SEARCH_ENABLED", config.X_SEARCH_ENABLED):
         schedule["x-search-weekly-sweep"] = {
             "task": "app.tasks.newspaper.sweep_x_search_weekly",
             "schedule": crontab(
@@ -192,7 +196,9 @@ def _build_beat_schedule() -> dict:
     if is_crawler_enabled(CrawlerType.METRICS):
         schedule["collect-price-metrics"] = {
             "task": "app.tasks.metrics.collect_price_metrics",
-            "schedule": float(os.getenv("PRICE_METRICS_POLL_SECONDS", "3600")),
+            "schedule": float(
+                env_int("PRICE_METRICS_POLL_SECONDS", config.PRICE_METRICS_POLL_SECONDS)
+            ),
         }
     # ensure_review_ready was retired 2026-08-25 (folded into drain_to_compose,
     # which now composes eligible review-bound to_compose slots on every one
@@ -238,16 +244,18 @@ def _build_beat_schedule() -> dict:
     # exactly a big batch of classify_pending_domains chunks fired at once,
     # saturating the concurrency=4 scrape worker pool and starving unrelated
     # admin/routine tasks.
-    if os.getenv("FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED", "false").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
+    if env_bool(
+        "FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED", config.FRONTIER_GRAY_ZONE_RECLASSIFY_ENABLED
+    ):
         schedule["reclassify-gray-zone-domains"] = {
             "task": "app.tasks.crawler.reclassify_gray_zone_domains",
             "schedule": float(os.getenv("FRONTIER_GRAY_ZONE_RECLASSIFY_SECONDS", "1800")),
-            "kwargs": {"limit": int(os.getenv("FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT", "5"))},
+            "kwargs": {
+                "limit": env_int(
+                    "FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT",
+                    config.FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT,
+                )
+            },
         }
     # Editorial-room compose trigger (2026-08-25): replaces
     # drain_standard_publish_queue as the live selection/compose mechanism --
@@ -260,7 +268,9 @@ def _build_beat_schedule() -> dict:
     # docstring and the deleted breaking_credibility.py).
     schedule["drain-to-compose"] = {
         "task": "app.tasks.newspaper.drain_to_compose",
-        "schedule": float(os.getenv("PUBLISH_QUEUE_DRAIN_SECONDS", "3600")),
+        "schedule": float(
+            env_int("PUBLISH_QUEUE_DRAIN_SECONDS", config.PUBLISH_QUEUE_DRAIN_SECONDS)
+        ),
     }
     # Once-daily: picks the day's to_compose slate (human pin + N-1 platform
     # picks). Runs early UTC so a "pin for tomorrow" set any time the day
@@ -292,7 +302,7 @@ def _build_beat_schedule() -> dict:
     # reaper itself is what keeps it from ever touching a live session.
     schedule["reap-orphaned-browser-processes"] = {
         "task": "app.tasks.newspaper.reap_orphaned_browser_processes",
-        "schedule": float(os.getenv("BROWSER_REAP_SECONDS", "300")),
+        "schedule": float(env_int("BROWSER_REAP_SECONDS", config.BROWSER_REAP_SECONDS)),
     }
     # Root-caused 2026-08-26 (see to_compose_selection.
     # find_stale_selected_artifacts's own docstring): select_to_compose_for_day
@@ -328,7 +338,9 @@ def _build_beat_schedule() -> dict:
     # even while composing itself is paused.
     schedule["sweep-artifact-priorities"] = {
         "task": "app.tasks.newspaper.sweep_artifact_priorities",
-        "schedule": float(os.getenv("ARTIFACT_PRIORITY_SWEEP_SECONDS", "86400")),
+        "schedule": float(
+            env_int("ARTIFACT_PRIORITY_SWEEP_SECONDS", config.ARTIFACT_PRIORITY_SWEEP_SECONDS)
+        ),
     }
     # Ongoing automated detection for the two service-duplication bug
     # classes found in the 2026-08-2x new-service-lane audit (see
@@ -379,7 +391,7 @@ def _build_beat_schedule() -> dict:
     if is_crawler_enabled(CrawlerType.MAIL):
         schedule["mail-poll-inbox"] = {
             "task": "app.tasks.newspaper.poll_mail_inbox",
-            "schedule": float(os.getenv("MAIL_POLL_SECONDS", "300")),
+            "schedule": float(env_int("MAIL_POLL_SECONDS", config.MAIL_POLL_SECONDS)),
         }
     # Editorial-brief recurrence (auto-assign never-run briefs + cadence
     # refresh) is OFF by default: it silently regenerated standing briefs with
