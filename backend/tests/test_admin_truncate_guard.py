@@ -1,4 +1,4 @@
-"""admin.api.routes TRUNCATE-all endpoints (reset-articles, clear-domains).
+"""admin.api.routes TRUNCATE-all endpoints (reset-articles, clear-domains, clear-classifier-reviews).
 
 - Outside prod, proceed unconditionally (dev/test convenience).
 - In prod, require a `{"confirm": "<table-set hash>"}` body field so a
@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -152,6 +152,58 @@ def test_admin_clear_domains_allowed_in_prod_with_correct_confirm(
         result = admin_routes.admin_clear_domains(_req(body=body))
     assert result == {"cleared": True}
     session.execute.assert_called_once_with("TRUNCATE domain_tracking")
+
+
+def test_admin_clear_classifier_reviews_blocked_in_prod_without_confirm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In prod without a confirm field, clear-classifier-reviews 403s before touching Cassandra."""
+    monkeypatch.setattr(settings, "app_env", "prod")
+    session = MagicMock()
+    with (
+        patch.object(admin_routes, "require_admin_wallet", return_value=None),
+        patch("app.core.cassandra.get_cassandra_session", return_value=session),
+    ):
+        resp = admin_routes.admin_clear_classifier_reviews(_req(body=b"{}"))
+    assert resp.status_code == 403
+    session.execute.assert_not_called()
+
+
+def test_admin_clear_classifier_reviews_allowed_in_prod_with_correct_confirm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In prod, the correct confirm hash lets clear-classifier-reviews truncate as usual."""
+    monkeypatch.setattr(settings, "app_env", "prod")
+    session = MagicMock()
+    confirm = admin_routes._truncate_confirmation_hash(
+        admin_routes._CLEAR_CLASSIFIER_REVIEWS_TABLES
+    )
+    body = f'{{"confirm": "{confirm}"}}'.encode()
+    with (
+        patch.object(admin_routes, "require_admin_wallet", return_value=None),
+        patch("app.core.cassandra.get_cassandra_session", return_value=session),
+    ):
+        result = admin_routes.admin_clear_classifier_reviews(_req(body=body))
+    assert result == {"cleared": True}
+    assert session.execute.call_args_list == [
+        call("TRUNCATE classifier_review_pending"),
+        call("TRUNCATE classifier_review_queue"),
+    ]
+
+
+def test_admin_clear_classifier_reviews_truncates_outside_prod(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outside prod, the endpoint truncates both tables without confirmation."""
+    monkeypatch.setattr(settings, "app_env", "dev")
+    session = MagicMock()
+    with (
+        patch.object(admin_routes, "require_admin_wallet", return_value=None),
+        patch("app.core.cassandra.get_cassandra_session", return_value=session),
+    ):
+        result = admin_routes.admin_clear_classifier_reviews(_req())
+    assert result == {"cleared": True}
+    assert session.execute.call_count == len(admin_routes._CLEAR_CLASSIFIER_REVIEWS_TABLES)
 
 
 def test_admin_retrain_500_is_generic_and_does_not_leak_exception_text() -> None:
