@@ -491,6 +491,20 @@ _GENERIC_TOKENS = frozenset(
         # shared token alone, telling the model it already had a Play-
         # install-count capability it genuinely didn't.
         "google",
+        # Same "google" pattern, domain-flavored: every NFT tool name carries
+        # "nft" (nft_asset_listing_status, nft_collection_market_stats,
+        # nft_collection_distribution_timeline) even though the three answer
+        # unrelated questions (one item's listing state / a collection's
+        # market stats / a collection's holder-distribution timeline over
+        # time) -- root-caused from a rejected-article audit 2026-08-28:
+        # "algorand_nft_marketplace_health_aggregator" (is this whole
+        # marketplace up?) single-token-matched nft_asset_listing_status (is
+        # this one asset ID listed for sale?) on "nft" alone. The model
+        # trusted the false "you already have this" redirect, never called
+        # the wrongly-suggested tool, and the article shipped an
+        # overconfident, un-hedged "Defunct" claim about a marketplace that
+        # was actually intermittently up.
+        "nft",
     }
 )
 
@@ -540,10 +554,27 @@ def _match_existing_tool(capability: str, known_tools: set[str]) -> str | None:
         if alias and alias in known_tools:
             return alias
     significant = {t for t in tokens if t not in _GENERIC_TOKENS}
+    if not significant:
+        return None
     best: tuple[int, str] | None = None
     for tool in known_tools:
-        overlap = significant & {t for t in tool.lower().split("_") if t not in _GENERIC_TOKENS}
-        if overlap and (best is None or len(overlap) > best[0]):
+        tool_significant = {t for t in tool.lower().split("_") if t not in _GENERIC_TOKENS}
+        overlap = significant & tool_significant
+        if not overlap:
+            continue
+        # A single shared token isn't proof of overlap by itself -- it has to
+        # cover a real fraction of the smaller side's vocabulary, not just be
+        # present somewhere in it. Without this, a broad-but-not-technically-
+        # generic domain word (see the "nft" note on _GENERIC_TOKENS above)
+        # lets a multi-word capability false-match a tool it shares almost
+        # nothing else with. Real near-duplicates (reddit_search vs
+        # reddit_api_post_history, forum_discussion_search vs
+        # discourse_forum) clear this easily since the shared token already
+        # is most of what either side says.
+        smaller = min(len(significant), len(tool_significant))
+        if smaller and len(overlap) / smaller < 0.5:
+            continue
+        if best is None or len(overlap) > best[0]:
             best = (len(overlap), tool)
     return best[1] if best else None
 
