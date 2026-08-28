@@ -14,7 +14,7 @@ from app.modules.crawler.url_queue import (
     pending_url_count,
     reclaim_stale_processing_urls,
 )
-from app.modules.scraper.core.browser_scrape import maybe_start_session
+from app.modules.scraper.core.browser_scrape import PlaywrightSession, maybe_start_session
 from app.modules.scraper.crawlers.web_crawler import WebCrawlerDriver
 
 logger = logging.getLogger(__name__)
@@ -129,9 +129,24 @@ def _cached_domain_urls(domain: str, limit: int = 20) -> list[str]:
 
 
 def _sample_domain_pages(
-    driver: WebCrawlerDriver, landing_url: str, domain: str, max_pages: int
+    driver: WebCrawlerDriver,
+    landing_url: str,
+    domain: str,
+    max_pages: int,
+    *,
+    playwright_session: PlaywrightSession | None = None,
 ) -> tuple[list[tuple[str, str, tuple[str, ...]]], int]:
     """(pages, same_domain_link_count). pages: (url, text, outbound_external_links) for the landing page plus up to max_pages-1 same-domain links found on it. Best-effort — a same-domain page that fails to fetch is just skipped, never counted as an error against the domain. The external links travel with each page so the caller can feed them to score_page's explorer-link signal — a multi-chain service's product page can link straight to its Algorand explorer entry without ever using the word "algorand" in its own text (quantoz.com/EURQ, 2026-07-21).
+
+    playwright_session: reuse a caller-owned session across every fetch this
+    call makes (landing page plus up to max_pages-1 same-domain links)
+    instead of each SPA-fallback hit launching its own throwaway Chromium —
+    same reasoning and caller-owned/never-closed-here contract as
+    drain_url_queue's own session (see scrape_with_fallback's docstring).
+    classify_pending_domains starts ONE session per task run and passes it
+    into every domain's call here, so an N-domain batch pays for at most one
+    browser launch total, not one per domain (root-caused 2026-08-28, same
+    incident as drain_url_queue's fix).
 
     same_domain_link_count is the landing page's TRUE same-domain link fan-out
     (before truncating to max_pages-1) — a free by-product of the link
@@ -172,7 +187,7 @@ def _sample_domain_pages(
             return cached, ""
         if not is_allowed(url):
             return "", ""
-        result = driver.scrape_with_fallback(url, domain)
+        result = driver.scrape_with_fallback(url, domain, playwright_session=playwright_session)
         return result.text or "", result.raw_html or ""
 
     landing_text, landing_html = _fetch(landing_url)
@@ -292,9 +307,27 @@ def _deep_crawl_should_stop(domain: str, deadline: float) -> bool:
 
 
 def _deep_crawl_for_relevance(
-    *, domain: str, landing_url: str, max_pages: int, time_budget_seconds: float | None = None
+    *,
+    domain: str,
+    landing_url: str,
+    max_pages: int,
+    time_budget_seconds: float | None = None,
+    playwright_session: PlaywrightSession | None = None,
 ) -> tuple[tuple[str, object] | None, int, bool, int]:
     """Random-order same-domain crawl that stops at the first page clearing score_page's threshold.
+
+    playwright_session: reuse a caller-owned session across every fetch in
+    this loop (up to max_pages of them) instead of each SPA-fallback hit
+    launching its own throwaway Chromium — same contract as
+    scrape_with_fallback's own playwright_session param (caller-owned, never
+    closed here). _run_deep_classify starts ONE session for the whole call
+    and closes it right after this function returns (whether it stopped by
+    finding a relevant page, exhausting the frontier, hitting max_pages, or
+    the time budget) — this crawl can visit up to FRONTIER_DEEP_CLASSIFY_
+    MAX_PAGES (200 by default) pages in one run, a single task potentially
+    paying for far more throwaway browser launches than drain_url_queue's own
+    per-tick batch ever would (root-caused 2026-08-28, same incident as
+    drain_url_queue's fix).
 
     Returns (found, fetched, exhaustive, landing_same_domain_link_count) where
     found is (url, score_result) or None. `exhaustive` is True only when the
@@ -357,7 +390,7 @@ def _deep_crawl_for_relevance(
             continue
         visited.add(url)
         try:
-            result = driver.scrape_with_fallback(url, domain)
+            result = driver.scrape_with_fallback(url, domain, playwright_session=playwright_session)
         except Exception:
             continue
         fetched += 1
@@ -490,16 +523,35 @@ def deep_classify_domain(
 
 
 def _run_deep_classify(*, domain: str, landing_url: str, max_pages: int) -> dict[str, object]:
-    """The actual crawl-and-verdict body of deep_classify_domain, split out so the try/finally wrapping it (see deep_classify_domain's own docstring) reads as one clean block instead of an indented 150+-line body -- CLAUDE.md's 150-line-function guidance."""
+    """The actual crawl-and-verdict body of deep_classify_domain, split out so the try/finally wrapping it (see deep_classify_domain's own docstring) reads as one clean block instead of an indented 150+-line body -- CLAUDE.md's 150-line-function guidance.
+
+    Starts ONE PlaywrightSession up front (mirroring drain_url_queue's own
+    pattern -- maybe_start_session() never raises, and the session is always
+    closed in `finally`) and hands it to _deep_crawl_for_relevance for its
+    whole fetch loop, instead of each SPA-fallback hit inside that up-to-200-
+    page loop launching its own throwaway Chromium (root-caused 2026-08-28,
+    same incident as drain_url_queue's fix, worse here since one task can
+    visit far more pages than one drain_url_queue tick ever does). Closed
+    right after the crawl returns -- whether it found a page, exhausted the
+    frontier, hit max_pages, or stopped early on the wall-clock time budget
+    (_deep_crawl_should_stop) -- not held open through the verdict-writing /
+    external-corroboration work that follows, none of which touches a
+    browser.
+    """
     from app.modules.crawler.domain_tracker import (
         ensure_monitored_service,
         suggest_full_site,
         update_domain_status,
     )
 
-    found, fetched, exhaustive, landing_same_domain_link_count = _deep_crawl_for_relevance(
-        domain=domain, landing_url=landing_url, max_pages=max_pages
-    )
+    session = maybe_start_session()
+    try:
+        found, fetched, exhaustive, landing_same_domain_link_count = _deep_crawl_for_relevance(
+            domain=domain, landing_url=landing_url, max_pages=max_pages, playwright_session=session
+        )
+    finally:
+        if session is not None:
+            session.close()
 
     if found is not None:
         found_url, score_result = found
@@ -816,64 +868,89 @@ def classify_pending_domains(
     is only ever invoked in-process — by ``reevaluate_pending_domains``'s
     daily beat call, and directly in tests) but a live trap for the next
     caller that dispatches it by name expecting the documented behavior.
+
+    Starts ONE PlaywrightSession up front (mirroring drain_url_queue's own
+    pattern) and shares it across every domain's _sample_domain_pages call —
+    up to `limit` domains scored in one run — instead of each domain's own
+    SPA-fallback hit launching its own throwaway Chromium. Always closed in
+    `finally`, even if a domain's sample raises. maybe_start_session() never
+    raises (returns None if the SPA lane is disabled or launch fails), same
+    fail-open contract as everywhere else this pattern is used.
     """
     from app.core.cassandra import get_cassandra_session
     from app.core.config import FRONTIER_CLASSIFY_SAMPLE_PAGES, FRONTIER_CONTENT_REJECT_SCORE
     from app.modules.crawler.domain_tracker import is_protected_domain
-    from app.modules.scraper.crawlers.web_crawler import WebCrawlerDriver
 
+    # WebCrawlerDriver is already imported at module scope above -- a
+    # redundant second `from ... import WebCrawlerDriver` used to sit here,
+    # shadowing that module-level name with a fresh import inside this
+    # function's local namespace on every call. Harmless in production (both
+    # names bind the same real class), but it silently defeated
+    # `monkeypatch.setattr(uq, "WebCrawlerDriver", ...)` in tests -- the
+    # local re-import always won, so a test-supplied fake driver never
+    # actually reached this function. Removed 2026-08-28 while wiring the
+    # shared PlaywrightSession through here, which needs that seam to work.
     session = get_cassandra_session()
     pending = _pending_domains_to_classify(session, limit)
 
     driver = WebCrawlerDriver()
     scored = rejected = errors = unreadable = escalated = 0
     samples: list[dict] = []
-    for domain, meta in pending:
-        url = meta.get("pending_url") or f"https://{domain}"
-        try:
-            # HTTP first, transparent Playwright fallback for thin/SPA pages, so a
-            # JS dApp gets its REAL rendered text instead of mis-scoring 0.
-            pages, same_domain_link_count = _sample_domain_pages(
-                driver, url, domain, FRONTIER_CLASSIFY_SAMPLE_PAGES
-            )
-        except Exception:
-            errors += 1
-            _mark_unscoreable(session, domain, meta, url, "fetch_error", dry_run=dry_run)
-            continue
-        # Too little text to judge (dead/blocked/SPA-disabled) — don't pretend
-        # it's off-topic; leave it for a human.
-        pages = [(u, t, links) for u, t, links in pages if len(t.strip()) >= 100]
-        if not pages:
-            unreadable += 1
-            _mark_unscoreable(session, domain, meta, url, "unreadable", dry_run=dry_run)
-            continue
+    playwright_session = maybe_start_session()
+    try:
+        for domain, meta in pending:
+            url = meta.get("pending_url") or f"https://{domain}"
+            try:
+                # HTTP first, transparent Playwright fallback for thin/SPA pages, so a
+                # JS dApp gets its REAL rendered text instead of mis-scoring 0.
+                pages, same_domain_link_count = _sample_domain_pages(
+                    driver,
+                    url,
+                    domain,
+                    FRONTIER_CLASSIFY_SAMPLE_PAGES,
+                    playwright_session=playwright_session,
+                )
+            except Exception:
+                errors += 1
+                _mark_unscoreable(session, domain, meta, url, "fetch_error", dry_run=dry_run)
+                continue
+            # Too little text to judge (dead/blocked/SPA-disabled) — don't pretend
+            # it's off-topic; leave it for a human.
+            pages = [(u, t, links) for u, t, links in pages if len(t.strip()) >= 100]
+            if not pages:
+                unreadable += 1
+                _mark_unscoreable(session, domain, meta, url, "unreadable", dry_run=dry_run)
+                continue
 
-        best_url, score_result = _best_scored_page(pages)
-        score = round(float(score_result.score), 3)
-        scored += 1
-        will_reject = (
-            auto_reject
-            and score < FRONTIER_CONTENT_REJECT_SCORE
-            and not is_protected_domain(domain)
-        )
-        if len(samples) < 40:
-            samples.append({"domain": domain, "score": score, "reject": will_reject})
-        if not dry_run:
-            outcome = _classify_and_store_domain(
-                session,
-                domain,
-                meta,
-                url,
-                score,
-                score_result,
-                best_url,
-                will_reject=will_reject,
-                same_domain_link_count=same_domain_link_count,
+            best_url, score_result = _best_scored_page(pages)
+            score = round(float(score_result.score), 3)
+            scored += 1
+            will_reject = (
+                auto_reject
+                and score < FRONTIER_CONTENT_REJECT_SCORE
+                and not is_protected_domain(domain)
             )
-            if outcome == "escalated":
-                escalated += 1
-            elif outcome == "rejected":
-                rejected += 1
+            if len(samples) < 40:
+                samples.append({"domain": domain, "score": score, "reject": will_reject})
+            if not dry_run:
+                outcome = _classify_and_store_domain(
+                    session,
+                    domain,
+                    meta,
+                    url,
+                    score,
+                    score_result,
+                    best_url,
+                    will_reject=will_reject,
+                    same_domain_link_count=same_domain_link_count,
+                )
+                if outcome == "escalated":
+                    escalated += 1
+                elif outcome == "rejected":
+                    rejected += 1
+    finally:
+        if playwright_session is not None:
+            playwright_session.close()
     samples.sort(key=lambda s: s["score"])
     return {
         "status": "ok",

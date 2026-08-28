@@ -22,12 +22,20 @@ from app.modules.scraper.core.base import ScrapeResult
 
 
 class _FakeDriver:
-    """Serves canned ScrapeResults for known URLs — no network."""
+    """Serves canned ScrapeResults for known URLs — no network.
+
+    Also records every playwright_session it was handed (across all
+    fetches), so tests can assert a shared session reaches every call.
+    """
 
     def __init__(self, pages: dict[str, ScrapeResult]) -> None:
         self._pages = pages
+        self.playwright_sessions_seen: list[object] = []
 
-    def scrape_with_fallback(self, url: str, _source_id: str) -> ScrapeResult:
+    def scrape_with_fallback(
+        self, url: str, _source_id: str, *, playwright_session: object = None
+    ) -> ScrapeResult:
+        self.playwright_sessions_seen.append(playwright_session)
         if url not in self._pages:
             raise ValueError(f"unexpected fetch: {url}")
         return self._pages[url]
@@ -189,7 +197,7 @@ def test_sample_domain_pages_returns_empty_when_budget_exhausted(
         "app.modules.crawler.domain_tracker.domain_crawl_budget_exhausted", lambda _d: True
     )
 
-    def _boom(_url: str, _source_id: str) -> Never:
+    def _boom(_url: str, _source_id: str, **_kw: object) -> Never:
         raise AssertionError("must not fetch anything once the domain's budget is exhausted")
 
     driver = SimpleNamespace(scrape_with_fallback=_boom)
@@ -206,7 +214,7 @@ def test_sample_domain_pages_returns_empty_when_domain_in_cooldown(
     """A domain currently in its compose/diversity cooldown gets no fetches at all."""
     monkeypatch.setattr("app.modules.crawler.domain_tracker.domain_in_cooldown", lambda _d: True)
 
-    def _boom(_url: str, _source_id: str) -> Never:
+    def _boom(_url: str, _source_id: str, **_kw: object) -> Never:
         raise AssertionError("must not fetch anything while the domain is in cooldown")
 
     driver = SimpleNamespace(scrape_with_fallback=_boom)
@@ -244,7 +252,7 @@ def test_sample_domain_pages_robots_disallowed_landing_page_yields_empty_text(
     """A robots-disallowed landing page still returns its one placeholder entry (best-effort, like any other unfetchable page) rather than raising or fetching anyway."""
     monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: False)
 
-    def _boom(_url: str, _source_id: str) -> Never:
+    def _boom(_url: str, _source_id: str, **_kw: object) -> Never:
         raise AssertionError("must not fetch a robots-disallowed URL")
 
     driver = SimpleNamespace(scrape_with_fallback=_boom)
@@ -266,7 +274,7 @@ def test_deep_crawl_for_relevance_stops_when_budget_exhausted(
         "app.modules.crawler.domain_tracker.domain_crawl_budget_exhausted", lambda _d: True
     )
 
-    def _boom(_url: str, _source_id: str) -> Never:
+    def _boom(_url: str, _source_id: str, **_kw: object) -> Never:
         raise AssertionError("must not fetch anything once the domain's budget is exhausted")
 
     monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: SimpleNamespace(scrape_with_fallback=_boom))
@@ -289,7 +297,7 @@ def test_deep_crawl_for_relevance_stops_when_domain_in_cooldown(
     monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
     monkeypatch.setattr("app.modules.crawler.domain_tracker.domain_in_cooldown", lambda _d: True)
 
-    def _boom(_url: str, _source_id: str) -> Never:
+    def _boom(_url: str, _source_id: str, **_kw: object) -> Never:
         raise AssertionError("must not fetch anything while the domain is in cooldown")
 
     monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: SimpleNamespace(scrape_with_fallback=_boom))
@@ -619,7 +627,7 @@ def test_deep_crawl_for_relevance_stops_within_time_budget_on_a_slow_crawl(
 
     pages = _make_chain_pages("slow.example", 20)
 
-    def slow_scrape(url: str, _source_id: str) -> ScrapeResult:
+    def slow_scrape(url: str, _source_id: str, **_kw: object) -> ScrapeResult:
         clock["now"] += 100.0  # each page fetch "takes" 100s of simulated time
         return pages[url]
 
@@ -656,7 +664,7 @@ def test_deep_crawl_for_relevance_time_budget_does_not_cut_off_a_fast_crawl(
     # Only 3 pages total, each fetch "costs" 1s -- nowhere near a 250s budget.
     pages = _make_chain_pages("fast.example", 2)
 
-    def fast_scrape(url: str, _source_id: str) -> ScrapeResult:
+    def fast_scrape(url: str, _source_id: str, **_kw: object) -> ScrapeResult:
         clock["now"] += 1.0
         return pages[url]
 
@@ -690,7 +698,7 @@ def test_deep_classify_domain_produces_a_sensible_verdict_when_stopped_by_time_b
 
     pages = _make_chain_pages("slowreal.example", 200)
 
-    def slow_scrape(url: str, _source_id: str) -> ScrapeResult:
+    def slow_scrape(url: str, _source_id: str, **_kw: object) -> ScrapeResult:
         clock["now"] += per_fetch_seconds
         return pages[url]
 
@@ -739,7 +747,7 @@ def test_classify_pending_domains_escalates_instead_of_rejecting_outright(
     monkeypatch.setattr(
         uq,
         "_sample_domain_pages",
-        lambda _driver, url, _domain, _n: ([(url, "off-topic content" * 10, ())], 0),
+        lambda _driver, url, _domain, _n, **_kw: ([(url, "off-topic content" * 10, ())], 0),
     )
     monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: object())
 
@@ -790,7 +798,7 @@ def test_classify_pending_domains_rejects_outright_when_deep_classify_disabled(
     monkeypatch.setattr(
         uq,
         "_sample_domain_pages",
-        lambda _driver, url, _domain, _n: ([(url, "off-topic content" * 10, ())], 0),
+        lambda _driver, url, _domain, _n, **_kw: ([(url, "off-topic content" * 10, ())], 0),
     )
     monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: object())
     monkeypatch.setattr("app.modules.crawler.domain_tracker.is_protected_domain", lambda _d: False)
@@ -830,7 +838,13 @@ def test_classify_pending_domains_marks_fetch_errors_so_they_stop_recurring(
         ),
     )
 
-    def _raise(_driver: Any, _url: str, _domain: str, _n: int) -> Never:  # noqa: ANN401 -- duck-typed fake driver
+    def _raise(
+        _driver: Any,  # noqa: ANN401 -- duck-typed fake driver
+        _url: str,
+        _domain: str,
+        _n: int,
+        **_kw: object,
+    ) -> Never:
         raise ValueError("dns resolution failed")
 
     monkeypatch.setattr(uq, "_sample_domain_pages", _raise)
@@ -875,7 +889,9 @@ def test_classify_pending_domains_marks_unreadable_so_it_stops_recurring(
         ),
     )
     monkeypatch.setattr(
-        uq, "_sample_domain_pages", lambda _driver, url, _domain, _n: ([(url, "too short", ())], 0)
+        uq,
+        "_sample_domain_pages",
+        lambda _driver, url, _domain, _n, **_kw: ([(url, "too short", ())], 0),
     )
     monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: object())
 
@@ -1090,7 +1106,7 @@ def test_classify_pending_domains_escalation_stamps_deep_classify_queued_at(
     monkeypatch.setattr(
         uq,
         "_sample_domain_pages",
-        lambda _driver, url, _domain, _n: ([(url, "off-topic content" * 10, ())], 0),
+        lambda _driver, url, _domain, _n, **_kw: ([(url, "off-topic content" * 10, ())], 0),
     )
     monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: object())
     monkeypatch.setattr("app.celery_app.celery_app.send_task", lambda *_a, **_kw: None)
@@ -1335,3 +1351,298 @@ def test_reclaim_stale_processing_urls_task_resolves_to_the_real_function(
 
     assert out == {"status": "ok", "reclaimed": 0}
     assert called == [True]
+
+
+# --------------------------------------------------------------------------- #
+# Shared PlaywrightSession threaded through _sample_domain_pages /
+# _deep_crawl_for_relevance and their task-level callers (classify_pending_
+# domains, deep_classify_domain) -- root-caused 2026-08-28, same incident as
+# drain_url_queue's own fix (see test_drain_url_queue_playwright_session.py):
+# each SPA-fallback hit inside these loops used to launch its own throwaway
+# Chromium. deep_classify_domain can visit up to FRONTIER_DEEP_CLASSIFY_
+# MAX_PAGES (200 by default) pages in ONE run -- a single task potentially
+# paying for far more browser launches than drain_url_queue's own per-tick
+# batch ever would.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeSession:
+    """Records close() without touching real Playwright.
+
+    Mirrors test_drain_url_queue_playwright_session.py's own fake.
+    """
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_sample_domain_pages_threads_the_session_into_every_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The landing-page fetch and every followed same-domain link fetch must all receive the SAME caller-supplied playwright_session -- not None, and not a fresh one per page."""
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
+    landing_html = '<a href="/a">A</a> <a href="/b">B</a>'
+    driver = _FakeDriver(
+        {
+            "https://svc.example": _result("https://svc.example", "landing text", landing_html),
+            "https://svc.example/a": _result("https://svc.example/a", "a text"),
+            "https://svc.example/b": _result("https://svc.example/b", "b text"),
+        }
+    )
+    sentinel = _FakeSession()
+    pages, _ = _sample_domain_pages(
+        driver, "https://svc.example", "svc.example", max_pages=3, playwright_session=sentinel
+    )
+    assert len(pages) == 3
+    # All 3 fetches (landing + 2 links) got the exact same session object.
+    assert driver.playwright_sessions_seen == [sentinel, sentinel, sentinel]
+
+
+def test_sample_domain_pages_defaults_to_no_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitting playwright_session (the pre-existing call shape) still works exactly as before -- every fetch is made with playwright_session=None."""
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
+    driver = _FakeDriver(
+        {"https://svc.example": _result("https://svc.example", "landing text", "")}
+    )
+    pages, _ = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=1)
+    assert pages == [("https://svc.example", "landing text", ())]
+    assert driver.playwright_sessions_seen == [None]
+
+
+def test_deep_crawl_for_relevance_threads_the_session_into_every_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A multi-page deep crawl must hand the SAME session to every one of its scrape_with_fallback calls -- proving one browser serves the whole up-to-max_pages loop, not one per page."""
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    pages = _make_chain_pages("session.example", 5)
+    driver = _FakeDriver(pages)
+    monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: driver)
+
+    sentinel = _FakeSession()
+    found, fetched, exhaustive, _link_count = _deep_crawl_for_relevance(
+        domain="session.example",
+        landing_url="https://session.example",
+        max_pages=10,
+        playwright_session=sentinel,
+    )
+    assert found is None
+    assert exhaustive is True
+    assert fetched > 1  # walked past the landing page, proving a real multi-page loop
+    assert driver.playwright_sessions_seen == [sentinel] * fetched
+
+
+def test_classify_pending_domains_shares_one_session_across_all_domains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """classify_pending_domains scores several pending domains in one run -- all of them must share exactly ONE PlaywrightSession (one maybe_start_session() call), not one per domain."""
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    rows = [
+        SimpleNamespace(domain="a.example", frontier_status="pending", metadata={}),
+        SimpleNamespace(domain="b.example", frontier_status="pending", metadata={}),
+        SimpleNamespace(domain="c.example", frontier_status="pending", metadata={}),
+    ]
+    monkeypatch.setattr(
+        "app.core.cassandra.get_cassandra_session",
+        lambda: SimpleNamespace(execute=lambda _stmt, _params: rows, prepare=lambda cql: cql),
+    )
+    driver = _FakeDriver(
+        {
+            "https://a.example": _result("https://a.example", "algorand asa" * 10, ""),
+            "https://b.example": _result("https://b.example", "algorand asa" * 10, ""),
+            "https://c.example": _result("https://c.example", "algorand asa" * 10, ""),
+        }
+    )
+    monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: driver)
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
+
+    sessions_started: list[_FakeSession] = []
+
+    def _fake_maybe_start_session() -> _FakeSession:
+        session = _FakeSession()
+        sessions_started.append(session)
+        return session
+
+    monkeypatch.setattr(uq, "maybe_start_session", _fake_maybe_start_session)
+
+    out = classify_pending_domains(limit=10, dry_run=True, auto_reject=False)
+
+    assert out["scored"] == 3
+    assert len(sessions_started) == 1
+    the_session = sessions_started[0]
+    assert driver.playwright_sessions_seen == [the_session, the_session, the_session]
+    assert the_session.closed is True
+
+
+def test_classify_pending_domains_closes_the_shared_session_even_if_a_domain_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hard failure scoring one domain (outside the per-domain fetch-error try/except -- e.g. score_page blowing up) must not leak the shared browser."""
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    rows = [SimpleNamespace(domain="a.example", frontier_status="pending", metadata={})]
+    monkeypatch.setattr(
+        "app.core.cassandra.get_cassandra_session",
+        lambda: SimpleNamespace(execute=lambda _stmt, _params: rows, prepare=lambda cql: cql),
+    )
+    monkeypatch.setattr(
+        uq,
+        "_sample_domain_pages",
+        lambda _driver, url, _domain, _n, **_kw: ([(url, "some content" * 10, ())], 0),
+    )
+    monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: object())
+
+    def _boom(_pages: list) -> Never:
+        raise RuntimeError("boom scoring a domain")
+
+    monkeypatch.setattr(uq, "_best_scored_page", _boom)
+
+    sessions_started: list[_FakeSession] = []
+
+    def _fake_maybe_start_session() -> _FakeSession:
+        session = _FakeSession()
+        sessions_started.append(session)
+        return session
+
+    monkeypatch.setattr(uq, "maybe_start_session", _fake_maybe_start_session)
+
+    with pytest.raises(RuntimeError, match="boom scoring a domain"):
+        classify_pending_domains(limit=10, dry_run=True, auto_reject=False)
+
+    assert len(sessions_started) == 1
+    assert sessions_started[0].closed is True
+
+
+def test_deep_classify_domain_shares_one_session_across_the_whole_crawl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single deep_classify_domain run visiting several pages must share exactly ONE PlaywrightSession across the whole crawl -- not one per page, and not one per _sample_domain_pages-style call -- proving the fix covers deep_classify_domain's up-to-200-page loop the same way drain_url_queue's own per-tick batch is covered."""
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    driver = _FakeDriver(_make_chain_pages("deep.example", 5))
+    calls = _patch_common(monkeypatch, driver)
+
+    sessions_started: list[_FakeSession] = []
+
+    def _fake_maybe_start_session() -> _FakeSession:
+        session = _FakeSession()
+        sessions_started.append(session)
+        return session
+
+    monkeypatch.setattr(uq, "maybe_start_session", _fake_maybe_start_session)
+
+    out = deep_classify_domain(domain="deep.example", max_pages=10)
+
+    assert out["verdict"] == "dead_end"
+    assert out["pages_fetched"] > 1  # a real multi-page crawl happened
+    assert len(sessions_started) == 1
+    the_session = sessions_started[0]
+    assert driver.playwright_sessions_seen == [the_session] * out["pages_fetched"]
+    assert the_session.closed is True
+    assert calls  # the verdict was still written normally
+
+
+def test_deep_classify_domain_closes_the_session_promptly_when_the_time_budget_stops_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the crawl stops itself early via the wall-clock time budget, the shared session must already be closed by the time the verdict gets written -- not held open through the post-crawl update_domain_status / external-corroboration work, none of which touches a browser."""
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    clock = {"now": 0.0}
+    monkeypatch.setattr("time.monotonic", lambda: clock["now"])
+    per_fetch_seconds = _deep_classify_time_budget_seconds() / 16
+    pages = _make_chain_pages("promptclose.example", 200)
+
+    def slow_scrape(url: str, _source_id: str, **_kw: object) -> ScrapeResult:
+        clock["now"] += per_fetch_seconds
+        return pages[url]
+
+    driver = SimpleNamespace(scrape_with_fallback=slow_scrape)
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
+    monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: driver)
+
+    session = _FakeSession()
+    monkeypatch.setattr(uq, "maybe_start_session", lambda: session)
+
+    closed_when_verdict_written: list[bool] = []
+
+    def _spy_update_domain_status(_domain: str, **_kw: object) -> None:
+        closed_when_verdict_written.append(session.closed)
+
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.update_domain_status", _spy_update_domain_status
+    )
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.ensure_monitored_service", lambda *_a, **_kw: True
+    )
+
+    out = deep_classify_domain(domain="promptclose.example", max_pages=200)
+
+    assert out["exhaustive"] is False  # confirms the time-budget stop actually fired
+    assert session.closed is True
+    # update_domain_status is called twice here -- once for the dead_end
+    # verdict itself, once more by _clear_deep_classify_queued in
+    # deep_classify_domain's own finally -- and both must observe the
+    # session ALREADY closed, not held open through either.
+    assert closed_when_verdict_written == [True, True]
+
+
+def test_run_deep_classify_closes_the_shared_session_even_when_the_crawl_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hard failure inside the crawl loop itself (e.g. score_page raising on a malformed page) must not leak the shared browser -- _run_deep_classify's own try/finally around _deep_crawl_for_relevance closes it on the way out, the same guarantee drain_url_queue's batch loop has."""
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
+    driver = _FakeDriver(
+        {
+            "https://raises.example": _result(
+                "https://raises.example", "landing text, nothing chain-related" * 5, ""
+            ),
+        }
+    )
+    monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: driver)
+
+    session = _FakeSession()
+    monkeypatch.setattr(uq, "maybe_start_session", lambda: session)
+
+    def _boom_score_page(**_kw: object) -> Never:
+        raise RuntimeError("boom mid-crawl")
+
+    monkeypatch.setattr("app.modules.search.classifier.score.score_page", _boom_score_page)
+
+    with pytest.raises(RuntimeError, match="boom mid-crawl"):
+        uq._run_deep_classify(
+            domain="raises.example", landing_url="https://raises.example", max_pages=5
+        )
+
+    assert session.closed is True
+
+
+def test_deep_classify_domain_works_unchanged_when_no_session_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """maybe_start_session() returning None (SPA lane disabled, or Chromium failed to launch) must not break the crawl -- every fetch runs with playwright_session=None, same as before this change, and there is nothing to close."""
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    driver = _FakeDriver(
+        {
+            "https://svc.example": _result(
+                "https://svc.example", "algorand mainnet testnet asa" * 5, ""
+            ),
+        }
+    )
+    calls = _patch_common(monkeypatch, driver)
+    monkeypatch.setattr(uq, "maybe_start_session", lambda: None)
+
+    out = deep_classify_domain(domain="svc.example", max_pages=200)
+
+    assert out["verdict"] == "approved"
+    assert driver.playwright_sessions_seen == [None]
+    assert calls
