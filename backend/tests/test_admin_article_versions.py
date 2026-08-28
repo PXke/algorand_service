@@ -96,3 +96,54 @@ def test_get_article_version_missing_returns_none(monkeypatch: pytest.MonkeyPatc
     _patch(monkeypatch, fake)
 
     assert AdminCassandraStore().get_article_version(str(uuid4()), 99) is None
+
+
+def test_delete_article_deletes_all_versions_in_one_partition_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-08-28 perf audit: article_versions' delete must be a single partition delete.
+
+    Its PRIMARY KEY is (article_id, version) -- article_id alone is the
+    whole partition key, so every version of one article lives in the same
+    partition. delete_article must issue a single partition-range DELETE,
+    not read the version list and issue one DELETE per version (the old
+    N+1 shape: 1 SELECT + N DELETEs).
+    """
+    article_id = uuid4()
+    calls: list[tuple[str, tuple]] = []
+
+    class _TrackingSession:
+        def prepare(self, cql: str) -> str:
+            return cql
+
+        def execute(self, query: str, params: tuple = ()) -> _Result:
+            q = " ".join(str(query).split())
+            calls.append((q, tuple(params)))
+            return _Result([])
+
+    fake = _TrackingSession()
+    _patch(monkeypatch, fake)
+    monkeypatch.setattr(
+        AdminCassandraStore,
+        "get_article",
+        lambda self, aid: SimpleNamespace(translations=None, slug=None),  # noqa: ARG005
+    )
+    monkeypatch.setattr("app.modules.seo.sitemap.bust_tombstone_cache", lambda: None)
+    monkeypatch.setattr(
+        "algorand_shared.article_transitions.transition_article_status",
+        lambda *a, **kw: None,  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        "app.core.typesense_client.delete_article_document",
+        lambda *a, **kw: None,  # noqa: ARG005
+    )
+    monkeypatch.setattr("app.modules.seo.indexnow.ping_article", lambda *a, **kw: None)  # noqa: ARG005
+
+    result = AdminCassandraStore().delete_article(str(article_id))
+
+    assert result is True
+    version_calls = [c for c in calls if "article_versions" in c[0]]
+    assert len(version_calls) == 1
+    query, params = version_calls[0]
+    assert query == "DELETE FROM algorand_platform.article_versions WHERE article_id = ?"
+    assert params == (article_id,)

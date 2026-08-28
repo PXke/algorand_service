@@ -141,13 +141,35 @@ class ArticleVersionStmts:
         "SELECT version, title, summary, body, edit_reason, editor, edited_at "
         "FROM algorand_platform.article_versions WHERE article_id = ? AND version = ?"
     )
-    LIST_VERSIONS = _Stmt(
-        "SELECT version FROM algorand_platform.article_versions WHERE article_id = ?"
-    )
-    DELETE = _Stmt(
-        "DELETE FROM algorand_platform.article_versions WHERE article_id = ? AND version = ?"
+    # article_versions' PRIMARY KEY is (article_id, version) -- article_id alone
+    # is the full partition key, so every version of one article lives in the
+    # same partition. Deleting "all versions of this article" is therefore a
+    # single partition-range delete, not a per-version tombstone: no read of
+    # the version list is needed first, and there is nothing to batch (a
+    # multi-statement BATCH buys nothing over one DELETE that already covers
+    # the whole partition, and Cassandra's own guidance is against reaching
+    # for BATCH as a round-trip-reduction tool).
+    DELETE_ALL_FOR_ARTICLE = _Stmt(
+        "DELETE FROM algorand_platform.article_versions WHERE article_id = ?"
     )
 
+
+# --------------------------------------------------------------------------- #
+# articles (admin-only bounded reads)
+# --------------------------------------------------------------------------- #
+class AdminArticleStmts:
+    """Backend-admin-only prepared statements against `articles` that need a LIMIT.
+
+    The shared ArticlesStmts.LIST_IDS_BY_STATUS (algorand_shared.
+    article_statements) doesn't take one; kept as a separate statement here
+    rather than changing the shared one's signature out from under its other
+    callers (e.g. the sitemap's deleted-article enumeration).
+    """
+
+    LIST_IDS_BY_STATUS_BOUNDED = _Stmt(
+        "SELECT article_id, status_updated_at FROM algorand_platform.articles "
+        "WHERE status = ? AND year = ? LIMIT ?"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -396,9 +418,18 @@ class SuggestionStmts:
         "FROM algorand_platform.suggestions_by_status "
         "WHERE status = ? AND suggestion_id = ? ALLOW FILTERING"
     )
+    # suggestions_by_txid (migration 087): submission_txid -> suggestion_id
+    # lookup table, dual-written alongside every INSERT above. Replaces a
+    # cluster-wide `WHERE submission_txid = ? ALLOW FILTERING` scan of
+    # suggestions_by_status (every submission ran it) with a direct
+    # partition-key point lookup.
+    INSERT_TXID = _Stmt(
+        "INSERT INTO algorand_platform.suggestions_by_txid ("
+        "submission_txid, suggestion_id, status, created_at"
+        ") VALUES (?, ?, ?, ?)"
+    )
     HAS_TXID = _Stmt(
-        "SELECT suggestion_id FROM algorand_platform.suggestions_by_status "
-        "WHERE submission_txid = ? LIMIT 1 ALLOW FILTERING"
+        "SELECT suggestion_id FROM algorand_platform.suggestions_by_txid WHERE submission_txid = ?"
     )
 
 

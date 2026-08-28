@@ -337,9 +337,12 @@ class AdminCassandraStore:
             bust_tombstone_cache()
 
         try:
-            version_rows = session.execute(ArticleVersionStmts.LIST_VERSIONS, (aid,))
-            for row in version_rows:
-                session.execute(ArticleVersionStmts.DELETE, (aid, row.version))
+            # article_versions' PRIMARY KEY is (article_id, version) -- article_id
+            # alone is the whole partition key, so every version of this article
+            # lives in one partition. A single partition-range DELETE removes
+            # them all in one round trip; no need to read the version list first
+            # and issue one DELETE per version (was N+1: 1 SELECT + N DELETEs).
+            session.execute(ArticleVersionStmts.DELETE_ALL_FOR_ARTICLE, (aid,))
         except Exception:
             logger.warning("failed to delete version rows for article %s", aid, exc_info=True)
 
@@ -436,7 +439,7 @@ class AdminCassandraStore:
                 )
         return updated
 
-    def list_draft_articles(self) -> list[dict]:
+    def list_draft_articles(self, *, scan_limit: int = 500) -> list[dict]:
         """Currently-drafted articles, for the admin UI's restore list -- these are absent from articles_feed by design, so the normal feed listing can never surface them.
 
         2026-08-24: enumeration reads `articles` directly (was
@@ -445,19 +448,31 @@ class AdminCassandraStore:
         enumeration makes that class of bug impossible here). status_updated_at
         (migration 070) is the drafted_at equivalent -- the old table's own
         drafted_at column had no counterpart on `articles` until this.
+
+        2026-08-28: bounded both per-partition (a real LIMIT on the query,
+        so a single year's `status='draft'` partition can't come back
+        unbounded) and in total across the 3 scanned years (`scan_limit`,
+        default 500 -- also caps the CassandraArticleStore.get_many() fanout
+        below, which fires one concurrent lookup per row).
         """
         from datetime import UTC, datetime
 
-        from algorand_shared.article_statements import ArticlesStmts
-
         from app.core.cassandra import get_cassandra_session
+        from app.core.statements import AdminArticleStmts
         from app.modules.news.stores.cassandra import CassandraArticleStore
 
         session = get_cassandra_session()
         current_year = datetime.now(tz=UTC).year
         rows = []
         for year in range(current_year, current_year - 3, -1):
-            rows.extend(session.execute(ArticlesStmts.LIST_IDS_BY_STATUS, ("draft", year)))
+            remaining = scan_limit - len(rows)
+            if remaining <= 0:
+                break
+            rows.extend(
+                session.execute(
+                    AdminArticleStmts.LIST_IDS_BY_STATUS_BOUNDED, ("draft", year, remaining)
+                )
+            )
         if not rows:
             return []
         stored = CassandraArticleStore().get_many([str(row.article_id) for row in rows])

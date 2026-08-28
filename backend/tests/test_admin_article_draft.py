@@ -192,6 +192,77 @@ def test_list_draft_articles_returns_empty_with_no_drafts(monkeypatch: pytest.Mo
     assert AdminCassandraStore().list_draft_articles() == []
 
 
+def test_list_draft_articles_bounds_rows_across_years(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2026-08-28 perf audit: the drafts listing must not fetch unbounded rows.
+
+    It must not re-fetch every status='draft' row across all 3 scanned
+    year-partitions unbounded -- each year's query now carries a real LIMIT
+    (the query's 3rd bind param), and the function stops assembling once the
+    overall scan_limit is hit, never even querying a further year's
+    partition once the cap is already reached.
+    """
+    fake = _FakeSession(None)
+    calls: list[tuple] = []
+    current_year = datetime.now(tz=UTC).year
+    # More rows available per year than the default scan_limit (500), so the bound is
+    # what actually stops the read, not running out of data.
+    per_year_available = {current_year: 400, current_year - 1: 400, current_year - 2: 400}
+
+    def execute(query: str, params: tuple = ()) -> Any:  # noqa: ANN401
+        q = " ".join(str(query).split())
+        if "FROM algorand_platform.articles WHERE status = ? AND year = ?" in q:
+            calls.append(tuple(params))
+            _status, year, limit_param = params
+            n = min(limit_param, per_year_available.get(year, 0))
+            return [
+                SimpleNamespace(
+                    article_id=uuid4(), status_updated_at=datetime(2026, 8, 17, tzinfo=UTC)
+                )
+                for _ in range(n)
+            ]
+        return fake.__class__.execute(fake, query, params)
+
+    fake.execute = execute  # type: ignore[method-assign]
+    _patch(monkeypatch, fake)
+    monkeypatch.setattr(
+        "app.modules.news.stores.cassandra.CassandraArticleStore.get_many",
+        lambda self, ids: {},  # noqa: ARG005 -- this test is about the bound, not the join
+    )
+
+    AdminCassandraStore().list_draft_articles()
+
+    # scan_limit (500) is reached after year 1 (400) + year 2 (100 more) -- year 3's
+    # partition is never queried at all.
+    assert len(calls) == 2
+    assert calls[0] == ("draft", current_year, 500)
+    assert calls[1] == ("draft", current_year - 1, 100)
+
+
+def test_list_draft_articles_scan_limit_is_a_real_query_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller-supplied scan_limit is threaded through as the CQL LIMIT.
+
+    Not just a post-hoc Python-side truncation.
+    """
+    fake = _FakeSession(None)
+    calls: list[tuple] = []
+
+    def execute(query: str, params: tuple = ()) -> Any:  # noqa: ANN401
+        q = " ".join(str(query).split())
+        if "FROM algorand_platform.articles WHERE status = ? AND year = ?" in q:
+            calls.append(tuple(params))
+            return []
+        return fake.__class__.execute(fake, query, params)
+
+    fake.execute = execute  # type: ignore[method-assign]
+    _patch(monkeypatch, fake)
+
+    assert AdminCassandraStore().list_draft_articles(scan_limit=7) == []
+
+    assert calls
+    assert calls[0][2] == 7
+
 
 def test_restore_claims_a_slug_when_the_row_never_had_one(
     monkeypatch: pytest.MonkeyPatch,

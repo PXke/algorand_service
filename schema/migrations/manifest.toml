@@ -757,3 +757,11 @@ file = "backend/schema/migrations/app/086_drop_articles_by_slug.cql"
 tier = "prod"
 status = "active"
 description = "add articles_slug_sai (SAI on articles.slug) and drop articles_by_slug: same precedent 067_articles_consolidated.cql set for article_id -- SAI supports point queries without the partition key, so slug uniqueness/lookup moves fully onto articles itself, closing the write-back-drift class (a claim recorded in articles_by_slug that never got written back onto the owning article) by construction instead of needing a reconciliation beat to detect it. Trades away articles_by_slug's atomic IF NOT EXISTS claim -- accepted deliberately since this pipeline composes/publishes one article at a time (single compose slot, 1-slot review queue, per-service cooldown), so two writers racing on the identical slug text is not a real exposure; ensure_article_slug (shared/algorand_shared/slugs.py) now does a single check-then-write directly against articles instead of a separate claim-then-write-back across two tables/three call sites"
+
+[[migrations]]
+stream = "app"
+version = "087"
+file = "backend/schema/migrations/app/087_suggestions_by_txid.cql"
+tier = "prod"
+status = "active"
+description = "add suggestions_by_txid (submission_txid text PRIMARY KEY -> suggestion_id/status/created_at) and drop the now-dead suggestions_submission_txid_idx (migration 001): 2026-08-28 performance audit found CassandraSuggestionStore.has_submission_txid running a cluster-wide `WHERE submission_txid = ? ALLOW FILTERING` scan of suggestions_by_status on every suggestion submission -- CLAUDE.md forbids new ALLOW FILTERING on non-key columns and calls for a lookup table instead; SuggestionStmts.HAS_TXID now does a direct partition-key point lookup against this table, dual-written alongside every suggestions_by_status INSERT (CassandraSuggestionStore.insert). Pre-existing suggestions_by_status rows written before this migration have no matching row here until a one-off backfill runs -- not performed by this change (no production data migration authorized in scope), flagged for whoever deploys it"
