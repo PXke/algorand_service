@@ -147,6 +147,11 @@ def scrape_throttled(service_id: str) -> bool:
     try:
         return bool(_client().exists(_throttle_key(service_id)))
     except Exception:
+        logger.warning(
+            "scrape_throttled(%s): Redis unavailable, treating as not throttled",
+            service_id,
+            exc_info=True,
+        )
         return False
 
 
@@ -158,4 +163,9 @@ def mark_scraped(service_id: str, *, ok: bool = True) -> None:
     try:
         _client().set(_throttle_key(service_id), "1", ex=window)
     except Exception:
+        logger.warning(
+            "mark_scraped(%s): Redis unavailable, poll stamp not recorded",
+            service_id,
+            exc_info=True,
+        )
         return
