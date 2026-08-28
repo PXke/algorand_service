@@ -7,6 +7,7 @@ import hashlib
 from app.modules.scraper.core.base import BaseScraper, ScrapeResult
 from app.modules.scraper.core.browser_scrape import (
     BrowserScrapeError,
+    PlaywrightSession,
     fetch_page,
     resolve_browser_target_url,
 )
@@ -18,15 +19,26 @@ class BrowserScraper(BaseScraper):
     Registry: browser://https://… or https://… on an allowlisted domain.
     """
 
-    def scrape(self, url: str, source_id: str) -> ScrapeResult:
-        """Scrape one URL via Playwright and return its extracted content and metadata."""
+    def scrape(
+        self,
+        url: str,
+        source_id: str,
+        *,
+        playwright_session: PlaywrightSession | None = None,
+    ) -> ScrapeResult:
+        """Scrape one URL via Playwright and return its extracted content and metadata.
+
+        playwright_session: reuse a caller-owned session instead of paying
+        for a fresh Chromium launch for this one URL -- see fetch_page's
+        docstring. Optional and caller-owned: this never closes it.
+        """
         target = self._resolve_url(url)
         if not target:
             msg = f"cannot resolve browser scrape url: {url!r}"
             raise BrowserScrapeError(msg)
 
         try:
-            page = fetch_page(target)
+            page = fetch_page(target, playwright_session=playwright_session)
         except BrowserScrapeError:
             raise
         except Exception as exc:
