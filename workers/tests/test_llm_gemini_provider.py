@@ -14,6 +14,7 @@ from app.modules.ai.llm_gemini_provider import (
     _openai_tools_to_gemini,
 )
 from app.modules.ai.llm_provider import LLMError, LLMProvider
+from app.modules.ai.story_spike import StorySpikedError
 
 
 def _fake_client(post_fn: Callable[..., object]) -> type:
@@ -259,6 +260,61 @@ def test_chat_with_tools_nudges_once_for_a_required_tool(monkeypatch: pytest.Mon
     )
     assert result == "FINAL"
     assert calls["n"] == 2
+
+
+def test_chat_with_tools_reraises_story_spiked_error_and_records_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer aborting the article (abort_article) must escape chat_with_tools uncaught, same contract as OpenAICompatibleProvider (see test_story_spike.py) -- before this fix it was caught by the generic `except Exception` and fed back to the model as an ordinary {"error": ...} tool result, silently defeating the abort."""
+    responses = [
+        {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {
+                                "functionCall": {
+                                    "name": "abort_article",
+                                    "args": {
+                                        "category": "dead_project",
+                                        "reason": "no on-chain activity since 2021",
+                                    },
+                                }
+                            }
+                        ],
+                    }
+                }
+            ],
+            "usageMetadata": {},
+        },
+    ]
+    calls = {"n": 0}
+
+    def _post(*_a: object) -> object:
+        i = calls["n"]
+        calls["n"] += 1
+        return _response(200, responses[i])
+
+    _patch_httpx(monkeypatch, _fake_client(_post))
+
+    def spike_handler(**_kw: object) -> dict:
+        raise StorySpikedError("no on-chain activity since 2021", "dead_project")
+
+    provider = GeminiProvider(api_key="test-key")
+    trace: list = []
+    with pytest.raises(StorySpikedError):
+        provider.chat_with_tools(
+            [{"role": "user", "content": "research this"}],
+            tools=[{"type": "function", "function": {"name": "abort_article", "parameters": {}}}],
+            handlers={"abort_article": spike_handler},
+            trace=trace,
+        )
+    assert calls["n"] == 1  # never asked the model to continue past the spike
+    assert trace, "spike call must be recorded in the trace before re-raising"
+    assert trace[-1]["tool"] == "abort_article"
+    assert trace[-1]["result"]["spiked"] is True
+    assert trace[-1]["result"]["category"] == "dead_project"
 
 
 def test_post_raises_llm_credit_error_on_403(monkeypatch: pytest.MonkeyPatch) -> None:

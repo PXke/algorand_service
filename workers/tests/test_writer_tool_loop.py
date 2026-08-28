@@ -224,3 +224,168 @@ def test_cross_pass_dedup_still_allows_retry_of_errored_calls(
     )
     assert out == "DONE"
     assert executed["n"] == 1  # errored call re-ran
+
+
+def test_malformed_tool_arguments_are_rejected_without_running_the_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool call whose `arguments` string fails to json.loads() must not be silently coerced to {} and run anyway -- that would execute the handler with args the model never actually sent. It must be told its call was malformed instead."""
+    client = MistralProvider(api_key="test-key")
+    executed = {"n": 0}
+
+    def handler(**_kwargs: object) -> dict:
+        executed["n"] += 1
+        return {"ok": True}
+
+    seq = [
+        _msg(
+            tool_calls=[
+                {"id": "1", "function": {"name": "fetch_url", "arguments": "{not valid json"}}
+            ]
+        ),
+        _msg(content="DONE"),
+    ]
+    calls = {"n": 0}
+
+    def fake_post(_payload: dict) -> dict:
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i]
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    trace: list = []
+    out = client.chat_with_tools(
+        [{"role": "user", "content": "x"}],
+        tools=[],
+        handlers={"fetch_url": handler},
+        trace=trace,
+    )
+    assert out == "DONE"
+    assert executed["n"] == 0  # handler never ran against unparsed args
+    assert trace[-1]["tool"] == "fetch_url"
+    assert trace[-1]["result"] == {"error": "malformed tool arguments"}
+
+
+def test_malformed_required_tool_call_does_not_satisfy_require_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed call to the mandatory tool never ran the handler, so it must not count as satisfying require_tool -- the model still gets nudged to call it for real."""
+    client = MistralProvider(api_key="test-key")
+    executed = {"n": 0}
+
+    def handler(**_kwargs: object) -> dict:
+        executed["n"] += 1
+        return {"grade": 8}
+
+    seq = [
+        _msg(
+            tool_calls=[{"id": "1", "function": {"name": "review_draft", "arguments": "{bad json"}}]
+        ),
+        _msg(content="STILL NOT DONE"),  # nudged (require_tool never satisfied)
+        _msg(content="FINAL"),  # nudge-once exhausted, accepted anyway
+    ]
+    calls = {"n": 0}
+
+    def fake_post(_payload: dict) -> dict:
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i]
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    out = client.chat_with_tools(
+        [{"role": "user", "content": "x"}],
+        tools=[],
+        handlers={"review_draft": handler},
+        require_tool="review_draft",
+    )
+    assert out == "FINAL"
+    assert executed["n"] == 0  # the malformed call never actually ran review_draft
+    assert calls["n"] == 3  # initial malformed call + one nudge + final accept
+
+
+def test_capped_tool_refusal_does_not_satisfy_require_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call to the mandatory tool that gets refused outright by the per-session call cap never reached the handler either, so it must not satisfy require_tool -- same fix, same reasoning, as the malformed-arguments case above."""
+    client = MistralProvider(api_key="test-key")
+    executed = {"n": 0}
+
+    def handler(**_kwargs: object) -> dict:
+        executed["n"] += 1
+        return {"listed": False}
+
+    seq = [
+        _msg(
+            tool_calls=[
+                {"id": "1", "function": {"name": "search_x", "arguments": '{"query":"new"}'}}
+            ]
+        ),
+        _msg(content="STILL NOT DONE"),
+        _msg(content="FINAL"),
+    ]
+    calls = {"n": 0}
+
+    def fake_post(_payload: dict) -> dict:
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i]
+
+    monkeypatch.setattr(client, "_post", fake_post)
+    # Seed the per-tool call count at the cap (3) via the trace, as a real
+    # cross-pass session would after 3 earlier search_x calls.
+    trace = [
+        {"tool": "search_x", "arguments": {"query": f"q{i}"}, "result": {"count": 0}}
+        for i in range(3)
+    ]
+    out = client.chat_with_tools(
+        [{"role": "user", "content": "x"}],
+        tools=[],
+        handlers={"search_x": handler},
+        require_tool="search_x",
+        trace=trace,
+    )
+    assert out == "FINAL"
+    assert executed["n"] == 0  # the capped call never actually ran search_x
+    assert calls["n"] == 3  # initial capped call + one nudge + final accept
+
+
+def test_exhaustion_finalizer_fits_budget_and_passes_max_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the loop runs out of rounds, the one extra completion asking for the final article must (a) trim the accumulated convo to the same budget the per-round loop enforces, and (b) honor the caller's own max_tokens instead of silently falling back to the provider default."""
+    client = MistralProvider(api_key="test-key")
+
+    def always_calls_a_tool(_payload: dict) -> dict:
+        return _msg(tool_calls=[{"id": "1", "function": {"name": "fetch_url", "arguments": "{}"}}])
+
+    monkeypatch.setattr(client, "_post", always_calls_a_tool)
+
+    seen_budgets: list[int] = []
+    seen_max_tokens: list[int | None] = []
+
+    def fake_fit(_convo: list, budget: int) -> None:
+        seen_budgets.append(budget)
+
+    def fake_chat_completion(
+        _messages: list[dict],
+        *,
+        json_object: bool = False,  # noqa: ARG001
+        temperature: float = 0.6,  # noqa: ARG001
+        max_tokens: int | None = None,
+    ) -> str:
+        seen_max_tokens.append(max_tokens)
+        return "FINAL"
+
+    monkeypatch.setattr("app.modules.ai.llm_openai_compatible.fit_messages_to_budget", fake_fit)
+    monkeypatch.setattr(client, "chat_completion", fake_chat_completion)
+
+    out = client.chat_with_tools(
+        [{"role": "user", "content": "x"}],
+        tools=[],
+        handlers={"fetch_url": lambda **_k: {"ok": True}},
+        max_rounds=1,
+        max_tokens=1234,
+    )
+    assert out == "FINAL"
+    assert seen_max_tokens == [1234]
+    assert seen_budgets  # fit_messages_to_budget ran again right before the finalizer

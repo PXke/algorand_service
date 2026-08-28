@@ -848,6 +848,26 @@ class OpenAICompatibleProvider(LLMProvider):
                 counts[name] = counts.get(name, 0) + 1
         return counts
 
+    @staticmethod
+    def _malformed_tool_call_result(
+        name: str,
+        raw_args: str,
+        call_id: str,
+        *,
+        trace: list[dict[str, Any]] | None,
+    ) -> tuple[dict[str, Any], bool, dict[str, Any] | None]:
+        """The tool-result message for a call whose `arguments` failed to json.loads() -- split out of `_run_tool_call` purely to keep that method's branching (and cyclomatic complexity) simple. Don't silently coerce malformed arguments to {} and run the handler anyway -- that would execute the call with args the model never actually sent. Tell the model its call was rejected instead; the caller never adds this to the dedup set, since a signature built from args we couldn't parse is meaningless and would wrongly block a later, valid retry with the same raw text."""
+        result: dict[str, Any] = {"error": "malformed tool arguments"}
+        if trace is not None:
+            trace.append({"tool": name, "arguments": raw_args, "result": result})
+        message = {
+            "role": "tool",
+            "name": name,
+            "tool_call_id": call_id,
+            "content": serialize_tool_result(result, LLM_TOOL_RESULT_MAX_CHARS),
+        }
+        return message, False, None
+
     def _run_tool_call(
         self,
         call: dict[str, Any],
@@ -868,13 +888,15 @@ class OpenAICompatibleProvider(LLMProvider):
         """
         fn = call.get("function") or {}
         name = fn.get("name", "")
+        raw_args = fn.get("arguments") or "{}"
         try:
-            args = json.loads(fn.get("arguments") or "{}")
+            args = json.loads(raw_args)
         except json.JSONDecodeError:
-            args = {}
+            return self._malformed_tool_call_result(name, raw_args, call.get("id", ""), trace=trace)
         sig = f"{name}:{json.dumps(args, sort_keys=True)}"
         is_fetch_continuation = name == "fetch_url" and bool(args.get("continue_reading"))
         cap = self._CALL_CAPPED_TOOLS.get(name)
+        satisfied_require_tool = False
         if cap is not None and tool_call_counts.get(name, 0) >= cap:
             # A varying-argument tool a model can call forever without ever
             # tripping the exact-signature dedup below — refuse outright
@@ -918,6 +940,10 @@ class OpenAICompatibleProvider(LLMProvider):
             handler = handlers.get(name)
             try:
                 result = handler(**args) if handler else {"error": f"unknown tool {name}"}
+                # Only a call that actually reached and ran the handler can
+                # satisfy a `require_tool` gate -- a capped refusal or a
+                # dedup nudge above never runs it, so it must never count.
+                satisfied_require_tool = name == require_tool
             except StorySpikedError as spike:
                 # The one tool "failure" that MUST abort the article —
                 # abort_article is the writer refusing to compose at all.
@@ -938,7 +964,6 @@ class OpenAICompatibleProvider(LLMProvider):
                 raise
             except Exception as exc:  # tool failure must not abort the article
                 result = {"error": str(exc)}
-        satisfied_require_tool = name == require_tool
         if trace is not None:
             trace.append({"tool": name, "arguments": args, "result": result})
         message = {
@@ -1282,10 +1307,21 @@ class OpenAICompatibleProvider(LLMProvider):
         # pass finalize_on_exhaustion=False.
         if not finalize_on_exhaustion:
             return last_content
+        # The per-round trim inside the loop above only ran up to the last
+        # round that actually executed; the round that pushed the loop past
+        # `rounds` never got a post-append fit, so the accumulated convo can
+        # still be over convo_budget going into this one extra completion.
+        # Fit it now, and pass the caller's own max_tokens through (a caller
+        # that explicitly capped its answer size, e.g. the LLM quality
+        # rubric's small max_tokens=800, wants that honored here too, not
+        # silently reset to the provider default).
+        if convo_budget > 0:
+            fit_messages_to_budget(convo, convo_budget)
         return self.chat_completion(
             [*convo, {"role": "user", "content": "Now write the final JSON article."}],
             json_object=True,
             temperature=temperature,
+            max_tokens=max_tokens,
         )
 
 
