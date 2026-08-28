@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -27,11 +26,11 @@ from app.modules.newspaper.article_tags import derive_article_tags, order_reader
 from app.modules.newspaper.compose_lock import COMPOSE_LOCK_KEY, ComposeBusyError
 from app.modules.newspaper.ingest_signal import ingest_publish_signal
 from app.modules.newspaper.peak_hours import is_off_peak_now
+from app.modules.newspaper.publish_fanout import fanout_after_publish, record_compose_cadence
 from app.modules.newspaper.publish_policy import PublishKind, PublishTier, PublishTopic
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow
 from app.modules.newspaper.writer_enrichment import enrichment_block_for_row
 from app.modules.scraper.core.factory import get_scraper_for_url
-from app.modules.search.tasks.index_tasks import index_article, index_crawled_page
 
 logger = logging.getLogger(__name__)
 
@@ -530,9 +529,7 @@ def _fresh_auto_approve_passes(
                 separators=(",", ":"),
             )
         except Exception:
-            logger.warning(
-                "fresh auto-approve grading failed for %s", source_url, exc_info=True
-            )
+            logger.warning("fresh auto-approve grading failed for %s", source_url, exc_info=True)
     else:
         logger.warning("fresh auto-approve missing compose-time grade for %s", source_url)
 
@@ -1200,8 +1197,7 @@ def _grade_and_gate(
             # 2026-07-12) -- but a dead-domain reference is a distinct, always-on
             # safety check, not a completeness rule, so it hard-fails regardless.
             gate_ok = (
-                gate.factuality_score >= worker_config.GATEKEEPER_FACT_MIN
-                and not gate.dead_domains
+                gate.factuality_score >= worker_config.GATEKEEPER_FACT_MIN and not gate.dead_domains
             )
         else:
             gate_ok = True  # gatekeeper disabled entirely — no signal to fail on
@@ -1340,19 +1336,13 @@ def _hold_for_review(
         )
     # A held-for-review draft is a created article — count it toward the
     # per-website daily cap so a domain can't exceed its COMPOSE_MAX_PER_DOMAIN_PER_DAY.
-    if compose_domain:
-        from app.modules.crawler.domain_tracker import record_domain_compose
-
-        record_domain_compose(compose_domain)
-    if row.service_id:
-        from app.modules.crawler.domain_tracker import record_service_compose
-
-        record_service_compose(row.service_id)
-    if payload.get("source_kind") == "editorial_assignment":
-        from app.modules.newspaper.editorial_assignment import mark_brief_run
-
-        with contextlib.suppress(Exception):
-            mark_brief_run(brief_id=str(payload.get("brief_id", "")), article_id=held_article_id)
+    record_compose_cadence(
+        compose_domain=compose_domain,
+        service_id=row.service_id,
+        article_id=held_article_id,
+        is_editorial_assignment=payload.get("source_kind") == "editorial_assignment",
+        brief_id=str(payload.get("brief_id", "")),
+    )
     if route_to_backlog:
         # Approved but the cadence/cap is closed: the article was already
         # stored with status='backlog' (and interest_score/approved_at set)
@@ -1465,60 +1455,22 @@ def _finalize_publish(
     except Exception:
         release_publish_slot(tier=tier)
         raise
-    index_article.delay(
-        article_id=article_id,
-        title=title,
-        summary=summary,
-        body=body,
-        service_id=row.service_id,
-        published_at_epoch=int(time.time()),
-    )
-    # Auto-post to social channels (Bluesky, Telegram, ...) — best-effort,
-    # each channel isolated from the others, never blocks the publish itself.
-    try:
-        from app.modules.newspaper.tasks.distribution_tasks import distribute_article
-
-        distribute_article.delay(article_id=article_id)
-    except Exception:
-        logger.warning("failed to queue distribution for article %s", article_id, exc_info=True)
-    # Notify IndexNow (Bing/Ecosia/DuckDuckGo, Yandex, Seznam, Naver) so the new
-    # story gets crawled in minutes. Best-effort — never let it block a publish.
-    try:
-        from app.modules.newspaper.article_store import ensure_article_slug
-        from app.modules.newspaper.indexnow import ping_article
-
-        ping_article(article_id, slug=ensure_article_slug(article_id, title))
-    except Exception:
-        logger.warning("IndexNow ping failed for article %s", article_id, exc_info=True)
     page_text = str(payload.get("page_text", ""))
     page_title = str(payload.get("page_title", ""))
-    if page_text:
-        index_crawled_page.delay(
-            url=row.scrape_url,
-            title=page_title,
-            text=page_text,
-            service_id=row.service_id,
-        )
+    fanout_after_publish(
+        str(article_id), distribute=True, page_text=page_text, page_title=page_title
+    )
     publish_mode = str(payload.get("publish_mode", "create"))
 
     # Published straight to the feed is a created article — count it toward the
     # per-website daily cap.
-    if compose_domain:
-        from app.modules.crawler.domain_tracker import record_domain_compose
-
-        record_domain_compose(compose_domain)
-    if row.service_id:
-        from app.modules.crawler.domain_tracker import record_service_compose
-
-        record_service_compose(row.service_id)
-
-    if payload.get("source_kind") == "editorial_assignment":
-        from app.modules.newspaper.editorial_assignment import mark_brief_run
-
-        with contextlib.suppress(Exception):
-            mark_brief_run(brief_id=str(payload.get("brief_id", "")), article_id=article_id)
-
-    enqueue_article_translations(str(article_id))
+    record_compose_cadence(
+        compose_domain=compose_domain,
+        service_id=row.service_id,
+        article_id=str(article_id),
+        is_editorial_assignment=payload.get("source_kind") == "editorial_assignment",
+        brief_id=str(payload.get("brief_id", "")),
+    )
 
     return {
         "status": "published",
@@ -2680,7 +2632,9 @@ def backfill_deepseek_translations_task(
     """
     from app.modules.newspaper.translation_backfill import dispatch_deepseek_translation_backfill
 
-    return dispatch_deepseek_translation_backfill(limit=limit, dry_run=dry_run, scan_limit=scan_limit)
+    return dispatch_deepseek_translation_backfill(
+        limit=limit, dry_run=dry_run, scan_limit=scan_limit
+    )
 
 
 def _recompose_published_source_text(
@@ -2833,7 +2787,9 @@ def _recompose_published_hero_image(
     if og_image:
         return og_image, og_image
     try:
-        row = get_cassandra_session().execute(ArticlesStmts.GET_FULL_BY_ID, (UUID(article_id),)).one()
+        row = (
+            get_cassandra_session().execute(ArticlesStmts.GET_FULL_BY_ID, (UUID(article_id),)).one()
+        )
         return og_image, ((row.image_url or "") if row else "")
     except Exception:
         return og_image, ""
@@ -3157,7 +3113,6 @@ def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dic
     unconditionally, see its own draft guard); only the indexing/
     translation/IndexNow side effects below are skipped.
     """
-    import time as _time
     from uuid import UUID as _UUID
 
     from algorand_shared.article_statements import ArticlesStmts
@@ -3217,22 +3172,9 @@ def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dic
         )
         return {"status": "ok_draft_preserved", "article_id": live_article_id}
 
-    index_article.delay(
-        article_id=live_article_id,
-        title=draft.title,
-        summary=draft.summary,
-        body=draft.body,
-        service_id=live.service_id,
-        published_at_epoch=int(new_published_at.timestamp()) or int(_time.time()),
-    )
-    # Translations were cleared with the old prose; re-enqueue all languages.
-    enqueue_article_translations(live_article_id)
-    try:
-        from app.modules.newspaper.indexnow import ping_article
-
-        ping_article(live_article_id, translation_langs=[], slug=live.slug)
-    except Exception:
-        logger.warning(
-            "apply_recomposed_article: IndexNow ping failed for %s", live_article_id, exc_info=True
-        )
+    # Translations were cleared with the old prose; fanout_after_publish
+    # re-enqueues all languages. distribute=False -- reposting every refresh
+    # of already-published content to social channels would look repetitive
+    # to followers.
+    fanout_after_publish(live_article_id, distribute=False)
     return {"status": "ok", "article_id": live_article_id}

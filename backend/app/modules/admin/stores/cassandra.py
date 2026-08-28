@@ -88,9 +88,7 @@ class AdminCassandraStore:
         new_summary = summary if summary is not None else current.summary
         new_body = sanitize_markdown_body(body) if body is not None else current.body
         content_changed = (
-            new_title != current.title
-            or new_summary != current.summary
-            or new_body != current.body
+            new_title != current.title or new_summary != current.summary or new_body != current.body
         )
         self._save_version_snapshot(current, editor=editor)
         self._write_article(current, new_title, new_summary, new_body, tag_extra="updated")
@@ -129,7 +127,7 @@ class AdminCassandraStore:
 
     @staticmethod
     def _clear_and_reenqueue_translations(article_id: str) -> None:
-        """Wipe every stored translation and re-enqueue all languages via the modern batch task (app.tasks.newspaper.translate_article_batch) -- NOT the legacy per-language translate_article shim _enqueue_article_translations uses, which calls a paid LLM directly and skips the local-engine/DeepSeek-per-language routing the batch task has (see workers' DEEPSEEK_TRANSLATE_LANGS)."""
+        """Wipe every stored translation and re-enqueue all languages via the modern batch task (app.tasks.newspaper.translate_article_batch) -- NOT the legacy per-language translate_article dispatch that fanout_after_publish's enqueue_article_translations uses, which calls a paid LLM directly and skips the local-engine/DeepSeek-per-language routing the batch task has (see workers' DEEPSEEK_TRANSLATE_LANGS)."""
         try:
             from celery import Celery
 
@@ -617,9 +615,7 @@ class AdminCassandraStore:
                     out["grade"] = str(parsed["grade"])
                 gd = parsed.get("grade_detail")
                 if gd is not None:
-                    out["grade_detail"] = (
-                        gd if isinstance(gd, str) else serialization.dumps(gd)
-                    )
+                    out["grade_detail"] = gd if isinstance(gd, str) else serialization.dumps(gd)
         except Exception:
             logger.debug("failed to parse review metadata for %s", review_id, exc_info=True)
         return out
@@ -1207,7 +1203,9 @@ class AdminCassandraStore:
         # in the scan permanently rather than silently dropping out of the list.
         buckets = ["all", *months_back(datetime.now(tz=UTC), 3)]
         rows = [
-            r for bucket in buckets for r in session.execute(ToolInsightStmts.LIST_SUGGESTIONS, (bucket,))
+            r
+            for bucket in buckets
+            for r in session.execute(ToolInsightStmts.LIST_SUGGESTIONS, (bucket,))
         ]
         rows.sort(key=lambda r: r.created_at, reverse=True)
         return [
@@ -1302,56 +1300,43 @@ class AdminCassandraStore:
         # transition_article_status() call above already carries service_id
         # onto this row with status='published' — the gap this worked around
         # no longer exists, so the extra write was removed.
-        # The article just went live on the public feed — index it so it's
-        # findable in site search immediately, instead of waiting on the
-        # once-daily reindex_articles safety net. Best-effort, never blocks
-        # the publish.
-        published = None
-        with contextlib.suppress(Exception):
-            from app.core.typesense_client import upsert_article_document
-
-            published = self.get_article(article_id)
-            if published is not None:
-                upsert_article_document(
-                    article_id=article_id,
-                    title=published.title,
-                    summary=published.summary,
-                    body=published.body,
-                    service_id=published.service_id,
-                    published_at_epoch=published.published_at_epoch,
-                    translations=published.translations,
-                    slug=published.slug,
-                )
-        # The article just became publicly visible — notify IndexNow, same as
-        # the workers' direct-publish path does. Best-effort, never blocks.
-        # Uses the freshly-fetched `published.slug` above, NOT the `row.slug`
-        # captured before this function's own transition ran -- `row` is a
-        # pre-publish snapshot, so for a first-time-published draft its slug
-        # is always stale/None even after the claim above just set a real one.
-        with contextlib.suppress(Exception):
-            from app.modules.seo.indexnow import ping_article
-
-            ping_article(article_id, slug=published.slug if published is not None else row.slug)
+        #
+        # The search-index / IndexNow fanout that used to live here (W4-A,
+        # 2026-08-28) moved to _trigger_fanout_after_publish, which sends
+        # the same "app.tasks.newspaper.fanout_after_publish" task the
+        # workers-side direct-publish/backlog-release/recompose paths call
+        # in-process -- backend reimplementing that fanout by hand (its own
+        # Typesense upsert, its own IndexNow ping) was a fourth divergent
+        # copy of the exact same "an article just went live" logic.
         return True
 
     @staticmethod
-    def _enqueue_article_translations(article_id: str) -> None:
-        """Fan out worker translate_article tasks now that the article is feed- visible. Translation happens at publish time only — held drafts are not translated (see workers publish_tasks.enqueue_article_translations, the other half of this seam). The task fetches current text by id and skips already-stored languages, so this is safe to fire more than once."""
+    def _trigger_fanout_after_publish(article_id: str) -> None:
+        """Trigger the shared post-publish fanout (search index, translations, IndexNow, distribution) via workers' `app.tasks.newspaper.fanout_after_publish` (see workers/app/modules/newspaper/publish_fanout.py) -- backend and workers are separate deployables, so this dispatches by task name over the shared Celery broker rather than importing workers' Python directly.
+
+        Always distribute=True: this is only ever called for genuinely NEW
+        content landing in the feed (see _publish_or_queue_article). An
+        approved recompose never reaches here -- it routes through
+        _trigger_apply_recompose instead, whose apply_recomposed_article task
+        calls fanout_after_publish itself with distribute=False (reposting
+        every refresh of already-published content would look repetitive to
+        followers).
+        """
         try:
             from celery import Celery
 
-            from app.core.article_translation_langs import ARTICLE_TRANSLATION_LANGS
             from app.core.config import settings
 
-            app = Celery(broker=settings.celery_broker_url)
-            for lang in ARTICLE_TRANSLATION_LANGS:
-                app.send_task(
-                    "app.tasks.newspaper.translate_article",
-                    args=[str(article_id), lang],
-                    queue="pipeline",
-                )
+            Celery(broker=settings.celery_broker_url).send_task(
+                "app.tasks.newspaper.fanout_after_publish",
+                args=[article_id],
+                kwargs={"distribute": True},
+                queue="pipeline",
+            )
         except Exception:
-            logger.warning("failed to enqueue translation tasks", exc_info=True)
+            logger.warning(
+                "failed to trigger fanout_after_publish for %s", article_id, exc_info=True
+            )
 
     def _review_replaces_article_id(self, review_id: str) -> str:
         """The published article this review's draft would replace on approval (recompose_published flow), or "" for normal reviews. Fail-open to "" so a metadata read error degrades to the normal publish path."""
@@ -1387,22 +1372,6 @@ class AdminCassandraStore:
             )
         except Exception:
             logger.warning("failed to trigger apply_recomposed_article", exc_info=True)
-
-    @staticmethod
-    def _trigger_distribution(article_id: str) -> None:
-        """Auto-post to social channels (Bluesky, Telegram, ...) once an admin-approved fresh article actually lands in the feed. Recompose approvals deliberately do NOT trigger this (see apply_recomposed_article) — reposting every refresh of already- published content would look repetitive to followers."""
-        try:
-            from celery import Celery
-
-            from app.core.config import settings
-
-            Celery(broker=settings.celery_broker_url).send_task(
-                "app.tasks.newspaper.distribute_article",
-                args=[article_id],
-                queue="pipeline",
-            )
-        except Exception:
-            logger.warning("failed to trigger distribute_article", exc_info=True)
 
     @staticmethod
     def _trigger_compose_next() -> None:
@@ -1529,8 +1498,7 @@ class AdminCassandraStore:
         # queue, so the feed gets a steady drip not a dump.
         if self._feed_count_today(session, bucket) < cap and self._is_standard_publish_due():
             if self._publish_article_to_feed(article_id):
-                self._enqueue_article_translations(article_id)
-                self._trigger_distribution(article_id)
+                self._trigger_fanout_after_publish(article_id)
             self._record_standard_publish()
             return "published"
         try:

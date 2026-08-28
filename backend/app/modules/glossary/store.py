@@ -154,9 +154,9 @@ def enqueue_glossary_term_translations(slug: str) -> None:
     """Publish-time only — a held draft is not translated (same rule as articles: enqueue_article_translations).
 
     Fires one workers-side Celery task per target language, same task-name
-    dispatch over the shared broker as _enqueue_article_translations
-    (backend and workers are separate services/venvs, so this can't import
-    the task directly).
+    dispatch over the shared broker as fanout_after_publish's
+    enqueue_article_translations (backend and workers are separate
+    services/venvs, so this can't import the task directly).
 
     queue="translate" (root-caused 2026-08-11): a bulk glossary-review pass
     that published 105 drafts at once fanned out ~840 of these tasks onto

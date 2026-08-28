@@ -6,10 +6,12 @@ import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
 
+from app.modules.newspaper import publish_fanout
 from app.modules.newspaper.tasks import queue_drain_tasks
 
 # `articles`' column order (see algorand_shared.article_transitions._ARTICLES_COLUMNS).
@@ -133,14 +135,19 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, fake: _FakeSession) -> None:
         "app.modules.newspaper.publish_daily_guard.reserve_publish_slot",
         lambda **_kw: (True, "ok"),
     )
+    # enqueue_article_translations stays a genuine function-local import in
+    # fanout_after_publish (circular import: publish_tasks.py imports
+    # publish_fanout.py) -- patched at its origin module. ping_article/
+    # distribute_article are module-top imports in publish_fanout.py (no
+    # circular-import forces them local, CLAUDE.md Sec.3), so they're
+    # patched on publish_fanout's own bound name instead.
     monkeypatch.setattr(
         "app.modules.newspaper.tasks.publish_tasks.enqueue_article_translations",
         lambda *_a, **_kw: None,
     )
-    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", lambda *_a, **_kw: None)
+    monkeypatch.setattr(publish_fanout, "ping_article", lambda *_a, **_kw: None)
     monkeypatch.setattr(
-        "app.modules.newspaper.tasks.distribution_tasks.distribute_article",
-        SimpleNamespace(delay=lambda *_a, **_kw: None),
+        publish_fanout, "distribute_article", SimpleNamespace(delay=lambda *_a, **_kw: None)
     )
 
 
@@ -403,7 +410,7 @@ def test_indexnow_ping_failure_is_logged_not_swallowed(
     def _boom(*_a: object, **_kw: object) -> None:
         raise RuntimeError("indexnow unreachable")
 
-    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", _boom)
+    monkeypatch.setattr(publish_fanout, "ping_article", _boom)
 
     with caplog.at_level(logging.WARNING):
         result = queue_drain_tasks.drain_approved_feed_queue()
@@ -413,3 +420,49 @@ def test_indexnow_ping_failure_is_logged_not_swallowed(
     matches = [rec for rec in caplog.records if "IndexNow ping failed" in rec.message]
     assert matches
     assert matches[0].exc_info is not None
+
+
+def test_backlog_release_now_indexes_the_article_into_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W4-A regression: _release_pending_feed_backlog used to reimplement the direct-publish path's fanout by hand and never called index_article at all, so a released article silently never entered Typesense until the once-daily reindex_articles safety net caught it. It now goes through the shared fanout_after_publish, which does index it."""
+    article_id = uuid4()
+    compose_time = datetime.now(tz=UTC) - timedelta(hours=5)
+    fake = _FakeSession(
+        pending_rows=[_PendingRow(article_id)],
+        article_row=_article_row(article_id, published_at=compose_time),
+    )
+    _patch_common(monkeypatch, fake)
+    index_mock = MagicMock()
+    monkeypatch.setattr(publish_fanout, "index_article", index_mock)
+
+    result = queue_drain_tasks.drain_approved_feed_queue()
+
+    assert result["status"] == "ok"
+    assert result["published"] == 1
+    index_mock.delay.assert_called_once()
+    _, kwargs = index_mock.delay.call_args
+    assert kwargs["article_id"] == str(article_id)
+    assert kwargs["service_id"] == "svc"
+    assert kwargs["title"] == "Title"
+
+
+def test_backlog_release_goes_through_shared_fanout_after_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: _release_pending_feed_backlog must call the shared fanout_after_publish (W4-A) instead of reimplementing its own copy of the post-publish steps."""
+    article_id = uuid4()
+    compose_time = datetime.now(tz=UTC) - timedelta(hours=5)
+    fake = _FakeSession(
+        pending_rows=[_PendingRow(article_id)],
+        article_row=_article_row(article_id, published_at=compose_time),
+    )
+    _patch_common(monkeypatch, fake)
+    fanout_mock = MagicMock(return_value={"status": "ok"})
+    monkeypatch.setattr(queue_drain_tasks, "fanout_after_publish", fanout_mock)
+
+    result = queue_drain_tasks.drain_approved_feed_queue()
+
+    assert result["status"] == "ok"
+    assert result["published"] == 1
+    fanout_mock.assert_called_once_with(str(article_id), distribute=True)
