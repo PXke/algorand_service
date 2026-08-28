@@ -1380,6 +1380,19 @@ SEARXNG_URL = env_str("SEARXNG_URL", "").rstrip("/")
 #              the signals are trusted on real drafts.
 GATEKEEPER_ENABLED = env_bool("GATEKEEPER_ENABLED", True)
 GATEKEEPER_ENFORCE = env_bool("GATEKEEPER_ENFORCE", False)
+# investigation_findings (the evidence trail fact_align.py's numeric-
+# entailment check grounds article figures against) used to hard-cap at the
+# FIRST 25 tool calls of a compose's trace, with each result truncated to
+# 8000 chars. Root-caused 2026-08-28 (Lumi Rogue recompose): a compose can
+# run up to LLM_MAX_TOOL_ROUNDS=48 rounds, so anything past call #25 --
+# typically exactly the write-stage's own marketplace/on-chain fetches and
+# any play_interactive steps, since research happens first -- contributed
+# ZERO grounding anchors, the same first-N-slice bug class already fixed
+# once for the admin Sessions transcript (tool_insights_store.py) but never
+# fixed here. A genuinely well-researched article can score a low
+# gk_factuality purely from this, not from actual fabrication.
+INVESTIGATION_TRACE_MAX_ENTRIES = env_int("INVESTIGATION_TRACE_MAX_ENTRIES", 200)
+INVESTIGATION_RESULT_MAX_CHARS = env_int("INVESTIGATION_RESULT_MAX_CHARS", 16_000)
 # Lightweight heuristic-grader floor (article_grader.grade_article_draft, the
 # same score review_draft/_review_and_revise already compute during compose).
 # Below this, a would-be direct-publish draft is diverted to human review

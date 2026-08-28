@@ -23,22 +23,30 @@ def _stringify_percent_fields(result: Any) -> Any:  # noqa: ANN401 -- recursive 
     return out
 
 
-def load_investigation_trace(service_id: str, *, limit: int = 25) -> str:
+def load_investigation_trace(service_id: str, *, limit: int | None = None) -> str:
     """Reconstruct the agent's tool trace as a text blob for the gatekeeper.
 
     Reads the evidence trail stored by ``store_investigation_findings`` (keyed by
     service_id == the compose-time source_url). One line per tool call:
     ``tool(arguments) -> result_json``. Best-effort: returns "" on any error so
     the gate degrades gracefully rather than aborting a publish.
+
+    ``limit`` defaults to ``config.INVESTIGATION_TRACE_MAX_ENTRIES`` -- must
+    stay >= whatever ``store_investigation_findings`` actually wrote, or the
+    read side re-introduces the same first-N-slice truncation the write side
+    was just fixed for.
     """
     if not service_id:
         return ""
     try:
         from app.core.cassandra import get_cassandra_session
+        from app.core.config import INVESTIGATION_TRACE_MAX_ENTRIES
         from app.core.statements import InvestigationStmts
 
         session = get_cassandra_session()
-        rows = session.execute(InvestigationStmts.LIST, (service_id, limit))
+        rows = session.execute(
+            InvestigationStmts.LIST, (service_id, limit or INVESTIGATION_TRACE_MAX_ENTRIES)
+        )
         lines = [
             f"{r.tool}({r.arguments}) -> {r.result_json}" for r in rows if getattr(r, "tool", None)
         ]
@@ -60,12 +68,13 @@ def store_investigation_findings(
         from cassandra.util import uuid_from_time
 
         from app.core.cassandra import get_cassandra_session
+        from app.core.config import INVESTIGATION_RESULT_MAX_CHARS, INVESTIGATION_TRACE_MAX_ENTRIES
         from app.core.statements import InvestigationStmts
 
         session = get_cassandra_session()
         now = datetime.now(tz=UTC)
         n = 0
-        for entry in trace[:25]:
+        for entry in trace[:INVESTIGATION_TRACE_MAX_ENTRIES]:
             session.execute(
                 InvestigationStmts.INSERT,
                 (
@@ -75,7 +84,9 @@ def store_investigation_findings(
                     source_url[:512],
                     str(entry.get("tool", ""))[:64],
                     json.dumps(entry.get("arguments", {}))[:2000],
-                    json.dumps(_stringify_percent_fields(entry.get("result", {})))[:8000],
+                    json.dumps(_stringify_percent_fields(entry.get("result", {})))[
+                        :INVESTIGATION_RESULT_MAX_CHARS
+                    ],
                 ),
             )
             n += 1
