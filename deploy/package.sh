@@ -177,6 +177,29 @@ _create_archive() {
   )
   ln -sf "$(basename "$ARCHIVE")" "$LATEST_LINK"
   ln -sf "$(basename "$ARCHIVE").sha256" "${LATEST_LINK}.sha256"
+  _prune_old_archives
+}
+
+# Archive mode ran unpruned for months (2026-06 through 2026-07): 268
+# numbered .tar.gz/.tar.xz archives accumulated to 3.1G in deploy/build with
+# no retention at all -- nothing reads an old numbered archive once a newer
+# one exists (rollback.sh works off the releases/current+previous symlink
+# swap on the deploy target, never off these local build artifacts), so
+# keeping more than a handful is pure disk waste. Retain the
+# PACKAGE_ARCHIVE_RETAIN (default 5) most recent archives; older ones (and
+# their .sha256 companions) are deleted. The "latest" symlink pair is
+# excluded from the count/deletion by construction (glob below only matches
+# timestamped names, never the plain "-latest" one).
+_prune_old_archives() {
+  local retain="${PACKAGE_ARCHIVE_RETAIN:-5}"
+  local ext="${ARCHIVE##*.}"
+  find "$OUT_DIR" -maxdepth 1 -type f -name "algorand-platform-*.${ext}" \
+    ! -name "algorand-platform-latest.${ext}" -print0 \
+    | xargs -0 -r ls -t \
+    | tail -n "+$((retain + 1))" \
+    | while IFS= read -r stale; do
+        rm -f "$stale" "${stale}.sha256"
+      done
 }
 
 _maybe_build_frontend
