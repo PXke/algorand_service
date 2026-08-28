@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 import app.celery_app as celery_app
+from app.core import config
 
 
 def test_editorial_brief_scan_absent_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,3 +156,35 @@ def test_reap_stale_deep_classify_flags_beat_interval_configurable(
     monkeypatch.setenv("DEEP_CLASSIFY_REAP_SECONDS", "120")
     schedule = celery_app._build_beat_schedule()
     assert schedule["reap-stale-deep-classify-flags"]["schedule"] == 120.0
+
+
+def test_drain_to_compose_default_matches_config_not_a_stale_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (2026-08-28): celery_app used to hardcode its own default of "3600" for PUBLISH_QUEUE_DRAIN_SECONDS while config.py's own module constant separately (and never-read) defaulted to 900 -- two owners of one setting silently disagreeing whenever the env var was unset. celery_app now sources its default from config.PUBLISH_QUEUE_DRAIN_SECONDS directly, so the two can no longer drift: patching the config constant (as if PUBLISH_QUEUE_DRAIN_SECONDS were never set in the environment at all) must be reflected in the beat schedule."""
+    monkeypatch.delenv("PUBLISH_QUEUE_DRAIN_SECONDS", raising=False)
+    monkeypatch.setattr(config, "PUBLISH_QUEUE_DRAIN_SECONDS", 1234)
+    schedule = celery_app._build_beat_schedule()
+    assert schedule["drain-to-compose"]["schedule"] == 1234.0
+
+
+def test_drain_to_compose_env_override_still_wins_over_config_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit PUBLISH_QUEUE_DRAIN_SECONDS env var still overrides config.py's default, matching prod's existing override behavior."""
+    monkeypatch.setattr(config, "PUBLISH_QUEUE_DRAIN_SECONDS", 1234)
+    monkeypatch.setenv("PUBLISH_QUEUE_DRAIN_SECONDS", "42")
+    schedule = celery_app._build_beat_schedule()
+    assert schedule["drain-to-compose"]["schedule"] == 42.0
+
+
+def test_drain_url_queue_default_matches_config_not_a_stale_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (2026-08-28): same shape as the PUBLISH_QUEUE_DRAIN_SECONDS bug above, but for URL_QUEUE_DRAIN_SECONDS -- celery_app hardcoded "10" while config.py's own constant (never actually read) defaulted to 60. celery_app now sources its default from config.URL_QUEUE_DRAIN_SECONDS."""
+    monkeypatch.delenv("URL_QUEUE_DRAIN_SECONDS", raising=False)
+    monkeypatch.setattr(config, "URL_QUEUE_DRAIN_SECONDS", 77)
+    schedule = celery_app._build_beat_schedule()
+    entry = schedule["drain-url-queue"]
+    assert entry["schedule"] == 77.0
+    assert entry["options"]["expires"] == 77.0

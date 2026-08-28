@@ -20,19 +20,15 @@ class Settings(msgspec.Struct, kw_only=True):
     app_env: str = "dev"
     app_host: str = "0.0.0.0"
     app_port: int = 8080
-    # Gunicorn gthread sizing (see deploy/scripts/run_backend.sh). Default 1
-    # worker; threads default to CPU count (nproc) at runtime when unset.
-    app_processes: int = 1
-    app_threads: int = 0  # 0 = use nproc in run_backend.sh
-    # Legacy alias — mapped to GUNICORN_THREADS when APP_THREADS is unset.
-    app_workers: int = 0
+    # NOTE: Gunicorn process/thread sizing (APP_PROCESSES/APP_THREADS/APP_WORKERS/
+    # GUNICORN_WORKERS/GUNICORN_THREADS) is read directly from the shell environment
+    # by deploy/scripts/run_backend.sh before this process starts -- no Settings
+    # field for it exists here since nothing in Python ever reads one (deleted
+    # 2026-08-28: app_processes/app_threads/app_workers were dead struct fields).
 
     # Public-facing site (used to build absolute canonical / OG / sitemap URLs
     # in the SEO-rendered document routes). Override per-env via PUBLIC_SITE_URL.
     public_site_url: str = "https://algorand.pxke.me"
-    # Reserved for future resource hints. API preconnect was removed because
-    # client fetches are deferred and early preconnect hurt Lighthouse scores.
-    public_api_url: str = ""
     site_name: str = "PXke Algorand"
     # Doubles as the meta description for the front page and RSS channel —
     # written for the SERP snippet (task #39, 2026-07-16: the brand query
@@ -149,7 +145,6 @@ class Settings(msgspec.Struct, kw_only=True):
     news_feed_limit: int = 50
     news_placement_slot: str = "news_feed_inline"
     news_placement_limit: int = 5
-    news_placement_every_n_articles: int = 5
     # After an admin rejects a review, suppress re-enqueueing that URL in the
     # worker pipeline for this long (seconds). Mirror of the worker's
     # URL_REJECT_COOLDOWN_TTL — both must point redis_url at the same Redis DB.
