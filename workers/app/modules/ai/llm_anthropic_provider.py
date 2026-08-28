@@ -20,9 +20,15 @@ with the id missing.
 
 Scope note: same as GeminiProvider -- covers the core mechanics
 compose_runner.compose() needs, verified against a mocked response shape (no
-live Anthropic access configured in this environment). Does not yet
-replicate every OpenAICompatibleProvider refinement (round-budget notes,
-the tool-call cap, bogus-tool-call salvage).
+live Anthropic access configured in this environment). The agentic
+chat_with_tools loop's round-budget bookkeeping, seen-calls dedup cache,
+tool_call_counts/cap enforcement, require_tool nudging, exhaustion handling,
+and trace/debug recording are shared with every other provider via
+llm_tool_loop.run_tool_loop -- this module still owns 100% of the actual
+Messages API request/response shaping (`_AnthropicToolLoopAdapter`, below).
+It does not yet replicate OpenAICompatibleProvider's bogus-tool-call salvage
+path or its context-window trimming -- those are about that one wire
+format's own failure modes, not something Anthropic's shape has hit yet.
 """
 
 from __future__ import annotations
@@ -41,12 +47,16 @@ from app.core.config import (
     ANTHROPIC_API_KEY,
     ANTHROPIC_MODEL_WRITER,
     LLM_MAX_TOKENS,
-    LLM_MAX_TOOL_ROUNDS,
 )
 from app.modules.ai.llm_provider import LLMCreditError, LLMError, LLMProvider
 from app.modules.ai.llm_rate_limit import throttle_llm_call
+from app.modules.ai.llm_tool_loop import (
+    NormalizedToolCall,
+    RoundResult,
+    ToolLoopAdapter,
+    run_tool_loop,
+)
 from app.modules.ai.mistral_credit_guard import is_credit_exhausted, mark_credit_exhausted
-from app.modules.ai.story_spike import StorySpikedError
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +155,12 @@ class AnthropicProvider(LLMProvider):
         self._api_base = (api_base if api_base is not None else ANTHROPIC_API_BASE).rstrip("/")
         self._model = model if model is not None else ANTHROPIC_MODEL_WRITER
         self._timeout = float(timeout) if timeout is not None else 120.0
-        self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
+        self._usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+        }
 
     def usage_totals(self) -> dict[str, int]:
         """Cumulative {prompt_tokens, completion_tokens, total_tokens} across every request this instance has made."""
@@ -239,7 +254,9 @@ class AnthropicProvider(LLMProvider):
         temperature: float = 0.3,
     ) -> str:
         """A single plain-text completion, no tools."""
-        del temperature  # see _round_payload's docstring: Claude Sonnet 5 rejects this field outright
+        del (
+            temperature
+        )  # see _round_payload's docstring: Claude Sonnet 5 rejects this field outright
         system_text, anthropic_messages = _openai_messages_to_anthropic(messages)
         payload: dict[str, Any] = {
             "model": self._model,
@@ -249,7 +266,9 @@ class AnthropicProvider(LLMProvider):
         if system_text:
             payload["system"] = system_text
         data = self._post(payload)
-        return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        return "".join(
+            b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
+        )
 
     def chat_json_object(
         self,
@@ -293,80 +312,6 @@ class AnthropicProvider(LLMProvider):
             payload["tools"] = anthropic_tools
         return payload
 
-    def _execute_tool_uses(
-        self,
-        tool_uses: list[dict[str, Any]],
-        *,
-        handlers: dict[str, Any],
-        trace: list[dict[str, Any]] | None,
-        require_tool: str | None,
-    ) -> tuple[list[dict[str, Any]], bool]:
-        """Run every tool_use block from one round, return the tool_result content blocks to append (as one user-role message's content list) plus whether require_tool was satisfied this round."""
-        results: list[dict[str, Any]] = []
-        satisfied = False
-        for tu in tool_uses:
-            name = tu.get("name", "")
-            args = tu.get("input") or {}
-            handler = handlers.get(name)
-            try:
-                result = handler(**args) if handler else {"error": f"unknown tool {name}"}
-            except StorySpikedError as spike:
-                # The writer aborting the article (abort_article tool) -- must
-                # propagate uncaught, mirroring OpenAICompatibleProvider's
-                # _run_tool_call, so the compose actually terminates instead
-                # of being swallowed into a tool-error the model can shrug
-                # off and keep writing past.
-                if trace is not None:
-                    trace.append(
-                        {
-                            "tool": name,
-                            "arguments": args,
-                            "result": {
-                                "spiked": True,
-                                "category": spike.category,
-                                "reason": spike.reason,
-                            },
-                        }
-                    )
-                raise
-            except Exception as exc:  # tool failure must not abort the article
-                result = {"error": str(exc)}
-            if trace is not None:
-                trace.append({"tool": name, "arguments": args, "result": result})
-            if name == require_tool:
-                satisfied = True
-            results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tu.get("id", ""),
-                    "content": json.dumps(result),
-                }
-            )
-        return results, satisfied
-
-    def _finalize_exhausted(
-        self,
-        anthropic_messages: list[dict[str, Any]],
-        *,
-        system_text: str,
-        temperature: float,
-    ) -> str:
-        """Out of rounds: ask once more, no tools, for a final write-up -- mirrors OpenAICompatibleProvider's own exhaustion behavior."""
-        anthropic_messages.append(
-            {"role": "user", "content": "Now write the final JSON article."}
-        )
-        payload = self._round_payload(
-            anthropic_messages,
-            anthropic_tools=[],
-            system_text=system_text,
-            temperature=temperature,
-            max_tokens=None,
-        )
-        data = self._post(payload)
-        return "".join(
-            b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
-        )
-
     def chat_with_tools(
         self,
         messages: list[dict[str, Any]],
@@ -384,69 +329,117 @@ class AnthropicProvider(LLMProvider):
         on_round: Callable[[], None] | None = None,
         show_round_budget: bool = False,
     ) -> str:
-        """The agentic tool-calling loop, translated to/from Anthropic's tool_use/tool_result content-block shape. See module docstring for what this deliberately doesn't yet replicate from OpenAICompatibleProvider."""
-        del context_tokens, show_round_budget  # not yet implemented for Anthropic, see module docstring
-        rounds = max_rounds if max_rounds is not None else LLM_MAX_TOOL_ROUNDS
-        system_text, anthropic_messages = _openai_messages_to_anthropic(messages)
-        anthropic_tools = _openai_tools_to_anthropic(tools)
-        last_text = ""
-        required_satisfied = require_tool is None
+        """The agentic tool-calling loop, translated to/from Anthropic's tool_use/tool_result content-block shape. Round bookkeeping (dedup, cap, require_tool, exhaustion, trace/debug) is the shared llm_tool_loop driver -- see module docstring for what this provider's adapter still doesn't replicate from OpenAICompatibleProvider."""
+        del context_tokens  # not yet implemented for Anthropic, see module docstring
+        adapter = _AnthropicToolLoopAdapter(self, messages, tools)
+        return run_tool_loop(
+            adapter,
+            tools=tools,
+            handlers=handlers,
+            max_rounds=max_rounds,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            trace=trace,
+            debug=debug,
+            require_tool=require_tool,
+            finalize_on_exhaustion=finalize_on_exhaustion,
+            on_round=on_round,
+            show_round_budget=show_round_budget,
+        )
 
-        for round_idx in range(rounds):
-            payload = self._round_payload(
-                anthropic_messages,
-                anthropic_tools=anthropic_tools,
-                system_text=system_text,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            data = self._post(payload)
-            content = data.get("content", [])
-            tool_uses = [b for b in content if b.get("type") == "tool_use"]
-            last_text = (
-                "".join(b.get("text", "") for b in content if b.get("type") == "text")
-                or last_text
-            )
 
-            if debug is not None:
-                debug.setdefault("messages", []).append(
-                    {"role": "assistant", "content": last_text if not tool_uses else ""}
-                )
-                debug["rounds"] = round_idx + 1
+class _AnthropicToolLoopAdapter(ToolLoopAdapter):
+    """ToolLoopAdapter for AnthropicProvider's Messages API tool_use/tool_result content-block shape.
 
-            if not tool_uses:
-                if required_satisfied:
-                    return last_text
-                anthropic_messages.append({"role": "assistant", "content": content})
-                anthropic_messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Before finishing you MUST call the `{require_tool}` tool "
-                            "once on your current draft and address its feedback. Do "
-                            "that now, then output the final answer."
-                        ),
-                    }
-                )
-                required_satisfied = True  # only nudge once
-                if callable(on_round):
-                    on_round()
-                continue
+    Translates `messages`/`tools` to Anthropic's native shape once, up front
+    (`_openai_messages_to_anthropic`/`_openai_tools_to_anthropic`), then owns
+    folding each round's assistant turn / tool results / require_tool nudge
+    back into that same running `self._messages` list.
+    """
 
-            anthropic_messages.append({"role": "assistant", "content": content})
-            tool_results, satisfied = self._execute_tool_uses(
-                tool_uses, handlers=handlers, trace=trace, require_tool=require_tool
-            )
-            anthropic_messages.append({"role": "user", "content": tool_results})
-            required_satisfied = required_satisfied or satisfied
-            if callable(on_round):
-                on_round()
+    def __init__(
+        self,
+        provider: AnthropicProvider,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> None:
+        self._provider = provider
+        self._system_text, self._messages = _openai_messages_to_anthropic(messages)
+        self._tools = _openai_tools_to_anthropic(tools)
 
+    def prepare(self, debug: dict[str, Any] | None) -> None:
         if debug is not None:
-            debug["rounds"] = rounds
-            debug["exhausted"] = True
-        if not finalize_on_exhaustion:
-            return last_text
-        return self._finalize_exhausted(
-            anthropic_messages, system_text=system_text, temperature=temperature
+            debug["messages"] = self._messages
+            debug["model"] = self._provider.model
+
+    def send_round(
+        self,
+        *,
+        tools: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int | None,
+        round_budget_note: str,
+    ) -> RoundResult:
+        # `tools` is unchanged from __init__'s translation (self._tools);
+        # round-budget notes aren't implemented for Anthropic yet -- see
+        # this module's docstring.
+        del tools, round_budget_note
+        payload = self._provider._round_payload(
+            self._messages,
+            anthropic_tools=self._tools,
+            system_text=self._system_text,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        data = self._provider._post(payload)
+        content = data.get("content", [])
+        tool_uses = [b for b in content if b.get("type") == "tool_use"]
+        text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+        normalized = [
+            NormalizedToolCall(
+                id=tu.get("id", ""), name=tu.get("name", ""), args=tu.get("input") or {}
+            )
+            for tu in tool_uses
+        ]
+        return RoundResult(text=text, tool_calls=normalized, raw=content)
+
+    def append_assistant_turn(self, round_result: RoundResult) -> None:
+        self._messages.append({"role": "assistant", "content": round_result.raw})
+
+    def append_tool_results(self, entries: list[tuple[NormalizedToolCall, dict[str, Any]]]) -> None:
+        tool_results = [
+            {"type": "tool_result", "tool_use_id": call.id, "content": json.dumps(result)}
+            for call, result in entries
+        ]
+        self._messages.append({"role": "user", "content": tool_results})
+
+    def append_require_tool_nudge(self, require_tool: str) -> None:
+        self._messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"Before finishing you MUST call the `{require_tool}` tool "
+                    "once on your current draft and address its feedback. Do "
+                    "that now, then output the final answer."
+                ),
+            }
+        )
+
+    def finalize(self, *, temperature: float, max_tokens: int | None) -> str:
+        # Matches the pre-refactor exhaustion behavior exactly: Anthropic's
+        # final write-up completion does NOT honor the caller's own
+        # max_tokens (unlike OpenAICompatibleProvider's) -- see this
+        # module's own docstring; preserved as-is, not changed here.
+        del max_tokens
+        self._messages.append({"role": "user", "content": "Now write the final JSON article."})
+        payload = self._provider._round_payload(
+            self._messages,
+            anthropic_tools=[],
+            system_text=self._system_text,
+            temperature=temperature,
+            max_tokens=None,
+        )
+        data = self._provider._post(payload)
+        return "".join(
+            b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
         )
