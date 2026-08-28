@@ -69,11 +69,12 @@ class _FakePage:
 def _make_session() -> PlaywrightSession:
     """A PlaywrightSession with no real Playwright/Chromium behind it -- _read_page only touches self._storage_state_path and the page it's handed, so a bare instance (bypassing __init__'s real launch) is enough."""
     session = object.__new__(PlaywrightSession)
-    session._storage_state_path = ""  # noqa: SLF001 -- test constructs the instance directly
+    session._storage_state_path = ""
     return session
 
 
 def test_read_page_prefers_the_main_landmark_over_a_raw_body_dump() -> None:
+    """_read_page uses _extract_visible_text's landmark preference, not a raw body dump."""
     main_text = f"Real article content, the thing a visitor actually reads. {_LONG_ENOUGH}"
     # A raw body dump would repeat the footer block, unrelated to the actual
     # article content -- if _read_page ever regresses to page.inner_text("body"),
@@ -82,16 +83,17 @@ def test_read_page_prefers_the_main_landmark_over_a_raw_body_dump() -> None:
     page = _FakePage(main_text, body_text)
     session = _make_session()
 
-    result = session._read_page(page, engine="playwright-session")  # noqa: SLF001
+    result = session._read_page(page, engine="playwright-session")
 
     assert "Real article content" in result.text
     assert "Join Discord" not in result.text
 
 
 def test_read_page_falls_back_to_body_when_no_landmark_matches() -> None:
+    """With no main/article landmark present, _read_page still falls back to the body text."""
     page = _FakePage("", "whole body text, long enough to clear the floor. " + _LONG_ENOUGH)
     session = _make_session()
 
-    result = session._read_page(page, engine="playwright-session")  # noqa: SLF001
+    result = session._read_page(page, engine="playwright-session")
 
     assert "whole body text" in result.text

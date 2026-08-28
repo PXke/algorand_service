@@ -8,6 +8,8 @@ observable behavior as the old one-shot launch.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from app.modules.scraper.core import browser_scrape
@@ -17,7 +19,7 @@ from app.modules.scraper.core.browser_scrape import BrowserPageResult, click_and
 class _FakeSession:
     """Stands in for PlaywrightSession -- records construction/close/method calls with no real Playwright involved."""
 
-    instances: list["_FakeSession"] = []
+    instances: ClassVar[list[_FakeSession]] = []
 
     def __init__(self, *, storage_state_path: str | None = None) -> None:
         self.storage_state_path = storage_state_path
