@@ -414,7 +414,6 @@ def _gate_enforces_review(
     gate = gate_draft(
         source_text=page_text,
         article_text=f"{title}\n{body}",
-        service_id=source_url,
         source_url=source_url,
     )
     return gate is not None and not gate.passed
@@ -545,7 +544,6 @@ def _fresh_auto_approve_passes(
         gate = gate_draft(
             source_text=page_text,
             article_text=f"{title}\n{body}",
-            service_id=source_url,
             source_url=source_url,
         )
         if gate is not None:
@@ -1194,7 +1192,6 @@ def _grade_and_gate(
         gate = gate_draft(
             source_text=page_text,
             article_text=f"{title}\n{composed.body}",
-            service_id=service_id,
             source_url=source_url,
         )
         if gate is not None:
@@ -1240,8 +1237,24 @@ def _hold_for_review(
     from app.modules.newspaper.article_store import insert_stored_article
     from app.modules.newspaper.security import sanitize_body
 
+    # has_pending_review_for_url() is ALSO checked upstream, before compose
+    # starts (_pending_review_veto), specifically to avoid burning a Mistral
+    # compose on a URL whose review already exists — that is the real
+    # protection. By the time we're here the compose (minutes) has already
+    # run, so this is only a race window: another poll of the same URL can
+    # enqueue its own pending review mid-compose. This branch used to
+    # discard the finished draft outright on that race — the same
+    # "throw away a finished compose" failure already fixed for the
+    # review-queue-full race just below (Pixel City / pixelcity-aetheralabs-es,
+    # 2026-08-10) — so store and enqueue anyway; the reviewer just sees two
+    # pending items for the URL instead of one.
     if has_pending_review_for_url(row.scrape_url):
-        return {"status": "duplicate_review_pending", "service_id": row.service_id}
+        logger.warning(
+            "duplicate pending review for %s (%s) — storing and enqueuing "
+            "anyway instead of discarding the finished draft",
+            row.scrape_url,
+            row.service_id,
+        )
     from app.modules.crawler.classifier_review_store import review_queue_full
 
     # review_queue_full() is ALSO checked upstream, before compose starts
@@ -1588,7 +1601,9 @@ def _stamp_service_recompose_cooldown(service_id: str, *, ok: bool) -> None:
         mark_scraped(service_id, ok=ok)
 
 
-@single_flight(lambda row, **_kw: f"compose:{row.queue_id}", ttl=1800)
+@single_flight(
+    lambda row, **_kw: f"compose:{row.queue_id}", ttl=worker_config.COMPOSE_TASK_SOFT_TIME_LIMIT
+)
 def _publish_from_queued_row_impl(
     row: QueuedPublishRow,
     *,
@@ -3020,13 +3035,44 @@ def recompose_published(
     if auto_apply:
         from app.modules.crawler.classifier_review_store import complete_classifier_review
 
+        # Store before mark (CLAUDE.md invariant #2): apply the draft onto
+        # the live article FIRST, and only mark the review resolved once
+        # that succeeded. This used to call complete_classifier_review
+        # first — if apply_recomposed_article then failed
+        # (draft_or_live_missing / replace_failed), the review was already
+        # closed as "auto_approved" with the live article never actually
+        # updated, silently losing the recompose with no trail back to a
+        # human reviewer.
+        #
+        # apply_recomposed_article has TWO success statuses, not one:
+        # "ok" (full fanout: index/translate/IndexNow) and
+        # "ok_draft_preserved" (the live article is itself currently
+        # drafted, so content is applied and versioned but the
+        # index/translate/IndexNow fanout is deliberately skipped -- see
+        # that function's DRAFT GUARD docstring). Both are complete,
+        # successful applies; only "error" means the swap didn't happen.
+        apply_result = apply_recomposed_article(draft_id, article_id)
+        if apply_result.get("status") not in ("ok", "ok_draft_preserved"):
+            logger.warning(
+                "recompose_published auto-apply failed for draft %s -> article %s "
+                "(%s) — leaving review %s open instead of marking auto_approved",
+                draft_id,
+                article_id,
+                apply_result.get("status", "unknown"),
+                review_id,
+            )
+            return {
+                "status": "apply_failed",
+                "review_id": review_id,
+                "draft_article_id": draft_id,
+                "apply_result": apply_result.get("status", "unknown"),
+            }
         # Resolve the review immediately (audit trail stays visible in admin
         # as "auto_approved") rather than leaving it pending for a click that
         # will never come. Never written to classifier_feedback — that table
         # trains the classifier from HUMAN labels; an auto-decision isn't one,
         # and feeding it back in would let the model approve its own homework.
         complete_classifier_review(review_id, resolution="auto_approved")
-        apply_result = apply_recomposed_article(draft_id, article_id)
         return {
             "status": "auto_applied",
             "review_id": review_id,
@@ -3191,5 +3237,7 @@ def apply_recomposed_article(draft_article_id: str, live_article_id: str) -> dic
 
         ping_article(live_article_id, translation_langs=[], slug=live.slug)
     except Exception:
-        pass
+        logger.warning(
+            "apply_recomposed_article: IndexNow ping failed for %s", live_article_id, exc_info=True
+        )
     return {"status": "ok", "article_id": live_article_id}

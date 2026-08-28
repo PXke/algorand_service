@@ -163,10 +163,21 @@ def _dead_domains_referenced(article_text: str, *, source_domain: str = "") -> l
     return dead
 
 
-def gate_draft(
-    *, source_text: str, article_text: str, service_id: str, source_url: str = ""
-) -> DeterministicGate | None:
-    """Convenience wrapper for the publish task: loads the trace by service_id, reads config, runs the gate, then folds in the dead-domain check (needs I/O -- domain_tracking lookups and, for never-seen domains, a live DNS resolution -- so it lives here rather than in the pure ``run_deterministic_gate`` core). Returns None when disabled or on any error (shadow-safe). The caller enforces only when ``GATEKEEPER_ENFORCE`` and ``not result.passed``."""
+def gate_draft(*, source_text: str, article_text: str, source_url: str) -> DeterministicGate | None:
+    """Convenience wrapper for the publish task: loads the trace by source_url, reads config, runs the gate, then folds in the dead-domain check (needs I/O -- domain_tracking lookups and, for never-seen domains, a live DNS resolution -- so it lives here rather than in the pure ``run_deterministic_gate`` core). Returns None when disabled or on any error (shadow-safe). The caller enforces only when ``GATEKEEPER_ENFORCE`` and ``not result.passed``.
+
+    ``source_url`` is used for both lookups: it's the compose-time source_url
+    that ``load_investigation_trace`` keys the stored trace by (see that
+    function's own docstring), and it's also what the dead-domain check
+    derives the article's own domain from, so it's never excluded from its
+    own "references a dead domain" scan. This used to be two separate
+    parameters (``service_id`` for the trace lookup, ``source_url`` for the
+    domain check) even though every caller passed the identical URL to both
+    -- misleading, since the trace is never actually keyed by a service_id,
+    and a latent footgun, since nothing stopped a caller from passing two
+    different values and silently keying the trace lookup off one URL while
+    excluding a different domain from the dead-domain scan.
+    """
     try:
         from app.core.config import (
             GATEKEEPER_ENABLED,
@@ -178,7 +189,7 @@ def gate_draft(
             return None
         from app.modules.newspaper.investigation_store import load_investigation_trace
 
-        trace = load_investigation_trace(service_id)
+        trace = load_investigation_trace(source_url)
         gate = run_deterministic_gate(
             source_text,
             trace,

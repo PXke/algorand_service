@@ -396,3 +396,191 @@ def test_blank_extra_source_material_leaves_page_text_untouched(
         pt.recompose_published.run("55555555-5555-5555-5555-555555555555")
 
     assert captured["page_text"] == "live page body"
+
+
+def _wire_common_recompose_published_mocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shared plumbing for the two auto-apply-ordering tests below.
+
+    Wires a live article, a successful compose, and every downstream
+    storage/tagging call so the task runs end to end without touching
+    Cassandra/Redis/an LLM.
+    """
+    from types import SimpleNamespace
+
+    from app.modules.newspaper.article_composer import ArticleComposeResult
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    art = SimpleNamespace(
+        service_id="hesabpay",
+        source_url="https://hesabpay.com",
+        body="live page body",
+        title="old title",
+        tags=[],
+        summary="s",
+    )
+    monkeypatch.setattr("app.modules.newspaper.article_store.get_article", lambda _aid: art)
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.has_pending_review_for_url",
+        lambda _url: False,
+    )
+    monkeypatch.setattr(
+        pt,
+        "get_scraper_for_url",
+        lambda _url: SimpleNamespace(
+            scrape=lambda **_kw: (_ for _ in ()).throw(RuntimeError("skip"))
+        ),
+    )
+    monkeypatch.setattr("app.core.config.SERVICE_CONTEXT_ENABLED", False)
+
+    composed = ArticleComposeResult(
+        title="HesabPay handles 30% of Afghanistan's electricity bills on Algorand",
+        summary="s",
+        body="new body",
+        composer="mistral",
+    )
+    monkeypatch.setattr(pt, "compose_scrape_article", lambda **_kw: composed)
+
+    class _FakeSession:
+        def execute(self, *_a: object, **_kw: object) -> _FakeSession:
+            return self
+
+        def one(self) -> None:
+            return None
+
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.insert_stored_article",
+        lambda **_kw: ("dddddddd-dddd-dddd-dddd-dddddddddddd", True),
+    )
+    monkeypatch.setattr(pt, "_grade_and_gate", lambda *_a, **_kw: ({}, 9.0, True))
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.enqueue_classifier_review",
+        lambda **_kw: "rid-99",
+    )
+
+
+def test_recompose_published_auto_apply_applies_before_marking_review_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Store before mark (CLAUDE.md invariant #2).
+
+    apply_recomposed_article must run and succeed BEFORE
+    complete_classifier_review marks the review resolved -- not after. The
+    old ordering closed the review as "auto_approved" first, so an apply
+    failure right after (draft_or_live_missing / replace_failed) left the
+    live article never actually updated with no trail back to a human --
+    the review already showed resolved.
+    """
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    _wire_common_recompose_published_mocks(monkeypatch)
+
+    call_order: list[str] = []
+
+    def _fake_apply(draft_id: str, article_id: str) -> dict[str, str]:
+        call_order.append("apply")
+        assert draft_id == "dddddddd-dddd-dddd-dddd-dddddddddddd"
+        assert article_id == "66666666-6666-6666-6666-666666666666"
+        return {"status": "ok", "article_id": article_id}
+
+    def _fake_complete(review_id: str, *, resolution: str) -> None:
+        call_order.append("complete")
+        assert review_id == "rid-99"
+        assert resolution == "auto_approved"
+
+    monkeypatch.setattr(pt, "apply_recomposed_article", _fake_apply)
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.complete_classifier_review",
+        _fake_complete,
+    )
+
+    result = pt.recompose_published.run("66666666-6666-6666-6666-666666666666")
+
+    assert call_order == ["apply", "complete"]
+    assert result == {
+        "status": "auto_applied",
+        "review_id": "rid-99",
+        "draft_article_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+        "apply_result": "ok",
+    }
+
+
+def test_recompose_published_auto_apply_treats_ok_draft_preserved_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """apply_recomposed_article has two success statuses, not one.
+
+    "ok_draft_preserved" (the live article is itself currently drafted, so
+    content is applied and versioned but index/translate/IndexNow fanout is
+    deliberately skipped -- see apply_recomposed_article's DRAFT GUARD
+    docstring) is a complete, successful apply, not a failure. The review
+    must still be marked auto_approved, and the task must still report
+    auto_applied, not apply_failed.
+    """
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    _wire_common_recompose_published_mocks(monkeypatch)
+
+    call_order: list[str] = []
+
+    def _fake_apply(draft_id: str, article_id: str) -> dict[str, str]:
+        call_order.append("apply")
+        assert draft_id == "dddddddd-dddd-dddd-dddd-dddddddddddd"
+        return {"status": "ok_draft_preserved", "article_id": article_id}
+
+    def _fake_complete(review_id: str, *, resolution: str) -> None:
+        call_order.append("complete")
+        assert review_id == "rid-99"
+        assert resolution == "auto_approved"
+
+    monkeypatch.setattr(pt, "apply_recomposed_article", _fake_apply)
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.complete_classifier_review",
+        _fake_complete,
+    )
+
+    result = pt.recompose_published.run("66666666-6666-6666-6666-666666666666")
+
+    assert call_order == ["apply", "complete"]
+    assert result == {
+        "status": "auto_applied",
+        "review_id": "rid-99",
+        "draft_article_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+        "apply_result": "ok_draft_preserved",
+    }
+
+
+def test_recompose_published_auto_apply_failure_leaves_review_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The review must not be marked auto_approved when the apply itself fails.
+
+    When apply_recomposed_article does not report status "ok" (e.g. the live
+    article vanished between lookup and apply), the review stays open for a
+    human, and the task reports apply_failed rather than pretending the
+    recompose landed.
+    """
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    _wire_common_recompose_published_mocks(monkeypatch)
+
+    def _fake_apply(draft_id: str, article_id: str) -> dict[str, str]:  # noqa: ARG001
+        return {"status": "error", "reason": "replace_failed"}
+
+    def _boom_complete(*_a: object, **_kw: object) -> None:
+        raise AssertionError("complete_classifier_review must not run on a failed apply")
+
+    monkeypatch.setattr(pt, "apply_recomposed_article", _fake_apply)
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.complete_classifier_review",
+        _boom_complete,
+    )
+
+    result = pt.recompose_published.run("66666666-6666-6666-6666-666666666666")
+
+    assert result == {
+        "status": "apply_failed",
+        "review_id": "rid-99",
+        "draft_article_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+        "apply_result": "error",
+    }
