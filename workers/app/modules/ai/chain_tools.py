@@ -63,9 +63,8 @@ def _algod_get(path: str, *, cache_ttl: int = 0) -> dict[str, Any]:
     See CHAIN_CACHE_TTL_STATIC/SLOW/FAST in app.core.config for the tiers
     each caller picks from.
     """
-    import httpx
-
     from app.core.config import ALGOD_TOKEN, ALGOD_URL
+    from app.core.http_client import get_http_client
 
     if not ALGOD_URL:
         return {"error": "algod not configured (ALGOD_URL unset)"}
@@ -76,8 +75,7 @@ def _algod_get(path: str, *, cache_ttl: int = 0) -> dict[str, Any]:
             return cached
     headers = {"X-Algo-API-Token": ALGOD_TOKEN} if ALGOD_TOKEN else {}
     try:
-        with httpx.Client(timeout=_TIMEOUT) as http:
-            r = http.get(f"{ALGOD_URL}{path}", headers=headers)
+        r = get_http_client(timeout=_TIMEOUT).get(f"{ALGOD_URL}{path}", headers=headers)
         if r.status_code == 404:
             return {"_status": 404}
         r.raise_for_status()
@@ -310,9 +308,8 @@ def _mainnet_idx_get(
     cache_ttl > 0 caches a genuine successful body -- see _algod_get's
     docstring for the caching contract, identical here.
     """
-    import httpx
-
     from app.core.config import MAINNET_INDEXER_URL
+    from app.core.http_client import get_http_client
 
     if not MAINNET_INDEXER_URL:
         return {"error": "mainnet indexer not configured (MAINNET_INDEXER_URL unset)"}
@@ -322,8 +319,7 @@ def _mainnet_idx_get(
         if cached is not None:
             return cached
     try:
-        with httpx.Client(timeout=_TIMEOUT) as http:
-            r = http.get(f"{MAINNET_INDEXER_URL}{path}", params=params)
+        r = get_http_client(timeout=_TIMEOUT).get(f"{MAINNET_INDEXER_URL}{path}", params=params)
         if r.status_code == 404:
             return {"_status": 404}
         r.raise_for_status()
@@ -1313,7 +1309,7 @@ def _boxes_get(base_url: str, token: str, app_id: str, *, cache_ttl: int = 0) ->
     -- cache_ttl > 0 caches a genuine successful body (both the full-list and
     the total-only-on-400 shapes), never {"error": ...}/{"_status": 404}.
     """
-    import httpx
+    from app.core.http_client import get_http_client
 
     key = (
         _cache_key("boxes", f"{base_url}/v2/applications/{app_id}/boxes", None)
@@ -1326,12 +1322,11 @@ def _boxes_get(base_url: str, token: str, app_id: str, *, cache_ttl: int = 0) ->
             return cached
     headers = {"X-Algo-API-Token": token} if token else {}
     try:
-        with httpx.Client(timeout=_TIMEOUT) as http:
-            r = http.get(
-                f"{base_url}/v2/applications/{app_id}/boxes",
-                headers=headers,
-                params={"max": _BOXES_REQUEST_MAX},
-            )
+        r = get_http_client(timeout=_TIMEOUT).get(
+            f"{base_url}/v2/applications/{app_id}/boxes",
+            headers=headers,
+            params={"max": _BOXES_REQUEST_MAX},
+        )
         if r.status_code == 404:
             return {"_status": 404}
         try:
@@ -1571,9 +1566,8 @@ def _testnet_idx_get(
     cache_ttl > 0 caches a genuine successful body -- see _algod_get's
     docstring for the caching contract, identical here.
     """
-    import httpx
-
     from app.core.config import TESTNET_INDEXER_URL
+    from app.core.http_client import get_http_client
 
     if not TESTNET_INDEXER_URL:
         return {"error": "testnet indexer not configured (TESTNET_INDEXER_URL unset)"}
@@ -1583,8 +1577,7 @@ def _testnet_idx_get(
         if cached is not None:
             return cached
     try:
-        with httpx.Client(timeout=_TIMEOUT) as http:
-            r = http.get(f"{TESTNET_INDEXER_URL}{path}", params=params)
+        r = get_http_client(timeout=_TIMEOUT).get(f"{TESTNET_INDEXER_URL}{path}", params=params)
         if r.status_code == 404:
             return {"_status": 404}
         r.raise_for_status()

@@ -44,9 +44,8 @@ _bsky_token_cache: dict[str, float | str] = {}
 
 def _tool_search_web(query: str, limit: int = 6) -> dict[str, Any]:
     """General web search via SearXNG: titles, URLs and snippets a journalist would skim before writing. Use to discover sources and context you were not handed; then fetch the most relevant URL with the safe fetch tool. Also queries news-specific engines (Bing News, DuckDuckGo News, Google News) for a real publish-date signal — general engines rarely return one at all."""
-    import httpx
-
     from app.core.config import SEARXNG_URL
+    from app.core.http_client import get_http_client
 
     if not SEARXNG_URL:
         return {"query": query, "error": "web search not configured", "results": []}
@@ -55,18 +54,18 @@ def _tool_search_web(query: str, limit: int = 6) -> dict[str, Any]:
         return {"query": query, "results": []}
     n = max(1, min(int(limit), 12))
     try:
-        with httpx.Client(timeout=12.0, headers={"User-Agent": _UA}) as client:
-            resp = client.get(
-                f"{SEARXNG_URL}/search",
-                params={
-                    "q": q,
-                    "format": "json",
-                    "categories": "general,news",
-                    "language": "en",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        resp = get_http_client(timeout=12.0).get(
+            f"{SEARXNG_URL}/search",
+            params={
+                "q": q,
+                "format": "json",
+                "categories": "general,news",
+                "language": "en",
+            },
+            headers={"User-Agent": _UA},
+        )
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as exc:
         return {"query": query, "error": str(exc)[:200], "results": []}
     # News engines (Bing/DuckDuckGo/Google News) carry a real publish date;
@@ -472,16 +471,14 @@ def _guarded_post(
     timeout: float = 12.0,
 ) -> httpx.Response:
     """SSRF-guarded POST for a known external JSON API. Validates the host is public and does NOT follow redirects (so it can't be bounced to an internal one). Used for fixed endpoints we choose, not LLM-supplied URLs."""
-    import httpx
-
+    from app.core.http_client import get_http_client
     from app.core.net_guard import assert_public_url
 
     assert_public_url(url)
     h = {"User-Agent": _UA, "Content-Type": "application/json"}
     if headers:
         h.update(headers)
-    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-        return client.post(url, json=json, headers=h)
+    return get_http_client(timeout=timeout, follow_redirects=False).post(url, json=json, headers=h)
 
 
 def _github_get(

@@ -32,7 +32,12 @@ class _FakeClient:
     def __exit__(self, *args: object) -> None:
         return None
 
-    def get(self, _url: str, params: tuple | None = None) -> _FakeResponse:
+    def get(
+        self,
+        _url: str,
+        params: tuple | None = None,
+        headers: dict | None = None,  # noqa: ARG002 -- name must match the real callee's keyword arg
+    ) -> _FakeResponse:
         self._captured.append(params)
         return _FakeResponse(self._payload)
 

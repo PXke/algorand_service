@@ -6,7 +6,6 @@ import html
 import re
 from typing import Any
 
-import httpx
 from bs4 import BeautifulSoup
 
 _TWEET_URL = re.compile(
@@ -39,12 +38,14 @@ def fetch_tweet_context(tweet_url: str, *, timeout: float = 15.0) -> dict[str, A
 
     Use only for URLs already present in trusted ingest (Discord mirror, push).
     """
+    from app.core.http_client import get_http_client
+
     result: dict[str, Any] = {"url": tweet_url}
     try:
-        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            response = client.get(_OEMBED, params={"url": tweet_url, "omit_script": "true"})
-            response.raise_for_status()
-            data = response.json()
+        client = get_http_client(timeout=timeout, follow_redirects=True)
+        response = client.get(_OEMBED, params={"url": tweet_url, "omit_script": "true"})
+        response.raise_for_status()
+        data = response.json()
     except Exception as exc:
         result["error"] = str(exc)[:200]
         return result

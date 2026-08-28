@@ -89,13 +89,15 @@ def fetch_spot_tick(
         "include_24hr_vol": "true",
     }
     try:
-        with httpx.Client(timeout=timeout) as client:
-            asset_name = _resolve_asset_name(client, asset_id)
-            price_resp = client.get(f"{COINGECKO_API}/simple/price", params=params)
-            price_resp.raise_for_status()
-            payload = price_resp.json().get(asset_id)
-            if not payload:
-                raise PriceMetricsCollectorError(f"no price data for {asset_id}")
+        from app.core.http_client import get_http_client
+
+        client = get_http_client(timeout=timeout)
+        asset_name = _resolve_asset_name(client, asset_id)
+        price_resp = client.get(f"{COINGECKO_API}/simple/price", params=params)
+        price_resp.raise_for_status()
+        payload = price_resp.json().get(asset_id)
+        if not payload:
+            raise PriceMetricsCollectorError(f"no price data for {asset_id}")
 
         price_usd = float(payload.get(currency) or 0)
         if price_usd <= 0:

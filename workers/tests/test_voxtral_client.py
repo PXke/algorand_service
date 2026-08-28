@@ -54,7 +54,9 @@ def test_transcribe_audio_returns_text(monkeypatch: pytest.MonkeyPatch, audio_fi
             assert "file" in files
             return FakeResponse()
 
-    monkeypatch.setattr(voxtral_module.httpx, "Client", FakeClient)
+    import httpx
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
 
     result = transcribe_audio(audio_file)
     assert result == "hello world"
@@ -107,7 +109,9 @@ def test_transcribe_audio_raises_on_http_error(
         ) -> Any:  # noqa: ANN401 -- test double / fake response
             return FakeResponse()
 
-    monkeypatch.setattr(voxtral_module.httpx, "Client", FakeClient)
+    import httpx
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
 
     with pytest.raises(LLMError, match="500"):
         transcribe_audio(audio_file)

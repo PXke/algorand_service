@@ -36,15 +36,13 @@ def get_algod_head_round() -> int:
     Unlike the Conduit-ingested head, this is always available as long as the
     node is reachable, so it is the fallback when Cassandra has no meta row yet.
     """
-    import httpx
-
     from app.core.config import ALGOD_TOKEN, ALGOD_URL
+    from app.core.http_client import get_http_client
 
     headers = {"X-Algo-API-Token": ALGOD_TOKEN} if ALGOD_TOKEN else {}
-    with httpx.Client(timeout=20.0) as http:
-        response = http.get(f"{ALGOD_URL}/v2/status", headers=headers)
-        response.raise_for_status()
-        return int(response.json()["last-round"])
+    response = get_http_client(timeout=20.0).get(f"{ALGOD_URL}/v2/status", headers=headers)
+    response.raise_for_status()
+    return int(response.json()["last-round"])
 
 
 def list_transactions_for_round(round_num: int) -> list[RoundTransaction]:

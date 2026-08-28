@@ -173,8 +173,11 @@ class GeminiProvider(LLMProvider):
             throttle_llm_call()
             last_attempt = attempt >= _MAX_RETRIES
             try:
-                with httpx.Client(timeout=self._timeout) as client:
-                    resp = client.post(url, headers=headers, json=payload)
+                from app.core.http_client import get_http_client
+
+                resp = get_http_client(timeout=self._timeout).post(
+                    url, headers=headers, json=payload
+                )
             except httpx.RequestError as exc:
                 if last_attempt:
                     raise LLMError(f"Gemini request failed after {attempt + 1} attempts: {exc}") from exc

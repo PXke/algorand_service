@@ -91,18 +91,28 @@ def guarded_get(
     follow_redirects must stay off here: otherwise a public URL could 302 to an
     internal one and the client would follow it before any guard runs. We follow
     manually and call assert_public_url before each request.
+
+    Uses the process-cached shared client (app.core.http_client.get_http_client)
+    rather than opening a fresh httpx.Client per call: this is the fetch helper
+    behind nearly every LLM-supplied and frontier-discovered URL in workers/,
+    including link_extractor.enqueue_page_links's per-external-link domain
+    preview (60-200 links per page is routine), so a fresh TCP/TLS handshake
+    per call here was the single largest source of unreused connections in the
+    codebase.
     """
     import httpx
 
+    from app.core.http_client import get_http_client
+
     current = url
-    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-        for _ in range(max_redirects + 1):
-            assert_public_url(current)
-            response = client.get(current, headers=headers, params=params)
-            location = response.headers.get("location")
-            if response.is_redirect and location:
-                current = str(httpx.URL(response.url).join(location))
-                params = None  # query travels in the redirect target after hop 1
-                continue
-            return response
+    client = get_http_client(timeout=timeout, follow_redirects=False)
+    for _ in range(max_redirects + 1):
+        assert_public_url(current)
+        response = client.get(current, headers=headers, params=params)
+        location = response.headers.get("location")
+        if response.is_redirect and location:
+            current = str(httpx.URL(response.url).join(location))
+            params = None  # query travels in the redirect target after hop 1
+            continue
+        return response
     raise UnsafeUrlError("too many redirects")
