@@ -97,6 +97,7 @@ def fetch_page(
     timeout_ms: int | None = None,
     storage_state_path: str | None = None,
     skip_login_wall_check: bool = False,
+    playwright_session: PlaywrightSession | None = None,
 ) -> BrowserPageResult:
     """Load a hard target (SPA / heavy JS) with Playwright Chromium.
 
@@ -110,90 +111,43 @@ def fetch_page(
     is public; leave it False for anything reached via a general-purpose
     fetch where the heuristic's protection (don't let the writer cite
     auth-gated content as real) still matters.
+
+    playwright_session: reuse an already-running PlaywrightSession's
+    browser/context instead of launching a fresh, throwaway Chromium just
+    for this one call -- pass one when the caller is about to fetch several
+    URLs back to back (e.g. draining a batch of queued URLs in one beat
+    tick) so the whole batch pays for exactly ONE browser launch instead of
+    one per URL (root-caused 2026-08-28: this function used to always
+    launch+tear down its own sync_playwright()/chromium.launch(), a second,
+    diverged copy of the exact launch/settle/read logic PlaywrightSession
+    below already implements and reuses across a compose's dozens of tool
+    calls -- see that class's docstring). The session's owner remains
+    responsible for closing it; this never closes a session it didn't
+    create itself. With no session given, a short-lived one is created and
+    closed here, same net effect as the old one-shot launch.
     """
-    wait_ms = wait_after_load_ms if wait_after_load_ms is not None else config.BROWSER_WAIT_MS
-    timeout = timeout_ms if timeout_ms is not None else config.BROWSER_TIMEOUT_MS
-    state_path = storage_state_path or config.BROWSER_STORAGE_STATE_PATH
+    if playwright_session is not None:
+        return playwright_session.fetch(
+            url,
+            wait_after_load_ms=wait_after_load_ms,
+            timeout_ms=timeout_ms,
+            skip_login_wall_check=skip_login_wall_check,
+        )
 
     try:
-        from playwright.sync_api import sync_playwright
+        session = PlaywrightSession(storage_state_path=storage_state_path)
     except ImportError as exc:
         msg = "playwright package not installed"
         raise BrowserScrapeError(msg) from exc
-
-    launch_kwargs: dict[str, object] = {"headless": config.BROWSER_HEADLESS}
-    channel = (config.BROWSER_CHANNEL or "").strip()
-    if channel:
-        launch_kwargs["channel"] = channel
-
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(**launch_kwargs)
-        try:
-            context_kwargs: dict = {"user_agent": _BROWSER_UA}
-            if state_path and Path(state_path).is_file():
-                context_kwargs["storage_state"] = state_path
-                logger.info("browser scrape using storage_state=%s", state_path)
-
-            context = browser.new_context(**context_kwargs)
-            page = context.new_page()
-            # Block navigation to internal/private targets (SSRF) before load.
-            from app.core.net_guard import assert_public_url
-
-            assert_public_url(url)
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-            # domcontentloaded fires on raw HTML parse, before a page's OWN
-            # async fetch()/XHR calls (e.g. an API-backed gallery/stats
-            # widget) resolve -- extracting text right after it can capture
-            # a genuinely inconsistent in-between state: a "loading..."
-            # placeholder AND a hidden "empty" fallback message both present
-            # at once, neither reflecting the page's real, settled content
-            # (root-caused live 2026-08-10: pixelcity.aetheralabs.es's
-            # gallery fetches /api/gallery client-side; the scrape landed
-            # mid-fetch and captured its display:none "no works minted yet"
-            # placeholder as if genuinely shown, producing a fabricated
-            # "the site's own gallery disagrees with the chain" narrative
-            # for a gallery that actually renders 246 real NFTs once its
-            # fetch completes). Best-effort and capped short: a page with
-            # persistent background chatter (websockets, polling, ads) would
-            # never go idle, and this must never turn into an extra ~timeout
-            # seconds of dead wait on every ordinary page -- the fixed
-            # wait_ms fallback below still runs regardless as a floor.
-            try:
-                page.wait_for_load_state("networkidle", timeout=min(timeout, 8_000))
-            except Exception:
-                logger.debug("networkidle wait timed out for %s; continuing", url)
-            if wait_ms > 0:
-                page.wait_for_timeout(wait_ms)
-            _expand_collapsed_content(page)
-            title = page.title() or ""
-            text = _extract_visible_text(page)
-            html = page.content()
-            final_url = page.url
-            context.close()
-        finally:
-            browser.close()
-
-    cleaned = _clean_extracted_text(text)
-    if (
-        not skip_login_wall_check
-        and _looks_like_login_wall(cleaned, title)
-        and not (state_path and Path(state_path).is_file())
-    ):
-        raise BrowserScrapeError(
-            "browser page looks like a login or gate — use push ingest, mail, or "
-            "BROWSER_STORAGE_STATE_PATH for an allowlisted session you control"
+    try:
+        return session.fetch(
+            url,
+            wait_after_load_ms=wait_after_load_ms,
+            timeout_ms=timeout_ms,
+            skip_login_wall_check=skip_login_wall_check,
         )
-
-    if len(cleaned) < 80:
-        raise BrowserScrapeError("browser page had insufficient visible text")
-
-    return BrowserPageResult(
-        title=title.strip(),
-        text=cleaned,
-        final_url=final_url,
-        engine="playwright",
-        html=html,
-    )
+    finally:
+        session.close()
 
 
 def click_and_read(
@@ -202,6 +156,7 @@ def click_and_read(
     *,
     wait_after_click_ms: int = 1500,
     timeout_ms: int | None = None,
+    playwright_session: PlaywrightSession | None = None,
 ) -> BrowserPageResult:
     """Load url, click the first visible element whose text matches click_text, and return the page's content AFTER the click.
 
@@ -214,64 +169,39 @@ def click_and_read(
     real visitor experiences: the footer items are BUTTONS with no href at
     all, and clicking either opens a working in-page modal with real
     content. fetch_page has no way to discover that; this does.
-    """
-    timeout = timeout_ms if timeout_ms is not None else config.BROWSER_TIMEOUT_MS
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
-        msg = "playwright package not installed"
-        raise BrowserScrapeError(msg) from exc
 
+    playwright_session: reuse an already-running PlaywrightSession's
+    browser/context instead of launching a fresh, throwaway Chromium for
+    this one call -- same rationale and ownership contract as fetch_page's
+    playwright_session param (the caller that created the session owns it
+    and closes it; this never does). With no session given, one is created
+    and closed here for just this call.
+    """
+    # Checked before any browser is launched (rather than deferred into a
+    # freshly-created session's own goto, as fetch_page above does) so a
+    # blocked/private target never costs a Chromium launch it can't use --
+    # this function's original behavior, preserved across the delegation
+    # below.
     from app.core.net_guard import assert_public_url
 
     assert_public_url(url)
 
-    launch_kwargs: dict[str, object] = {"headless": config.BROWSER_HEADLESS}
-    channel = (config.BROWSER_CHANNEL or "").strip()
-    if channel:
-        launch_kwargs["channel"] = channel
+    if playwright_session is not None:
+        return playwright_session.click_and_read(
+            url, click_text, wait_after_click_ms=wait_after_click_ms, timeout_ms=timeout_ms
+        )
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(**launch_kwargs)
-        try:
-            context = browser.new_context(user_agent=_BROWSER_UA)
-            page = context.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-            try:
-                page.wait_for_load_state("networkidle", timeout=min(timeout, 8_000))
-            except Exception:
-                logger.debug("networkidle wait timed out for %s; continuing", url)
-
-            locator = _locate_clickable(page, click_text)
-            if locator is None:
-                clickable = _sample_clickable_texts(page)
-                msg = (
-                    f"no element with text matching {click_text!r} found -- "
-                    f"visible clickable text on the page includes: {clickable}"
-                )
-                raise BrowserScrapeError(msg)
-            _click_robust(locator)
-            page.wait_for_timeout(wait_after_click_ms)
-            _expand_collapsed_content(page)
-            title = page.title() or ""
-            text = _extract_visible_text(page)
-            html = page.content()
-            final_url = page.url
-            context.close()
-        finally:
-            browser.close()
-
-    cleaned = _clean_extracted_text(text)
-    if len(cleaned) < 80:
-        raise BrowserScrapeError("page had insufficient visible text after the click")
-
-    return BrowserPageResult(
-        title=title.strip(),
-        text=cleaned,
-        final_url=final_url,
-        engine="playwright-click",
-        html=html,
-    )
+    try:
+        session = PlaywrightSession()
+    except ImportError as exc:
+        msg = "playwright package not installed"
+        raise BrowserScrapeError(msg) from exc
+    try:
+        return session.click_and_read(
+            url, click_text, wait_after_click_ms=wait_after_click_ms, timeout_ms=timeout_ms
+        )
+    finally:
+        session.close()
 
 
 def _sample_clickable_texts(page: Page, limit: int = 25) -> list[str]:
@@ -567,8 +497,15 @@ class PlaywrightSession:
     (success or failure -- caller must use try/finally).
     """
 
-    def __init__(self) -> None:
-        """Launch the browser+context immediately; raises if Playwright/Chromium isn't available (use maybe_start_session() to get a caller-safe None instead)."""
+    def __init__(self, *, storage_state_path: str | None = None) -> None:
+        """Launch the browser+context immediately; raises if Playwright/Chromium isn't available (use maybe_start_session() to get a caller-safe None instead).
+
+        storage_state_path overrides config.BROWSER_STORAGE_STATE_PATH for this
+        one session -- lets a caller with its own per-call override (e.g. the
+        module-level fetch_page's storage_state_path param) get the same
+        session behind it as every other caller, instead of that override
+        living only in a separate, un-reused launch path.
+        """
         from playwright.sync_api import sync_playwright
 
         self._closed = False
@@ -579,10 +516,10 @@ class PlaywrightSession:
             launch_kwargs["channel"] = channel
         self._browser = self._playwright.chromium.launch(**launch_kwargs)
         context_kwargs: dict = {"user_agent": _BROWSER_UA}
-        state_path = config.BROWSER_STORAGE_STATE_PATH
-        if state_path and Path(state_path).is_file():
-            context_kwargs["storage_state"] = state_path
-            logger.info("playwright session using storage_state=%s", state_path)
+        self._storage_state_path = storage_state_path or config.BROWSER_STORAGE_STATE_PATH
+        if self._storage_state_path and Path(self._storage_state_path).is_file():
+            context_kwargs["storage_state"] = self._storage_state_path
+            logger.info("playwright session using storage_state=%s", self._storage_state_path)
         self._context = self._browser.new_context(**context_kwargs)
         # A long-lived page for play_interactive (2026-08-11), distinct from
         # every other method above: fetch/click/type each open a FRESH page
@@ -622,11 +559,19 @@ class PlaywrightSession:
     def _read_page(self, page: Page, *, engine: str, skip_login_wall_check: bool = False) -> BrowserPageResult:
         _expand_collapsed_content(page)
         title = page.title() or ""
-        text = page.inner_text("body")
+        # _extract_visible_text (main/article landmark preference + dedup),
+        # not a raw page.inner_text("body") dump -- this session's own reads
+        # used to skip that extraction entirely, a second, worse-quality copy
+        # of "get the page's text" living side by side with the module-level
+        # fetch_page/click_and_read below. Unifying on it here is what makes
+        # those two safe to delegate to this session (see fetch_page/
+        # click_and_read's playwright_session param) without regressing their
+        # output quality.
+        text = _extract_visible_text(page)
         html = page.content()
         final_url = page.url
         cleaned = _clean_extracted_text(text)
-        state_path = config.BROWSER_STORAGE_STATE_PATH
+        state_path = self._storage_state_path
         if (
             not skip_login_wall_check
             and _looks_like_login_wall(cleaned, title)

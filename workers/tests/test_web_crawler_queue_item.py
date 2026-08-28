@@ -94,7 +94,7 @@ def test_scrape_from_queue_item_counts_domain_crawl_before_quality_gate(
         published_at="2026-08-20T00:00:00Z",
         links=[{"text": "explorer", "url": "https://allo.info/asset/1/token"}],
     )
-    monkeypatch.setattr(driver, "scrape_with_fallback", lambda _url, _source_id: result)
+    monkeypatch.setattr(driver, "scrape_with_fallback", lambda _url, _source_id, **_kw: result)
 
     outcome = driver.scrape_from_queue_item(_item("https://svc.example/thin"))
 
@@ -140,7 +140,7 @@ def test_scrape_from_queue_item_forwards_outbound_links_and_published_at(
             {"text": "docs", "url": "https://docs.svc.example/"},
         ],
     )
-    monkeypatch.setattr(driver, "scrape_with_fallback", lambda _url, _source_id: result)
+    monkeypatch.setattr(driver, "scrape_with_fallback", lambda _url, _source_id, **_kw: result)
 
     driver.scrape_from_queue_item(_item("https://svc.example/ok"))
 

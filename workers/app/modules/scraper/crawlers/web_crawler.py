@@ -7,6 +7,7 @@ import logging
 import httpx
 
 from app.modules.scraper.core.base import BaseScraper, ScrapeResult
+from app.modules.scraper.core.browser_scrape import PlaywrightSession
 from app.modules.scraper.core.browser_scraper import BrowserScraper
 from app.modules.scraper.core.http_scraper import HttpScraper
 from app.modules.scraper.core.scrape_engine import uses_browser_engine
@@ -120,23 +121,48 @@ class WebCrawlerDriver:
         # every lane (publish pipeline included) benefits from the fallback.
         return _SmartWebScraper(self)
 
-    def scrape_with_fallback(self, scrape_url: str, source_id: str) -> ScrapeResult:
-        """Scrape via HTTP, falling back to the browser scraper for thin or SPA pages."""
+    def scrape_with_fallback(
+        self,
+        scrape_url: str,
+        source_id: str,
+        *,
+        playwright_session: PlaywrightSession | None = None,
+    ) -> ScrapeResult:
+        """Scrape via HTTP, falling back to the browser scraper for thin or SPA pages.
+
+        playwright_session: reuse a caller-owned session across a batch of
+        scrape_with_fallback calls (e.g. drain_url_queue's per-item loop)
+        instead of each browser-fallback hit launching its own throwaway
+        Chromium -- see fetch_page's docstring. Optional and caller-owned:
+        this never closes it.
+        """
         http = HttpScraper()
         try:
             result = http.scrape(scrape_url, source_id)
         except Exception as exc:
             if is_web_spa_enabled() and _browser_might_help(exc):
-                return BrowserScraper().scrape(scrape_url, source_id)
+                return BrowserScraper().scrape(
+                    scrape_url, source_id, playwright_session=playwright_session
+                )
             raise
 
         if needs_spa_fallback(result.text, raw_html=result.raw_html) and is_web_spa_enabled():
-            return BrowserScraper().scrape(scrape_url, source_id)
+            return BrowserScraper().scrape(
+                scrape_url, source_id, playwright_session=playwright_session
+            )
         return result
 
-    def scrape(self, scrape_url: str, source_id: str) -> ScrapeResult:
+    def scrape(
+        self,
+        scrape_url: str,
+        source_id: str,
+        *,
+        playwright_session: PlaywrightSession | None = None,
+    ) -> ScrapeResult:
         """Scrape one URL, falling back to the browser scraper for thin or SPA pages."""
-        return self.scrape_with_fallback(scrape_url, source_id)
+        return self.scrape_with_fallback(
+            scrape_url, source_id, playwright_session=playwright_session
+        )
 
     @staticmethod
     def _skip(queue_id: str, url: str, *, status: str, reason: str) -> dict[str, object]:
@@ -202,8 +228,14 @@ class WebCrawlerDriver:
         except Exception:
             logger.warning("failed to enqueue page links from %s", url, exc_info=True)
 
-    def scrape_from_queue_item(self, item: dict) -> dict[str, object]:
-        """Full discovery pipeline for a dequeued URL queue item."""
+    def scrape_from_queue_item(
+        self, item: dict, *, playwright_session: PlaywrightSession | None = None
+    ) -> dict[str, object]:
+        """Full discovery pipeline for a dequeued URL queue item.
+
+        playwright_session: reuse a caller-owned session for this item's
+        scrape_with_fallback call -- see scrape_with_fallback's docstring.
+        """
         from app.core.config import SINGLE_PAGE_AUTOCOMPOSE_ENABLED
         from app.modules.ai.publish_classifier import (
             is_content_quality_sufficient,
@@ -243,7 +275,9 @@ class WebCrawlerDriver:
         # failure — keeps this exact link out of the crawler for the window.
         mark_url_crawled(url)
         try:
-            result = self.scrape_with_fallback(url, service_id)
+            result = self.scrape_with_fallback(
+                url, service_id, playwright_session=playwright_session
+            )
         except Exception as exc:
             if queue_id:
                 mark_url_done(queue_id, status="failed")

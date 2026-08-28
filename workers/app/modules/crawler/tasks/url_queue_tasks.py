@@ -14,6 +14,7 @@ from app.modules.crawler.url_queue import (
     pending_url_count,
     reclaim_stale_processing_urls,
 )
+from app.modules.scraper.core.browser_scrape import maybe_start_session
 from app.modules.scraper.crawlers.web_crawler import WebCrawlerDriver
 
 logger = logging.getLogger(__name__)
@@ -38,20 +39,37 @@ if TYPE_CHECKING:
 # stale (see celery_app.py's drain-url-queue beat entry).
 @single_flight(lambda *_a, **_kw: "crawler:drain_url_queue", ttl=celery_app.conf.task_time_limit)
 def drain_url_queue(*, max_items: int = 5) -> dict[str, object]:
-    """Dequeue URLs and run the web discovery pipeline."""
+    """Dequeue URLs and run the web discovery pipeline.
+
+    One PlaywrightSession is started up front and shared across this
+    batch's items, instead of scrape_from_queue_item's own browser-fallback
+    path launching a fresh throwaway Chromium per item -- root-caused
+    2026-08-28: with up to max_items (as high as 10 per tick) each
+    potentially hitting the SPA fallback, this beat could pay for up to
+    max_items separate Chromium launches (~2-5s + ~300MB RSS each) every
+    URL_QUEUE_DRAIN_SECONDS (as low as 10s), a real contributor to the
+    scrape-pool saturation incident. maybe_start_session() never raises
+    (returns None if the SPA lane is disabled or launch fails) and the
+    session is always closed in `finally`, even if an item's scrape raises.
+    """
     if not URL_QUEUE_ENABLED:
         return {"status": "skipped", "reason": "url_queue_disabled", "processed": 0}
 
     driver = WebCrawlerDriver()
     results: list[dict[str, object]] = []
     processed = 0
-    for _ in range(max_items):
-        item = dequeue_url()
-        if item is None:
-            break
-        outcome = driver.scrape_from_queue_item(item)
-        results.append(outcome)
-        processed += 1
+    session = maybe_start_session()
+    try:
+        for _ in range(max_items):
+            item = dequeue_url()
+            if item is None:
+                break
+            outcome = driver.scrape_from_queue_item(item, playwright_session=session)
+            results.append(outcome)
+            processed += 1
+    finally:
+        if session is not None:
+            session.close()
 
     return {
         "status": "ok",
