@@ -47,7 +47,7 @@ WRITER_EDITORIAL_BRIEFS_ENABLED=1
 
 ## Editorial briefs (admin suggestion box)
 
-Queued rows in `editorial_briefs` (migration `015`) whose **keywords** match ingest text are appended to the writer prompt as “editorial direction” — not final copy. Create briefs in the Flutter **Admin → Writer briefs** tab or `POST /api/v1/admin/briefs`.
+Queued rows in `editorial_briefs` (migration `015`) whose **keywords** match ingest text are appended to the writer prompt as “editorial direction” — not final copy. Create briefs in the **Admin → Briefs** tab (`frontend/src/routes/admin/tabs/BriefsTab.svelte`) or `POST /api/v1/admin/briefs`.
 
 Code: `workers/app/modules/newspaper/editorial_briefs.py`
 

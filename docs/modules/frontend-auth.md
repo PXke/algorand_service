@@ -2,7 +2,7 @@
 
 ## Goal
 
-Connect wallet, sign in, and attach session token to API calls in the Flutter app.
+Connect wallet, sign in, and attach session token to API calls in the Vite + Svelte frontend (`frontend/`).
 
 ## Status
 
@@ -10,11 +10,11 @@ Connect wallet, sign in, and attach session token to API calls in the Flutter ap
 
 ## Features (should do)
 
-- Riverpod `walletAuthClientProvider` wrapping `wallet_auth_flutter`
-- `WalletAuthPanel`: connect / disconnect / show address
-- WalletConnect URI dialog (copy, open wallet, done)
-- Restore session on startup from secure storage
-- Pass `x-session-token` on authenticated API calls (suggestions)
+- `walletProviders.ts`: multi-wallet adapter (Pera / Defly / Lute) — every provider lands on the same connect → nonce → sign → verify flow via `loadWalletAdapter`
+- `session.ts`: Svelte stores (`session`, `sessionReady`, `walletFlow`, `authBusy`, `authError`); `signInWithWalletConnect()` drives the flow, `restoreSession()` on startup
+- `WalletDialog.svelte`: connect/disconnect UI, wallet picker, pairing/signing status
+- Session token persisted in `localStorage` (`wallet_auth_session_token`)
+- Pass `x-session-token` on authenticated API calls (`sessionHeaders()` in `api/auth.ts`)
 
 ## Good to have
 
@@ -34,9 +34,12 @@ Client flows must match backend: CAIP-122, ARC-0060 / ARC-0025. [wallet-auth-pro
 
 ## Depends on
 
-- `wallet-auth`, `wallet-auth-flutter`, `web-platform`
+- `wallet-auth`, `web-platform`
 
 ## Code map
 
-- `frontend_flutter/lib/modules/auth/`
-- `opensource/wallet_auth_flutter/`
+- `frontend/src/lib/auth/` (`session.ts`, `walletProviders.ts`, `pera.ts`, `defly.ts`, `lute.ts`, `walletconnect.ts`)
+- `frontend/src/components/WalletDialog.svelte`
+- `frontend/src/lib/api/auth.ts`
+
+Note: `opensource/wallet_auth_flutter/` (formerly consumed here via the newspaper's old Flutter frontend) is now only consumed by the separate x402/KYC app (`frontend_kyc/`) — see [wallet-auth-flutter.md](wallet-auth-flutter.md).

@@ -1,6 +1,6 @@
 # Wallet Auth Protocol — ARC-0025, ARC-0060, SIWA / CAIP-122
 
-This document describes the **Wallet Auth brick** implementation across backend (`backend/app/modules/auth/`) and Flutter (`opensource/wallet_auth_flutter/`).
+This document describes the **Wallet Auth brick** implementation across backend (`backend/app/modules/auth/`) and the frontend client (`frontend/src/lib/auth/`, Vite + Svelte). The `opensource/wallet_auth_flutter/` Flutter package this doc used to describe client-side now belongs to the separate x402/KYC app (`frontend_kyc/`), not the main newspaper frontend.
 
 **Coverage:** full **SIWA / CAIP-122** message generation, **ARC-0060 AUTH** verification (reference-aligned with `assets/arc-0060/arc60wallet.api.ts`), and **ARC-0025** WalletConnect session + `algo_signTxn` fallback.
 
@@ -12,7 +12,7 @@ This document describes the **Wallet Auth brick** implementation across backend 
 
 | Standard | Role in login | Implementation |
 |----------|---------------|----------------|
-| **CAIP-122 / SIWA** | Canonical auth payload + EIP-4361 display string | `caip122.py` / `siwa_message.py` (backend), `caip122_message.dart` / `siwa_message.dart` (Flutter) |
+| **CAIP-122 / SIWA** | Canonical auth payload + EIP-4361 display string | `caip122.py` / `siwa_message.py` (backend), consumed inline via the `LoginChallenge` returned from `POST /auth/nonce` (`frontend/src/lib/auth/session.ts`, `walletProviders.ts`) |
 | **ARC-0060** | Preferred proof: `signData` AUTH scope | `arc0060_verify.py`, `arc0060.dart`, WC methods `algo_signData` / `signData` |
 | **ARC-0025** | WalletConnect v1 + `algo_signTxn` fallback | `walletconnect_algorand_connector.dart`, `algorand_txn_verify.py` |
 | **ARC-1** | `WalletTransaction` shape (`txn`, `signers`, `message`) | Used in `algo_signTxn` requests |
@@ -108,7 +108,7 @@ ARC-0025 fallback:
 
 ```mermaid
 sequenceDiagram
-  participant App as Flutter app
+  participant App as Frontend app
   participant WC as WalletConnect
   participant Wallet as Algorand wallet
   participant API as Backend

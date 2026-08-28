@@ -101,9 +101,18 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: Install and build
+      - name: Install
         working-directory: frontend
-        run: npm ci && npm run build
+        run: npm ci
+      - name: Check
+        working-directory: frontend
+        run: npm run check
+      - name: Test
+        working-directory: frontend
+        run: npm test
+      - name: Build
+        working-directory: frontend
+        run: npm run build
 
   docker-test:
     runs-on: ubuntu-latest

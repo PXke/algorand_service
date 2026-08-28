@@ -12,3 +12,11 @@ Use Robyn for API and Celery for workers. Persist primary records in Cassandra, 
 ## Consequences
 - Good concurrency and clear separation between API and long-running jobs.
 - Requires operational discipline for Celery queues and Cassandra query-model design.
+
+## Update
+
+The API was later migrated off Robyn onto **Falcon + gunicorn** (free-threaded
+Python). The rest of this decision — Celery for workers, Cassandra as the
+primary store, Redis for cache/queue, Typesense for search — is unchanged.
+This ADR's historical Decision/Consequences above are left as written; see
+`backend/` for the current framework.

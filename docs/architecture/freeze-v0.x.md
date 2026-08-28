@@ -1,5 +1,12 @@
 # Freeze checklist — v0.x (P1 + P2 joint ship)
 
+> **Historical snapshot.** This checklist reflects the stack at the v0.x
+> freeze gate, when the client was the Flutter app and the API ran on Robyn.
+> The Flutter frontend has since been fully replaced by the Vite + Svelte
+> `frontend/`, and the API migrated to Falcon + gunicorn. Checked items below
+> record what was true and verified *then*, not current tech — do not use
+> this as a description of the current stack.
+
 Target: end of current **2-week dev window** before TestNet validation. See [release-cadence.md](release-cadence.md).
 
 ## Product 0 — Wallet auth
