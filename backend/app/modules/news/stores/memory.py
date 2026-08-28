@@ -54,6 +54,11 @@ class InMemoryArticleStore:
         """Fetch one article by id, or None if it does not exist."""
         return self._by_id.get(article_id)
 
+    def get_detail(self, article_id: str, *, lang: str | None = None) -> StoredArticle | None:
+        """Fetch one article for the detail read path -- mirrors CassandraArticleStore.get_detail's (article_id, lang) contract. The in-memory store already holds the complete StoredArticle (including the full translations map) in memory, so there's no lighter projection to make; `lang` is accepted only for interface parity with the caller (NewsService._fetch_detail), which always passes it by keyword."""
+        _ = lang
+        return self._by_id.get(article_id)
+
     def get_many(self, article_ids: list[str]) -> dict[str, StoredArticle]:
         """Fetch many articles by id; missing ids are omitted."""
         return {
@@ -61,6 +66,13 @@ class InMemoryArticleStore:
             for aid in article_ids
             if (article := self._by_id.get(aid)) is not None
         }
+
+    def get_many_detail(
+        self, article_ids: list[str], *, lang: str | None = None
+    ) -> dict[str, StoredArticle]:
+        """Fetch many articles for the bulk detail read path -- mirrors get_many exactly; see get_detail's docstring for why lang is a no-op here."""
+        _ = lang
+        return self.get_many(article_ids)
 
     def list_by_tag_page(
         self, tag: str, *, limit: int = 50, cursor_epoch_ms: int | None = None

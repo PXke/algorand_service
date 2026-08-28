@@ -1,4 +1,4 @@
-"""algorand_shared.article_statements: the feed/tag-listing statements select translated_titles (the lightweight lang -> JSON {title, summary} column), not the full translations map -- migration 087. The single-article detail statement (GET_FULL_BY_ID) is untouched: it still selects both columns."""
+"""algorand_shared.article_statements: the feed/tag-listing statements select translated_titles (the lightweight lang -> JSON {title, summary} column), not the full translations map -- migration 087. The single-article detail statement (GET_FULL_BY_ID) is untouched: it still selects both columns; the NEW lang-aware detail statements added 2026-08-28 (GET_BY_ID_NO_TRANSLATIONS / GET_BY_ID_WITH_TRANSLATION, used by CassandraArticleStore.get_detail/get_many_detail, see backend/tests/test_news_service_detail_projection.py) sit alongside it rather than replacing it."""
 
 from __future__ import annotations
 
@@ -59,3 +59,17 @@ def test_update_translations_merges_both_maps_in_one_statement() -> None:
 def test_clear_translations_clears_both_columns_together() -> None:
     cql = _cql(ArticlesStmts, "CLEAR_TRANSLATIONS")
     assert cql.startswith("DELETE translations, translated_titles FROM")
+
+
+def test_get_by_id_no_translations_drops_the_translations_map_entirely() -> None:
+    """2026-08-28 single-article-detail follow-up: when NewsService has no lang to overlay, the detail read shouldn't ship `translations` at all -- unlike GET_FULL_BY_ID (untouched, see test_get_full_by_id_still_selects_the_full_translations_map above)."""
+    cql = _cql(ArticlesStmts, "GET_BY_ID_NO_TRANSLATIONS")
+    assert "translations" not in cql
+    assert "translated_titles" in cql
+
+
+def test_get_by_id_with_translation_selects_one_map_element_not_the_whole_map() -> None:
+    """`translations[?]` is a Cassandra 4.0+ map-element projection (CASSANDRA-7396; this platform runs Cassandra 5.0, see docker-compose.yml) -- a single bind-parameterized language key, never the other stored languages, aliased back to `translations` so the row shape matches GET_FULL_BY_ID's for the shared mapper."""
+    cql = _cql(ArticlesStmts, "GET_BY_ID_WITH_TRANSLATION")
+    assert "translations[?] AS translations" in cql
+    assert cql.count("?") == 2  # the map key (lang) + article_id

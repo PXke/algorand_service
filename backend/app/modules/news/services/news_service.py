@@ -332,12 +332,26 @@ class NewsService:
             if overlap is not None:
                 overlap()
 
-        get = self._store.get
-        try:
-            article = get(article_id, overlap=_overlap)  # type: ignore[call-arg]
-        except TypeError:
-            _overlap()
-            article = get(article_id)
+        # get_detail projects only the translation `lang` actually needs
+        # (or none, when lang is None) instead of `get()`'s complete
+        # `translations` map -- see CassandraArticleStore.get_detail's
+        # docstring. Falls back to `.get()` for a store that doesn't
+        # implement it (matches the existing optional-method convention
+        # this module already uses for `overlap`/`get_many` below).
+        get_detail = getattr(self._store, "get_detail", None)
+        if get_detail is None:
+            get_detail = self._store.get
+            try:
+                article = get_detail(article_id, overlap=_overlap)  # type: ignore[call-arg]
+            except TypeError:
+                _overlap()
+                article = get_detail(article_id)
+        else:
+            try:
+                article = get_detail(article_id, lang=lang, overlap=_overlap)  # type: ignore[call-arg]
+            except TypeError:
+                _overlap()
+                article = get_detail(article_id, lang=lang)
         if article is None:
             _drain_view_future(view_future)
             return None, False
@@ -360,16 +374,27 @@ class NewsService:
     def get_articles(
         self, article_ids: list[str], lang: str | None = None
     ) -> dict[str, ArticleDetail]:
-        """Fetch many article details concurrently (RSS / bulk enrichment)."""
-        getter = getattr(self._store, "get_many", None)
-        if getter is None:
-            stored = {
-                aid: article
-                for aid in article_ids
-                if (article := self._store.get(aid)) is not None
-            }
+        """Fetch many article details concurrently (RSS / bulk enrichment).
+
+        Prefers get_many_detail (projects only the translation `lang`
+        needs, or none, instead of get_many's complete `translations` map --
+        both current callers, the RSS feed and llms-full.txt, pass no lang
+        and only ever read `.body`, never `.translations`) with a fallback
+        to get_many/get for a store that doesn't implement it.
+        """
+        get_many_detail = getattr(self._store, "get_many_detail", None)
+        if get_many_detail is not None:
+            stored = get_many_detail(article_ids, lang=lang)
         else:
-            stored = getter(article_ids)
+            getter = getattr(self._store, "get_many", None)
+            if getter is None:
+                stored = {
+                    aid: article
+                    for aid in article_ids
+                    if (article := self._store.get(aid)) is not None
+                }
+            else:
+                stored = getter(article_ids)
         # Same admin-only gate as get_article — RSS/enrichment ids normally
         # come from the feed (which a draft is removed from), but this stays
         # correct even if a caller ever passes an id directly.
