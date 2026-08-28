@@ -30,9 +30,7 @@ def _fake_client(post_fn: Callable[..., object]) -> type:
         def __exit__(self, *args: object) -> None:
             return None
 
-        def post(
-            self, url: str, headers: dict | None = None, json: dict | None = None
-        ) -> object:
+        def post(self, url: str, headers: dict | None = None, json: dict | None = None) -> object:
             return post_fn(url, headers, json)
 
     return FakeClient
@@ -108,7 +106,9 @@ def test_messages_to_contents_translates_tool_result_to_function_response() -> N
     )
     assert contents[0] == {
         "role": "function",
-        "parts": [{"functionResponse": {"name": "search_web", "response": {"result": {"ok": True}}}}],
+        "parts": [
+            {"functionResponse": {"name": "search_web", "response": {"result": {"ok": True}}}}
+        ],
     }
 
 
@@ -239,8 +239,14 @@ def test_chat_with_tools_nudges_once_for_a_required_tool(monkeypatch: pytest.Mon
     """No function calls and require_tool not yet satisfied -> one nudge message, then accepts the next round's plain text."""
     """No function calls and require_tool not yet satisfied -> one nudge message, then accepts the next round's plain text."""
     responses = [
-        {"candidates": [{"content": {"role": "model", "parts": [{"text": "thinking..."}]}}], "usageMetadata": {}},
-        {"candidates": [{"content": {"role": "model", "parts": [{"text": "FINAL"}]}}], "usageMetadata": {}},
+        {
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "thinking..."}]}}],
+            "usageMetadata": {},
+        },
+        {
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "FINAL"}]}}],
+            "usageMetadata": {},
+        },
     ]
     calls = {"n": 0}
 
@@ -327,8 +333,188 @@ def test_post_raises_llm_credit_error_on_403(monkeypatch: pytest.MonkeyPatch) ->
         provider.chat_completion([{"role": "user", "content": "hi"}])
 
 
-def test_post_retries_then_raises_on_persistent_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_chat_with_tools_dedup_nudges_an_identical_repeat_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared llm_tool_loop driver's seen-calls dedup cache (previously enforced for OpenAI-compatible providers only, see test_writer_tool_loop.py's cross-pass-dedup tests) now protects Gemini sessions too: an exact repeat of an already-executed call is nudged, not re-run."""
+    call = {"functionCall": {"name": "search_web", "args": {"query": "x"}}}
+    responses = [
+        {"candidates": [{"content": {"role": "model", "parts": [call]}}], "usageMetadata": {}},
+        {"candidates": [{"content": {"role": "model", "parts": [call]}}], "usageMetadata": {}},
+        {
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "FINAL"}]}}],
+            "usageMetadata": {},
+        },
+    ]
+    calls = {"n": 0}
+
+    def _post(*_a: object) -> object:
+        i = calls["n"]
+        calls["n"] += 1
+        return _response(200, responses[i])
+
+    _patch_httpx(monkeypatch, _fake_client(_post))
+
+    provider = GeminiProvider(api_key="test-key")
+    executed = {"n": 0}
+
+    def handler(**_kw: object) -> dict:
+        executed["n"] += 1
+        return {"ok": True}
+
+    result = provider.chat_with_tools(
+        [{"role": "user", "content": "research this"}],
+        tools=[{"type": "function", "function": {"name": "search_web", "parameters": {}}}],
+        handlers={"search_web": handler},
+    )
+
+    assert result == "FINAL"
+    assert executed["n"] == 1  # the exact repeat in round 2 was nudged, never re-executed
+    assert calls["n"] == 3
+
+
+def test_chat_with_tools_enforces_the_shared_per_tool_call_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """search_x's per-session call cap (llm_tool_loop.CALL_CAPPED_TOOLS, previously enforced for OpenAI-compatible providers only) now also applies to a Gemini session via the shared driver: a call past the cap is refused outright without ever reaching the handler."""
+    responses = [
+        {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [{"functionCall": {"name": "search_x", "args": {"query": "new"}}}],
+                    }
+                }
+            ],
+            "usageMetadata": {},
+        },
+        {
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "FINAL"}]}}],
+            "usageMetadata": {},
+        },
+    ]
+    calls = {"n": 0}
+
+    def _post(*_a: object) -> object:
+        i = calls["n"]
+        calls["n"] += 1
+        return _response(200, responses[i])
+
+    _patch_httpx(monkeypatch, _fake_client(_post))
+
+    provider = GeminiProvider(api_key="test-key")
+    executed = {"n": 0}
+
+    def handler(**_kw: object) -> dict:
+        executed["n"] += 1
+        return {"count": 0}
+
+    # Seed the trace as if 3 earlier search_x calls (the cap) already ran
+    # this session -- cross-pass seeding is itself shared driver behavior.
+    trace = [
+        {"tool": "search_x", "arguments": {"query": f"q{i}"}, "result": {"count": 0}}
+        for i in range(3)
+    ]
+    result = provider.chat_with_tools(
+        [{"role": "user", "content": "x"}],
+        tools=[{"type": "function", "function": {"name": "search_x", "parameters": {}}}],
+        handlers={"search_x": handler},
+        trace=trace,
+    )
+
+    assert result == "FINAL"
+    assert executed["n"] == 0  # capped refusal -- handler never ran
+    assert calls["n"] == 2
+
+
+def test_chat_with_tools_exhaustion_sets_debug_flags_and_skips_finalize_when_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running out of rounds (the round-budget ceiling) sets debug["rounds"]/["exhausted"] -- previously OpenAI-only bookkeeping, now shared -- and, with finalize_on_exhaustion=False, returns the last seen text without paying for the extra wrap-up completion, matching OpenAICompatibleProvider's own exhaustion contract."""
+    call = {"functionCall": {"name": "fetch_url", "args": {"url": "https://example.com/1"}}}
+
+    def _post(*_a: object) -> object:
+        return _response(
+            200,
+            {"candidates": [{"content": {"role": "model", "parts": [call]}}], "usageMetadata": {}},
+        )
+
+    _patch_httpx(monkeypatch, _fake_client(_post))
+
+    provider = GeminiProvider(api_key="test-key")
+    debug: dict = {}
+    result = provider.chat_with_tools(
+        [{"role": "user", "content": "x"}],
+        tools=[{"type": "function", "function": {"name": "fetch_url", "parameters": {}}}],
+        handlers={"fetch_url": lambda **_k: {"ok": True}},
+        max_rounds=2,
+        finalize_on_exhaustion=False,
+        debug=debug,
+    )
+
+    assert result == ""  # every round called a tool, never produced text content
+    assert debug["rounds"] == 2
+    assert debug["exhausted"] is True
+
+
+def test_chat_with_tools_debug_transcript_is_a_live_native_contents_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """debug["messages"] is now the same kind of full, live-mutating transcript OpenAICompatibleProvider has always produced -- before this refactor Gemini only ever recorded a synthetic one-line-per-round summary, dropping the actual functionCall/functionResponse detail. debug["model"] is set too."""
+    responses = [
+        {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [{"functionCall": {"name": "search_web", "args": {"query": "x"}}}],
+                    }
+                }
+            ],
+            "usageMetadata": {},
+        },
+        {
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "FINAL"}]}}],
+            "usageMetadata": {},
+        },
+    ]
+    calls = {"n": 0}
+
+    def _post(*_a: object) -> object:
+        i = calls["n"]
+        calls["n"] += 1
+        return _response(200, responses[i])
+
+    _patch_httpx(monkeypatch, _fake_client(_post))
+
+    provider = GeminiProvider(api_key="test-key", model="gemini-test-model")
+    debug: dict = {}
+    result = provider.chat_with_tools(
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "research this"}],
+        tools=[{"type": "function", "function": {"name": "search_web", "parameters": {}}}],
+        handlers={"search_web": lambda **_kw: {"ok": True}},
+        debug=debug,
+    )
+
+    assert result == "FINAL"
+    assert debug["model"] == "gemini-test-model"
+    # The real native contents list -- role/parts shape, not a synthetic
+    # one-line summary -- so a functionResponse turn is really in there.
+    assert any(m.get("role") == "function" for m in debug["messages"])
+    assert any(
+        "functionCall" in p
+        for m in debug["messages"]
+        if m.get("role") == "model"
+        for p in m.get("parts", [])
+    )
+
+
+def test_post_retries_then_raises_on_persistent_network_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A persistent network error retries the configured number of times, then raises LLMError."""
+
     class _ExplodingClient:
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass

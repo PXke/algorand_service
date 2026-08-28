@@ -9,16 +9,20 @@ not a config-parameterized subclass of the OpenAI-compatible base the way
 Mistral/DeepSeek/OpenAI/Kimi/GLM are.
 
 Scope note: this covers the core mechanics compose_runner.compose() actually
-needs -- message/tool translation, the agentic round loop with real retry/
-backoff, and usage accounting -- verified against a mocked response shape
-(no live Gemini access configured in this environment yet). It deliberately
-does not yet replicate every refinement OpenAICompatibleProvider has grown
-over time (the live per-round budget note, the varying-argument tool-call
-cap, the bogus-tool-call salvage path) -- those are follow-ups once real
-Gemini traffic is actually flowing and any of them turns out to matter here
-too. Gemini's functionCall parts have no `id` field at all (unlike OpenAI's
-tool_calls), so the DeepSeek-style missing-tool-call-id failure class this
-session hit and fixed elsewhere does not apply to this wire format.
+needs -- message/tool translation, real retry/backoff, and usage accounting
+-- verified against a mocked response shape (no live Gemini access
+configured in this environment yet). The agentic chat_with_tools loop's
+round-budget bookkeeping, seen-calls dedup cache, tool_call_counts/cap
+enforcement, require_tool nudging, exhaustion handling, and trace/debug
+recording are shared with every other provider via llm_tool_loop.run_tool_loop
+-- this module still owns 100% of the actual generateContent request/response
+shaping (`_GeminiToolLoopAdapter`, below). It does not yet replicate
+OpenAICompatibleProvider's bogus-tool-call salvage path or its context-window
+trimming -- those are follow-ups once real Gemini traffic is actually flowing
+and either turns out to matter here too. Gemini's functionCall parts have no
+`id` field at all (unlike OpenAI's tool_calls), so the DeepSeek-style
+missing-tool-call-id failure class this session hit and fixed elsewhere does
+not apply to this wire format.
 """
 
 from __future__ import annotations
@@ -31,16 +35,16 @@ from typing import Any
 
 import httpx
 
-from app.core.config import (
-    GEMINI_API_BASE,
-    GEMINI_API_KEY,
-    GEMINI_MODEL_WRITER,
-    LLM_MAX_TOOL_ROUNDS,
-)
+from app.core.config import GEMINI_API_BASE, GEMINI_API_KEY, GEMINI_MODEL_WRITER
 from app.modules.ai.llm_provider import LLMCreditError, LLMError, LLMProvider
 from app.modules.ai.llm_rate_limit import throttle_llm_call
+from app.modules.ai.llm_tool_loop import (
+    NormalizedToolCall,
+    RoundResult,
+    ToolLoopAdapter,
+    run_tool_loop,
+)
 from app.modules.ai.mistral_credit_guard import is_credit_exhausted, mark_credit_exhausted
-from app.modules.ai.story_spike import StorySpikedError
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +143,12 @@ class GeminiProvider(LLMProvider):
         self._api_base = (api_base if api_base is not None else GEMINI_API_BASE).rstrip("/")
         self._model = model if model is not None else GEMINI_MODEL_WRITER
         self._timeout = float(timeout) if timeout is not None else 120.0
-        self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
+        self._usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+        }
 
     def usage_totals(self) -> dict[str, int]:
         """Cumulative {prompt_tokens, completion_tokens, total_tokens} across every request this instance has made."""
@@ -180,9 +189,16 @@ class GeminiProvider(LLMProvider):
                 )
             except httpx.RequestError as exc:
                 if last_attempt:
-                    raise LLMError(f"Gemini request failed after {attempt + 1} attempts: {exc}") from exc
+                    raise LLMError(
+                        f"Gemini request failed after {attempt + 1} attempts: {exc}"
+                    ) from exc
                 delay = _BACKOFF_BASE_SECONDS * (2**attempt)
-                logger.warning("Gemini network error (attempt %d/%d); backing off %.1fs", attempt + 1, _MAX_RETRIES + 1, delay)
+                logger.warning(
+                    "Gemini network error (attempt %d/%d); backing off %.1fs",
+                    attempt + 1,
+                    _MAX_RETRIES + 1,
+                    delay,
+                )
                 time.sleep(delay)
                 continue
             if resp.status_code in (401, 402, 403):
@@ -190,9 +206,17 @@ class GeminiProvider(LLMProvider):
                 raise LLMCreditError(f"Gemini API {resp.status_code}: {resp.text[:500]}")
             if resp.status_code in _RETRYABLE_STATUS:
                 if last_attempt:
-                    raise LLMError(f"Gemini API {resp.status_code} after {attempt + 1} attempts: {resp.text[:500]}")
+                    raise LLMError(
+                        f"Gemini API {resp.status_code} after {attempt + 1} attempts: {resp.text[:500]}"
+                    )
                 delay = _BACKOFF_BASE_SECONDS * (2**attempt)
-                logger.warning("Gemini retryable status %d (attempt %d/%d); backing off %.1fs", resp.status_code, attempt + 1, _MAX_RETRIES + 1, delay)
+                logger.warning(
+                    "Gemini retryable status %d (attempt %d/%d); backing off %.1fs",
+                    resp.status_code,
+                    attempt + 1,
+                    _MAX_RETRIES + 1,
+                    delay,
+                )
                 time.sleep(delay)
                 continue
             if resp.status_code >= 400:
@@ -278,71 +302,6 @@ class GeminiProvider(LLMProvider):
             payload["tools"] = gemini_tools
         return payload
 
-    def _execute_function_calls(
-        self,
-        function_calls: list[dict[str, Any]],
-        *,
-        handlers: dict[str, Any],
-        trace: list[dict[str, Any]] | None,
-        require_tool: str | None,
-    ) -> tuple[list[dict[str, Any]], bool]:
-        """Run every function call from one round, return the functionResponse content entries to append plus whether require_tool was satisfied this round."""
-        response_contents: list[dict[str, Any]] = []
-        satisfied = False
-        for fc in function_calls:
-            name = fc.get("name", "")
-            args = fc.get("args") or {}
-            handler = handlers.get(name)
-            try:
-                result = handler(**args) if handler else {"error": f"unknown tool {name}"}
-            except StorySpikedError as spike:
-                # The writer aborting the article (abort_article tool) -- must
-                # propagate uncaught, mirroring OpenAICompatibleProvider's
-                # _run_tool_call, so the compose actually terminates instead
-                # of being swallowed into a tool-error the model can shrug
-                # off and keep writing past.
-                if trace is not None:
-                    trace.append(
-                        {
-                            "tool": name,
-                            "arguments": args,
-                            "result": {
-                                "spiked": True,
-                                "category": spike.category,
-                                "reason": spike.reason,
-                            },
-                        }
-                    )
-                raise
-            except Exception as exc:  # tool failure must not abort the article
-                result = {"error": str(exc)}
-            if trace is not None:
-                trace.append({"tool": name, "arguments": args, "result": result})
-            if name == require_tool:
-                satisfied = True
-            response_contents.append(
-                {
-                    "role": "function",
-                    "parts": [{"functionResponse": {"name": name, "response": {"result": result}}}],
-                }
-            )
-        return response_contents, satisfied
-
-    def _finalize_exhausted(
-        self, contents: list[dict[str, Any]], *, system_text: str, temperature: float
-    ) -> str:
-        """Out of rounds: ask once more, no tools, for a final write-up -- mirrors OpenAICompatibleProvider's own exhaustion behavior. Uses the accumulated `contents` (full round history), not a fresh context, so the wrap-up is grounded in everything already found."""
-        contents.append({"role": "user", "parts": [{"text": "Now write the final JSON article."}]})
-        payload: dict[str, Any] = {
-            "contents": contents,
-            "generationConfig": {"temperature": temperature, "response_mime_type": "application/json"},
-        }
-        if system_text:
-            payload["systemInstruction"] = {"parts": [{"text": system_text}]}
-        data = self._post(payload)
-        parts = self._extract_candidate_parts(data)
-        return "".join(p.get("text", "") for p in parts if "text" in p)
-
     def chat_with_tools(
         self,
         messages: list[dict[str, Any]],
@@ -360,69 +319,127 @@ class GeminiProvider(LLMProvider):
         on_round: Callable[[], None] | None = None,
         show_round_budget: bool = False,
     ) -> str:
-        """The agentic tool-calling loop, translated to/from Gemini's functionCall/functionResponse shape. See module docstring for what this deliberately doesn't yet replicate from OpenAICompatibleProvider."""
-        del context_tokens, show_round_budget  # not yet implemented for Gemini, see module docstring
-        rounds = max_rounds if max_rounds is not None else LLM_MAX_TOOL_ROUNDS
-        system_text, contents = _openai_messages_to_gemini_contents(messages)
-        gemini_tools = _openai_tools_to_gemini(tools)
-        last_text = ""
-        required_satisfied = require_tool is None
+        """The agentic tool-calling loop, translated to/from Gemini's functionCall/functionResponse shape. Round bookkeeping (dedup, cap, require_tool, exhaustion, trace/debug) is the shared llm_tool_loop driver -- see module docstring for what this provider's adapter still doesn't replicate from OpenAICompatibleProvider."""
+        del context_tokens  # not yet implemented for Gemini, see module docstring
+        adapter = _GeminiToolLoopAdapter(self, messages, tools)
+        return run_tool_loop(
+            adapter,
+            tools=tools,
+            handlers=handlers,
+            max_rounds=max_rounds,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            trace=trace,
+            debug=debug,
+            require_tool=require_tool,
+            finalize_on_exhaustion=finalize_on_exhaustion,
+            on_round=on_round,
+            show_round_budget=show_round_budget,
+        )
 
-        for round_idx in range(rounds):
-            payload = self._round_payload(
-                contents,
-                gemini_tools=gemini_tools,
-                system_text=system_text,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            data = self._post(payload)
-            parts = self._extract_candidate_parts(data)
-            function_calls = [p["functionCall"] for p in parts if "functionCall" in p]
-            text_parts = [p.get("text", "") for p in parts if "text" in p]
-            last_text = "".join(text_parts) or last_text
 
-            if debug is not None:
-                debug.setdefault("messages", []).append(
-                    {"role": "assistant", "content": last_text if not function_calls else ""}
-                )
-                debug["rounds"] = round_idx + 1
+class _GeminiToolLoopAdapter(ToolLoopAdapter):
+    """ToolLoopAdapter for GeminiProvider's generateContent functionCall/functionResponse shape.
 
-            if not function_calls:
-                if required_satisfied:
-                    return last_text
-                contents.append({"role": "model", "parts": parts})
-                contents.append(
-                    {
-                        "role": "user",
-                        "parts": [
-                            {
-                                "text": (
-                                    f"Before finishing you MUST call the `{require_tool}` "
-                                    "tool once on your current draft and address its "
-                                    "feedback. Do that now, then output the final answer."
-                                )
-                            }
-                        ],
-                    }
-                )
-                required_satisfied = True  # only nudge once
-                if callable(on_round):
-                    on_round()
-                continue
+    Translates `messages`/`tools` to Gemini's native `contents`/tools shape
+    once, up front, then owns folding each round's assistant turn / tool
+    results / require_tool nudge back into that same running
+    `self._contents` list.
+    """
 
-            contents.append({"role": "model", "parts": parts})
-            response_contents, satisfied = self._execute_function_calls(
-                function_calls, handlers=handlers, trace=trace, require_tool=require_tool
-            )
-            contents.extend(response_contents)
-            required_satisfied = required_satisfied or satisfied
-            if callable(on_round):
-                on_round()
+    def __init__(
+        self,
+        provider: GeminiProvider,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> None:
+        self._provider = provider
+        self._system_text, self._contents = _openai_messages_to_gemini_contents(messages)
+        self._tools = _openai_tools_to_gemini(tools)
 
+    def prepare(self, debug: dict[str, Any] | None) -> None:
         if debug is not None:
-            debug["rounds"] = rounds
-            debug["exhausted"] = True
-        if not finalize_on_exhaustion:
-            return last_text
-        return self._finalize_exhausted(contents, system_text=system_text, temperature=temperature)
+            debug["messages"] = self._contents
+            debug["model"] = self._provider.model
+
+    def send_round(
+        self,
+        *,
+        tools: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int | None,
+        round_budget_note: str,
+    ) -> RoundResult:
+        # `tools` is unchanged from __init__'s translation (self._tools);
+        # round-budget notes aren't implemented for Gemini yet -- see this
+        # module's docstring.
+        del tools, round_budget_note
+        payload = self._provider._round_payload(
+            self._contents,
+            gemini_tools=self._tools,
+            system_text=self._system_text,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        data = self._provider._post(payload)
+        parts = self._provider._extract_candidate_parts(data)
+        function_calls = [p["functionCall"] for p in parts if "functionCall" in p]
+        text = "".join(p.get("text", "") for p in parts if "text" in p)
+        normalized = [
+            NormalizedToolCall(id="", name=fc.get("name", ""), args=fc.get("args") or {})
+            for fc in function_calls
+        ]
+        return RoundResult(text=text, tool_calls=normalized, raw=parts)
+
+    def append_assistant_turn(self, round_result: RoundResult) -> None:
+        self._contents.append({"role": "model", "parts": round_result.raw})
+
+    def append_tool_results(self, entries: list[tuple[NormalizedToolCall, dict[str, Any]]]) -> None:
+        for call, result in entries:
+            self._contents.append(
+                {
+                    "role": "function",
+                    "parts": [
+                        {"functionResponse": {"name": call.name, "response": {"result": result}}}
+                    ],
+                }
+            )
+
+    def append_require_tool_nudge(self, require_tool: str) -> None:
+        self._contents.append(
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": (
+                            f"Before finishing you MUST call the `{require_tool}` "
+                            "tool once on your current draft and address its "
+                            "feedback. Do that now, then output the final answer."
+                        )
+                    }
+                ],
+            }
+        )
+
+    def finalize(self, *, temperature: float, max_tokens: int | None) -> str:
+        # Matches the pre-refactor exhaustion behavior exactly: unlike
+        # `_round_payload`, this never sets maxOutputTokens at all -- not
+        # changed here, just preserved. Uses the accumulated `self._contents`
+        # (full round history), not a fresh context, so the wrap-up is
+        # grounded in everything already found.
+        del max_tokens
+        self._contents.append(
+            {"role": "user", "parts": [{"text": "Now write the final JSON article."}]}
+        )
+        payload: dict[str, Any] = {
+            "contents": self._contents,
+            "generationConfig": {
+                "temperature": temperature,
+                "response_mime_type": "application/json",
+            },
+        }
+        if self._system_text:
+            payload["systemInstruction"] = {"parts": [{"text": self._system_text}]}
+        data = self._provider._post(payload)
+        parts = self._provider._extract_candidate_parts(data)
+        return "".join(p.get("text", "") for p in parts if "text" in p)

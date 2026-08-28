@@ -52,7 +52,6 @@ from app.core.config import (
     LLM_CONTEXT_TOKENS,
     LLM_MAX_RETRIES,
     LLM_MAX_TOKENS,
-    LLM_MAX_TOOL_ROUNDS,
     LLM_TIMEOUT_SECONDS,
     LLM_TOOL_RESULT_MAX_CHARS,
     MISTRAL_API_BASE,
@@ -65,8 +64,15 @@ from app.core.config import (
 )
 from app.modules.ai.llm_provider import LLMCreditError, LLMError, LLMProvider
 from app.modules.ai.llm_rate_limit import throttle_llm_call
+from app.modules.ai.llm_tool_loop import (
+    CALL_CAPPED_TOOLS,
+    NormalizedToolCall,
+    RoundResult,
+    ToolLoopAdapter,
+    round_budget_note,
+    run_tool_loop,
+)
 from app.modules.ai.mistral_credit_guard import is_credit_exhausted, mark_credit_exhausted
-from app.modules.ai.story_spike import StorySpikedError
 from app.modules.ai.token_budget import fit_messages_to_budget, serialize_tool_result
 
 logger = logging.getLogger(__name__)
@@ -243,7 +249,7 @@ def _ensure_tool_call_ids(tool_calls: list[dict[str, Any]]) -> None:
     deepseek-v4-flash, every assistant tool_call and its paired tool-result's
     tool_call_id empty). That's harmless within a single provider's own
     multi-round loop (each round only needs internal consistency, which
-    `_run_tool_call`'s `call.get("id", "")` fallback preserves). It breaks
+    `_execute_tool_call`'s (llm_tool_loop.py) `NormalizedToolCall.id` fallback preserves). It breaks
     the moment this history is later echoed into a call served by Mistral's
     stricter API (e.g. the revision pass, `_merged_convo_with_prior_debug`
     prepending an earlier DeepSeek-run stage's transcript into a Mistral
@@ -276,7 +282,8 @@ def _tool_result_image_url(result: Any) -> str | None:  # noqa: ANN401 -- arbitr
     Currently only ``_tool_capture_screenshot``'s shape
     (``{"url": ..., "image_url": ..., "full_page": ...}``) has this key.
     None for every other tool result -- including the dedup/call-cap
-    refusal placeholders and error dicts _run_tool_call can also produce,
+    refusal placeholders and error dicts the shared tool-call executor
+    (llm_tool_loop._execute_tool_call) can also produce,
     none of which carry this field -- so this is a plain, cheap check with
     no false positives to guard against.
     """
@@ -299,7 +306,7 @@ def _vision_followup_message(
     anything else (system/assistant, and by the same restriction almost
     certainly `tool`) 400s outright. So the tool-role message keeps its
     existing plain-string content completely unchanged (see
-    `_run_tool_call`), and this extra turn -- not a substitute for it -- is
+    `_OpenAIToolLoopAdapter.append_tool_results`), and this extra turn -- not a substitute for it -- is
     what actually shows the model the pixels.
     """
     page_url = result.get("url") or image_url
@@ -408,7 +415,12 @@ class OpenAICompatibleProvider(LLMProvider):
         self._api_base = api_base.rstrip("/")
         self._model = model
         self._timeout = float(timeout if timeout is not None else LLM_TIMEOUT_SECONDS)
-        self._usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0}
+        self._usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+        }
         self._metadata = (
             _fetch_model_metadata(
                 api_base=self._api_base,
@@ -527,9 +539,7 @@ class OpenAICompatibleProvider(LLMProvider):
         text = resp.text
         if "reasoning_effort" not in text:
             return False
-        return any(
-            phrase in text for phrase in ("not enabled", "not supported", "unsupported")
-        )
+        return any(phrase in text for phrase in ("not enabled", "not supported", "unsupported"))
 
     def _raise_for_error_status(self, resp: httpx.Response) -> None:
         """Raise the appropriate LLMError subtype for a non-retryable error status."""
@@ -771,7 +781,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 _ensure_tool_call_ids(tcs)
                 # A tool-role message's own tool_call_id is a SEPARATE field
                 # on a SEPARATE message, set once at generation time
-                # (this module's _run_tool_call / llm_compose's synthetic
+                # (llm_tool_loop._execute_tool_call / llm_compose's synthetic
                 # _debug_tool_turn) and never revisited by the backfill
                 # above, which only touches the assistant side. Root-caused
                 # 2026-08-15: a synthetic debug-transcript entry (the
@@ -782,7 +792,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 # through a stricter provider rejected it ("messages with
                 # role 'tool' must have a 'tool_call_id'", GPT-5.6-luna,
                 # confirmed live). Re-pairing by position here (the same 1:1
-                # ordering _run_tool_call already produces for a real
+                # ordering _OpenAIToolLoopAdapter.append_tool_results already produces for a real
                 # multi-tool-call round) closes this generically, not just
                 # for the one call site that happened to trigger it.
                 for offset, call in enumerate(tcs):
@@ -798,196 +808,21 @@ class OpenAICompatibleProvider(LLMProvider):
             debug["model"] = self._model
         return convo
 
-    @staticmethod
-    def _seed_seen_calls_from_trace(trace: list[dict[str, Any]] | None) -> set[str]:
-        """Cross-pass tool-call dedup cache (2026-07-16), seeded from a shared trace's non-errored calls so an exact repeat in a later pass is nudged instead of silently re-executed (a real RandGallery session once repeated 5 of its 35 calls, ~970k tokens). Errored calls are NOT seeded — retrying a transient failure in a later pass is legitimate."""
-        seen_calls: set[str] = set()
-        for entry in trace or ():
-            result = entry.get("result")
-            if isinstance(result, dict) and result.get("error"):
-                continue
-            try:
-                seen_calls.add(
-                    f"{entry.get('tool')}:"
-                    f"{json.dumps(entry.get('arguments') or {}, sort_keys=True)}"
-                )
-            except (TypeError, ValueError):
-                continue
-        return seen_calls
-
-    # Tools that are genuinely optional/low-stakes (a nice-to-have side
-    # effect, not research) but where a model can keep finding "new" near-
-    # duplicate arguments forever, defeating the exact-signature dedup above
-    # entirely — root-caused 2026-08-06: a special-edition session made 33
-    # suggest_glossary_term calls (a different term each time, so never an
-    # exact repeat) instead of ever transitioning to writing, even after
-    # being told directly to stop, piling up enough extra rounds of real
-    # context to help exhaust the eventual output budget. Capped per
-    # session, not banned outright — a handful of genuinely new terms is
-    # legitimate, unbounded is not.
-    #
-    # search_x (added 2026-08-21) was originally capped because it was real
-    # per-call money (X's pay-as-you-go API) and a model could just as
-    # easily vary its query text call after call, defeating the exact-repeat
-    # dedup the same way. Reworked 2026-08-25 into a read against a weekly
-    # scheduled sweep (x_search_sweep.py) instead of a live call, so this is
-    # now a free Cassandra lookup — but the cap is kept anyway at the same
-    # small ceiling: it costs nothing to keep, and one article research pass
-    # still gains nothing from calling it more than a couple of times (a
-    # miss against the tracked-service list doesn't get better by
-    # rephrasing endlessly), so this is now purely a runaway-tool-loop
-    # guard, the same class of protection as suggest_glossary_term/
-    # suggest_tool above, not a cost control.
-    _CALL_CAPPED_TOOLS: ClassVar[dict[str, int]] = {
-        "suggest_glossary_term": 8,
-        "suggest_tool": 6,
-        "search_x": 3,
-    }
-
-    @staticmethod
-    def _seed_tool_call_counts_from_trace(trace: list[dict[str, Any]] | None) -> dict[str, int]:
-        """Per-tool-name call counts already made this session, seeded from the shared trace so a cap holds across every chained stage of a special-edition compose (research, entity-enumeration gap-fill, ...), not just one chat_with_tools invocation."""
-        counts: dict[str, int] = {}
-        for entry in trace or ():
-            name = entry.get("tool")
-            if name:
-                counts[name] = counts.get(name, 0) + 1
-        return counts
-
-    @staticmethod
-    def _malformed_tool_call_result(
-        name: str,
-        raw_args: str,
-        call_id: str,
-        *,
-        trace: list[dict[str, Any]] | None,
-    ) -> tuple[dict[str, Any], bool, dict[str, Any] | None]:
-        """The tool-result message for a call whose `arguments` failed to json.loads() -- split out of `_run_tool_call` purely to keep that method's branching (and cyclomatic complexity) simple. Don't silently coerce malformed arguments to {} and run the handler anyway -- that would execute the call with args the model never actually sent. Tell the model its call was rejected instead; the caller never adds this to the dedup set, since a signature built from args we couldn't parse is meaningless and would wrongly block a later, valid retry with the same raw text."""
-        result: dict[str, Any] = {"error": "malformed tool arguments"}
-        if trace is not None:
-            trace.append({"tool": name, "arguments": raw_args, "result": result})
-        message = {
-            "role": "tool",
-            "name": name,
-            "tool_call_id": call_id,
-            "content": serialize_tool_result(result, LLM_TOOL_RESULT_MAX_CHARS),
-        }
-        return message, False, None
-
-    def _run_tool_call(
-        self,
-        call: dict[str, Any],
-        *,
-        handlers: dict[str, Any],
-        seen_calls: set[str],
-        tool_call_counts: dict[str, int],
-        require_tool: str | None,
-        trace: list[dict[str, Any]] | None,
-    ) -> tuple[dict[str, Any], bool, dict[str, Any] | None]:
-        """Execute one model-requested tool call (or refuse/nudge past a cap or exact repeat this session), record it to the trace, and return (tool_result_message, satisfied_require_tool, vision_followup_message_or_None). A StorySpikedError (the writer aborting the article) is recorded to the trace then re-raised uncaught — every other tool failure is caught and fed back as an error result.
-
-        The third element is only ever non-None when this instance's model
-        actually supports vision (`_supports_vision`) AND the result carries
-        an `image_url` (currently only capture_screenshot's shape) -- every
-        other call, on every other provider/model, gets None here exactly
-        like before this was added.
-        """
-        fn = call.get("function") or {}
-        name = fn.get("name", "")
-        raw_args = fn.get("arguments") or "{}"
-        try:
-            args = json.loads(raw_args)
-        except json.JSONDecodeError:
-            return self._malformed_tool_call_result(name, raw_args, call.get("id", ""), trace=trace)
-        sig = f"{name}:{json.dumps(args, sort_keys=True)}"
-        is_fetch_continuation = name == "fetch_url" and bool(args.get("continue_reading"))
-        cap = self._CALL_CAPPED_TOOLS.get(name)
-        satisfied_require_tool = False
-        if cap is not None and tool_call_counts.get(name, 0) >= cap:
-            # A varying-argument tool a model can call forever without ever
-            # tripping the exact-signature dedup below — refuse outright
-            # once it's had a generous allowance, rather than nudge (a nudge
-            # here would just be one more low-value round).
-            result = {
-                "error": (
-                    f"{name} has been called {tool_call_counts[name]} times already "
-                    "this session — that's enough. Stop calling it and write the "
-                    "article now with what you already have."
-                )
-            }
-        elif sig in seen_calls and name != "suggest_tool" and not is_fetch_continuation:
-            # Identical call already executed this session — don't re-run
-            # the handler or resend the (unchanged) data; nudge to write.
-            # fetch_url continuations are exempt: _wrap_fetch_url_scroll
-            # tracks a per-URL offset in `context`, so repeated calls with
-            # continue_reading=true and the SAME surface arguments (same
-            # url/max_chars) are not actually duplicates — each one advances
-            # the stateful offset and returns the NEXT window of the page.
-            # Root-caused 2026-08-06: the model self-reported (via
-            # report_compose_issue) that reading a 62-slide PDF took 6 calls
-            # instead of ~3 because it had to keep changing max_chars just to
-            # dodge this exact-signature dedup on legitimate continuations.
-            note = (
-                "You already called this tool with these exact arguments "
-                "this session; its data has not changed. Do NOT call it "
-                "again — use the result you already have and write the "
-                "article now."
-            )
-            if name == "fetch_url" and not args.get("continue_reading"):
-                note += (
-                    " If you meant to read more of a long page, call fetch_url "
-                    "again with the same url and continue_reading=true."
-                )
-            result = {"note": note}
-        else:
-            seen_calls.add(sig)
-            if cap is not None:
-                tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
-            handler = handlers.get(name)
-            try:
-                result = handler(**args) if handler else {"error": f"unknown tool {name}"}
-                # Only a call that actually reached and ran the handler can
-                # satisfy a `require_tool` gate -- a capped refusal or a
-                # dedup nudge above never runs it, so it must never count.
-                satisfied_require_tool = name == require_tool
-            except StorySpikedError as spike:
-                # The one tool "failure" that MUST abort the article —
-                # abort_article is the writer refusing to compose at all.
-                # Record it in the trace first so the session shows the
-                # writer's own reasoning, then let it escape the loop.
-                if trace is not None:
-                    trace.append(
-                        {
-                            "tool": name,
-                            "arguments": args,
-                            "result": {
-                                "spiked": True,
-                                "category": spike.category,
-                                "reason": spike.reason,
-                            },
-                        }
-                    )
-                raise
-            except Exception as exc:  # tool failure must not abort the article
-                result = {"error": str(exc)}
-        if trace is not None:
-            trace.append({"tool": name, "arguments": args, "result": result})
-        message = {
-            "role": "tool",
-            "name": name,
-            "tool_call_id": call.get("id", ""),
-            # Structure-preserving cap: trims only the biggest string field
-            # (e.g. page text) so links/url/title still survive, unlike the
-            # old blind json.dumps(result)[:4000].
-            "content": serialize_tool_result(result, LLM_TOOL_RESULT_MAX_CHARS),
-        }
-        vision_followup = self._maybe_vision_followup(name, call, result)
-        return message, satisfied_require_tool, vision_followup
+    # Class-level alias, kept for llm_compose.py's _feedback_channels_for
+    # (OpenAICompatibleProvider._CALL_CAPPED_TOOLS.get("suggest_tool")) --
+    # the actual dict now lives in llm_tool_loop.py (shared by every
+    # provider's tool loop, not just this one), but that one external call
+    # site still reaches in through this class, so the name stays live here
+    # too rather than forcing that caller to import a different module.
+    _CALL_CAPPED_TOOLS: ClassVar[dict[str, int]] = CALL_CAPPED_TOOLS
 
     def _maybe_vision_followup(
-        self, name: str, call: dict[str, Any], result: Any  # noqa: ANN401 -- arbitrary tool-result shape
+        self,
+        name: str,
+        tool_call_id: str,
+        result: Any,  # noqa: ANN401 -- arbitrary tool-result shape
     ) -> dict[str, Any] | None:
-        """The vision followup message for this tool call's result, or None -- split out of `_run_tool_call` purely to keep that method's branching simple; see `_supports_vision`/`_tool_result_image_url` for the actual gating."""
+        """The vision followup message for this tool call's result, or None -- see `_supports_vision`/`_tool_result_image_url` for the actual gating."""
         if not self._supports_vision():
             return None
         image_url = _tool_result_image_url(result)
@@ -995,7 +830,7 @@ class OpenAICompatibleProvider(LLMProvider):
             return None
         return _vision_followup_message(
             tool_name=name,
-            tool_call_id=call.get("id", ""),
+            tool_call_id=tool_call_id,
             image_url=image_url,
             result=result,
         )
@@ -1016,7 +851,9 @@ class OpenAICompatibleProvider(LLMProvider):
         # would resend round 1's note, round 3 both, etc. A fresh, correct
         # note is cheap to recompute every round; a stale one accumulating
         # in the transcript is not.
-        messages = [*convo, {"role": "user", "content": round_budget_note}] if round_budget_note else convo
+        messages = (
+            [*convo, {"role": "user", "content": round_budget_note}] if round_budget_note else convo
+        )
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
@@ -1056,21 +893,11 @@ class OpenAICompatibleProvider(LLMProvider):
         """
         return None
 
-    @staticmethod
-    def _round_budget_note(round_idx: int, rounds: int) -> str:
-        """Live "N of M rounds, K remain" text for show_round_budget=True. On the LAST round, says so explicitly — the model should wrap up with what it has rather than start a new investigation it can't finish."""
-        remaining = rounds - round_idx - 1
-        if remaining <= 0:
-            return (
-                f"[research budget: round {round_idx + 1} of {rounds} — this is your LAST "
-                "round. Wrap up with what you have rather than starting a new line of "
-                "investigation you can't finish.]"
-            )
-        return (
-            f"[research budget: round {round_idx + 1} of {rounds} — {remaining} remain "
-            "after this one. Depth is cheap here; if there's more worth verifying, keep "
-            "going rather than settling for merely plausible.]"
-        )
+    # Kept as a staticmethod attribute for existing callers/tests
+    # (MistralProvider._round_budget_note(...)) -- the actual text-building
+    # logic now lives in llm_tool_loop.py (it's provider-agnostic, used by
+    # every provider's tool loop identically), this just re-exposes it here.
+    _round_budget_note = staticmethod(round_budget_note)
 
     @staticmethod
     def _extract_message(data: dict[str, Any]) -> dict[str, Any]:
@@ -1078,119 +905,6 @@ class OpenAICompatibleProvider(LLMProvider):
             return data["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError("unexpected response shape") from exc
-
-    @staticmethod
-    def _handle_no_tool_calls_round(
-        convo: list[dict[str, Any]],
-        msg: dict[str, Any],
-        *,
-        last_content: str,
-        required_satisfied: bool,
-        required_nudged: bool,
-        require_tool: str | None,
-        round_idx: int,
-        debug: dict[str, Any] | None,
-    ) -> tuple[bool, bool, str | None]:
-        """The model produced no tool calls this round. Returns (should_continue_loop, required_nudged, final_content_or_None).
-
-        Model wants to finish but hasn't called the mandatory tool yet: send it
-        back once with an explicit instruction. Only nudges once (via
-        required_nudged) so a stubborn model can't loop forever.
-        """
-        if not required_satisfied and not required_nudged:
-            convo.append(_for_conversation_history(msg))
-            convo.append(
-                {
-                    "role": "user",
-                    "content": (
-                        f"Before finishing you MUST call the `{require_tool}` tool "
-                        "once on your current draft (title + full body) and address "
-                        "its feedback. Do that now, then output the final JSON article."
-                    ),
-                }
-            )
-            return True, True, None
-        if debug is not None:
-            debug["rounds"] = round_idx + 1
-        return False, required_nudged, last_content
-
-    def _process_tool_calls_round(
-        self,
-        convo: list[dict[str, Any]],
-        msg: dict[str, Any],
-        tool_calls: list[dict[str, Any]],
-        *,
-        handlers: dict[str, Any],
-        seen_calls: set[str],
-        tool_call_counts: dict[str, int],
-        require_tool: str | None,
-        trace: list[dict[str, Any]] | None,
-        required_satisfied: bool,
-        round_idx: int,
-        debug: dict[str, Any] | None,
-    ) -> tuple[str | None, bool]:
-        """Handle a round where the model made tool calls: salvage a bogus-tool-call final article, or execute every real call and append its result. Returns (salvaged_final_or_None, required_satisfied)."""
-        # Some models emit their final JSON article as a bogus tool call
-        # (function name like ```json or the article itself) instead of
-        # message content. Recover it so the article is not lost.
-        salvaged = _salvage_final_article(tool_calls, handlers)
-        if salvaged is not None:
-            if debug is not None:
-                debug["rounds"] = round_idx + 1
-                debug["salvaged"] = True
-            return salvaged, required_satisfied
-        convo.append(_for_conversation_history(msg))
-        # Every tool_call in this round gets its tool-role response appended
-        # here, in order, before anything else -- the API expects each
-        # assistant tool_calls turn immediately followed by exactly one
-        # tool-role message per call_id, contiguously. Any vision followups
-        # (see _run_tool_call) are collected separately and appended only
-        # AFTER that full contiguous run, so a strict provider never sees a
-        # user-role turn interleaved between two tool-role ones.
-        vision_followups: list[dict[str, Any]] = []
-        for call in tool_calls:
-            tool_message, satisfied, vision_followup = self._run_tool_call(
-                call,
-                handlers=handlers,
-                seen_calls=seen_calls,
-                tool_call_counts=tool_call_counts,
-                require_tool=require_tool,
-                trace=trace,
-            )
-            if satisfied:
-                required_satisfied = True
-            convo.append(tool_message)
-            if vision_followup is not None:
-                vision_followups.append(vision_followup)
-        convo.extend(vision_followups)
-        return None, required_satisfied
-
-    @staticmethod
-    def _fire_on_round(
-        on_round: Callable[[], None] | None, *, debug: dict[str, Any] | None, round_idx: int
-    ) -> None:
-        """Best-effort invoke chat_with_tools' per-round callback — a checkpoint failure must never abort the compose loop.
-
-        Also updates ``debug["rounds"]`` to the round just completed BEFORE
-        firing the callback. Root-caused 2026-08-27 (live admin observation):
-        every other exit path in this loop only wrote ``debug["rounds"]``
-        once the WHOLE multi-round call finished (out of rounds, no more
-        tool calls, or a salvaged final article) — so a live checkpoint
-        fired by ``on_round`` mid-research always persisted `rounds: 0`
-        regardless of how many rounds had genuinely completed, even though
-        the sibling `tool_calls` count (derived from `len(trace)`) updated
-        correctly every round. Writing it here too makes `rounds` live and
-        consistent with `tool_calls`, matching `on_round`'s own stated
-        purpose in this method's caller's docstring.
-        """
-        if debug is not None:
-            debug["rounds"] = round_idx + 1
-        if on_round is None:
-            return
-        try:
-            on_round()
-        except Exception:
-            logger.debug("chat_with_tools on_round callback failed", exc_info=True)
 
     def chat_with_tools(
         self,
@@ -1220,114 +934,36 @@ class OpenAICompatibleProvider(LLMProvider):
         have left" is a genuine per-round decision (push an interactive
         flow further, chase one more unverified claim) rather than a
         one-off framing set at the start.
+
+        The round-budget bookkeeping, seen-calls dedup, tool_call_counts/cap
+        enforcement, require_tool nudging, exhaustion handling, and trace/
+        debug recording are all owned by the shared `run_tool_loop` driver
+        (llm_tool_loop.py) -- identical for this provider and for Anthropic/
+        Gemini. This method's own job is everything genuinely specific to
+        the OpenAI-compatible wire format: context-window trimming, the
+        cross-pass debug-transcript merge + tool_call id backfill, and the
+        bogus-tool-call salvage path -- all inside `_OpenAIToolLoopAdapter`.
         """
         if not self._api_key:
             raise LLMError(f"{self._provider} API key is not set")
         self._log_task_context("chat_with_tools")
 
-        rounds = max_rounds if max_rounds is not None else LLM_MAX_TOOL_ROUNDS
-        convo = self._merged_convo_with_prior_debug(messages, debug)
-        last_content = ""
-        # Guard against runaway loops: the data tools (price, market, chain head)
-        # return stable data, but the model otherwise re-calls them dozens of
-        # times. Cache (name+args) signatures and refuse to re-run an identical
-        # call, nudging the model to write instead.
-        seen_calls = self._seed_seen_calls_from_trace(trace)
-        tool_call_counts = self._seed_tool_call_counts_from_trace(trace)
-        # Enforce a mandatory tool (e.g. review_draft): the model is not allowed
-        # to produce its final answer until it has called this tool at least once.
-        required_satisfied = require_tool is None
-        required_nudged = False
-        response_reserve = self._effective_max_tokens(max_tokens)
-        # Leave room for the model's reply plus a safety pad below the window.
-        # An explicit context_tokens always wins; otherwise prefer this
-        # instance's own live-fetched limit (correct for whatever self._model
-        # actually is) over the generic hardcoded fallback.
-        window = (
-            context_tokens
-            if context_tokens is not None
-            else (self._metadata.get("max_context_length") or LLM_CONTEXT_TOKENS)
+        adapter = _OpenAIToolLoopAdapter(
+            self, messages, handlers=handlers, context_tokens=context_tokens, max_tokens=max_tokens
         )
-        convo_budget = window - response_reserve - LLM_CONTEXT_SAFETY_TOKENS
-        for round_idx in range(rounds):
-            # Token-aware trim: keep tool results generous, but if many rounds have
-            # accumulated and the conversation nears the context window, elide the
-            # OLDEST tool results (in place) so the request never overflows.
-            if convo_budget > 0:
-                fit_messages_to_budget(convo, convo_budget)
-            round_budget_note = (
-                self._round_budget_note(round_idx, rounds) if show_round_budget else ""
-            )
-            payload = self._tool_round_payload(
-                convo,
-                tools=tools,
-                response_reserve=response_reserve,
-                temperature=temperature,
-                round_budget_note=round_budget_note,
-            )
-            data = self._post(payload)
-            msg = self._extract_message(data)
-            last_content = _message_text(msg) or last_content
-            tool_calls = msg.get("tool_calls") or []
-            _ensure_tool_call_ids(tool_calls)
-            if not tool_calls:
-                should_continue, required_nudged, final = self._handle_no_tool_calls_round(
-                    convo,
-                    msg,
-                    last_content=last_content,
-                    required_satisfied=required_satisfied,
-                    required_nudged=required_nudged,
-                    require_tool=require_tool,
-                    round_idx=round_idx,
-                    debug=debug,
-                )
-                if should_continue:
-                    self._fire_on_round(on_round, debug=debug, round_idx=round_idx)
-                    continue
-                return final
-            salvaged, required_satisfied = self._process_tool_calls_round(
-                convo,
-                msg,
-                tool_calls,
-                handlers=handlers,
-                seen_calls=seen_calls,
-                tool_call_counts=tool_call_counts,
-                require_tool=require_tool,
-                trace=trace,
-                required_satisfied=required_satisfied,
-                round_idx=round_idx,
-                debug=debug,
-            )
-            if salvaged is not None:
-                return salvaged
-            self._fire_on_round(on_round, debug=debug, round_idx=round_idx)
-        # Out of rounds: ask once more without tools for a final write-up.
-        if debug is not None:
-            debug["rounds"] = rounds
-            debug["exhausted"] = True
-        # Research/gap-fill callers invoke this loop for its tool side-effects
-        # (the trace) and DISCARD the return value — burning a full completion
-        # asking the research model to "write the final JSON article" on
-        # exhaustion was pure waste (confirmed 2026-07-14: a gap-fill pass ran
-        # out of rounds and paid for an article nobody read). Those call sites
-        # pass finalize_on_exhaustion=False.
-        if not finalize_on_exhaustion:
-            return last_content
-        # The per-round trim inside the loop above only ran up to the last
-        # round that actually executed; the round that pushed the loop past
-        # `rounds` never got a post-append fit, so the accumulated convo can
-        # still be over convo_budget going into this one extra completion.
-        # Fit it now, and pass the caller's own max_tokens through (a caller
-        # that explicitly capped its answer size, e.g. the LLM quality
-        # rubric's small max_tokens=800, wants that honored here too, not
-        # silently reset to the provider default).
-        if convo_budget > 0:
-            fit_messages_to_budget(convo, convo_budget)
-        return self.chat_completion(
-            [*convo, {"role": "user", "content": "Now write the final JSON article."}],
-            json_object=True,
-            temperature=temperature,
+        return run_tool_loop(
+            adapter,
+            tools=tools,
+            handlers=handlers,
+            max_rounds=max_rounds,
             max_tokens=max_tokens,
+            temperature=temperature,
+            trace=trace,
+            debug=debug,
+            require_tool=require_tool,
+            finalize_on_exhaustion=finalize_on_exhaustion,
+            on_round=on_round,
+            show_round_budget=show_round_budget,
         )
 
 
@@ -1362,6 +998,152 @@ def _salvage_final_article(
             if isinstance(obj, dict) and obj.get("title") and obj.get("body"):
                 return candidate
     return None
+
+
+class _OpenAIToolLoopAdapter(ToolLoopAdapter):
+    """ToolLoopAdapter for OpenAICompatibleProvider's own chat/completions wire format.
+
+    Owns the pieces that are genuinely specific to it and that
+    `run_tool_loop` has no way to do generically: context-window trimming
+    (`fit_messages_to_budget`), the cross-pass debug-transcript merge + tool
+    call id backfill (`_merged_convo_with_prior_debug`), and the bogus-
+    tool-call salvage path (`_salvage_final_article`). One instance is built
+    fresh per `chat_with_tools` call.
+    """
+
+    def __init__(
+        self,
+        provider: OpenAICompatibleProvider,
+        messages: list[dict[str, Any]],
+        *,
+        handlers: dict[str, Any],
+        context_tokens: int | None,
+        max_tokens: int | None,
+    ) -> None:
+        self._provider = provider
+        self._messages = messages
+        self._handlers = handlers
+        self._convo: list[dict[str, Any]] = []
+        self._response_reserve = provider._effective_max_tokens(max_tokens)
+        # Leave room for the model's reply plus a safety pad below the
+        # window. An explicit context_tokens always wins; otherwise prefer
+        # this instance's own live-fetched limit (correct for whatever
+        # provider._model actually is) over the generic hardcoded fallback.
+        window = (
+            context_tokens
+            if context_tokens is not None
+            else (provider._metadata.get("max_context_length") or LLM_CONTEXT_TOKENS)
+        )
+        self._convo_budget = window - self._response_reserve - LLM_CONTEXT_SAFETY_TOKENS
+
+    def prepare(self, debug: dict[str, Any] | None) -> None:
+        self._convo = self._provider._merged_convo_with_prior_debug(self._messages, debug)
+
+    def send_round(
+        self,
+        *,
+        tools: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int | None,
+        round_budget_note: str,
+    ) -> RoundResult:
+        del max_tokens  # self._response_reserve (from __init__) is what governs the request, computed once like the original loop did
+        # Token-aware trim: keep tool results generous, but if many rounds
+        # have accumulated and the conversation nears the context window,
+        # elide the OLDEST tool results (in place) so the request never
+        # overflows.
+        if self._convo_budget > 0:
+            fit_messages_to_budget(self._convo, self._convo_budget)
+        payload = self._provider._tool_round_payload(
+            self._convo,
+            tools=tools,
+            response_reserve=self._response_reserve,
+            temperature=temperature,
+            round_budget_note=round_budget_note,
+        )
+        data = self._provider._post(payload)
+        msg = self._provider._extract_message(data)
+        text = _message_text(msg)
+        raw_tool_calls = msg.get("tool_calls") or []
+        _ensure_tool_call_ids(raw_tool_calls)
+        normalized: list[NormalizedToolCall] = []
+        for call in raw_tool_calls:
+            fn = call.get("function") or {}
+            name = fn.get("name", "")
+            raw_args = fn.get("arguments") or "{}"
+            try:
+                args: dict[str, Any] | None = json.loads(raw_args)
+            except json.JSONDecodeError:
+                args = None
+            normalized.append(
+                NormalizedToolCall(id=call.get("id", ""), name=name, args=args, raw_args=raw_args)
+            )
+        return RoundResult(text=text, tool_calls=normalized, raw=msg)
+
+    def append_assistant_turn(self, round_result: RoundResult) -> None:
+        self._convo.append(_for_conversation_history(round_result.raw))
+
+    def append_tool_results(self, entries: list[tuple[NormalizedToolCall, dict[str, Any]]]) -> None:
+        # Every tool_call in this round gets its tool-role response appended
+        # here, in order, before anything else -- the API expects each
+        # assistant tool_calls turn immediately followed by exactly one
+        # tool-role message per call_id, contiguously. Vision followups are
+        # collected separately and appended only AFTER that full contiguous
+        # run, so a strict provider never sees a user-role turn interleaved
+        # between two tool-role ones.
+        vision_followups: list[dict[str, Any]] = []
+        for call, result in entries:
+            message = {
+                "role": "tool",
+                "name": call.name,
+                "tool_call_id": call.id,
+                # Structure-preserving cap: trims only the biggest string
+                # field (e.g. page text) so links/url/title still survive,
+                # unlike a blind json.dumps(result)[:4000].
+                "content": serialize_tool_result(result, LLM_TOOL_RESULT_MAX_CHARS),
+            }
+            self._convo.append(message)
+            vision_followup = self._provider._maybe_vision_followup(call.name, call.id, result)
+            if vision_followup is not None:
+                vision_followups.append(vision_followup)
+        self._convo.extend(vision_followups)
+
+    def append_require_tool_nudge(self, require_tool: str) -> None:
+        self._convo.append(
+            {
+                "role": "user",
+                "content": (
+                    f"Before finishing you MUST call the `{require_tool}` tool "
+                    "once on your current draft (title + full body) and address "
+                    "its feedback. Do that now, then output the final JSON article."
+                ),
+            }
+        )
+
+    def try_salvage(self, round_result: RoundResult) -> str | None:
+        # Some models emit their final JSON article as a bogus tool call
+        # (function name like ```json or the article itself) instead of
+        # message content. Recover it so the article is not lost.
+        raw_tool_calls = (round_result.raw or {}).get("tool_calls") or []
+        return _salvage_final_article(raw_tool_calls, self._handlers)
+
+    def finalize(self, *, temperature: float, max_tokens: int | None) -> str:
+        # The per-round trim inside send_round only ran up to the last round
+        # that actually executed; the round that pushed the loop past
+        # `rounds` never got a post-append fit, so the accumulated convo can
+        # still be over convo_budget going into this one extra completion.
+        # Fit it now, and pass the caller's own max_tokens through (a caller
+        # that explicitly capped its answer size, e.g. the LLM quality
+        # rubric's small max_tokens=800, wants that honored here too, not
+        # silently reset to the provider default).
+        if self._convo_budget > 0:
+            fit_messages_to_budget(self._convo, self._convo_budget)
+        return self._provider.chat_completion(
+            [*self._convo, {"role": "user", "content": "Now write the final JSON article."}],
+            json_object=True,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
 
 def _retry_after_seconds(resp: httpx.Response) -> float | None:

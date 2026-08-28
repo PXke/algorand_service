@@ -30,9 +30,7 @@ def _fake_client(post_fn: Callable[..., object]) -> type:
         def __exit__(self, *args: object) -> None:
             return None
 
-        def post(
-            self, url: str, headers: dict | None = None, json: dict | None = None
-        ) -> object:
+        def post(self, url: str, headers: dict | None = None, json: dict | None = None) -> object:
             return post_fn(url, headers, json)
 
     return FakeClient
@@ -72,7 +70,9 @@ def test_messages_to_anthropic_splits_system_prompt_out() -> None:
         ]
     )
     assert system_text == "You are a helpful writer."
-    assert messages == [{"role": "user", "content": [{"type": "text", "text": "Write the article."}]}]
+    assert messages == [
+        {"role": "user", "content": [{"type": "text", "text": "Write the article."}]}
+    ]
 
 
 def test_messages_to_anthropic_translates_tool_calls_to_tool_use_blocks() -> None:
@@ -92,7 +92,12 @@ def test_messages_to_anthropic_translates_tool_calls_to_tool_use_blocks() -> Non
         ]
     )
     assert messages[0]["content"] == [
-        {"type": "tool_use", "id": "call_abc123", "name": "search_web", "input": {"query": "algorand"}}
+        {
+            "type": "tool_use",
+            "id": "call_abc123",
+            "name": "search_web",
+            "input": {"query": "algorand"},
+        }
     ]
 
 
@@ -114,11 +119,20 @@ def test_messages_to_anthropic_generates_a_synthetic_id_when_missing() -> None:
 def test_messages_to_anthropic_translates_tool_result_and_pairs_by_id() -> None:
     """OpenAI tool-role messages -> Anthropic tool_result blocks, paired to the original tool_use via tool_use_id."""
     _system, messages = _openai_messages_to_anthropic(
-        [{"role": "tool", "name": "search_web", "tool_call_id": "call_abc123", "content": '{"ok": true}'}]
+        [
+            {
+                "role": "tool",
+                "name": "search_web",
+                "tool_call_id": "call_abc123",
+                "content": '{"ok": true}',
+            }
+        ]
     )
     assert messages[0] == {
         "role": "user",
-        "content": [{"type": "tool_result", "tool_use_id": "call_abc123", "content": '{"ok": true}'}],
+        "content": [
+            {"type": "tool_result", "tool_use_id": "call_abc123", "content": '{"ok": true}'}
+        ],
     }
 
 
@@ -298,6 +312,165 @@ def test_chat_with_tools_reraises_story_spiked_error_and_records_trace(
     assert trace[-1]["result"]["category"] == "dead_project"
 
 
+def test_chat_with_tools_dedup_nudges_an_identical_repeat_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared llm_tool_loop driver's seen-calls dedup cache (previously enforced for OpenAI-compatible providers only, see test_writer_tool_loop.py's cross-pass-dedup tests) now protects Anthropic sessions too: an exact repeat of an already-executed call is nudged, not re-run."""
+    call = {"type": "tool_use", "id": "call_1", "name": "search_web", "input": {"query": "x"}}
+    responses = [
+        {"content": [call], "usage": {}},
+        {"content": [{**call, "id": "call_2"}], "usage": {}},
+        {"content": [{"type": "text", "text": "FINAL"}], "usage": {}},
+    ]
+    calls = {"n": 0}
+
+    def _post(*_a: object) -> object:
+        i = calls["n"]
+        calls["n"] += 1
+        return _response(200, responses[i])
+
+    _patch_httpx(monkeypatch, _fake_client(_post))
+
+    provider = AnthropicProvider(api_key="test-key")
+    executed = {"n": 0}
+
+    def handler(**_kw: object) -> dict:
+        executed["n"] += 1
+        return {"ok": True}
+
+    result = provider.chat_with_tools(
+        [{"role": "user", "content": "research this"}],
+        tools=[{"type": "function", "function": {"name": "search_web", "parameters": {}}}],
+        handlers={"search_web": handler},
+    )
+
+    assert result == "FINAL"
+    assert executed["n"] == 1  # the exact repeat in round 2 was nudged, never re-executed
+    assert calls["n"] == 3
+
+
+def test_chat_with_tools_enforces_the_shared_per_tool_call_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """search_x's per-session call cap (llm_tool_loop.CALL_CAPPED_TOOLS, previously enforced for OpenAI-compatible providers only) now also applies to an Anthropic session via the shared driver: a call past the cap is refused outright without ever reaching the handler."""
+    responses = [
+        {
+            "content": [
+                {"type": "tool_use", "id": "call_1", "name": "search_x", "input": {"query": "new"}}
+            ],
+            "usage": {},
+        },
+        {"content": [{"type": "text", "text": "FINAL"}], "usage": {}},
+    ]
+    calls = {"n": 0}
+
+    def _post(*_a: object) -> object:
+        i = calls["n"]
+        calls["n"] += 1
+        return _response(200, responses[i])
+
+    _patch_httpx(monkeypatch, _fake_client(_post))
+
+    provider = AnthropicProvider(api_key="test-key")
+    executed = {"n": 0}
+
+    def handler(**_kw: object) -> dict:
+        executed["n"] += 1
+        return {"count": 0}
+
+    # Seed the trace as if 3 earlier search_x calls (the cap) already ran
+    # this session -- cross-pass seeding is itself shared driver behavior.
+    trace = [
+        {"tool": "search_x", "arguments": {"query": f"q{i}"}, "result": {"count": 0}}
+        for i in range(3)
+    ]
+    result = provider.chat_with_tools(
+        [{"role": "user", "content": "x"}],
+        tools=[{"type": "function", "function": {"name": "search_x", "parameters": {}}}],
+        handlers={"search_x": handler},
+        trace=trace,
+    )
+
+    assert result == "FINAL"
+    assert executed["n"] == 0  # capped refusal -- handler never ran
+    assert calls["n"] == 2
+
+
+def test_chat_with_tools_exhaustion_sets_debug_flags_and_skips_finalize_when_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running out of rounds (the round-budget ceiling) sets debug["rounds"]/["exhausted"] -- previously OpenAI-only bookkeeping, now shared -- and, with finalize_on_exhaustion=False, returns the last seen text without paying for the extra wrap-up completion, matching OpenAICompatibleProvider's own exhaustion contract."""
+    call = {
+        "type": "tool_use",
+        "id": "call_1",
+        "name": "fetch_url",
+        "input": {"url": "https://example.com/1"},
+    }
+
+    def _post(*_a: object) -> object:
+        return _response(200, {"content": [call], "usage": {}})
+
+    _patch_httpx(monkeypatch, _fake_client(_post))
+
+    provider = AnthropicProvider(api_key="test-key")
+    debug: dict = {}
+    result = provider.chat_with_tools(
+        [{"role": "user", "content": "x"}],
+        tools=[{"type": "function", "function": {"name": "fetch_url", "parameters": {}}}],
+        handlers={"fetch_url": lambda **_k: {"ok": True}},
+        max_rounds=2,
+        finalize_on_exhaustion=False,
+        debug=debug,
+    )
+
+    assert result == ""  # every round called a tool, never produced text content
+    assert debug["rounds"] == 2
+    assert debug["exhausted"] is True
+
+
+def test_chat_with_tools_debug_transcript_is_a_live_native_messages_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """debug["messages"] is now the same kind of full, live-mutating transcript OpenAICompatibleProvider has always produced -- before this refactor Anthropic recorded no transcript detail at all beyond a one-line-per-round text summary. debug["model"] is set too."""
+    responses = [
+        {
+            "content": [
+                {"type": "tool_use", "id": "call_1", "name": "search_web", "input": {"query": "x"}}
+            ],
+            "usage": {},
+        },
+        {"content": [{"type": "text", "text": "FINAL"}], "usage": {}},
+    ]
+    calls = {"n": 0}
+
+    def _post(*_a: object) -> object:
+        i = calls["n"]
+        calls["n"] += 1
+        return _response(200, responses[i])
+
+    _patch_httpx(monkeypatch, _fake_client(_post))
+
+    provider = AnthropicProvider(api_key="test-key", model="claude-test-model")
+    debug: dict = {}
+    result = provider.chat_with_tools(
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "research this"}],
+        tools=[{"type": "function", "function": {"name": "search_web", "parameters": {}}}],
+        handlers={"search_web": lambda **_kw: {"ok": True}},
+        debug=debug,
+    )
+
+    assert result == "FINAL"
+    assert debug["model"] == "claude-test-model"
+    # The real native messages list -- role/content-block shape, not a
+    # synthetic one-line summary -- so a tool_result block is really in there.
+    assert any(
+        isinstance(m.get("content"), list)
+        and any(b.get("type") == "tool_result" for b in m["content"])
+        for m in debug["messages"]
+        if m.get("role") == "user"
+    )
+
+
 def test_post_raises_llm_credit_error_on_401(monkeypatch: pytest.MonkeyPatch) -> None:
     """A 401 (dead/invalid key) raises LLMCreditError, not a generic LLMError."""
     _patch_httpx(monkeypatch, _fake_client(lambda *_a: _response(401, {"error": "unauthorized"})))
@@ -306,7 +479,9 @@ def test_post_raises_llm_credit_error_on_401(monkeypatch: pytest.MonkeyPatch) ->
         provider.chat_completion([{"role": "user", "content": "hi"}])
 
 
-def test_post_retries_then_raises_on_persistent_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_post_retries_then_raises_on_persistent_network_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A persistent network error retries the configured number of times, then raises LLMError."""
 
     class _ExplodingClient:
