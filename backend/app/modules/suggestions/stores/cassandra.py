@@ -40,6 +40,20 @@ class CassandraSuggestionStore:
             SuggestionStmts.INSERT_TXID,
             (item.submission_txid, suggestion_id, item.status, created_at),
         )
+        # Dual-write the id lookup table (migration 089) so get() can do a
+        # direct point lookup instead of an ALLOW FILTERING scan.
+        session.execute(
+            SuggestionStmts.INSERT_BY_ID,
+            (
+                suggestion_id,
+                item.status,
+                created_at,
+                item.wallet_address,
+                item.title,
+                item.body,
+                item.submission_txid,
+            ),
+        )
 
     def list_open(self) -> list[StoredSuggestion]:
         """List open suggestions."""
@@ -75,7 +89,7 @@ class CassandraSuggestionStore:
             sid = UUID(suggestion_id)
         except ValueError:
             return None
-        rows = session.execute(SuggestionStmts.GET, ("open", sid))
+        rows = session.execute(SuggestionStmts.GET, (sid,))
         row = rows.one()
         if row is None:
             return None
