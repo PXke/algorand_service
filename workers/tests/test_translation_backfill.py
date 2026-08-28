@@ -13,7 +13,8 @@ from app.modules.newspaper.translation_backfill import (
 
 
 def _row(article_id: str, *, translations: dict[str, str] | None = None) -> SimpleNamespace:
-    return SimpleNamespace(article_id=article_id, translations=translations or {})
+    """A fake list_feed_articles row -- carries `translated_titles`, the lightweight companion the feed listing now selects instead of the full `translations` map (migration 087); `translations` here is only the KEY SET a caller cares about (what languages exist), so reusing it as the fake's translated_titles value is faithful to what find_deepseek_translation_gaps actually reads."""
+    return SimpleNamespace(article_id=article_id, translated_titles=translations or {})
 
 
 # --------------------------------------------------------------------------- #
@@ -21,7 +22,9 @@ def _row(article_id: str, *, translations: dict[str, str] | None = None) -> Simp
 # --------------------------------------------------------------------------- #
 
 
-def test_find_gaps_reports_only_missing_deepseek_routed_langs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_find_gaps_reports_only_missing_deepseek_routed_langs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Only languages in DEEPSEEK_TRANSLATE_LANGS are ever reported missing -- a language NOT routed to DeepSeek (e.g. narrowed back to local via env) is never this module's problem to report."""
     monkeypatch.setattr("app.core.config.DEEPSEEK_TRANSLATE_LANGS", frozenset({"ar", "fa", "ru"}))
     rows = [
@@ -30,7 +33,8 @@ def test_find_gaps_reports_only_missing_deepseek_routed_langs(monkeypatch: pytes
         _row("art-3", translations={}),  # missing all three
     ]
     monkeypatch.setattr(
-        "app.modules.newspaper.article_store.list_feed_articles", lambda *, limit: rows  # noqa: ARG005 -- fixture stub, limit intentionally ignored
+        "app.modules.newspaper.article_store.list_feed_articles",
+        lambda *, limit: rows,  # noqa: ARG005 -- fixture stub, limit intentionally ignored
     )
 
     findings = {f["article_id"]: f["missing_langs"] for f in find_deepseek_translation_gaps()}
@@ -45,7 +49,8 @@ def test_find_gaps_limit_trims_after_the_full_scan(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("app.core.config.DEEPSEEK_TRANSLATE_LANGS", frozenset({"ar"}))
     rows = [_row(f"art-{i:03d}") for i in range(20)]
     monkeypatch.setattr(
-        "app.modules.newspaper.article_store.list_feed_articles", lambda *, limit: rows  # noqa: ARG005 -- fixture stub, limit intentionally ignored
+        "app.modules.newspaper.article_store.list_feed_articles",
+        lambda *, limit: rows,  # noqa: ARG005 -- fixture stub, limit intentionally ignored
     )
 
     assert len(find_deepseek_translation_gaps()) == 20
@@ -79,14 +84,11 @@ def _patch_dispatch(
 ) -> list[tuple]:
     monkeypatch.setattr("app.core.config.DEEPSEEK_TRANSLATE_LANGS", frozenset({"ar", "fa"}))
     monkeypatch.setattr(
-        "app.modules.newspaper.article_store.list_feed_articles", lambda *, limit: rows  # noqa: ARG005 -- fixture stub, limit intentionally ignored
+        "app.modules.newspaper.article_store.list_feed_articles",
+        lambda *, limit: rows,  # noqa: ARG005 -- fixture stub, limit intentionally ignored
     )
-    monkeypatch.setattr(
-        "app.modules.newspaper.peak_hours.is_off_peak_now", lambda: off_peak
-    )
-    monkeypatch.setattr(
-        "app.modules.newspaper.peak_hours.next_off_peak_at", lambda: None
-    )
+    monkeypatch.setattr("app.modules.newspaper.peak_hours.is_off_peak_now", lambda: off_peak)
+    monkeypatch.setattr("app.modules.newspaper.peak_hours.next_off_peak_at", lambda: None)
     sent: list[tuple] = []
     monkeypatch.setattr(
         "app.celery_app.celery_app.send_task",
@@ -108,7 +110,9 @@ def test_dispatch_dry_run_default_makes_no_dispatch(monkeypatch: pytest.MonkeyPa
     assert sent == []
 
 
-def test_dispatch_real_run_routes_to_pipeline_queue_off_peak(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dispatch_real_run_routes_to_pipeline_queue_off_peak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A real dispatch, off-peak, calls send_task against the EXISTING translate_article_batch_task, explicitly overriding the queue to "pipeline" (the concurrency=4 worker) rather than letting it fall through to the dedicated single-language-at-a-time "translate" queue."""
     rows = [_row("art-1", translations={"ar": "{}"})]  # missing "fa" only
     sent = _patch_dispatch(monkeypatch, rows, off_peak=True)
@@ -125,7 +129,9 @@ def test_dispatch_real_run_routes_to_pipeline_queue_off_peak(monkeypatch: pytest
     assert queue == "pipeline"
 
 
-def test_dispatch_real_run_skips_entirely_during_peak_hours(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dispatch_real_run_skips_entirely_during_peak_hours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A real dispatch during peak hours fires NOTHING (not even a doomed-to-defer task) and reports skipped_peak_hours -- each dispatched translate_article_batch_task would just self-defer anyway, so firing them is pure churn."""
     rows = [_row(f"art-{i}") for i in range(3)]
     sent = _patch_dispatch(monkeypatch, rows, off_peak=False)

@@ -98,14 +98,23 @@ def _sanitize_body(body: str) -> str:
 
 @dataclass(frozen=True)
 class FeedArticleRow:
-    """One article row as it appears in the feed projection."""
+    """One article row as it appears in the feed projection.
+
+    Carries `translated_titles` (lang -> JSON {title, summary}), not the
+    full `translations` map -- the feed projection (LIST_PUBLISHED_PAGE) has
+    been body-less by design since the article-table consolidation, and as
+    of 2026-08-28 no longer selects the full per-language map either (see
+    ArticlesStmts.LIST_PUBLISHED_PAGE's own comment). A caller that needs
+    the full translations map for a specific article must fetch it via
+    get_article (the single-row detail read), not from a feed listing.
+    """
 
     article_id: str
     service_id: str
     title: str
     summary: str
     published_at_epoch: int
-    translations: dict[str, str] | None = None
+    translated_titles: dict[str, str] | None = None
     # Original publication moment; differs from published_at_epoch only after
     # a recompose re-publish (which re-stamps published_at). None = never
     # recomposed.
@@ -127,6 +136,12 @@ class ArticleDetail:
     source_url: str
     prompt_version: str = ""
     translations: dict[str, str] | None = None
+    # Lightweight lang -> JSON {title, summary} companion to `translations`
+    # (migration 087) -- populated here too (unlike backend's StoredArticle,
+    # which only fills it on feed-listing rows) so callers like the
+    # translated_titles backfill script can check what's already stored
+    # without re-deriving it from `translations` every run.
+    translated_titles: dict[str, str] | None = None
     tags: tuple[str, ...] = ()
     slug: str | None = None
 
@@ -159,6 +174,7 @@ def get_article(article_id: str) -> ArticleDetail | None:
         source_url=row.source_url or "",
         prompt_version=getattr(row, "prompt_version", "") or "",
         translations=dict(row.translations) if row.translations else None,
+        translated_titles=dict(row.translated_titles) if row.translated_titles else None,
         tags=tuple(row.tags or []),
         slug=getattr(row, "slug", None),
     )
@@ -263,7 +279,7 @@ def list_feed_articles(
                 title=row.title,
                 summary=row.summary or "",
                 published_at_epoch=epoch,
-                translations=dict(row.translations) if row.translations else None,
+                translated_titles=dict(row.translated_titles) if row.translated_titles else None,
                 first_published_at_epoch=(
                     int(first_published.timestamp()) if first_published else None
                 ),
@@ -365,6 +381,7 @@ def insert_stored_article(
             trigger_round,
             None,  # slug: claimed separately below (feed path) or left unset
             None,  # translations: none at creation time
+            None,  # translated_titles: none at creation time (mirrors translations)
             None,  # first_published_at: NULL until a recompose re-publish sets it
             None,  # updated_at: NULL until an edit/recompose
             prompt_version or None,
@@ -405,6 +422,7 @@ def insert_stored_article(
             source_url=source_url,
             slug=None,
             translations=None,
+            translated_titles=None,
             first_published_at=None,
             updated_at=None,
         )
@@ -535,6 +553,9 @@ def update_article(
             source_url=new_row.source_url,
             slug=new_row.slug,
             translations=dict(new_row.translations) if new_row.translations else None,
+            translated_titles=dict(new_row.translated_titles)
+            if new_row.translated_titles
+            else None,
             first_published_at=new_row.first_published_at,
             updated_at=updated_at,
         )
@@ -652,7 +673,9 @@ def _dual_write_draft_content(
         return
     key = (new_row.status, new_row.year, new_row.published_at, aid)
     try:
-        session.execute(ArticlesStmts.UPDATE_CONTENT, (title, summary, body, tags, image, now, *key))
+        session.execute(
+            ArticlesStmts.UPDATE_CONTENT, (title, summary, body, tags, image, now, *key)
+        )
         session.execute(ArticlesStmts.CLEAR_TRANSLATIONS, key)
     except Exception:
         logger.warning("articles dual-write update failed for %s", aid, exc_info=True)
@@ -686,6 +709,7 @@ def _dual_write_recompose_transition(
             first_published_at=first_published_at,
             updated_at=now,
             translations=None,
+            translated_titles=None,
         )
         if slug:
             new_row = session.execute(ArticlesStmts.GET_BY_ID, (aid,)).one()
@@ -884,8 +908,18 @@ def record_service_event(
     )
 
 
-def update_article_translations(article_id: str, translations: dict[str, str]) -> bool:
-    """Update an article's translations map on the `articles` table."""
+def update_article_translations(
+    article_id: str, translations: dict[str, str], translated_titles: dict[str, str]
+) -> bool:
+    """Update an article's translations and translated_titles maps on the `articles` table.
+
+    `translated_titles` carries the same map shape (lang -> JSON string) but
+    each value is only {"title", "summary"} -- the lightweight companion
+    LIST_PUBLISHED_PAGE/articles_by_tag's listing queries read instead of the
+    full per-language body (migration 087). Both maps are merged in the SAME
+    UPDATE statement so a language a caller just persisted can never drift
+    between the two -- pass `{}` for either map to leave it untouched.
+    """
     from uuid import UUID
 
     from algorand_shared.article_statements import ArticlesStmts
@@ -912,10 +946,15 @@ def update_article_translations(article_id: str, translations: dict[str, str]) -
     try:
         session.execute(
             ArticlesStmts.UPDATE_TRANSLATIONS,
-            (translations, new_row.status, new_row.year, new_row.published_at, aid),
+            (
+                translations,
+                translated_titles,
+                new_row.status,
+                new_row.year,
+                new_row.published_at,
+                aid,
+            ),
         )
     except Exception:
-        logger.warning(
-            "articles dual-write translations update failed for %s", aid, exc_info=True
-        )
+        logger.warning("articles dual-write translations update failed for %s", aid, exc_info=True)
     return True

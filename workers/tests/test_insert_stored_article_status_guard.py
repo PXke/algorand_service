@@ -20,10 +20,10 @@ from app.modules.newspaper.article_store import insert_stored_article
 # shared _ARTICLES_COLUMNS in algorand_shared.article_transitions): status is
 # the first bind param.
 _STATUS_INDEX = 0
-# See test_article_store_prompt_version.py for why param-tuple length (23
+# See test_article_store_prompt_version.py for why param-tuple length (25
 # bound columns), not statement identity, picks the article INSERT out of the
 # fake session's calls.
-_INSERT_PARAM_COUNT = 24  # +1 for `views` (migration 084)
+_INSERT_PARAM_COUNT = 25  # +1 for `translated_titles` (migration 087)
 
 
 def _article_insert_params(fake_cassandra_session: MagicMock) -> tuple:

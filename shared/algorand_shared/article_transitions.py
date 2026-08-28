@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 _ARTICLES_COLUMNS = (
     "status", "year", "published_at", "article_id", "service_id", "title", "summary", "body",
     "image_url", "tags", "source_url", "trigger_txid", "trigger_round", "slug", "translations",
-    "first_published_at", "updated_at", "prompt_version", "composed_by_model",
+    "translated_titles", "first_published_at", "updated_at", "prompt_version", "composed_by_model",
     "deleted_at", "status_updated_at", "interest_score", "approved_at", "views",
 )  # fmt: skip
 
@@ -99,6 +99,7 @@ def transition_article_status(
             source_url=values["source_url"],
             slug=values["slug"],
             translations=values["translations"],
+            translated_titles=values["translated_titles"],
             first_published_at=values["first_published_at"],
             updated_at=values["updated_at"],
         )

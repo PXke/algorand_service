@@ -93,7 +93,9 @@ def apply_release_gates(article_id: str) -> dict[str, Any]:
         # article is still unlisted at this instant — update_article would
         # upsert a feed row and publish it out-of-band; the caller inserts
         # the real feed row right after this returns.
-        _dual_write_release_gate_body(session, aid, new_body=new_body, tags=list(art.tags or []), now=now)
+        _dual_write_release_gate_body(
+            session, aid, new_body=new_body, tags=list(art.tags or []), now=now
+        )
         save_article_version(
             article_id=article_id,
             title=art.title,
@@ -166,8 +168,13 @@ def _dual_write_release_gate_body(
             source_url=new_row.source_url,
             slug=new_row.slug,
             translations=dict(new_row.translations) if new_row.translations else None,
+            translated_titles=dict(new_row.translated_titles)
+            if new_row.translated_titles
+            else None,
             first_published_at=new_row.first_published_at,
             updated_at=now,
         )
     except Exception:
-        logger.warning("articles dual-write release-gate body update failed for %s", aid, exc_info=True)
+        logger.warning(
+            "articles dual-write release-gate body update failed for %s", aid, exc_info=True
+        )

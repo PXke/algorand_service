@@ -11,6 +11,7 @@ from app.modules.news.stores.memory import InMemoryArticleStore
 from app.modules.search.services.search_service import (
     SearchService,
     _feed_article_matches,
+    _localized_view,
     _typesense_num_typos,
     _typesense_prefix_enabled,
 )
@@ -79,6 +80,46 @@ def test_search_feed_scan_caps_rows_scanned_independent_of_limit(
     assert seen_limits == [search_service_mod._FEED_SCAN_LIMIT]
     assert search_service_mod._FEED_SCAN_LIMIT < 100
     assert len(result.items) <= search_service_mod._FEED_SCAN_LIMIT
+
+
+def test_localized_view_overlays_from_translated_titles() -> None:
+    """The feed-scan fallback's per-locale view reads translated_titles (title+summary only, migration 087) -- a feed-listing StoredArticle never carries the full translations map, and body always stays the (empty) English feed-row body regardless of lang."""
+    import json
+
+    article = StoredArticle(
+        article_id="1",
+        service_id="svc",
+        title="English title",
+        summary="English summary",
+        body="",
+        published_at_epoch=1,
+        translated_titles={
+            "fr": json.dumps({"title": "Titre francais", "summary": "Resume francais"})
+        },
+    )
+
+    view = _localized_view(article, "fr")
+
+    assert view.title == "Titre francais"
+    assert view.summary == "Resume francais"
+    assert view.body == ""
+
+
+def test_localized_view_falls_back_to_english_without_a_stored_translation() -> None:
+    """No translated_titles entry for the requested lang -- falls back to English fields, no crash."""
+    article = StoredArticle(
+        article_id="1",
+        service_id="svc",
+        title="English title",
+        summary="English summary",
+        body="",
+        published_at_epoch=1,
+    )
+
+    view = _localized_view(article, "fr")
+
+    assert view.title == "English title"
+    assert view.summary == "English summary"
 
 
 def test_feed_scan_usa_does_not_match_usability(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -137,7 +137,9 @@ def test_translate_batch_task_persists_and_pings_per_language(
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_store.update_article_translations",
-        lambda article_id, translations: written.append((article_id, translations)),
+        lambda article_id, translations, translated_titles: written.append(
+            (article_id, translations, translated_titles)
+        ),
     )
     monkeypatch.setattr(
         "app.modules.newspaper.indexnow.ping_translation",
@@ -175,7 +177,10 @@ def test_translate_batch_task_tracks_session_lifecycle_per_language(
                 on_language_error(lang, "translation_error")
             else:
                 on_language_done(lang, {"title": f"t-{lang}", "summary": "s", "body": "b"})
-        return {"ok": [lang for lang in target_languages if lang != "ru"], "failed": {"ru": "translation_error"} if "ru" in target_languages else {}}
+        return {
+            "ok": [lang for lang in target_languages if lang != "ru"],
+            "failed": {"ru": "translation_error"} if "ru" in target_languages else {},
+        }
 
     monkeypatch.setattr(local_translate, "translate_article_batch", _fake_batch)
     monkeypatch.setattr(
@@ -231,16 +236,22 @@ def test_translate_batch_task_routes_deepseek_langs_away_from_local_engine(
         "app.modules.newspaper.article_store.get_article",
         lambda _id: SimpleNamespace(title="T", summary="S", body="B", translations={}),
     )
-    written: list[tuple[str, dict]] = []
+    written: list[tuple[str, dict, dict]] = []
     monkeypatch.setattr(
         "app.modules.newspaper.article_store.update_article_translations",
-        lambda article_id, translations: written.append((article_id, translations)),
+        lambda article_id, translations, translated_titles: written.append(
+            (article_id, translations, translated_titles)
+        ),
     )
 
     result = pt.translate_article_batch_task("article-1", ["fa", "ps"])
     assert result["status"] == "ok"
     assert set(result["ok"]) == {"fa", "ps"}
     assert [w[1] for w in written if "ps" in w[1]]
+    # translated_titles is derived from the same result dict, dropping body.
+    ps_titles = next(w[2] for w in written if "ps" in w[1])
+    assert set(ps_titles.keys()) == {"ps"}
+    assert "b" not in ps_titles["ps"]  # the fake result's body ("b") never lands here
 
 
 def test_translate_batch_task_deepseek_failure_is_isolated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -254,7 +265,9 @@ def test_translate_batch_task_deepseek_failure_is_isolated(monkeypatch: pytest.M
         lambda **_kw: {"ok": ["fa"], "failed": {}},
     )
     monkeypatch.setattr(
-        pt, "_translate_one_lang_via_deepseek", lambda **_kw: (_ for _ in ()).throw(RuntimeError("boom"))
+        pt,
+        "_translate_one_lang_via_deepseek",
+        lambda **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     monkeypatch.setattr(
         "app.modules.newspaper.article_store.get_article",
@@ -314,10 +327,12 @@ def test_translate_batch_task_defers_deepseek_langs_when_peak_hours(
         "app.modules.newspaper.article_store.get_article",
         lambda _id: SimpleNamespace(title="T", summary="S", body="B", translations={}),
     )
-    written: list[tuple[str, dict]] = []
+    written: list[tuple[str, dict, dict]] = []
     monkeypatch.setattr(
         "app.modules.newspaper.article_store.update_article_translations",
-        lambda article_id, translations: written.append((article_id, translations)),
+        lambda article_id, translations, translated_titles: written.append(
+            (article_id, translations, translated_titles)
+        ),
     )
 
     result = pt.translate_article_batch_task("article-1", ["fa", "ps", "ar"])

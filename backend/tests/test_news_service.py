@@ -233,6 +233,75 @@ def _story(article_id: str, epoch: int, tags: list[str]) -> StoredArticle:
     )
 
 
+def test_news_feed_applies_translation_overlay_from_translated_titles() -> None:
+    """A feed-listing card overlays title/summary from `translated_titles` (the lightweight lang -> JSON {title, summary} column, migration 087), NOT the full `translations` map -- a feed-sourced StoredArticle never carries the latter at all."""
+    import json
+
+    store = InMemoryArticleStore()
+    store.insert(
+        StoredArticle(
+            article_id="id-fa",
+            service_id="svc",
+            title="English title",
+            summary="English summary",
+            body="",
+            published_at_epoch=1,
+            translated_titles={
+                "fa": json.dumps({"title": "عنوان دری", "summary": "خلاصه"}, ensure_ascii=False)
+            },
+        )
+    )
+    svc = NewsService(store=store)
+    items = svc.list_feed(lang="fa")
+    assert len(items) == 1
+    assert items[0].title == "عنوان دری"
+    assert items[0].summary == "خلاصه"
+
+
+def test_news_feed_falls_back_to_english_without_a_matching_translated_title() -> None:
+    """No stored translated_titles entry for the requested lang -- the card stays English, no crash."""
+    store = InMemoryArticleStore()
+    store.insert(
+        StoredArticle(
+            article_id="id-en",
+            service_id="svc",
+            title="English title",
+            summary="English summary",
+            body="",
+            published_at_epoch=1,
+        )
+    )
+    svc = NewsService(store=store)
+    items = svc.list_feed(lang="fa")
+    assert items[0].title == "English title"
+    assert items[0].summary == "English summary"
+
+
+def test_list_feed_for_sitemap_reads_language_codes_from_translated_titles() -> None:
+    """The multilingual sitemap only needs language codes (hreflang alternates), sourced from translated_titles -- the same key set the full translations map would carry for any stored language."""
+    import json
+
+    store = InMemoryArticleStore()
+    store.insert(
+        StoredArticle(
+            article_id="id-1",
+            service_id="svc",
+            title="T",
+            summary="S",
+            body="",
+            published_at_epoch=1,
+            translated_titles={
+                "fa": json.dumps({"title": "T-fa", "summary": "S-fa"}),
+                "ar": json.dumps({"title": "T-ar", "summary": "S-ar"}),
+            },
+        )
+    )
+    svc = NewsService(store=store)
+    items, translations = svc.list_feed_for_sitemap(limit=10)
+    assert len(items) == 1
+    assert translations == {"id-1": ["ar", "fa"]}
+
+
 def test_news_feed_filters_by_tag_case_insensitive() -> None:
     """Matches a tag filter regardless of case or trailing whitespace on stored tags."""
     store = InMemoryArticleStore()

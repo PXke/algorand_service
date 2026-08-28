@@ -20,7 +20,7 @@ from app.modules.newspaper.article_store import insert_stored_article, replace_a
 # shared _ARTICLES_COLUMNS in algorand_shared.article_transitions): status,
 # year, published_at, article_id, service_id, title, summary, body, ...
 _INSERT_BODY_INDEX = 7
-_INSERT_PARAM_COUNT = 24  # see test_article_store_prompt_version.py
+_INSERT_PARAM_COUNT = 25  # see test_article_store_prompt_version.py
 
 
 def _article_insert_params(fake_cassandra_session: MagicMock) -> tuple:

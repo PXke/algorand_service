@@ -57,7 +57,10 @@ def test_dirty_body_is_corrected_and_persisted(monkeypatch: pytest.MonkeyPatch) 
             # First-ever import of index_tasks pulls in celery_app, whose
             # beat-schedule build reads crawler config at import time.
             text = str(stmt)
-            if "SELECT" in text.upper() and "FROM algorand_platform.articles WHERE article_id = ?" in text:
+            if (
+                "SELECT" in text.upper()
+                and "FROM algorand_platform.articles WHERE article_id = ?" in text
+            ):
                 return SimpleNamespace(one=lambda: article_row)
             # The `articles` content UPDATE is the write under test.
             if text.startswith("UPDATE algorand_platform.articles SET title"):
@@ -143,6 +146,7 @@ def test_release_drain_invokes_gates_before_feed_insert(monkeypatch: pytest.Monk
         trigger_round=0,
         slug=None,
         translations=None,
+        translated_titles=None,
         first_published_at=None,
         updated_at=None,
         prompt_version=None,
@@ -171,7 +175,10 @@ def test_release_drain_invokes_gates_before_feed_insert(monkeypatch: pytest.Monk
                 return [backlog_row]
             if "pending_feed_queue" in text and "SELECT" in text.upper():
                 return [pending_row]
-            if "SELECT" in text.upper() and "FROM algorand_platform.articles WHERE article_id = ?" in text:
+            if (
+                "SELECT" in text.upper()
+                and "FROM algorand_platform.articles WHERE article_id = ?" in text
+            ):
                 order.append("get_article_row")
                 return SimpleNamespace(one=lambda: feed_art)
             if text.startswith("INSERT INTO algorand_platform.articles ("):

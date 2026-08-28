@@ -100,7 +100,7 @@ def find_deepseek_translation_gaps(
 
     findings: list[dict[str, object]] = []
     for row in list_feed_articles(limit=scan_limit):
-        existing = set((row.translations or {}).keys())
+        existing = set((row.translated_titles or {}).keys())
         missing = sorted(lang for lang in DEEPSEEK_TRANSLATE_LANGS if lang not in existing)
         if missing:
             findings.append({"article_id": str(row.article_id), "missing_langs": missing})

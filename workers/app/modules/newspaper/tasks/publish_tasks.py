@@ -2236,6 +2236,23 @@ def scan_editorial_brief_schedule() -> dict[str, object]:
     return _scan()
 
 
+def _translated_title_entry(result: dict[str, str]) -> str:
+    """JSON-encode the {title, summary} shape stored in translated_titles, derived from a full translation result dict (which also carries body).
+
+    translated_titles is the lightweight companion column
+    LIST_PUBLISHED_PAGE/articles_by_tag's listing queries read instead of the
+    full per-language `translations` map (migration 087) -- feed/tag listing
+    pages only ever overlay a locale's title+summary, never a translated
+    body.
+    """
+    import json
+
+    return json.dumps(
+        {"title": result.get("title", ""), "summary": result.get("summary", "")},
+        ensure_ascii=False,
+    )
+
+
 @celery_app.task(name="app.tasks.newspaper.translate_article")
 def translate_article_task(
     article_id: str,
@@ -2272,8 +2289,9 @@ def translate_article_task(
 
         # Store as JSON in the Cassandra map
         translations = {lang: json.dumps(translated, ensure_ascii=False)}
+        translated_titles = {lang: _translated_title_entry(translated)}
 
-        update_article_translations(article_id, translations)
+        update_article_translations(article_id, translations, translated_titles)
         try:
             from app.modules.newspaper.indexnow import ping_translation
 
@@ -2513,7 +2531,11 @@ def translate_article_batch_task(article_id: str, langs: list[str]) -> dict:
             session_refs[lang] = start_translation_session(article_id, lang)
 
         def _persist(lang: str, result: dict[str, str]) -> None:
-            update_article_translations(article_id, {lang: json.dumps(result, ensure_ascii=False)})
+            update_article_translations(
+                article_id,
+                {lang: json.dumps(result, ensure_ascii=False)},
+                {lang: _translated_title_entry(result)},
+            )
             finish_translation_session(session_refs.get(lang), status="ok")
             # Push the newly-landed language into Typesense so site search
             # can actually find it. Before this, a translation only ever

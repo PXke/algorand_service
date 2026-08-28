@@ -765,3 +765,11 @@ file = "backend/schema/migrations/app/087_suggestions_by_txid.cql"
 tier = "prod"
 status = "active"
 description = "add suggestions_by_txid (submission_txid text PRIMARY KEY -> suggestion_id/status/created_at) and drop the now-dead suggestions_submission_txid_idx (migration 001): 2026-08-28 performance audit found CassandraSuggestionStore.has_submission_txid running a cluster-wide `WHERE submission_txid = ? ALLOW FILTERING` scan of suggestions_by_status on every suggestion submission -- CLAUDE.md forbids new ALLOW FILTERING on non-key columns and calls for a lookup table instead; SuggestionStmts.HAS_TXID now does a direct partition-key point lookup against this table, dual-written alongside every suggestions_by_status INSERT (CassandraSuggestionStore.insert). Pre-existing suggestions_by_status rows written before this migration have no matching row here until a one-off backfill runs -- not performed by this change (no production data migration authorized in scope), flagged for whoever deploys it"
+
+[[migrations]]
+stream = "app"
+version = "088"
+file = "backend/schema/migrations/app/088_articles_translated_titles.cql"
+tier = "prod"
+status = "active"
+description = "add translated_titles (map<text, text>) to articles and articles_by_tag: the feed/tag-listing queries (ArticlesStmts.LIST_PUBLISHED_PAGE, ArticleTagIndexStmts.LIST_PAGE/LIST_RECENT) were selecting the FULL per-language translations map -- title+summary+body per stored language -- even though a listing page only ever overlays a locale's title+summary onto a card or enumerates language codes, never a translated body (feed rows are body-less by design); a 2026-08-28 performance audit found this was shipping several MB of full translated article bodies per feed page just to render headlines. translated_titles is the lightweight lang -> JSON {title, summary} companion, written in the same UPDATE as translations everywhere a translation lands and cleared in the same DELETE everywhere translations is invalidated. Existing published articles need a one-off backfill from their current translations map: workers/scratch/backfill_translated_titles.py (not run against prod as part of this change)"
