@@ -693,17 +693,24 @@ def admin_reset_articles(request: Request) -> Response:
     return {"reset": True, "tables": list(tables), "typesense": typesense}
 
 
+_CLEAR_CLASSIFIER_REVIEWS_TABLES = ("classifier_review_pending", "classifier_review_queue")
+
+
 def admin_clear_classifier_reviews(request: Request) -> Response:
     """Discard all pending review items without recording any feedback (stored classifier_feedback labels are untouched)."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
+    guard = _require_truncate_confirmation(request, _CLEAR_CLASSIFIER_REVIEWS_TABLES)
+    if guard is not None:
+        return guard
+
     from app.core.cassandra import get_cassandra_session
 
     def _truncate() -> None:
         session = get_cassandra_session()
-        session.execute("TRUNCATE classifier_review_pending")
-        session.execute("TRUNCATE classifier_review_queue")
+        for table in _CLEAR_CLASSIFIER_REVIEWS_TABLES:
+            session.execute(f"TRUNCATE {table}")
 
 
     _truncate()
