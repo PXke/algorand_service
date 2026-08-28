@@ -13,7 +13,9 @@ from app.modules.scraper.core.scrape_cooldown import (
     cooldown_for_exception,
     is_on_cooldown,
     is_permanent_failure,
+    mark_scraped,
     record_scrape_failure,
+    scrape_throttled,
 )
 
 
@@ -78,5 +80,41 @@ def test_is_on_cooldown_fails_open_on_redis_error(monkeypatch: pytest.MonkeyPatc
     )
 
     assert is_on_cooldown("some-service") == (False, "")
+    assert logged
+    assert "some-service" in logged[0]
+
+
+def test_scrape_throttled_fails_open_on_redis_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Redis error must never crash the scrape beat -- scrape_throttled fails open (not throttled), like its is_on_cooldown/mark_scraped siblings, and logs a warning instead of raising."""
+
+    def _boom() -> Never:
+        raise ConnectionError("redis unreachable")
+
+    monkeypatch.setattr(scrape_cooldown, "_client", _boom)
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        scrape_cooldown.logger, "warning", lambda msg, *args, **_kw: logged.append(msg % args)
+    )
+
+    assert scrape_throttled("some-service") is False
+    assert logged
+    assert "some-service" in logged[0]
+
+
+def test_mark_scraped_fails_open_on_redis_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Redis error must never crash the scrape beat -- mark_scraped fails open (no-op, no raise), like its is_on_cooldown/scrape_throttled siblings, and logs a warning instead of raising."""
+
+    def _boom() -> Never:
+        raise ConnectionError("redis unreachable")
+
+    monkeypatch.setattr(scrape_cooldown, "_client", _boom)
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        scrape_cooldown.logger, "warning", lambda msg, *args, **_kw: logged.append(msg % args)
+    )
+
+    assert mark_scraped("some-service") is None
     assert logged
     assert "some-service" in logged[0]
