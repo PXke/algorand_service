@@ -78,9 +78,12 @@ class RoundResult:
 # arguments forever, defeating the exact-signature dedup cache entirely --
 # root-caused 2026-08-06 (a special-edition session made 33 suggest_glossary_
 # term calls, a different term each time, instead of ever transitioning to
-# writing) and reworked 2026-08-25 for search_x (now a free cached lookup,
-# kept capped anyway as a runaway-tool-loop guard, not a cost control -- see
-# X_SEARCH_ENABLED's own comment in core/config.py). Provider-agnostic: every
+# writing). search_x is capped for a different reason: it's real per-call
+# money (X's pay-as-you-go API, see X_SEARCH_ENABLED's own comment in
+# core/config.py), and a model can just as easily vary its query text call
+# after call, defeating the exact-signature dedup the same way -- this
+# session cap is the second of three layers alongside research_tools.py's
+# fixed max_results=10 and config.X_SEARCH_DAILY_CAP. Provider-agnostic: every
 # provider's writer session shares the same writer_tools.py registry and is
 # equally vulnerable to this failure class, so the cap applies uniformly
 # regardless of which provider is running the loop.
