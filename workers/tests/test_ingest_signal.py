@@ -1,11 +1,23 @@
 """Date-only content changes hash the same (must not trigger a re-publish)."""
 
+from collections.abc import Callable
+from datetime import UTC, datetime
+
 import pytest
 
+import app.modules.newspaper.ingest_signal as ingest_signal_mod
 from app.modules.newspaper.ingest_signal import (
     _insert_artifact_for_signal,
     _stable_content_hash,
     _strip_repeating_row_blocks,
+    ingest_publish_signal,
+)
+from app.modules.newspaper.publish_policy import (
+    PublishDecision,
+    PublishIntent,
+    PublishKind,
+    PublishTier,
+    PublishTopic,
 )
 
 _NFD_SALES_TABLE = """Recent sales
@@ -223,3 +235,148 @@ def test_non_crawler_channel_never_triggers_the_domain_check(monkeypatch: pytest
     assert calls[0]["channel"] == "mail"
     assert calls[0]["venue_service_id"] is None
     assert resolver_called == []
+
+
+# --------------------------------------------------------------------------- #
+# ingest_publish_signal -- artifact-before-snapshot ordering (W2-C)
+# --------------------------------------------------------------------------- #
+#
+# Store-before-mark (CLAUDE.md sec. 2.2): the durable artifact write must
+# land before insert_snapshot, the write that makes the NEXT poll's
+# `previous[0] == content_hash` check at the top of ingest_publish_signal
+# short-circuit to "unchanged". If the snapshot were written first (or
+# unconditionally) and the artifact insert then raised, a retry of the exact
+# same page would hash identically, see the already-written snapshot, and
+# skip forever without ever producing the artifact that was actually paid
+# for -- silently discarding a finished ingest.
+
+
+def _fake_snapshot_store() -> tuple[dict[str, tuple[str, str, str]], Callable, Callable, Callable]:
+    """An in-memory stand-in for snapshot_store, keyed like the real module."""
+    rows: dict[str, tuple[str, str, str]] = {}
+
+    def _source_id_for_service(service_id: str) -> str:
+        return f"svc:{service_id}"
+
+    def _get_latest_snapshot(source_id: str) -> tuple[str, str, str] | None:
+        return rows.get(source_id)
+
+    def _insert_snapshot(
+        *, source_id: str, content_hash: str, title: str, body: str, **_kw: object
+    ) -> None:
+        rows[source_id] = (content_hash, title, body)
+
+    return rows, _source_id_for_service, _get_latest_snapshot, _insert_snapshot
+
+
+def _patch_ingest_publish_signal_seams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, tuple[str, str, str]]:
+    """Fake out every collaborator of ingest_publish_signal except the artifact/snapshot ordering under test."""
+    rows, source_id_fn, get_latest_fn, insert_snapshot_fn = _fake_snapshot_store()
+    monkeypatch.setattr(ingest_signal_mod, "source_id_for_service", source_id_fn)
+    monkeypatch.setattr(ingest_signal_mod, "get_latest_snapshot", get_latest_fn)
+    monkeypatch.setattr(ingest_signal_mod, "insert_snapshot", insert_snapshot_fn)
+
+    # A non-None, non-stale updated_at so _resolve_stale_scale_signal returns
+    # the stored score directly, without also needing to fake
+    # resolve_service_scale (a network-touching resolver).
+    monkeypatch.setattr(
+        ingest_signal_mod, "get_stored_scale_signal", lambda _sid: (0.5, datetime.now(tz=UTC))
+    )
+    monkeypatch.setattr(ingest_signal_mod, "get_stored_service_weight", lambda _sid: 0)
+    monkeypatch.setattr(ingest_signal_mod, "upsert_service_profile", lambda **_kw: None)
+    monkeypatch.setattr(ingest_signal_mod, "upsert_service_scale", lambda **_kw: None)
+
+    intent = PublishIntent(
+        kind=PublishKind.SERVICE_DISCOVERY,
+        topic=PublishTopic.GENERIC,
+        tier=PublishTier.STANDARD,
+        priority=1,
+        priority_breakdown="test",
+        event_id="",
+        event_phase="",
+    )
+    monkeypatch.setattr(ingest_signal_mod, "build_publish_intent", lambda **_kw: intent)
+    monkeypatch.setattr(
+        ingest_signal_mod,
+        "evaluate_enqueue",
+        lambda *_a, **_kw: PublishDecision(kind=intent.kind, allowed=True, reason="ok"),
+    )
+    monkeypatch.setattr(
+        ingest_signal_mod,
+        "resolve_publish_mode",
+        lambda **_kw: {"publish_mode": "new", "linked_article_id": ""},
+    )
+
+    from app.modules.ai.content_signals import ContentSignals
+
+    fake_signals = ContentSignals(
+        category="test",
+        categories=("test",),
+        relevance=1.0,
+        publish_decision=True,
+        confidence=1.0,
+        storage_score=1.0,
+    )
+    monkeypatch.setattr(
+        "app.modules.ai.content_signals.compute_content_signals",
+        lambda *_a, **_kw: fake_signals,
+    )
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.url_recently_rejected", lambda _url: False
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.record_service_event", lambda **_kw: None
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.recent_title_similarity",
+        lambda *_a, **_kw: (0.0, None),
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.recent_content_similarity",
+        lambda *_a, **_kw: (0.0, None),
+    )
+    return rows
+
+
+def test_artifact_failure_leaves_no_snapshot_and_retry_composes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W2-C regression pin: a raising artifact write must not leave a snapshot behind, or a retry of the identical page would read back that snapshot's matching content_hash and skip as "unchanged" forever -- silently discarding a finished, paid-for ingest instead of composing it on retry."""
+    rows = _patch_ingest_publish_signal_seams(monkeypatch)
+
+    calls = {"n": 0}
+
+    def _flaky_insert_artifact(**_kw: object) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("artifact store unavailable")
+
+    monkeypatch.setattr(ingest_signal_mod, "_insert_artifact_for_signal", _flaky_insert_artifact)
+
+    kwargs = {
+        "service_id": "example-service",
+        "display_name": "Example Service",
+        "source_url": "https://example.test/",
+        "page_title": "Example ships a new feature",
+        "page_text": "Example now supports vaults.",
+        "source_kind": None,
+        "txid": "txid-1",
+    }
+
+    with pytest.raises(RuntimeError, match="artifact store unavailable"):
+        ingest_publish_signal(**kwargs)
+
+    # The failed attempt must leave no snapshot row -- otherwise the retry
+    # below would hash identically, read back a matching content_hash, and
+    # short-circuit to "unchanged" at the top of ingest_publish_signal
+    # instead of ever reaching the artifact write again.
+    assert rows == {}
+    assert calls["n"] == 1
+
+    result = ingest_publish_signal(**{**kwargs, "txid": "txid-2"})
+
+    assert result == {"status": "enqueued", "txid": "txid-2"}
+    assert calls["n"] == 2
+    assert rows  # snapshot now recorded, only after the artifact write succeeded
