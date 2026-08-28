@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING
 
 from app.celery_app import celery_app
 from app.core.config import URL_QUEUE_ENABLED
-from app.modules.crawler.url_queue import dequeue_url, pending_url_count
+from app.core.redis_lock import single_flight
+from app.modules.crawler.url_queue import (
+    dequeue_url,
+    pending_url_count,
+    reclaim_stale_processing_urls,
+)
 from app.modules.scraper.crawlers.web_crawler import WebCrawlerDriver
 
 logger = logging.getLogger(__name__)
@@ -20,6 +25,18 @@ if TYPE_CHECKING:
 
 
 @celery_app.task(name="app.tasks.crawler.drain_url_queue")
+# Beat fires every URL_QUEUE_DRAIN_SECONDS (as low as 10s); a batch of
+# max_items real fetches (with Playwright fallback) can easily outrun that
+# interval, so without single_flight a slow tick overlaps the next one and
+# both drain the same pending pool concurrently (2x the work, external sites
+# hit 2x). Lock TTL pinned to the celery-wide hard task_time_limit (not the
+# drain interval) per CLAUDE.md invariant 5 -- "lock TTL >= the task's soft
+# time limit" -- so the lock always outlives the run even if the soft-limit
+# interrupt doesn't land in time and celery has to hard-kill the worker; the
+# beat entry itself separately sets `expires=URL_QUEUE_DRAIN_SECONDS` so a
+# tick that never got a free worker slot in time is dropped rather than run
+# stale (see celery_app.py's drain-url-queue beat entry).
+@single_flight(lambda *_a, **_kw: "crawler:drain_url_queue", ttl=celery_app.conf.task_time_limit)
 def drain_url_queue(*, max_items: int = 5) -> dict[str, object]:
     """Dequeue URLs and run the web discovery pipeline."""
     if not URL_QUEUE_ENABLED:
@@ -852,3 +869,9 @@ def reclassify_gray_zone_domains(*, limit: int | None = None) -> dict[str, objec
 
     effective_limit = FRONTIER_GRAY_ZONE_RECLASSIFY_LIMIT if limit is None else limit
     return dispatch_gray_zone_deep_classify(limit=effective_limit, dry_run=False)
+
+
+@celery_app.task(name="app.tasks.crawler.reclaim_stale_processing_urls")
+def reclaim_stale_processing_urls_task() -> dict[str, object]:
+    """Maintenance beat: reset any url_queue row stuck in status='processing' for more than url_queue.STALE_PROCESSING_SECONDS (30 min) back to pending, so a worker that died mid-fetch (hard time_limit SIGKILL, a deploy's cold-shutdown SIGQUIT, an orphaned process) doesn't strand the row forever -- dequeue_url() hands a row to exactly one worker and nothing else ever un-sticks a stuck one. See url_queue.reclaim_stale_processing_urls for the mechanism (Redis-tracked processing-start markers, since url_queue itself has no per-row "started processing" timestamp column)."""
+    return reclaim_stale_processing_urls()

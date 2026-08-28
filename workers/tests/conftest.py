@@ -75,6 +75,7 @@ class FakeRedis:
         """Start with an empty in-process key/value store."""
         self.store: dict[str, str] = {}
         self.sets: dict[str, set[str]] = {}
+        self.hashes: dict[str, dict[str, str]] = {}
 
     def get(self, key: str) -> str | None:
         """Return the stored value for a key, or None if absent."""
@@ -116,6 +117,27 @@ class FakeRedis:
     def smembers(self, key: str) -> set[str]:
         """Return a set key's members (empty set if absent)."""
         return set(self.sets.get(key, set()))
+
+    def hset(self, key: str, field: str, value: str) -> int:
+        """Set one field of a hash key, returning 1 if the field is new else 0."""
+        hashv = self.hashes.setdefault(key, {})
+        is_new = field not in hashv
+        hashv[field] = str(value)
+        return 1 if is_new else 0
+
+    def hdel(self, key: str, *fields: str) -> int:
+        """Remove fields from a hash key, returning the count actually removed."""
+        hashv = self.hashes.get(key, {})
+        removed = 0
+        for field in fields:
+            if field in hashv:
+                del hashv[field]
+                removed += 1
+        return removed
+
+    def hgetall(self, key: str) -> dict[str, str]:
+        """Return a copy of a hash key's field/value pairs (empty dict if absent)."""
+        return dict(self.hashes.get(key, {}))
 
 
 @pytest.fixture

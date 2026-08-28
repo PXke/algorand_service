@@ -12,6 +12,7 @@ from app.modules.crawler.tasks.url_queue_tasks import (
     _sample_domain_pages,
     classify_pending_domains,
     deep_classify_domain,
+    drain_url_queue,
     reclassify_gray_zone_domains,
 )
 from app.modules.scraper.core.base import ScrapeResult
@@ -767,3 +768,73 @@ def test_reclassify_gray_zone_domains_explicit_limit_overrides_the_configured_de
     reclassify_gray_zone_domains(limit=2)
 
     assert called == [{"limit": 2, "dry_run": False}]
+
+
+# --------------------------------------------------------------------------- #
+# drain_url_queue single_flight lock + reclaim_stale_processing_urls beat (W3-A)
+# --------------------------------------------------------------------------- #
+
+
+def test_drain_url_queue_is_single_flight_locked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A concurrent drain_url_queue invocation must not race the first run -- a slow tick (real network fetches) overlapping the next beat tick would otherwise drain the same pending pool twice in parallel (2x the work, external sites hit 2x). Must return `already_running` without ever entering the drain body."""
+    monkeypatch.setattr("app.core.redis_lock.acquire", lambda _key, _ttl: None)
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    def _boom() -> None:
+        raise AssertionError("drain body must not run while the lock is held")
+
+    monkeypatch.setattr(uq, "WebCrawlerDriver", _boom)
+
+    result = drain_url_queue()
+
+    assert result == {"status": "already_running", "key": "crawler:drain_url_queue"}
+
+
+def test_drain_url_queue_lock_ttl_covers_the_hard_task_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lock TTL must be at least the task's soft time limit (CLAUDE.md invariant 5). drain_url_queue has no per-task time-limit override, so it inherits the celery-wide task_time_limit -- pinning the lock to that HARD bound (not just the soft one) mirrors drain_to_compose's precedent so the lock always outlives the run even if the soft-limit interrupt doesn't land and celery has to hard-kill the worker."""
+    from app.celery_app import celery_app
+
+    seen_ttls: list[int] = []
+
+    def _spy_acquire(_key: str, ttl: int) -> str:
+        seen_ttls.append(ttl)
+        return "token"
+
+    monkeypatch.setattr("app.core.redis_lock.acquire", _spy_acquire)
+    monkeypatch.setattr("app.core.redis_lock.release", lambda _key, _token: None)
+    # URL_QUEUE_ENABLED=False short-circuits the drain body immediately after
+    # the lock is acquired -- this test only cares about the ttl bound to
+    # acquire(), not the drain logic itself. Patched on the tasks module
+    # (where `from app.core.config import URL_QUEUE_ENABLED` already bound
+    # the name at import time), not app.core.config itself, which the
+    # already-bound name never looks back at.
+    monkeypatch.setattr("app.modules.crawler.tasks.url_queue_tasks.URL_QUEUE_ENABLED", False)
+
+    drain_url_queue()
+
+    assert seen_ttls == [celery_app.conf.task_time_limit]
+
+
+def test_reclaim_stale_processing_urls_task_resolves_to_the_real_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Celery task registered under "app.tasks.crawler.reclaim_stale_processing_urls" (the name the beat schedule dispatches by) must delegate to url_queue.reclaim_stale_processing_urls -- the real self-healing sweep, not a stray duplicate."""
+    from app.celery_app import celery_app
+
+    called: list[bool] = []
+    # The task wrapper calls the name bound into its own module's namespace
+    # at import time (from ... import reclaim_stale_processing_urls) -- patch
+    # that binding, not url_queue's own module attribute, which the wrapper
+    # never looks up again after import.
+    monkeypatch.setattr(
+        "app.modules.crawler.tasks.url_queue_tasks.reclaim_stale_processing_urls",
+        lambda: called.append(True) or {"status": "ok", "reclaimed": 0},
+    )
+
+    task = celery_app.tasks["app.tasks.crawler.reclaim_stale_processing_urls"]
+    out = task()
+
+    assert out == {"status": "ok", "reclaimed": 0}
+    assert called == [True]
