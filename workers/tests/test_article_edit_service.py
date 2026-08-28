@@ -139,7 +139,7 @@ def test_edit_recomposes_fully_without_leaking_the_old_body(
 
     monkeypatch.setattr(svc, "get_article", lambda _article_id: _existing_article())
     monkeypatch.setattr(svc, "mistral_configured", lambda: True)
-    monkeypatch.setattr(svc, "sanitize_body", lambda b: b)
+    monkeypatch.setattr(svc, "_sanitize_body", lambda b: b)
     monkeypatch.setattr(svc, "save_article_version", lambda **_kw: 2)
     monkeypatch.setattr(svc, "derive_article_tags", lambda **_kw: ["algorand"])
     monkeypatch.setattr(svc, "update_article", lambda **_kw: True)
@@ -191,7 +191,7 @@ def test_edit_merges_extra_tags_from_the_recompose(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(svc, "get_article", lambda _article_id: _existing_article())
     monkeypatch.setattr(svc, "mistral_configured", lambda: True)
-    monkeypatch.setattr(svc, "sanitize_body", lambda b: b)
+    monkeypatch.setattr(svc, "_sanitize_body", lambda b: b)
     monkeypatch.setattr(svc, "save_article_version", lambda **_kw: 2)
     monkeypatch.setattr(svc, "derive_article_tags", lambda **_kw: ["algorand"])
     monkeypatch.setattr(svc.index_article, "delay", lambda **_kw: None)
@@ -225,6 +225,75 @@ def test_edit_merges_extra_tags_from_the_recompose(monkeypatch: pytest.MonkeyPat
     svc.run_article_edit(_row())
 
     assert captured_tags == ["algorand", "special-edition"]
+
+
+def test_run_article_edit_sanitizes_body_before_storing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proves the real sanitizer runs on run_article_edit's write path.
+
+    W1-B replaced the regex-only <script>-tag-only stripper with the real
+    nh3 allowlist sanitizer (article_store._sanitize_body) on every other
+    article-body write path, but run_article_edit's follow-up-ingest edit
+    path was left on security.sanitize_body -- which strips <script> tags
+    only, with no on*= handler or javascript:/data: URL stripping. This
+    proves the real sanitizer now runs on THIS path too, using no
+    sanitizer monkeypatch (unlike the tests above) so the actual nh3 call is
+    exercised end to end up to the update_article() write.
+    """
+    from types import SimpleNamespace
+
+    import app.modules.newspaper.article_edit_service as svc
+
+    malicious_body = (
+        '<p onclick="alert(1)">Hello</p>'
+        "<script>alert(2)</script>"
+        '<a href="javascript:alert(3)">click</a>'
+        '<img src="x" onerror="alert(4)">'
+        " world"
+    )
+
+    monkeypatch.setattr(svc, "get_article", lambda _article_id: _existing_article())
+    monkeypatch.setattr(svc, "mistral_configured", lambda: True)
+    monkeypatch.setattr(svc, "save_article_version", lambda **_kw: 2)
+    monkeypatch.setattr(svc, "derive_article_tags", lambda **_kw: ["algorand"])
+    monkeypatch.setattr(svc.index_article, "delay", lambda **_kw: None)
+    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_grader.prior_service_article_summary",
+        lambda _service_id: "",
+    )
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_composer.compose_scrape_article",
+        lambda **_kw: SimpleNamespace(
+            title="T",
+            summary="S",
+            body=malicious_body,
+            composer="mistral",
+            extra_tags=(),
+            defunct_domains=(),
+            unsourced_hold_reason="",
+            broken_link_hold_reason="",
+        ),
+    )
+
+    captured: dict = {}
+
+    def _fake_update(**kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(svc, "update_article", _fake_update)
+
+    result = svc.run_article_edit(_row())
+
+    assert result["status"] == "edited"
+    stored_body = captured["body"]
+    assert "<script" not in stored_body
+    assert "alert(2)" not in stored_body
+    assert "onclick" not in stored_body
+    assert "onerror" not in stored_body
+    assert "javascript:" not in stored_body
+    assert "Hello" in stored_body
+    assert "world" in stored_body
 
 
 def test_edit_handles_writer_abort_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
