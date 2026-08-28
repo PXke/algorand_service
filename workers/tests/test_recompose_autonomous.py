@@ -505,6 +505,51 @@ def test_recompose_published_auto_apply_applies_before_marking_review_resolved(
     }
 
 
+def test_recompose_published_auto_apply_treats_ok_draft_preserved_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """apply_recomposed_article has two success statuses, not one.
+
+    "ok_draft_preserved" (the live article is itself currently drafted, so
+    content is applied and versioned but index/translate/IndexNow fanout is
+    deliberately skipped -- see apply_recomposed_article's DRAFT GUARD
+    docstring) is a complete, successful apply, not a failure. The review
+    must still be marked auto_approved, and the task must still report
+    auto_applied, not apply_failed.
+    """
+    from app.modules.newspaper.tasks import publish_tasks as pt
+
+    _wire_common_recompose_published_mocks(monkeypatch)
+
+    call_order: list[str] = []
+
+    def _fake_apply(draft_id: str, article_id: str) -> dict[str, str]:
+        call_order.append("apply")
+        assert draft_id == "dddddddd-dddd-dddd-dddd-dddddddddddd"
+        return {"status": "ok_draft_preserved", "article_id": article_id}
+
+    def _fake_complete(review_id: str, *, resolution: str) -> None:
+        call_order.append("complete")
+        assert review_id == "rid-99"
+        assert resolution == "auto_approved"
+
+    monkeypatch.setattr(pt, "apply_recomposed_article", _fake_apply)
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.complete_classifier_review",
+        _fake_complete,
+    )
+
+    result = pt.recompose_published.run("66666666-6666-6666-6666-666666666666")
+
+    assert call_order == ["apply", "complete"]
+    assert result == {
+        "status": "auto_applied",
+        "review_id": "rid-99",
+        "draft_article_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+        "apply_result": "ok_draft_preserved",
+    }
+
+
 def test_recompose_published_auto_apply_failure_leaves_review_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

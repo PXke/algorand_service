@@ -3043,8 +3043,16 @@ def recompose_published(
         # closed as "auto_approved" with the live article never actually
         # updated, silently losing the recompose with no trail back to a
         # human reviewer.
+        #
+        # apply_recomposed_article has TWO success statuses, not one:
+        # "ok" (full fanout: index/translate/IndexNow) and
+        # "ok_draft_preserved" (the live article is itself currently
+        # drafted, so content is applied and versioned but the
+        # index/translate/IndexNow fanout is deliberately skipped -- see
+        # that function's DRAFT GUARD docstring). Both are complete,
+        # successful applies; only "error" means the swap didn't happen.
         apply_result = apply_recomposed_article(draft_id, article_id)
-        if apply_result.get("status") != "ok":
+        if apply_result.get("status") not in ("ok", "ok_draft_preserved"):
             logger.warning(
                 "recompose_published auto-apply failed for draft %s -> article %s "
                 "(%s) — leaving review %s open instead of marking auto_approved",
