@@ -6,13 +6,12 @@ import logging
 import time
 
 from app.core.config import mistral_configured
-from app.modules.newspaper.article_store import get_article, update_article
+from app.modules.newspaper.article_store import _sanitize_body, get_article, update_article
 from app.modules.newspaper.article_tags import derive_article_tags
 from app.modules.newspaper.article_version_store import save_article_version
 from app.modules.newspaper.compose_lock import ComposeBusyError
 from app.modules.newspaper.publish_policy import PublishTopic
 from app.modules.newspaper.publish_queue_store import QueuedPublishRow
-from app.modules.newspaper.security import sanitize_body
 from app.modules.newspaper.writer_enrichment import enrichment_block_for_row
 from app.modules.search.tasks.index_tasks import index_article
 
@@ -186,7 +185,12 @@ def run_article_edit(row: QueuedPublishRow) -> dict[str, str]:
         return error_response
     title, summary, body, composer = fields.title, fields.summary, fields.body, fields.composer
 
-    body = sanitize_body(body)
+    # Real nh3 allowlist sanitizer (article_store._sanitize_body) -- same one
+    # every other article-body write path uses (insert_stored_article,
+    # replace_article_content). This was the last write path still on
+    # security.sanitize_body's regex-only <script>-tag strip (no on*=
+    # handler/javascript:/data: URL stripping), closed 2026-08-28.
+    body = _sanitize_body(body)
     edit_reason = f"follow_up_ingest:{row.scrape_url[:120]}"
 
     save_article_version(
