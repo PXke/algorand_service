@@ -48,10 +48,12 @@ class BlueskyDistributor(SocialDistributor):
     def post_article(self, share: ArticleShare) -> DistributionResult:
         """Post an article to Bluesky as a link-card embed with the share image as thumbnail."""
         try:
-            with httpx.Client(base_url=_SERVICE, timeout=_TIMEOUT) as client:
-                did, access_jwt = self._create_session(client)
-                thumb_blob = self._upload_thumb(client, access_jwt, share.image_url)
-                self._create_post(client, access_jwt, did, share, thumb_blob)
+            from app.core.http_client import get_http_client
+
+            client = get_http_client(base_url=_SERVICE, timeout=_TIMEOUT)
+            did, access_jwt = self._create_session(client)
+            thumb_blob = self._upload_thumb(client, access_jwt, share.image_url)
+            self._create_post(client, access_jwt, did, share, thumb_blob)
             return DistributionResult(channel=self.name, ok=True)
         except Exception as exc:
             log.warning("bluesky post failed for %s: %s", share.url, exc, exc_info=True)

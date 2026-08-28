@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import logging
 
-import httpx
-
 from app.modules.distribution.base import (
     ArticleShare,
     DistributionResult,
@@ -64,32 +62,34 @@ class TelegramDistributor(SocialDistributor):
         base = f"https://api.telegram.org/bot{self._bot_token}"
         caption = _caption(share)
         try:
-            with httpx.Client(timeout=_TIMEOUT) as client:
-                if share.image_url:
-                    resp = client.post(
-                        f"{base}/sendPhoto",
-                        json={
-                            "chat_id": self._chat_id,
-                            "photo": share.image_url,
-                            "caption": caption,
-                            "parse_mode": "HTML",
-                        },
-                    )
-                else:
-                    resp = client.post(
-                        f"{base}/sendMessage",
-                        json={
-                            "chat_id": self._chat_id,
-                            "text": caption,
-                            "parse_mode": "HTML",
-                        },
-                    )
-                resp.raise_for_status()
-                body = resp.json()
-                if not body.get("ok"):
-                    return DistributionResult(
-                        channel=self.name, ok=False, detail=str(body.get("description", ""))[:300]
-                    )
+            from app.core.http_client import get_http_client
+
+            client = get_http_client(timeout=_TIMEOUT)
+            if share.image_url:
+                resp = client.post(
+                    f"{base}/sendPhoto",
+                    json={
+                        "chat_id": self._chat_id,
+                        "photo": share.image_url,
+                        "caption": caption,
+                        "parse_mode": "HTML",
+                    },
+                )
+            else:
+                resp = client.post(
+                    f"{base}/sendMessage",
+                    json={
+                        "chat_id": self._chat_id,
+                        "text": caption,
+                        "parse_mode": "HTML",
+                    },
+                )
+            resp.raise_for_status()
+            body = resp.json()
+            if not body.get("ok"):
+                return DistributionResult(
+                    channel=self.name, ok=False, detail=str(body.get("description", ""))[:300]
+                )
             return DistributionResult(channel=self.name, ok=True)
         except Exception as exc:
             log.warning("telegram post failed for %s: %s", share.url, exc, exc_info=True)

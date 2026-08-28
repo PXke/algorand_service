@@ -100,7 +100,7 @@ def test_bluesky_disabled_without_credentials() -> None:
 def test_bluesky_post_success() -> None:
     """Posts to Bluesky via session, blob upload, and record creation, embedding the article as an external link card."""
     with patch("app.modules.distribution.bluesky.httpx.Client") as client_cls:
-        client = client_cls.return_value.__enter__.return_value
+        client = client_cls.return_value
 
         def post_side_effect(path: str, **_kwargs: object) -> MagicMock:
             resp = MagicMock()
@@ -145,7 +145,7 @@ def test_bluesky_post_survives_thumb_upload_failure() -> None:
     # text/link-only if the image fetch or blob upload fails.
     """A failed thumbnail upload still lets the post go out, link-only."""
     with patch("app.modules.distribution.bluesky.httpx.Client") as client_cls:
-        client = client_cls.return_value.__enter__.return_value
+        client = client_cls.return_value
 
         def post_side_effect(path: str, **_kwargs: object) -> MagicMock:
             resp = MagicMock()
@@ -171,7 +171,7 @@ def test_bluesky_post_survives_thumb_upload_failure() -> None:
 def test_bluesky_post_failure_does_not_raise() -> None:
     """A post failure is caught and returned as a failed DistributionResult, never raised."""
     with patch("app.modules.distribution.bluesky.httpx.Client") as client_cls:
-        client = client_cls.return_value.__enter__.return_value
+        client = client_cls.return_value
         client.post.side_effect = ConnectionError("auth service down")
 
         result = BlueskyDistributor(handle="x.bsky.social", app_password="pw").post_article(_SHARE)
@@ -193,8 +193,8 @@ def test_telegram_disabled_without_credentials() -> None:
 
 def test_telegram_sends_photo_when_image_present() -> None:
     """Sends the share image via sendPhoto with the caption and hashtags when an image is present."""
-    with patch("app.modules.distribution.telegram.httpx.Client") as client_cls:
-        client = client_cls.return_value.__enter__.return_value
+    with patch("httpx.Client") as client_cls:
+        client = client_cls.return_value
         resp = MagicMock()
         resp.raise_for_status = lambda: None
         resp.json.return_value = {"ok": True}
@@ -213,8 +213,8 @@ def test_telegram_sends_photo_when_image_present() -> None:
 def test_telegram_falls_back_to_send_message_without_image() -> None:
     """Falls back to sendMessage (plain text) when the article has no image."""
     share = ArticleShare(title="T", summary="S", url="https://x.test/a", image_url="")
-    with patch("app.modules.distribution.telegram.httpx.Client") as client_cls:
-        client = client_cls.return_value.__enter__.return_value
+    with patch("httpx.Client") as client_cls:
+        client = client_cls.return_value
         resp = MagicMock()
         resp.raise_for_status = lambda: None
         resp.json.return_value = {"ok": True}
@@ -231,8 +231,8 @@ def test_telegram_reports_api_level_failure() -> None:
     # Telegram returns HTTP 200 with {"ok": false} on API-level errors (e.g.
     # bot not admin of the channel) — not an HTTP error, must still surface.
     """Surfaces a Telegram API-level failure (HTTP 200, ok: false) as a failed result."""
-    with patch("app.modules.distribution.telegram.httpx.Client") as client_cls:
-        client = client_cls.return_value.__enter__.return_value
+    with patch("httpx.Client") as client_cls:
+        client = client_cls.return_value
         resp = MagicMock()
         resp.raise_for_status = lambda: None
         resp.json.return_value = {"ok": False, "description": "bot is not a member"}

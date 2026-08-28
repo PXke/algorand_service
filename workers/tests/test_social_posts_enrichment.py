@@ -21,10 +21,8 @@ def test_enrich_linked_posts_mocked() -> None:
         "author_url": "https://x.com/d13_co",
         "html": "<p>Scam warning algoblow.com</p>",
     }
-    with patch(
-        "app.modules.newspaper.writer_enrichment.collectors.social_posts.httpx.Client"
-    ) as client_cls:
-        client = client_cls.return_value.__enter__.return_value
+    with patch("httpx.Client") as client_cls:
+        client = client_cls.return_value
         client.get.return_value.raise_for_status = lambda: None
         client.get.return_value.json.return_value = fake
         out = enrich_linked_posts(

@@ -38,6 +38,14 @@ def _reset_cassandra_session(**_kwargs: object) -> None:
     get_cassandra_session.cache_clear()
 
 
+@worker_process_init.connect
+def _reset_http_client_cache(**_kwargs: object) -> None:
+    """Belt-and-braces prefork safety for app.core.http_client's process-cached httpx.Client, mirroring _reset_cassandra_session above. Sync httpx.Client doesn't run a background IO thread the way the Cassandra driver does, so it doesn't share that exact failure mode -- but a client built (and used) in the parent before this fork would still hand a forked child live socket file descriptors it could corrupt by writing to alongside the parent. Dropping the cache here means every child always builds its own client/connection pool on first use. See app.core.http_client's module docstring for the full analysis."""
+    from app.core.http_client import get_http_client
+
+    get_http_client.cache_clear()
+
+
 celery_app.conf.task_default_queue = "default"
 celery_app.conf.task_routes = {
     "app.tasks.scrape.*": {"queue": "scrape"},

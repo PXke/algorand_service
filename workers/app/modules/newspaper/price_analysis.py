@@ -85,20 +85,22 @@ def fetch_weekly_price(
             return _snapshot_from_dict(hit)
 
     try:
-        with httpx.Client(timeout=timeout) as client:
-            asset_name = cache.get_name(asset_id)
-            if not asset_name:
-                meta = client.get(f"{COINGECKO_API}/coins/{asset_id}")
-                meta.raise_for_status()
-                asset_name = str(meta.json().get("name") or asset_id)
-                cache.set_name(asset_id, asset_name)
+        from app.core.http_client import get_http_client
 
-            chart = client.get(
-                f"{COINGECKO_API}/coins/{asset_id}/market_chart",
-                params={"vs_currency": currency, "days": str(days)},
-            )
-            chart.raise_for_status()
-            prices = chart.json().get("prices") or []
+        client = get_http_client(timeout=timeout)
+        asset_name = cache.get_name(asset_id)
+        if not asset_name:
+            meta = client.get(f"{COINGECKO_API}/coins/{asset_id}")
+            meta.raise_for_status()
+            asset_name = str(meta.json().get("name") or asset_id)
+            cache.set_name(asset_id, asset_name)
+
+        chart = client.get(
+            f"{COINGECKO_API}/coins/{asset_id}/market_chart",
+            params={"vs_currency": currency, "days": str(days)},
+        )
+        chart.raise_for_status()
+        prices = chart.json().get("prices") or []
 
         if len(prices) < 2:
             msg = f"insufficient price points for {asset_id}"

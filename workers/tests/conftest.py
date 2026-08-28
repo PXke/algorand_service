@@ -64,6 +64,14 @@ def _clear_redis_client_cache() -> None:
     get_redis.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _clear_http_client_cache() -> None:
+    """app.core.http_client.get_http_client() process-caches its httpx.Client (functools.cache), same shape and same reason as _clear_redis_client_cache above: a test that monkeypatches httpx.Client (on whatever module happens to import it -- they all share the one httpx module object) would otherwise leak its fake client into any later test that requests the same (timeout, follow_redirects, base_url) combination. Cleared before every test so every monkeypatch of httpx.Client always sees a fresh call into get_http_client()."""
+    from app.core.http_client import get_http_client
+
+    get_http_client.cache_clear()
+
+
 class FakeRedis:
     """In-memory stand-in for the redis-py client, covering the get/set/incr/decr/expire/exists surface used across the crawl-budget, cooldown, and publish-cap modules.
 

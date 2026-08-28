@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import httpx
-
 from app.core.config import (
     MISTRAL_API_BASE,
     MISTRAL_API_KEY,
@@ -17,13 +15,13 @@ from app.modules.ai.llm_provider import LLMError
 
 def transcribe_audio(audio_path: str, *, timeout: float | None = None) -> str:
     """Upload a local audio file to Mistral's Voxtral transcription endpoint and return the transcript text. Raises LLMError on failure — this is an inner call, not a never-raises boundary; callers that need best-effort behavior (e.g. the YouTube transcript pipeline) must catch it themselves."""
+    from app.core.http_client import get_http_client
+
     if not MISTRAL_API_KEY:
         raise LLMError("MISTRAL_API_KEY not configured")
 
-    with (
-        Path(audio_path).open("rb") as f,
-        httpx.Client(timeout=timeout or MISTRAL_VOXTRAL_TIMEOUT) as client,
-    ):
+    client = get_http_client(timeout=timeout or MISTRAL_VOXTRAL_TIMEOUT)
+    with Path(audio_path).open("rb") as f:
         resp = client.post(
             f"{MISTRAL_API_BASE}/audio/transcriptions",
             headers={"Authorization": f"Bearer {MISTRAL_API_KEY}"},

@@ -361,8 +361,11 @@ def _fetch_model_metadata(
     if is_credit_exhausted(provider):
         return {}
     try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.get(f"{api_base}/models", headers={"Authorization": f"Bearer {api_key}"})
+        from app.core.http_client import get_http_client
+
+        resp = get_http_client(timeout=10.0).get(
+            f"{api_base}/models", headers={"Authorization": f"Bearer {api_key}"}
+        )
         resp.raise_for_status()
         for m in resp.json().get("data", []):
             if m.get("id") == model:
@@ -587,8 +590,11 @@ class OpenAICompatibleProvider(LLMProvider):
             throttle_llm_call()
             last_attempt = attempt >= LLM_MAX_RETRIES
             try:
-                with httpx.Client(timeout=self._timeout) as client:
-                    resp = client.post(url, headers=headers, json=payload)
+                from app.core.http_client import get_http_client
+
+                resp = get_http_client(timeout=self._timeout).post(
+                    url, headers=headers, json=payload
+                )
             except httpx.RequestError as exc:
                 if http_log:
                     http_log.info(

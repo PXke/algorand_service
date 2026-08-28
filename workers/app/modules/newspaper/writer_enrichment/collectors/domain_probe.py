@@ -7,9 +7,9 @@ import ssl
 from typing import Any
 from urllib.parse import urlparse
 
-import httpx
-
 logger = logging.getLogger(__name__)
+
+_UA = "algorand-platform-enrichment/1.0"
 
 
 def probe_domain(domain: str, *, timeout: float = 12.0) -> dict[str, Any]:
@@ -24,34 +24,32 @@ def probe_domain(domain: str, *, timeout: float = 12.0) -> dict[str, Any]:
     url = f"https://{host}/"
     result: dict[str, Any] = {"domain": host, "url": url}
     try:
+        from app.core.http_client import get_http_client
         from app.core.net_guard import assert_public_url
 
         assert_public_url(url)
-        with httpx.Client(
-            timeout=timeout,
-            follow_redirects=True,
-            headers={"User-Agent": "algorand-platform-enrichment/1.0"},
-        ) as client:
-            response = client.head(url)
-            if response.status_code >= 400:
-                response = client.get(url)
-            result["status_code"] = response.status_code
-            result["final_url"] = str(response.url)
-            headers = {
-                k.lower(): v
-                for k, v in response.headers.items()
-                if k.lower()
-                in (
-                    "server",
-                    "strict-transport-security",
-                    "content-security-policy",
-                    "x-frame-options",
-                    "cf-ray",
-                )
-            }
-            result["headers"] = headers
-            result["https"] = str(response.url).startswith("https://")
-            result["hsts"] = "strict-transport-security" in headers
+        client = get_http_client(timeout=timeout, follow_redirects=True)
+        req_headers = {"User-Agent": _UA}
+        response = client.head(url, headers=req_headers)
+        if response.status_code >= 400:
+            response = client.get(url, headers=req_headers)
+        result["status_code"] = response.status_code
+        result["final_url"] = str(response.url)
+        headers = {
+            k.lower(): v
+            for k, v in response.headers.items()
+            if k.lower()
+            in (
+                "server",
+                "strict-transport-security",
+                "content-security-policy",
+                "x-frame-options",
+                "cf-ray",
+            )
+        }
+        result["headers"] = headers
+        result["https"] = str(response.url).startswith("https://")
+        result["hsts"] = "strict-transport-security" in headers
     except ssl.SSLError as exc:
         result["https"] = False
         result["error"] = f"tls_error: {exc}"
