@@ -28,6 +28,8 @@ dependencies = [
   "resvg-py>=0.3.3",
   # ICO re-encoding (media proxy) + generated OG share cards (seo/share_card.py)
   "Pillow>=10.0",
+  # Server-side article-body HTML sanitizer (app/core/sanitize.py).
+  "nh3>=0.2.18",
 ]
 
 [project.optional-dependencies]

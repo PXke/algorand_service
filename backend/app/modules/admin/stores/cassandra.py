@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from app.core import serialization
+from app.core.sanitize import sanitize_markdown_body
 
 if TYPE_CHECKING:
     from cassandra.cluster import Session as CassandraSession
@@ -85,7 +86,7 @@ class AdminCassandraStore:
             return None
         new_title = title if title is not None else current.title
         new_summary = summary if summary is not None else current.summary
-        new_body = body if body is not None else current.body
+        new_body = sanitize_markdown_body(body) if body is not None else current.body
         content_changed = (
             new_title != current.title
             or new_summary != current.summary
