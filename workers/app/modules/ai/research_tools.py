@@ -94,8 +94,8 @@ def _tool_search_web(query: str, limit: int = 6) -> dict[str, Any]:
     return out
 
 
-def _bsky_access_token() -> str:
-    """App-password session token, cached ~50 min. Empty when not configured."""
+def _bsky_access_token() -> tuple[str, str]:
+    """App-password session token, cached ~50 min, as (token, error_message). Both empty when Bluesky simply isn't configured (no credentials set) -- that's a real, non-error state. A non-empty error_message means credentials ARE set but minting a session actually failed (bad password, network error, Bluesky outage); the caller must not conflate that with "not configured", or a real outage silently reads as a deliberate no-op."""
     import os
     import time
 
@@ -104,11 +104,11 @@ def _bsky_access_token() -> str:
     ident = os.getenv("BLUESKY_IDENTIFIER", "").strip()
     pw = os.getenv("BLUESKY_APP_PASSWORD", "").strip()
     if not ident or not pw:
-        return ""
+        return "", ""
     cached = _bsky_token_cache.get("token")
     expires = _bsky_token_cache.get("expires", 0.0)
     if isinstance(cached, str) and isinstance(expires, float) and time.time() < expires:
-        return cached
+        return cached, ""
     try:
         resp = httpx.post(
             _BSKY_CREATE_SESSION,
@@ -118,12 +118,12 @@ def _bsky_access_token() -> str:
         )
         resp.raise_for_status()
         token = str(resp.json().get("accessJwt") or "")
-    except Exception:
-        return ""
+    except Exception as exc:
+        return "", str(exc)[:200]
     if token:
         _bsky_token_cache["token"] = token
         _bsky_token_cache["expires"] = time.time() + 3000.0
-    return token
+    return token, ""
 
 
 def _tool_search_bluesky(query: str, limit: int = 10) -> dict[str, Any]:
@@ -133,9 +133,13 @@ def _tool_search_bluesky(query: str, limit: int = 10) -> dict[str, Any]:
     q = (query or "").strip()
     if not q:
         return {"query": query, "posts": []}
-    token = _bsky_access_token()
+    token, token_error = _bsky_access_token()
     if not token:
-        return {"query": query, "error": "bluesky not configured", "posts": []}
+        return {
+            "query": query,
+            "error": token_error or "bluesky not configured",
+            "posts": [],
+        }
     n = max(1, min(int(limit), 25))
     try:
         resp = guarded_get(
@@ -696,8 +700,12 @@ def _github_releases(slug: str, n: int) -> list[dict[str, Any]]:
             for x in rel
             if isinstance(x, dict)
         ][:n]
-    except Exception:
-        return []
+    except Exception as exc:
+        # An empty list here reads to the writer as "this repo has no
+        # releases" ground truth, indistinguishable from a GitHub API/network
+        # failure — surface the failure instead (per _tool_github_activity's
+        # docstring: every branch of this helper must carry an "error" key).
+        return [{"error": str(exc)[:200]}]
 
 
 def _github_recent_commits(slug: str, n: int) -> list[dict[str, Any]]:
@@ -715,8 +723,9 @@ def _github_recent_commits(slug: str, n: int) -> list[dict[str, Any]]:
             for c in commits
             if isinstance(c, dict)
         ][:n]
-    except Exception:
-        return []
+    except Exception as exc:
+        # See _github_releases: don't let an API failure read as "no commits".
+        return [{"error": str(exc)[:200]}]
 
 
 def _github_top_contributors(slug: str, n: int) -> list[dict[str, Any]]:
@@ -731,8 +740,9 @@ def _github_top_contributors(slug: str, n: int) -> list[dict[str, Any]]:
             for c in contributors
             if isinstance(c, dict)
         ][:n]
-    except Exception:
-        return []
+    except Exception as exc:
+        # See _github_releases: don't let an API failure read as "no contributors".
+        return [{"error": str(exc)[:200]}]
 
 
 def _tool_github_activity(repo: str, limit: int = 5) -> dict[str, Any]:
@@ -2387,8 +2397,8 @@ def _discourse_search(base: str, hdr: dict[str, str], q: str, n: int) -> dict[st
         return {"error": f"search failed: {str(exc)[:160]}"}
 
 
-def _discourse_categories(base: str, hdr: dict[str, str]) -> tuple[list[dict[str, Any]], dict]:
-    """Top categories (name/topic count/description) plus an id -> name lookup for topic annotation."""
+def _discourse_categories(base: str, hdr: dict[str, str]) -> tuple[list[dict[str, Any]], dict, str]:
+    """Top categories (name/topic count/description) plus an id -> name lookup for topic annotation. Returns (categories, id_to_name, error_message) -- mirrors _discourse_recent_topics's (data, error) shape so a fetch failure surfaces to the caller instead of reading as "this forum has zero categories"."""
     try:
         clist = (
             (_guarded_get(f"{base}/categories.json", headers=hdr).json() or {}).get(
@@ -2406,9 +2416,9 @@ def _discourse_categories(base: str, hdr: dict[str, str]) -> tuple[list[dict[str
             if isinstance(c, dict)
         ]
         cat_names = {c.get("id"): c.get("name") or "" for c in clist if isinstance(c, dict)}
-        return categories, cat_names
-    except Exception:
-        return [], {}
+        return categories, cat_names, ""
+    except Exception as exc:
+        return [], {}, str(exc)[:160]
 
 
 def _discourse_recent_topics(
@@ -2475,8 +2485,10 @@ def _tool_discourse_forum(forum_url: str, limit: int = 10, query: str = "") -> d
         out.update(_discourse_search(base, hdr, q, n))
         return out
 
-    categories, cat_names = _discourse_categories(base, hdr)
+    categories, cat_names, categories_error = _discourse_categories(base, hdr)
     out["categories"] = categories
+    if categories_error:
+        out["categories_error"] = categories_error
     recent_topics, latest_error = _discourse_recent_topics(base, hdr, n, cat_names)
     out["recent_topics"] = recent_topics
     if latest_error:

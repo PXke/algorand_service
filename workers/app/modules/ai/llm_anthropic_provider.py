@@ -46,6 +46,7 @@ from app.core.config import (
 from app.modules.ai.llm_provider import LLMCreditError, LLMError, LLMProvider
 from app.modules.ai.llm_rate_limit import throttle_llm_call
 from app.modules.ai.mistral_credit_guard import is_credit_exhausted, mark_credit_exhausted
+from app.modules.ai.story_spike import StorySpikedError
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +307,25 @@ class AnthropicProvider(LLMProvider):
             handler = handlers.get(name)
             try:
                 result = handler(**args) if handler else {"error": f"unknown tool {name}"}
+            except StorySpikedError as spike:
+                # The writer aborting the article (abort_article tool) -- must
+                # propagate uncaught, mirroring OpenAICompatibleProvider's
+                # _run_tool_call, so the compose actually terminates instead
+                # of being swallowed into a tool-error the model can shrug
+                # off and keep writing past.
+                if trace is not None:
+                    trace.append(
+                        {
+                            "tool": name,
+                            "arguments": args,
+                            "result": {
+                                "spiked": True,
+                                "category": spike.category,
+                                "reason": spike.reason,
+                            },
+                        }
+                    )
+                raise
             except Exception as exc:  # tool failure must not abort the article
                 result = {"error": str(exc)}
             if trace is not None:
