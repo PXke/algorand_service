@@ -159,7 +159,8 @@ class CassandraArticleStore:
             remaining_after = limit - len(items) - len(rows)
             if remaining_after > 0 and index + 1 < len(years):
                 fut = execute_async(
-                    ArticlesStmts.LIST_PUBLISHED_PAGE, (years[index + 1], cursor_dt, remaining_after)
+                    ArticlesStmts.LIST_PUBLISHED_PAGE,
+                    (years[index + 1], cursor_dt, remaining_after),
                 )
             else:
                 fut = None
@@ -266,7 +267,9 @@ class CassandraArticleStore:
             return [], None
         cursor_dt = cursor_from_ms(cursor_epoch_ms)
         rows = list(
-            get_cassandra_session().execute(ArticleTagIndexStmts.LIST_PAGE, (clean, cursor_dt, limit))
+            get_cassandra_session().execute(
+                ArticleTagIndexStmts.LIST_PAGE, (clean, cursor_dt, limit)
+            )
         )
         items = [_feed_row_to_stored(row) for row in rows]
         last_dt = rows[-1].published_at if rows else None
@@ -280,39 +283,59 @@ class CassandraArticleStore:
         view counts and find the last-seen epoch -- irrelevant at this
         platform's real per-tag volume, a safety cap against a pathological
         single tag dominating the corpus.
+
+        The fan-out itself (one COUNT + one LIST_RECENT per tag, every call)
+        is cached (``app.core.cache.cached_json``, keyed on ``sample_limit``
+        so a caller asking for a different sample size can't be served a
+        mismatched cached one) -- this runs unconditionally on every call
+        with no bound on tag count, and tag_stats (its only production
+        caller) is itself only cached at the HTTP route layer, not here at
+        the source of the actual Cassandra fan-out.
         """
-        from algorand_shared.article_statements import ArticleTagIndexStmts
+        from app.core.cache import cached_json
 
-        from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
+        def compute() -> list[dict]:
+            from algorand_shared.article_statements import ArticleTagIndexStmts
 
-        tags = sorted({row.tag for row in get_cassandra_session().execute(ArticleTagIndexStmts.LIST_TAGS) if row.tag})
-        if not tags:
-            return []
-        count_results = execute_parallel_with_args(
-            ArticleTagIndexStmts.COUNT, [(t,) for t in tags], raise_on_error=False
-        )
-        sample_results = execute_parallel_with_args(
-            ArticleTagIndexStmts.LIST_RECENT,
-            [(t, sample_limit) for t in tags],
-            raise_on_error=False,
-        )
-        out: list[TagSummary] = []
-        for tag, (count_ok, count_res), (sample_ok, sample_res) in zip(
-            tags, count_results, sample_results, strict=True
-        ):
-            count = 0
-            if count_ok:
-                count_row = count_res.one()
-                if count_row is not None:
-                    count = int(count_row.count)
-            rows = list(sample_res) if sample_ok else []
-            last_epoch = _epoch(rows[0].published_at) if rows else 0
-            out.append(
-                TagSummary(
-                    tag=tag,
-                    count=count,
-                    last_epoch=last_epoch,
-                    article_ids=[str(r.article_id) for r in rows],
-                )
+            from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
+
+            tags = sorted(
+                {
+                    row.tag
+                    for row in get_cassandra_session().execute(ArticleTagIndexStmts.LIST_TAGS)
+                    if row.tag
+                }
             )
-        return out
+            if not tags:
+                return []
+            count_results = execute_parallel_with_args(
+                ArticleTagIndexStmts.COUNT, [(t,) for t in tags], raise_on_error=False
+            )
+            sample_results = execute_parallel_with_args(
+                ArticleTagIndexStmts.LIST_RECENT,
+                [(t, sample_limit) for t in tags],
+                raise_on_error=False,
+            )
+            out: list[dict] = []
+            for tag, (count_ok, count_res), (sample_ok, sample_res) in zip(
+                tags, count_results, sample_results, strict=True
+            ):
+                count = 0
+                if count_ok:
+                    count_row = count_res.one()
+                    if count_row is not None:
+                        count = int(count_row.count)
+                rows = list(sample_res) if sample_ok else []
+                last_epoch = _epoch(rows[0].published_at) if rows else 0
+                out.append(
+                    {
+                        "tag": tag,
+                        "count": count,
+                        "last_epoch": last_epoch,
+                        "article_ids": [str(r.article_id) for r in rows],
+                    }
+                )
+            return out
+
+        data = cached_json(f"news:tag-summary:{sample_limit}", 600, compute)
+        return [TagSummary(**entry) for entry in data]

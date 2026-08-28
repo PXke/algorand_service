@@ -317,6 +317,55 @@ def article(request: Request) -> Response:
     return _article_document(request, None)
 
 
+_ARTICLE_DOC_CACHE_TTL = 45  # short-TTL response cache -- see _cached_article_render
+
+
+def _cached_article_render(article_id: str, lang: str | None) -> dict[str, object] | None:
+    """Cache-aside the expensive part of one article document.
+
+    Caches the Cassandra detail fetch plus render.render_article's (head,
+    body) HTML, keyed by (article_id, lang). None means "no such published
+    article" and is itself cached (a repeated
+    404/410 probe under load shouldn't re-hit Cassandra either).
+
+    Deliberately does NOT cover the per-request side effects in
+    _article_document (pageview recording, the two-hand scraper-detection
+    mark, the redirect-if-slug-mismatch decision) -- those must run on every
+    real hit regardless of whether the render itself came from cache.
+
+    render_article is a pure function of its arguments (no request state, no
+    relative-time strings), so the cached HTML is byte-identical to what an
+    uncached render would have produced for the same (article_id, lang) at
+    cache-fill time. The TTL bounds staleness (including the view count baked
+    into the render) to well under what this route's own Cache-Control header
+    already promises downstream (max-age=300, stale-while-revalidate=600), so
+    this is not a new staleness budget, just fewer Cassandra reads to honor
+    the existing one.
+    """
+    from app.core.cache import cached_json
+
+    cache_key = f"seo:article-doc:{article_id}:{lang or 'en'}"
+
+    def compute() -> dict[str, object] | None:
+        detail = news.get_article(article_id, lang=lang)
+        if detail is None:
+            return None
+        translation_langs = news.translation_langs_for(article_id)
+        # Footer topic links + related stories reuse the cached topics-index feed.
+        feed, topics = cached_feed_snapshot(news.list_feed)
+        related = render.pick_related_articles(detail, feed, limit=5)
+        head, body = render.render_article(
+            detail,
+            lang=lang,
+            translation_langs=translation_langs,
+            topic_links=topics,
+            related=related,
+        )
+        return {"slug": detail.slug, "head": head, "body": body}
+
+    return cached_json(cache_key, _ARTICLE_DOC_CACHE_TTL, compute)
+
+
 def _article_document(request: Request, lang: str | None) -> Response:
     """Render one article document for a resolved locale (None = English)."""
     raw = request.path_params.get("article_id", "")
@@ -326,10 +375,10 @@ def _article_document(request: Request, lang: str | None) -> Response:
     # uuid that resolves gets a permanent redirect to its slug, so search
     # engines consolidate on one URL instead of seeing two for one story.
     article_id = news.resolve_slug(raw) or raw
-    detail = news.get_article(article_id, lang=lang) if article_id else None
-    if detail is not None and detail.slug and raw != detail.slug:
-        return _permanent_redirect(render.article_path(article_id, detail.slug, lang))
-    if detail is None:
+    cached = _cached_article_render(article_id, lang) if article_id else None
+    if cached is not None and cached["slug"] and raw != cached["slug"]:
+        return _permanent_redirect(render.article_path(article_id, cached["slug"], lang))  # type: ignore[arg-type]
+    if cached is None:
         _record_notfound(request, f"/news/articles/{article_id}")
         # 410 Gone for tombstoned (deliberately deleted) articles: their
         # URLs live on in old sitemaps/crawl queues, and Google drops a 410
@@ -344,7 +393,6 @@ def _article_document(request: Request, lang: str | None) -> Response:
         return _doc_response(
             render.render_noindex("Article not found"), "public, max-age=60", status=404
         )
-    translation_langs = news.translation_langs_for(article_id)
     # Tracked under the CANONICAL (unprefixed) path regardless of locale: these
     # counters drive per-article view counts and Most Read, and keying them by
     # locale path would split one story's readership across nine URLs and rank
@@ -367,18 +415,9 @@ def _article_document(request: Request, lang: str | None) -> Response:
     # see _ARTICLE_PREFIX) beacon under the raw locale path on every direct
     # visit. Root-caused 2026-07-30 from an admin-analytics report the day
     # after locale path URLs shipped.
-    browser_path = render.article_path(article_id, detail.slug, lang)
-    # Footer topic links + related stories reuse the cached topics-index feed.
-    feed, topics = cached_feed_snapshot(news.list_feed)
-    related = render.pick_related_articles(detail, feed, limit=5)
+    browser_path = render.article_path(article_id, cached["slug"], lang)  # type: ignore[arg-type]
     return _doc_response(
-        render.render_article(
-            detail,
-            lang=lang,
-            translation_langs=translation_langs,
-            topic_links=topics,
-            related=related,
-        ),
+        (cached["head"], cached["body"]),  # type: ignore[arg-type]
         "public, max-age=300, stale-while-revalidate=600",
         dedup_path=browser_path,
         tracked_path=path,
@@ -487,7 +526,10 @@ def topic(request: Request) -> Response:
     path = f"/topic/{tag}"
     _record(request, path)
     head, body = render.render_topic(
-        tag, items, topic_links=topic_list, total_count=len(matching),
+        tag,
+        items,
+        topic_links=topic_list,
+        total_count=len(matching),
         indexable=is_reliable_tag(tag, feed),
     )
     return _doc_response((head, body), "public, max-age=120", tracked_path=path)
@@ -500,7 +542,9 @@ def glossary_index(request: Request) -> Response:
     path = "/glossary"
     _record(request, path)
     terms = list_terms(published_only=True)
-    return _doc_response(render.render_glossary_index(terms), "public, max-age=300", tracked_path=path)
+    return _doc_response(
+        render.render_glossary_index(terms), "public, max-age=300", tracked_path=path
+    )
 
 
 def glossary_term(request: Request) -> Response:
@@ -517,7 +561,9 @@ def glossary_term(request: Request) -> Response:
         )
     path = f"/glossary/{slug}"
     _record(request, path)
-    return _doc_response(render.render_glossary_term(term), "public, max-age=300", tracked_path=path)
+    return _doc_response(
+        render.render_glossary_term(term), "public, max-age=300", tracked_path=path
+    )
 
 
 def about(request: Request) -> Response:
@@ -543,7 +589,9 @@ def search(request: Request) -> Response:
 def suggestions(request: Request) -> Response:
     """SSR noindex shell for the client-side suggestions page."""
     _ = request
-    return _doc_response(render.render_noindex("Suggestions", active="/suggestions"), "public, max-age=300")
+    return _doc_response(
+        render.render_noindex("Suggestions", active="/suggestions"), "public, max-age=300"
+    )
 
 
 def admin(request: Request) -> Response:

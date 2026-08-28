@@ -42,6 +42,45 @@ def test_search_feed_scan_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "governance" in result.items[0].snippet.lower()
 
 
+def test_search_feed_scan_caps_rows_scanned_independent_of_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The feed-scan fallback scans a small, fixed number of rows regardless of the caller's requested `limit` -- Typesense being unreachable is exactly when load is already spiking, so a large `limit` must not balloon the scan (previously hardcoded to 100 rows no matter what)."""
+    monkeypatch.setattr(
+        "app.modules.search.services.search_service.get_typesense_client",
+        lambda: None,
+    )
+    from app.modules.search.services import search_service as search_service_mod
+
+    seen_limits: list[int] = []
+
+    class _SpyStore(InMemoryArticleStore):
+        def list_feed(self, *, feed_bucket: str = "main", limit: int = 50) -> list[StoredArticle]:
+            seen_limits.append(limit)
+            return super().list_feed(feed_bucket=feed_bucket, limit=limit)
+
+    store = _SpyStore()
+    for i in range(50):
+        store.insert(
+            StoredArticle(
+                article_id=str(i),
+                service_id="svc",
+                title="Algorand governance update",
+                summary="Weekly recap",
+                body="body",
+                published_at_epoch=i,
+            )
+        )
+    news = NewsService(store=store)
+    result = SearchService(news_service=news).search("governance", limit=100)
+
+    assert result.engine == "feed_scan"
+    # The scan limit is the module's fixed cap, not the caller's requested 100.
+    assert seen_limits == [search_service_mod._FEED_SCAN_LIMIT]
+    assert search_service_mod._FEED_SCAN_LIMIT < 100
+    assert len(result.items) <= search_service_mod._FEED_SCAN_LIMIT
+
+
 def test_feed_scan_usa_does_not_match_usability(monkeypatch: pytest.MonkeyPatch) -> None:
     """Searching "USA" does not spuriously match an article containing "usability"."""
     monkeypatch.setattr(
