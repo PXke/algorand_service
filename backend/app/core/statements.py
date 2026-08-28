@@ -27,12 +27,27 @@ from algorand_shared.article_statements import (
 from algorand_shared.artifact_statements import ArtifactStmts as ArtifactStmts
 from algorand_shared.artifact_statements import ToComposeStmts as ToComposeStmts
 from algorand_shared.chain_statements import CHAIN_CONDUIT_HEAD, CHAIN_TXNS_BY_ROUND
+from algorand_shared.crawler_statements import (
+    CLASSIFIER_FEEDBACK_INSERT,
+    CLASSIFIER_REVIEW_DELETE_PENDING,
+    CLASSIFIER_REVIEW_GET_DETAIL,
+    CLASSIFIER_REVIEW_INSERT_QUEUE,
+    CLASSIFIER_REVIEW_LIST_PENDING,
+    CRAWLED_PAGE_COUNT_BY_DOMAIN,
+    URL_QUEUE_INSERT,
+    URL_QUEUE_INSERT_PENDING,
+)
 from algorand_shared.platform_statements import (
     CLASSIFIER_FEEDBACK_INSERT_BY_TIME,
     DOMAIN_TRACKING_INSERT,
     GLOSSARY_UPDATE_TRANSLATIONS,
     PAGE_SNAPSHOT_GET_LATEST,
     PAGE_SNAPSHOT_INSERT,
+    SERVICE_REGISTRY_GET_ID,
+    SERVICE_REGISTRY_GET_SCRAPE_URL,
+    SERVICE_REGISTRY_LIST_ALL,
+    SERVICE_REGISTRY_SET_ENABLED,
+    SERVICE_REGISTRY_UPSERT,
     SERVICE_SOURCE_DELETE_FOR_SERVICE,
     SERVICE_SOURCE_GET_BY_DOMAIN,
     SERVICE_SOURCE_LIST_FOR_SERVICE,
@@ -201,7 +216,13 @@ class EditorialBriefStmts:
 # classifier_feedback / classifier_feedback_by_time
 # --------------------------------------------------------------------------- #
 class ClassifierFeedbackStmts:
-    """Prepared statements for classifier training feedback."""
+    """Prepared statements for classifier training feedback.
+
+    GET_GRADE deliberately does NOT select `url` -- workers' copy of this
+    class does (see workers/app/core/statements.py), but grep found no
+    workers call site that reads it back off the row; left as unexercised
+    drift there rather than edited as part of this consolidation.
+    """
 
     GET_GRADE = _Stmt(
         "SELECT approved, metadata FROM algorand_platform.classifier_feedback WHERE feedback_id = ?"
@@ -210,12 +231,7 @@ class ClassifierFeedbackStmts:
         "SELECT feedback_id, approved FROM algorand_platform.classifier_feedback_by_time "
         "WHERE bucket = ? LIMIT 5000"
     )
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.classifier_feedback ("
-        "feedback_id, url, text_sample, category, predicted_category, quality, "
-        "predicted_publish, approved, admin_wallet, created_at, metadata"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
+    INSERT = CLASSIFIER_FEEDBACK_INSERT
     INSERT_BY_TIME = CLASSIFIER_FEEDBACK_INSERT_BY_TIME
 
 
@@ -258,9 +274,7 @@ class DomainTrackingStmts:
 class CrawledPageStmts:
     """Prepared statements for crawled_pages."""
 
-    COUNT_BY_DOMAIN = _Stmt(
-        "SELECT COUNT(*) AS c FROM algorand_platform.crawled_pages_by_domain WHERE domain = ?"
-    )
+    COUNT_BY_DOMAIN = CRAWLED_PAGE_COUNT_BY_DOMAIN
 
 
 # --------------------------------------------------------------------------- #
@@ -323,20 +337,16 @@ class UrlQueueStmts:
     # so one statement shape serves both the enabled and disabled config.
     # Mirrors workers' UrlQueueStmts (whose UPDATE_STATUS carries the same
     # TTL) — keep the TTL treatment in sync across both services.
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.url_queue ("
-        "queue_id, url, source, priority, enqueued_at, status, metadata"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL ?"
-    )
+    INSERT = URL_QUEUE_INSERT
+    # Unlike workers' INSERT_BY_URL, this also writes a `status` column --
+    # harmless drift (see algorand_shared.crawler_statements' module docstring:
+    # nothing actually reads `.status` back off `url_queue_by_url`), left
+    # local/distinct rather than force-unified.
     INSERT_BY_URL = _Stmt(
         "INSERT INTO algorand_platform.url_queue_by_url (url, queue_id, enqueued_at, status) "
         "VALUES (?, ?, ?, ?) USING TTL ?"
     )
-    INSERT_PENDING = _Stmt(
-        "INSERT INTO algorand_platform.url_queue_pending ("
-        "status, priority, enqueued_at, queue_id, url, source"
-        ") VALUES (?, ?, ?, ?, ?, ?) USING TTL ?"
-    )
+    INSERT_PENDING = URL_QUEUE_INSERT_PENDING
 
 
 # --------------------------------------------------------------------------- #
@@ -355,7 +365,15 @@ class InvestigationStmts:
 # classifier_review_queue / classifier_review_pending
 # --------------------------------------------------------------------------- #
 class ClassifierReviewStmts:
-    """Prepared statements for the pending classifier-review queue."""
+    """Prepared statements for the pending classifier-review queue.
+
+    GET_FULL deliberately does NOT select `status` -- workers' copy of this
+    class does (see workers/app/core/statements.py), because its recompose
+    path needs to refuse acting on an already-resolved review (2026-07-10
+    regression fix). Backend's only caller (`_complete_classifier_review`)
+    always overwrites status with the resolution being applied, so it never
+    needs to read the old value back.
+    """
 
     GET_METADATA = _Stmt(
         "SELECT metadata FROM algorand_platform.classifier_review_queue WHERE review_id = ?"
@@ -364,24 +382,10 @@ class ClassifierReviewStmts:
         "SELECT review_id, url, page_text, page_title, category, storage_score, "
         "created_at, metadata FROM algorand_platform.classifier_review_queue WHERE review_id = ?"
     )
-    GET_DETAIL = _Stmt(
-        "SELECT review_id, url, page_title, page_text, category, storage_score, metadata "
-        "FROM algorand_platform.classifier_review_queue WHERE review_id = ?"
-    )
-    INSERT_QUEUE = _Stmt(
-        "INSERT INTO algorand_platform.classifier_review_queue ("
-        "review_id, url, page_text, page_title, category, "
-        "storage_score, status, created_at, metadata"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    LIST_PENDING = _Stmt(
-        "SELECT review_id, url, category, created_at "
-        "FROM algorand_platform.classifier_review_pending WHERE status = ? LIMIT ?"
-    )
-    DELETE_PENDING = _Stmt(
-        "DELETE FROM algorand_platform.classifier_review_pending "
-        "WHERE status = ? AND created_at = ? AND review_id = ?"
-    )
+    GET_DETAIL = CLASSIFIER_REVIEW_GET_DETAIL
+    INSERT_QUEUE = CLASSIFIER_REVIEW_INSERT_QUEUE
+    LIST_PENDING = CLASSIFIER_REVIEW_LIST_PENDING
+    DELETE_PENDING = CLASSIFIER_REVIEW_DELETE_PENDING
 
 
 # --------------------------------------------------------------------------- #
@@ -482,27 +486,19 @@ class UpvoteStmts:
 # service_registry
 # --------------------------------------------------------------------------- #
 class ServiceRegistryStmts:
-    """Prepared statements for the service registry."""
+    """Prepared statements for the service registry.
 
-    LIST_ALL = _Stmt(
-        "SELECT service_id, display_name, match_kind, match_value, scrape_url, enabled, origin "
-        "FROM algorand_platform.service_registry"
-    )
-    UPSERT = _Stmt(
-        "INSERT INTO algorand_platform.service_registry ("
-        "service_id, display_name, match_kind, match_value, scrape_url, enabled, "
-        "updated_at, origin"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
+    DELETE is backend-admin-only (workers never deletes a registry row), so
+    it stays local -- everything else here is byte-identical to workers' copy
+    and sourced from algorand_shared.platform_statements.
+    """
+
+    LIST_ALL = SERVICE_REGISTRY_LIST_ALL
+    UPSERT = SERVICE_REGISTRY_UPSERT
     DELETE = _Stmt("DELETE FROM algorand_platform.service_registry WHERE service_id = ?")
-    GET_ID = _Stmt("SELECT service_id FROM algorand_platform.service_registry WHERE service_id = ?")
-    SET_ENABLED = _Stmt(
-        "UPDATE algorand_platform.service_registry SET enabled = ?, updated_at = ? "
-        "WHERE service_id = ?"
-    )
-    GET_SCRAPE_URL = _Stmt(
-        "SELECT scrape_url FROM algorand_platform.service_registry WHERE service_id = ?"
-    )
+    GET_ID = SERVICE_REGISTRY_GET_ID
+    SET_ENABLED = SERVICE_REGISTRY_SET_ENABLED
+    GET_SCRAPE_URL = SERVICE_REGISTRY_GET_SCRAPE_URL
 
 
 # --------------------------------------------------------------------------- #

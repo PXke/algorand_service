@@ -2,14 +2,18 @@
 
 Both deployables read and write the SAME physical Cassandra tables
 (`service_sources`, `service_by_domain`, `page_snapshots`, `glossary_terms`,
-`domain_tracking`, `classifier_feedback_by_time`) via independently
-hand-maintained statement classes in each service's own `app/core/statements.py`.
-Every statement here was found BYTE-IDENTICAL in both services' copies; each
-local `statements.py` now assigns its class attribute from one of these
-constants instead of defining its own copy, so a future edit to one of these
-queries can no longer silently stop matching the other service's copy (the
-exact drift `ChainStmts.TXNS_BY_ROUND` had already suffered -- see
-`chain_statements.py`).
+`domain_tracking`, `classifier_feedback_by_time`, `service_registry`) via
+independently hand-maintained statement classes in each service's own
+`app/core/statements.py`. Every statement here was found BYTE-IDENTICAL in
+both services' copies; each local `statements.py` now assigns its class
+attribute from one of these constants instead of defining its own copy, so a
+future edit to one of these queries can no longer silently stop matching the
+other service's copy (the exact drift `ChainStmts.TXNS_BY_ROUND` had already
+suffered -- see `chain_statements.py`).
+
+`service_registry`'s `DELETE` is deliberately NOT here -- it's backend-admin-
+only (workers never deletes a registry row), so it stays a local-only
+statement on backend's `ServiceRegistryStmts`.
 
 Names are flat module-level constants, NOT nested in a class, for the same
 reason as `article_statements.py` (see that module's docstring for the full
@@ -115,4 +119,27 @@ CLASSIFIER_FEEDBACK_INSERT_BY_TIME = _Stmt(
     "INSERT INTO algorand_platform.classifier_feedback_by_time ("
     "bucket, created_at, feedback_id, url, approved"
     ") VALUES (?, ?, ?, ?, ?)"
+)
+
+# --------------------------------------------------------------------------- #
+# service_registry
+# --------------------------------------------------------------------------- #
+SERVICE_REGISTRY_LIST_ALL = _Stmt(
+    "SELECT service_id, display_name, match_kind, match_value, scrape_url, enabled, origin "
+    "FROM algorand_platform.service_registry"
+)
+SERVICE_REGISTRY_GET_ID = _Stmt(
+    "SELECT service_id FROM algorand_platform.service_registry WHERE service_id = ?"
+)
+SERVICE_REGISTRY_UPSERT = _Stmt(
+    "INSERT INTO algorand_platform.service_registry ("
+    "service_id, display_name, match_kind, match_value, scrape_url, enabled, "
+    "updated_at, origin"
+    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+)
+SERVICE_REGISTRY_SET_ENABLED = _Stmt(
+    "UPDATE algorand_platform.service_registry SET enabled = ?, updated_at = ? WHERE service_id = ?"
+)
+SERVICE_REGISTRY_GET_SCRAPE_URL = _Stmt(
+    "SELECT scrape_url FROM algorand_platform.service_registry WHERE service_id = ?"
 )
