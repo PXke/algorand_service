@@ -90,17 +90,64 @@ def _recent_harvested_pages(
     # (e.g. a blog being refreshed daily) must not crowd the service's other
     # hosts (forum, docs, second domain) out of the aggregate — multi-host
     # representation is the point of a merged service.
-    picked = _fair_share_by_host(list(candidates.values()), max_pages=max_pages)
+    #
+    # Root-caused 2026-08-28 (Lumi Rogue): a client-rendered SPA served the
+    # SAME shell HTML (JS routing never executes for a non-browser fetch)
+    # for ~20 crawler-guessed URL variants (?view=gungi, /play/gungi,
+    # /#/gungi, ...) inside one crawl burst -- because the OLD cap here
+    # applied to `picked` (fair-share order, still one slot per URL) BEFORE
+    # dedup, that burst filled the entire max_pages budget with near-
+    # duplicate/soft-404 content and crowded out every genuinely different
+    # older page. Fair-share now runs over the FULL candidate pool (already
+    # bounded -- LIST_BY_DOMAIN caps at 40 rows/host), bodies are fetched for
+    # all of it, and both filters below run BEFORE the max_pages cut so
+    # duplicates/soft-404s never occupy a slot a real page could have used.
+    ordered = _fair_share_by_host(list(candidates.values()), max_pages=len(candidates))
     bodies = execute_parallel_with_args(
-        CrawledPageStmts.GET_BODY, [(page_id,) for _, page_id, _, _ in picked]
+        CrawledPageStmts.GET_BODY, [(page_id,) for _, page_id, _, _ in ordered]
     )
+    return _select_distinct_pages(ordered, bodies, max_pages=max_pages)
+
+
+def _select_distinct_pages(
+    ordered: list[tuple[datetime, object, str, str]],
+    bodies: list[tuple[bool, object]],
+    *,
+    max_pages: int,
+) -> list[ContextPage]:
+    """Walk `ordered` (fair-share priority order) pairing each candidate with its fetched body, skipping soft-404s and content-duplicates of an already-accepted page, until max_pages distinct real pages are collected."""
     pages: list[ContextPage] = []
-    for (_, _, url, title), (ok, result) in zip(picked, bodies, strict=True):
+    seen_content: set[str] = set()
+    for (_, _, url, title), (ok, result) in zip(ordered, bodies, strict=True):
+        if len(pages) >= max_pages:
+            break
         detail = result.one() if ok else None
-        if detail is None or not (detail.body or "").strip():
+        body = (detail.body if detail else "") or ""
+        if not body.strip() or _looks_like_soft_404(body):
             continue
-        pages.append(ContextPage(url=url, title=title or detail.title or "", body=detail.body))
+        content_key = normalize_text(body)
+        if content_key in seen_content:
+            continue
+        seen_content.add(content_key)
+        pages.append(ContextPage(url=url, title=title or detail.title or "", body=body))
     return pages
+
+
+# A client-side router's inline fallback ("Page Not Found") is characteristically
+# tiny compared to any real page on the same app (83 chars observed on Lumi
+# Rogue vs. 976-1484 for its real shell/homepage) -- length alone is too broad
+# a filter (a real page can legitimately be short), so this only fires on the
+# combination of short AND explicitly says not-found.
+_SOFT_404_MAX_CHARS = 200
+_SOFT_404_MARKERS = ("page not found", "404 not found", "could not be found")
+
+
+def _looks_like_soft_404(body: str) -> bool:
+    text = body.strip()
+    if len(text) > _SOFT_404_MAX_CHARS:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in _SOFT_404_MARKERS)
 
 
 def _fair_share_by_host(

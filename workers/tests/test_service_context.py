@@ -1,9 +1,17 @@
 """Aggregating per-page context into one bounded service-watch snapshot."""
 
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from app.modules.ai.llm_openai_compatible import _parse_json_object
-from app.modules.newspaper.service_context import ContextPage, build_service_context
+from app.modules.newspaper.service_context import (
+    ContextPage,
+    _looks_like_soft_404,
+    _select_distinct_pages,
+    build_service_context,
+)
 
 
 def _pages() -> list[ContextPage]:
@@ -105,6 +113,65 @@ def test_fair_share_selection_across_hosts() -> None:
     assert "forum.x.io" in hosts
     assert "docs.x.io" in hosts
     assert len(picked) == 6
+
+
+def test_soft_404_detection() -> None:
+    """Short client-router 'not found' fallbacks are flagged; real pages (even short ones) are not."""
+    assert _looks_like_soft_404('404 Page Not Found The page "gungi" could not be found. Go Home')
+    assert _looks_like_soft_404("Sorry, this page could not be found.")
+    assert not _looks_like_soft_404("A short real page with no error phrasing at all.")
+    assert not _looks_like_soft_404("w " * 200)  # long -- not a soft-404 regardless of content
+
+
+@dataclass
+class _FakeBodyRow:
+    body: str
+    title: str = ""
+
+
+def _candidate(
+    url: str, *, minutes_ago: int = 0, page_id: str = "id", title: str = ""
+) -> tuple[datetime, str, str, str]:
+    now = datetime.now(tz=UTC)
+    return (now - timedelta(minutes=minutes_ago), page_id, url, title)
+
+
+def _one(row: _FakeBodyRow) -> object:
+    class _Result:
+        def one(self) -> _FakeBodyRow:
+            return row
+
+    return _Result()
+
+
+def test_select_distinct_pages_skips_soft_404s() -> None:
+    """A soft-404 candidate never occupies a page slot, even when nothing else competes for it."""
+    ordered = [_candidate("https://ex.io/ghost", page_id="p1")]
+    bodies = [(True, _one(_FakeBodyRow(body="404 Page Not Found. Go Home")))]
+    pages = _select_distinct_pages(ordered, bodies, max_pages=5)
+    assert pages == []
+
+
+def test_select_distinct_pages_dedupes_content_not_just_url() -> None:
+    """Root-caused 2026-08-28 (Lumi Rogue): ~20 URL-variants of one client-rendered SPA all serve byte-identical shell HTML. Content-dedup must collapse them to ONE slot, freeing the rest of max_pages for genuinely different pages instead of the flood eating the whole budget."""
+    shell = "LUMI ROGUE v0.21 Try the demo (tutorial) Rankings Need an Ankh?"
+    ordered = [
+        _candidate("https://ex.io/?view=gungi", minutes_ago=1, page_id="p1"),
+        _candidate("https://ex.io/play/gungi", minutes_ago=2, page_id="p2"),
+        _candidate("https://ex.io/#/gungi", minutes_ago=3, page_id="p3"),
+        _candidate(
+            "https://ex.io/about", minutes_ago=100, page_id="p4"
+        ),  # genuinely different, older
+    ]
+    bodies = [
+        (True, _one(_FakeBodyRow(body=shell))),
+        (True, _one(_FakeBodyRow(body=shell))),
+        (True, _one(_FakeBodyRow(body=shell))),
+        (True, _one(_FakeBodyRow(body="A real About page with real content about the team."))),
+    ]
+    pages = _select_distinct_pages(ordered, bodies, max_pages=2)
+    urls = [p.url for p in pages]
+    assert urls == ["https://ex.io/?view=gungi", "https://ex.io/about"]
 
 
 def test_parse_json_object_salvages_fences_and_prose() -> None:
