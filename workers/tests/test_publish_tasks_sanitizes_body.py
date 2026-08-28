@@ -43,12 +43,8 @@ def _assert_sanitized(body: str) -> None:
 
 
 def _wire_domain_tracker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "app.modules.crawler.domain_tracker.record_domain_compose", lambda _domain: None
-    )
-    monkeypatch.setattr(
-        "app.modules.crawler.domain_tracker.record_service_compose", lambda _service_id: None
-    )
+    """No-op the compose-cadence bookkeeping _finalize_publish/_hold_for_review call via the shared publish_fanout.record_compose_cadence (W4-A, 2026-08-28) -- record_domain_compose/record_service_compose are now bound at publish_fanout's own module top, not re-imported per call, so patching domain_tracker's origin module no longer reaches them."""
+    monkeypatch.setattr(pt, "record_compose_cadence", lambda **_kw: None)
 
 
 def test_stash_capped_compose_to_backlog_sanitizes_body(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,8 +155,11 @@ def test_finalize_publish_sanitizes_body(monkeypatch: pytest.MonkeyPatch) -> Non
         return "dddddddd-dddd-dddd-dddd-dddddddddddd"
 
     monkeypatch.setattr(pt, "insert_article", _fake_insert_article)
-    monkeypatch.setattr(pt.index_article, "delay", lambda **_kw: None)
-    monkeypatch.setattr(pt, "enqueue_article_translations", lambda _article_id: None)
+    # _finalize_publish's post-publish tail is now the shared
+    # publish_fanout.fanout_after_publish (W4-A, 2026-08-28) -- this test only
+    # cares that the body is sanitized before insert_article, not fanout's own
+    # internals (search index/IndexNow/translations/distribution), so no-op it.
+    monkeypatch.setattr(pt, "fanout_after_publish", lambda *_a, **_kw: {"status": "ok"})
     monkeypatch.setattr(
         "app.modules.newspaper.publish_daily_guard.release_publish_slot", lambda **_kw: None
     )
