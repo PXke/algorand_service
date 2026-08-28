@@ -4,6 +4,7 @@
   import { get } from 'svelte/store'
   import { looksLikeFaviconUrl, proxiedImageUrl, sameImageUrl } from '../lib/images'
   import { renderChartHtml } from '../lib/chartRender'
+  import { sanitizeArticleHtml } from '../lib/sanitizeHtml'
   import { glossaryApi, type GlossaryTerm } from '../lib/api/glossary'
   import { activeLocale, messages, t } from '../lib/i18n'
   import { navigate } from '../lib/router'
@@ -294,8 +295,9 @@
       `<div class="table-frame"><div class="table-scroll">${baseTable(token)}</div><span class="table-hint" aria-hidden="true">→</span></div>`
 
     const baseLink = renderer.link.bind(renderer)
-    renderer.link = ({ href, title, tokens }) => {
-      const out = baseLink({ href, title, tokens })
+    renderer.link = (token) => {
+      const { href } = token
+      const out = baseLink(token)
       // Open external http(s) links in a new tab.
       if (href && /^https?:\/\//i.test(href)) {
         return out.replace('<a ', '<a target="_blank" rel="noopener noreferrer" ')
@@ -337,7 +339,11 @@
       breaks: false,
       renderer,
     }) as string
-    return restyleSources(parsed)
+    // Article bodies are writer/LLM output over crawled-page content --
+    // never trusted -- so the fully-assembled markup (including the
+    // restyled sources block) is sanitized right before it reaches
+    // {@html} below, not just the raw marked.parse() output.
+    return sanitizeArticleHtml(restyleSources(parsed))
   })
 
 </script>

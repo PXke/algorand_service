@@ -1,3 +1,4 @@
+/// <reference types="vite-plugin-pwa/client" />
 import { mount } from 'svelte'
 import './app.css'
 import './lib/theme'
@@ -67,7 +68,7 @@ function registerSwWhenIdle(): void {
       .then(({ registerSW }) => {
         registerSW({
           immediate: true,
-          onRegisteredSW(_url, registration) {
+          onRegisteredSW(_url: string, registration: ServiceWorkerRegistration | undefined) {
             // Pick up new hashed chunks soon after a deploy lands.
             if (!registration) return
             window.setInterval(() => {
