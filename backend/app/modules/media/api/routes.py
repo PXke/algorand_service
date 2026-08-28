@@ -8,7 +8,7 @@ import ipaddress
 import socket
 from functools import lru_cache
 from typing import TYPE_CHECKING
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 import httpx
 
@@ -90,18 +90,31 @@ def _cache_set(url: str, ctype: str, data: bytes) -> None:
         _redis().set(_cache_key(url), ctype.encode("latin-1") + b"\0" + data, ex=_CACHE_TTL)
 
 
-def _is_public_host(host: str) -> bool:
+def _resolve_public_ip(host: str) -> str | None:
+    """Resolve `host` and return one public IP literal to connect to.
+
+    Returns None if `host` is empty, unresolvable, or ANY resolved address
+    is private/internal.
+
+    Rejecting on any non-public address in the result set (not just the first)
+    closes a DNS trick where a host round-robins between a public IP and an
+    internal one. The caller connects to the IP this function returns instead
+    of letting httpx re-resolve the hostname at connect time — otherwise a
+    DNS answer that changes between this check and the actual TCP connect
+    (DNS rebinding) would bypass the SSRF guard entirely.
+    """
     if not host:
-        return False
+        return None
     try:
         infos = socket.getaddrinfo(host, None)
     except OSError:
-        return False
+        return None
+    ips: list[str] = []
     for info in infos:
         try:
             addr = ipaddress.ip_address(info[4][0])
         except ValueError:
-            return False
+            return None
         if (
             addr.is_private
             or addr.is_loopback
@@ -110,29 +123,66 @@ def _is_public_host(host: str) -> bool:
             or addr.is_multicast
             or addr.is_unspecified
         ):
-            return False
-    return True
+            return None
+        ips.append(f"[{addr}]" if addr.version == 6 else str(addr))
+    return ips[0] if ips else None
 
 
-def _fetch_image(url: str) -> httpx.Response | None:
-    """Fetch an image, re-validating the host on each redirect hop (SSRF safe)."""
-    with httpx.Client(timeout=_TIMEOUT, follow_redirects=False) as client:
+def _stream_fetch(
+    url: str, *, transport: httpx.BaseTransport | None = None
+) -> tuple[int, str, bytes]:
+    """(status, content_type, body) — fetch upstream with a stream+abort byte cap.
+
+    Re-validates the host on each redirect hop (SSRF safe) and connects to
+    the IP `_resolve_public_ip` already validated for that hop — never a
+    second, unvalidated DNS lookup at connect time (see _resolve_public_ip).
+    The original hostname still goes out as the Host header and TLS SNI so
+    virtual-hosted / cert-checked upstreams keep working.
+
+    Reads at most _MAX_BYTES off the wire before aborting the connection —
+    an oversized or slow-drip upstream body can no longer be pulled fully
+    into memory before the existing `[:_MAX_BYTES]` slice (the previous
+    behavior: `client.get()` downloads the whole response first).
+
+    Returns (502, "", b"") for any fetch/SSRF failure, (404, "", b"") when
+    the final response isn't a 200 image, else (200, ctype, body).
+    """
+    with httpx.Client(timeout=_TIMEOUT, follow_redirects=False, transport=transport) as client:
         for _ in range(_MAX_REDIRECTS + 1):
             parsed = urlparse(url)
-            if parsed.scheme not in _ALLOWED_SCHEMES or not _is_public_host(parsed.hostname or ""):
-                return None
+            host = parsed.hostname or ""
+            if parsed.scheme not in _ALLOWED_SCHEMES:
+                return 502, "", b""
+            ip = _resolve_public_ip(host)
+            if ip is None:
+                return 502, "", b""
+            port_suffix = f":{parsed.port}" if parsed.port else ""
+            connect_url = urlunparse(parsed._replace(netloc=f"{ip}{port_suffix}"))
             try:
-                resp = client.get(url, headers={"User-Agent": _UA})
+                with client.stream(
+                    "GET",
+                    connect_url,
+                    headers={"User-Agent": _UA, "Host": parsed.netloc},
+                    extensions={"sni_hostname": host},
+                ) as resp:
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        loc = resp.headers.get("location")
+                        if not loc:
+                            return 502, "", b""
+                        url = urljoin(url, loc)
+                        continue
+                    ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+                    if resp.status_code != 200 or not ctype.startswith("image/"):
+                        return 404, "", b""
+                    body = bytearray()
+                    for chunk in resp.iter_bytes():
+                        body.extend(chunk)
+                        if len(body) > _MAX_BYTES:
+                            break  # abort: `with` closes the connection on exit
+                    return 200, ctype, bytes(body[:_MAX_BYTES])
             except Exception:
-                return None
-            if resp.status_code in (301, 302, 303, 307, 308):
-                loc = resp.headers.get("location")
-                if not loc:
-                    return None
-                url = urljoin(url, loc)
-                continue
-            return resp
-    return None
+                return 502, "", b""
+    return 502, "", b""
 
 
 def _rasterize_svg(data: bytes) -> tuple[str, bytes] | None:
@@ -184,13 +234,10 @@ def _optimize(ctype: str, data: bytes) -> tuple[str, bytes]:
 
 def _fetch_and_optimize(url: str) -> tuple[int, str, bytes]:
     """(status, content_type, body) — fetch upstream, optimize, and cache."""
-    resp = _fetch_image(url)
-    if resp is None:
-        return 502, "", b""
-    ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-    if resp.status_code != 200 or not ctype.startswith("image/"):
-        return 404, "", b""
-    ctype, data = _optimize(ctype, resp.content[:_MAX_BYTES])
+    status, ctype, data = _stream_fetch(url)
+    if status != 200:
+        return status, "", b""
+    ctype, data = _optimize(ctype, data)
     _cache_set(url, ctype, data)
     return 200, ctype, data
 
