@@ -8,11 +8,13 @@ from typing import Any, Never
 import pytest
 
 from app.modules.crawler.tasks.url_queue_tasks import (
+    _deep_crawl_for_relevance,
     _external_corroboration,
     _sample_domain_pages,
     classify_pending_domains,
     deep_classify_domain,
     drain_url_queue,
+    reap_stale_deep_classify_flags,
     reclassify_gray_zone_domains,
 )
 from app.modules.scraper.core.base import ScrapeResult
@@ -36,8 +38,9 @@ def _result(url: str, text: str, raw_html: str = "") -> ScrapeResult:
     )
 
 
-def test_sample_domain_pages_follows_same_domain_links() -> None:
+def test_sample_domain_pages_follows_same_domain_links(monkeypatch: pytest.MonkeyPatch) -> None:
     """Follows same-domain links discovered on the landing page, skipping external ones."""
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
     landing_html = (
         '<a href="/product">Product</a> '
         '<a href="https://other.example/ad">Ad</a> '
@@ -58,8 +61,9 @@ def test_sample_domain_pages_follows_same_domain_links() -> None:
     ]
 
 
-def test_sample_domain_pages_pool_of_one_skips_links() -> None:
+def test_sample_domain_pages_pool_of_one_skips_links(monkeypatch: pytest.MonkeyPatch) -> None:
     """With max_pages=1, returns only the landing page without following any links."""
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
     driver = _FakeDriver(
         {
             "https://svc.example": _result(
@@ -71,8 +75,11 @@ def test_sample_domain_pages_pool_of_one_skips_links() -> None:
     assert pages == [("https://svc.example", "landing text", ())]
 
 
-def test_sample_domain_pages_skips_a_link_that_fails_to_fetch() -> None:
+def test_sample_domain_pages_skips_a_link_that_fails_to_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Skips a linked page whose fetch raises, continuing on to the remaining links."""
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
     landing_html = '<a href="/broken">Broken</a> <a href="/ok">Ok</a>'
     driver = _FakeDriver(
         {
@@ -85,8 +92,11 @@ def test_sample_domain_pages_skips_a_link_that_fails_to_fetch() -> None:
     assert [u for u, _, _ in pages] == ["https://svc.example", "https://svc.example/ok"]
 
 
-def test_sample_domain_pages_carries_outbound_external_links() -> None:
+def test_sample_domain_pages_carries_outbound_external_links(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Carries each page's outbound external links alongside its text for later scoring."""
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
     # The quantoz.com/EURQ case: a page's own text never says "algorand", but
     # it links straight to an Algorand explorer entry — that link must travel
     # with the page so classify_pending_domains can feed it to score_page.
@@ -153,12 +163,142 @@ def test_sample_domain_pages_cache_miss_falls_back_to_live_fetch(
     """Falls back to a live driver fetch when the page body isn't cached."""
     import app.modules.crawler.tasks.url_queue_tasks as uq
 
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
     monkeypatch.setattr(uq, "_cached_page_body", lambda _url: None)
     driver = _FakeDriver(
         {"https://svc.example": _result("https://svc.example", "live text", "<a href='/x'>x</a>")}
     )
     pages, _ = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=1)
     assert pages == [("https://svc.example", "live text", ())]
+
+
+# --------------------------------------------------------------------------- #
+# _sample_domain_pages / _deep_crawl_for_relevance -- robots/budget/cooldown
+# gate routing (W3-B, root-caused 2026-08-26: neither function checked the
+# domain's crawl budget or cooldown before fetching, and _sample_domain_pages
+# had no robots.txt check at all).
+# --------------------------------------------------------------------------- #
+
+
+def test_sample_domain_pages_returns_empty_when_budget_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A domain already over its crawl-page budget gets no fetches at all, not even the landing page."""
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.domain_crawl_budget_exhausted", lambda _d: True
+    )
+
+    def _boom(_url: str, _source_id: str) -> Never:
+        raise AssertionError("must not fetch anything once the domain's budget is exhausted")
+
+    driver = SimpleNamespace(scrape_with_fallback=_boom)
+    pages, same_domain_link_count = _sample_domain_pages(
+        driver, "https://svc.example", "svc.example", max_pages=3
+    )
+    assert pages == []
+    assert same_domain_link_count == 0
+
+
+def test_sample_domain_pages_returns_empty_when_domain_in_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A domain currently in its compose/diversity cooldown gets no fetches at all."""
+    monkeypatch.setattr("app.modules.crawler.domain_tracker.domain_in_cooldown", lambda _d: True)
+
+    def _boom(_url: str, _source_id: str) -> Never:
+        raise AssertionError("must not fetch anything while the domain is in cooldown")
+
+    driver = SimpleNamespace(scrape_with_fallback=_boom)
+    pages, same_domain_link_count = _sample_domain_pages(
+        driver, "https://svc.example", "svc.example", max_pages=3
+    )
+    assert pages == []
+    assert same_domain_link_count == 0
+
+
+def test_sample_domain_pages_skips_a_robots_disallowed_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-domain link robots.txt disallows is skipped like a fetch failure, while an allowed sibling link still gets fetched."""
+
+    def _fake_is_allowed(url: str) -> bool:
+        return url != "https://svc.example/disallowed"
+
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", _fake_is_allowed)
+    landing_html = '<a href="/disallowed">No</a> <a href="/ok">Ok</a>'
+    driver = _FakeDriver(
+        {
+            "https://svc.example": _result("https://svc.example", "landing text", landing_html),
+            "https://svc.example/ok": _result("https://svc.example/ok", "ok text"),
+            # /disallowed deliberately absent -- must never be fetched.
+        }
+    )
+    pages, _ = _sample_domain_pages(driver, "https://svc.example", "svc.example", max_pages=3)
+    assert [u for u, _, _ in pages] == ["https://svc.example", "https://svc.example/ok"]
+
+
+def test_sample_domain_pages_robots_disallowed_landing_page_yields_empty_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A robots-disallowed landing page still returns its one placeholder entry (best-effort, like any other unfetchable page) rather than raising or fetching anyway."""
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: False)
+
+    def _boom(_url: str, _source_id: str) -> Never:
+        raise AssertionError("must not fetch a robots-disallowed URL")
+
+    driver = SimpleNamespace(scrape_with_fallback=_boom)
+    pages, same_domain_link_count = _sample_domain_pages(
+        driver, "https://svc.example", "svc.example", max_pages=3
+    )
+    assert pages == [("https://svc.example", "", ())]
+    assert same_domain_link_count == 0
+
+
+def test_deep_crawl_for_relevance_stops_when_budget_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The random-order deep crawl stops (non-exhaustive) the moment the domain's crawl budget trips, instead of continuing to burn fetches against it."""
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.domain_crawl_budget_exhausted", lambda _d: True
+    )
+
+    def _boom(_url: str, _source_id: str) -> Never:
+        raise AssertionError("must not fetch anything once the domain's budget is exhausted")
+
+    monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: SimpleNamespace(scrape_with_fallback=_boom))
+
+    found, fetched, exhaustive, link_count = _deep_crawl_for_relevance(
+        domain="svc.example", landing_url="https://svc.example", max_pages=200
+    )
+    assert found is None
+    assert fetched == 0
+    assert exhaustive is False  # a budget trip is a limit, not proof the site has nothing
+    assert link_count == 0
+
+
+def test_deep_crawl_for_relevance_stops_when_domain_in_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The random-order deep crawl stops the moment the domain enters cooldown, same as a budget trip."""
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
+    monkeypatch.setattr("app.modules.crawler.domain_tracker.domain_in_cooldown", lambda _d: True)
+
+    def _boom(_url: str, _source_id: str) -> Never:
+        raise AssertionError("must not fetch anything while the domain is in cooldown")
+
+    monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: SimpleNamespace(scrape_with_fallback=_boom))
+
+    found, fetched, exhaustive, _link_count = _deep_crawl_for_relevance(
+        domain="svc.example", landing_url="https://svc.example", max_pages=200
+    )
+    assert found is None
+    assert fetched == 0
+    assert exhaustive is False
 
 
 def _patch_common(
@@ -711,6 +851,223 @@ def test_deep_classify_domain_approves_via_external_corroboration(
     # Registers the monitored source at the domain's OWN landing page, not
     # the outside corroborating URL (a Reddit post isn't on this domain).
     assert service_calls == [("chainsilent.example", {"scrape_url": "https://chainsilent.example"})]
+
+
+# --------------------------------------------------------------------------- #
+# deep_classify_domain's try/finally -- deep_classify_queued must never get
+# stuck "true" (W3-B, root-caused 2026-08-26: none of the three verdict
+# branches ever cleared it, so every completed run stayed permanently
+# excluded from _gray_zone_rows'/_classify_and_store_domain's in-flight
+# dedup check).
+# --------------------------------------------------------------------------- #
+
+
+def test_deep_classify_domain_clears_queued_flag_on_approve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The approve path's own update_domain_status write is followed by a second call clearing deep_classify_queued -- the try/finally fires after a normal return too, not just on failure."""
+    driver = _FakeDriver(
+        {
+            "https://svc.example": _result(
+                "https://svc.example", "algorand mainnet testnet asa" * 5, ""
+            ),
+        }
+    )
+    calls = _patch_common(monkeypatch, driver)
+    deep_classify_domain(domain="svc.example", max_pages=200)
+    assert calls[-1] == ("svc.example", {"metadata": {"deep_classify_queued": "false"}})
+
+
+def test_deep_classify_domain_clears_queued_flag_on_reject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dead_end reject path also gets the flag cleared afterward."""
+    driver = _FakeDriver(
+        {
+            "https://offtopic.example": _result(
+                "https://offtopic.example", "we sell shoes online" * 10, ""
+            ),
+        }
+    )
+    calls = _patch_common(monkeypatch, driver)
+    deep_classify_domain(domain="offtopic.example", max_pages=200)
+    assert calls[-1] == ("offtopic.example", {"metadata": {"deep_classify_queued": "false"}})
+
+
+def test_deep_classify_domain_clears_queued_flag_even_when_crawl_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hard failure mid-crawl (e.g. a Cassandra hiccup surfacing out of _deep_crawl_for_relevance) still clears the flag on the way out -- the finally block, not the three verdict branches, is what guarantees this."""
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.update_domain_status",
+        lambda domain, **kw: calls.append((domain, kw)),
+    )
+
+    def _boom(**_kw: object) -> Never:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(uq, "_deep_crawl_for_relevance", _boom)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        deep_classify_domain(domain="svc.example", max_pages=200)
+
+    # No verdict was ever written (the crawl itself raised before either
+    # branch), but the finally-only clear must still have run.
+    assert calls == [("svc.example", {"metadata": {"deep_classify_queued": "false"}})]
+
+
+# --------------------------------------------------------------------------- #
+# _classify_and_store_domain's escalation path -- deep_classify_queued_at
+# stamping (W3-B: needed so reap_stale_deep_classify_flags can judge
+# staleness for domains escalated from here, not just gray_zone_
+# reconciliation.dispatch_gray_zone_deep_classify's own dispatch path).
+# --------------------------------------------------------------------------- #
+
+
+def test_classify_pending_domains_escalation_stamps_deep_classify_queued_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The escalation write includes a parseable deep_classify_queued_at timestamp, not just the deep_classify_queued flag."""
+    from datetime import UTC, datetime
+
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    monkeypatch.setattr("app.core.config.FRONTIER_DEEP_CLASSIFY_ENABLED", True)
+    monkeypatch.setattr("app.core.config.FRONTIER_DEEP_CLASSIFY_MAX_PAGES", 200)
+
+    rows = [SimpleNamespace(domain="offtopic.example", frontier_status="pending", metadata={})]
+    executed = []
+    monkeypatch.setattr(
+        "app.core.cassandra.get_cassandra_session",
+        lambda: SimpleNamespace(
+            execute=lambda stmt, params: executed.append((stmt, params)) or rows,
+            prepare=lambda cql: cql,
+        ),
+    )
+    monkeypatch.setattr(
+        uq,
+        "_sample_domain_pages",
+        lambda _driver, url, _domain, _n: ([(url, "off-topic content" * 10, ())], 0),
+    )
+    monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: object())
+    monkeypatch.setattr("app.celery_app.celery_app.send_task", lambda *_a, **_kw: None)
+    monkeypatch.setattr("app.modules.crawler.domain_tracker.is_protected_domain", lambda _d: False)
+
+    before = datetime.now(tz=UTC)
+    classify_pending_domains(limit=10, dry_run=False, auto_reject=True)
+    after = datetime.now(tz=UTC)
+
+    update_calls = [p for _, p in executed if isinstance(p, tuple) and len(p) == 2]
+    new_meta = update_calls[-1][0]
+    assert new_meta["deep_classify_queued"] == "true"
+    stamped = datetime.fromisoformat(new_meta["deep_classify_queued_at"])
+    assert before <= stamped <= after
+
+
+# --------------------------------------------------------------------------- #
+# reap_stale_deep_classify_flags -- the sweep that catches what the try/
+# finally above structurally can't (a hard SIGKILL past task_time_limit).
+# --------------------------------------------------------------------------- #
+
+
+def test_reap_stale_deep_classify_flags_clears_only_rows_past_the_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clears deep_classify_queued on rows stamped well before the cutoff, leaves a recently-queued row and a row with no timestamp untouched, and counts the no-timestamp row separately rather than guessing at it."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.statements import DomainTrackingStmts
+
+    now = datetime.now(tz=UTC)
+    stale_at = (now - timedelta(seconds=10_000)).isoformat()
+    fresh_at = (now - timedelta(seconds=5)).isoformat()
+    rows = [
+        SimpleNamespace(
+            domain="stale.example",
+            metadata={"deep_classify_queued": "true", "deep_classify_queued_at": stale_at},
+        ),
+        SimpleNamespace(
+            domain="fresh.example",
+            metadata={"deep_classify_queued": "true", "deep_classify_queued_at": fresh_at},
+        ),
+        SimpleNamespace(
+            domain="no_timestamp.example",
+            metadata={"deep_classify_queued": "true"},
+        ),
+        SimpleNamespace(domain="untouched.example", metadata={}),
+    ]
+    executed: list[tuple] = []
+    monkeypatch.setattr(
+        "app.core.cassandra.get_cassandra_session",
+        lambda: SimpleNamespace(
+            execute=lambda stmt, params: executed.append((stmt, params)) or rows,
+            prepare=lambda cql: cql,
+        ),
+    )
+
+    out = reap_stale_deep_classify_flags(stale_seconds=3600)
+
+    assert out["reaped"] == 1
+    assert out["reaped_domains"] == ["stale.example"]
+    assert out["skipped_no_timestamp"] == 1
+    update_calls = [
+        params for stmt, params in executed if stmt == DomainTrackingStmts.UPDATE_METADATA
+    ]
+    assert len(update_calls) == 1
+    new_meta, domain = update_calls[0]
+    assert domain == "stale.example"
+    assert new_meta["deep_classify_queued"] == "false"
+
+
+def test_reap_stale_deep_classify_flags_default_threshold_derives_from_task_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no explicit stale_seconds, the default threshold is a generous multiple of the celery-wide hard task_time_limit, not a magic number -- a row stamped well inside that default window must survive untouched."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.celery_app import celery_app
+
+    hard_limit = celery_app.conf.task_time_limit
+    # Comfortably inside even a 1x margin above the hard limit -- must never
+    # be reaped regardless of the exact multiplier this module chooses.
+    recent_at = (datetime.now(tz=UTC) - timedelta(seconds=min(hard_limit - 5, 60))).isoformat()
+    rows = [
+        SimpleNamespace(
+            domain="recent.example",
+            metadata={"deep_classify_queued": "true", "deep_classify_queued_at": recent_at},
+        ),
+    ]
+    monkeypatch.setattr(
+        "app.core.cassandra.get_cassandra_session",
+        lambda: SimpleNamespace(execute=lambda _stmt, _params: rows, prepare=lambda cql: cql),
+    )
+
+    out = reap_stale_deep_classify_flags()
+
+    assert out["reaped"] == 0
+    assert out["stale_seconds"] > hard_limit
+
+
+def test_reap_stale_deep_classify_flags_task_resolves_to_the_real_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Celery task registered under "app.tasks.crawler.reap_stale_deep_classify_flags" must delegate to the real sweep function, mirroring reclaim_stale_processing_urls_task's own regression test."""
+    from app.celery_app import celery_app
+
+    called: list[bool] = []
+    monkeypatch.setattr(
+        "app.modules.crawler.tasks.url_queue_tasks.reap_stale_deep_classify_flags",
+        lambda: called.append(True) or {"status": "ok", "reaped": 0},
+    )
+
+    task = celery_app.tasks["app.tasks.crawler.reap_stale_deep_classify_flags"]
+    out = task()
+
+    assert out == {"status": "ok", "reaped": 0}
+    assert called == [True]
 
 
 # --------------------------------------------------------------------------- #

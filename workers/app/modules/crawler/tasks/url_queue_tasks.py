@@ -127,13 +127,33 @@ def _sample_domain_pages(
     links; if that happens on the landing page itself, _cached_domain_urls
     supplies fallback candidates from this domain's existing harvest instead
     of shrinking the sample to one page (2026-07-22).
+
+    A cache hit skips the gate entirely (no new request is made, so there is
+    nothing to be polite about or count against the budget) — only a LIVE
+    fetch checks domain_crawl_budget_exhausted / domain_in_cooldown (once,
+    for the whole sample — this function fetches at most FRONTIER_CLASSIFY_
+    SAMPLE_PAGES pages, not deep_classify_domain's up-to-200, so a single
+    upfront check is enough) and is_allowed (robots.txt, per URL). Previously
+    this called WebCrawlerDriver.scrape_with_fallback directly with none of
+    those three checks at all, unlike every routine drain_url_queue fetch
+    (see scrape_from_queue_item._pre_fetch_gate) — root-caused 2026-08-26.
     """
+    from app.modules.crawler.domain_tracker import (
+        domain_crawl_budget_exhausted,
+        domain_in_cooldown,
+    )
+    from app.modules.crawler.robots import is_allowed
     from app.modules.scraper.core.link_extractor import extract_page_links
+
+    if domain_crawl_budget_exhausted(domain) or domain_in_cooldown(domain):
+        return [], 0
 
     def _fetch(url: str) -> tuple[str, str]:
         cached = _cached_page_body(url)
         if cached is not None:
             return cached, ""
+        if not is_allowed(url):
+            return "", ""
         result = driver.scrape_with_fallback(url, domain)
         return result.text or "", result.raw_html or ""
 
@@ -221,10 +241,28 @@ def _deep_crawl_for_relevance(
     found is (url, score_result) or None. `exhaustive` is True only when the
     frontier ran dry — every reachable same-domain page really was checked —
     versus stopping because max_pages was hit with pages still unexplored.
+
+    Each iteration re-checks the same domain-level gate scrape_from_queue_
+    item's own _pre_fetch_gate applies to routine drain_url_queue fetches —
+    domain_crawl_budget_exhausted (the per-domain page-budget cap) and
+    domain_in_cooldown (diversity spacing) — before popping the next URL, and
+    is_allowed (robots.txt) per URL as before. Neither of the first two was
+    checked at all here previously (root-caused 2026-08-26): this crawl talks
+    to WebCrawlerDriver.scrape_with_fallback directly, never through
+    _pre_fetch_gate, so a 200-page deep-classify escalation could burn its
+    entire budget against a domain regardless of that domain's page-budget or
+    cooldown state. A domain-level trip BREAKS the loop (not `continue` — it
+    applies to the whole domain, not just the popped URL), which surfaces the
+    same way running out of max_pages does: exhaustive=False, since the
+    frontier is generally still non-empty.
     """
     import random
     import time
 
+    from app.modules.crawler.domain_tracker import (
+        domain_crawl_budget_exhausted,
+        domain_in_cooldown,
+    )
     from app.modules.crawler.robots import is_allowed
     from app.modules.scraper.core.link_extractor import extract_page_links
     from app.modules.search.classifier.score import score_page
@@ -246,6 +284,8 @@ def _deep_crawl_for_relevance(
     landing_same_domain_link_count = 0
 
     while frontier and fetched < max_pages:
+        if domain_crawl_budget_exhausted(domain) or domain_in_cooldown(domain):
+            break
         url = frontier.pop(random.randrange(len(frontier)))
         if url in visited or not is_allowed(url):
             continue
@@ -285,6 +325,25 @@ def _deep_crawl_for_relevance(
     # were more unexplored pages when it stopped — a real negative signal,
     # but a budget limit, not proof the rest of the site has nothing either.
     return found, fetched, not frontier, landing_same_domain_link_count
+
+
+def _clear_deep_classify_queued(domain: str) -> None:
+    """Best-effort clear of the ``deep_classify_queued`` in-flight marker once a ``deep_classify_domain`` run has actually finished — success, reject, or an uncaught exception. ``update_domain_status``/``UPDATE_METADATA`` MERGE metadata, they never delete keys, so a value written "true" before dispatch (see ``_classify_and_store_domain`` and ``gray_zone_reconciliation.dispatch_gray_zone_deep_classify``) stays "true" forever unless something explicitly overwrites it — root-caused 2026-08-26 (see ``gray_zone_reconciliation.py``'s own module docstring): neither the approve, external-corroboration, nor reject branch here ever cleared it, so every completed run left the domain permanently excluded from ``_gray_zone_rows``'/``_classify_and_store_domain``'s own "already in flight" dedup check.
+
+    Called from ``deep_classify_domain``'s own ``finally`` block (CLAUDE.md
+    invariant 7: flags set before dispatch must be cleared on failure too),
+    so it runs on every exit path that block reaches. The one path it can't
+    reach is a hard SIGKILL past the task's own ``task_time_limit`` — that
+    gap is what ``reap_stale_deep_classify_flags`` below is for. Fails open
+    with a log line, not a raise: a write hiccup here must never mask
+    whatever verdict (or exception) the run itself already produced.
+    """
+    from app.modules.crawler.domain_tracker import update_domain_status
+
+    try:
+        update_domain_status(domain, metadata={"deep_classify_queued": "false"})
+    except Exception:
+        logger.warning("failed to clear deep_classify_queued flag for %s", domain, exc_info=True)
 
 
 @celery_app.task(name="app.tasks.crawler.deep_classify_domain")
@@ -340,14 +399,33 @@ def deep_classify_domain(
     and no-ops on every later pass. The existing tests never caught this
     because they call ``deep_classify_domain(...)`` directly as a plain
     function, bypassing the Celery name resolution entirely.
+
+    The whole crawl-and-verdict body runs inside a ``try``/``finally`` that
+    calls ``_clear_deep_classify_queued`` on every exit — approve, external-
+    corroboration approve, reject, or an uncaught exception — so a completed
+    (or crashed-but-caught) run never leaves ``deep_classify_queued="true"``
+    stuck on the domain forever (root-caused 2026-08-26: none of the three
+    verdict branches below ever cleared it, so every finished run was
+    permanently invisible to the next ``_classify_and_store_domain``/
+    ``dispatch_gray_zone_deep_classify`` in-flight check). A hard SIGKILL
+    past this task's own ``task_time_limit`` still skips the ``finally`` —
+    see ``reap_stale_deep_classify_flags`` for that remaining gap.
     """
+    landing_url = seed_url or f"https://{domain}"
+    try:
+        return _run_deep_classify(domain=domain, landing_url=landing_url, max_pages=max_pages)
+    finally:
+        _clear_deep_classify_queued(domain)
+
+
+def _run_deep_classify(*, domain: str, landing_url: str, max_pages: int) -> dict[str, object]:
+    """The actual crawl-and-verdict body of deep_classify_domain, split out so the try/finally wrapping it (see deep_classify_domain's own docstring) reads as one clean block instead of an indented 150+-line body -- CLAUDE.md's 150-line-function guidance."""
     from app.modules.crawler.domain_tracker import (
         ensure_monitored_service,
         suggest_full_site,
         update_domain_status,
     )
 
-    landing_url = seed_url or f"https://{domain}"
     found, fetched, exhaustive, landing_same_domain_link_count = _deep_crawl_for_relevance(
         domain=domain, landing_url=landing_url, max_pages=max_pages
     )
@@ -568,6 +646,8 @@ def _classify_and_store_domain(
     same_domain_link_count: int = 0,
 ) -> str:
     """Write the classification back and apply the reject/escalate/keep-pending decision. Returns 'escalated' | 'rejected' | 'pending' ('pending' also covers the deep-classify-already-in-flight no-op, which makes no state change)."""
+    from datetime import UTC, datetime
+
     from app.core.config import FRONTIER_DEEP_CLASSIFY_ENABLED, FRONTIER_DEEP_CLASSIFY_MAX_PAGES
     from app.core.statements import DomainTrackingStmts
     from app.modules.crawler.domain_tracker import suggest_full_site, update_domain_status
@@ -606,6 +686,16 @@ def _classify_and_store_domain(
         if meta.get("deep_classify_queued") == "true":
             return "pending"
         new_meta["deep_classify_queued"] = "true"
+        # Stamped here too, not just in gray_zone_reconciliation.py's own
+        # dispatch path -- reap_stale_deep_classify_flags below needs this on
+        # EVERY escalation, whichever path queued it, or a domain escalated
+        # from here (the ordinary shallow-sample reject path, not the
+        # gray-zone one) can get stuck deep_classify_queued="true" forever
+        # with no timestamp to judge staleness by if the dispatched task never
+        # runs to completion (dropped message, crashed worker -- see
+        # deep_classify_domain's own try/finally and _clear_deep_classify_
+        # queued for the normal-exit clear this covers the gap for).
+        new_meta["deep_classify_queued_at"] = datetime.now(tz=UTC).isoformat()
         new_meta["frontier_status"] = "pending"
         session.execute(DomainTrackingStmts.UPDATE_METADATA, (new_meta, domain))
         from app.celery_app import celery_app as _celery_app
@@ -875,3 +965,95 @@ def reclassify_gray_zone_domains(*, limit: int | None = None) -> dict[str, objec
 def reclaim_stale_processing_urls_task() -> dict[str, object]:
     """Maintenance beat: reset any url_queue row stuck in status='processing' for more than url_queue.STALE_PROCESSING_SECONDS (30 min) back to pending, so a worker that died mid-fetch (hard time_limit SIGKILL, a deploy's cold-shutdown SIGQUIT, an orphaned process) doesn't strand the row forever -- dequeue_url() hands a row to exactly one worker and nothing else ever un-sticks a stuck one. See url_queue.reclaim_stale_processing_urls for the mechanism (Redis-tracked processing-start markers, since url_queue itself has no per-row "started processing" timestamp column)."""
     return reclaim_stale_processing_urls()
+
+
+# How long a domain_tracking row may sit with deep_classify_queued="true"
+# before reap_stale_deep_classify_flags below treats it as abandoned rather
+# than genuinely in flight. deep_classify_domain's own try/finally (see
+# _clear_deep_classify_queued) already clears the flag on every exit path it
+# reaches -- approve, external-corroboration approve, reject, or an uncaught
+# exception -- so this reaper only ever catches the one thing a try/finally
+# structurally can't: a hard SIGKILL past the task's own task_time_limit (the
+# celery-wide hard kill; deep_classify_domain has no per-task override), a
+# dropped Celery message, or a crashed worker pool. Mirrors COMPOSE_SESSION_
+# STALE_MINUTES' own reasoning (workers/app/core/config.py) -- roughly 2x the
+# hard time limit is a generous margin above any run that actually finished,
+# while still catching a genuinely abandoned one the same day. Derived from
+# celery_app.conf.task_time_limit directly (same source drain_url_queue's
+# own single_flight TTL already reads) rather than a new config setting, so
+# this stays self-contained to this module.
+_DEEP_CLASSIFY_STALE_SECONDS_MULTIPLIER = 2
+
+
+def reap_stale_deep_classify_flags(
+    *, stale_seconds: int | None = None, scan_limit: int = 5000
+) -> dict[str, object]:
+    """Beat maintenance: clear deep_classify_queued="true" on any domain_tracking row whose deep_classify_queued_at is older than stale_seconds, so a deep_classify_domain run that never reached its own try/finally doesn't leave a domain permanently excluded from the next classify_pending_domains / dispatch_gray_zone_deep_classify in-flight check (see _clear_deep_classify_queued and this module's own _DEEP_CLASSIFY_STALE_SECONDS_MULTIPLIER comment for why a try/finally alone isn't enough).
+
+    Mirrors url_queue.reclaim_stale_processing_urls' shape: a periodic sweep
+    that RE-CHECKS the real current state (the flag itself) before writing,
+    so a domain a completed run already resolved is never double-touched --
+    only genuinely stuck rows get reset.
+
+    deep_classify_queued_at is stamped at dispatch time by BOTH escalation
+    paths that set deep_classify_queued="true" -- _classify_and_store_
+    domain's ordinary shallow-sample escalation and gray_zone_reconciliation.
+    dispatch_gray_zone_deep_classify's gray-zone dispatch -- so this one sweep
+    covers rows from either. A row with deep_classify_queued="true" but no
+    parseable deep_classify_queued_at (written before this field existed, or
+    a malformed value) is skipped, not guessed at -- there is no way to judge
+    staleness without a timestamp, mirroring find_stale_gray_zone_dispatches'
+    own same choice in gray_zone_reconciliation.py.
+
+    scan_limit bounds the domain_tracking table scan, matching the 5000-row
+    scan reevaluate_pending_domains and gray_zone_reconciliation already use.
+    """
+    from datetime import UTC, datetime
+
+    from app.core.cassandra import get_cassandra_session
+    from app.core.statements import DomainTrackingStmts
+
+    effective_stale_seconds = (
+        stale_seconds
+        if stale_seconds is not None
+        else celery_app.conf.task_time_limit * _DEEP_CLASSIFY_STALE_SECONDS_MULTIPLIER
+    )
+    session = get_cassandra_session()
+    now = datetime.now(tz=UTC)
+
+    reaped: list[str] = []
+    skipped_no_timestamp = 0
+    for row in session.execute(DomainTrackingStmts.LIST, (scan_limit,)):
+        meta = dict(row.metadata or {})
+        if meta.get("deep_classify_queued") != "true":
+            continue
+        queued_at_raw = meta.get("deep_classify_queued_at")
+        if not queued_at_raw:
+            skipped_no_timestamp += 1
+            continue
+        try:
+            queued_at = datetime.fromisoformat(queued_at_raw)
+        except (TypeError, ValueError):
+            skipped_no_timestamp += 1
+            continue
+        if queued_at.tzinfo is None:
+            queued_at = queued_at.replace(tzinfo=UTC)
+        if (now - queued_at).total_seconds() < effective_stale_seconds:
+            continue
+        new_meta = {**meta, "deep_classify_queued": "false"}
+        session.execute(DomainTrackingStmts.UPDATE_METADATA, (new_meta, row.domain))
+        reaped.append(row.domain)
+
+    return {
+        "status": "ok",
+        "reaped": len(reaped),
+        "reaped_domains": reaped[:40],
+        "skipped_no_timestamp": skipped_no_timestamp,
+        "stale_seconds": effective_stale_seconds,
+    }
+
+
+@celery_app.task(name="app.tasks.crawler.reap_stale_deep_classify_flags")
+def reap_stale_deep_classify_flags_task() -> dict[str, object]:
+    """Maintenance beat: clear deep_classify_queued flags stuck 'true' well past deep_classify_domain's own task_time_limit -- the try/finally in deep_classify_domain (_clear_deep_classify_queued) covers every exit path it reaches, but a hard SIGKILL past the task's own hard time limit skips it, the same gap COMPOSE_SESSION_STALE_MINUTES/reap_stale_compose_sessions covers for compose_sessions. See reap_stale_deep_classify_flags for the mechanism."""
+    return reap_stale_deep_classify_flags()
