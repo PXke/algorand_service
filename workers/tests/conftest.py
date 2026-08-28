@@ -16,6 +16,18 @@ import pytest
 # set here so it is in place before any test imports celery_app.
 os.environ["BUGSNAG_API_KEY"] = ""
 
+# DeepSeek migration (2026-08-28): every LLM_PROVIDER_<PURPOSE> config now
+# defaults to "deepseek", and llm_purpose_router._select_provider raises
+# LLMError if DEEPSEEK_API_KEY is unset instead of silently falling back to
+# the retired Mistral provider. A test that builds a real, unmocked
+# get_llm_*_client() needs a harmless non-empty key so routing succeeds;
+# the no-network guard below still makes the resulting client's own
+# model-metadata prefetch (and any real API call) fail closed, exactly like
+# the pre-migration empty-key case did. A test that specifically exercises
+# the missing-key failure path sets DEEPSEEK_API_KEY back to "" itself (see
+# test_llm_purpose_router.py).
+os.environ.setdefault("DEEPSEEK_API_KEY", "test-deepseek-key")
+
 
 def _install_no_network_guard() -> None:
     """Unit tests must never open real sockets — before this guard, tests were quietly dialing live Redis (:6379), Cassandra (:9042), and in one case the public internet. Any connect fails with ConnectionRefusedError naming the target — the same failure mode as "service not running", so code under test that deliberately exercises a backend-down path behaves as before, just without a real connection attempt. Installed process-wide at conftest import (not a per-test fixture) so driver background threads — e.g. the Cassandra reconnector — stay blocked between tests too. A test that trips this should fake the client at its seam (see fake_redis / fake_cassandra_session below)."""

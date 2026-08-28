@@ -77,7 +77,7 @@ _PROVIDER_CONFIG: dict[str, tuple[str, int, str]] = {
 
 
 def _select_provider(purpose: str) -> str:
-    """Which provider actually serves this call: `purpose`'s configured default, or its canary alternate on a random roll (LLM_PROVIDER_<PURPOSE>_CANARY_PCT). Falls back to mistral if that resolves to deepseek but DEEPSEEK_API_KEY is unset — a canary or override can never hard-fail a compose just because the second provider isn't configured yet."""
+    """Which provider actually serves this call: `purpose`'s configured default, or its canary alternate on a random roll (LLM_PROVIDER_<PURPOSE>_CANARY_PCT). Raises LLMError if that resolves to deepseek but DEEPSEEK_API_KEY is unset, rather than silently falling back to mistral -- Mistral is retired (see CLAUDE.md), so a silent fallback there used to mask a missing/rotated DeepSeek key as "composed fine, just on the wrong, retired provider" instead of failing loud the moment it happened."""
     import random
 
     default_provider, canary_pct, _ = _PROVIDER_CONFIG[purpose]
@@ -85,7 +85,9 @@ def _select_provider(purpose: str) -> str:
     if canary_pct > 0 and random.random() * 100 < canary_pct:
         provider = "deepseek" if provider == "mistral" else "mistral"
     if provider == "deepseek" and not DEEPSEEK_API_KEY.strip():
-        return "mistral"
+        raise LLMError(
+            f"LLM_PROVIDER_{purpose.upper()} resolved to deepseek but DEEPSEEK_API_KEY is not set"
+        )
     return provider
 
 

@@ -5,7 +5,17 @@ from types import SimpleNamespace
 import pytest
 
 from app.modules.ai import llm_compose as mc
+from app.modules.ai import llm_purpose_router
 from app.modules.ai.llm_openai_compatible import MistralProvider
+
+
+def _pin_provider_to_mistral(monkeypatch: pytest.MonkeyPatch, *purposes: str) -> None:
+    """Force `purposes` to route to Mistral regardless of the DeepSeek-default config (2026-08-28) -- _PROVIDER_CONFIG is a plain dict built once at import time from the LLM_PROVIDER_* config values, so patching those config names after import has no effect; the dict entry itself must be patched."""
+    for purpose in purposes:
+        _, canary_pct, deepseek_model = llm_purpose_router._PROVIDER_CONFIG[purpose]
+        monkeypatch.setitem(
+            llm_purpose_router._PROVIDER_CONFIG, purpose, ("mistral", canary_pct, deepseek_model)
+        )
 
 
 def test_translations_use_small_tier(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -19,6 +29,7 @@ def test_translations_use_small_tier(monkeypatch: pytest.MonkeyPatch) -> None:
     get_llm_translate_client() ran unpatched and attempted a live network
     request.
     """
+    _pin_provider_to_mistral(monkeypatch, "translate")
     writer_called = {"yes": False}
     monkeypatch.setattr(
         mc, "get_llm_writer_client", lambda **_kw: writer_called.__setitem__("yes", True)
@@ -265,8 +276,10 @@ def test_no_prior_coverage_block_omits_the_note(monkeypatch: pytest.MonkeyPatch)
     assert "Our own most recent article about this service" not in captured["user"]
 
 
-def test_model_tier_split_large_writes_small_does_mechanics() -> None:
-    """Owner policy (2026-07-12): Large writes reader-facing prose (writer, digest); Small does the mechanical work (tool-loop research, translate)."""
+def test_model_tier_split_large_writes_small_does_mechanics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owner policy (2026-07-12): Large writes reader-facing prose (writer, digest); Small does the mechanical work (tool-loop research, translate). Mistral-specific split, so pinned explicitly to mistral -- both purposes default to deepseek since the 2026-08-28 migration."""
     from app.core.config import (
         MISTRAL_MODEL_DIGEST,
         MISTRAL_MODEL_RESEARCH,
@@ -277,6 +290,8 @@ def test_model_tier_split_large_writes_small_does_mechanics() -> None:
         get_llm_digest_client,
         get_llm_research_client,
     )
+
+    _pin_provider_to_mistral(monkeypatch, "research", "digest")
 
     assert "small" in MISTRAL_MODEL_RESEARCH
     assert "small" in MISTRAL_MODEL_TRANSLATE
@@ -308,6 +323,7 @@ def test_special_edition_scales_the_research_client_timeout(
         def __init__(self, tier: str, model: str) -> None:
             self._tier = tier
             self._model = model
+            self.model = model
 
         def chat_with_tools(self, *_a: object, **_kw: object) -> str:
             return ""
@@ -359,6 +375,7 @@ def test_two_stage_compose_routes_research_to_small_tier(monkeypatch: pytest.Mon
         def __init__(self, tier: str, model: str) -> None:
             self._tier = tier
             self._model = model
+            self.model = model
 
         def chat_with_tools(self, *_a: object, **_kw: object) -> str:
             calls.append(("tools", self._tier))
@@ -420,6 +437,7 @@ def test_digest_gap_triggers_one_bounded_research_pass(monkeypatch: pytest.Monke
         def __init__(self, tier: str, model: str) -> None:
             self._tier = tier
             self._model = model
+            self.model = model
 
         def chat_with_tools(self, *_a: object, **kw: object) -> str:
             calls.append(("tools", self._tier, kw))
@@ -487,6 +505,7 @@ def test_digest_with_no_gaps_skips_extra_research_pass(monkeypatch: pytest.Monke
 
     class _FakeClient:
         provider = "mistral"
+        model = "mistral-small-latest"
 
         def __init__(self, tier: str) -> None:
             self._tier = tier
