@@ -24,6 +24,16 @@ from algorand_shared.article_statements import (
 from algorand_shared.artifact_statements import ArtifactStmts as ArtifactStmts
 from algorand_shared.artifact_statements import ToComposeStmts as ToComposeStmts
 from algorand_shared.chain_statements import CHAIN_CONDUIT_HEAD, CHAIN_TXNS_BY_ROUND
+from algorand_shared.crawler_statements import (
+    CLASSIFIER_FEEDBACK_INSERT,
+    CLASSIFIER_REVIEW_DELETE_PENDING,
+    CLASSIFIER_REVIEW_GET_DETAIL,
+    CLASSIFIER_REVIEW_INSERT_QUEUE,
+    CLASSIFIER_REVIEW_LIST_PENDING,
+    CRAWLED_PAGE_COUNT_BY_DOMAIN,
+    URL_QUEUE_INSERT,
+    URL_QUEUE_INSERT_PENDING,
+)
 from algorand_shared.platform_statements import (
     CLASSIFIER_FEEDBACK_INSERT_BY_TIME,
     DOMAIN_TRACKING_INSERT,
@@ -31,6 +41,11 @@ from algorand_shared.platform_statements import (
     GLOSSARY_UPDATE_TRANSLATIONS,
     PAGE_SNAPSHOT_GET_LATEST,
     PAGE_SNAPSHOT_INSERT,
+    SERVICE_REGISTRY_GET_ID,
+    SERVICE_REGISTRY_GET_SCRAPE_URL,
+    SERVICE_REGISTRY_LIST_ALL,
+    SERVICE_REGISTRY_SET_ENABLED,
+    SERVICE_REGISTRY_UPSERT,
     SERVICE_SOURCE_DELETE_FOR_SERVICE,
     SERVICE_SOURCE_GET_BY_DOMAIN,
     SERVICE_SOURCE_LIST_FOR_SERVICE,
@@ -86,20 +101,18 @@ class UrlQueueStmts:
     # UPDATE_STATUS carries the same TTL: Cassandra TTLs are per-cell, so a
     # status update without one would leave a cell outliving the insert's
     # cells, surfacing a phantom queue_id+status row after the rest expires.
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.url_queue ("
-        "queue_id, url, source, priority, enqueued_at, status, metadata"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL ?"
-    )
+    INSERT = URL_QUEUE_INSERT
+    # Unlike backend's INSERT_BY_URL, this does NOT write a `status` column --
+    # harmless drift (see algorand_shared.crawler_statements' module docstring:
+    # nothing actually reads `.status` back off `url_queue_by_url`; enqueue_url
+    # below only reads `.queue_id` off the BY_URL row, then re-checks status
+    # fresh against `url_queue` via GET_STATUS), left local/distinct rather
+    # than force-unified.
     INSERT_BY_URL = _Stmt(
         "INSERT INTO algorand_platform.url_queue_by_url (url, queue_id, enqueued_at) "
         "VALUES (?, ?, ?) USING TTL ?"
     )
-    INSERT_PENDING = _Stmt(
-        "INSERT INTO algorand_platform.url_queue_pending ("
-        "status, priority, enqueued_at, queue_id, url, source"
-        ") VALUES (?, ?, ?, ?, ?, ?) USING TTL ?"
-    )
+    INSERT_PENDING = URL_QUEUE_INSERT_PENDING
     PEEK_PENDING = _Stmt(
         "SELECT queue_id, url, source, priority, enqueued_at "
         "FROM algorand_platform.url_queue_pending WHERE status = ? LIMIT 1"
@@ -129,14 +142,16 @@ class UrlQueueStmts:
 # classifier_review_queue / classifier_review_pending
 # --------------------------------------------------------------------------- #
 class ClassifierReviewStmts:
-    """Prepared statements for the pending classifier-review queue."""
+    """Prepared statements for the pending classifier-review queue.
 
-    INSERT_QUEUE = _Stmt(
-        "INSERT INTO algorand_platform.classifier_review_queue ("
-        "review_id, url, page_text, page_title, category, "
-        "storage_score, status, created_at, metadata"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
+    GET_FULL deliberately DOES select `status` -- backend's copy of this
+    class doesn't (see backend/app/core/statements.py); this side needs it
+    because publish_tasks.py's recompose-from-review path reads row.status
+    to refuse acting on an already-resolved review (2026-07-10 regression
+    fix, see the call site's own comment).
+    """
+
+    INSERT_QUEUE = CLASSIFIER_REVIEW_INSERT_QUEUE
     INSERT_PENDING = _Stmt(
         "INSERT INTO algorand_platform.classifier_review_pending ("
         "status, created_at, review_id, url, category"
@@ -148,23 +163,14 @@ class ClassifierReviewStmts:
     LIST_PENDING_URLS = _Stmt(
         "SELECT url FROM algorand_platform.classifier_review_pending WHERE status = ? LIMIT ?"
     )
-    LIST_PENDING = _Stmt(
-        "SELECT review_id, url, category, created_at "
-        "FROM algorand_platform.classifier_review_pending WHERE status = ? LIMIT ?"
-    )
-    GET_DETAIL = _Stmt(
-        "SELECT review_id, url, page_title, page_text, category, storage_score, metadata "
-        "FROM algorand_platform.classifier_review_queue WHERE review_id = ?"
-    )
+    LIST_PENDING = CLASSIFIER_REVIEW_LIST_PENDING
+    GET_DETAIL = CLASSIFIER_REVIEW_GET_DETAIL
     GET_FULL = _Stmt(
         "SELECT review_id, url, page_text, page_title, category, storage_score, "
         "status, created_at, metadata "
         "FROM algorand_platform.classifier_review_queue WHERE review_id = ?"
     )
-    DELETE_PENDING = _Stmt(
-        "DELETE FROM algorand_platform.classifier_review_pending "
-        "WHERE status = ? AND created_at = ? AND review_id = ?"
-    )
+    DELETE_PENDING = CLASSIFIER_REVIEW_DELETE_PENDING
 
 
 # --------------------------------------------------------------------------- #
@@ -207,9 +213,7 @@ class CrawledPageStmts:
         "domain, crawled_at, page_id, url, title, description, service_id, source, keywords"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    COUNT_BY_DOMAIN = _Stmt(
-        "SELECT COUNT(*) AS c FROM algorand_platform.crawled_pages_by_domain WHERE domain = ?"
-    )
+    COUNT_BY_DOMAIN = CRAWLED_PAGE_COUNT_BY_DOMAIN
     # Service-context aggregation: newest harvested pages per host (clustering
     # is crawled_at DESC), bodies fetched by id in a parallel second pass.
     LIST_BY_DOMAIN = _Stmt(
@@ -226,14 +230,15 @@ class CrawledPageStmts:
 # classifier_feedback / classifier_feedback_by_time
 # --------------------------------------------------------------------------- #
 class ClassifierFeedbackStmts:
-    """Prepared statements for classifier training feedback."""
+    """Prepared statements for classifier training feedback.
 
-    INSERT = _Stmt(
-        "INSERT INTO algorand_platform.classifier_feedback ("
-        "feedback_id, url, text_sample, category, predicted_category, quality, "
-        "predicted_publish, approved, admin_wallet, created_at, metadata"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
+    GET_GRADE deliberately DOES select `url` -- backend's copy of this class
+    doesn't (see backend/app/core/statements.py). No workers call site
+    currently reads `.url` back off a GET_GRADE row (grep found none); left
+    as unexercised drift rather than edited as part of this consolidation.
+    """
+
+    INSERT = CLASSIFIER_FEEDBACK_INSERT
     INSERT_BY_TIME = CLASSIFIER_FEEDBACK_INSERT_BY_TIME
     LIST_IDS = _Stmt(
         "SELECT feedback_id FROM algorand_platform.classifier_feedback_by_time "
@@ -525,27 +530,18 @@ class AnalyticsFlushStmts:
 # service_registry
 # --------------------------------------------------------------------------- #
 class ServiceRegistryStmts:
-    """Prepared statements for the service registry."""
+    """Prepared statements for the service registry.
 
-    LIST_ALL = _Stmt(
-        "SELECT service_id, display_name, match_kind, match_value, scrape_url, enabled, origin "
-        "FROM algorand_platform.service_registry"
-    )
-    GET_ID = _Stmt("SELECT service_id FROM algorand_platform.service_registry WHERE service_id = ?")
-    # Mirrors the backend admin store's UPSERT — keep the column lists in sync.
-    UPSERT = _Stmt(
-        "INSERT INTO algorand_platform.service_registry ("
-        "service_id, display_name, match_kind, match_value, scrape_url, enabled, "
-        "updated_at, origin"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    SET_ENABLED = _Stmt(
-        "UPDATE algorand_platform.service_registry SET enabled = ?, updated_at = ? "
-        "WHERE service_id = ?"
-    )
-    GET_SCRAPE_URL = _Stmt(
-        "SELECT scrape_url FROM algorand_platform.service_registry WHERE service_id = ?"
-    )
+    Sourced from algorand_shared.platform_statements -- byte-identical to
+    backend's copy (which also has a DELETE; workers never deletes a
+    registry row, so it has no local-only addition here).
+    """
+
+    LIST_ALL = SERVICE_REGISTRY_LIST_ALL
+    GET_ID = SERVICE_REGISTRY_GET_ID
+    UPSERT = SERVICE_REGISTRY_UPSERT
+    SET_ENABLED = SERVICE_REGISTRY_SET_ENABLED
+    GET_SCRAPE_URL = SERVICE_REGISTRY_GET_SCRAPE_URL
 
 
 # --------------------------------------------------------------------------- #
