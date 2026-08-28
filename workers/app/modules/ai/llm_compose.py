@@ -37,6 +37,48 @@ logger = logging.getLogger(__name__)
 # grades/engagement instead of guessing from deploy timestamps.
 PROMPT_VERSION = "2026-07-20"
 
+# Same four counters compose_sessions' INSERT columns carry (prompt_tokens/
+# completion_tokens/total_tokens/cached_tokens) -- the single vocabulary every
+# usage_totals()/accumulator dict in this module uses.
+_USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
+
+
+def _merge_usage(accumulator: dict[str, int] | None, usage: dict[str, int]) -> None:
+    """Add one LLM call's usage_totals() into a running accumulator, in place.
+
+    `accumulator` is optional (None is a no-op) so every ephemeral-client call
+    site below (rubric grading, digest synthesis, entity enumeration, the
+    narrative outline, raw-mode gap extraction) can report into it
+    unconditionally, regardless of whether the caller wired one up. These all
+    build their OWN client instance via get_llm_rubric_client()/
+    get_llm_digest_client() rather than reusing the compose's research_llm/
+    llm pair (2026-08-06, so a compose can route research to one provider and
+    grading to another -- see get_llm_rubric_client's docstring), so their
+    spend never showed up in _usage_so_far()'s research_llm+llm sum until
+    this accumulator was added (2026-08-28 audit).
+    """
+    if accumulator is None:
+        return
+    for key in _USAGE_KEYS:
+        accumulator[key] = accumulator.get(key, 0) + usage.get(key, 0)
+
+
+def _merge_usage_from(accumulator: dict[str, int] | None, client: LLMProvider) -> None:
+    """Merge `client`'s current usage_totals() into `accumulator` -- but only ever CALL usage_totals() when `accumulator` is not None.
+
+    Every ephemeral-client call site below invokes this from a `finally`
+    block, so it always runs, including on the client's own failure path.
+    A plain `_merge_usage(accumulator, client.usage_totals())` would call
+    usage_totals() unconditionally, which breaks any caller (production or
+    test) whose client is a minimal stand-in that doesn't implement the full
+    LLMProvider interface and never asked for accounting in the first place
+    -- exactly the shape of the pre-existing test doubles in
+    test_llm_compose_cost_controls.py / test_special_edition_brief.py /
+    test_deepseek_migration_regressions.py / test_compose_review_stage.py.
+    """
+    if accumulator is not None:
+        _merge_usage(accumulator, client.usage_totals())
+
 
 @dataclass(frozen=True)
 class LLMArticleFields:
@@ -1138,7 +1180,12 @@ _GAP_EXTRACTION_PROMPT = (
 )
 
 
-def _extract_gaps_from_raw_trace(full_trace: str, research_context: str) -> str:
+def _extract_gaps_from_raw_trace(
+    full_trace: str,
+    research_context: str,
+    *,
+    extra_usage: dict[str, int] | None = None,
+) -> str:
     """A cheap, single-purpose LLM call standing in for the '### Unresolved Gaps' section a synthesized digest would otherwise carry.
 
     Raw-trace mode (RESEARCH_DIGEST_MODE=raw, or any deepseek research) skips
@@ -1153,11 +1200,15 @@ def _extract_gaps_from_raw_trace(full_trace: str, research_context: str) -> str:
     Empty string on any failure (a bad response, a client error): the caller
     then simply skips gap-fill, same as a digest that honestly reported no
     gaps -- never worse than today's (also gap-fill-less) raw-mode behavior.
+    `extra_usage`, if given, gets this call's real spend merged in even on
+    failure -- this builds its own ephemeral digest-tier client rather than
+    reusing the compose's research_llm/llm pair, so nothing else accounts
+    for it (2026-08-28 audit).
     """
+    digest_client = get_llm_digest_client()
     try:
         from app.core.config import LLM_TEMP_RESEARCH
 
-        digest_client = get_llm_digest_client()
         text = digest_client.chat_completion(
             [
                 {
@@ -1175,6 +1226,8 @@ def _extract_gaps_from_raw_trace(full_trace: str, research_context: str) -> str:
     except Exception:
         logger.warning("raw-mode gap extraction failed; skipping gap-fill", exc_info=True)
         return ""
+    finally:
+        _merge_usage_from(extra_usage, digest_client)
 
 
 def _synthesize_research_digest(
@@ -1182,8 +1235,15 @@ def _synthesize_research_digest(
     trace: list[dict],
     research_context: str,
     provider: str = "",
+    extra_usage: dict[str, int] | None = None,
 ) -> str:
-    """Stage 1→2 handoff: model-synthesized digest instead of raw tool JSON, unless RESEARCH_DIGEST_MODE=raw (see config.py) or the research provider is deepseek — deepseek's context window is large enough to read the raw trace directly (owner call, 2026-08-06), so it always skips synthesis regardless of the config value; RESEARCH_DIGEST_MODE=raw remains a manual override for forcing raw mode on Mistral too. Deterministic asset-facts appendix is still added either way, since that's free regardless of mode. Raw mode also runs a cheap, separate gap-extraction call (see _extract_gaps_from_raw_trace) so _run_digest_gap_fill's safety net still has something to find -- a full raw trace has no '### Unresolved Gaps' section of its own."""
+    """Stage 1→2 handoff: model-synthesized digest instead of raw tool JSON, unless RESEARCH_DIGEST_MODE=raw (see config.py) or the research provider is deepseek — deepseek's context window is large enough to read the raw trace directly (owner call, 2026-08-06), so it always skips synthesis regardless of the config value; RESEARCH_DIGEST_MODE=raw remains a manual override for forcing raw mode on Mistral too. Deterministic asset-facts appendix is still added either way, since that's free regardless of mode. Raw mode also runs a cheap, separate gap-extraction call (see _extract_gaps_from_raw_trace) so _run_digest_gap_fill's safety net still has something to find -- a full raw trace has no '### Unresolved Gaps' section of its own.
+
+    `extra_usage`, if given, receives every ephemeral digest-tier client this
+    call spends (this call's own synthesis pass, plus the raw-mode gap
+    extraction it may delegate to) -- see _merge_usage's docstring for why
+    that accounting doesn't happen anywhere else.
+    """
     from app.core.config import DIGEST_GAP_FILL_ENABLED, RESEARCH_DIGEST_MODE
 
     asset_facts = _extract_asset_facts(trace)
@@ -1193,7 +1253,9 @@ def _synthesize_research_digest(
             return ""
         digest = f"{full_trace}\n\n{asset_facts}" if asset_facts else full_trace
         if DIGEST_GAP_FILL_ENABLED:
-            gaps_section = _extract_gaps_from_raw_trace(full_trace, research_context)
+            gaps_section = _extract_gaps_from_raw_trace(
+                full_trace, research_context, extra_usage=extra_usage
+            )
             if gaps_section:
                 digest = f"{digest}\n\n{gaps_section}"
         return digest
@@ -1201,10 +1263,10 @@ def _synthesize_research_digest(
     raw_trace = _format_research_digest(trace)
     if not raw_trace.strip():
         return ""
+    digest_client = get_llm_digest_client()
     try:
         from app.core.config import LLM_TEMP_RESEARCH
 
-        digest_client = get_llm_digest_client()
         digest = digest_client.chat_completion(
             [
                 {
@@ -1226,6 +1288,8 @@ def _synthesize_research_digest(
     except Exception:
         logger.warning("research digest synthesis failed; using raw trace", exc_info=True)
         return raw_trace
+    finally:
+        _merge_usage_from(extra_usage, digest_client)
 
 
 def _extract_unresolved_gaps(digest: str) -> str:
@@ -1850,55 +1914,25 @@ def _attempt_revision_with_retry(
     return revised
 
 
-def _review_and_revise(
+def _run_grade_revise_loop(
     llm: MistralProvider,
     payload: dict,
+    quality_llm: MistralProvider,
     *,
     system: str,
     gen_user: str,
     trace: list[dict],
-    debug: dict | None = None,
-    user: str = "",
-    research_user: str | None = None,
-    is_special_edition: bool = False,
-    revision_tool_schemas: list[dict] | None = None,
-    revision_tool_handlers: dict | None = None,
+    debug: dict | None,
+    user: str,
+    research_user: str | None,
+    is_special_edition: bool,
+    max_revisions: int,
+    revision_tool_schemas: list[dict] | None,
+    revision_tool_handlers: dict | None,
 ) -> dict:
-    """Stage 3+4 of two-stage compose: grade the draft, then revise if weak.
-
-    The warm generation pass runs with NO tools, so the model cannot call
-    review_draft itself — we run the heuristic grader deterministically here and,
-    on a sub-threshold grade or any listed issues, revise with the concrete
-    issues fed back, up to WRITER_REVISION_MAX_PASSES times (a pass that comes
-    back clean stops the loop early — most drafts never need a second). Every
-    grading is recorded in the trace like review_draft tool calls so
-    telemetry/insights see them.
-
-    revision_tool_schemas/handlers (2026-08-11, owner request): the revision
-    call itself DOES get tool access (same research toolset as stage 1,
-    minus review_draft) — a flagged issue is often exactly the kind a fresh
-    tool call could resolve (an unverified claim, a stale figure, a dead
-    link with a findable replacement), not just a reorganize-the-prose job.
-    None/empty falls back to the old tool-less behavior (e.g. a caller that
-    hasn't wired tools through, or WRITER_TOOLS_ENABLED off upstream).
-    """
-    from app.core.config import (
-        LLM_TEMP_WRITE,
-        WRITER_QUALITY_LLM_MIN_SCORE,
-        WRITER_REVIEW_ENABLED,
-        WRITER_REVISION_MAX_PASSES,
-    )
+    """The grade -> (maybe revise) -> re-grade loop itself, factored out of _review_and_revise (which just builds quality_llm, runs this, and merges quality_llm's usage) so that caller stays under the 150-line budget -- see _review_and_revise's own docstring for the algorithm this implements unchanged."""
+    from app.core.config import LLM_TEMP_WRITE, WRITER_QUALITY_LLM_MIN_SCORE
     from app.modules.newspaper.article_quality_llm import quality_needs_revision
-
-    if not WRITER_REVIEW_ENABLED:
-        return payload
-
-    # LLM rubric grading (narrative synthesis/technical depth/critical
-    # distance) is a judgment task, not generation — it doesn't need the
-    # writer's Large-tier model, and (2026-08-06) it's its own routing
-    # purpose so a compose can send its research tool loop to one provider
-    # while grading with another (e.g. DeepSeek research, Mistral rubric).
-    quality_llm = get_llm_rubric_client()
 
     def _note_revision_failure(reason: str, raw: str = "") -> None:
         # Surface WHY the revision didn't happen instead of silently keeping the
@@ -1914,7 +1948,6 @@ def _review_and_revise(
         _debug_tool_turn(debug, "review_draft", args, result)
 
     current = payload
-    max_revisions = max(1, WRITER_REVISION_MAX_PASSES)
     revise_count = 0
     # Best-of-N: a revision pass can trade one fixed issue for a regression on
     # something an EARLIER pass already fixed (observed 2026-07-14 on a CompX
@@ -2023,6 +2056,82 @@ def _review_and_revise(
         revised["_heuristic_grade"] = review
         current = revised
         revise_count += 1
+
+
+def _review_and_revise(
+    llm: MistralProvider,
+    payload: dict,
+    *,
+    system: str,
+    gen_user: str,
+    trace: list[dict],
+    debug: dict | None = None,
+    user: str = "",
+    research_user: str | None = None,
+    is_special_edition: bool = False,
+    revision_tool_schemas: list[dict] | None = None,
+    revision_tool_handlers: dict | None = None,
+    extra_usage: dict[str, int] | None = None,
+) -> dict:
+    """Stage 3+4 of two-stage compose: grade the draft, then revise if weak.
+
+    The warm generation pass runs with NO tools, so the model cannot call
+    review_draft itself — we run the heuristic grader deterministically here and,
+    on a sub-threshold grade or any listed issues, revise with the concrete
+    issues fed back, up to WRITER_REVISION_MAX_PASSES times (a pass that comes
+    back clean stops the loop early — most drafts never need a second). Every
+    grading is recorded in the trace like review_draft tool calls so
+    telemetry/insights see them. The loop itself lives in
+    _run_grade_revise_loop; this function's own job is building quality_llm,
+    running that loop, and merging quality_llm's usage when it's done.
+
+    revision_tool_schemas/handlers (2026-08-11, owner request): the revision
+    call itself DOES get tool access (same research toolset as stage 1,
+    minus review_draft) — a flagged issue is often exactly the kind a fresh
+    tool call could resolve (an unverified claim, a stale figure, a dead
+    link with a findable replacement), not just a reorganize-the-prose job.
+    None/empty falls back to the old tool-less behavior (e.g. a caller that
+    hasn't wired tools through, or WRITER_TOOLS_ENABLED off upstream).
+
+    `extra_usage`, if given, receives quality_llm's cumulative usage_totals()
+    once the loop is done -- one instance grades every pass (including the
+    final re-grade after the last revision), so a single merge at the end
+    captures the whole loop's rubric spend, which otherwise never reaches the
+    compose's own accounting (2026-08-28 audit; see _merge_usage).
+    """
+    from app.core.config import WRITER_REVIEW_ENABLED, WRITER_REVISION_MAX_PASSES
+
+    if not WRITER_REVIEW_ENABLED:
+        return payload
+
+    # LLM rubric grading (narrative synthesis/technical depth/critical
+    # distance) is a judgment task, not generation — it doesn't need the
+    # writer's Large-tier model, and (2026-08-06) it's its own routing
+    # purpose so a compose can send its research tool loop to one provider
+    # while grading with another (e.g. DeepSeek research, Mistral rubric).
+    quality_llm = get_llm_rubric_client()
+    try:
+        return _run_grade_revise_loop(
+            llm,
+            payload,
+            quality_llm,
+            system=system,
+            gen_user=gen_user,
+            trace=trace,
+            debug=debug,
+            user=user,
+            research_user=research_user,
+            is_special_edition=is_special_edition,
+            max_revisions=max(1, WRITER_REVISION_MAX_PASSES),
+            revision_tool_schemas=revision_tool_schemas,
+            revision_tool_handlers=revision_tool_handlers,
+        )
+    finally:
+        # Cumulative across every pass the loop ran (including the final
+        # re-grade after the last revision) -- quality_llm is the SAME
+        # instance for the whole loop, so one merge here is correct and
+        # cannot double-count (see _merge_usage's docstring).
+        _merge_usage_from(extra_usage, quality_llm)
 
 
 # Stable output contract shared by every compose function. Kept in the SYSTEM
@@ -2641,8 +2750,9 @@ def _run_digest_gap_fill(
     digest: str,
     *,
     checkpoint: Callable[[str], None] | None = None,
+    extra_usage: dict[str, int] | None = None,
 ) -> str:
-    """Gap-fill: the digest may flag specific unresolved-but-material gaps. Give the model ONE bounded extra research pass targeting exactly those before handing off to the tool-less writer, which otherwise either omits the gap (fine) or invents/recalls something to fill it. Re-synthesizes the digest afterward so the writer sees whatever was actually found (or an honest "still unresolved") rather than the pre-gap-fill digest."""
+    """Gap-fill: the digest may flag specific unresolved-but-material gaps. Give the model ONE bounded extra research pass targeting exactly those before handing off to the tool-less writer, which otherwise either omits the gap (fine) or invents/recalls something to fill it. Re-synthesizes the digest afterward so the writer sees whatever was actually found (or an honest "still unresolved") rather than the pre-gap-fill digest. `extra_usage` is forwarded to that re-synthesis call -- see _merge_usage."""
     from app.core.config import (
         DIGEST_GAP_FILL_ENABLED,
         DIGEST_GAP_FILL_MAX_ROUNDS,
@@ -2673,7 +2783,10 @@ def _run_digest_gap_fill(
         show_round_budget=True,
     )
     return _synthesize_research_digest(
-        trace=trace, research_context=stage1_user, provider=research_llm.provider
+        trace=trace,
+        research_context=stage1_user,
+        provider=research_llm.provider,
+        extra_usage=extra_usage,
     )
 
 
@@ -2722,15 +2835,17 @@ _ENTITY_ENUMERATION_PROMPT = (
 )
 
 
-def _run_entity_enumeration(*, trace: list[dict], digest: str) -> str:
-    """Structured People/Places/Dates/Services/Numbers accounting, synthesized from the trace + digest already gathered. Same lightweight digest-tier client as _synthesize_research_digest -- this is synthesis over already-fetched material, not new research. Empty trace or any failure yields "" (caller treats that as no enumeration available, never a hard failure)."""
+def _run_entity_enumeration(
+    *, trace: list[dict], digest: str, extra_usage: dict[str, int] | None = None
+) -> str:
+    """Structured People/Places/Dates/Services/Numbers accounting, synthesized from the trace + digest already gathered. Same lightweight digest-tier client as _synthesize_research_digest -- this is synthesis over already-fetched material, not new research. Empty trace or any failure yields "" (caller treats that as no enumeration available, never a hard failure). `extra_usage`, if given, gets this ephemeral client's real spend merged in even on failure -- see _merge_usage."""
     raw_trace = _format_research_digest(trace)
     if not raw_trace.strip():
         return ""
+    digest_client = get_llm_digest_client()
     try:
         from app.core.config import LLM_TEMP_RESEARCH
 
-        digest_client = get_llm_digest_client()
         enumeration = digest_client.chat_completion(
             [
                 {
@@ -2749,6 +2864,8 @@ def _run_entity_enumeration(*, trace: list[dict], digest: str) -> str:
     except Exception:
         logger.warning("entity enumeration failed; continuing without it", exc_info=True)
         return ""
+    finally:
+        _merge_usage_from(extra_usage, digest_client)
 
 
 def _extract_enumeration_gaps(enumeration: str) -> str:
@@ -2835,14 +2952,16 @@ _NARRATIVE_OUTLINE_PROMPT = (
 )
 
 
-def _run_narrative_outline(*, digest: str, enumeration: str) -> str:
-    """A concrete section-by-section plan for Stage 2 to write from, instead of synthesizing organization cold from a raw digest. Same lightweight digest-tier client as digest synthesis -- this is planning over already-gathered material, not new research. Empty on failure (caller treats a missing outline as "write from the digest alone," never a hard failure)."""
+def _run_narrative_outline(
+    *, digest: str, enumeration: str, extra_usage: dict[str, int] | None = None
+) -> str:
+    """A concrete section-by-section plan for Stage 2 to write from, instead of synthesizing organization cold from a raw digest. Same lightweight digest-tier client as digest synthesis -- this is planning over already-gathered material, not new research. Empty on failure (caller treats a missing outline as "write from the digest alone," never a hard failure). `extra_usage`, if given, gets this ephemeral client's real spend merged in even on failure -- see _merge_usage."""
     if not digest.strip() and not enumeration.strip():
         return ""
+    digest_client = get_llm_digest_client()
     try:
         from app.core.config import LLM_TEMP_RESEARCH
 
-        digest_client = get_llm_digest_client()
         outline = digest_client.chat_completion(
             [
                 {
@@ -2860,6 +2979,8 @@ def _run_narrative_outline(*, digest: str, enumeration: str) -> str:
     except Exception:
         logger.warning("narrative outline synthesis failed; continuing without it", exc_info=True)
         return ""
+    finally:
+        _merge_usage_from(extra_usage, digest_client)
 
 
 def _run_special_edition_deepening(
@@ -2873,14 +2994,15 @@ def _run_special_edition_deepening(
     digest: str,
     *,
     checkpoint: Callable[[str], None] | None = None,
+    extra_usage: dict[str, int] | None = None,
 ) -> tuple[str, str, str]:
-    """Special-edition-only Stage 1c/1d: enumerate -> targeted gap-fill -> re-synthesize digest -> outline. Returns (digest, enumeration, outline); any disabled/failed step degrades gracefully (empty enumeration/outline, unchanged digest) rather than blocking the compose."""
+    """Special-edition-only Stage 1c/1d: enumerate -> targeted gap-fill -> re-synthesize digest -> outline. Returns (digest, enumeration, outline); any disabled/failed step degrades gracefully (empty enumeration/outline, unchanged digest) rather than blocking the compose. `extra_usage` is forwarded to every ephemeral digest-tier call this makes (enumeration, re-synthesis, outline) -- see _merge_usage."""
     from app.core.config import SPECIAL_EDITION_OUTLINE_ENABLED
 
     if not SPECIAL_EDITION_OUTLINE_ENABLED:
         return digest, "", ""
 
-    enumeration = _run_entity_enumeration(trace=trace, digest=digest)
+    enumeration = _run_entity_enumeration(trace=trace, digest=digest, extra_usage=extra_usage)
     gaps = _extract_enumeration_gaps(enumeration) if enumeration else ""
     if gaps:
         _run_enumeration_gap_fill(
@@ -2895,9 +3017,14 @@ def _run_special_edition_deepening(
             checkpoint=checkpoint,
         )
         digest = _synthesize_research_digest(
-            trace=trace, research_context=stage1_user, provider=research_llm.provider
+            trace=trace,
+            research_context=stage1_user,
+            provider=research_llm.provider,
+            extra_usage=extra_usage,
         )
-    outline = _run_narrative_outline(digest=digest, enumeration=enumeration)
+    outline = _run_narrative_outline(
+        digest=digest, enumeration=enumeration, extra_usage=extra_usage
+    )
     return digest, enumeration, outline
 
 
@@ -2918,41 +3045,27 @@ def _append_stage2_debug_turn(debug: dict, digest: str, payload: dict) -> None:
     debug["messages"].append({"role": "assistant", "content": json.dumps(payload)[:4000]})
 
 
-def _run_two_stage_compose(
-    *,
+def _run_stage1_cold_research(
     research_llm: MistralProvider,
-    llm: MistralProvider,
     system: str,
-    user: str,
-    research_user: str | None,
-    tool_schemas: list[dict],
-    tool_handlers: dict,
+    stage1_user: str,
+    research_schemas: list[dict],
+    research_handlers: dict,
     trace: list,
     debug: dict,
+    *,
+    max_rounds: int | None,
     checkpoint: Callable[[str], None],
-    max_rounds: int | None = None,
-    is_special_edition: bool = False,
-) -> dict:
-    """Two-stage compose: cold research (tools, low temp) on the Small research tier, a floor + gap-fill pass if it under-researched, a structured digest handoff, then a warm no-tools generation on the writer tier, and finally deterministic grade/revise."""
-    from app.core.config import LLM_TEMP_RESEARCH, LLM_TEMP_WRITE
+) -> None:
+    """Stage 1's cold research tool-calling pass, factored out of _run_two_stage_compose to keep that function under the 150-line budget.
 
-    checkpoint("researching")
-    # The model actually serving this session's research calls -- not the
-    # Mistral-only config constant, which stays wrong the moment
-    # LLM_PROVIDER_RESEARCH (or a canary roll) routes this session to
-    # DeepSeek instead.
-    debug["research_model"] = research_llm.model
-    # Stage 1 — cold research: tools available (minus review_draft, no
-    # draft yet), low temp for deterministic tool selection. We keep the
-    # trace; the model's prose here is discarded. Research rounds
-    # re-send the whole conversation every round, so they get the
-    # slimmer research_user when the caller provided one. Runs on the
-    # Small research tier — better tool-calling, cheaper per round.
-    stage1_user = research_user or user
-    research_schemas = [
-        s for s in tool_schemas if (s.get("function") or {}).get("name") != "review_draft"
-    ]
-    research_handlers = {k: v for k, v in tool_handlers.items() if k != "review_draft"}
+    Tools available (minus review_draft, no draft yet), low temp for
+    deterministic tool selection. Runs for its tool side-effects (the
+    trace); the model's prose here is discarded — the return value is
+    never used.
+    """
+    from app.core.config import LLM_TEMP_RESEARCH
+
     research_llm.chat_with_tools(
         [
             {"role": "system", "content": system + _research_phase_guidance(trace)},
@@ -2972,6 +3085,60 @@ def _run_two_stage_compose(
         on_round=lambda: checkpoint("researching"),
         show_round_budget=True,
     )
+
+
+def _run_two_stage_compose(
+    *,
+    research_llm: MistralProvider,
+    llm: MistralProvider,
+    system: str,
+    user: str,
+    research_user: str | None,
+    tool_schemas: list[dict],
+    tool_handlers: dict,
+    trace: list,
+    debug: dict,
+    checkpoint: Callable[[str], None],
+    max_rounds: int | None = None,
+    is_special_edition: bool = False,
+    extra_usage: dict[str, int] | None = None,
+) -> dict:
+    """Two-stage compose: cold research (tools, low temp) on the Small research tier, a floor + gap-fill pass if it under-researched, a structured digest handoff, then a warm no-tools generation on the writer tier, and finally deterministic grade/revise.
+
+    `extra_usage`, if given, accumulates every ephemeral rubric/digest-tier
+    client's spend across this whole compose (digest synthesis, gap-fill
+    re-synthesis, special-edition enumeration/outline, and the grade/revise
+    loop's rubric grading) -- none of that reuses research_llm/llm, so
+    nothing else accounts for it (2026-08-28 audit; see _merge_usage).
+    """
+    from app.core.config import LLM_TEMP_WRITE
+
+    checkpoint("researching")
+    # The model actually serving this session's research calls -- not the
+    # Mistral-only config constant, which stays wrong the moment
+    # LLM_PROVIDER_RESEARCH (or a canary roll) routes this session to
+    # DeepSeek instead.
+    debug["research_model"] = research_llm.model
+    # Stage 1 — cold research. Research rounds re-send the whole conversation
+    # every round, so they get the slimmer research_user when the caller
+    # provided one. Runs on the Small research tier — better tool-calling,
+    # cheaper per round.
+    stage1_user = research_user or user
+    research_schemas = [
+        s for s in tool_schemas if (s.get("function") or {}).get("name") != "review_draft"
+    ]
+    research_handlers = {k: v for k, v in tool_handlers.items() if k != "review_draft"}
+    _run_stage1_cold_research(
+        research_llm,
+        system,
+        stage1_user,
+        research_schemas,
+        research_handlers,
+        trace,
+        debug,
+        max_rounds=max_rounds,
+        checkpoint=checkpoint,
+    )
     _run_research_floor(
         research_llm,
         system,
@@ -2986,7 +3153,10 @@ def _run_two_stage_compose(
     # Stage 1b — synthesize a structured Research Digest handoff so Stage 2
     # grounds on high-signal facts, not raw tool JSON.
     digest = _synthesize_research_digest(
-        trace=trace, research_context=stage1_user, provider=research_llm.provider
+        trace=trace,
+        research_context=stage1_user,
+        provider=research_llm.provider,
+        extra_usage=extra_usage,
     )
     digest = _run_digest_gap_fill(
         research_llm,
@@ -2998,6 +3168,7 @@ def _run_two_stage_compose(
         debug,
         digest,
         checkpoint=checkpoint,
+        extra_usage=extra_usage,
     )
     # Stage 1c/1d — special-edition-only: enumerate every named entity found
     # (surfaces coverage gaps a prose digest's generic 3-item cap can miss),
@@ -3017,6 +3188,7 @@ def _run_two_stage_compose(
             debug,
             digest,
             checkpoint=checkpoint,
+            extra_usage=extra_usage,
         )
     checkpoint("writing", digest=digest)  # research (+ gap-fill/deepening) done, now generating
     gen_user = _build_stage2_user(
@@ -3053,6 +3225,7 @@ def _run_two_stage_compose(
         is_special_edition=is_special_edition,
         revision_tool_schemas=research_schemas,
         revision_tool_handlers=research_handlers,
+        extra_usage=extra_usage,
     )
 
 
@@ -3316,13 +3489,23 @@ def _compose_via_writer_tools_locked(
             # -> done) instead of nothing until the very end.
             _sid, _screated = register.new_ref()
 
+            # Running total for every ephemeral rubric/digest-tier client this
+            # session spends (grade/revise's get_llm_rubric_client(), digest
+            # synthesis/gap-fill/entity-enumeration/narrative-outline's
+            # get_llm_digest_client()) -- none of those reuse research_llm/llm,
+            # so _usage_so_far below folds this in explicitly (2026-08-28
+            # audit; see _merge_usage's docstring). Two-stage only: the legacy
+            # single-loop branch grades via a tool call on `llm` itself, so
+            # its usage is already inside llm.usage_totals().
+            _extra_usage: dict[str, int] = dict.fromkeys(_USAGE_KEYS, 0)
+
             def _usage_so_far() -> dict[str, int]:
-                """Combined token usage across both clients used in this session (research_llm for stage 1, llm for stage 2/revise) — each is a fresh instance per compose, so its counter is this session's total, not a lifetime one."""
+                """Combined token usage across every client used in this session: research_llm for stage 1, llm for stage 2/revise, plus _extra_usage for any ephemeral rubric/digest-tier client spawned along the way. research_llm/llm are each a fresh instance per compose, so their counters are this session's total, not a lifetime one."""
                 research_usage = research_llm.usage_totals()
                 write_usage = llm.usage_totals()
                 return {
-                    key: research_usage[key] + write_usage[key]
-                    for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
+                    key: research_usage[key] + write_usage[key] + _extra_usage[key]
+                    for key in _USAGE_KEYS
                 }
 
             def _checkpoint(stage_status: str, *, detail: str = "", digest: str = "") -> None:
@@ -3375,6 +3558,7 @@ def _compose_via_writer_tools_locked(
                     checkpoint=_checkpoint,
                     max_rounds=research_max_rounds,
                     is_special_edition=is_special_edition,
+                    extra_usage=_extra_usage,
                 )
             else:
                 # Legacy single agentic loop: tools + final article in one pass.

@@ -389,6 +389,14 @@ def test_two_stage_compose_routes_research_to_small_tier(monkeypatch: pytest.Mon
             calls.append(("completion", self._tier))
             return "## Research Digest\n\n### Verified Facts\n- fact [src](https://x)"
 
+        def usage_totals(self) -> dict[str, int]:
+            return {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "cached_tokens": 0,
+            }
+
     writer = _FakeClient("writer", "mistral-medium-latest")
     research = _FakeClient("research", "mistral-small-latest")
 
@@ -458,6 +466,14 @@ def test_digest_gap_triggers_one_bounded_research_pass(monkeypatch: pytest.Monke
                 )
             return "## Research Digest\n\n### Verified Facts\n- fact [src](https://x)\n"
 
+        def usage_totals(self) -> dict[str, int]:
+            return {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "cached_tokens": 0,
+            }
+
     writer = _FakeClient("writer", "mistral-medium-latest")
     research = _FakeClient("research", "mistral-small-latest")
 
@@ -523,6 +539,14 @@ def test_digest_with_no_gaps_skips_extra_research_pass(monkeypatch: pytest.Monke
             return (
                 "## Research Digest\n\n### Verified Facts\n- fact\n\n### Unresolved Gaps\n- None\n"
             )
+
+        def usage_totals(self) -> dict[str, int]:
+            return {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "cached_tokens": 0,
+            }
 
     writer = _FakeClient("writer")
     research = _FakeClient("research")
