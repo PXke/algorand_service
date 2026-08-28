@@ -335,7 +335,9 @@ class IntelligenceStmts:
 
 
 # --------------------------------------------------------------------------- #
-# x_search_weekly (weekly X/Twitter sweep cache, read by the search_x tool)
+# x_search_weekly (weekly X/Twitter sweep cache -- DORMANT since 2026-08-28,
+# search_x reverted to live per-compose calls, see x_search_sweep.py's
+# module docstring for why; left in place for a possible manual re-enable)
 # --------------------------------------------------------------------------- #
 class XSearchWeeklyStmts:
     """Prepared statements for the weekly per-service X search cache.

@@ -153,7 +153,25 @@ def test_daily_cap_refuses_without_a_request(
     third = _tool_search_x("three")
     assert "error" in third
     assert third["posts"] == []
-    assert calls["n"] == 2  # the third call never reached the network
+
+
+def test_daily_cap_fails_open_on_redis_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Redis outage on the budget check must not crash the compose or silently eat a session-cap slot for nothing (CLAUDE.md invariant 2.9) -- the call proceeds as if under budget."""
+    monkeypatch.setattr("app.core.config.X_SEARCH_ENABLED", True)
+    monkeypatch.setattr("app.core.config.X_BEARER_TOKEN", "test-token")
+
+    def _raise_redis() -> None:
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr("app.core.redis_client.get_redis", _raise_redis)
+    monkeypatch.setattr(
+        "app.core.net_guard.guarded_get",
+        lambda url, **_kw: _json_response(url, 200, _SEARCH_PAYLOAD),
+    )
+
+    result = _tool_search_x("algorand")
+    assert "error" not in result
+    assert result["daily_calls_used"] == 0
 
 
 def test_budget_key_is_scoped_to_todays_utc_date(

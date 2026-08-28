@@ -162,7 +162,26 @@ def test_select_distinct_pages_dedupes_content_not_just_url() -> None:
     ]
     pages = _select_distinct_pages(ordered, bodies, max_pages=2)
     urls = [p.url for p in pages]
-    assert urls == ["https://ex.io/?view=gungi", "https://ex.io/about"]
+    # The shortest of the 3 duplicate URLs represents the collapsed slot
+    # (2026-08-28: picking whichever sorted first in fair-share order would
+    # label the aggregate with one of the guessed junk URLs itself).
+    assert urls == ["https://ex.io/#/gungi", "https://ex.io/about"]
+
+
+def test_select_distinct_pages_also_dedupes_against_the_entry_page() -> None:
+    """A harvested page whose content matches the entry page itself (a www. twin, a ?utm variant) must not occupy a slot -- it adds nothing the aggregate doesn't already have via the entry section."""
+    entry_text = "LUMI ROGUE v0.21 Try the demo (tutorial) Rankings Need an Ankh?"
+    ordered = [
+        _candidate("https://www.ex.io/", minutes_ago=1, page_id="p1"),
+        _candidate("https://ex.io/about", minutes_ago=2, page_id="p2"),
+    ]
+    bodies = [
+        (True, _one(_FakeBodyRow(body=entry_text))),
+        (True, _one(_FakeBodyRow(body="A real About page with real content about the team."))),
+    ]
+    pages = _select_distinct_pages(ordered, bodies, max_pages=5, entry_text=entry_text)
+    urls = [p.url for p in pages]
+    assert urls == ["https://ex.io/about"]
 
 
 def test_parse_json_object_salvages_fences_and_prose() -> None:

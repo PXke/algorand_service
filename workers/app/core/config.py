@@ -201,8 +201,15 @@ SCREENSHOT_PUBLIC_BASE_URL = env_str(
 # mechanics through a few real clicks/inputs, not master or complete it).
 # Bounded on purpose -- exploring a system takes a handful of steps; an
 # unbounded budget would let one compose turn into an open-ended playthrough
-# and burn the compose's time/cost budget on a single tool.
-PLAY_INTERACTIVE_MAX_STEPS = env_int("PLAY_INTERACTIVE_MAX_STEPS", 8)
+# and burn the compose's time/cost budget on a single tool. Raised 8->32
+# 2026-08-28 (owner request, Lumi Rogue): the budget is session-wide across
+# BOTH stages, so a model that explores peripheral panels (leaderboards,
+# stats) before finding the actual demo/tutorial entry point could exhaust
+# an 8-step budget before ever reaching it, even with the tightened
+# "enter the demo itself" prompt instruction (llm_compose.py) telling it
+# where to go. 32 gives real room to explore peripherals AND still enter
+# and meaningfully play the actual game.
+PLAY_INTERACTIVE_MAX_STEPS = env_int("PLAY_INTERACTIVE_MAX_STEPS", 32)
 
 # connect_wallet tool (2026-08-11, agent-wallet Phase 1: WalletConnect LOGIN
 # only, see workers/app/modules/wallet/signer.py's docstring for the actual

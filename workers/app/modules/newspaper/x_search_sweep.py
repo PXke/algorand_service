@@ -16,8 +16,16 @@ ceiling, not a routine truncation (see that config's comment).
 
 Results are stored one row per service_id (x_search_weekly, see
 x_search_store.py), superseding the previous week's row -- a rolling cache
-of "recent posts about this service", not a history. The search_x writer
-tool (research_tools.py) reads it at compose time instead of calling X live.
+of "recent posts about this service", not a history.
+
+DORMANT since 2026-08-28: search_x was reverted back to live per-compose
+calls (owner decision -- a fixed tracked-service list left real stories
+about untracked/newly-registered projects, e.g. Lumi Rogue, with nothing
+to read; see config.X_SEARCH_ENABLED's comment for the full picture). This
+module and its beat entry are no longer wired into celery_app.py's
+schedule, so nothing calls run_x_search_weekly_sweep automatically any
+more -- left in place, not deleted, in case the sweep design is ever
+reinstated. A manual/admin trigger of the task still works.
 """
 
 from __future__ import annotations

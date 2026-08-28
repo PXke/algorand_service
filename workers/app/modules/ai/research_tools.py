@@ -97,7 +97,15 @@ def _tool_search_web(query: str, limit: int = 6) -> dict[str, Any]:
 
 
 def _bsky_access_token() -> tuple[str, str]:
-    """App-password session token, cached ~50 min, as (token, error_message). Both empty when Bluesky simply isn't configured (no credentials set) -- that's a real, non-error state. A non-empty error_message means credentials ARE set but minting a session actually failed (bad password, network error, Bluesky outage); the caller must not conflate that with "not configured", or a real outage silently reads as a deliberate no-op."""
+    """App-password session token, cached ~50 min, as (token, error_message). Both empty when Bluesky simply isn't configured (no credentials set) -- that's a real, non-error state. A non-empty error_message means credentials ARE set but minting a session actually failed (bad password, network error, Bluesky outage); the caller must not conflate that with "not configured", or a real outage silently reads as a deliberate no-op.
+
+    Retries transient failures/5xx (2026-08-28): root-caused alongside the
+    search-call 502 fix (Lumi Rogue) that a platform-wide bsky.social outage
+    hits THIS call first on a cold cache (~50min TTL, so a fresh compose
+    mints before it ever searches) -- fixing only the search call's retry
+    left the session mint as a single point of failure for the exact same
+    incident.
+    """
     import os
     import time
 
@@ -111,13 +119,26 @@ def _bsky_access_token() -> tuple[str, str]:
     expires = _bsky_token_cache.get("expires", 0.0)
     if isinstance(cached, str) and isinstance(expires, float) and time.time() < expires:
         return cached, ""
+    resp = None
+    last_exc: Exception | None = None
+    for attempt in range(_FETCH_MAX_ATTEMPTS):
+        try:
+            resp = httpx.post(
+                _BSKY_CREATE_SESSION,
+                json={"identifier": ident, "password": pw},
+                headers={"User-Agent": _UA},
+                timeout=12.0,
+            )
+        except Exception as exc:
+            last_exc = exc
+            resp = None
+        if resp is not None and resp.status_code not in _FETCH_RETRYABLE_STATUS:
+            break
+        if attempt < _FETCH_MAX_ATTEMPTS - 1:
+            time.sleep(_fetch_backoff_seconds(attempt, resp))
+    if resp is None:
+        return "", str(last_exc)[:200] if last_exc else "bluesky session mint failed"
     try:
-        resp = httpx.post(
-            _BSKY_CREATE_SESSION,
-            json={"identifier": ident, "password": pw},
-            headers={"User-Agent": _UA},
-            timeout=12.0,
-        )
         resp.raise_for_status()
         token = str(resp.json().get("accessJwt") or "")
     except Exception as exc:
@@ -198,18 +219,31 @@ _X_SEARCH_MAX_RESULTS = 10
 
 
 def _x_daily_cap_reserve() -> tuple[bool, int, int]:
-    """Atomically reserve one call against today's X search budget. Returns (allowed, count_after, cap). Same INCR+EXPIRE pattern as publish_daily_guard.py -- INCR first, decrement back out if that pushed past the cap, so concurrent callers never both slip through under the limit."""
-    import redis
+    """Atomically reserve one call against today's X search budget. Returns (allowed, count_after, cap). Same INCR+EXPIRE pattern as publish_daily_guard.py -- INCR first, decrement back out if that pushed past the cap, so concurrent callers never both slip through under the limit.
 
-    from app.core.config import REDIS_URL, X_SEARCH_DAILY_CAP
+    Fails OPEN on a Redis error (2026-08-28, CLAUDE.md invariant 2.9): a
+    Redis blip must not crash a compose over a paid-API spend cap that
+    exists purely as a defensive ceiling, and previously had no try/except
+    at all -- an outage here surfaced as an unlogged generic tool error and
+    silently burned one of search_x's 3 session-cap slots for nothing.
+    """
+    import datetime
 
-    day = __import__("datetime").datetime.now(tz=__import__("datetime").UTC).strftime("%Y-%m-%d")
+    from app.core.config import X_SEARCH_DAILY_CAP
+    from app.core.redis_client import get_redis
+
+    day = datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d")
     key = f"news:x_search_count:{day}"
-    client = redis.from_url(REDIS_URL, decode_responses=True)
-    count = int(client.incr(key))
-    client.expire(key, 90_000)  # a bit over 24h, same margin as the publish-slot cap
+    try:
+        client = get_redis()
+        count = int(client.incr(key))
+        client.expire(key, 90_000)  # a bit over 24h, same margin as the publish-slot cap
+    except Exception:
+        logger.warning("_x_daily_cap_reserve: Redis unavailable, failing open", exc_info=True)
+        return True, 0, X_SEARCH_DAILY_CAP
     if count > X_SEARCH_DAILY_CAP:
-        client.decr(key)
+        with contextlib.suppress(Exception):
+            client.decr(key)
         return False, count - 1, X_SEARCH_DAILY_CAP
     return True, count, X_SEARCH_DAILY_CAP
 

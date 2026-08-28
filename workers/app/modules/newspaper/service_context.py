@@ -58,7 +58,12 @@ def _hosts_for_service(service_id: str, entry_url: str) -> list[str]:
 
 
 def _recent_harvested_pages(
-    hosts: list[str], *, exclude_url: str, max_pages: int, max_age_days: int
+    hosts: list[str],
+    *,
+    exclude_url: str,
+    max_pages: int,
+    max_age_days: int,
+    entry_text: str = "",
 ) -> list[ContextPage]:
     from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
     from app.core.statements import CrawledPageStmts
@@ -107,7 +112,7 @@ def _recent_harvested_pages(
     bodies = execute_parallel_with_args(
         CrawledPageStmts.GET_BODY, [(page_id,) for _, page_id, _, _ in ordered]
     )
-    return _select_distinct_pages(ordered, bodies, max_pages=max_pages)
+    return _select_distinct_pages(ordered, bodies, max_pages=max_pages, entry_text=entry_text)
 
 
 def _select_distinct_pages(
@@ -115,22 +120,48 @@ def _select_distinct_pages(
     bodies: list[tuple[bool, object]],
     *,
     max_pages: int,
+    entry_text: str = "",
 ) -> list[ContextPage]:
-    """Walk `ordered` (fair-share priority order) pairing each candidate with its fetched body, skipping soft-404s and content-duplicates of an already-accepted page, until max_pages distinct real pages are collected."""
-    pages: list[ContextPage] = []
-    seen_content: set[str] = set()
+    """Walk `ordered` (fair-share priority order) pairing each candidate with its fetched body, skipping soft-404s and content-duplicates of an already-accepted page (or of the entry page itself), until max_pages distinct real pages are collected.
+
+    Two passes: which max_pages CONTENT groups make the cut is decided in
+    priority order exactly as before (pass 1); which URL represents each
+    accepted group is then chosen as the shortest one seen for that content
+    (pass 2), not just whichever happened to sort first in the fair-share
+    walk -- a junk URL-guess flood's surviving slot would otherwise label
+    the aggregate's shell content with one of the guessed URLs itself (e.g.
+    ``## PAGE: https://lumirogue.com/play/gungi``), implying to the writer
+    that a real page exists there.
+    """
+    valid: list[tuple[str, str, str]] = []  # (url, title, body) per non-soft-404 candidate
     for (_, _, url, title), (ok, result) in zip(ordered, bodies, strict=True):
-        if len(pages) >= max_pages:
-            break
         detail = result.one() if ok else None
         body = (detail.body if detail else "") or ""
         if not body.strip() or looks_like_soft_404(body):
             continue
+        valid.append((url, title or (detail.title if detail else "") or "", body))
+
+    by_content: dict[str, list[tuple[str, str, str]]] = {}
+    for url, title, body in valid:
+        by_content.setdefault(normalize_text(body), []).append((url, title, body))
+
+    accepted_order: list[str] = []
+    seen: set[str] = set()
+    if entry_text.strip():
+        seen.add(normalize_text(entry_text))
+    for _url, _title, body in valid:
+        if len(accepted_order) >= max_pages:
+            break
         content_key = normalize_text(body)
-        if content_key in seen_content:
+        if content_key in seen:
             continue
-        seen_content.add(content_key)
-        pages.append(ContextPage(url=url, title=title or detail.title or "", body=body))
+        seen.add(content_key)
+        accepted_order.append(content_key)
+
+    pages: list[ContextPage] = []
+    for content_key in accepted_order:
+        url, title, body = min(by_content[content_key], key=lambda utb: (len(utb[0]), utb[0]))
+        pages.append(ContextPage(url=url, title=title, body=body))
     return pages
 
 
@@ -189,6 +220,7 @@ def build_service_context(
                 exclude_url=entry_url,
                 max_pages=SERVICE_CONTEXT_MAX_PAGES,
                 max_age_days=SERVICE_CONTEXT_MAX_AGE_DAYS,
+                entry_text=entry_text,
             )
         except Exception:
             pages = []

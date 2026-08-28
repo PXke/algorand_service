@@ -138,11 +138,14 @@ def test_bsky_access_token_distinguishes_unconfigured_from_auth_failure(
     assert token == ""
     assert error == ""
 
-    # Configured, but minting a session actually fails: must carry a real
-    # error message the caller can distinguish from "not configured".
+    # Configured, but minting a session actually fails on every retry: must
+    # carry a real error message the caller can distinguish from "not
+    # configured" (time.sleep patched so the retry backoff doesn't slow the
+    # test down).
     monkeypatch.setenv("BLUESKY_IDENTIFIER", "someone.bsky.social")
     monkeypatch.setenv("BLUESKY_APP_PASSWORD", "app-password")
     research_tools._bsky_token_cache.clear()
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
 
     def fake_post(*_args: object, **_kwargs: object) -> httpx.Response:
         raise httpx.ConnectError("bluesky is down")
@@ -151,6 +154,32 @@ def test_bsky_access_token_distinguishes_unconfigured_from_auth_failure(
     token, error = _bsky_access_token()
     assert token == ""
     assert "bluesky is down" in error
+
+
+def test_bsky_access_token_retries_a_502_before_giving_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-caused 2026-08-28 (Lumi Rogue): fixing only the search call's 502 retry left the session mint itself as a single point of failure for the exact same class of outage -- a platform-wide bsky.social 502 event hits the mint FIRST on a cold cache."""
+    monkeypatch.setenv("BLUESKY_IDENTIFIER", "someone.bsky.social")
+    monkeypatch.setenv("BLUESKY_APP_PASSWORD", "app-password")
+    research_tools._bsky_token_cache.clear()
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    calls = {"n": 0}
+
+    def fake_post(url: str, **_kw: object) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 2:
+            return httpx.Response(502, request=httpx.Request("POST", url))
+        return httpx.Response(
+            200, json={"accessJwt": "real-token"}, request=httpx.Request("POST", url)
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    token, error = _bsky_access_token()
+    assert calls["n"] == 2
+    assert token == "real-token"
+    assert error == ""
 
 
 def test_search_bluesky_reports_real_auth_failure_not_generic_not_configured(
