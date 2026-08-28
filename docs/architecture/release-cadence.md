@@ -47,7 +47,7 @@ Document in release notes each freeze:
 - `PLATFORM_TREASURY_ADDRESS` (TestNet)
 - Conduit catch-up round / genesis
 - Minimum suggestion payment (`SUGGESTION_MIN_MICROALGOS`)
-- Flutter `apiBaseUrl` + `AUTH_DOMAIN` for web testers
+- Frontend `VITE_API_BASE_URL` + `AUTH_DOMAIN` for web testers
 
 ## Related
 
