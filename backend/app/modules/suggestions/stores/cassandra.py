@@ -21,17 +21,24 @@ class CassandraSuggestionStore:
 
         session = get_cassandra_session()
         created_at = datetime.fromtimestamp(item.created_at_epoch, tz=UTC)
+        suggestion_id = UUID(item.suggestion_id)
         session.execute(
             SuggestionStmts.INSERT,
             (
                 item.status,
                 created_at,
-                UUID(item.suggestion_id),
+                suggestion_id,
                 item.wallet_address,
                 item.title,
                 item.body,
                 item.submission_txid,
             ),
+        )
+        # Dual-write the txid lookup table (migration 087) so has_submission_txid
+        # can do a direct point lookup instead of an ALLOW FILTERING scan.
+        session.execute(
+            SuggestionStmts.INSERT_TXID,
+            (item.submission_txid, suggestion_id, item.status, created_at),
         )
 
     def list_open(self) -> list[StoredSuggestion]:
