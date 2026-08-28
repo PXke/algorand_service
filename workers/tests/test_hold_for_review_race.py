@@ -100,6 +100,72 @@ def test_review_queue_full_race_stores_and_enqueues_instead_of_discarding(
     assert enqueued["metadata"]["article_id"] == out["article_id"]
 
 
+def test_duplicate_review_pending_race_stores_and_enqueues_instead_of_discarding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same failure class as the review_queue_full race above: has_pending_review_for_url() is ALSO checked pre-compose (_pending_review_veto), so a True here after the multi-minute compose already ran means only that another pending review for this URL was enqueued mid-compose -- not that this draft's content is worthless. It must be stored and enqueued too, not discarded, mirroring the review_queue_full fix."""
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.has_pending_review_for_url",
+        lambda _url: True,
+    )
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.review_queue_full",
+        lambda: False,
+    )
+    stored: dict = {}
+    monkeypatch.setattr(
+        "app.modules.newspaper.article_store.insert_stored_article",
+        lambda **kw: (stored.update(kw), ("aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000", True))[1],
+    )
+    enqueued: dict = {}
+    monkeypatch.setattr(
+        "app.modules.crawler.classifier_review_store.enqueue_classifier_review",
+        lambda **kw: (enqueued.update(kw), "rid-1")[1],
+    )
+    monkeypatch.setattr(pt, "_grade_and_gate", lambda *_a, **_kw: ({}, None, True))
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.record_domain_compose", lambda _domain: None
+    )
+    monkeypatch.setattr(
+        "app.modules.crawler.domain_tracker.record_service_compose", lambda _service_id: None
+    )
+
+    row = SimpleNamespace(
+        queue_id="q1",
+        service_id="pixelcity-aetheralabs-es",
+        scrape_url="https://pixelcity.aetheralabs.es/gallery",
+    )
+    composed = ArticleComposeResult(
+        title="Pixel City generative art collection hits 246 of 450 mints on Algorand",
+        summary="s",
+        body="body text",
+        composer="mistral",
+    )
+
+    out = pt._hold_for_review(
+        row,
+        {"txid": "", "round_num": 0},
+        composed,
+        topic=PublishTopic.GENERIC,
+        publish_kind=PublishKind.CONTENT_UPDATE,
+        compose_domain="aetheralabs.es",
+        clf_category="ecosystem",
+        clf_confidence=0.5,
+        signals=_signals(),
+        gate_enforced_review=False,
+        hold_reason="",
+        hero_image="",
+        image_field="",
+        route_to_backlog=False,
+        page_text_for_clf="page text",
+    )
+
+    assert out["status"] == "review"
+    assert stored["publish_to_feed"] is False
+    assert stored["title"] == composed.title
+    assert enqueued["metadata"]["article_id"] == out["article_id"]
+
+
 def test_route_to_backlog_ignores_review_queue_full_as_before(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

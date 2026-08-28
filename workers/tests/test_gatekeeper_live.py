@@ -191,7 +191,6 @@ def test_gate_draft_hard_fails_on_dead_domain_reference(monkeypatch: pytest.Monk
     gate = gate_draft(
         source_text="A routine update.",
         article_text="Unlike deadwallet.io, this new wallet is thriving.",
-        service_id="svc-1",
         source_url="https://newwallet.app",
     )
     assert gate is not None
@@ -212,7 +211,6 @@ def test_gate_draft_passes_when_no_domains_dead(monkeypatch: pytest.MonkeyPatch)
     gate = gate_draft(
         source_text="A routine update.",
         article_text="See https://perawallet.app for details.",
-        service_id="svc-1",
         source_url="https://newwallet.app",
     )
     assert gate is not None
