@@ -1,6 +1,7 @@
 """Global compose mutex — only one writer research loop at a time."""
 
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Never
 from unittest.mock import MagicMock
@@ -114,7 +115,9 @@ def test_holder_is_dead_false_without_task_id_or_pid_even_when_old() -> None:
 def test_holder_is_dead_true_for_bare_invocation_with_a_dead_pid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No task_id (a bare/manual script, not a real Celery task) but a recorded pid that's confirmed gone -- reclaimable via the same-host PID-liveness fallback."""
+    """No task_id (a bare/manual script, not a real Celery task) but a recorded pid that's confirmed gone, on THIS host -- reclaimable via the same-host PID-liveness fallback."""
+    import socket
+
     monkeypatch.setattr(
         "app.modules.newspaper.compose_lock._pid_is_dead", lambda _pid, _start: True
     )
@@ -122,6 +125,7 @@ def test_holder_is_dead_true_for_bare_invocation_with_a_dead_pid(
         "started_at": (datetime.now(tz=UTC) - timedelta(seconds=300)).isoformat(),
         "pid": 999999,
         "pid_start_ticks": 12345,
+        "hostname": socket.gethostname(),
     }
     assert _holder_is_dead(meta)
 
@@ -130,6 +134,8 @@ def test_holder_is_dead_false_for_bare_invocation_with_a_live_pid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A recorded pid that's still confirmed alive is never reclaimed."""
+    import socket
+
     monkeypatch.setattr(
         "app.modules.newspaper.compose_lock._pid_is_dead", lambda _pid, _start: False
     )
@@ -137,8 +143,39 @@ def test_holder_is_dead_false_for_bare_invocation_with_a_live_pid(
         "started_at": (datetime.now(tz=UTC) - timedelta(seconds=300)).isoformat(),
         "pid": 999999,
         "pid_start_ticks": 12345,
+        "hostname": socket.gethostname(),
     }
     assert not _holder_is_dead(meta)
+
+
+def test_holder_is_dead_false_for_a_pid_recorded_on_a_different_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded pid from a DIFFERENT host is never evaluated locally -- even one that would (wrongly) look dead against this host's own /proc has no bearing on whether the real, foreign holder is still running."""
+    monkeypatch.setattr(
+        "app.modules.newspaper.compose_lock._pid_is_dead", lambda _pid, _start: True
+    )
+    meta = {
+        "started_at": (datetime.now(tz=UTC) - timedelta(seconds=300)).isoformat(),
+        "pid": 999999,
+        "pid_start_ticks": 12345,
+        "hostname": "some-other-host-entirely",
+    }
+    assert not _holder_is_dead(meta)
+
+
+def _fake_ticks_except_target(
+    target_pid: int, target_value: int | None
+) -> Callable[[int], int | None]:
+    """A _proc_start_ticks stand-in that answers normally for pid 1 (so the tripwire always passes) and returns `target_value` for `target_pid` specifically -- isolates a test to exactly the branch after the tripwire, matching how a real, healthy /proc actually behaves (pid 1 always readable)."""
+
+    def _fake(pid: int) -> int | None:
+        if pid == 1:
+            return 1
+        assert pid == target_pid
+        return target_value
+
+    return _fake
 
 
 def test_pid_is_dead_true_when_process_gone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,7 +183,8 @@ def test_pid_is_dead_true_when_process_gone(monkeypatch: pytest.MonkeyPatch) -> 
     from app.modules.newspaper.compose_lock import _pid_is_dead
 
     monkeypatch.setattr(
-        "app.modules.newspaper.compose_lock._proc_start_ticks", lambda _pid: None
+        "app.modules.newspaper.compose_lock._proc_start_ticks",
+        _fake_ticks_except_target(999999, None),
     )
     assert _pid_is_dead(999999, 12345)
 
@@ -156,7 +194,8 @@ def test_pid_is_dead_true_when_pid_reused(monkeypatch: pytest.MonkeyPatch) -> No
     from app.modules.newspaper.compose_lock import _pid_is_dead
 
     monkeypatch.setattr(
-        "app.modules.newspaper.compose_lock._proc_start_ticks", lambda _pid: 99999
+        "app.modules.newspaper.compose_lock._proc_start_ticks",
+        _fake_ticks_except_target(999999, 99999),
     )
     assert _pid_is_dead(999999, 12345)
 
@@ -166,7 +205,8 @@ def test_pid_is_dead_false_when_start_time_matches(monkeypatch: pytest.MonkeyPat
     from app.modules.newspaper.compose_lock import _pid_is_dead
 
     monkeypatch.setattr(
-        "app.modules.newspaper.compose_lock._proc_start_ticks", lambda _pid: 12345
+        "app.modules.newspaper.compose_lock._proc_start_ticks",
+        _fake_ticks_except_target(999999, 12345),
     )
     assert not _pid_is_dead(999999, 12345)
 
@@ -178,9 +218,53 @@ def test_pid_is_dead_false_when_no_start_time_was_ever_recorded(
     from app.modules.newspaper.compose_lock import _pid_is_dead
 
     monkeypatch.setattr(
-        "app.modules.newspaper.compose_lock._proc_start_ticks", lambda _pid: 12345
+        "app.modules.newspaper.compose_lock._proc_start_ticks",
+        _fake_ticks_except_target(999999, 12345),
     )
     assert not _pid_is_dead(999999, None)
+
+
+def test_pid_is_dead_false_when_pid_1_is_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pid-1 tripwire: if THIS process can't even read pid 1's own stat file, /proc can't be trusted for any OTHER pid either -- a hardened mount (hidepid=2, ProtectProc=invisible) reports a hidden-but-alive process as a bare ENOENT, indistinguishable from genuinely gone. Must never reclaim in that state, even though the target pid itself looks 'gone'."""
+    from app.modules.newspaper.compose_lock import _pid_is_dead
+
+    def fake_start_ticks(_pid: int) -> int | None:
+        return None  # both pid 1 and the target pid "look" gone
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.compose_lock._proc_start_ticks", fake_start_ticks
+    )
+    assert not _pid_is_dead(999999, 12345)
+
+
+def test_pid_is_dead_false_when_target_pid_raises_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Permission denied reading the TARGET pid's own stat file (pid 1 is readable, so the tripwire passes) is uncertainty, not confirmation of death -- must never be treated as dead."""
+    from app.modules.newspaper.compose_lock import _pid_is_dead
+
+    def fake_start_ticks(pid: int) -> int | None:
+        if pid == 1:
+            return 1  # pid 1 readable -- /proc view is trustworthy in general
+        raise PermissionError("cannot read /proc/999999/stat")
+
+    monkeypatch.setattr(
+        "app.modules.newspaper.compose_lock._proc_start_ticks", fake_start_ticks
+    )
+    assert not _pid_is_dead(999999, 12345)
+
+
+def test_proc_start_ticks_permission_error_raises_not_returns_none() -> None:
+    """A real PermissionError reading /proc/<pid>/stat must propagate, not silently collapse into the same None that means 'confirmed gone' -- the two mean very different things to _pid_is_dead. FileNotFoundError is the only exception this function swallows into None."""
+    from unittest.mock import patch
+
+    from app.modules.newspaper.compose_lock import _proc_start_ticks
+
+    with (
+        patch("pathlib.Path.read_text", side_effect=PermissionError("denied")),
+        pytest.raises(PermissionError),
+    ):
+        _proc_start_ticks(1)
 
 
 def test_holder_is_dead_false_within_min_age(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -291,7 +375,7 @@ def test_compose_lock_still_raises_when_reclaim_fails(monkeypatch: pytest.Monkey
 
 
 def test_proc_start_ticks_reads_a_real_stable_value_for_this_process() -> None:
-    """Against the actual running test process (no mocking) -- a real /proc/<pid>/stat parse, called twice, must return the same value both times (a process's own start time never changes)."""
+    """Against the actual running test process (no mocking) -- a real /proc/<pid>/stat parse, called twice, must return the same value both times (a process's own start time never changes). Parseability only -- see the field-identity and real spawn/kill tests below for proof the INDEX is actually correct, not just stable."""
     import os
 
     from app.modules.newspaper.compose_lock import _proc_start_ticks
@@ -307,6 +391,57 @@ def test_proc_start_ticks_none_for_a_pid_that_cannot_exist() -> None:
     from app.modules.newspaper.compose_lock import _proc_start_ticks
 
     assert _proc_start_ticks(2**30) is None
+
+
+def test_proc_start_ticks_field_index_matches_a_freshly_spawned_processs_real_wall_clock_start() -> (
+    None
+):
+    """Proves field index 19 is genuinely field 22 (starttime), not just a stable-looking neighbor (e.g. itrealvalue, always 0; or vsize, stable across two immediate reads) -- both of which would make the weaker 'called twice' test above pass even with an off-by-one. Converts the raw tick value back to wall-clock time (boot time from /proc/stat's btime line + ticks / SC_CLK_TCK) and checks it lands within a few seconds of a subprocess spawned right now."""
+    import os
+    import subprocess
+    import time
+    from pathlib import Path
+
+    from app.modules.newspaper.compose_lock import _proc_start_ticks
+
+    before = time.time()
+    proc = subprocess.Popen(["sleep", "5"])
+    try:
+        ticks = _proc_start_ticks(proc.pid)
+        after = time.time()
+        assert ticks is not None
+
+        btime = next(
+            int(line.split()[1])
+            for line in Path("/proc/stat").read_text().splitlines()
+            if line.startswith("btime ")
+        )
+        clk_tck = os.sysconf("SC_CLK_TCK")
+        computed_start = btime + ticks / clk_tck
+
+        # Generous 5s tolerance either side -- boot-time/tick rounding, not
+        # a tight race; a wrong field index (vsize, an address, a flags
+        # bitmask) would land wildly outside this, not just barely miss it.
+        assert before - 5 <= computed_start <= after + 5
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_pid_is_dead_against_a_real_spawned_and_killed_subprocess() -> None:
+    """True end-to-end proof, no mocking: a real subprocess is reported alive while running, then reported dead (via the genuinely-gone path, not the pid-reuse path) immediately after it's killed and reaped."""
+    import subprocess
+
+    from app.modules.newspaper.compose_lock import _pid_is_dead, _proc_start_ticks
+
+    proc = subprocess.Popen(["sleep", "5"])
+    try:
+        real_start_ticks = _proc_start_ticks(proc.pid)
+        assert not _pid_is_dead(proc.pid, real_start_ticks)
+    finally:
+        proc.kill()
+        proc.wait()  # reap -- otherwise it's a zombie, still visible in /proc
+    assert _pid_is_dead(proc.pid, real_start_ticks)
 
 
 def test_write_meta_records_pid_and_start_ticks(monkeypatch: pytest.MonkeyPatch) -> None:

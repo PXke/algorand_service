@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import os
+import socket
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -77,24 +78,46 @@ def _current_task_id() -> str:
 
 
 def _proc_start_ticks(pid: int) -> int | None:
-    """This process's start time in clock ticks since boot, from /proc/<pid>/stat field 22 -- None if unreadable (no /proc, pid gone, permission denied). No psutil dependency, same convention as browser_reaper.py's ps-based process inspection -- Linux-only, which every other part of this codebase already assumes (ps-based reaper, journalctl, etc.)."""
-    try:
-        from pathlib import Path
+    """This process's start time in clock ticks since boot, from /proc/<pid>/stat field 22. Returns None ONLY when the process is confirmed gone (a bare `FileNotFoundError` -- no such pid at all). Any other unreadable case (permission denied, a hardened /proc mount) RAISES instead of returning None: "gone" and "can't tell" mean very different things to a caller deciding whether it's safe to reclaim a lock, and collapsing them together silently is exactly how an invisible-but-alive process would get treated as dead. No psutil dependency, same convention as browser_reaper.py's ps-based process inspection -- Linux-only, which every other part of this codebase already assumes (ps-based reaper, journalctl, etc.)."""
+    from pathlib import Path
 
+    try:
         raw = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return None
+    try:
         # comm (field 2) is parenthesized and can itself contain spaces or
         # closing parens, so split on the LAST ")" to safely find the
         # fixed-width fields that follow it -- field 22 (starttime) is
         # then index 19 in that remainder (fields 3..22 zero-indexed).
         _, _, rest = raw.rpartition(")")
         return int(rest.split()[19])
-    except (OSError, ValueError, IndexError):
+    except (ValueError, IndexError):
         return None
 
 
 def _pid_is_dead(pid: int, recorded_start_ticks: int | None) -> bool:
-    """True only when positively confirmed: either no process is running at `pid` any more, or one is, but its start time doesn't match what was recorded when the lock was written -- meaning `pid` has since been reused by an unrelated process. Any uncertainty (can't read /proc at all, or no start time was ever recorded to compare against) returns False, matching `_holder_is_dead`'s own conservative contract."""
-    current = _proc_start_ticks(pid)
+    """True only when positively confirmed: either no process is running at `pid` any more, or one is, but its start time doesn't match what was recorded when the lock was written -- meaning `pid` has since been reused by an unrelated process. Any uncertainty at all returns False, matching `_holder_is_dead`'s own conservative contract: can't read /proc for this pid (permission denied); no start time was ever recorded to compare against; or -- checked first, below -- can't even trust /proc to show us OTHER processes at all.
+
+    The pid-1 tripwire: pid 1 always exists and is always readable on a
+    normal /proc mount. If THIS process can't read pid 1's own stat file,
+    the whole /proc view can't be trusted for anyone else's pid either --
+    a hardened mount (`hidepid=2`, systemd's `ProtectProc=invisible`)
+    reports a hidden-but-alive process as a bare ENOENT, byte-for-byte
+    identical to "gone", so splitting exceptions in `_proc_start_ticks`
+    alone cannot catch this case. Checked lazily on every call (not once at
+    import time), so this stays correct if the mount options ever change
+    without a restart.
+    """
+    try:
+        if _proc_start_ticks(1) is None:
+            return False
+    except OSError:
+        return False
+    try:
+        current = _proc_start_ticks(pid)
+    except OSError:
+        return False
     if current is None:
         return True
     if recorded_start_ticks is None:
@@ -111,9 +134,14 @@ def _write_meta(label: str, task_id: str) -> None:
         # Recorded unconditionally (not just for bare invocations) so
         # _holder_is_dead has a same-host fallback ready the moment task_id
         # is empty -- a real Celery task also has a pid, this costs nothing
-        # extra to capture for it.
+        # extra to capture for it. hostname matters because a pid is only
+        # ever meaningful on the host that minted it -- without it, a
+        # future multi-host worker fleet would evaluate a foreign pid
+        # against ITS OWN /proc and almost always see "no such pid",
+        # falsely concluding the holder is dead.
         "pid": pid,
         "pid_start_ticks": _proc_start_ticks(pid),
+        "hostname": socket.gethostname(),
     }
     with contextlib.suppress(Exception):
         _redis_client().set(_META_KEY, json.dumps(meta), ex=COMPOSE_LOCK_TTL)
@@ -135,6 +163,31 @@ def get_compose_lock_status() -> dict | None:
             meta = json.loads(raw)
     meta["ttl_seconds"] = ttl
     return meta
+
+
+def _celery_task_is_dead(task_id: str) -> bool:
+    """True only when Celery's control plane positively confirms `task_id` is not active anywhere. Any failure to ask (broker unreachable, timeout) returns False -- do not guess."""
+    try:
+        from app.celery_app import celery_app
+
+        active = celery_app.control.inspect(timeout=5).active() or {}
+    except Exception:
+        return False  # inspect itself failed — do not guess, leave it alone
+    for tasks in active.values():
+        for t in tasks:
+            if t.get("id") == task_id:
+                return False  # confirmed still alive
+    return True  # inspect succeeded and the task id is nowhere — genuinely dead
+
+
+def _bare_holder_is_dead(meta: dict) -> bool:
+    """True only when a same-host PID-liveness check (see _pid_is_dead) positively confirms the recorded holder is gone. False whenever there's no pid to check, or it was recorded on a different host (a pid is only ever meaningful on the host that minted it)."""
+    pid = meta.get("pid")
+    if not isinstance(pid, int):
+        return False  # no task_id AND no pid recorded — nothing to check
+    if meta.get("hostname") != socket.gethostname():
+        return False  # a different host's pid — can't evaluate locally, never reclaim
+    return _pid_is_dead(pid, meta.get("pid_start_ticks"))
 
 
 def _holder_is_dead(meta: dict) -> bool:
@@ -172,22 +225,8 @@ def _holder_is_dead(meta: dict) -> bool:
 
     task_id = meta.get("task_id")
     if task_id:
-        try:
-            from app.celery_app import celery_app
-
-            active = celery_app.control.inspect(timeout=5).active() or {}
-        except Exception:
-            return False  # inspect itself failed — do not guess, leave it alone
-        for tasks in active.values():
-            for t in tasks:
-                if t.get("id") == task_id:
-                    return False  # confirmed still alive
-        return True  # inspect succeeded and the task id is nowhere — genuinely dead
-
-    pid = meta.get("pid")
-    if not isinstance(pid, int):
-        return False  # no task_id AND no pid recorded — nothing to check
-    return _pid_is_dead(pid, meta.get("pid_start_ticks"))
+        return _celery_task_is_dead(task_id)
+    return _bare_holder_is_dead(meta)
 
 
 def _try_reclaim() -> bool:
