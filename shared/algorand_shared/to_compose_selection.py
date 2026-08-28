@@ -29,6 +29,16 @@ against a large, frequently-updating service saturating every platform slot
 with routine small updates and crowding out first-ever coverage of smaller/
 newer services, while still letting a genuinely big update from an
 established service win purely on priority when there's surplus capacity.
+
+2026-08-28: `reclaim_stale_selected_artifacts` no longer drops a stale pick
+(one that never got composed before its day rolled over) back into the
+undifferentiated pending pool with no special standing. A HUMAN-lane pick
+is re-pinned forward to the next actionable day (`_next_open_day_for_pin`)
+so the human's specific choice persists day over day until it's actually
+composed; a PLATFORM-lane pick is reverted to pending with its priority
+boosted above the current top of the pool, a documented best-effort (not
+guaranteed) fallback -- see that function's own docstring for the full
+reasoning and trade-offs.
 """
 
 from __future__ import annotations
@@ -440,19 +450,102 @@ def find_stale_selected_artifacts(*, today: str | None = None) -> list[dict[str,
     return stale
 
 
+# 2026-08-28: platform-lane reclaim fallback (see reclaim_stale_selected_
+# artifacts's own docstring for why this is a deliberate fallback rather
+# than a guaranteed slot). Not a config knob -- a fixed, documented margin
+# for an internal ranking nudge, the same kind of module-local constant as
+# NEW_SERVICE_POOL/UPDATE_POOL above, not an operational tunable.
+_PLATFORM_RECLAIM_PRIORITY_BOOST = 1.0
+
+# Defensive circuit breaker for _next_open_day_for_pin's day-by-day probe --
+# `to_compose` holds at most a handful of rows per day forever, so this
+# resolves within one or two candidates in every real scenario; this just
+# bounds the pathological case (e.g. a bug that fills `claimed` unbounded)
+# from looping forever.
+_MAX_PIN_FORWARD_PROBE_DAYS = 366
+
+
+def _next_open_day_for_pin(start_day: str, claimed: set[str]) -> str:
+    """Earliest day >= `start_day` that is both NOT already carrying a `to_compose` selection (`list_to_compose_for_day` empty -- i.e. `select_to_compose_for_day` hasn't locked that day in yet) and not already claimed by an earlier artifact reclaimed in this same run (`claimed`).
+
+    This is "the next day a re-pinned human pick will actually be honored":
+    `select_to_compose_for_day`/`select_to_compose_for_today_task` only ever
+    reads a PENDING artifact's `human_pick_day` at the moment THAT day gets
+    selected, and once selected a day is never re-run (`select_to_compose_
+    for_today_task`'s own already-selected no-op) -- so pinning for a day
+    that's already locked in would silently never be honored until some
+    OTHER, later day happens to be re-picked, with no guarantee that ever
+    happens. `claimed` guards the case where this same reclaim run carries
+    forward MORE than one stale human pick (e.g. after several consecutive
+    paused days each had their own human pin stranded): without it, a
+    second call here would pick the exact same day the first call just
+    chose, and the two `pin_artifact_for_day` calls would silently steal
+    the slot back and forth from each other (`pin_artifact_for_day`'s own
+    "at most one pin per day" rule) -- both are seeded into `claimed`
+    up front from every OTHER currently-pending artifact's own
+    `human_pick_day` too, so this also never steals a genuine, unrelated
+    admin pin that's simply waiting for a future day.
+    """
+    cursor = date.fromisoformat(start_day)
+    for _ in range(_MAX_PIN_FORWARD_PROBE_DAYS):
+        candidate = cursor.isoformat()
+        if candidate not in claimed and not list_to_compose_for_day(candidate):
+            return candidate
+        cursor += timedelta(days=1)
+    return cursor.isoformat()
+
+
 def reclaim_stale_selected_artifacts(
     *, today: str | None = None, dry_run: bool = True
 ) -> dict[str, object]:
-    """Revert every stale-selected artifact (see `find_stale_selected_artifacts`) back to PENDING, re-entering it into the normal priority-ranked pool so a future `select_to_compose_for_day` can pick it up again like any other candidate -- not forced to the front, just no longer permanently stuck.
+    """Carry forward every stale-selected artifact (see `find_stale_selected_artifacts`) to the next actionable day instead of dropping it back into the undifferentiated pending pool -- an owner requirement (2026-08-28) that a pick that didn't get composed should roll forward, not be forgotten.
+
+    Three cases, by finding:
+
+    1. `has_current_reference=True` -- unchanged from the 2026-08-27 fix:
+       the artifact is legitimately SELECTED elsewhere (a current/future
+       day's own valid row); only the stale row is deleted, the artifact's
+       status is never touched. See this same case's history below.
+
+    2. HUMAN lane -- reverts the artifact to PENDING (`revert_artifact_to_
+       pending`) and immediately re-pins it (`pin_artifact_for_day`, the
+       same primitive `pin_for_tomorrow` uses) for the earliest day that
+       isn't already locked in (`_next_open_day_for_pin`), instead of the
+       pre-2026-08-28 behaviour of clearing the pin outright
+       (`clear_artifact_pin`) and letting the artifact compete in the
+       ordinary pool with no special standing. The human's specific choice
+       therefore persists and rolls forward one day at a time (each day's
+       `select_to_compose_for_today_task` -- which runs unconditionally,
+       not gated on AUTO_COMPOSE_PAUSED -- will select it into that day's
+       human slot; if that day also goes uncomposed, the NEXT reclaim run
+       carries it forward again) until it's actually composed, rather than
+       vanishing with no trace.
+
+    3. PLATFORM lane -- still reverts to PENDING (a direct in-place rewrite
+       of an already-locked day's `to_compose` row was considered and
+       rejected: platform slots aren't individually addressable by
+       artifact the way the one human slot is, so inserting one would mean
+       evicting and renumbering an already-selected sibling pick, on a
+       table this module elsewhere treats as safe to bulk-delete but never
+       safe to partially renumber -- see `_purge_other_to_compose_rows`'s
+       own aliasing incident for what "the same artifact_id in two rows at
+       once" already costs). Instead of plain reversion, though, the
+       artifact's priority is boosted (`update_artifact_priority`) to
+       strictly above the current top of the pending pool
+       (`_PLATFORM_RECLAIM_PRIORITY_BOOST` above whatever's currently
+       highest) before reverting -- a real, not just theoretical, near-
+       guarantee of winning a platform slot the very next time
+       `_rank_platform_picks` runs, without touching a day that's already
+       locked in. This is a deliberate, documented trade-off: the boost is
+       a fresh snapshot taken at reclaim time, not a permanent tag, so a
+       flood of OTHER stale reclaims or a fresh high-priority artifact
+       landing before the next selection run could still in principle
+       outrank it -- "a real chance", not an unconditional guarantee the
+       way the human lane's re-pin is.
 
     Uses the existing `revert_artifact_to_pending` (built for the admin
     "redo picks" action, `reset_to_compose_for_day` above) rather than a new
-    write path. A reclaimed HUMAN-lane pick also has its stale
-    `human_pick_day` cleared (`clear_artifact_pin`) -- otherwise the
-    artifact goes back to PENDING still carrying a human_pick_day for a day
-    that has already passed, which is inert (no future day's exact-date
-    match will ever equal it) but confusing leftover state to see on an
-    otherwise-ordinary pending artifact.
+    write path, same as before 2026-08-28.
 
     2026-08-26: also deletes the stale slot's own `to_compose` row
     (`ToComposeStmts.DELETE_SLOT`, keyed on the exact (compose_day, slot)
@@ -479,32 +572,89 @@ def reclaim_stale_selected_artifacts(
     function in this codebase added this session (`gray_zone_
     reconciliation.dispatch_gray_zone_deep_classify`, `browser_reaper.
     reap_orphaned_browser_processes`) -- reports what WOULD be reclaimed
-    without writing anything until a caller opts in.
+    without writing anything until a caller opts in. The plan itself (which
+    day a human pick would be re-pinned to, what priority a platform pick
+    would be boosted to) is computed the same way in dry-run mode too --
+    only the actual `pin_artifact_for_day`/`revert_artifact_to_pending`/
+    `update_artifact_priority`/`DELETE_SLOT` calls are skipped -- so a
+    dry-run report accurately reflects what a real run would do, not just
+    which artifacts it would touch.
     """
     from app.core.cassandra import get_cassandra_session
 
     from algorand_shared.artifact_statements import ToComposeStmts
-    from algorand_shared.artifact_store import clear_artifact_pin, revert_artifact_to_pending
+    from algorand_shared.artifact_store import (
+        get_artifact,
+        revert_artifact_to_pending,
+        update_artifact_priority,
+    )
 
+    today = today or datetime.now(tz=UTC).date().isoformat()
     stale = find_stale_selected_artifacts(today=today)
     reclaimed: list[dict[str, object]] = []
+
+    # Seed with every OTHER pending artifact's own human pin so a carried-
+    # forward re-pin never silently steals a genuine, unrelated admin pin
+    # that's simply waiting for its future day -- see _next_open_day_for_pin.
+    claimed_days: set[str] = {
+        a.human_pick_day for a in list_pending_artifacts() if a.human_pick_day
+    }
+
     for finding in stale:
         artifact_id = str(finding["artifact_id"])
-        if dry_run:
-            reclaimed.append(finding)
-            continue
-        session = get_cassandra_session()
+
         if finding.get("has_current_reference"):
             # Stale row only -- the artifact is legitimately SELECTED
             # elsewhere for a current/future day. Never touch its status.
-            session.execute(ToComposeStmts.DELETE_SLOT, (finding["compose_day"], finding["slot"]))
-            reclaimed.append({**finding, "action": "stale_row_deleted_only"})
+            entry = {**finding, "action": "stale_row_deleted_only"}
+            if not dry_run:
+                session = get_cassandra_session()
+                session.execute(
+                    ToComposeStmts.DELETE_SLOT, (finding["compose_day"], finding["slot"])
+                )
+            reclaimed.append(entry)
+            continue
+
+        if finding["lane"] == "human":
+            target_day = _next_open_day_for_pin(today, claimed_days)
+            claimed_days.add(target_day)
+            entry = {**finding, "action": "repinned_forward", "target_day": target_day}
+            if dry_run:
+                reclaimed.append(entry)
+                continue
+            if revert_artifact_to_pending(artifact_id):
+                pin_artifact_for_day(artifact_id, target_day)
+                session = get_cassandra_session()
+                session.execute(
+                    ToComposeStmts.DELETE_SLOT, (finding["compose_day"], finding["slot"])
+                )
+                reclaimed.append(entry)
+            continue
+
+        # Platform lane: revert to pending, but with a priority boost above
+        # the current top of the pending pool -- see this function's own
+        # docstring, case 3, for why this is a deliberate fallback rather
+        # than a direct in-place slot insert.
+        pending_now = list_pending_artifacts()
+        current_max_priority = pending_now[0].priority if pending_now else 0.0
+        artifact = get_artifact(artifact_id)
+        own_priority = artifact.priority if artifact is not None else 0.0
+        boosted_priority = (
+            max(current_max_priority, own_priority) + _PLATFORM_RECLAIM_PRIORITY_BOOST
+        )
+        entry = {
+            **finding,
+            "action": "reverted_with_priority_boost",
+            "boosted_priority": boosted_priority,
+        }
+        if dry_run:
+            reclaimed.append(entry)
             continue
         if revert_artifact_to_pending(artifact_id):
-            if finding["lane"] == "human":
-                clear_artifact_pin(artifact_id)
+            update_artifact_priority(artifact_id, boosted_priority)
+            session = get_cassandra_session()
             session.execute(ToComposeStmts.DELETE_SLOT, (finding["compose_day"], finding["slot"]))
-            reclaimed.append({**finding, "action": "reverted_to_pending"})
+            reclaimed.append(entry)
 
     return {"dry_run": dry_run, "reclaimed_count": len(reclaimed), "reclaimed": reclaimed}
 
