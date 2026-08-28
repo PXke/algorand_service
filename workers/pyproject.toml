@@ -25,6 +25,9 @@ dependencies = [
   # keypair + WalletConnect LOGIN capability, see workers/app/modules/wallet/.
   "py-algorand-sdk>=2.11.1",
   "pyWalletConnect>=1.6.2",
+  # Server-side article-body HTML sanitizer (article_store.py's
+  # _sanitize_body, mirrors backend/app/core/sanitize.py's allowlist).
+  "nh3>=0.2.18",
 ]
 
 [project.optional-dependencies]

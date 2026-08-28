@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import nh3
 from algorand_shared.article_transitions import transition_article_status
 from algorand_shared.feed_cache import invalidate_feed_first_page
 from algorand_shared.slugs import (
@@ -17,6 +18,82 @@ from algorand_shared.slugs import (
 from app.core.config import NEWS_FEED_BUCKET
 
 logger = logging.getLogger(__name__)
+
+# Same allowlist as backend/app/core/sanitize.py's sanitize_markdown_body --
+# kept as a separate constant here because backend and workers are separate
+# deployable services with no shared import path for this (both have a
+# top-level `app` package, so `app.core.sanitize` from workers would resolve
+# to workers' own app.core, not backend's). Keep the two lists in sync by
+# hand if the allowlist ever changes.
+_SANITIZE_ALLOWED_TAGS = {
+    "p",
+    "br",
+    "hr",
+    "strong",
+    "b",
+    "em",
+    "i",
+    "u",
+    "s",
+    "del",
+    "ins",
+    "mark",
+    "sub",
+    "sup",
+    "blockquote",
+    "q",
+    "cite",
+    "ul",
+    "ol",
+    "li",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "a",
+    "img",
+    "code",
+    "pre",
+    "kbd",
+    "samp",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "th",
+    "td",
+    "span",
+    "div",
+}
+
+_SANITIZE_ALLOWED_ATTRIBUTES: dict[str, set[str]] = {
+    "a": {"href", "title"},
+    "img": {"src", "alt", "title", "width", "height"},
+    "td": {"colspan", "rowspan"},
+    "th": {"colspan", "rowspan"},
+}
+
+_SANITIZE_ALLOWED_URL_SCHEMES = {"http", "https", "mailto"}
+
+
+def _sanitize_body(body: str) -> str:
+    """Strip disallowed HTML from an article body before storage.
+
+    Applied at every write path that lands writer/recompose output onto the
+    `articles` table (insert_stored_article, replace_article_content) --
+    the writer's output is LLM-composed markdown and could contain a raw
+    `<script>`/`<iframe>`/`onerror=` payload that the frontend's `marked`
+    renderer would otherwise pass straight through to `{@html}`.
+    """
+    return nh3.clean(
+        body,
+        tags=_SANITIZE_ALLOWED_TAGS,
+        attributes=_SANITIZE_ALLOWED_ATTRIBUTES,
+        url_schemes=_SANITIZE_ALLOWED_URL_SCHEMES,
+        link_rel="noopener noreferrer",
+    ).strip()
 
 
 @dataclass(frozen=True)
@@ -249,6 +326,7 @@ def insert_stored_article(
         )
         status = "on_hold"
 
+    body = _sanitize_body(body)
     body = auto_link_glossary_terms(body)
     article_id = article_id or uuid.uuid4()
     published_at = datetime.now(tz=UTC)
@@ -506,6 +584,7 @@ def replace_article_content(
         aid = UUID(article_id)
     except ValueError:
         return None
+    body = _sanitize_body(body)
     body = auto_link_glossary_terms(body)
     session = get_cassandra_session()
     # 2026-08-24: reads `articles` directly (was `articles_by_id`'s
