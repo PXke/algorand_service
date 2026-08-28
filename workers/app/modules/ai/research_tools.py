@@ -126,9 +126,16 @@ def _bsky_access_token() -> tuple[str, str]:
 
 
 def _tool_search_bluesky(query: str, limit: int = 10) -> dict[str, Any]:
-    """Recent public Bluesky posts matching a query — community sentiment and discussion. Returns post text + engagement so the writer judges the mood; a post is social opinion, never cited as established fact."""
-    from app.core.net_guard import guarded_get
+    """Recent public Bluesky posts matching a query — community sentiment and discussion. Returns post text + engagement so the writer judges the mood; a post is social opinion, never cited as established fact.
 
+    Uses `_guarded_get_with_retry` (2026-08-28) rather than a bare `guarded_get`
+    call: root-caused live on a real compose (Lumi Rogue recompose,
+    session 957f895a) where both attempts got a straight `502 Bad Gateway`
+    from bsky.social with zero retry, silently losing the community-
+    sentiment angle for a first-coverage story. 502 is in
+    `_FETCH_RETRYABLE_STATUS`, the same policy every other external-API tool
+    in this module already gets.
+    """
     q = (query or "").strip()
     if not q:
         return {"query": query, "posts": []}
@@ -141,10 +148,10 @@ def _tool_search_bluesky(query: str, limit: int = 10) -> dict[str, Any]:
         }
     n = max(1, min(int(limit), 25))
     try:
-        resp = guarded_get(
+        resp = _guarded_get_with_retry(
             _BSKY_SEARCH,
             params={"q": q, "limit": n, "sort": "top"},
-            headers={"User-Agent": _UA, "Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}"},
             timeout=12.0,
         )
         resp.raise_for_status()
@@ -433,7 +440,11 @@ def _fetch_backoff_seconds(attempt: int, resp: httpx.Response | None = None) -> 
 
 
 def _guarded_get_with_retry(
-    url: str, *, headers: dict | None = None, timeout: float = 12.0
+    url: str,
+    *,
+    headers: dict | None = None,
+    params: dict | None = None,
+    timeout: float = 12.0,
 ) -> httpx.Response:
     """`_guarded_get` with retry: transient network errors and 429/5xx responses get up to 5 attempts with exponential backoff, capped at 60s per wait (429 backs off harder, honoring Retry-After when the server sends one). SSRF rejections and real 4xx responses are permanent, so they fail immediately."""
     import time
@@ -444,7 +455,7 @@ def _guarded_get_with_retry(
     last_exc: Exception | None = None
     for attempt in range(_FETCH_MAX_ATTEMPTS):
         try:
-            resp = _guarded_get(url, headers=headers, timeout=timeout)
+            resp = _guarded_get(url, headers=headers, params=params, timeout=timeout)
         except UnsafeUrlError:
             raise
         except Exception as exc:

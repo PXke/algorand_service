@@ -163,3 +163,53 @@ def test_search_bluesky_reports_real_auth_failure_not_generic_not_configured(
     out = _tool_search_bluesky("algorand")
     assert out["error"] == "session mint failed: 500"
     assert out["posts"] == []
+
+
+def test_search_bluesky_retries_a_502_instead_of_failing_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-caused live 2026-08-28 (Lumi Rogue recompose, session 957f895a).
+
+    bsky.social returned a straight 502 Bad Gateway on both of the writer's
+    search_bluesky attempts, and the old bare `guarded_get` call had no
+    retry, so the tool gave up on the FIRST 502 and the writer lost the
+    community-sentiment angle entirely on a first-coverage story. 502 is a
+    retryable status for every other external-API tool in this module
+    (`_FETCH_RETRYABLE_STATUS`) -- search_bluesky must get the same policy
+    via `_guarded_get_with_retry`, not a bespoke one-shot call.
+    """
+    monkeypatch.setattr(research_tools, "_bsky_access_token", lambda: ("tok", ""))
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    calls: list[dict] = []
+
+    def fake_guarded_get(
+        url: str,
+        *,
+        headers: dict | None = None,  # noqa: ARG001
+        params: dict | None = None,
+        timeout: float = 12.0,  # noqa: ARG001
+    ) -> httpx.Response:
+        calls.append({"url": url, "params": params})
+        if len(calls) < 2:
+            return httpx.Response(502, request=httpx.Request("GET", url))
+        return httpx.Response(
+            200,
+            json={
+                "posts": [
+                    {
+                        "record": {"text": "gm"},
+                        "author": {"handle": "someone.bsky.social"},
+                        "uri": "at://did:plc:abc/app.bsky.feed.post/xyz",
+                        "likeCount": 1,
+                    }
+                ]
+            },
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(research_tools, "_guarded_get", fake_guarded_get)
+    out = _tool_search_bluesky("Lumi Rogue")
+    assert len(calls) == 2, "must retry once after the 502, not give up immediately"
+    assert out["posts"][0]["author"] == "someone.bsky.social"
+    assert "error" not in out
