@@ -1122,21 +1122,81 @@ def _format_full_research_trace(trace: list[dict]) -> str:
     return "\n".join(lines)
 
 
+_GAP_EXTRACTION_PROMPT = (
+    "From the raw tool trace below, identify ONLY unresolved research gaps "
+    "-- you are NOT writing the article or any other digest section. Output "
+    "Markdown ONLY, exactly this one section:\n\n"
+    "### Unresolved Gaps\n"
+    "- List up to 3 SPECIFIC, answerable questions that materially matter to "
+    "this story and that a further tool call could plausibly resolve (e.g. "
+    "'a real recent sale/transaction figure for this marketplace', 'the "
+    "on-chain app ID for the registry contract'). Each gap must name the "
+    "missing fact and what kind of tool call might find it -- not a vague "
+    "'more detail' or 'more sources'. If the research already covers the "
+    "story adequately, write exactly: None\n\n"
+    "Do not write anything else."
+)
+
+
+def _extract_gaps_from_raw_trace(full_trace: str, research_context: str) -> str:
+    """A cheap, single-purpose LLM call standing in for the '### Unresolved Gaps' section a synthesized digest would otherwise carry.
+
+    Raw-trace mode (RESEARCH_DIGEST_MODE=raw, or any deepseek research) skips
+    the full _RESEARCH_DIGEST_SYNTHESIS pass entirely, so the digest it hands
+    back never has its own Unresolved Gaps section -- _extract_unresolved_gaps
+    always found nothing on it, so _run_digest_gap_fill's bounded second-look
+    pass silently never ran for a large-context provider (root-caused
+    2026-08-16). This is deliberately NOT the full synthesis prompt -- raw
+    mode exists specifically to skip that -- just the one section gap-fill
+    actually needs to decide whether to run at all.
+
+    Empty string on any failure (a bad response, a client error): the caller
+    then simply skips gap-fill, same as a digest that honestly reported no
+    gaps -- never worse than today's (also gap-fill-less) raw-mode behavior.
+    """
+    try:
+        from app.core.config import LLM_TEMP_RESEARCH
+
+        digest_client = get_llm_digest_client()
+        text = digest_client.chat_completion(
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        f"{research_context}\n\nRaw tool trace:\n{full_trace}\n\n"
+                        f"{_GAP_EXTRACTION_PROMPT}"
+                    ),
+                },
+            ],
+            json_object=False,
+            temperature=LLM_TEMP_RESEARCH,
+        )
+        return (text or "").strip()
+    except Exception:
+        logger.warning("raw-mode gap extraction failed; skipping gap-fill", exc_info=True)
+        return ""
+
+
 def _synthesize_research_digest(
     *,
     trace: list[dict],
     research_context: str,
     provider: str = "",
 ) -> str:
-    """Stage 1→2 handoff: model-synthesized digest instead of raw tool JSON, unless RESEARCH_DIGEST_MODE=raw (see config.py) or the research provider is deepseek — deepseek's context window is large enough to read the raw trace directly (owner call, 2026-08-06), so it always skips synthesis regardless of the config value; RESEARCH_DIGEST_MODE=raw remains a manual override for forcing raw mode on Mistral too. Deterministic asset-facts appendix is still added either way, since that's free regardless of mode."""
-    from app.core.config import RESEARCH_DIGEST_MODE
+    """Stage 1→2 handoff: model-synthesized digest instead of raw tool JSON, unless RESEARCH_DIGEST_MODE=raw (see config.py) or the research provider is deepseek — deepseek's context window is large enough to read the raw trace directly (owner call, 2026-08-06), so it always skips synthesis regardless of the config value; RESEARCH_DIGEST_MODE=raw remains a manual override for forcing raw mode on Mistral too. Deterministic asset-facts appendix is still added either way, since that's free regardless of mode. Raw mode also runs a cheap, separate gap-extraction call (see _extract_gaps_from_raw_trace) so _run_digest_gap_fill's safety net still has something to find -- a full raw trace has no '### Unresolved Gaps' section of its own."""
+    from app.core.config import DIGEST_GAP_FILL_ENABLED, RESEARCH_DIGEST_MODE
 
     asset_facts = _extract_asset_facts(trace)
     if RESEARCH_DIGEST_MODE == "raw" or provider == "deepseek":
         full_trace = _format_full_research_trace(trace)
         if not full_trace.strip():
             return ""
-        return f"{full_trace}\n\n{asset_facts}" if asset_facts else full_trace
+        digest = f"{full_trace}\n\n{asset_facts}" if asset_facts else full_trace
+        if DIGEST_GAP_FILL_ENABLED:
+            gaps_section = _extract_gaps_from_raw_trace(full_trace, research_context)
+            if gaps_section:
+                digest = f"{digest}\n\n{gaps_section}"
+        return digest
 
     raw_trace = _format_research_digest(trace)
     if not raw_trace.strip():
@@ -2770,10 +2830,14 @@ def _run_two_stage_compose(
     is_special_edition: bool = False,
 ) -> dict:
     """Two-stage compose: cold research (tools, low temp) on the Small research tier, a floor + gap-fill pass if it under-researched, a structured digest handoff, then a warm no-tools generation on the writer tier, and finally deterministic grade/revise."""
-    from app.core.config import LLM_TEMP_RESEARCH, LLM_TEMP_WRITE, MISTRAL_MODEL_RESEARCH
+    from app.core.config import LLM_TEMP_RESEARCH, LLM_TEMP_WRITE
 
     checkpoint("researching")
-    debug["research_model"] = MISTRAL_MODEL_RESEARCH
+    # The model actually serving this session's research calls -- not the
+    # Mistral-only config constant, which stays wrong the moment
+    # LLM_PROVIDER_RESEARCH (or a canary roll) routes this session to
+    # DeepSeek instead.
+    debug["research_model"] = research_llm.model
     # Stage 1 — cold research: tools available (minus review_draft, no
     # draft yet), low temp for deterministic tool selection. We keep the
     # trace; the model's prose here is discarded. Research rounds
@@ -3087,7 +3151,6 @@ def _compose_via_writer_tools_locked(
                 LLM_MAX_TOOL_ROUNDS,
                 LLM_TIMEOUT_SECONDS,
                 LLM_TIMEOUT_SPECIAL_EDITION_MULTIPLIER,
-                MISTRAL_MODEL_RESEARCH,
                 WRITER_TWO_STAGE,
             )
             from app.modules.ai.writer_tools import all_tools
@@ -3118,7 +3181,11 @@ def _compose_via_writer_tools_locked(
             tool_context = {
                 "service_id": source_url,
                 "source_url": source_url,
-                "model": MISTRAL_MODEL_RESEARCH,
+                # The model actually serving this session's research calls --
+                # not the Mistral-only config constant, which stays wrong the
+                # moment LLM_PROVIDER_RESEARCH (or a canary roll) routes this
+                # session to DeepSeek instead.
+                "model": research_llm.model,
                 "_playwright_session": playwright_session,
             }
             tool_schemas, tool_handlers = all_tools(context=tool_context)
@@ -3287,10 +3354,15 @@ def _compose_via_writer_tools_locked(
             with contextlib.suppress(Exception):
                 _checkpoint("error", detail=str(exc))
             raise
-        except Exception:
-            # Tool/parse failure (the API worked): fall back to single-shot. Mark
-            # the row 'fallback' so it leaves the non-terminal state instead of
-            # appearing stuck mid-compose.
+        except Exception as exc:
+            # Tool/parse failure (the API worked). Used to fall back to an
+            # ungrounded tool-less chat_json_object() single-shot here --
+            # removed 2026-08-28 (CLAUDE.md invariant #4 / owner decision
+            # 2026-07-14: no ungrounded fallback compose, ever -- a compose
+            # that fails must raise, never quietly return a worse, tool-less
+            # draft as if nothing happened). Re-raise so this failure is
+            # indistinguishable from any other failed compose to the caller:
+            # retried or surfaced, never silently downgraded.
             #
             # Root-caused 2026-07-16: this branch swallowed the exception with
             # ZERO logging, so a real crash (dork.fi: 16 real tool calls,
@@ -3299,9 +3371,10 @@ def _compose_via_writer_tools_locked(
             # by manually replaying compose_sessions.messages — the traceback
             # itself was gone forever. logger.exception here costs nothing and
             # makes every future one of these actually diagnosable.
-            logger.exception("compose fell back to ungrounded single-shot for %s", source_url)
+            logger.exception("compose tool loop failed for %s", source_url)
             with contextlib.suppress(Exception):
-                _checkpoint("fallback")
+                _checkpoint("error", detail=str(exc))
+            raise
         finally:
             _chart_trace_scope.close()
             if playwright_session is not None:

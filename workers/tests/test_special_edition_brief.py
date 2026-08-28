@@ -67,6 +67,7 @@ def test_two_stage_compose_forwards_max_rounds_to_stage1(monkeypatch: pytest.Mon
 
     class _FakeResearchClient:
         provider = "mistral"
+        model = "mistral-small-latest"
 
         def chat_with_tools(self, *_args: object, **kwargs: object) -> str:
             captured.update(kwargs)
@@ -122,6 +123,7 @@ def test_two_stage_compose_forwards_is_special_edition_to_review_and_revise(
 
     class _FakeResearchClient:
         provider = "mistral"
+        model = "mistral-small-latest"
 
         def chat_with_tools(self, *_args: object, **_kwargs: object) -> str:
             return ""
@@ -390,6 +392,7 @@ def test_two_stage_compose_runs_deepening_only_for_special_editions(
 
     class _FakeResearchClient:
         provider = "mistral"
+        model = "mistral-small-latest"
 
         def chat_with_tools(self, *_args: object, **_kwargs: object) -> str:
             return ""
@@ -441,6 +444,7 @@ def test_two_stage_compose_skips_deepening_for_standard_articles(
 
     class _FakeResearchClient:
         provider = "mistral"
+        model = "mistral-small-latest"
 
         def chat_with_tools(self, *_args: object, **_kwargs: object) -> str:
             return ""

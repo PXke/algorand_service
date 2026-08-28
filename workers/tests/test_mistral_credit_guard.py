@@ -8,7 +8,9 @@ from typing import Never
 import pytest
 
 from app.modules.ai.mistral_credit_guard import (
+    _DEEPSEEK_BREAKER_TTL_SECONDS,
     _seconds_until_next_month_utc,
+    _ttl_seconds,
     is_credit_exhausted,
     mark_credit_exhausted,
 )
@@ -81,3 +83,52 @@ def test_mark_does_not_raise_on_redis_error(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr("redis.from_url", _boom)
     mark_credit_exhausted()  # must not raise
+
+
+def test_ttl_seconds_deepseek_is_flat_one_hour() -> None:
+    """DeepSeek's breaker TTL is a flat hour, not Mistral's until-next-month-reset math -- DeepSeek is pay-as-you-go, so a same-day top-up shouldn't stay short-circuited for weeks."""
+    assert _ttl_seconds("deepseek") == _DEEPSEEK_BREAKER_TTL_SECONDS == 3600
+
+
+def test_ttl_seconds_mistral_unchanged() -> None:
+    """Mistral (and any other provider) keeps the original until-next-month-reset TTL, unchanged by the DeepSeek-specific carve-out."""
+    now = datetime(2026, 7, 24, 8, 0, 0, tzinfo=UTC)
+    assert _ttl_seconds("mistral", now) == _seconds_until_next_month_utc(now)
+
+
+def test_mark_deepseek_uses_one_hour_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real (402) DeepSeek exhaustion trips the breaker with the 1h TTL, not the Mistral monthly one."""
+    store: dict[str, str] = {}
+    monkeypatch.setattr("redis.from_url", lambda *_a, **_kw: _FakeRedis(store))
+
+    mark_credit_exhausted("deepseek", status_code=402)
+    assert is_credit_exhausted("deepseek") is True
+    assert store["deepseek:credit_exhausted:ex"] == _DEEPSEEK_BREAKER_TTL_SECONDS
+
+
+def test_mark_deepseek_401_does_not_trip_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A DeepSeek 401 (auth problem) is NOT treated as credit exhaustion and must not trip the breaker -- unlike Mistral, whose real credit exhaustion showed up as a 401 historically."""
+    store: dict[str, str] = {}
+    monkeypatch.setattr("redis.from_url", lambda *_a, **_kw: _FakeRedis(store))
+
+    mark_credit_exhausted("deepseek", status_code=401)
+    assert is_credit_exhausted("deepseek") is False
+    assert store == {}
+
+
+def test_mark_mistral_401_still_trips_breaker_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mistral keeps tripping on a 401 -- its own history is the opposite of DeepSeek's (real credit exhaustion showed up AS a 401), so the new status_code carve-out must not touch Mistral's behavior."""
+    store: dict[str, str] = {}
+    monkeypatch.setattr("redis.from_url", lambda *_a, **_kw: _FakeRedis(store))
+
+    mark_credit_exhausted("mistral", status_code=401)
+    assert is_credit_exhausted("mistral") is True
+
+
+def test_mark_no_status_code_still_trips_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Existing call sites that don't pass status_code (the default) keep tripping the breaker exactly as before the DeepSeek carve-out was added."""
+    store: dict[str, str] = {}
+    monkeypatch.setattr("redis.from_url", lambda *_a, **_kw: _FakeRedis(store))
+
+    mark_credit_exhausted("deepseek")
+    assert is_credit_exhausted("deepseek") is True

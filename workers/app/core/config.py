@@ -467,21 +467,24 @@ ANTHROPIC_MODEL_RUBRIC = env_str("ANTHROPIC_MODEL_RUBRIC", "claude-sonnet-5")
 # but so is any compression scheme; this isn't assumed better, just testable.
 RESEARCH_DIGEST_MODE = env_str("RESEARCH_DIGEST_MODE", "synthesize").strip().lower()
 
-# Per-purpose provider routing: "mistral" (default, unchanged behavior) or
-# "deepseek". CANARY_PCT (0-100) sends that percentage of calls to the OTHER
-# provider instead of the configured default, so a purpose can stay put while
-# sampling the alternative for comparison — compose_sessions.model records
-# whichever model actually ran, so a canary is visible after the fact with no
-# extra plumbing. A canary or explicit override that resolves to "deepseek"
-# silently falls back to Mistral if DEEPSEEK_API_KEY is unset (see
-# llm_purpose_router._select_provider).
-LLM_PROVIDER_WRITER = env_str("LLM_PROVIDER_WRITER", "mistral").strip().lower()
+# Per-purpose provider routing: "deepseek" (default -- DeepSeek is the live
+# provider, Mistral is retired, see CLAUDE.md) or "mistral". CANARY_PCT
+# (0-100) sends that percentage of calls to the OTHER provider instead of
+# the configured default, so a purpose can stay put while sampling the
+# alternative for comparison — compose_sessions.model records whichever
+# model actually ran, so a canary is visible after the fact with no extra
+# plumbing. A canary or explicit override that resolves to "deepseek" now
+# RAISES if DEEPSEEK_API_KEY is unset instead of silently falling back to
+# Mistral (see llm_purpose_router._select_provider) -- a silent fallback to
+# a retired provider masked a missing/rotated key as "it composed fine,
+# just on the wrong model."
+LLM_PROVIDER_WRITER = env_str("LLM_PROVIDER_WRITER", "deepseek").strip().lower()
 LLM_PROVIDER_WRITER_CANARY_PCT = env_int("LLM_PROVIDER_WRITER_CANARY_PCT", 0)
-LLM_PROVIDER_RESEARCH = env_str("LLM_PROVIDER_RESEARCH", "mistral").strip().lower()
+LLM_PROVIDER_RESEARCH = env_str("LLM_PROVIDER_RESEARCH", "deepseek").strip().lower()
 LLM_PROVIDER_RESEARCH_CANARY_PCT = env_int("LLM_PROVIDER_RESEARCH_CANARY_PCT", 0)
-LLM_PROVIDER_DIGEST = env_str("LLM_PROVIDER_DIGEST", "mistral").strip().lower()
+LLM_PROVIDER_DIGEST = env_str("LLM_PROVIDER_DIGEST", "deepseek").strip().lower()
 LLM_PROVIDER_DIGEST_CANARY_PCT = env_int("LLM_PROVIDER_DIGEST_CANARY_PCT", 0)
-LLM_PROVIDER_TRANSLATE = env_str("LLM_PROVIDER_TRANSLATE", "mistral").strip().lower()
+LLM_PROVIDER_TRANSLATE = env_str("LLM_PROVIDER_TRANSLATE", "deepseek").strip().lower()
 LLM_PROVIDER_TRANSLATE_CANARY_PCT = env_int("LLM_PROVIDER_TRANSLATE_CANARY_PCT", 0)
 LLM_PROVIDER_RUBRIC = env_str("LLM_PROVIDER_RUBRIC", "deepseek").strip().lower()
 LLM_PROVIDER_RUBRIC_CANARY_PCT = env_int("LLM_PROVIDER_RUBRIC_CANARY_PCT", 0)
