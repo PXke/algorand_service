@@ -650,7 +650,7 @@ WRITER_QUALITY_LLM_MIN_SCORE = env_int("WRITER_QUALITY_LLM_MIN_SCORE", 4)
 # length is not a graded dimension and not a target. Research DEPTH drives the
 # grade instead, so the model fetches context rather than padding to a word count.
 LENGTH_OK_MIN_WORDS = env_int("LENGTH_OK_MIN_WORDS", 250)
-LENGTH_OK_MAX_WORDS = env_int("LENGTH_OK_MAX_WORDS", 3000)
+LENGTH_OK_MAX_WORDS = env_int("LENGTH_OK_MAX_WORDS", 6000)
 # Stage-1 research FLOOR: after the research pass, if the writer touched fewer
 # than this many distinct SOURCES (domains fetched, or a stable per-tool identity
 # for calls with no URL — see _distinct_research_calls; EXCLUDING review_draft
