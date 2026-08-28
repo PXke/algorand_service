@@ -44,6 +44,49 @@ def test_match_covers_the_actual_prod_suggestions() -> None:
     assert match("algo_account_lookup", _KNOWN) == "lookup_account"
 
 
+_NFT_KNOWN = _KNOWN | {
+    "nft_asset_listing_status",
+    "nft_collection_market_stats",
+    "nft_collection_distribution_timeline",
+}
+
+
+def test_marketplace_health_ask_does_not_false_match_a_single_item_or_stats_tool() -> None:
+    """2026-08-28 rejected-article audit: a suggestion asking whether a whole
+    marketplace is up/operational must NOT fuzzy-match nft_asset_listing_status
+    (a single asset ID's listing state) or nft_collection_market_stats (a
+    collection's price/volume stats) on the shared-but-domain-generic "nft"
+    token alone -- both are a different question than marketplace liveness."""
+    match = wt._match_existing_tool
+    assert match("algorand_nft_marketplace_health_aggregator", _NFT_KNOWN) is None
+
+
+def test_nft_alone_is_too_generic_to_match_across_unrelated_nft_tools() -> None:
+    """Sharing only "nft" -- a token every registered NFT tool's name contains --
+    with an otherwise unrelated capability ask must never be treated as a match,
+    the same way a shared "google" or "api" token isn't."""
+    match = wt._match_existing_tool
+    assert match("nft_royalty_enforcement_checker", _NFT_KNOWN) is None
+    assert match("nft_mint_event_stream", _NFT_KNOWN) is None
+
+
+def test_close_nft_rewording_still_matches_on_multiple_shared_tokens() -> None:
+    """A genuinely close rewording (multiple shared significant tokens, not just
+    the generic "nft") still redirects to the existing tool -- the fix must not
+    make every NFT-domain suggestion an unconditional miss."""
+    match = wt._match_existing_tool
+    assert match("nft_asset_listing_lookup", _NFT_KNOWN) == "nft_asset_listing_status"
+    assert match("nft_collection_market_data", _NFT_KNOWN) == "nft_collection_market_stats"
+
+
+def test_single_generic_token_overlap_never_matches() -> None:
+    """A capability sharing only a clearly-generic token (already excluded from
+    "significant") with an otherwise unrelated tool never matches -- generic
+    tokens carry zero signal regardless of overlap ratio."""
+    match = wt._match_existing_tool
+    assert match("widget_report_api", _KNOWN | {"gizmo_export_api"}) is None
+
+
 def test_twitter_x_alias_targets_search_x_not_bluesky() -> None:
     """The twitter/x alias points at search_x (added 2026-08-21), not search_bluesky -- misdirecting a genuine X-only need to the wrong platform's search tool was worse than reporting a real gap."""
     match = wt._match_existing_tool
