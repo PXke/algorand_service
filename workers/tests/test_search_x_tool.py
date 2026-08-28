@@ -97,6 +97,9 @@ def test_happy_path_full_text_untruncated(
     assert result["daily_call_cap"] == 20
     # max_results is fixed, never model-controlled -- cost predictability depends on this.
     assert seen_params[0]["max_results"] == 10
+    # 2026-08-28: ranked by relevancy, matching search_bluesky's sort="top",
+    # not X's recency default.
+    assert seen_params[0]["sort_order"] == "relevancy"
     # Real engagement present -- no need to warn the writer off overstating it.
     assert "engagement_note" not in result
 

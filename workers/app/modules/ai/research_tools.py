@@ -230,6 +230,12 @@ def _x_search_live(query: str) -> dict[str, Any]:
                 "query": q,
                 "max_results": _X_SEARCH_MAX_RESULTS,
                 "tweet.fields": "author_id,created_at,public_metrics",
+                # X defaults to "recency" (newest first) when this is
+                # omitted; "relevancy" instead ranks by X's own engagement/
+                # relevance signal -- matches search_bluesky's sort="top"
+                # so the two social-search tools behave consistently
+                # (2026-08-28 owner request).
+                "sort_order": "relevancy",
             },
             headers={"Authorization": f"Bearer {X_BEARER_TOKEN}"},
             timeout=12.0,
@@ -353,9 +359,10 @@ _X_SEARCH_SCHEMA = {
             "composed today, so use it only when the story's value genuinely "
             "depends on an X-only signal (an announcement, a stated reason, "
             "community reaction) that search_bluesky and search_web could not "
-            "surface. Always returns exactly 10 most-recent matching posts, each "
-            "with likes/reposts/replies -- cite a specific post only when it is "
-            "genuinely useful to the article, and check its engagement before "
+            "surface. Always returns up to 10 posts ranked by X's own relevancy "
+            "(not strictly newest-first), each with likes/reposts/replies -- cite "
+            "a specific post only when it is genuinely useful to the article, and "
+            "check its engagement before "
             "framing it as a reaction: a single reply with 0 likes/0 reposts is "
             "one account's opinion, not 'the community' or 'users'. Treat results "
             "as social opinion/announcement, never cited as established fact on "
