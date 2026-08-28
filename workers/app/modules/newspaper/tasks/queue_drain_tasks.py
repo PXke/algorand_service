@@ -40,6 +40,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 
 from app.celery_app import celery_app
 from app.core import config
+from app.core.redis_lock import single_flight
 from app.modules.ai.mistral_credit_guard import is_credit_exhausted
 from app.modules.newspaper.publish_policy import (
     PublishKind,
@@ -331,9 +332,20 @@ def _publish_standard_row(
     row: QueuedPublishRow,
     published: int,
     *,
+    backlog_full: bool,
     resolve: Callable[[QueuedPublishRow, dict], str],
 ) -> tuple[dict | None, int, dict | None]:
-    """Evaluate policy and compose+publish one non-review standard row. Returns (results_entry, published_delta, early_stop_result). See `_process_review_row` for what ``resolve`` is."""
+    """Evaluate policy and compose+publish one non-review standard row. Returns (results_entry, published_delta, early_stop_result). See `_process_review_row` for what ``resolve`` is.
+
+    ``backlog_full`` mirrors `_process_review_row`'s own check: a full day of
+    paced backlog releases already queued means composing a fresh standard
+    row now is pure cost (it would only join the same backlog, further
+    behind). The review branch already gets this right -- this was the one
+    remaining path that didn't, so a standard-tier slot behind an already-
+    full backlog composed anyway while the review branch waited.
+    """
+    if backlog_full:
+        return None, 0, None
     kind = PublishKind(row.publish_kind)
     diff = row.payload.get("diff")
     decision = evaluate_standard_publish(
@@ -407,14 +419,34 @@ def _resolve_artifact(artifact_id: str, outcome: dict) -> str:
     - anything else (rate_limited, mistral_failed, already_running,
       review_queue_full, ...) is transient -- the artifact is left SELECTED
       so a later drain_to_compose run retries it.
+
+    ``outcome`` here always reflects a compose that already ran (paid for),
+    so the marking write below must itself land -- retried once if
+    ``SoftTimeLimitExceeded`` fires mid-write (the Cassandra call), then
+    re-raised. Without the retry, an artifact whose compose already
+    succeeded (published/held for review) could get its bookkeeping write
+    cut off by the same soft-limit interrupt that also killed the drain
+    run, leaving it stuck SELECTED and re-composed by a later run even
+    though its work already landed.
     """
     status = str(outcome.get("status", ""))
     queue_status = str(outcome.get("queue_status", ""))
 
-    if is_terminal_outcome(outcome):
-        mark_artifact_status(artifact_id, COMPOSED)
-    elif queue_status:
-        mark_artifact_status(artifact_id, DISCARDED)
+    def _mark() -> None:
+        if is_terminal_outcome(outcome):
+            mark_artifact_status(artifact_id, COMPOSED)
+        elif queue_status:
+            mark_artifact_status(artifact_id, DISCARDED)
+
+    try:
+        _mark()
+    except SoftTimeLimitExceeded:
+        logger.warning(
+            "artifact %s bookkeeping write interrupted by soft time limit — retrying once",
+            artifact_id,
+        )
+        _mark()
+        raise
 
     return status
 
@@ -518,7 +550,7 @@ def _drain_one_to_compose_slot(
         # standard drain's own `if published >= 1: break`.
         return None, True
     entry, published_delta, early_stop = _publish_standard_row(
-        row, state.published, resolve=resolve_this
+        row, state.published, backlog_full=state.backlog_full, resolve=resolve_this
     )
     if early_stop is not None:
         return early_stop, False
@@ -613,8 +645,18 @@ def discard_dead_pending_sources_task() -> dict[str, object]:
     soft_time_limit=config.COMPOSE_TASK_SOFT_TIME_LIMIT,
     time_limit=config.COMPOSE_TASK_TIME_LIMIT,
 )
+@single_flight(lambda: "drain:to_compose", ttl=config.COMPOSE_TASK_TIME_LIMIT)
 def drain_to_compose() -> dict[str, object]:
     """Compose today's already-selected `to_compose` slate -- the live successor to drain_standard_publish_queue (see this module's docstring for what changed and why).
+
+    single_flight-locked on a single fixed key (no per-row/per-day
+    parameterization -- this task itself takes no arguments) with a TTL
+    pinned to COMPOSE_TASK_TIME_LIMIT (the HARD kill bound, not just the
+    soft one) so the lock always outlives the run it guards even if the
+    soft limit's interrupt doesn't land in time and celery has to hard-kill
+    the worker -- an overlapping second run would double-process the same
+    to_compose slate (concurrent compose of the same slot, or two runs
+    racing the same one-fresh-compose-per-run budget).
 
     Cadence: `select_to_compose_for_today_task` picks the day's fixed slate
     ONCE (a dedicated daily beat, self-healed here too via
@@ -771,7 +813,7 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
     from datetime import UTC, datetime
 
     from algorand_shared.article_statements import ArticlesStmts
-    from algorand_shared.article_transitions import list_backlog_articles
+    from algorand_shared.article_transitions import list_backlog_articles, transition_article_status
 
     from app.core.cassandra import get_cassandra_session
 
@@ -790,12 +832,21 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
         art = session.execute(ArticlesStmts.GET_FULL_BY_ID, (r.article_id,)).one()
         if art is None:
             # A permanently missing article would otherwise jam this
-            # one-row-per-run backlog forever if it were never skipped, but
-            # that silently discards whatever compose spend produced it —
-            # log it so the loss is at least visible.
+            # one-row-per-run backlog forever: list_backlog_articles keeps
+            # returning the SAME top-priority row every run (rows =
+            # backlog[:1]) since nothing about it ever changes, so the
+            # drain would retry -- and log -- the identical dead row
+            # indefinitely instead of ever reaching the next-best backlog
+            # candidate. Move it to a terminal status via the shared
+            # transition helper so it drops out of list_backlog_articles's
+            # status='backlog' scan and the next run advances.
+            transitioned = transition_article_status(r.article_id, new_status="discarded_missing")
             logger.warning(
-                "backlog row %s has no matching article — dropping without release",
+                "backlog row %s has no matching article — %s",
                 r.article_id,
+                "marked discarded_missing"
+                if transitioned
+                else "transition_article_status ALSO found no row; still stuck",
             )
         if art is not None:
             # Time-capsule fix (2026-07-18): the article was composed days
@@ -877,7 +928,9 @@ def _release_pending_feed_backlog(*, slots: int) -> dict[str, object]:
                     slug=ensure_article_slug(art.article_id, art.title),
                 )
             except Exception:
-                pass
+                logger.warning(
+                    "IndexNow ping failed for backlog release %s", art.article_id, exc_info=True
+                )
             try:
                 from app.modules.newspaper.tasks.distribution_tasks import distribute_article
 
