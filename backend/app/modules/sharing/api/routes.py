@@ -8,7 +8,6 @@ param through sharing.store.resolve_active_link before doing anything else.
 from __future__ import annotations
 
 import logging
-from contextlib import suppress
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -18,6 +17,7 @@ if TYPE_CHECKING:
 from app.core import serialization
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_response
+from app.modules.contact.api.routes import _client_ip
 from app.modules.sharing.store import ShareLinkItem
 from app.schemas import CreateCommentRequest, SharedArticleResponse
 
@@ -45,23 +45,29 @@ def _redis() -> redis.Redis:
     return redis.from_url(settings.redis_url, decode_responses=True, socket_connect_timeout=2)
 
 
-def _rate_limited(token: str) -> bool:
-    """Fail OPEN: a Redis hiccup must never block a legitimate reviewer's comment.
+def _rate_limited(token: str, client_ip: str) -> bool:
+    """Fail CLOSED, unlike the reviewer-facing rate limits elsewhere in this codebase.
 
-    Keyed by TOKEN, not IP -- a reviewer's office IP may be shared with
-    others, and IP-keying would cross-contaminate unrelated share links
-    behind the same NAT.
+    A leaked/guessed share token has no wallet or session behind it at all --
+    if Redis is down we can't tell a burst apart from abuse, so treat that
+    as rate-limited rather than opening the gate wide.
+
+    Keyed by TOKEN *and* IP together, not either alone: token-only lets one
+    leaked token be hammered from anywhere; IP-only would cross-contaminate
+    unrelated share links reviewed from the same office NAT.
     """
     if not token:
-        return False
-    with suppress(Exception):
-        key = f"algorand:sharing:comment_rl:{token}"
+        return True
+    try:
+        key = f"algorand:sharing:comment_rl:{token}:{client_ip}"
         client = _redis()
         count = client.incr(key)
         if count == 1:
             client.expire(key, 3600)
         return int(count) > _COMMENT_RATE_LIMIT_PER_HOUR
-    return False
+    except Exception:
+        logger.warning("sharing comment rate-limit check failed; failing closed", exc_info=True)
+        return True
 
 
 def _require_link(request: Request) -> tuple[ShareLinkItem | None, Response | None]:
@@ -109,7 +115,7 @@ def shared_comments_create(request: Request) -> Response | dict:
     if err is not None or link is None:
         return err  # type: ignore[return-value]
 
-    if _rate_limited(link.token):
+    if _rate_limited(link.token, _client_ip(request)):
         return json_error_response(
             429, "rate_limited", "Too many comments — please slow down"
         )

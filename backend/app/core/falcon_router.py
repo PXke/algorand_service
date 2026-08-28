@@ -16,6 +16,14 @@ from app.core.http import QueryParams, Request
 Handler = Callable[[Request], Any]
 _PARAM_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 
+# Request body cap, enforced from Content-Length before the stream is ever
+# read. PATCH is exclusively the admin article-edit endpoint (the only PATCH
+# route registered anywhere in the backend), which carries full article
+# title/summary/body content and legitimately needs more headroom than the
+# rest of the API's small JSON payloads.
+_MAX_BODY_BYTES = 256 * 1024
+_MAX_ADMIN_PATCH_BODY_BYTES = 2 * 1024 * 1024
+
 
 def _to_falcon_path(path: str) -> str:
     return _PARAM_RE.sub(r"{\1}", path)
@@ -61,6 +69,16 @@ class _FalconResource:
         handler = self._methods.get(req.method.upper())
         if handler is None:
             raise falcon.HTTPMethodNotAllowed(list(self._methods.keys()))
+        max_bytes = (
+            _MAX_ADMIN_PATCH_BODY_BYTES if req.method.upper() == "PATCH" else _MAX_BODY_BYTES
+        )
+        # Reject an oversized body off the Content-Length header alone, before
+        # `bounded_stream.read()` below pulls any of it into memory.
+        if req.content_length is not None and req.content_length > max_bytes:
+            raise falcon.HTTPContentTooLarge(
+                title="payload_too_large",
+                description=f"request body exceeds {max_bytes} bytes",
+            )
         # Falcon exposes headers as uppercase (e.g. X-SESSION-TOKEN). Route
         # handlers expect lowercase / mixed-case keys from the old stack.
         headers = {str(k).lower(): str(v) for k, v in req.headers.items()}

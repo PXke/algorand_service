@@ -44,6 +44,42 @@ def _invalidate_domains_cache() -> None:
     invalidate(*_DOMAIN_CACHE_KEYS)
 
 
+def _truncate_confirmation_hash(tables: tuple[str, ...]) -> str:
+    """Deterministic fingerprint of the table set a destructive TRUNCATE-all endpoint wipes."""
+    import hashlib
+
+    return hashlib.sha256("|".join(tables).encode()).hexdigest()
+
+
+def _require_truncate_confirmation(request: Request, tables: tuple[str, ...]) -> Response | None:
+    """Guard shared by the admin TRUNCATE-all endpoints (reset-articles, clear-domains).
+
+    Allowed unconditionally outside prod, but in prod only when the request
+    body carries `{"confirm": "<sha256 of the exact table set>"}`.
+    `require_admin_wallet` already authenticates the caller; this is a
+    second, deliberate-intent check so a stray/blind POST with an empty body
+    can't wipe production data by accident. Returns an error Response to
+    hand back as-is, or None when the caller may proceed.
+    """
+    from app.core.config import settings
+
+    if settings.app_env != "prod":
+        return None
+    expected = _truncate_confirmation_hash(tables)
+    try:
+        body = serialization.loads(request.body or "{}")
+    except Exception:
+        body = {}
+    confirm = body.get("confirm", "") if isinstance(body, dict) else ""
+    if isinstance(confirm, str) and confirm == expected:
+        return None
+    return json_error_response(
+        403,
+        "confirmation_required",
+        f'This truncates production data. Retry with {{"confirm": "{expected}"}} to proceed.',
+    )
+
+
 def admin_analytics(request: Request) -> Response | dict:
     """Site-wide pageview/referrer analytics for the given day window, cached briefly."""
     denied = require_admin_wallet(request)
@@ -244,8 +280,9 @@ def admin_assign_brief_now(request: Request) -> Response:
             task_name, kwargs={"brief_id": brief_id}, queue="pipeline"
         )
         return {"status": "queued", "brief_id": brief_id}
-    except Exception as exc:
-        return json_error_response(500, "assign_failed", str(exc))
+    except Exception:
+        logger.exception("failed to queue brief assignment for %s", brief_id)
+        return json_error_response(500, "assign_failed", "Failed to queue brief assignment")
 
 
 def admin_list_classifier_reviews(request: Request) -> Response:
@@ -294,8 +331,9 @@ def admin_retrain(request: Request) -> Response:
         client = Celery(broker=settings.celery_broker_url)
         client.send_task("app.tasks.crawler.retrain_publish_classifier", queue="scrape")
         return {"status": "queued"}
-    except Exception as exc:
-        return json_error_response(500, "retrain_failed", str(exc))
+    except Exception:
+        logger.exception("failed to queue publish-classifier retrain")
+        return json_error_response(500, "retrain_failed", "Failed to queue retrain")
 
 
 def admin_classifier_feedback(request: Request) -> Response:
@@ -606,33 +644,39 @@ def admin_health_check(request: Request) -> Response:
     return cached_json(f"admin:health-check:{name}", 5, lambda: asdict(check()))
 
 
+_RESET_ARTICLES_TABLES = (
+    "articles",
+    "articles_by_tag",
+    "article_versions",
+    "artifacts",
+    "artifacts_pending",
+    "artifact_content",
+    "to_compose",
+    "page_snapshots",
+    "url_queue",
+    "url_queue_by_url",
+    "url_queue_pending",
+    "service_events",
+    # Writer introspection — orphaned once articles are wiped, so reset too.
+    "tool_suggestions",
+    "compose_feedback",
+    "investigation_findings",
+    "compose_sessions",
+)
+
+
 def admin_reset_articles(request: Request) -> Response:
     """Beta convenience: wipe all article/publish state so the pipeline starts fresh. Keeps sources, classifier feedback and pending reviews."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
+    tables = _RESET_ARTICLES_TABLES
+    guard = _require_truncate_confirmation(request, tables)
+    if guard is not None:
+        return guard
+
     from app.core.cassandra import get_cassandra_session
     from app.core.typesense_client import clear_search_index
-
-    tables = (
-        "articles",
-        "articles_by_tag",
-        "article_versions",
-        "artifacts",
-        "artifacts_pending",
-        "artifact_content",
-        "to_compose",
-        "page_snapshots",
-        "url_queue",
-        "url_queue_by_url",
-        "url_queue_pending",
-        "service_events",
-        # Writer introspection — orphaned once articles are wiped, so reset too.
-        "tool_suggestions",
-        "compose_feedback",
-        "investigation_findings",
-        "compose_sessions",
-    )
 
     def _truncate_all() -> None:
         session = get_cassandra_session()
@@ -642,8 +686,9 @@ def admin_reset_articles(request: Request) -> Response:
 
     try:
         _truncate_all()
-    except Exception as exc:
-        return json_error_response(500, "reset_failed", str(exc))
+    except Exception:
+        logger.exception("failed to truncate article/publish tables during admin reset")
+        return json_error_response(500, "reset_failed", "Failed to reset article state")
     typesense = clear_search_index()
     return {"reset": True, "tables": list(tables), "typesense": typesense}
 
@@ -1456,11 +1501,17 @@ def admin_set_domain(request: Request) -> Response:
     return result
 
 
+_CLEAR_DOMAINS_TABLES = ("domain_tracking",)
+
+
 def admin_clear_domains(request: Request) -> Response:
     """Forget the whole crawl frontier: every explored/pending/dead-end domain record. The blocklist (config) is unaffected."""
     denied = require_admin_wallet(request)
     if denied is not None:
         return denied
+    guard = _require_truncate_confirmation(request, _CLEAR_DOMAINS_TABLES)
+    if guard is not None:
+        return guard
 
     from app.core.cassandra import get_cassandra_session
 
