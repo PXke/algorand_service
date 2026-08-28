@@ -13,8 +13,8 @@ export function createAdminApi(wallet: string, token: string | null) {
   const h = () => adminHeaders(wallet, token)
   return {
     listContactMessages: () => api.getJson('/api/v1/admin/contact-messages', h()),
-    fetchAnalytics: (days = 14) =>
-      api.getJson(`/api/v1/admin/analytics?days=${days}`, h()),
+    fetchAnalytics: (days = 14, signal?: AbortSignal) =>
+      api.getJson(`/api/v1/admin/analytics?days=${days}`, { headers: h(), signal }),
     listBriefs: () => api.getJson('/api/v1/admin/briefs', h()),
     createBrief: (body: Record<string, unknown>) =>
       api.postJson('/api/v1/admin/briefs', body, h()),
@@ -24,10 +24,10 @@ export function createAdminApi(wallet: string, token: string | null) {
       api.getJson('/api/v1/admin/pending-feed-backlog', h()),
     getTrainingStats: () => api.getJson('/api/v1/admin/training-stats', h()),
     triggerRetrain: () => api.postJson('/api/v1/admin/retrain', {}, h()),
-    listDomains: (status = 'all', page = 1, pageSize = 25) =>
+    listDomains: (status = 'all', page = 1, pageSize = 25, signal?: AbortSignal) =>
       api.getJson(
         `/api/v1/admin/domains?status=${encodeURIComponent(status)}&page=${page}&page_size=${pageSize}`,
-        h(),
+        { headers: h(), signal },
       ),
     setDomainRelevant: (body: Record<string, unknown>) =>
       api.postJson('/api/v1/admin/domains/set', body, h()),

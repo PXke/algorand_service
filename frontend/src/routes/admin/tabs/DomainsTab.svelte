@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { AdminApi } from '../../../lib/api/admin'
+  import { LatestOnly } from '../../../lib/asyncGuard'
 
   let {
     admin,
@@ -138,18 +139,27 @@
     return labels[f]
   }
 
+  // Switching the status filter or paging while a request is still in
+  // flight fires another one; without this, a stale filter/page's response
+  // resolving after the newer one would clobber the list the admin is
+  // currently looking at.
+  const inflight = new LatestOnly()
+
   async function load() {
+    const { signal, stale } = inflight.next()
     loading = true
     error = null
     try {
-      const res = await admin.listDomains(filter, page, PAGE_SIZE)
+      const res = await admin.listDomains(filter, page, PAGE_SIZE, signal)
+      if (stale()) return
       items = Array.isArray(res.items) ? (res.items as Array<Record<string, unknown>>) : []
       total = Number(res.total ?? items.length)
       autoApprovedToday = Number(res.auto_approved_today ?? 0)
     } catch (e) {
+      if (stale() || (e instanceof DOMException && e.name === 'AbortError')) return
       error = e instanceof Error ? e.message : String(e)
     } finally {
-      loading = false
+      if (!stale()) loading = false
     }
   }
 

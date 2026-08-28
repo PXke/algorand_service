@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { AdminApi } from '../../../lib/api/admin'
+  import { LatestOnly } from '../../../lib/asyncGuard'
   import {
     asMap,
     asRows,
@@ -27,16 +28,24 @@
   let data = $state<Record<string, unknown> | null>(null)
   let loading = $state(true)
   let error = $state<string | null>(null)
+  // Switching the day-range select (or hitting Refresh again before the
+  // first fetch lands) fires a second request; without this, whichever
+  // response resolves last wins even if it's the stale one.
+  const inflight = new LatestOnly()
 
   async function load() {
+    const { signal, stale } = inflight.next()
     loading = true
     error = null
     try {
-      data = await admin.fetchAnalytics(Number(days))
+      const res = await admin.fetchAnalytics(Number(days), signal)
+      if (stale()) return
+      data = res
     } catch (e) {
+      if (stale() || (e instanceof DOMException && e.name === 'AbortError')) return
       error = e instanceof Error ? e.message : String(e)
     } finally {
-      loading = false
+      if (!stale()) loading = false
     }
   }
 

@@ -1,11 +1,11 @@
 import { api } from './client'
 
 export const searchApi = {
-  async search(q: string, limit = 20, serviceId?: string, lang?: string) {
+  async search(q: string, limit = 20, serviceId?: string, lang?: string, signal?: AbortSignal) {
     const params = new URLSearchParams({ q, limit: String(limit) })
     if (serviceId) params.set('service_id', serviceId)
     if (lang) params.set('lang', lang)
-    const body = await api.getJson(`/api/v1/search?${params}`)
+    const body = await api.getJson(`/api/v1/search?${params}`, signal ? { signal } : undefined)
     const items = Array.isArray(body.items) ? body.items : []
     return {
       engine: String(body.engine ?? ''),

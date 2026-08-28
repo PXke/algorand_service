@@ -6,6 +6,7 @@
   import { articleHref } from '../lib/paths'
   import { route, navigate } from '../lib/router'
   import { ApiException } from '../lib/api/client'
+  import { LatestOnly } from '../lib/asyncGuard'
   import Icon from '../components/Icon.svelte'
   import PageMeta from '../components/PageMeta.svelte'
   import { SITE_TAGLINE } from '../lib/seo'
@@ -19,6 +20,10 @@
   let error = $state<string | null>(null)
   let timer: ReturnType<typeof setTimeout> | undefined
   let inputEl: HTMLInputElement | undefined = $state()
+  // Search-as-you-type fires one request per debounced keystroke; the
+  // network can resolve them out of order, so a stale response for an
+  // earlier (shorter) query must not clobber a newer one's results.
+  const inflight = new LatestOnly()
 
   /** Typesense wraps matches in `<mark>`; keep only that markup. */
   function highlightHtml(raw: string): string {
@@ -47,18 +52,21 @@
   async function run(query = q) {
     const trimmed = query.trim()
     if (!trimmed) return
+    const { signal, stale } = inflight.next()
     loading = true
     error = null
     searched = true
     try {
-      const res = await searchApi.search(trimmed, 20, undefined, get(activeLocale))
+      const res = await searchApi.search(trimmed, 20, undefined, get(activeLocale), signal)
+      if (stale()) return
       items = res.items
       engine = res.engine
     } catch (e) {
+      if (stale() || (e instanceof DOMException && e.name === 'AbortError')) return
       error = e instanceof ApiException ? e.userMessage : t($messages, 'errorGeneric')
       items = []
     } finally {
-      loading = false
+      if (!stale()) loading = false
     }
   }
 
@@ -71,6 +79,7 @@
   function onInput() {
     clearTimeout(timer)
     if (!q.trim()) {
+      inflight.cancel()
       items = []
       engine = ''
       error = null
@@ -93,6 +102,7 @@
 
   function clearQuery() {
     clearTimeout(timer)
+    inflight.cancel()
     q = ''
     items = []
     engine = ''

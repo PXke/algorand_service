@@ -130,16 +130,24 @@
       // The admin-authenticated read, not newsApi.fetchArticle: that one is
       // the public endpoint, which 404s a drafted article by design.
       const a = (await admin.getArticle(id)) as Record<string, unknown>
+      // Clicking a different list row while this fetch is in flight moves
+      // `selectedId` on before this one resolves. Without this check, an
+      // older row's response landing after a newer click overwrote the
+      // editor with the wrong article's title/summary/body/draft flag —
+      // same "selectedId !== id" guard loadCommentsAndShareLinks already
+      // used below, just missing here.
+      if (selectedId !== id) return
       title = String(a.title ?? '')
       summary = String(a.summary ?? '')
       body = String(a.body ?? '')
       isDraft = Boolean(a.draft)
     } catch (e) {
+      if (selectedId !== id) return
       error = e instanceof Error ? e.message : String(e)
     } finally {
-      loadingArticle = false
+      if (selectedId === id) loadingArticle = false
     }
-    void loadCommentsAndShareLinks(id)
+    if (selectedId === id) void loadCommentsAndShareLinks(id)
   }
 
   async function loadCommentsAndShareLinks(id: string) {
