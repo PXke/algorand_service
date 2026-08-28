@@ -211,6 +211,23 @@ SCREENSHOT_PUBLIC_BASE_URL = env_str(
 # and meaningfully play the actual game.
 PLAY_INTERACTIVE_MAX_STEPS = env_int("PLAY_INTERACTIVE_MAX_STEPS", 32)
 
+# Interactive crawl mode (2026-08-28, owner request, Lumi Rogue): for a
+# domain whose href-based crawling keeps landing on the same content
+# (see crawled_page_store.needs_interactive_crawl) -- a client-routed SPA
+# where real content sits behind clicks, not navigable URLs -- the crawler
+# opens the entry page and clicks through its visible UI instead, the same
+# click_and_read mechanism play_interactive already gives the writer, just
+# run unattended by the crawl pipeline rather than by an LLM mid-compose.
+# Kept deliberately smaller than PLAY_INTERACTIVE_MAX_STEPS: this can run
+# per-domain on a schedule across many flagged domains, not once per
+# article, so the per-domain cost multiplies differently.
+INTERACTIVE_CRAWL_ENABLED = env_bool("INTERACTIVE_CRAWL_ENABLED", True)
+INTERACTIVE_CRAWL_MAX_STEPS = env_int("INTERACTIVE_CRAWL_MAX_STEPS", 15)
+# Don't re-run the (expensive: launches a real browser, N clicks) interactive
+# crawl for a domain that already got one recently -- same cooldown shape as
+# SERVICE_CONTEXT_MAX_AGE_DAYS.
+INTERACTIVE_CRAWL_COOLDOWN_DAYS = env_int("INTERACTIVE_CRAWL_COOLDOWN_DAYS", 7)
+
 # connect_wallet tool (2026-08-11, agent-wallet Phase 1: WalletConnect LOGIN
 # only, see workers/app/modules/wallet/signer.py's docstring for the actual
 # security boundary). Off by default -- a dedicated MainNet keypair (holds

@@ -77,6 +77,79 @@ def domain_has_similar_content(domain: str, body: str, *, sample_limit: int = 20
         return False
 
 
+@dataclass(frozen=True)
+class ContentDiversity:
+    """How much of a domain's recently-crawled corpus is actually distinct content."""
+
+    distinct_count: int
+    total_count: int
+
+    @property
+    def ratio(self) -> float:
+        """Fraction of sampled pages that are content-distinct from each other. 1.0 = every page different; near 0 = href-based crawling keeps landing on the same content (a client-routed SPA, most likely)."""
+        return (self.distinct_count / self.total_count) if self.total_count else 1.0
+
+
+def domain_content_diversity(domain: str, *, sample_limit: int = 20) -> ContentDiversity:
+    """How many of `domain`'s `sample_limit` most-recently-crawled pages are content-distinct from each other.
+
+    Root-caused 2026-08-28 (Lumi Rogue): href-based crawling can look
+    productive by URL count (25 "new" pages discovered) while finding
+    almost nothing genuinely new by CONTENT, when a domain is a client-
+    routed SPA that serves the same shell for any route its JS router
+    doesn't recognize. This is the signal `needs_interactive_crawl` uses
+    to decide whether a domain needs click-based exploration instead of
+    (or alongside) further href-following -- distinct from
+    `domain_has_similar_content`, which checks one NEW page against the
+    existing corpus rather than characterizing the whole domain.
+
+    Best-effort: any lookup failure returns an all-zero diversity (reads as
+    "not enough samples yet", never as "needs interactive crawl") so an
+    infra hiccup can't wrongly trigger the (much more expensive) interactive
+    path.
+    """
+    if not domain:
+        return ContentDiversity(0, 0)
+    try:
+        from app.core.cassandra import execute_parallel_with_args, get_cassandra_session
+        from app.core.statements import CrawledPageStmts
+
+        session = get_cassandra_session()
+        listing = session.execute(CrawledPageStmts.LIST_BY_DOMAIN, (domain, sample_limit))
+        page_ids = [row.page_id for row in listing]
+        if not page_ids:
+            return ContentDiversity(0, 0)
+        bodies = execute_parallel_with_args(CrawledPageStmts.GET_BODY, [(pid,) for pid in page_ids])
+        seen: set[str] = set()
+        total = 0
+        for ok, result in bodies:
+            if not ok:
+                continue
+            detail = result.one()
+            if detail is None or not (detail.body or "").strip():
+                continue
+            total += 1
+            seen.add(normalize_text(detail.body))
+        return ContentDiversity(distinct_count=len(seen), total_count=total)
+    except Exception:
+        logger.debug("domain_content_diversity lookup failed for %s", domain, exc_info=True)
+        return ContentDiversity(0, 0)
+
+
+def needs_interactive_crawl(
+    diversity: ContentDiversity, *, min_samples: int = 8, max_diversity_ratio: float = 0.3
+) -> bool:
+    """Whether href-based crawling has stopped finding real new content for a domain and it needs click-based exploration instead.
+
+    Requires `min_samples` pages before judging at all -- a brand-new domain
+    with 2 crawled pages hasn't given href-crawling a real chance yet, and
+    2 distinct/2 total would misleadingly read as perfect diversity anyway.
+    """
+    if diversity.total_count < min_samples:
+        return False
+    return diversity.ratio < max_diversity_ratio
+
+
 _STOPWORDS = {
     "the",
     "and",

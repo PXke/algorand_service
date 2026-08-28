@@ -8,8 +8,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.modules.crawler.crawled_page_store import (
+    ContentDiversity,
+    domain_content_diversity,
     domain_has_similar_content,
     looks_like_soft_404,
+    needs_interactive_crawl,
     normalize_domain,
 )
 
@@ -96,3 +99,57 @@ def test_domain_has_similar_content_empty_inputs_short_circuit() -> None:
     assert domain_has_similar_content("", "some body") is False
     assert domain_has_similar_content("lumirogue.com", "") is False
     assert domain_has_similar_content("lumirogue.com", "   ") is False
+
+
+def test_domain_content_diversity_counts_distinct_vs_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-caused 2026-08-28 (Lumi Rogue): href-crawling looked productive by URL count (25 'new' pages) while finding almost nothing new by CONTENT -- this is the signal that catches that gap. 3 of 5 sampled pages share one shell body -> 3 distinct (the shell + 2 real pages)."""
+    shell = "same shell content"
+    _stub_domain_lookup(
+        monkeypatch,
+        listing_rows=[_ListingRow(page_id=f"p{i}") for i in range(5)],
+        bodies=[
+            _BodyRow(body=shell),
+            _BodyRow(body=shell),
+            _BodyRow(body=shell),
+            _BodyRow(body="real page one"),
+            _BodyRow(body="real page two"),
+        ],
+    )
+    diversity = domain_content_diversity("lumirogue.com")
+    assert diversity.total_count == 5
+    assert diversity.distinct_count == 3
+    assert diversity.ratio == 3 / 5
+
+
+def test_domain_content_diversity_fails_open_on_lookup_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Cassandra hiccup reads as 'not enough samples yet' (all-zero), never as 'needs interactive crawl' -- an infra blip must not trigger the far more expensive interactive path."""
+
+    def _raise() -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.core.cassandra.get_cassandra_session", _raise)
+    diversity = domain_content_diversity("lumirogue.com")
+    assert diversity == ContentDiversity(0, 0)
+    assert needs_interactive_crawl(diversity) is False
+
+
+def test_needs_interactive_crawl_requires_minimum_samples() -> None:
+    """A brand-new domain with only 2 crawled pages hasn't given href-crawling a real chance yet, even if both happen to be identical (which would otherwise read as a 0.5 ratio, well under the threshold)."""
+    diversity = ContentDiversity(distinct_count=1, total_count=2)
+    assert needs_interactive_crawl(diversity, min_samples=8) is False
+
+
+def test_needs_interactive_crawl_flags_low_diversity_past_the_sample_floor() -> None:
+    """Root-caused 2026-08-28 (Lumi Rogue): 2 distinct pages out of 20 crawled (the homepage shell repeated 19 times under different URLs) is exactly the shape href-crawling produces for a client-routed SPA -- must be flagged."""
+    diversity = ContentDiversity(distinct_count=2, total_count=20)
+    assert needs_interactive_crawl(diversity, min_samples=8, max_diversity_ratio=0.3) is True
+
+
+def test_needs_interactive_crawl_leaves_a_genuinely_diverse_domain_alone() -> None:
+    """A domain where href-crawling IS finding real new content (a blog, a docs site) must not be flagged just because it has many pages."""
+    diversity = ContentDiversity(distinct_count=18, total_count=20)
+    assert needs_interactive_crawl(diversity, min_samples=8, max_diversity_ratio=0.3) is False

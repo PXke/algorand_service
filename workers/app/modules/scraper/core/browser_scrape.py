@@ -857,6 +857,11 @@ class PlaywrightSession:
         page = self._require_interactive_page()
         return self._read_page(page, engine="playwright-interactive-read")
 
+    def interactive_clickable_texts(self, limit: int = 25) -> list[str]:
+        """Visible button/link text on the currently-open interactive page -- for a caller deciding WHAT to click next (interactive_crawl.py's SPA exploration), not just for a failed-click error message the way _sample_clickable_texts is otherwise used."""
+        page = self._require_interactive_page()
+        return _sample_clickable_texts(page, limit=limit)
+
     def interactive_close(self) -> None:
         """End the current play_interactive session, if one is open. Idempotent."""
         if self._interactive_page is not None:
