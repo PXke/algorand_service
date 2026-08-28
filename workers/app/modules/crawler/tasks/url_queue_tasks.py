@@ -232,15 +232,62 @@ def _external_corroboration(domain: str) -> tuple[str, str] | None:
     return None
 
 
+# deep_classify_domain's own hard-kill boundary is celery_app.conf.
+# task_time_limit (1860s default) -- see reap_stale_deep_classify_flags'
+# own comment below for why this reads that directly instead of adding a
+# new config setting. A full FRONTIER_DEEP_CLASSIFY_MAX_PAGES crawl (200
+# pages by default) run serially, each with a 0.3s politeness sleep plus a
+# real fetch that can hit the ~35s BROWSER_TIMEOUT_MS Playwright SPA
+# fallback, can run for thousands of seconds on a large/slow domain --
+# structurally past task_time_limit -- and nothing is stored until
+# _run_deep_classify's verdict at the very end, so a SIGKILL mid-crawl
+# throws away 100% of the crawl work done so far (root-caused by the
+# 2026-08-28 perf audit; the domain's deep_classify_queued flag is then
+# left for reap_stale_deep_classify_flags to eventually notice and clear,
+# instead of the run finishing normally). This margin is how much of
+# task_time_limit the crawl LOOP below may spend before stopping itself
+# early with whatever evidence it already has -- leaving room for the
+# post-loop verdict work (one _external_corroboration SearXNG call, a
+# couple of Cassandra writes, an enqueue) plus a cushion below celery's
+# own task_soft_time_limit (1800s) too, so a slow domain degrades to an
+# honest partial verdict (see _deep_crawl_for_relevance's exhaustive=False
+# path below) instead of tripping SoftTimeLimitExceeded or the hard kill.
+_DEEP_CLASSIFY_TIME_BUDGET_MARGIN_SECONDS = 300
+
+
+def _deep_classify_time_budget_seconds() -> float:
+    """How long _deep_crawl_for_relevance's own fetch loop may run before stopping itself early -- see _DEEP_CLASSIFY_TIME_BUDGET_MARGIN_SECONDS above. A plain function (not a module-level constant) so it always reflects celery_app.conf.task_time_limit at call time, the same reasoning reap_stale_deep_classify_flags' own default already follows."""
+    return max(0.0, celery_app.conf.task_time_limit - _DEEP_CLASSIFY_TIME_BUDGET_MARGIN_SECONDS)
+
+
+def _deep_crawl_should_stop(domain: str, deadline: float) -> bool:
+    """Whether _deep_crawl_for_relevance's own loop should give up now with whatever evidence it already has, instead of popping another URL -- either the wall-clock deadline (monotonic seconds, see _deep_classify_time_budget_seconds) ran out, or the same per-domain crawl-budget/cooldown trip already fired. A separate top-level function (rather than inlining a 3-way `or` in the loop) purely to keep _deep_crawl_for_relevance's own branch count under CLAUDE.md's complexity guidance -- not a DI seam; the local import below mirrors this file's own established style for these same two domain_tracker functions (see _sample_domain_pages)."""
+    import time
+
+    from app.modules.crawler.domain_tracker import domain_crawl_budget_exhausted, domain_in_cooldown
+
+    return (
+        time.monotonic() >= deadline
+        or domain_crawl_budget_exhausted(domain)
+        or domain_in_cooldown(domain)
+    )
+
+
 def _deep_crawl_for_relevance(
-    *, domain: str, landing_url: str, max_pages: int
+    *, domain: str, landing_url: str, max_pages: int, time_budget_seconds: float | None = None
 ) -> tuple[tuple[str, object] | None, int, bool, int]:
     """Random-order same-domain crawl that stops at the first page clearing score_page's threshold.
 
     Returns (found, fetched, exhaustive, landing_same_domain_link_count) where
     found is (url, score_result) or None. `exhaustive` is True only when the
     frontier ran dry — every reachable same-domain page really was checked —
-    versus stopping because max_pages was hit with pages still unexplored.
+    versus stopping because max_pages was hit, or the wall-clock time budget
+    (time_budget_seconds, default _deep_classify_time_budget_seconds() — see
+    its docstring) ran out, with pages still unexplored. The time-budget stop
+    deliberately reuses this exact same "budget hit, not exhaustive" shape
+    instead of inventing a third outcome — to every downstream verdict branch
+    in _run_deep_classify, a time-budget stop and a max_pages stop are the
+    same kind of honest partial evidence.
 
     Each iteration re-checks the same domain-level gate scrape_from_queue_
     item's own _pre_fetch_gate applies to routine drain_url_queue fetches —
@@ -259,10 +306,6 @@ def _deep_crawl_for_relevance(
     import random
     import time
 
-    from app.modules.crawler.domain_tracker import (
-        domain_crawl_budget_exhausted,
-        domain_in_cooldown,
-    )
     from app.modules.crawler.robots import is_allowed
     from app.modules.scraper.core.link_extractor import extract_page_links
     from app.modules.search.classifier.score import score_page
@@ -272,6 +315,11 @@ def _deep_crawl_for_relevance(
     frontier: list[str] = [landing_url]
     fetched = 0
     found: tuple[str, object] | None = None
+    budget = (
+        _deep_classify_time_budget_seconds() if time_budget_seconds is None else time_budget_seconds
+    )
+    deadline = time.monotonic() + budget
+
     # Full Site / Single Page suggestion signal (see suggest_full_site) — a
     # free by-product of the landing page's own link extraction below, which
     # this task already does as part of its normal crawl. Captured only on
@@ -284,7 +332,7 @@ def _deep_crawl_for_relevance(
     landing_same_domain_link_count = 0
 
     while frontier and fetched < max_pages:
-        if domain_crawl_budget_exhausted(domain) or domain_in_cooldown(domain):
+        if _deep_crawl_should_stop(domain, deadline):
             break
         url = frontier.pop(random.randrange(len(frontier)))
         if url in visited or not is_allowed(url):
@@ -321,7 +369,8 @@ def _deep_crawl_for_relevance(
     # Two different "found nothing" outcomes, and they carry different
     # confidence: the frontier running dry means every reachable same-domain
     # page was actually checked — as exhaustive a negative as this task can
-    # produce. Hitting max_pages with the frontier still non-empty means there
+    # produce. Stopping for any other reason (max_pages hit, or the time
+    # budget above ran out) with the frontier still non-empty means there
     # were more unexplored pages when it stopped — a real negative signal,
     # but a budget limit, not proof the rest of the site has nothing either.
     return found, fetched, not frontier, landing_same_domain_link_count
@@ -379,11 +428,15 @@ def deep_classify_domain(
     A rejection carries one of two different confidence levels, recorded in
     metadata as deep_classify_exhaustive: "true" means the frontier ran dry —
     every reachable same-domain page was actually checked, as conclusive a
-    negative as this task can produce. "false" means max_pages was hit while
-    pages were still unexplored — still a real negative signal (this is what
-    actually gets stored either way), but a budget limit, not proof the rest
-    of the site has nothing either; the note field says which, so a human
-    reviewing the domain list can tell the two apart.
+    negative as this task can produce. "false" means either max_pages was hit
+    or the crawl's own wall-clock time budget ran out (see
+    _deep_classify_time_budget_seconds — a large/slow domain stops itself
+    early, before this task's own celery hard time limit would SIGKILL it
+    mid-crawl and discard everything) while pages were still unexplored —
+    still a real negative signal (this is what actually gets stored either
+    way), but a budget limit, not proof the rest of the site has nothing
+    either; the note field says which, so a human reviewing the domain list
+    can tell the two apart.
 
     The Celery task decorator belongs HERE, not on the ``_deep_crawl_for_
     relevance`` helper above (root-caused 2026-08-25): it used to sit on that

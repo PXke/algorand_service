@@ -8,6 +8,7 @@ from typing import Any, Never
 import pytest
 
 from app.modules.crawler.tasks.url_queue_tasks import (
+    _deep_classify_time_budget_seconds,
     _deep_crawl_for_relevance,
     _external_corroboration,
     _sample_domain_pages,
@@ -567,6 +568,145 @@ def test_deep_classify_domain_stops_at_max_pages(monkeypatch: pytest.MonkeyPatch
     assert out["exhaustive"] is False
     assert calls[0][1]["frontier_status_override"] == "dead_end"
     assert calls[0][1]["metadata"]["deep_classify_exhaustive"] == "false"
+
+
+# --------------------------------------------------------------------------- #
+# _deep_crawl_for_relevance -- wall-clock time-budget stop (2026-08-28 perf
+# audit): a genuinely slow/large domain must stop itself, with margin, before
+# this task's own celery hard task_time_limit SIGKILLs it mid-crawl and
+# discards all the work done so far (nothing is stored until the verdict at
+# the very end of _run_deep_classify).
+# --------------------------------------------------------------------------- #
+
+
+def _make_chain_pages(domain: str, count: int) -> dict[str, ScrapeResult]:
+    """A chain of `count` same-domain pages, each linking only to the next, none of them ever relevant -- so the crawl only ever stops via max_pages or the time budget, never by finding something or by the frontier running dry early."""
+    pages: dict[str, ScrapeResult] = {}
+    for i in range(count):
+        url = f"https://{domain}/p{i}"
+        next_html = f'<a href="/p{i + 1}">next</a>' if i < count - 1 else ""
+        pages[url] = _result(url, "generic content, nothing chain-related" * 10, next_html)
+    pages[f"https://{domain}"] = _result(
+        f"https://{domain}", "landing, nothing here" * 10, '<a href="/p0">start</a>'
+    )
+    return pages
+
+
+def test_deep_classify_time_budget_derives_from_task_time_limit_with_margin() -> None:
+    """The default time budget is celery's own hard task_time_limit minus the documented safety margin, mirroring reap_stale_deep_classify_flags' own reasoning for reading task_time_limit directly instead of a new config setting."""
+    from app.celery_app import celery_app
+    from app.modules.crawler.tasks import url_queue_tasks as uq
+
+    expected = celery_app.conf.task_time_limit - uq._DEEP_CLASSIFY_TIME_BUDGET_MARGIN_SECONDS
+    assert _deep_classify_time_budget_seconds() == expected
+    # And it must leave real margin below the hard limit, not shave it to zero.
+    assert _deep_classify_time_budget_seconds() < celery_app.conf.task_time_limit
+
+
+def test_deep_crawl_for_relevance_stops_within_time_budget_on_a_slow_crawl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow/large domain (each page fetch simulated as costing real wall-clock time, e.g. repeatedly hitting the Playwright SPA fallback) stops itself once the time budget's deadline is reached -- with margin, well short of max_pages -- instead of running until this task's celery hard time limit SIGKILLs it."""
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)  # no real sleeping in tests
+
+    # Fake monotonic clock advanced only by the fetch itself (mirrors a real
+    # per-page cost), not by a fixed number of loop ticks.
+    clock = {"now": 0.0}
+    monkeypatch.setattr("time.monotonic", lambda: clock["now"])
+
+    pages = _make_chain_pages("slow.example", 20)
+
+    def slow_scrape(url: str, _source_id: str) -> ScrapeResult:
+        clock["now"] += 100.0  # each page fetch "takes" 100s of simulated time
+        return pages[url]
+
+    driver = SimpleNamespace(scrape_with_fallback=slow_scrape)
+    monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: driver)
+
+    found, fetched, exhaustive, _link_count = _deep_crawl_for_relevance(
+        domain="slow.example",
+        landing_url="https://slow.example",
+        max_pages=200,  # far more than the time budget will allow it to reach
+        time_budget_seconds=250.0,  # ~2 fetches' worth before the deadline trips
+    )
+
+    assert found is None
+    assert 1 <= fetched < 200  # stopped well short of max_pages, but did real work
+    # Stopped by the deadline with the frontier still non-empty -- the exact
+    # same "budget hit, not exhaustive" shape a max_pages stop produces, not
+    # a silently-empty or falsely-conclusive result.
+    assert exhaustive is False
+
+
+def test_deep_crawl_for_relevance_time_budget_does_not_cut_off_a_fast_crawl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A small domain that finishes well within the time budget is completely unaffected -- it still runs to a normal, exhaustive verdict, not an early time-based cutoff."""
+    import app.modules.crawler.tasks.url_queue_tasks as uq
+
+    monkeypatch.setattr("app.modules.crawler.robots.is_allowed", lambda _url: True)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    clock = {"now": 0.0}
+    monkeypatch.setattr("time.monotonic", lambda: clock["now"])
+
+    # Only 3 pages total, each fetch "costs" 1s -- nowhere near a 250s budget.
+    pages = _make_chain_pages("fast.example", 2)
+
+    def fast_scrape(url: str, _source_id: str) -> ScrapeResult:
+        clock["now"] += 1.0
+        return pages[url]
+
+    driver = SimpleNamespace(scrape_with_fallback=fast_scrape)
+    monkeypatch.setattr(uq, "WebCrawlerDriver", lambda: driver)
+
+    found, fetched, exhaustive, _link_count = _deep_crawl_for_relevance(
+        domain="fast.example",
+        landing_url="https://fast.example",
+        max_pages=200,
+        time_budget_seconds=250.0,
+    )
+
+    assert found is None
+    assert fetched == 3  # landing + p0 + p1, then the frontier ran dry naturally
+    assert exhaustive is True  # frontier exhaustion, not a time-budget cutoff
+
+
+def test_deep_classify_domain_produces_a_sensible_verdict_when_stopped_by_time_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: when the crawl loop stops itself on the time budget (using the real default-derived budget, not an injected override), deep_classify_domain still writes a normal, honest dead_end/non-exhaustive verdict -- not a silently empty or wrong one -- exactly like the existing max_pages-limited case."""
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    clock = {"now": 0.0}
+    monkeypatch.setattr("time.monotonic", lambda: clock["now"])
+    # Each fetch consumes 1/16th of the default budget, so the loop trips the
+    # deadline partway through a 200-page max_pages ceiling it would otherwise
+    # have run to (proving the fix, not just the override parameter, is what
+    # stops it).
+    per_fetch_seconds = _deep_classify_time_budget_seconds() / 16
+
+    pages = _make_chain_pages("slowreal.example", 200)
+
+    def slow_scrape(url: str, _source_id: str) -> ScrapeResult:
+        clock["now"] += per_fetch_seconds
+        return pages[url]
+
+    driver = SimpleNamespace(scrape_with_fallback=slow_scrape)
+    calls = _patch_common(monkeypatch, driver)
+
+    out = deep_classify_domain(domain="slowreal.example", max_pages=200)
+
+    assert out["verdict"] == "dead_end"
+    assert isinstance(out["pages_fetched"], int)
+    assert 1 <= out["pages_fetched"] < 200
+    assert out["exhaustive"] is False
+    assert calls[0][1]["frontier_status_override"] == "dead_end"
+    assert calls[0][1]["metadata"]["deep_classify_exhaustive"] == "false"
+    # The note must still be an honest, non-empty explanation, not blank.
+    assert calls[0][1]["metadata"]["note"]
 
 
 def test_classify_pending_domains_escalates_instead_of_rejecting_outright(
