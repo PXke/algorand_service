@@ -231,6 +231,54 @@ class ArticlesStmts:
         "deleted_at, status_updated_at, interest_score, approved_at, views "
         "FROM algorand_platform.articles WHERE article_id = ?"
     )
+    # Single-article DETAIL read path (NewsService._fetch_detail /
+    # get_article / get_article_ignoring_draft_gate, and the bulk RSS/
+    # llms-full.txt variant get_articles/get_many_detail) -- NOT a
+    # replacement for GET_FULL_BY_ID above, which stays exactly as-is for
+    # its ~15 other call sites (writes, admin tools, backfills) that
+    # genuinely need the complete `translations` map.
+    #
+    # A detail render overlays AT MOST ONE stored language onto
+    # title/summary/body (NewsService._to_detail reads only
+    # `article.translations[lang]`), or none at all when lang is None
+    # (English/default) -- `_to_detail` never touches `translations` in that
+    # case. GET_FULL_BY_ID's `translations` column ships every stored
+    # language's full {title,summary,body} JSON blob regardless, which is
+    # the exact "ship the whole map to read at most one entry" waste the
+    # 2026-08-28 performance audit's translated_titles fix (migration 087)
+    # already killed on the feed-listing path -- this is that same fix for
+    # the single-article path.
+    #
+    # GET_BY_ID_NO_TRANSLATIONS drops `translations` from the SELECT list
+    # entirely (used when lang is None): Cassandra never materialises the
+    # map at all. GET_BY_ID_WITH_TRANSLATION instead projects a single map
+    # ELEMENT -- `translations[?]`, a bind-parameterized map-key lookup
+    # (Cassandra 4.0+, CASSANDRA-7396; this platform runs 5.0 -- see
+    # docker-compose.yml) -- so only the one requested language's JSON blob
+    # crosses the wire, never the others. It's aliased back to
+    # `translations` (`AS translations`) so the result row keeps the same
+    # attribute name GET_FULL_BY_ID's rows use; unlike GET_FULL_BY_ID, the
+    # value on this row is the raw JSON string for that one language (or
+    # NULL), not a map -- CassandraArticleStore._detail_row_to_stored is the
+    # only place that reads it, and builds the same `{lang: blob}` shape
+    # NewsService._to_detail already expects. Both statements otherwise
+    # select the exact same other columns as GET_FULL_BY_ID -- only the
+    # translations projection differs.
+    GET_BY_ID_NO_TRANSLATIONS = _Stmt(
+        "SELECT status, year, published_at, article_id, service_id, title, summary, body, "
+        "image_url, tags, source_url, trigger_txid, trigger_round, slug, "
+        "translated_titles, first_published_at, updated_at, prompt_version, composed_by_model, "
+        "deleted_at, status_updated_at, interest_score, approved_at, views "
+        "FROM algorand_platform.articles WHERE article_id = ?"
+    )
+    GET_BY_ID_WITH_TRANSLATION = _Stmt(
+        "SELECT status, year, published_at, article_id, service_id, title, summary, body, "
+        "image_url, tags, source_url, trigger_txid, trigger_round, slug, "
+        "translations[?] AS translations, "
+        "translated_titles, first_published_at, updated_at, prompt_version, composed_by_model, "
+        "deleted_at, status_updated_at, interest_score, approved_at, views "
+        "FROM algorand_platform.articles WHERE article_id = ?"
+    )
     # views (migration 084): the per-article view tally, folded in from the
     # old article_view_counts counter table. GET_VIEWS_BY_ID deliberately
     # also selects the row's partition/clustering key (status/year/

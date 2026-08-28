@@ -77,8 +77,18 @@ class ArticleStore(Protocol):
         """Fetch one article by id, or None if it does not exist."""
         ...
 
+    def get_detail(self, article_id: str, *, lang: str | None = None) -> StoredArticle | None:
+        """Fetch one article for the single-article DETAIL read path (NewsService._fetch_detail), projecting only the translation `lang` needs (or none, when lang is None) instead of `get()`'s complete `translations` map. Same not-found/deleted/draft semantics as `get()`."""
+        ...
+
     def get_many(self, article_ids: list[str]) -> dict[str, StoredArticle]:
         """Fetch many articles by id; missing ids are omitted."""
+        ...
+
+    def get_many_detail(
+        self, article_ids: list[str], *, lang: str | None = None
+    ) -> dict[str, StoredArticle]:
+        """Fetch many articles for the bulk DETAIL read path (NewsService.get_articles), projecting only the translation `lang` needs instead of `get_many()`'s complete `translations` map."""
         ...
 
     def list_by_tag_page(

@@ -97,6 +97,13 @@ def _articles_row_to_stored(row: Any) -> StoredArticle | None:
     """
     if row.status == "deleted":
         return None
+    return _build_stored_article(
+        row, translations=dict(row.translations) if row.translations else None
+    )
+
+
+def _build_stored_article(row: Any, *, translations: dict[str, str] | None) -> StoredArticle:  # noqa: ANN401 -- duck-typed Cassandra row, matches _articles_row_to_stored's existing row: Any
+    """Shared StoredArticle construction for a full `articles` row -- GET_FULL_BY_ID, GET_BY_ID_NO_TRANSLATIONS, and GET_BY_ID_WITH_TRANSLATION all select the same other columns, so only `translations` differs by caller (see `_articles_row_to_stored` / `_detail_row_to_stored`). Callers have already filtered out status='deleted'."""
     epoch = _epoch(row.published_at)
     return StoredArticle(
         article_id=str(row.article_id),
@@ -111,11 +118,36 @@ def _articles_row_to_stored(row: Any) -> StoredArticle | None:
         tags=list(row.tags or []),
         image_url=row.image_url,
         slug=row.slug,
-        translations=dict(row.translations) if row.translations else None,
+        translations=translations,
         updated_at_epoch=_epoch(row.updated_at) or None,
         first_published_at_epoch=_epoch(row.first_published_at) or None,
         draft=row.status == "draft",
     )
+
+
+def _detail_row_to_stored(row: Any, *, lang: str | None) -> StoredArticle | None:  # noqa: ANN401 -- duck-typed Cassandra row, matches _articles_row_to_stored's existing row: Any
+    """Map a single-article DETAIL row (ArticlesStmts.GET_BY_ID_NO_TRANSLATIONS or GET_BY_ID_WITH_TRANSLATION) to StoredArticle, or None if it's not a publicly-fetchable row.
+
+    Same status='deleted' filter / status='draft' flagging as
+    `_articles_row_to_stored` (see its own docstring) -- both statements
+    select the identical other columns as GET_FULL_BY_ID, just not the full
+    `translations` map.
+
+    GET_BY_ID_NO_TRANSLATIONS rows have no `translations` attribute at all
+    (not in the SELECT list) -- `translations` comes back None, matching
+    `_to_detail`'s "no lang requested" path, which never reads it anyway.
+    GET_BY_ID_WITH_TRANSLATION rows carry `translations` as a single JSON
+    STRING (the `translations[?]` map-element projection, aliased back to
+    the column name `translations`), not a map -- this rebuilds it into the
+    same `{lang: blob}` shape NewsService._to_detail already reads via
+    `article.translations[lang]`, so its "no stored translation for this
+    lang -> fall back to English" logic is unchanged.
+    """
+    if row.status == "deleted":
+        return None
+    blob = getattr(row, "translations", None)
+    translations = {lang: blob} if (lang and blob) else None
+    return _build_stored_article(row, translations=translations)
 
 
 class CassandraArticleStore:
@@ -229,10 +261,55 @@ class CassandraArticleStore:
             return None
         return _articles_row_to_stored(row)
 
-    def get_many(self, article_ids: list[str]) -> dict[str, StoredArticle]:
-        """Fetch many articles by id concurrently; missing ids are omitted."""
+    def get_detail(
+        self,
+        article_id: str,
+        *,
+        lang: str | None = None,
+        overlap: Callable[[], Any] | None = None,
+    ) -> StoredArticle | None:
+        """Fetch one article for the single-article DETAIL read path (NewsService._fetch_detail / get_article / get_article_ignoring_draft_gate), projecting only the translation `lang` actually needs instead of `get()`'s complete `translations` map.
+
+        This is a NEW method alongside `get()`, not a change to it -- `get()`
+        keeps reading GET_FULL_BY_ID exactly as before for its other callers
+        (translation_langs_for needs every stored language's key, admin/
+        backfill tools need the complete row). See
+        ArticlesStmts.GET_BY_ID_NO_TRANSLATIONS / GET_BY_ID_WITH_TRANSLATION
+        for the read-cost reasoning; `_detail_row_to_stored` builds a
+        StoredArticle whose `translations` carries the same `{lang: blob}`
+        shape NewsService._to_detail already reads, so its "no stored
+        translation for this lang -> fall back to English" behavior is
+        unchanged -- this is a read-cost optimization only.
+        """
         from algorand_shared.article_statements import ArticlesStmts
 
+        from app.core.cassandra import execute_then
+
+        try:
+            aid = UUID(article_id)
+        except ValueError:
+            return None
+        if lang:
+            row = execute_then(
+                ArticlesStmts.GET_BY_ID_WITH_TRANSLATION, (lang, aid), overlap=overlap
+            ).one()
+        else:
+            row = execute_then(
+                ArticlesStmts.GET_BY_ID_NO_TRANSLATIONS, (aid,), overlap=overlap
+            ).one()
+        if row is None:
+            return None
+        return _detail_row_to_stored(row, lang=lang)
+
+    def _fetch_many(
+        self,
+        article_ids: list[str],
+        *,
+        stmt: Any,  # noqa: ANN401 -- PreparedStatement, typed Any to avoid a TYPE_CHECKING import just for this helper
+        args_for: Callable[[UUID], tuple],
+        mapper: Callable[[Any], StoredArticle | None],
+    ) -> dict[str, StoredArticle]:
+        """Shared id-parsing + concurrent-fetch + row-mapping loop behind get_many/get_many_detail."""
         from app.core.cassandra import execute_parallel_with_args
 
         pairs: list[tuple[str, UUID]] = []
@@ -247,7 +324,7 @@ class CassandraArticleStore:
         for (raw, _), (ok, result) in zip(
             pairs,
             execute_parallel_with_args(
-                ArticlesStmts.GET_FULL_BY_ID, [(aid,) for _, aid in pairs], raise_on_error=False
+                stmt, [args_for(aid) for _, aid in pairs], raise_on_error=False
             ),
             strict=True,
         ):
@@ -255,10 +332,47 @@ class CassandraArticleStore:
                 continue
             row = result.one() if hasattr(result, "one") else None
             if row is not None:
-                stored = _articles_row_to_stored(row)
+                stored = mapper(row)
                 if stored is not None:
                     out[raw] = stored
         return out
+
+    def get_many(self, article_ids: list[str]) -> dict[str, StoredArticle]:
+        """Fetch many articles by id concurrently; missing ids are omitted."""
+        from algorand_shared.article_statements import ArticlesStmts
+
+        return self._fetch_many(
+            article_ids,
+            stmt=ArticlesStmts.GET_FULL_BY_ID,
+            args_for=lambda aid: (aid,),
+            mapper=_articles_row_to_stored,
+        )
+
+    def get_many_detail(
+        self, article_ids: list[str], *, lang: str | None = None
+    ) -> dict[str, StoredArticle]:
+        """Fetch many articles for the bulk DETAIL read path (NewsService.get_articles -- RSS feed / llms-full.txt), projecting only the translation `lang` needs instead of `get_many()`'s complete `translations` map.
+
+        A NEW method alongside `get_many()`, not a change to it --
+        `get_many()` keeps reading GET_FULL_BY_ID exactly as before for its
+        other caller (admin's list_draft_articles, which needs the complete
+        row shape). Same reasoning as `get_detail`.
+        """
+        from algorand_shared.article_statements import ArticlesStmts
+
+        if lang:
+            return self._fetch_many(
+                article_ids,
+                stmt=ArticlesStmts.GET_BY_ID_WITH_TRANSLATION,
+                args_for=lambda aid: (lang, aid),
+                mapper=lambda row: _detail_row_to_stored(row, lang=lang),
+            )
+        return self._fetch_many(
+            article_ids,
+            stmt=ArticlesStmts.GET_BY_ID_NO_TRANSLATIONS,
+            args_for=lambda aid: (aid,),
+            mapper=lambda row: _detail_row_to_stored(row, lang=None),
+        )
 
     def list_by_tag_page(
         self, tag: str, *, limit: int = 50, cursor_epoch_ms: int | None = None
