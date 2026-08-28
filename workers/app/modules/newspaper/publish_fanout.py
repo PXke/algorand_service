@@ -30,6 +30,12 @@ import logging
 import time
 
 from app.celery_app import celery_app
+from app.modules.crawler.domain_tracker import record_domain_compose, record_service_compose
+from app.modules.newspaper.article_store import ensure_article_slug, get_article
+from app.modules.newspaper.editorial_assignment import mark_brief_run
+from app.modules.newspaper.indexnow import ping_article
+from app.modules.newspaper.tasks.distribution_tasks import distribute_article
+from app.modules.search.tasks.index_tasks import index_article, index_crawled_page
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +73,6 @@ def fanout_after_publish(
     this) -- omitted (the default), the crawled-page index step is skipped,
     matching every other call site's existing behavior.
     """
-    from app.modules.newspaper.article_store import get_article
-
     article = get_article(article_id)
     if article is None:
         logger.warning(
@@ -79,8 +83,6 @@ def fanout_after_publish(
     published_at_epoch = article.published_at_epoch or int(time.time())
 
     try:
-        from app.modules.search.tasks.index_tasks import index_article
-
         index_article.delay(
             article_id=article_id,
             title=article.title,
@@ -96,8 +98,6 @@ def fanout_after_publish(
 
     if page_text:
         try:
-            from app.modules.search.tasks.index_tasks import index_crawled_page
-
             index_crawled_page.delay(
                 url=article.source_url,
                 title=page_title,
@@ -123,9 +123,6 @@ def fanout_after_publish(
     # new/updated story gets crawled in minutes. Best-effort -- never let it
     # block a publish.
     try:
-        from app.modules.newspaper.article_store import ensure_article_slug
-        from app.modules.newspaper.indexnow import ping_article
-
         ping_article(article_id, slug=ensure_article_slug(article_id, article.title))
     except Exception:
         logger.warning("IndexNow ping failed for article %s", article_id, exc_info=True)
@@ -134,8 +131,6 @@ def fanout_after_publish(
         # Auto-post to social channels (Bluesky, Telegram, ...) -- best-
         # effort, never blocks the publish itself.
         try:
-            from app.modules.newspaper.tasks.distribution_tasks import distribute_article
-
             distribute_article.delay(article_id=article_id)
         except Exception:
             logger.warning("failed to queue distribution for article %s", article_id, exc_info=True)
@@ -177,15 +172,9 @@ def record_compose_cadence(
     slot was already recorded when the draft was first produced.
     """
     if compose_domain:
-        from app.modules.crawler.domain_tracker import record_domain_compose
-
         record_domain_compose(compose_domain)
     if service_id:
-        from app.modules.crawler.domain_tracker import record_service_compose
-
         record_service_compose(service_id)
     if is_editorial_assignment:
-        from app.modules.newspaper.editorial_assignment import mark_brief_run
-
         with contextlib.suppress(Exception):
             mark_brief_run(brief_id=brief_id, article_id=article_id)

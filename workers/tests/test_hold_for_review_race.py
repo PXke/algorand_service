@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.modules.ai.content_signals import ContentSignals
+from app.modules.newspaper import publish_fanout
 from app.modules.newspaper.article_composer import ArticleComposeResult
 from app.modules.newspaper.publish_policy import PublishKind, PublishTopic
 from app.modules.newspaper.tasks import publish_tasks as pt
@@ -58,12 +59,11 @@ def test_review_queue_full_race_stores_and_enqueues_instead_of_discarding(
         lambda **kw: (enqueued.update(kw), "rid-1")[1],
     )
     monkeypatch.setattr(pt, "_grade_and_gate", lambda *_a, **_kw: ({}, None, True))
-    monkeypatch.setattr(
-        "app.modules.crawler.domain_tracker.record_domain_compose", lambda _domain: None
-    )
-    monkeypatch.setattr(
-        "app.modules.crawler.domain_tracker.record_service_compose", lambda _service_id: None
-    )
+    # record_domain_compose/record_service_compose are module-top imports in
+    # publish_fanout.py (no circular import forces them local, CLAUDE.md
+    # Sec.3), reached via _hold_for_review's shared record_compose_cadence.
+    monkeypatch.setattr(publish_fanout, "record_domain_compose", lambda _domain: None)
+    monkeypatch.setattr(publish_fanout, "record_service_compose", lambda _service_id: None)
 
     row = SimpleNamespace(
         queue_id="q1",
@@ -124,12 +124,11 @@ def test_duplicate_review_pending_race_stores_and_enqueues_instead_of_discarding
         lambda **kw: (enqueued.update(kw), "rid-1")[1],
     )
     monkeypatch.setattr(pt, "_grade_and_gate", lambda *_a, **_kw: ({}, None, True))
-    monkeypatch.setattr(
-        "app.modules.crawler.domain_tracker.record_domain_compose", lambda _domain: None
-    )
-    monkeypatch.setattr(
-        "app.modules.crawler.domain_tracker.record_service_compose", lambda _service_id: None
-    )
+    # record_domain_compose/record_service_compose are module-top imports in
+    # publish_fanout.py (no circular import forces them local, CLAUDE.md
+    # Sec.3), reached via _hold_for_review's shared record_compose_cadence.
+    monkeypatch.setattr(publish_fanout, "record_domain_compose", lambda _domain: None)
+    monkeypatch.setattr(publish_fanout, "record_service_compose", lambda _service_id: None)
 
     row = SimpleNamespace(
         queue_id="q1",
@@ -184,12 +183,11 @@ def test_route_to_backlog_ignores_review_queue_full_as_before(
         lambda **kw: ("aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000", True),  # noqa: ARG005
     )
     monkeypatch.setattr(pt, "_grade_and_gate", lambda *_a, **_kw: ({}, None, True))
-    monkeypatch.setattr(
-        "app.modules.crawler.domain_tracker.record_domain_compose", lambda _domain: None
-    )
-    monkeypatch.setattr(
-        "app.modules.crawler.domain_tracker.record_service_compose", lambda _service_id: None
-    )
+    # record_domain_compose/record_service_compose are module-top imports in
+    # publish_fanout.py (no circular import forces them local, CLAUDE.md
+    # Sec.3), reached via _hold_for_review's shared record_compose_cadence.
+    monkeypatch.setattr(publish_fanout, "record_domain_compose", lambda _domain: None)
+    monkeypatch.setattr(publish_fanout, "record_service_compose", lambda _service_id: None)
     executed: list = []
 
     class _FakeSession:

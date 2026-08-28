@@ -41,28 +41,32 @@ def _fake_article(**overrides: object) -> SimpleNamespace:
 
 
 def _patch_steps(monkeypatch: pytest.MonkeyPatch, *, article: SimpleNamespace | None) -> dict:
-    """Wire every fanout_after_publish step to a mock/fake, return them keyed by name."""
-    monkeypatch.setattr(
-        "app.modules.newspaper.article_store.get_article",
-        lambda _aid: article,
-    )
+    """Wire every fanout_after_publish step to a mock/fake, return them keyed by name.
+
+    publish_fanout.py imports get_article/index_article/index_crawled_page/
+    ensure_article_slug/ping_article/distribute_article at module top (not
+    function-local -- see CLAUDE.md Sec.3, no circular import forces them
+    local), so each is patched on publish_fanout's own bound name, not the
+    origin module -- patching the origin wouldn't reach a name already bound
+    into this module's namespace at import time.
+    """
+    monkeypatch.setattr(publish_fanout, "get_article", lambda _aid: article)
     index_mock = MagicMock()
-    monkeypatch.setattr("app.modules.search.tasks.index_tasks.index_article", index_mock)
+    monkeypatch.setattr(publish_fanout, "index_article", index_mock)
     crawled_mock = MagicMock()
-    monkeypatch.setattr("app.modules.search.tasks.index_tasks.index_crawled_page", crawled_mock)
+    monkeypatch.setattr(publish_fanout, "index_crawled_page", crawled_mock)
     translate_mock = MagicMock()
+    # enqueue_article_translations stays a genuine function-local import in
+    # fanout_after_publish (circular import: publish_tasks.py imports this
+    # module) -- patched at its origin module, same as any other caller.
     monkeypatch.setattr(
         "app.modules.newspaper.tasks.publish_tasks.enqueue_article_translations", translate_mock
     )
-    monkeypatch.setattr(
-        "app.modules.newspaper.article_store.ensure_article_slug", lambda _aid, _title: "a-title"
-    )
+    monkeypatch.setattr(publish_fanout, "ensure_article_slug", lambda _aid, _title: "a-title")
     ping_mock = MagicMock()
-    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", ping_mock)
+    monkeypatch.setattr(publish_fanout, "ping_article", ping_mock)
     distribute_mock = MagicMock()
-    monkeypatch.setattr(
-        "app.modules.newspaper.tasks.distribution_tasks.distribute_article", distribute_mock
-    )
+    monkeypatch.setattr(publish_fanout, "distribute_article", distribute_mock)
     return {
         "index": index_mock,
         "crawled": crawled_mock,
@@ -220,12 +224,8 @@ def test_record_compose_cadence_stamps_domain_and_service(monkeypatch: pytest.Mo
     """Both cooldown stamps fire with the given domain/service_id."""
     domain_calls: list[str] = []
     service_calls: list[str] = []
-    monkeypatch.setattr(
-        "app.modules.crawler.domain_tracker.record_domain_compose", domain_calls.append
-    )
-    monkeypatch.setattr(
-        "app.modules.crawler.domain_tracker.record_service_compose", service_calls.append
-    )
+    monkeypatch.setattr(publish_fanout, "record_domain_compose", domain_calls.append)
+    monkeypatch.setattr(publish_fanout, "record_service_compose", service_calls.append)
 
     publish_fanout.record_compose_cadence(compose_domain="perawallet.app", service_id="pera")
 
@@ -239,8 +239,8 @@ def test_record_compose_cadence_skips_empty_domain_and_service(
     """An empty compose_domain/service_id must not stamp either cooldown."""
     domain_mock = MagicMock()
     service_mock = MagicMock()
-    monkeypatch.setattr("app.modules.crawler.domain_tracker.record_domain_compose", domain_mock)
-    monkeypatch.setattr("app.modules.crawler.domain_tracker.record_service_compose", service_mock)
+    monkeypatch.setattr(publish_fanout, "record_domain_compose", domain_mock)
+    monkeypatch.setattr(publish_fanout, "record_service_compose", service_mock)
 
     publish_fanout.record_compose_cadence(compose_domain="", service_id="")
 
@@ -252,12 +252,10 @@ def test_record_compose_cadence_marks_brief_only_when_editorial_assignment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """mark_brief_run only fires when is_editorial_assignment=True, with the given brief/article ids."""
-    monkeypatch.setattr("app.modules.crawler.domain_tracker.record_domain_compose", lambda _d: None)
-    monkeypatch.setattr(
-        "app.modules.crawler.domain_tracker.record_service_compose", lambda _s: None
-    )
+    monkeypatch.setattr(publish_fanout, "record_domain_compose", lambda _d: None)
+    monkeypatch.setattr(publish_fanout, "record_service_compose", lambda _s: None)
     mark_mock = MagicMock()
-    monkeypatch.setattr("app.modules.newspaper.editorial_assignment.mark_brief_run", mark_mock)
+    monkeypatch.setattr(publish_fanout, "mark_brief_run", mark_mock)
 
     publish_fanout.record_compose_cadence(
         compose_domain="d.com", service_id="svc", is_editorial_assignment=False
@@ -278,15 +276,13 @@ def test_record_compose_cadence_suppresses_mark_brief_run_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """mark_brief_run failing must not blow up the publish path that just successfully stored/published the article."""
-    monkeypatch.setattr("app.modules.crawler.domain_tracker.record_domain_compose", lambda _d: None)
-    monkeypatch.setattr(
-        "app.modules.crawler.domain_tracker.record_service_compose", lambda _s: None
-    )
+    monkeypatch.setattr(publish_fanout, "record_domain_compose", lambda _d: None)
+    monkeypatch.setattr(publish_fanout, "record_service_compose", lambda _s: None)
 
     def _boom(**_kw: object) -> None:
         raise RuntimeError("cassandra blip")
 
-    monkeypatch.setattr("app.modules.newspaper.editorial_assignment.mark_brief_run", _boom)
+    monkeypatch.setattr(publish_fanout, "mark_brief_run", _boom)
 
     # Must not raise.
     publish_fanout.record_compose_cadence(

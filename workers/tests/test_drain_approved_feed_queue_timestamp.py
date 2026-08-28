@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.modules.newspaper import publish_fanout
 from app.modules.newspaper.tasks import queue_drain_tasks
 
 # `articles`' column order (see algorand_shared.article_transitions._ARTICLES_COLUMNS).
@@ -134,14 +135,19 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, fake: _FakeSession) -> None:
         "app.modules.newspaper.publish_daily_guard.reserve_publish_slot",
         lambda **_kw: (True, "ok"),
     )
+    # enqueue_article_translations stays a genuine function-local import in
+    # fanout_after_publish (circular import: publish_tasks.py imports
+    # publish_fanout.py) -- patched at its origin module. ping_article/
+    # distribute_article are module-top imports in publish_fanout.py (no
+    # circular-import forces them local, CLAUDE.md Sec.3), so they're
+    # patched on publish_fanout's own bound name instead.
     monkeypatch.setattr(
         "app.modules.newspaper.tasks.publish_tasks.enqueue_article_translations",
         lambda *_a, **_kw: None,
     )
-    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", lambda *_a, **_kw: None)
+    monkeypatch.setattr(publish_fanout, "ping_article", lambda *_a, **_kw: None)
     monkeypatch.setattr(
-        "app.modules.newspaper.tasks.distribution_tasks.distribute_article",
-        SimpleNamespace(delay=lambda *_a, **_kw: None),
+        publish_fanout, "distribute_article", SimpleNamespace(delay=lambda *_a, **_kw: None)
     )
 
 
@@ -404,7 +410,7 @@ def test_indexnow_ping_failure_is_logged_not_swallowed(
     def _boom(*_a: object, **_kw: object) -> None:
         raise RuntimeError("indexnow unreachable")
 
-    monkeypatch.setattr("app.modules.newspaper.indexnow.ping_article", _boom)
+    monkeypatch.setattr(publish_fanout, "ping_article", _boom)
 
     with caplog.at_level(logging.WARNING):
         result = queue_drain_tasks.drain_approved_feed_queue()
@@ -428,7 +434,7 @@ def test_backlog_release_now_indexes_the_article_into_search(
     )
     _patch_common(monkeypatch, fake)
     index_mock = MagicMock()
-    monkeypatch.setattr("app.modules.search.tasks.index_tasks.index_article", index_mock)
+    monkeypatch.setattr(publish_fanout, "index_article", index_mock)
 
     result = queue_drain_tasks.drain_approved_feed_queue()
 
