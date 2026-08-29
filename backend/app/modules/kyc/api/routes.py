@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from x402.extensions.bazaar import declare_discovery_extension
-from x402.extensions.bazaar.resource_service import OutputConfig
-
 from app.core import serialization
 from app.core.config import settings
 from app.core.http import Request, Response, Router
@@ -15,6 +12,7 @@ from app.modules.kyc.services.consent_message import build_kyc_consent_message
 from app.modules.kyc.services.enrollment_service import EnrollmentService
 from app.modules.kyc.services.lookup_service import LookupService
 from app.modules.kyc.services.payout_service import send_payout
+from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.guard import require_payment
 from app.schemas import EnrollRequest, KycPayoutRetryRequest
 
@@ -32,19 +30,15 @@ lookup_service = LookupService()
 
 
 def kyc_test_ping(request: Request) -> Response:
-    """Throwaway: proves the x402 402 -> pay -> verify -> settle round-trip through Robyn on TestNet. No attestation data, no Cassandra, no payout leg yet — those land once this is confirmed working end to end."""
+    """Throwaway: proves the x402 402 -> pay -> verify -> settle round-trip on TestNet. No attestation data, no Cassandra, no payout leg yet — those land once this is confirmed working end to end."""
     result = require_payment(
         request,
         price="$0.01",
         resource="kyc-ping",
-        extensions=declare_discovery_extension(
+        extensions=describe_json_endpoint(
             input={},
             input_schema={},
-            # OutputConfig, not a bare dict: the package reads `output.example`
-            # as an attribute -- a raw dict here 500s the route with an
-            # AttributeError before it ever reaches the payment gate. Real,
-            # reproduced bug (found 2026-08-29 building x402_directory).
-            output=OutputConfig(example={"ok": True, "paid_by": "..."}),
+            output_example={"ok": True, "paid_by": "..."},
         ),
     )
     if result.error:
@@ -99,22 +93,18 @@ def kyc_verify(request: Request) -> Response:
         request,
         price=settings.kyc_lookup_price,
         resource="kyc-verify",
-        extensions=declare_discovery_extension(
+        extensions=describe_json_endpoint(
             input={"wallet": "ALGORAND_ADDRESS"},
             input_schema={
                 "properties": {"wallet": {"type": "string"}},
                 "required": ["wallet"],
             },
-            # OutputConfig, not a bare dict -- see kyc_test_ping's identical fix
-            # above for why a raw dict here 500s the route.
-            output=OutputConfig(
-                example={
-                    "enrolled": True,
-                    "wallet_address": "...",
-                    "kyc_level": "basic",
-                    "payout_status": "sent",
-                }
-            ),
+            output_example={
+                "enrolled": True,
+                "wallet_address": "...",
+                "kyc_level": "basic",
+                "payout_status": "sent",
+            },
         ),
     )
     if result.error:

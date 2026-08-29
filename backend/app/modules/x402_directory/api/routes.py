@@ -9,14 +9,12 @@ this change is not authorized to deploy.
 
 from __future__ import annotations
 
-from x402.extensions.bazaar import declare_discovery_extension
-from x402.extensions.bazaar.resource_service import OutputConfig
-
 from app.core import serialization
 from app.core.config import settings
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
+from app.modules.x402.discovery import describe_json_endpoint
 from app.modules.x402.paid_request import require_paid_request
 from app.modules.x402_directory.models.domain import DirectoryError, StoredListing
 from app.modules.x402_directory.services.listing_service import ListingService
@@ -75,11 +73,11 @@ def x402_list(request: Request) -> Response:
             f"List one x402 endpoint in the public PXke x402 directory for {term_days} days. "
             f"Discoverable immediately at GET /api/v1/x402/search."
         ),
-        extensions=declare_discovery_extension(
+        extensions=describe_json_endpoint(
             # POST carries its input as a JSON body, so this must declare a
             # BODY discovery extension. Without body_type the package builds a
-            # query-params one (declare_discovery_extension's body_type=None
-            # branch), which would describe this route's input incorrectly.
+            # query-params one, which would describe this route's input
+            # incorrectly.
             body_type="json",
             input=_LISTING_EXAMPLE,
             input_schema={
@@ -94,15 +92,11 @@ def x402_list(request: Request) -> Response:
                 },
                 "required": ["url", "price"],
             },
-            # OutputConfig, not a bare dict: the package reads `output.example`
-            # as an attribute and an AttributeError here would 500 the route.
-            output=OutputConfig(
-                example={
-                    "listing": {**_LISTING_EXAMPLE, "term_end_epoch": 0},
-                    "settlement_tx_id": "...",
-                    "term_days": term_days,
-                }
-            ),
+            output_example={
+                "listing": {**_LISTING_EXAMPLE, "term_end_epoch": 0},
+                "settlement_tx_id": "...",
+                "term_days": term_days,
+            },
         ),
     )
     if result.error:

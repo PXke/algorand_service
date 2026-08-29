@@ -162,26 +162,21 @@ def test_require_payment_has_no_bazaar_declaration_when_extensions_omitted(
 
 
 def test_kyc_routes_declare_discovery_extension_without_raising() -> None:
-    """Regression: both KYC paid routes build their Bazaar discovery extension with a real AttributeError before this fix -- output={"example": ...} is a plain dict, but the installed package reads output.example as an attribute, not a dict key. Calling the exact route module's import + the same declare_discovery_extension(...) call shape each route uses must not raise."""
-    from x402.extensions.bazaar import declare_discovery_extension
-    from x402.extensions.bazaar.resource_service import OutputConfig
+    """Regression: both KYC paid routes built their Bazaar discovery extension with a real AttributeError before this fix -- output={"example": ...} is a plain dict, but the installed package reads output.example as an attribute, not a dict key. Both routes now go through describe_json_endpoint (modules/x402/discovery.py), which cannot reproduce this bug -- it always wraps in OutputConfig. Calling it with the exact shape each route uses must not raise."""
+    from app.modules.x402.discovery import describe_json_endpoint
 
     # Same shape as kyc_test_ping's extensions= argument.
-    declare_discovery_extension(
-        input={}, input_schema={}, output=OutputConfig(example={"ok": True, "paid_by": "..."})
-    )
+    describe_json_endpoint(input={}, input_schema={}, output_example={"ok": True, "paid_by": "..."})
     # Same shape as kyc_verify's extensions= argument.
-    declare_discovery_extension(
+    describe_json_endpoint(
         input={"wallet": "ALGORAND_ADDRESS"},
         input_schema={"properties": {"wallet": {"type": "string"}}, "required": ["wallet"]},
-        output=OutputConfig(
-            example={
-                "enrolled": True,
-                "wallet_address": "...",
-                "kyc_level": "basic",
-                "payout_status": "sent",
-            }
-        ),
+        output_example={
+            "enrolled": True,
+            "wallet_address": "...",
+            "kyc_level": "basic",
+            "payout_status": "sent",
+        },
     )
 
 
