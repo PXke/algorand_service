@@ -92,3 +92,47 @@ When you spawn sub-agents:
 2. Verification output tail.
 3. Observed-not-fixed list.
 4. Anything you assumed because the task was ambiguous.
+
+## 9. x402 Agent Marketplace (Algorand Global x402 Challenge, deadline Sept 1)
+
+A second product, `backend/modules/x402/` + `backend/modules/kyc/` and its
+successors, sharing the same backend/Cassandra/Redis/deploy pipeline as the
+newspaper but a **separate concern** — do not conflate its rules with
+sections 1-8 above, and do not let newspaper work block it or vice versa.
+Reference: `docs/x402-facilitator.md` (verified facilitator/CAIP-2/tag
+mechanics — work from that file, not memory or the official docs' literal
+wording, which is wrong about the challenge tag).
+
+Non-negotiable constraints (verbatim from the build plan, owner-approved):
+
+- Nothing custodial: never hold user funds. Payouts come only from the
+  dedicated hot wallet; the x402 `payTo` address is receive-only and its key
+  is never in the repo, the agent's reach, or any container.
+- No entity, no licence assumed. Anything needing KYB, PII storage, or fiat
+  handling is out of scope (Phase 2 at the earliest).
+- Cassandra + Redis only, via `StoreFactory[T]` and a `Protocol` per store.
+  Memory backend for dev/test only.
+- TestNet until Phase 0 acceptance passes; mainnet is a config flip, done
+  once, deliberately.
+- Every settlement logged: asset id, amount, tx id, payer, resource, UTC
+  timestamp, EUR value at time of settlement. This is the bookkeeping ledger.
+- No wash volume, ever. Nothing in the codebase may pay our own endpoints
+  from our own wallets except the probe, which is labelled as such and
+  excluded from any ranking. The competition administrator explicitly audits
+  for and disqualifies this — it is not just good practice.
+- Multi-asset `accepts` in the 402 offer from day one, even if only USDC is
+  enabled initially. Note: the competition's Volume score is USDC-specific;
+  other assets help the Innovation score, not Volume — don't over-invest
+  before a working USDC endpoint exists.
+- Rate limit every free endpoint per wallet and per IP.
+- Docstrings say Falcon. Robyn is gone; delete any mention.
+- Every paid product is a plugin/module behind the shared `require_payment()`
+  gate. No paid route lives in core without going through it.
+
+Entry category: **Composite** (several endpoints, one `payTo`, individually
+discoverable) — confirmed against the official category definitions, not
+Standard or Orchestrator. See `docs/x402-facilitator.md` for why.
+
+Registration itself requires real personal identity/legal attestation — an
+agent drafts and verifies the technical prerequisites, but does not submit
+the registration form unattended.
