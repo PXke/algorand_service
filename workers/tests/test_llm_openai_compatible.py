@@ -214,6 +214,15 @@ def test_kimi_provider_floors_max_tokens_like_deepseek() -> None:
     assert provider._effective_max_tokens(100_000) == 100_000
 
 
+def test_glm_provider_floors_max_tokens_like_deepseek() -> None:
+    """Root-caused live 2026-08-29 (LumiRogue recompose, glm-5.3-flash): a follow-up write call came back finish_reason="length" with EMPTY content TWICE in a row, reasoning_content alone having filled the inherited 12000-token LLM_MAX_TOKENS ceiling -- same failure shape as the 2026-08-06 DeepSeek incident, same floor fix, just never applied to GLM until now."""
+    provider = GLMProvider()
+    assert provider._effective_max_tokens(10) >= 40_000
+    assert provider._effective_max_tokens(None) >= 40_000
+    # A generous explicit request is never reduced.
+    assert provider._effective_max_tokens(100_000) == 100_000
+
+
 def test_other_providers_still_support_temperature() -> None:
     """The override is OpenAI/Kimi-specific -- Mistral, DeepSeek, and GLM still accept an explicit temperature."""
     assert MistralProvider()._supports_temperature() is True

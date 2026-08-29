@@ -473,6 +473,16 @@ KIMI_MAX_TOKENS = env_int("KIMI_MAX_TOKENS", 40000)
 GLM_API_KEY = env_str("GLM_API_KEY", "")
 GLM_API_BASE = env_str("GLM_API_BASE", "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
 GLM_MODEL_WRITER = env_str("GLM_MODEL_WRITER", "glm-5.2")
+# Same shape as DEEPSEEK_MAX_TOKENS/KIMI_MAX_TOKENS above -- root-caused live
+# 2026-08-29 (LumiRogue recompose, glm-5.3-flash): a follow-up write call fed
+# the research digest back in and came back finish_reason="length" with EMPTY
+# content TWICE in a row, reasoning_content alone having filled the inherited
+# 12000-token LLM_MAX_TOKENS ceiling -- GLMProvider had no floor override like
+# DeepSeek/Kimi do, so it never got the same protection. The compose correctly
+# raised rather than falling back (CLAUDE.md invariant #4), but the entire
+# 48-round research pass and an already-successfully-written article were
+# lost with it.
+GLM_MAX_TOKENS = env_int("GLM_MAX_TOKENS", 40000)
 
 # Gemini's native API is NOT OpenAI-compatible (contents/parts, functionCall,
 # role="model") -- GeminiProvider (llm_gemini_provider.py) translates to/from

@@ -41,6 +41,7 @@ from app.core.config import (
     DEEPSEEK_MODEL_WRITER,
     GLM_API_BASE,
     GLM_API_KEY,
+    GLM_MAX_TOKENS,
     GLM_MODEL_WRITER,
     KIMI_API_BASE,
     KIMI_API_KEY,
@@ -1316,3 +1317,8 @@ class GLMProvider(OpenAICompatibleProvider):
             timeout=timeout,
             provider="glm",
         )
+
+    def _effective_max_tokens(self, requested: int | None) -> int:
+        """Floor at GLM_MAX_TOKENS -- same pattern as DeepSeek/Kimi above. Root-caused live 2026-08-29 (LumiRogue recompose, glm-5.3-flash): a follow-up write call came back finish_reason="length" with EMPTY content TWICE in a row, reasoning_content alone having filled the inherited 12000-token LLM_MAX_TOKENS ceiling -- same failure shape as the 2026-08-06 DeepSeek incident this exact pattern was built to prevent, just never applied to GLM when it was first wired in."""
+        base = requested if requested is not None else LLM_MAX_TOKENS
+        return max(base, GLM_MAX_TOKENS)
