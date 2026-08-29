@@ -1,10 +1,10 @@
 """Per-route payment guard.
 
-Robyn has no per-route middleware in this codebase (see require_admin_wallet
-in app/modules/admin/auth.py) — auth/payment gating is a guard function called
-first in the handler, not a framework middleware chain. require_payment
-follows that same shape: call it, return its .error Response immediately if
-set, otherwise proceed with the now-paid-for work.
+This backend has no per-route middleware chain (see require_admin_wallet in
+app/modules/admin/auth.py) — auth/payment gating is a guard function called
+first in the Falcon handler. require_payment follows that same shape: call it,
+return its .error Response immediately if set, otherwise proceed with the
+now-paid-for work.
 """
 
 from __future__ import annotations
@@ -52,6 +52,12 @@ class PaymentResult:
     # The incoming payment's own txid, for audit trails that need to link a
     # side effect (e.g. a payout) back to the payment that funded it.
     payment_txid: str | None = None
+    # What was actually paid, taken from the matched PaymentRequirements rather
+    # than re-derived from settings: the settlement ledger records the asset the
+    # payer really used, which stops being "USDC on the configured network" the
+    # moment a second asset is accepted. Both None unless error is None.
+    asset_id: str | None = None
+    network: str | None = None
 
 
 def _instructions_to_response(instr: HTTPResponseInstructions) -> Response:
@@ -67,14 +73,18 @@ def require_payment(
     *,
     price: str,
     resource: str,
+    description: str | None = None,
     extensions: dict[str, Any] | None = None,
 ) -> PaymentResult:
-    """Gate a Robyn handler behind an x402 payment.
+    """Gate a Falcon handler behind an x402 payment.
 
     `price` is a Money string, e.g. "$0.01" — converted to USDC atomic units
     by the tagged money parser registered in client.py, which is also where
     the required challenge tag gets attached (see CHALLENGE_TAG there).
     `resource` is a short stable id for this endpoint, shown to the payer.
+    `description` is free text reaching the payer as the 402's
+    resource.description, before they commit — the place to state anything the
+    price alone doesn't say (a term length, what the fee buys).
     `extensions` sets RouteConfig.extensions — pass
     `x402.extensions.bazaar.declare_discovery_extension(...)` here to make a
     route Bazaar-discoverable (required for the leaderboard, not automatic).
@@ -87,6 +97,7 @@ def require_payment(
             network=settings.x402_network,
         ),
         resource=resource,
+        description=description,
         extensions=extensions,
     )
     # A fresh wrapper per call (route compilation is cheap, local regex work)
@@ -139,4 +150,6 @@ def require_payment(
         settlement_headers=settle.headers,
         amount_atomic=result.payment_requirements.amount,
         payment_txid=settle.transaction,
+        asset_id=result.payment_requirements.asset,
+        network=result.payment_requirements.network,
     )

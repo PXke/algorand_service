@@ -191,6 +191,26 @@ class Settings(msgspec.Struct, kw_only=True):
     # (logged, never block the paid lookup response) until configured.
     kyc_payout_mnemonic: str = ""
 
+    # x402 endpoint directory (POST /x402/list paid, GET /x402/search free).
+    # See app/modules/x402_directory/.
+    x402_directory_store: str = "memory"
+    # Flat listing fee, a Money string parsed by the tagged money parser in
+    # modules/x402/client.py (which is also what attaches the challenge tag).
+    x402_listing_price: str = "$0.10"
+    # How long a paid listing stays live. Stated in the 402 offer's description
+    # before the payer commits, and stored as the listing's term_end.
+    x402_listing_term_days: int = 30
+    # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
+    # endpoint per IP), same Redis incr/expire shape as the contact form.
+    x402_search_rate_limit_per_hour: int = 120
+    # Hard cap on a search page — no unbounded listings (CLAUDE.md section 4).
+    x402_search_max_results: int = 100
+    # Replay window for an already-spent payment header. Must be >= 2x the
+    # facilitator's own HTTP timeout (FacilitatorConfig.timeout defaults to
+    # 30s in x402-avm==2.0.2) so a header can never be re-presented while the
+    # first settle of it is still in flight.
+    x402_replay_ttl_seconds: int = 900
+
     @property
     def cors_origins(self) -> list[str]:
         """Parse the comma-separated CORS origins setting into a list."""

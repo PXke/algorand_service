@@ -108,13 +108,13 @@ Non-negotiable constraints (verbatim from the build plan, owner-approved):
 - Nothing custodial: never hold user funds. Payouts come only from the
   dedicated hot wallet; the x402 `payTo` address is receive-only and its key
   is never in the repo, the agent's reach, or any container.
-- No entity, no licence assumed. Anything needing **regulated KYB (real
-  business/entity compliance)**, PII storage, or fiat handling is out of
-  scope (Phase 2 at the earliest). Note the deliberate acronym overload: the
-  KYC/KYB *product* (roadmap item 8 below) means "Know Your **Bot**" — wallet
-  age, on-chain behaviour, self-declared web identity, an on-chain
-  attestation — not regulated Know-Your-Business. That product is in scope
-  now; regulated entity compliance is not, ever, until Phase 2.
+- No entity, no licence assumed. **KYB (Know Your Business — regulated
+  real-entity/company compliance), PII storage, and fiat handling are out of
+  scope, Phase 2 at the earliest.** Separately, **KYA (Know Your Agent —
+  wallet age, on-chain behaviour, self-declared web identity, an on-chain
+  attestation; roadmap item 8 below) is in scope now.** These are two
+  different things with easily-confused acronyms — KYA ships, KYB does not,
+  ever, without an explicit new owner decision.
 - Cassandra + Redis only, via `StoreFactory[T]` and a `Protocol` per store.
   Memory backend for dev/test only.
 - TestNet until Phase 0 acceptance passes; mainnet is a config flip, done
@@ -169,13 +169,15 @@ become an excuse to defer proving the one thing the deadline depends on.
    endpoint, selling measured uptime/latency/spec-correctness. Already
    scoped (§5.3). Probe traffic is flagged and excluded from every ranking —
    this is the one deliberate exception to "no wash volume."
-8. **Know Your Bot (KYC/KYB)** — tiered bot/agent identity (wallet, web
+8. **Know Your Agent (KYA)** — tiered bot/agent identity (wallet, web
    identity, verified owner, behaviour), on-chain attestation, paid verify.
-   This is `modules/kyc/`, currently broken (a real, reproduced bug — see
+   This is `modules/kyc/` (module directory name predates the KYA/KYB
+   terminology split — rename opportunistically if touching this module, not
+   as its own task), currently broken (a real, reproduced bug — see
    `services/enrollment_service.py`/`api/routes.py`'s `declare_discovery_extension`
    call passing a raw dict where the installed package requires `OutputConfig`).
-   **"KYB" here is Know Your Bot, not regulated Know Your Business** — see the
-   constraints note above. Do not conflate with real entity compliance.
+   **This is KYA, not KYB** — see the constraints note above. Do not conflate
+   with regulated Know-Your-Business/entity compliance, which stays excluded.
 9. **Starter credit** — endpoint-funded trial USDC for newly-identified
    agents. Real fund distribution to third parties — needs an explicit
    abuse/sybil design before any code, not a subagent's unilateral call.

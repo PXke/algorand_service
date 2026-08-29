@@ -786,6 +786,55 @@ class KycStmts:
 
 
 # --------------------------------------------------------------------------- #
+# x402_listings / x402_listings_by_recency / x402_settlements (migration 090)
+# --------------------------------------------------------------------------- #
+class X402DirectoryStmts:
+    """Prepared statements for the x402 endpoint directory and settlement ledger."""
+
+    # Full INSERT, never a partial UPDATE: a partial write to either listing
+    # table would upsert a row whose unwritten columns read back as null, the
+    # same phantom-row class articles_feed hit (CLAUDE.md section 3).
+    UPSERT_LISTING = _Stmt(
+        "INSERT INTO algorand_platform.x402_listings ("
+        "url_hash, url, price, assets, description, schema_json, tags, "
+        "term_end, settlement_tx_id, created_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    GET_LISTING = _Stmt(
+        "SELECT url_hash, url, price, assets, description, schema_json, tags, "
+        "term_end, settlement_tx_id, created_at "
+        "FROM algorand_platform.x402_listings WHERE url_hash = ?"
+    )
+    INSERT_RECENCY = _Stmt(
+        "INSERT INTO algorand_platform.x402_listings_by_recency ("
+        "directory, created_at, url_hash, url, price, assets, description, "
+        "schema_json, tags, term_end, settlement_tx_id"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    # Deletes the row a re-listing supersedes. Needs the exact created_at of
+    # the previous listing (read from x402_listings first), since created_at is
+    # a clustering column -- deleting by url_hash alone is not addressable.
+    DELETE_RECENCY = _Stmt(
+        "DELETE FROM algorand_platform.x402_listings_by_recency "
+        "WHERE directory = ? AND created_at = ? AND url_hash = ?"
+    )
+    # Newest-first by clustering order; the LIMIT is bound, never interpolated,
+    # and the caller clamps it (no unbounded listings, CLAUDE.md section 4).
+    LIST_RECENT = _Stmt(
+        "SELECT url_hash, url, price, assets, description, schema_json, tags, "
+        "term_end, settlement_tx_id, created_at "
+        "FROM algorand_platform.x402_listings_by_recency "
+        "WHERE directory = ? LIMIT ?"
+    )
+    INSERT_SETTLEMENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_settlements ("
+        "day, settled_at, tx_id, asset_id, amount_atomic, payer, resource, "
+        "network, eur_value"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # glossary_terms
 # --------------------------------------------------------------------------- #
 class GlossaryStmts:

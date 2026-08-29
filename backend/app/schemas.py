@@ -359,6 +359,41 @@ class KycPayoutRetryRequest(msgspec.Struct, kw_only=True):
     amount_atomic: Annotated[str, Meta(min_length=1, max_length=32)]
 
 
+# ── x402 directory ────────────────────────────────────────────────────────────
+class X402ListingRequest(msgspec.Struct, kw_only=True):
+    """Request body for POST /x402/list — one paid x402 endpoint listing.
+
+    `price` is the listed endpoint's OWN price as free text (e.g. "$0.01"),
+    describing what a caller of that endpoint pays. It is not the listing fee,
+    which is fixed at settings.x402_listing_price and charged by the gate.
+
+    `schema` mirrors the field name in the stored listing's JSON representation;
+    it is persisted as a JSON string in the schema_json column (SCHEMA is a
+    reserved CQL keyword and cannot be a bare column name).
+    """
+
+    url: Annotated[str, Meta(min_length=8, max_length=2048)]
+    price: Annotated[str, Meta(min_length=1, max_length=64)]
+    description: Annotated[str, Meta(max_length=2000)] = ""
+    assets: Annotated[list[str], Meta(max_length=16)] = field(default_factory=list)
+    tags: Annotated[list[str], Meta(max_length=16)] = field(default_factory=list)
+    schema: dict | None = None
+
+
+class X402ListingItem(msgspec.Struct, kw_only=True):
+    """One directory listing as served by /x402/list and /x402/search."""
+
+    url: str
+    price: str
+    description: str
+    assets: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    schema: dict | None = None
+    term_end_epoch: int = 0
+    created_at_epoch: int = 0
+    settlement_tx_id: str = ""
+
+
 # ── Metrics ───────────────────────────────────────────────────────────────────
 class PriceMetricsResponse(msgspec.Struct, kw_only=True):
     """Price-metrics brief for the dashboard."""
