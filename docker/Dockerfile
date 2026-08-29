@@ -52,6 +52,11 @@ COPY workers/tests workers/tests
 # (prod gets the same package via deploy/scripts/link_shared.sh instead).
 COPY shared shared
 COPY deploy deploy
+# Same mechanism prod uses (a .pth in site-packages, see the script) instead
+# of a second, Docker-only way to make algorand_shared importable at runtime.
+# pytest's own resolution (pythonpath = ["../shared"] in both pyproject.toml)
+# is unaffected and unrelated -- this is only for gunicorn/celery at runtime.
+RUN deploy/scripts/link_shared.sh /usr/local shared
 COPY schema schema
 COPY conduit/schema conduit/schema
 
