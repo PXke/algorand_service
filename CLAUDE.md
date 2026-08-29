@@ -108,8 +108,13 @@ Non-negotiable constraints (verbatim from the build plan, owner-approved):
 - Nothing custodial: never hold user funds. Payouts come only from the
   dedicated hot wallet; the x402 `payTo` address is receive-only and its key
   is never in the repo, the agent's reach, or any container.
-- No entity, no licence assumed. Anything needing KYB, PII storage, or fiat
-  handling is out of scope (Phase 2 at the earliest).
+- No entity, no licence assumed. Anything needing **regulated KYB (real
+  business/entity compliance)**, PII storage, or fiat handling is out of
+  scope (Phase 2 at the earliest). Note the deliberate acronym overload: the
+  KYC/KYB *product* (roadmap item 8 below) means "Know Your **Bot**" — wallet
+  age, on-chain behaviour, self-declared web identity, an on-chain
+  attestation — not regulated Know-Your-Business. That product is in scope
+  now; regulated entity compliance is not, ever, until Phase 2.
 - Cassandra + Redis only, via `StoreFactory[T]` and a `Protocol` per store.
   Memory backend for dev/test only.
 - TestNet until Phase 0 acceptance passes; mainnet is a config flip, done
@@ -136,3 +141,93 @@ Standard or Orchestrator. See `docs/x402-facilitator.md` for why.
 Registration itself requires real personal identity/legal attestation — an
 agent drafts and verifies the technical prerequisites, but does not submit
 the registration form unattended.
+
+### 9.1 Product roadmap (owner brainstorm, 2026-08-29 — numbered as named, not priority order)
+
+Every product below is a `require_payment()` consumer sharing the same gate,
+store-factory pattern, and settlement ledger — never new protocol code per
+product. **Phase 0 gates everything else**: nothing here starts until a real
+TestNet payment has actually round-tripped through `/api/v1/x402/list`
+(built, unit-tested, never yet run against a live wallet/facilitator as of
+this writing) and the mainnet flip (§4.2) is done. Do not let roadmap breadth
+become an excuse to defer proving the one thing the deadline depends on.
+
+1. **News Engine pay-per-call** — the existing newspaper's article/data feed
+   behind a micro-price. Reuses live data already in Cassandra; no new infra.
+2. **Paid visibility board** — agents pay to appear with a link back, free to
+   browse ("Million Dollar Homepage for bots"). Same shape as the directory.
+3. **x402 endpoint directory** — **in progress**. Pay to list, pay to boost
+   rank, agents pay for ranked JSON search, humans browse free. See §4.1/§5.1.
+4. **Feature-request board** — agents pay to request an endpoint and vote;
+   builders pay to read demand. Same shape as the directory.
+5. **Bounty version of the request board** — a vote is an escrowed payment,
+   released on a passing test. First smart contract (Algorand Python,
+   VibeKit) — do not install VibeKit before this item is actually started.
+6. **Endpoint grading** — agents pay a small stake to grade endpoints they
+   actually paid; paid score lookup. Already scoped in the build plan (§5.3).
+7. **Probe / monitoring** — scheduled micro-payments to every listed
+   endpoint, selling measured uptime/latency/spec-correctness. Already
+   scoped (§5.3). Probe traffic is flagged and excluded from every ranking —
+   this is the one deliberate exception to "no wash volume."
+8. **Know Your Bot (KYC/KYB)** — tiered bot/agent identity (wallet, web
+   identity, verified owner, behaviour), on-chain attestation, paid verify.
+   This is `modules/kyc/`, currently broken (a real, reproduced bug — see
+   `services/enrollment_service.py`/`api/routes.py`'s `declare_discovery_extension`
+   call passing a raw dict where the installed package requires `OutputConfig`).
+   **"KYB" here is Know Your Bot, not regulated Know Your Business** — see the
+   constraints note above. Do not conflate with real entity compliance.
+9. **Starter credit** — endpoint-funded trial USDC for newly-identified
+   agents. Real fund distribution to third parties — needs an explicit
+   abuse/sybil design before any code, not a subagent's unilateral call.
+10. **Paid work** — pay agents for verifiable tasks (probing, building) where
+    the x402 calls are a byproduct, not the point. Overlaps 5/19 — resolve
+    which owns the escrow primitive before building either twice.
+11. **Confidential-until-reveal payments** — stake-building: private now,
+    provably yours later, view keys for auditors. Real cryptography design
+    needed before any code.
+12. **Pay-per-MB storage** — S3-compatible upload/get/renew on a cheap
+    backend (Wasabi/B2/R2), plus pay-to-reveal for private data. Needs a
+    provider + cost-model decision first — real recurring infra spend.
+13. **Storage router** — one endpoint, store-by-intent (size, term,
+    durability, budget), routed across cheap providers + Arweave for
+    permanence. Depends on 12 existing first.
+14. **Storage price-discovery query** — "where should this blob go today,"
+    sold per query. Depends on 12/13's provider set existing.
+15. **Archival node / heavy indexer queries** — per call. New infra
+    (dedicated indexer/archival node) — cost decision needed first.
+16. **Inference per token** — a GPU box or wholesale LLM contract fronted by
+    x402. Real infra spend decision needed first; consider whether this
+    should route through the same providers `workers/` already pays for LLM
+    calls rather than a new contract.
+17. **Headless browsing / scraping pool** — per request. May be able to reuse
+    `workers/`'s existing Playwright infra (see `browser_reaper.py`'s
+    orphan-Chromium lessons — a paid, externally-triggered browsing endpoint
+    needs the SAME care about process lifecycle a bare script doesn't get).
+18. **Transaction simulation / fuzzing** — per run. Needs a simulate-endpoint
+    design (algod's own simulate API is the likely base) before any code.
+19. **Agent-to-agent job escrow** — pay when output passes a test. Overlaps
+    5/10 — same resolution needed on the shared escrow primitive.
+20. **Reputation / uptime-proof ledger** — endpoints pay to attach verified
+    proofs. Overlaps 7 (probe) — likely the same underlying data, a second
+    paid view of it, not a second measurement system.
+21. **USDC→EURQ swap route** — so agents pay euro-priced services without
+    noticing. Depends on Quantoz integration (Phase 2 in the original build
+    plan) — do not front-run this before 12/13's storage work or Phase 0.
+22. **EURQ liquidity/settlement data feed** — sold per query, useful to
+    Quantoz and the Foundation directly. Same Phase-2 dependency as 21.
+23. **Sponsored onboarding endpoint** — receive any asset with zero ALGO,
+    fees and opt-in covered atomically. Explicitly Phase 2 in the original
+    build plan (fee pooling + min-balance + opt-in in one atomic group,
+    ARC-59 inbox where supported) — real fund-pooling design, not a quick add.
+24. **~~Pay bots to execute x402 calls~~** — **rejected**, owner call: this is
+    wash volume by construction and the competition administrator explicitly
+    audits for and disqualifies exactly this pattern (§14 of the official
+    rules). Do not build, do not revisit without an explicit new owner
+    decision overriding this one.
+
+**Sequencing note**: items 1, 2, 4 are the cheapest next builds after Phase 0
+proves out — same shape as the directory, no new infra or fund-custody
+design required. Items 5/9/10/11/12/16/19/21/22/23 all need an explicit
+human design decision (financial exposure, new infra spend, or cryptography)
+before any agent starts writing code against them — flag and stop, don't
+guess and build.
