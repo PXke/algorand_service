@@ -94,15 +94,15 @@ def _run_one_round(
 
 def test_writer_and_research_default_off_the_experimental_vision_model() -> None:
     """Reverted 2026-08-28 (owner decision, Lumi Rogue): the vision-capable variant is an experimental release, and a real test of it produced an unused capture_screenshot result plus separate tool-discipline problems in the same compose. Both roles still get full tool access to capture_screenshot (research directly, writer via the revision pass and the legacy single-loop path) -- see llm_compose._compose_via_writer_tools_locked / _run_two_stage_compose -- capture_screenshot just returns an image_url without also feeding a vision follow-up on this model."""
-    assert DEEPSEEK_MODEL_WRITER == "deepseek-v4-flash-0731"
-    assert DEEPSEEK_MODEL_RESEARCH == "deepseek-v4-flash-0731"
+    assert DEEPSEEK_MODEL_WRITER == "deepseek-v4-flash"
+    assert DEEPSEEK_MODEL_RESEARCH == "deepseek-v4-flash"
 
 
 def test_digest_still_defaults_to_the_vision_model_translate_and_rubric_do_not() -> None:
     """2026-08-27 put all five DeepSeek call sites on one shared model string; 2026-08-28 pulled writer/research/translate/rubric back off it (owner decision -- distrust of the experimental variant, see config.py's DEEPSEEK_MODEL_WRITER comment), leaving digest as the only one still on vision-exp. `_supports_vision()` reading True for digest is harmless either way: it only gates OPTIONAL image embedding when a tool result actually carries an image_url, which digest never produces regardless of what the model can see."""
     assert DEEPSEEK_MODEL_DIGEST == "deepseek-v4-flash-vision-exp"
-    assert DEEPSEEK_MODEL_TRANSLATE == "deepseek-v4-flash-0731"
-    assert DEEPSEEK_MODEL_RUBRIC == "deepseek-v4-flash-0731"
+    assert DEEPSEEK_MODEL_TRANSLATE == "deepseek-v4-flash"
+    assert DEEPSEEK_MODEL_RUBRIC == "deepseek-v4-flash"
 
 
 # --------------------------------------------------------------------------- #
@@ -249,5 +249,5 @@ def test_multiple_tool_calls_in_one_round_keep_tool_messages_contiguous() -> Non
 def test_deepseek_provider_defaults_off_the_vision_model() -> None:
     """DeepSeekProvider() with no explicit model resolves to DEEPSEEK_MODEL_WRITER, reverted 2026-08-28 off the experimental vision-capable variant (see config.py's own comment) -- the vision mechanism itself still works, see test_deepseek_vision_model_supports_vision above, it's just not the default any more."""
     provider = DeepSeekProvider()
-    assert provider.model == "deepseek-v4-flash-0731"
+    assert provider.model == "deepseek-v4-flash"
     assert not provider._supports_vision()

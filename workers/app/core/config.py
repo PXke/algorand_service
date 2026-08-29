@@ -362,12 +362,20 @@ DEEPSEEK_API_BASE = env_str("DEEPSEEK_API_BASE", "https://api.deepseek.com").rst
 # og_image), alongside separate, unrelated tool-discipline problems in that
 # same compose (18 lookup_glossary_term calls, including repeated calls
 # against a term the tool had already explicitly said not to re-query).
-# Reverted to the stable dated snapshot, deepseek-v4-flash-0731, to test
+# Reverted to the stable non-vision model, deepseek-v4-flash, to test
 # whether that discipline improves without the experimental variant in the
-# loop. Both roles still get full tool access (writer_tools.all_tools, same
-# toolset backing the research loop, revision pass, and legacy single-loop
-# path) -- capture_screenshot itself just returns an image_url instead of
-# also feeding a real vision follow-up on this model (see
+# loop. (First attempt at this revert used the string
+# "deepseek-v4-flash-0731" -- there is no such model; DeepSeek's API 400s on
+# it. The API's own error enumerates the only valid names as
+# deepseek-v4-pro, deepseek-v4-flash, and deepseek-v4-flash-vision-exp.
+# Caught same-day via a recompose that came back status="mistral_failed"
+# instead of composing -- no data loss, since the 400 happens before any
+# compose content is produced, so nothing "finished" was ever at risk of
+# being discarded; see CLAUDE.md invariant #1.) Both roles still get full
+# tool access (writer_tools.all_tools, same toolset backing the research
+# loop, revision pass, and legacy single-loop path) -- capture_screenshot
+# itself just returns an image_url instead of also feeding a real vision
+# follow-up on this model (see
 # llm_openai_compatible.OpenAICompatibleProvider's _supports_vision hook).
 #
 # translate and rubric reverted alongside writer/research, same date and
@@ -380,10 +388,10 @@ DEEPSEEK_API_BASE = env_str("DEEPSEEK_API_BASE", "https://api.deepseek.com").rst
 # produce an image result either, so this experiment doesn't concern it;
 # splits the cache pool that decision unified, an accepted cost of testing
 # the others in isolation.
-DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-v4-flash-0731")
-DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-v4-flash-0731")
+DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-v4-flash")
+DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-v4-flash")
 DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-v4-flash-vision-exp")
-DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-v4-flash-0731")
+DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-v4-flash")
 # Per-language override: languages in this list translate via DeepSeek
 # (translate_article) instead of the local CPU engines, independent
 # of LLM_PROVIDER_TRANSLATE's global mistral/deepseek routing. Multi-article
@@ -429,7 +437,7 @@ DEEPSEEK_TRANSLATE_LANGS = frozenset(
 # blanket distrust-of-the-experimental-variant call, not new evidence
 # specific to grading. DEEPSEEK_MODEL_DIGEST is now the only one still on
 # vision-exp.
-DEEPSEEK_MODEL_RUBRIC = env_str("DEEPSEEK_MODEL_RUBRIC", "deepseek-v4-flash-0731")
+DEEPSEEK_MODEL_RUBRIC = env_str("DEEPSEEK_MODEL_RUBRIC", "deepseek-v4-flash")
 # DeepSeek's thinking mode returns reasoning in a separate reasoning_content
 # field, but BOTH reasoning_content and content draw from the same max_tokens
 # budget (visible as usage.completion_tokens_details.reasoning_tokens) —
