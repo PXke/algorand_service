@@ -354,29 +354,36 @@ MISTRAL_REASONING_EFFORT = env_str("MISTRAL_REASONING_EFFORT", "high")
 # `model` string.
 DEEPSEEK_API_KEY = env_str("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_BASE = env_str("DEEPSEEK_API_BASE", "https://api.deepseek.com").rstrip("/")
-# Writer and research both get real tool access to capture_screenshot (see
-# writer_tools.all_tools -- the same toolset backs the research loop, the
-# revision pass, and the legacy single-loop path), so both need the
-# vision-capable variant (released 2026-08-21, same token pricing as
-# deepseek-chat -- see llm_openai_compatible.OpenAICompatibleProvider's
-# _supports_vision hook for where the image actually gets embedded).
+# Writer and research moved OFF the vision-capable variant 2026-08-28 (owner
+# decision, Lumi Rogue): vision-exp is an experimental release, and the one
+# real-world test of it actually exercising vision was unconvincing --
+# capture_screenshot was called successfully but the result was never used
+# anywhere in the article (not described in prose, not even set as the
+# og_image), alongside separate, unrelated tool-discipline problems in that
+# same compose (18 lookup_glossary_term calls, including repeated calls
+# against a term the tool had already explicitly said not to re-query).
+# Reverted to the stable dated snapshot, deepseek-v4-flash-0731, to test
+# whether that discipline improves without the experimental variant in the
+# loop. Both roles still get full tool access (writer_tools.all_tools, same
+# toolset backing the research loop, revision pass, and legacy single-loop
+# path) -- capture_screenshot itself just returns an image_url instead of
+# also feeding a real vision follow-up on this model (see
+# llm_openai_compatible.OpenAICompatibleProvider's _supports_vision hook).
 #
-# 2026-08-27: digest/translate/rubric moved onto the SAME model too, even
-# though none of them ever produce an image tool result -- one model string
-# means every call this pipeline makes shares one cache pool instead of
-# splitting traffic (and therefore cache hit rate) across two. No cost
-# penalty either way (vision-exp is priced identically to the plain models
-# it replaces here). The one known wrinkle: a rare DeepSeek failure mode
-# (a reasoning-to-answer collapse returning a body-less completion) was
-# observed once on this model under a very large ~180k-token revision-scale
-# writer prompt -- digest/translate/rubric prompts are far smaller (a single
-# article, not an accumulated research transcript), so the exposure here is
-# expected to be much lower, but it's the same underlying model, worth
-# knowing if a similar empty-response failure ever shows up on these paths.
-DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-v4-flash-vision-exp")
-DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-v4-flash-vision-exp")
+# translate and rubric reverted alongside writer/research, same date and
+# same reason (owner decision -- distrust of the experimental variant
+# generally, not specific evidence against either of them, neither of which
+# ever gets tool access or produces an image result either way).
+#
+# DEEPSEEK_MODEL_DIGEST (below) is the only one still on vision-exp
+# (2026-08-27 decision, see git history) -- it doesn't get tool access or
+# produce an image result either, so this experiment doesn't concern it;
+# splits the cache pool that decision unified, an accepted cost of testing
+# the others in isolation.
+DEEPSEEK_MODEL_WRITER = env_str("DEEPSEEK_MODEL_WRITER", "deepseek-v4-flash-0731")
+DEEPSEEK_MODEL_RESEARCH = env_str("DEEPSEEK_MODEL_RESEARCH", "deepseek-v4-flash-0731")
 DEEPSEEK_MODEL_DIGEST = env_str("DEEPSEEK_MODEL_DIGEST", "deepseek-v4-flash-vision-exp")
-DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-v4-flash-vision-exp")
+DEEPSEEK_MODEL_TRANSLATE = env_str("DEEPSEEK_MODEL_TRANSLATE", "deepseek-v4-flash-0731")
 # Per-language override: languages in this list translate via DeepSeek
 # (translate_article) instead of the local CPU engines, independent
 # of LLM_PROVIDER_TRANSLATE's global mistral/deepseek routing. Multi-article
@@ -415,7 +422,14 @@ DEEPSEEK_TRANSLATE_LANGS = frozenset(
 # to one provider while keeping the rubric on another (e.g. DeepSeek's extra
 # research depth is worth it, but Mistral's rubric grading is trusted more
 # while DeepSeek's is newer/less proven).
-DEEPSEEK_MODEL_RUBRIC = env_str("DEEPSEEK_MODEL_RUBRIC", "deepseek-v4-flash-vision-exp")
+#
+# Reverted off vision-exp 2026-08-28 alongside writer/research/translate
+# (see config.py's DEEPSEEK_MODEL_WRITER comment) -- rubric never gets tool
+# access or produces an image result either way, so this is the same
+# blanket distrust-of-the-experimental-variant call, not new evidence
+# specific to grading. DEEPSEEK_MODEL_DIGEST is now the only one still on
+# vision-exp.
+DEEPSEEK_MODEL_RUBRIC = env_str("DEEPSEEK_MODEL_RUBRIC", "deepseek-v4-flash-0731")
 # DeepSeek's thinking mode returns reasoning in a separate reasoning_content
 # field, but BOTH reasoning_content and content draw from the same max_tokens
 # budget (visible as usage.completion_tokens_details.reasoning_tokens) —
