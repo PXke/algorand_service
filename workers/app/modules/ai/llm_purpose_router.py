@@ -1,4 +1,4 @@
-"""Purpose-based LLM routing: writer/research/digest/translate/rubric -> Mistral or DeepSeek.
+"""Purpose-based LLM routing: writer/research/digest/translate/rubric -> Mistral, DeepSeek, or GLM.
 
 Moved out of the now-deleted mistral_client.py backward-compat shim
 (2026-08-25, the mistral_* -> llm_* rename follow-up) -- this is the routing
@@ -8,6 +8,16 @@ concern. Deliberately kept in its own module rather than folded into
 llm_registry.py: that module's own docstring calls this purpose-based routing
 "orthogonal to" its direct name -> provider selection (get_provider("kimi") et
 al) -- different concerns, kept separate.
+
+GLM added 2026-08-29 (owner decision, live comparison against DeepSeek on the
+Lumi Rogue recompose) -- unlike DeepSeek, GLM has no per-purpose model knob
+(no GLM_MODEL_RESEARCH/DIGEST/TRANSLATE/RUBRIC), so every purpose that routes
+to glm shares GLM_MODEL_WRITER, same as how the standalone benchmark script
+(scripts/benchmark_compose_providers.py) already uses one model for both the
+research and writer tiers. The mistral<->deepseek canary flip below is
+guarded to a no-op when the resolved provider is glm -- there is no
+"canary between glm and something else" concept yet, only an explicit
+LLM_PROVIDER_<PURPOSE>=glm opt-in per purpose.
 
 PeakHoursBlockedError also lives here (not a real API failure -- see its own
 docstring) since it's raised by the same purpose-routed call sites this module
@@ -24,6 +34,7 @@ from app.core.config import (
     DEEPSEEK_MODEL_RUBRIC,
     DEEPSEEK_MODEL_TRANSLATE,
     DEEPSEEK_MODEL_WRITER,
+    GLM_API_KEY,
     LLM_PROVIDER_DIGEST,
     LLM_PROVIDER_DIGEST_CANARY_PCT,
     LLM_PROVIDER_RESEARCH,
@@ -41,6 +52,7 @@ from app.core.config import (
 )
 from app.modules.ai.llm_openai_compatible import (
     DeepSeekProvider,
+    GLMProvider,
     MistralProvider,
     OpenAICompatibleProvider,
 )
@@ -77,25 +89,32 @@ _PROVIDER_CONFIG: dict[str, tuple[str, int, str]] = {
 
 
 def _select_provider(purpose: str) -> str:
-    """Which provider actually serves this call: `purpose`'s configured default, or its canary alternate on a random roll (LLM_PROVIDER_<PURPOSE>_CANARY_PCT). Raises LLMError if that resolves to deepseek but DEEPSEEK_API_KEY is unset, rather than silently falling back to mistral -- Mistral is retired (see CLAUDE.md), so a silent fallback there used to mask a missing/rotated DeepSeek key as "composed fine, just on the wrong, retired provider" instead of failing loud the moment it happened."""
+    """Which provider actually serves this call: `purpose`'s configured default, or its canary alternate on a random roll (LLM_PROVIDER_<PURPOSE>_CANARY_PCT). Raises LLMError if that resolves to deepseek/glm but the matching API key is unset, rather than silently falling back to mistral -- Mistral is retired (see CLAUDE.md), so a silent fallback there used to mask a missing/rotated key as "composed fine, just on the wrong, retired provider" instead of failing loud the moment it happened. The canary flip only ever swaps between mistral and deepseek (its original, only meaning) -- a glm default is left alone since there is no "canary against glm" concept configured anywhere yet."""
     import random
 
     default_provider, canary_pct, _ = _PROVIDER_CONFIG[purpose]
     provider = default_provider
-    if canary_pct > 0 and random.random() * 100 < canary_pct:
+    if (
+        canary_pct > 0
+        and provider in ("deepseek", "mistral")
+        and random.random() * 100 < canary_pct
+    ):
         provider = "deepseek" if provider == "mistral" else "mistral"
     if provider == "deepseek" and not DEEPSEEK_API_KEY.strip():
         raise LLMError(
             f"LLM_PROVIDER_{purpose.upper()} resolved to deepseek but DEEPSEEK_API_KEY is not set"
         )
+    if provider == "glm" and not GLM_API_KEY.strip():
+        raise LLMError(f"LLM_PROVIDER_{purpose.upper()} resolved to glm but GLM_API_KEY is not set")
     return provider
 
 
 def _client_for_purpose(
     purpose: str, *, mistral_model: str, timeout: float | None = None
 ) -> OpenAICompatibleProvider:
-    """A client for `purpose` ("writer"/"research"/"digest"/"translate"), routed to Mistral or DeepSeek per that purpose's LLM_PROVIDER_<PURPOSE> config (+ canary). `mistral_model` is used when Mistral serves the call — same model as today's behavior when DeepSeek isn't configured, so this is a no-op change until DEEPSEEK_API_KEY is actually set."""
-    if _select_provider(purpose) == "deepseek":
+    """A client for `purpose` ("writer"/"research"/"digest"/"translate"/"rubric"), routed to Mistral, DeepSeek, or GLM per that purpose's LLM_PROVIDER_<PURPOSE> config (+ canary). `mistral_model` is used when Mistral serves the call — same model as today's behavior when DeepSeek/GLM isn't configured, so this is a no-op change until DEEPSEEK_API_KEY/GLM_API_KEY is actually set."""
+    provider = _select_provider(purpose)
+    if provider == "deepseek":
         _, _, deepseek_model = _PROVIDER_CONFIG[purpose]
         return DeepSeekProvider(
             api_key=DEEPSEEK_API_KEY,
@@ -103,6 +122,8 @@ def _client_for_purpose(
             model=deepseek_model,
             timeout=timeout,
         )
+    if provider == "glm":
+        return GLMProvider(timeout=timeout)
     return MistralProvider(model=mistral_model, timeout=timeout)
 
 

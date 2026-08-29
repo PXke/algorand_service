@@ -62,3 +62,40 @@ def test_select_provider_canary_to_deepseek_raises_on_missing_key(
 
     with pytest.raises(LLMError, match="DEEPSEEK_API_KEY"):
         router._select_provider("writer")
+
+
+def test_select_provider_raises_when_glm_key_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A purpose resolved to glm with no GLM_API_KEY set raises LLMError -- same fail-loud contract as deepseek, never a silent Mistral downgrade."""
+    monkeypatch.setattr(router, "GLM_API_KEY", "")
+    monkeypatch.setitem(router._PROVIDER_CONFIG, "writer", ("glm", 0, "deepseek-model"))
+
+    with pytest.raises(LLMError, match="GLM_API_KEY"):
+        router._select_provider("writer")
+
+
+def test_select_provider_returns_glm_when_key_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A purpose resolved to glm with a real key set returns "glm"."""
+    monkeypatch.setattr(router, "GLM_API_KEY", "glm-real-key")
+    monkeypatch.setitem(router._PROVIDER_CONFIG, "writer", ("glm", 0, "deepseek-model"))
+
+    assert router._select_provider("writer") == "glm"
+
+
+def test_select_provider_canary_never_flips_a_glm_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mistral<->deepseek canary flip is a no-op when the configured default is glm -- there is no "canary against glm" concept, so a glm purpose stays glm regardless of the random roll."""
+    monkeypatch.setattr(router, "GLM_API_KEY", "glm-real-key")
+    monkeypatch.setitem(router._PROVIDER_CONFIG, "writer", ("glm", 100, "deepseek-model"))
+    monkeypatch.setattr("random.random", lambda: 0.0)
+
+    assert router._select_provider("writer") == "glm"
+
+
+def test_client_for_purpose_builds_glm_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A purpose resolved to glm builds a GLMProvider, not a silent Mistral fallback."""
+    from app.modules.ai.llm_openai_compatible import GLMProvider
+
+    monkeypatch.setattr(router, "GLM_API_KEY", "glm-real-key")
+    monkeypatch.setitem(router._PROVIDER_CONFIG, "writer", ("glm", 0, "deepseek-model"))
+
+    client = router._client_for_purpose("writer", mistral_model="mistral-model")
+    assert isinstance(client, GLMProvider)
