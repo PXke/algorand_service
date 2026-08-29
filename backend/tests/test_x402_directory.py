@@ -22,6 +22,7 @@ from x402.schemas.responses import SupportedKind, SupportedResponse
 from x402.schemas.v1 import PaymentRequirementsV1
 from x402.server import x402ResourceServerSync
 
+from app.core import rate_limit as rate_limit_core
 from app.core.config import settings
 from app.core.http import QueryParams, Request, Response
 from app.modules.x402 import client as x402_client
@@ -31,7 +32,6 @@ from app.modules.x402 import replay as replay_module
 from app.modules.x402 import settlement as settlement_service
 from app.modules.x402.settlement import InMemorySettlementStore, SettlementRecord
 from app.modules.x402_directory.api import routes as directory_routes
-from app.modules.x402_directory.services import rate_limit as rate_limit_service
 from app.modules.x402_directory.services.listing_service import (
     ListingService,
     normalize_url,
@@ -162,7 +162,7 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     """Swap both Redis seams for one in-process fake shared by replay and rate limiting."""
     client = _FakeRedis()
     monkeypatch.setattr(replay_module, "get_redis", lambda **_kw: client)
-    monkeypatch.setattr(rate_limit_service, "get_redis", lambda **_kw: client)
+    monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: client)
     return client
 
 
@@ -577,7 +577,7 @@ def test_search_fails_open_when_redis_is_down(
     store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A Redis outage must not take the free directory read offline."""
-    monkeypatch.setattr(rate_limit_service, "get_redis", lambda **_kw: _BrokenRedis())
+    monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: _BrokenRedis())
     monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
 
     result = directory_routes.x402_search(
