@@ -161,6 +161,30 @@ def test_require_payment_has_no_bazaar_declaration_when_extensions_omitted(
     assert not (payment_required.extensions or {}).get("bazaar")
 
 
+def test_kyc_routes_declare_discovery_extension_without_raising() -> None:
+    """Regression: both KYC paid routes build their Bazaar discovery extension with a real AttributeError before this fix -- output={"example": ...} is a plain dict, but the installed package reads output.example as an attribute, not a dict key. Calling the exact route module's import + the same declare_discovery_extension(...) call shape each route uses must not raise."""
+    from x402.extensions.bazaar import declare_discovery_extension
+    from x402.extensions.bazaar.resource_service import OutputConfig
+
+    # Same shape as kyc_test_ping's extensions= argument.
+    declare_discovery_extension(
+        input={}, input_schema={}, output=OutputConfig(example={"ok": True, "paid_by": "..."})
+    )
+    # Same shape as kyc_verify's extensions= argument.
+    declare_discovery_extension(
+        input={"wallet": "ALGORAND_ADDRESS"},
+        input_schema={"properties": {"wallet": {"type": "string"}}, "required": ["wallet"]},
+        output=OutputConfig(
+            example={
+                "enrolled": True,
+                "wallet_address": "...",
+                "kyc_level": "basic",
+                "payout_status": "sent",
+            }
+        ),
+    )
+
+
 @pytest.mark.skipif(
     os.environ.get("X402_TESTNET_INTEGRATION") != "1",
     reason="needs a funded Algorand TestNet payer + reachable facilitator "

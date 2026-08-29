@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from x402.extensions.bazaar import declare_discovery_extension
+from x402.extensions.bazaar.resource_service import OutputConfig
 
 from app.core import serialization
 from app.core.config import settings
@@ -37,7 +38,13 @@ def kyc_test_ping(request: Request) -> Response:
         price="$0.01",
         resource="kyc-ping",
         extensions=declare_discovery_extension(
-            input={}, input_schema={}, output={"example": {"ok": True, "paid_by": "..."}}
+            input={},
+            input_schema={},
+            # OutputConfig, not a bare dict: the package reads `output.example`
+            # as an attribute -- a raw dict here 500s the route with an
+            # AttributeError before it ever reaches the payment gate. Real,
+            # reproduced bug (found 2026-08-29 building x402_directory).
+            output=OutputConfig(example={"ok": True, "paid_by": "..."}),
         ),
     )
     if result.error:
@@ -98,14 +105,16 @@ def kyc_verify(request: Request) -> Response:
                 "properties": {"wallet": {"type": "string"}},
                 "required": ["wallet"],
             },
-            output={
-                "example": {
+            # OutputConfig, not a bare dict -- see kyc_test_ping's identical fix
+            # above for why a raw dict here 500s the route.
+            output=OutputConfig(
+                example={
                     "enrolled": True,
                     "wallet_address": "...",
                     "kyc_level": "basic",
                     "payout_status": "sent",
                 }
-            },
+            ),
         ),
     )
     if result.error:
