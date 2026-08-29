@@ -26,9 +26,11 @@ from app.core.config import settings
 from app.core.http import QueryParams, Request, Response
 from app.modules.x402 import client as x402_client
 from app.modules.x402 import guard as x402_guard
+from app.modules.x402 import paid_request as payment_service
+from app.modules.x402 import replay as replay_module
+from app.modules.x402 import settlement as settlement_service
+from app.modules.x402.settlement import InMemorySettlementStore, SettlementRecord
 from app.modules.x402_directory.api import routes as directory_routes
-from app.modules.x402_directory.models.domain import SettlementRecord
-from app.modules.x402_directory.services import payment as payment_service
 from app.modules.x402_directory.services import rate_limit as rate_limit_service
 from app.modules.x402_directory.services.listing_service import (
     ListingService,
@@ -133,8 +135,18 @@ def _request(
 
 @pytest.fixture
 def store() -> InMemoryListingStore:
-    """A fresh in-memory listing store and settlement ledger per test."""
+    """A fresh in-memory listing store per test."""
     return InMemoryListingStore()
+
+
+@pytest.fixture
+def settlement_store() -> InMemorySettlementStore:
+    """A fresh in-memory settlement ledger per test.
+
+    Separate from the listing store since 2026-08-30 (settlement.py moved out
+    of x402_directory, see its own module docstring).
+    """
+    return InMemorySettlementStore()
 
 
 @pytest.fixture
@@ -149,7 +161,7 @@ def testnet_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     """Swap both Redis seams for one in-process fake shared by replay and rate limiting."""
     client = _FakeRedis()
-    monkeypatch.setattr(payment_service, "get_redis", lambda **_kw: client)
+    monkeypatch.setattr(replay_module, "get_redis", lambda **_kw: client)
     monkeypatch.setattr(rate_limit_service, "get_redis", lambda **_kw: client)
     return client
 
@@ -238,15 +250,15 @@ def _settled_result() -> x402_guard.PaymentResult:
 
 
 def test_settlement_is_written_to_the_ledger_with_every_required_field(
-    store: InMemoryListingStore,
+    settlement_store: InMemorySettlementStore,
 ) -> None:
     """Every settled payment lands in the ledger with asset id, amount, txid, payer, resource, UTC timestamp and EUR value."""
-    payment_service.record_settlement(
-        _settled_result(), resource="x402-directory-list", store=store
+    settlement_service.record_settlement(
+        _settled_result(), resource="x402-directory-list", store=settlement_store
     )
 
-    assert len(store.settlements) == 1
-    record = store.settlements[0]
+    assert len(settlement_store.settlements) == 1
+    record = settlement_store.settlements[0]
     assert record.tx_id == "TX123"
     assert record.asset_id == "10458941"
     assert record.amount_atomic == "100000"
@@ -262,12 +274,12 @@ def test_a_ledger_write_failure_never_drops_the_paid_response(
 ) -> None:
     """A settled payment whose ledger write fails is logged loudly and does NOT raise — the paid response must still be served."""
 
-    class _BrokenStore(InMemoryListingStore):
+    class _BrokenStore(InMemorySettlementStore):
         def record_settlement(self, item: SettlementRecord) -> Never:  # noqa: ARG002 -- signature must match the Protocol
             raise RuntimeError("cassandra down")
 
     with caplog.at_level("ERROR"):
-        payment_service.record_settlement(
+        settlement_service.record_settlement(
             _settled_result(), resource="x402-directory-list", store=_BrokenStore()
         )
 
@@ -280,7 +292,7 @@ def test_a_ledger_write_failure_never_drops_the_paid_response(
 @pytest.mark.usefixtures("testnet_settings")
 def test_a_replayed_payment_header_is_rejected_before_reaching_settle(
     fake_redis: _FakeRedis,
-    store: InMemoryListingStore,
+    settlement_store: InMemorySettlementStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A payment header already claimed is rejected with 409 without the gate — and so the facilitator's settle — ever running again."""
@@ -292,11 +304,11 @@ def test_a_replayed_payment_header_is_rejected_before_reaching_settle(
 
     request = _request(headers={"PAYMENT-SIGNATURE": "spent-header"})
     # Pre-claim the header, as a first, successful request would have.
-    fake_redis.set(payment_service._replay_key("spent-header"), "1", nx=True, ex=900)
+    fake_redis.set(replay_module._replay_key("spent-header"), "1", nx=True, ex=900)
     monkeypatch.setattr(payment_service, "require_payment", _never_gate)
 
     result = payment_service.require_paid_request(
-        request, price="$0.10", resource="x402-directory-list", store=store
+        request, price="$0.10", resource="x402-directory-list", settlement_store=settlement_store
     )
 
     assert result.error is not None
@@ -306,7 +318,9 @@ def test_a_replayed_payment_header_is_rejected_before_reaching_settle(
 
 
 def test_replay_claim_ttl_is_at_least_twice_the_facilitator_timeout(
-    fake_redis: _FakeRedis, store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+    fake_redis: _FakeRedis,
+    settlement_store: InMemorySettlementStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The replay key outlives two full facilitator timeouts, so a header cannot be re-presented while the first settle is still in flight."""
     from x402.http.facilitator_client_base import FacilitatorConfig
@@ -317,16 +331,18 @@ def test_replay_claim_ttl_is_at_least_twice_the_facilitator_timeout(
         _request(headers={"PAYMENT-SIGNATURE": "fresh-header"}),
         price="$0.10",
         resource="x402-directory-list",
-        store=store,
+        settlement_store=settlement_store,
     )
 
-    key = payment_service._replay_key("fresh-header")
+    key = replay_module._replay_key("fresh-header")
     assert fake_redis.store[key] == "1"
     assert fake_redis.expires[key] >= 2 * FacilitatorConfig().timeout
 
 
 def test_a_failed_payment_releases_its_claim_so_a_retry_is_not_burned(
-    fake_redis: _FakeRedis, store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+    fake_redis: _FakeRedis,
+    settlement_store: InMemorySettlementStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A header whose payment never settled is un-claimed, so the payer can retry it."""
     from app.core.http_errors import json_error_response
@@ -343,28 +359,28 @@ def test_a_failed_payment_releases_its_claim_so_a_retry_is_not_burned(
         _request(headers={"PAYMENT-SIGNATURE": "unlucky-header"}),
         price="$0.10",
         resource="x402-directory-list",
-        store=store,
+        settlement_store=settlement_store,
     )
 
-    assert payment_service._replay_key("unlucky-header") not in fake_redis.store
+    assert replay_module._replay_key("unlucky-header") not in fake_redis.store
 
 
 def test_replay_check_fails_open_when_redis_is_down(
-    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+    settlement_store: InMemorySettlementStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A Redis outage must not take the paid endpoint offline — the payment still goes through."""
-    monkeypatch.setattr(payment_service, "get_redis", lambda **_kw: _BrokenRedis())
+    monkeypatch.setattr(replay_module, "get_redis", lambda **_kw: _BrokenRedis())
     monkeypatch.setattr(payment_service, "require_payment", lambda *_a, **_kw: _settled_result())
 
     result = payment_service.require_paid_request(
         _request(headers={"PAYMENT-SIGNATURE": "any-header"}),
         price="$0.10",
         resource="x402-directory-list",
-        store=store,
+        settlement_store=settlement_store,
     )
 
     assert result.error is None
-    assert len(store.settlements) == 1
+    assert len(settlement_store.settlements) == 1
 
 
 # --------------------------------------------------------------------------- #

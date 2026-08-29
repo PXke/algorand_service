@@ -1,4 +1,9 @@
-"""Domain types for directory listings and the settlement ledger."""
+"""Domain types for directory listings.
+
+The settlement ledger's SettlementRecord moved to modules/x402/settlement.py
+2026-08-30 -- it was never actually directory-specific, see that module's
+docstring.
+"""
 
 from __future__ import annotations
 
@@ -33,20 +38,3 @@ class StoredListing:
     created_at_epoch: int
     assets: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
-
-
-@dataclass
-class SettlementRecord:
-    """One settled x402 payment, for the bookkeeping ledger (CLAUDE.md section 9)."""
-
-    tx_id: str
-    asset_id: str
-    amount_atomic: str
-    payer: str
-    resource: str
-    network: str
-    settled_at_epoch: int
-    # EUR value at settlement time. Always 0.0 today: no FX lookup is built, and
-    # a visible zero is preferable to an absent column that later reads as
-    # "this settlement had no value".
-    eur_value: float = 0.0

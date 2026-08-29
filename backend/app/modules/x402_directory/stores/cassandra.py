@@ -1,4 +1,4 @@
-"""Cassandra-backed x402 directory listing and settlement storage."""
+"""Cassandra-backed x402 directory listing storage."""
 
 from __future__ import annotations
 
@@ -6,11 +6,7 @@ from datetime import UTC, datetime
 
 from app.core.cassandra import get_cassandra_session
 from app.core.statements import X402DirectoryStmts
-from app.modules.x402_directory.models.domain import (
-    DIRECTORY_PARTITION,
-    SettlementRecord,
-    StoredListing,
-)
+from app.modules.x402_directory.models.domain import DIRECTORY_PARTITION, StoredListing
 
 
 def _dt(epoch: int) -> datetime:
@@ -37,7 +33,7 @@ def _row_to_listing(row: object) -> StoredListing:
 
 
 class CassandraListingStore:
-    """Cassandra-backed x402 directory listing and settlement storage."""
+    """Cassandra-backed x402 directory listing storage."""
 
     def upsert(self, item: StoredListing) -> None:
         """Create or replace the listing for one endpoint URL, feed projection included.
@@ -103,22 +99,3 @@ class CassandraListingStore:
         session = get_cassandra_session()
         rows = session.execute(X402DirectoryStmts.LIST_RECENT, (DIRECTORY_PARTITION, limit))
         return [_row_to_listing(row) for row in rows]
-
-    def record_settlement(self, item: SettlementRecord) -> None:
-        """Append one settled payment to the bookkeeping ledger."""
-        session = get_cassandra_session()
-        settled_at = _dt(item.settled_at_epoch)
-        session.execute(
-            X402DirectoryStmts.INSERT_SETTLEMENT,
-            (
-                settled_at.strftime("%Y-%m-%d"),
-                settled_at,
-                item.tx_id,
-                item.asset_id,
-                item.amount_atomic,
-                item.payer,
-                item.resource,
-                item.network,
-                item.eur_value,
-            ),
-        )

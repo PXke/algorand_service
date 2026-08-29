@@ -17,9 +17,9 @@ from app.core.config import settings
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
+from app.modules.x402.paid_request import require_paid_request
 from app.modules.x402_directory.models.domain import DirectoryError, StoredListing
 from app.modules.x402_directory.services.listing_service import ListingService
-from app.modules.x402_directory.services.payment import require_paid_request
 from app.modules.x402_directory.services.rate_limit import search_rate_limited
 from app.schemas import X402ListingRequest
 

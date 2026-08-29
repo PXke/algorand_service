@@ -826,6 +826,16 @@ class X402DirectoryStmts:
         "FROM algorand_platform.x402_listings_by_recency "
         "WHERE directory = ? LIMIT ?"
     )
+
+
+class X402Stmts:
+    """Prepared statements shared by every x402-gated module (modules/x402/).
+
+    Not directory-specific, despite the table being defined in migration 090
+    (the directory was simply the first paid module built). See
+    modules/x402/settlement.py.
+    """
+
     INSERT_SETTLEMENT = _Stmt(
         "INSERT INTO algorand_platform.x402_settlements ("
         "day, settled_at, tx_id, asset_id, amount_atomic, payer, resource, "

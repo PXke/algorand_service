@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from app.modules.x402_directory.models.domain import SettlementRecord, StoredListing
+from app.modules.x402_directory.models.domain import StoredListing
 
 
 class InMemoryListingStore:
-    """In-memory x402 directory listing and settlement storage."""
+    """In-memory x402 directory listing storage."""
 
     def __init__(self) -> None:
-        """Start with an empty listing table and settlement ledger."""
+        """Start with an empty listing table."""
         self._items: dict[str, StoredListing] = {}
-        self.settlements: list[SettlementRecord] = []
 
     def upsert(self, item: StoredListing) -> None:
         """Create or replace the listing for one endpoint URL."""
@@ -30,7 +29,3 @@ class InMemoryListingStore:
         """
         ordered = sorted(self._items.values(), key=lambda i: (-i.created_at_epoch, i.url_hash))
         return ordered[: max(0, limit)]
-
-    def record_settlement(self, item: SettlementRecord) -> None:
-        """Append one settled payment to the bookkeeping ledger."""
-        self.settlements.append(item)
