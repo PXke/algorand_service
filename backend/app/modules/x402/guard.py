@@ -78,14 +78,14 @@ def _instructions_to_response(instr: HTTPResponseInstructions) -> Response:
     return Response(status_code=instr.status, headers=instr.headers, description=body)
 
 
-def _resource_url(request: Request, resource: str) -> str:
+def _resource_url(request: Request, resource: str, resource_path: str | None = None) -> str:
     """The absolute public URL a 402 offer advertises for this route.
 
     Built from the configured public API base plus the request path; falls
     back to the short ledger id only when the request carries no path (a
     bare test Request), so a real request always advertises a real URL.
     """
-    path = request.url.path or ""
+    path = resource_path or request.url.path or ""
     if not path:
         return resource
     return f"{settings.x402_public_api_base.rstrip('/')}{path}"
@@ -98,8 +98,13 @@ def require_payment(
     resource: str,
     description: str | None = None,
     extensions: dict[str, Any] | None = None,
+    resource_path: str | None = None,
 ) -> PaymentResult:
     """Gate a Falcon handler behind an x402 payment.
+
+    `resource_path` overrides the advertised path for routes with a path
+    parameter (e.g. "/api/v1/x402/features/{request_id}/vote"), so the
+    Bazaar catalogs one template entry rather than one per parameter value.
 
     `price` is a Money string, e.g. "$0.01" — the base price, always in US
     dollars. It is offered in every asset this marketplace accepts (USDC first,
@@ -128,7 +133,7 @@ def require_payment(
     # ledger records.
     route_config = RouteConfig(
         accepts=offer.options,
-        resource=_resource_url(request, resource),
+        resource=_resource_url(request, resource, resource_path),
         description=_describe(description, offer.preference_note()),
         mime_type="application/json",
         extensions=extensions,

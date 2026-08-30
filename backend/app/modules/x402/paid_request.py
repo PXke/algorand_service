@@ -75,6 +75,7 @@ def require_paid_request(
     resource: str,
     description: str | None = None,
     extensions: dict[str, Any] | None = None,
+    resource_path: str | None = None,
     settlement_store: SettlementStore | None = None,
 ) -> PaymentResult:
     """Run the shared payment gate with replay protection and settlement logging.
@@ -102,6 +103,7 @@ def require_paid_request(
         resource=resource,
         description=description,
         extensions=extensions,
+        resource_path=resource_path,
     )
     if result.error is not None:
         # Nothing settled, so the header was never spent — free the claim rather

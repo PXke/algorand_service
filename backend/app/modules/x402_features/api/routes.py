@@ -161,6 +161,7 @@ def x402_features_vote(request: Request) -> Response:
         request,
         price=settings.x402_features_vote_price,
         resource="x402-features-vote",
+        resource_path="/api/v1/x402/features/{request_id}/vote",
         # The payer needs to know before committing that this is additive and
         # repeatable, not a toggle they might be paying to flip twice.
         description=(
