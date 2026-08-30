@@ -264,14 +264,15 @@ class Settings(msgspec.Struct, kw_only=True):
     # counts votes, and a count is only amount-weighted while every vote costs
     # the same (see FeatureService.vote).
     x402_features_vote_price: str = "$0.02"
-    # Fee to read the ranked demand signal. The most expensive surface in the
-    # module by an order of magnitude, and the only one priced above the other
-    # products' write fees: it is the aggregate of every vote every agent has
-    # paid for, so a builder reading it is buying the whole board's accumulated
-    # paid signal rather than performing one write. It is also the only read
-    # here that resells other payers' contributions, which is what makes it
-    # worth more than a nickel.
-    x402_features_demand_price: str = "$0.25"
+    # Fee to read the ranked demand signal. Still the most expensive surface
+    # in the module (it resells every vote every agent has paid for, not one
+    # write), but cut from $0.25 to $0.05 on 2026-08-30 -- $0.25 was an outlier
+    # against every other paid-read price point in the marketplace (board
+    # placement, feature request, KYC lookup all sit at $0.05), and a price
+    # that high directly suppresses the paid-intent volume the competition's
+    # Volume score is counting. $0.05 keeps it priced above a single vote
+    # while matching the marketplace's established paid-read tier.
+    x402_features_demand_price: str = "$0.05"
     # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
     # endpoint per IP), counted under its own key prefix, not the search or
     # board one. The paid demand read is not counted against this.
@@ -307,12 +308,15 @@ class Settings(msgspec.Struct, kw_only=True):
     # the fee is high enough that honest agents skip them. Flooding is bounded
     # by the one-grade-per-(grader, url) rule rather than by price.
     x402_grading_grade_price: str = "$0.02"
-    # Fee to read one endpoint's aggregate score. 5x the grade fee: a grade is
-    # one data point and this is every grader's paid contribution to that
-    # endpoint at once, the same reasoning that puts the feature board's demand
-    # read above its vote. Below that demand read's $0.25 because this returns
-    # one endpoint's score rather than the whole board's ranking.
-    x402_grading_score_price: str = "$0.10"
+    # Fee to read one endpoint's aggregate score. Still priced above the grade
+    # fee (an aggregate read is worth more than one contributed data point),
+    # but cut from $0.10 to $0.03 on 2026-08-30 against a real external
+    # comparable: Verun, the Berlin-hackathon-winning agent-trust-score
+    # product doing the same thing on Algorand, charges $0.01 per verdict --
+    # $0.10 was 10x that for a directly comparable read, which both looks
+    # uncompetitive and suppresses the paid-intent volume the competition's
+    # Volume score counts.
+    x402_grading_score_price: str = "$0.03"
     # Free-endpoint abuse gate (CLAUDE.md section 9: rate limit every free
     # endpoint per IP), counted under its own key prefix, not the search,
     # board or features one.
