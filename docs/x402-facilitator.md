@@ -63,10 +63,43 @@ Sources: [Official Rules PDF](https://algorand.co/hubfs/x402%20competition%20Off
   - `GET {base}/supported` (called once at process startup by
     `get_resource_server()` in `modules/x402/client.py` — do not call this
     per-request)
-- Dashboard/leaderboard (from the submission guide, exact paths unverified
-  live — check before relying on them): `{base}/dashboard`,
-  `{base}/dashboard/leaderboards`, `{base}/discovery/resources`,
-  `{base}/discovery/merchants`.
+- Public read endpoints, **all confirmed live 2026-08-30** by fetching them
+  (no auth needed):
+  - `GET {base}/` — endpoint index (lists everything below).
+  - `GET {base}/docs/openapi.json` — the facilitator's OpenAPI document.
+  - `GET {base}/data/leaderboards?cat=<merchants|resources|payers|assets|networks|countries>&range=ALL&limit=<n ≤ 50>&offset=<n>`
+    — the leaderboard data behind the UI, one category per call.
+  - `GET {base}/data/merchants/{id}` — one merchant's roll-up. Our merchant
+    id is `3e5946af2c9756b6` (keyed on `payTo`, so every route sharing our
+    `payTo` rolls up under it — the Composite category in practice).
+  - `GET {base}/data/transactions` — settled transactions.
+  - `GET {base}/api/receipt/{txId}` — the receipt for one settlement.
+  - Bazaar catalog: `GET {base}/discovery/resources`,
+    `GET {base}/discovery/merchants`, `GET {base}/discovery/all`.
+  - UI: `{base}/dashboard` and `{base}/dashboard/leaderboards?cat=resources`.
+
+### How a route gets into the Bazaar (verified live 2026-08-30)
+
+The facilitator catalogs a resource in the Bazaar **from the 402 offer's
+`resource.url`, after a settlement** on it. Two consequences, both observed
+on our own merchant entry:
+
+- A settlement whose offer carried a non-URL `resource` (e.g. the bare ledger
+  id `x402-directory-list`) **settles fine and counts on the leaderboard**
+  (`challenge: true`, because the tag rides on the asset's `extra`) but is
+  **never catalogued** (`bazaar: false`) — there is no URL to catalog.
+- Only an offer whose `resource.url` is an absolute public URL gets a Bazaar
+  entry, and it gets one **per distinct URL**, so a templated route must
+  advertise its template, not one URL per path-parameter value.
+
+`backend/app/modules/x402/guard.py` therefore advertises
+`settings.x402_public_api_base` + the request path as the offer's
+`resource.url` (`_resource_url`), while the short id passed as `resource=`
+stays what the settlement ledger records. Routes with a path parameter pass
+`resource_path=` to override the advertised path with the template (the
+feature-vote route advertises `/api/v1/x402/features/{request_id}/vote`).
+After this change our merchant reads `bazaar: true` with 7 challenge-tagged
+settlements.
 
 ## CAIP-2 network ids and USDC asset ids
 
@@ -132,22 +165,47 @@ requirement.
 
 ## Bazaar discovery extension
 
-Confirmed from `x402/extensions/bazaar/resource_service.py` (already in
-active use, `modules/kyc/api/routes.py`):
+Confirmed from `x402/extensions/bazaar/resource_service.py` (in active use
+by every paid module: `modules/x402_directory/`, `x402_board/`,
+`x402_features/`, `x402_grading/`, `x402_news/`, `modules/kya/api/routes.py`).
+
+**Do not call `declare_discovery_extension(..., output={"example": ...})`
+with a bare dict** — that is what the submission guide shows, and it 500s the
+route before it ever emits a 402: the installed `x402-avm==2.0.2` reads
+`output.example` as an attribute, so `output` must be an `OutputConfig`. Both
+KYA paid routes shipped with that bug (fixed 2026-08-30). The repo's wrapper
+`modules/x402/discovery.py:describe_json_endpoint` makes the mistake
+structurally impossible, so always go through it:
 
 ```python
-from x402.extensions.bazaar import declare_discovery_extension
+from app.modules.x402.discovery import describe_json_endpoint
 
-declare_discovery_extension(
-    input={...},          # example input: query params (GET/HEAD/DELETE) or body (POST/PUT/PATCH)
-    input_schema={...},   # JSON Schema for the input
-    output={"example": {...}},
+describe_json_endpoint(
+    body_type="json",        # POST/PUT/PATCH whose input is a JSON body; omit for
+                             # GET/HEAD/DELETE (query-params extension, the default)
+    input={...},             # example input
+    input_schema={...},      # JSON Schema for the input
+    output_example={...},    # wrapped into OutputConfig(example=...) for you
 )
 ```
 
-HTTP method is inferred from the route, not passed explicitly. Pass the
-result as `RouteConfig.extensions` in `require_payment(...)` — see
-`modules/x402/guard.py`'s existing usage.
+which is, underneath:
+
+```python
+from x402.extensions.bazaar import declare_discovery_extension
+from x402.extensions.bazaar.resource_service import OutputConfig
+
+declare_discovery_extension(
+    input=..., input_schema=..., body_type=...,
+    output=OutputConfig(example={...}),
+)
+```
+
+`body_type="json"` matters: without it the package builds a query-params
+extension, which describes a body-taking POST incorrectly. HTTP method is
+inferred from the route, not passed explicitly. Pass the result as
+`extensions=` to `require_payment(...)` / `require_paid_request(...)`, which
+sets `RouteConfig.extensions` — see `modules/x402/guard.py`.
 
 Full merchant-level registration (`bazaar_resource_server_extension`) is
 already wired once, process-wide, in `get_resource_server()` — new modules
@@ -272,11 +330,16 @@ was already correct.
 - Exact response shape of `{base}/verify` and `{base}/settle` beyond what
   `facilitator_client.py`'s typed wrappers already assume — trust the
   package's parsing, don't hand-roll a second interpretation.
-- Dashboard/leaderboard URL paths (`/dashboard/leaderboards` etc.) — listed
-  above from secondary-source scraping, not confirmed against a live
-  response.
+- ~~Dashboard/leaderboard URL paths~~ — **verified live 2026-08-30**, see the
+  endpoint list in the GoPlausible section above. The full response schemas
+  of `/data/*` and `/discovery/*` beyond the fields we read (`challenge`,
+  `bazaar`, merchant id, settlement counts) are not documented here — read
+  `{base}/docs/openapi.json` rather than trusting a paraphrase.
 - Whether the leaderboard counts *only* facilitator-settled payments (assumed
   yes, per the rules' own framing of "processed through the submitted x402
-  endpoint") — plain wallet transfers almost certainly do not count.
+  endpoint") — plain wallet transfers almost certainly do not count. What
+  *is* confirmed: a facilitator-settled payment on an offer carrying the tag
+  shows as `challenge: true` on our merchant entry whether or not the route
+  was Bazaar-catalogued.
 - EURQ/USDQ/USDT asset ids — not in any official material, needs its own
   research pass if pursued.

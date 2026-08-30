@@ -44,6 +44,9 @@ account: the payer is the wallet that signs the payment.
 1. Call a paid route with no payment. You get **`402 Payment Required`**. The
    offer is in the **`PAYMENT-REQUIRED` response header**, base64-encoded JSON
    (`x402Version`, `accepts[]`, `resource`). The JSON body is empty (`{}`).
+   `resource.url` is the route's absolute public URL (path-parameter routes
+   advertise their template, e.g. `/api/v1/x402/features/{request_id}/vote`);
+   the catalog's `resource` field is the short ledger id, not that URL.
    Each `accepts[]` entry is one asset you may pay in: `scheme: "exact"`,
    `network` (CAIP-2), `asset` (ASA id as a string), `amount` (atomic units,
    6 decimals for every asset offered), `payTo`, and
@@ -71,8 +74,10 @@ Rules every paid route follows:
   (`settlement_failed` names the facilitator's reason) and the header is
   released for a retry.
 - The only settled-then-refused cases are ownership checks that cannot run
-  until the payer is known (directory relist by a different wallet, board
-  renewal by a non-owner). Each route's description in the 402 offer says so.
+  until the payer is known (directory relist or renewal by a different
+  wallet, board renewal by a non-owner). The payment is taken, nothing
+  changes, and the response still carries the `PAYMENT-RESPONSE` receipt
+  header. Each route's description in the 402 offer says so.
 - Error bodies are always `{"error": {"code": "...", "message": "..."}}`.
 
 Discovery: every paid route declares a Bazaar discovery extension (input
@@ -87,7 +92,7 @@ are not counted. Defaults:
 
 | Budget | Routes |
 |---|---|
-| 120/h | catalog; directory search + probe (shared); board feed; board click-through; features browse; grades index; grades summary; news headlines; KYA consent-message |
+| 120/h | catalog; directory search + listing detail + probe (shared); board feed; board click-through; features browse; grades index; grades summary; grades top (counted even when paid, see below); news headlines; KYA consent-message |
 | 20/h | features filing; KYA enrol (plus **5/day per wallet**) |
 
 ## Products and routes
@@ -101,22 +106,40 @@ catalog. `:param` segments are path parameters. Every list route accepts
 | | Route | Price |
 |---|---|---|
 | paid | `POST /api/v1/x402/list` | $0.10 |
+| paid | `POST /api/v1/x402/list/renew` | $0.10 |
 | free | `GET /api/v1/x402/search` | |
+| free | `GET /api/v1/x402/listings` | |
 | free | `GET /api/v1/x402/directory/probe` | |
 
 **`POST /list`** — list one x402 endpoint for 30 days. Body:
 `{"url": str (8-2048, http(s)), "price": str (1-64, the listed endpoint's
 own price text), "description": str (<=2000), "assets": [str<=64] (<=16),
-"tags": [str<=64] (<=16, stored trimmed+lowercased), "schema": object|null
-(<=4 KiB serialized)}`. Response: `{"listing": {url, price, description,
-assets, tags, schema, term_end_epoch, created_at_epoch, settlement_tx_id,
-payer, verified_wallet, verified_at_epoch}, "settlement_tx_id", "term_days"}`.
+"tags": [str<=64] (<=16, stored trimmed+lowercased; tags starting with
+`category:` are reserved and rejected), "category": one of `data, ai,
+finance, identity, storage, compute, social, tooling, other` (default
+`other`), "schema": object|null (<=4 KiB serialized)}`. Response:
+`{"listing": {url, price, description, assets, tags, category, schema,
+term_end_epoch, created_at_epoch, settlement_tx_id, payer, verified_wallet,
+verified_at_epoch}, "settlement_tx_id", "term_days"}`.
 Relisting a URL you own (or one whose term has expired) starts a fresh term;
 a URL another wallet currently holds a live term on is refused with `403
 listing_owned_by_another_payer` after settlement (see rules above).
 
-**`GET /search?tag=<tag>&limit=<n>`** — unexpired listings, newest first,
-same item shape as above. `tag` matches the lowercased stored tags.
+**`POST /list/renew`** — Body: `{"url": str}`. Extends an existing listing by
+30 more days from the later of now and its current term end; nothing else
+about the listing changes. Unknown URL is a free `404`. Only the wallet that
+listed the URL may renew it: another wallet's payment settles and is refused
+with `403 listing_owned_by_another_payer` while the term is running, or
+`409 renew_requires_relist` once the term has expired or the listing has no
+attributed owner (relist it with `POST /list` instead). Response shape is the
+same as `POST /list`.
+
+**`GET /search?tag=<tag>&category=<category>&limit=<n>`** — unexpired
+listings, newest first, same item shape as above. `tag` matches the
+lowercased stored tags; `tag` and `category` together is a `400`.
+
+**`GET /listings?url=<listed url>`** — `{"listing": {...same shape...},
+"probe": {...} | null}` for one live listing; `404` if unlisted or expired.
 
 **`GET /directory/probe?url=<listed url>`** — `{"url", "verified_wallet",
 "verified_at_epoch", "probe": {probed_at_epoch, reachable, http_status,
@@ -140,8 +163,11 @@ settlement_tx_id}, "settlement_tx_id", "term_days"}`.
 
 **`POST /board/:entry_id/renew`** — no body; adds one more 14-day term from
 the later of now and the current term end. Only the placing wallet may renew;
-another wallet's payment settles and is refused with `403`. 404 (free) for an
-unknown id.
+another wallet's payment settles and is refused with `403
+placement_owned_by_another_payer`. Free, before the gate: `404` for an
+unknown id, and `409 not_renewable` for a placement with no attributed payer
+wallet (it can never pass the ownership check, so it is refused before any
+payment is taken — re-place the link instead).
 
 **`GET /board/:entry_id/go`** — `302` to the tile's link, counting the click.
 
@@ -199,10 +225,15 @@ mean, total_weight, weights_resolved, distribution: {"1".."5": n}, grades:
 [{grader, score, comment, created_at_epoch, settlement_tx_id, weight}],
 truncated, settlement_tx_id}`. 404 (free) if nobody has graded it.
 
-**`GET /grades/top?tag=`** — paid: directory listings carrying `tag`, ranked
-by weighted mean: `{tag, items: [{rank, url_hash, url, count, weighted_mean,
-mean, total_weight, truncated}], weights_resolved, candidates_considered,
-settlement_tx_id}`. 404 (free) if no graded listing carries the tag.
+**`GET /grades/top?tag=`** — paid: directory listings carrying `tag` (at
+most 25 considered), ranked by weighted mean: `{tag, items: [{rank, url_hash,
+url, count, weighted_mean, mean, total_weight, truncated}], weights_resolved,
+candidates_considered, settlement_tx_id}`. An endpoint is ranked only with
+**at least 2 eligible grades**; the listing owner's grade of their own
+listing and any operator-wallet grade are not eligible. 404 (free) if no
+listing under the tag qualifies. This route is rate-limited per IP before
+the gate (the pre-gate eligibility check is a scan), and successful paid
+reads count against that budget too.
 
 ### News Engine (the PXke Algorand newspaper, per call)
 
@@ -261,13 +292,24 @@ excluded from every ranking.
 
 Rankings, grades and volume figures only count third-party payments. Any
 payment that does originate from an operator-controlled wallet (the probe's
-own wallet, or any wallet the operator declares as such) is excluded from
-every ranking, score and summary in code, not by convention: it is recorded
-in the settlement ledger like any other payment, then ignored wherever
-positions are computed. Abusive content or traffic -- spam listings,
-placements, feature requests or grades that misrepresent an endpoint, or
-attempts to inflate an entry's position -- can be removed by an operator
-through the admin routes; a removed entry is not refunded.
+own wallet, or any wallet the operator declares in the `X402_PROBE_PAYERS`
+setting, a comma-separated list of addresses) is excluded from every
+ranking, score and summary in code, not by convention: it is recorded in the
+settlement ledger like any other payment, then ignored wherever positions are
+computed (grade averages, the tag leaderboard, feature-demand totals,
+credibility weights, the board feed). Abusive content or traffic -- spam
+listings, placements, feature requests or grades that misrepresent an
+endpoint, or attempts to inflate an entry's position -- can be removed by an
+operator through the admin routes; a removed entry is not refunded.
 
-Admin-only routes (`/api/v1/admin/...`) exist for operators and are not part
-of the marketplace surface.
+## Admin (operator only)
+
+Not part of the marketplace surface; every one requires an authenticated
+admin wallet session (the `X-Admin-Wallet` header alone is never trusted).
+Listed so the removal paths above are known to exist:
+
+- `DELETE /api/v1/admin/x402/listings` — delist a directory URL.
+- `DELETE /api/v1/admin/x402/board` — remove a board placement.
+- `DELETE /api/v1/admin/x402/grades` — remove one wallet's grade of one URL.
+- `DELETE /api/v1/admin/x402/features` — remove a feature request.
+- `POST /api/v1/admin/kyc/payouts/retry` — retry a KYA payout.
