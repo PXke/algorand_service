@@ -7,7 +7,7 @@ USE algorand_platform;
 -- validated before the payment gate, defaulting to other. Denormalized onto
 -- both projections like every other listing column so a feed serves from
 -- one table. A null (any row written before this migration) reads back as
--- other; no backfill.
+-- other, no backfill.
 --
 -- No new table for GET /api/v1/x402/search?category=. The category is
 -- projected into the existing x402_listings_by_tag (096) as one extra row
@@ -23,7 +23,7 @@ USE algorand_platform;
 -- recency feed), settlement_tx_id and payer replaced. Because both
 -- projections are keyed on created_at, every projection row is rewritten in
 -- place by the same full INSERTs a relist uses, which is how they pick up
--- the new term_end. Only the current owner may renew a live listing; an
+-- the new term_end. Only the current owner may renew a live listing -- an
 -- unowned or expired one may be renewed (and thereby claimed) by anyone,
 -- the same ownership rule as a relist (094).
 ALTER TABLE x402_listings ADD category text;
