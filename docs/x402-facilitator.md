@@ -150,6 +150,119 @@ already wired once, process-wide, in `get_resource_server()` — new modules
 don't re-register it, they just declare their own route's discovery
 extension via `require_payment(extensions=...)`.
 
+## Phase 0 acceptance — PASSED 2026-08-30
+
+A real payment round-tripped end-to-end on TestNet against the live
+GoPlausible facilitator: `POST /api/v1/x402/list` with no payment → `402` with
+a correct offer → built + signed a real payment → retried → `200` with a
+`settlement_tx_id` → independently confirmed on-chain via the public indexer
+(not just trusted from our own backend's response) → confirmed the listing
+appears in `GET /api/v1/x402/search`. Settlement tx
+`VXFLM6A225ODFIV52XET7CZTYV22TF32562FA5IPZXJ74QHUXVNQ`, confirmed round
+66808163, `asset-id 10458941`, sender = payer wallet, receiver = `payTo`
+wallet, group-settled alongside the facilitator's own fee-payer leg (fee: 0 on
+our transaction — the gasless abstraction genuinely works).
+
+Two real prerequisites this surfaced, easy to miss:
+
+1. **The `payTo` wallet must itself opt into every ASA it's meant to receive**,
+   the same as any Algorand account. Ours (`x402_pay_to_address`) had never
+   opted into TestNet USDC — every attempted settlement failed simulation with
+   `receiver error: must optin, asset 10458941 missing from <payTo>` until it
+   was opted in (and briefly funded with a small amount of ALGO to cover its
+   own min-balance and the opt-in fee — 0.1 ALGO covers the asset's
+   min-balance bump plus the flat 1000-microAlgo fee). This is a one-time
+   setup step per network (repeat it for mainnet's real `payTo` before the
+   mainnet flip), not a per-payment concern.
+2. **The payer wallet must opt into the same ASA before it can be paid *from*,
+   not just before it can receive** — obvious in hindsight, easy to forget
+   when funding a fresh TestNet wallet via a dispenser that only sends ALGO by
+   default.
+
+### The package's own `ClientAvmSigner` docstring example is wrong in three places
+
+`x402/mechanisms/avm/__init__.py`'s module docstring — the officially
+documented pattern for implementing a client-side signer — does not work
+against the installed `x402-avm==2.0.2` runtime behavior. All three bugs are
+the same shape: the docstring's example threads `algosdk.encoding.*` helpers
+that operate on **base64 strings** through a real interface that operates on
+**raw msgpack bytes** at every step. Concretely, against
+`unsigned_txns: list[bytes]`:
+
+```python
+# WRONG — the docstring's own example, reproduced verbatim:
+def sign_transactions(self, unsigned_txns, indexes_to_sign):
+    result = []
+    for i, txn_bytes in enumerate(unsigned_txns):
+        if i in indexes_to_sign:
+            txn = algosdk.encoding.msgpack_decode(txn_bytes)   # (1) fails
+            signed = txn.sign(self._secret_key)                # (2) fails
+            result.append(algosdk.encoding.msgpack_encode(signed))  # (3) wrong type
+        else:
+            result.append(None)
+    return result
+```
+
+1. `algosdk.encoding.msgpack_decode(enc)` does `base64.b64decode(enc)`
+   internally before unpacking — but `txn_bytes` here is **raw msgpack
+   bytes**, not base64. Passing it raises `binascii.Error: Incorrect padding`
+   (or, less obviously, `msgpack.exceptions.ExtraData`, depending on what the
+   raw bytes happen to decode to as garbage base64).
+2. `Transaction.sign(private_key)` also does `base64.b64decode(private_key)`
+   internally — it wants the base64 **string** form of the secret key. But
+   the docstring's own `__init__` already converts the mnemonic-derived key to
+   **raw bytes** (`self._secret_key = base64.b64decode(mnemonic.to_private_key(...))`,
+   done so `encode_address(self._secret_key[32:])` can slice it) — so by the
+   time `sign()` is called, the raw-bytes form is passed where a base64
+   string is required, same failure again.
+3. `algosdk.encoding.msgpack_encode(obj)` returns a base64 **string**
+   (`base64.b64encode(msgpack.packb(...)).decode()`), but the caller
+   (`x402/mechanisms/avm/exact/client.py`) does `base64.b64encode(signed)` on
+   whatever `sign_transactions` returns — it wants **raw bytes** back, not
+   a string. Returning the string raises
+   `TypeError: a bytes-like object is required, not 'str'`.
+
+**Working implementation** — keep the base64-string secret key form for
+signing, derive raw bytes only locally for the address, unpack `txn_bytes`
+with plain `msgpack.unpackb` (not `msgpack_decode`) before handing it to
+`msgpack_decode` (which special-cases dict input and skips its own base64
+step), and unwrap `msgpack_encode`'s base64 string back to raw bytes before
+returning:
+
+```python
+import base64
+import msgpack
+import algosdk
+from algosdk import mnemonic
+
+class WorkingAvmSigner:
+    def __init__(self, mnemonic_phrase: str) -> None:
+        self._secret_key_b64 = mnemonic.to_private_key(mnemonic_phrase)
+        raw = base64.b64decode(self._secret_key_b64)
+        self._address = algosdk.encoding.encode_address(raw[32:])
+
+    @property
+    def address(self) -> str:
+        return self._address
+
+    def sign_transactions(self, unsigned_txns, indexes_to_sign):
+        result = []
+        for i, txn_bytes in enumerate(unsigned_txns):
+            if i in indexes_to_sign:
+                txn_dict = msgpack.unpackb(txn_bytes, raw=False)
+                txn = algosdk.encoding.msgpack_decode(txn_dict)
+                signed = txn.sign(self._secret_key_b64)
+                result.append(base64.b64decode(algosdk.encoding.msgpack_encode(signed)))
+            else:
+                result.append(None)
+        return result
+```
+
+This only affects **client-side** signer implementations (anything paying
+*through* our marketplace, or a test harness proving Phase 0) — it does not
+affect our own server-side code, which never implements `ClientAvmSigner` and
+was already correct.
+
 ## What's still unverified — check live before relying on it
 
 - Exact response shape of `{base}/verify` and `{base}/settle` beyond what
