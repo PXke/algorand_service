@@ -142,11 +142,26 @@ def create_app() -> falcon.App:
     if settings.suggestions_enabled:
         register_suggestions_routes(router)
     if settings.x402_enabled:
-        register_kyc_routes(router)
-        register_x402_directory_routes(router)
-        register_x402_board_routes(router)
-        register_x402_features_routes(router)
-        register_x402_grading_routes(router)
+        # Each product is gated a second time on its own store setting, not
+        # just the shared x402_enabled switch: "memory" is a per-process dict
+        # (CLAUDE.md section 9: memory backend is dev/test only), and under
+        # gunicorn's multiple worker processes a paid write in one worker is
+        # invisible to a read that lands on another. Registering a paid route
+        # backed by memory in a x402_enabled deployment would accept real
+        # settled payments with no reliable way to honor what was paid for --
+        # so a product stays unregistered (a clean 404, nothing charged)
+        # until its own store is explicitly set to something durable, rather
+        # than going live silently alongside whichever products actually are.
+        if settings.kyc_store != "memory":
+            register_kyc_routes(router)
+        if settings.x402_directory_store != "memory":
+            register_x402_directory_routes(router)
+        if settings.x402_board_store != "memory":
+            register_x402_board_routes(router)
+        if settings.x402_features_store != "memory":
+            register_x402_features_routes(router)
+        if settings.x402_grading_store != "memory":
+            register_x402_grading_routes(router)
     register_seo_routes(router)
     return app
 
