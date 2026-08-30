@@ -1,4 +1,4 @@
-"""The 402 offer KYC's paid lookup serves before anyone has paid.
+"""The 402 offer KYA's paid lookup serves before anyone has paid.
 
 Fully offline: a stub facilitator client avoids any real network call and
 asserts verify()/settle() are never reached when no payment header is
@@ -167,7 +167,7 @@ def test_require_payment_has_no_bazaar_declaration_when_extensions_omitted(
 
 
 def test_kyc_routes_declare_discovery_extension_without_raising() -> None:
-    """Regression: the KYC paid routes built their Bazaar discovery extension with a real AttributeError before this fix -- output={"example": ...} is a plain dict, but the installed package reads output.example as an attribute, not a dict key. The route now goes through describe_json_endpoint (modules/x402/discovery.py), which cannot reproduce this bug -- it always wraps in OutputConfig. Calling it with the exact shape the route uses must not raise."""
+    """Regression: the KYA paid routes built their Bazaar discovery extension with a real AttributeError before this fix -- output={"example": ...} is a plain dict, but the installed package reads output.example as an attribute, not a dict key. The route now goes through describe_json_endpoint (modules/x402/discovery.py), which cannot reproduce this bug -- it always wraps in OutputConfig. Calling it with the exact shape the route uses must not raise."""
     from app.modules.x402.discovery import describe_json_endpoint
 
     # Same shape as kyc_verify's extensions= argument.

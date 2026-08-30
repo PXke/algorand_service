@@ -1,4 +1,4 @@
-"""HTTP routes for the x402 feature-request board: 3 paid surfaces, 1 free.
+"""HTTP routes for the x402 feature-request board: 2 free surfaces, 2 paid.
 
 Route paths are /api/v1/x402/*, not the bare /x402/* the build plan names.
 nginx only proxies `location ^~ /api/` to this backend on the API host and
@@ -6,10 +6,12 @@ answers everything else with 404 (deploy/nginx/algorand-platform.conf), so a
 bare /x402/features would be unreachable in production without an nginx change
 this change is not authorized to deploy.
 
-Every paid route here obeys the same two rules the board's does: everything
-that can make the request invalid is checked BEFORE the payment gate, so
-nobody is ever charged for a request that cannot succeed, and once a payment
-has settled the handler never returns a 4xx.
+Filing a request and browsing the board are free and rate-limited per IP
+(CLAUDE.md section 9). Voting and reading the ranked demand are paid, and
+both obey the same two rules the board's routes do: everything that can make
+the request invalid is checked BEFORE the payment gate, so nobody is ever
+charged for a request that cannot succeed, and once a payment has settled the
+handler never returns a 4xx.
 """
 
 from __future__ import annotations
@@ -20,14 +22,17 @@ from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
 from app.modules.x402.discovery import describe_json_endpoint
-from app.modules.x402.paid_request import require_paid_request
+from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
 from app.modules.x402_features.models.domain import (
     FeatureError,
     RankedFeatureRequest,
     StoredFeatureRequest,
 )
 from app.modules.x402_features.services.feature_service import FeatureService
-from app.modules.x402_features.services.rate_limit import features_read_rate_limited
+from app.modules.x402_features.services.rate_limit import (
+    features_read_rate_limited,
+    features_submit_rate_limited,
+)
 from app.schemas import X402FeatureRequestSubmission
 
 # Store is resolved lazily on first use, so this is safe as a module-level
@@ -63,94 +68,60 @@ def _public_json(item: StoredFeatureRequest) -> dict:
 
 
 def _demand_json(ranked: RankedFeatureRequest) -> dict:
-    """Serialize a ranked request for the PAID demand surface, vote total included."""
+    """Serialize a ranked request for the PAID demand surface, vote total included.
+
+    Requests are filed free and anonymously, so `submitter` is null -- served
+    as null rather than as an empty string or a placeholder, so a builder
+    reading demand is never handed a fabricated author. The demand signal
+    itself (vote_total) is what this surface sells.
+    """
     item = ranked.request
     return {
         "request_id": item.request_id,
         "title": item.title,
         "description": item.description,
-        "submitter": item.submitter,
+        "submitter": item.submitter or None,
         "created_at_epoch": item.created_at_epoch,
-        "settlement_tx_id": item.settlement_tx_id,
         "vote_total": ranked.vote_total,
     }
 
 
 def x402_features_submit(request: Request) -> Response:
-    """Paid: file one feature request on the public board.
+    """Free: file one anonymous feature request on the public board, rate-limited per IP.
 
-    The body is parsed and validated BEFORE the payment gate runs, so a
-    malformed request is rejected with a 400 without anyone being charged for
-    it. Nothing is written before the payment settles, and once it has settled
-    the request is stored and returned.
+    Filing is free because the board exists to collect "I wish an x402
+    endpoint existed that..." ideas from agents, and a fee is friction against
+    exactly that. Demand on a request is still a costly signal -- voting stays
+    paid (see x402_features_vote). Filing buys a listing and a place in the
+    demand ranking, not a commitment to build anything.
+
+    Anonymous: there is no payment to attribute the request to and no
+    self-declared wallet field, so the stored submitter is empty. The
+    per-IP hourly budget is counted before the body is parsed, so malformed
+    bodies burn budget rather than being a free way to probe.
     """
+    if features_submit_rate_limited(request):
+        return json_error_response(
+            429, "rate_limited", "Too many feature requests filed — please try again later"
+        )
+
     try:
         payload = serialization.decode(request.body, X402FeatureRequestSubmission)
     except serialization.DecodeError as exc:
         return json_error_response(400, "invalid_request", str(exc))
 
-    result = require_paid_request(
-        request,
-        price=settings.x402_features_request_price,
-        resource="x402-features-submit",
-        # Reaches the payer as the 402's resource.description, before they
-        # commit — it has to say that filing is not building, or a payer could
-        # reasonably read the fee as buying the endpoint itself.
-        description=(
-            "File one feature request on the public PXke x402 feature-request "
-            "board. Listed immediately at GET /api/v1/x402/features; agents "
-            "signal demand for it by paying POST "
-            "/api/v1/x402/features/{request_id}/vote. Filing a request buys it "
-            "a listing and a place in the demand ranking, not a commitment to "
-            "build it."
-        ),
-        extensions=describe_json_endpoint(
-            # POST carries its input as a JSON body, so this must declare a
-            # BODY discovery extension. Without body_type the package builds a
-            # query-params one, which would describe this route's input
-            # incorrectly.
-            body_type="json",
-            input=_REQUEST_EXAMPLE,
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "maxLength": 120},
-                    "description": {"type": "string", "maxLength": 2000},
-                },
-                "required": ["title"],
-            },
-            output_example={
-                "request": {**_REQUEST_EXAMPLE, "request_id": "...", "created_at_epoch": 0},
-                "settlement_tx_id": "...",
-            },
-        ),
-    )
-    if result.error:
-        return result.error
-
     try:
-        item = feature_service.create(
-            title=payload.title,
-            description=payload.description,
-            submitter=result.payer or "",
-            settlement_tx_id=result.payment_txid or "",
-        )
+        item = feature_service.create(title=payload.title, description=payload.description)
     except FeatureError as exc:
-        # Unreachable in practice — the title is validated during decode and
-        # the only other raiser is _clean_title, which runs on the same input.
-        # Kept explicit so a future validation rule cannot silently 500 a
-        # request whose payment has already been taken.
+        # The title is already validated during decode; _clean_title runs the
+        # same rule. Kept explicit so a future validation rule maps to a 4xx
+        # rather than a 500.
         return json_error_from_platform(exc)
 
     return Response(
-        status_code=200,
-        headers={"Content-Type": "application/json", **result.settlement_headers},
-        description=serialization.dumps(
-            {
-                "request": _public_json(item),
-                "settlement_tx_id": result.payment_txid or "",
-            }
-        ),
+        status_code=201,
+        headers={"Content-Type": "application/json"},
+        description=serialization.dumps({"request": _public_json(item)}),
     )
 
 
@@ -160,8 +131,8 @@ def x402_features_vote(request: Request) -> Response:
     Existence is checked BEFORE the payment gate. A vote for an unknown
     request id is a 404 and costs nothing -- charging for it would take money
     for an increment that can never land anywhere. This is the same
-    reject-before-charging rule the submit route applies to a malformed body,
-    and it is why the 404 here is not a violation of "a settled payment never
+    reject-before-charging rule the demand route applies to a bad limit, and
+    it is why the 404 here is not a violation of "a settled payment never
     yields a 4xx": nothing has settled yet when it is returned.
 
     Paying again votes again. See FeatureService.vote for why this is not
@@ -198,6 +169,7 @@ def x402_features_vote(request: Request) -> Response:
         voter=result.payer or "",
         settlement_tx_id=result.payment_txid or "",
     )
+    mark_fulfilled(result.payment_txid, resource="x402-features-vote")
 
     return Response(
         status_code=200,
@@ -215,7 +187,8 @@ def x402_features_vote(request: Request) -> Response:
 def x402_features_browse(request: Request) -> Response | dict:
     """Free: what has been asked for, newest first, rate-limited per IP.
 
-    Carries no vote counts by design -- see _public_json.
+    Carries no vote counts by design -- see _public_json. Its budget is
+    separate from the free filing route's.
     """
     if features_read_rate_limited(request):
         return json_error_response(
@@ -273,7 +246,7 @@ def x402_features_demand(request: Request) -> Response:
                     {
                         **_REQUEST_EXAMPLE,
                         "request_id": "...",
-                        "submitter": "...",
+                        "submitter": None,
                         "created_at_epoch": 0,
                         "vote_total": 7,
                     }
@@ -286,6 +259,7 @@ def x402_features_demand(request: Request) -> Response:
         return result.error
 
     ranked = feature_service.rank_by_demand(limit=limit)
+    mark_fulfilled(result.payment_txid, resource="x402-features-demand")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -299,7 +273,7 @@ def x402_features_demand(request: Request) -> Response:
 
 
 def register_x402_features_routes(app: Router) -> None:
-    """Register the feature board's three paid routes and its free browse route."""
+    """Register the feature board's two free routes (file, browse) and two paid ones (vote, demand)."""
     app.post("/api/v1/x402/features")(x402_features_submit)
     app.get("/api/v1/x402/features")(x402_features_browse)
     # /features/demand does not collide with /features/:request_id/vote: the

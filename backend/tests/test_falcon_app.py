@@ -6,7 +6,8 @@ import pytest
 from falcon import testing
 
 from app.core import cors
-from app.falcon_main import create_app, settings as falcon_main_settings
+from app.falcon_main import create_app
+from app.falcon_main import settings as falcon_main_settings
 
 
 def test_health() -> None:

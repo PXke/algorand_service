@@ -1,17 +1,17 @@
-"""Cassandra-backed KYC enrollment and lookup-event storage."""
+"""Cassandra-backed KYA enrollment and lookup-event storage."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from app.modules.kyc.models.domain import StoredEnrollment
+from app.modules.kya.models.domain import StoredEnrollment
 
 
 class CassandraEnrollmentStore:
-    """Cassandra-backed KYC enrollment storage."""
+    """Cassandra-backed KYA enrollment storage."""
 
     def upsert(self, item: StoredEnrollment) -> None:
-        """Insert or update a KYC enrollment record."""
+        """Insert or update a KYA enrollment record."""
         from app.core.cassandra import get_cassandra_session
         from app.core.statements import KycStmts
 

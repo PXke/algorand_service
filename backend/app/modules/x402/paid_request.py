@@ -10,6 +10,36 @@ directory-specific in name only): every future paid module needs the
 identical replay-then-gate-then-ledger sequence, so this is where it
 actually belongs. See modules/x402/replay.py and settlement.py for the two
 pieces this composes.
+
+Fulfillment contract every paid route MUST follow
+-------------------------------------------------
+By the time require_paid_request returns with `.error is None` the payer has
+been charged and the ledger row exists with `fulfilled=False`. The route's
+product write happens after that, so a route looks like::
+
+    result = require_paid_request(request, price=..., resource=RESOURCE)
+    if result.error is not None:
+        return result.error
+    stored = service.store(...)                # the product write, may raise
+    mark_fulfilled(result.payment_txid, resource=RESOURCE)
+    return response(stored, headers=result.settlement_headers)
+
+1. Call `settlement.mark_fulfilled` ONLY after the product write has
+   durably succeeded -- store before mark (CLAUDE.md section 2 invariant 2).
+   Never before, never in a `finally`.
+2. Do not swallow the product write's exception to "keep the response
+   going": let it propagate to the 500 handler. The ledger row then stays
+   `fulfilled=False`, which is the durable record that this payment bought
+   nothing -- see x402_settlements_by_tx (migration 095) for the per-txid
+   point read an operator reconciles from.
+3. Do NOT release the replay claim on a fulfillment failure. The payment is
+   committed on-chain, so the facilitator cannot settle the same header
+   again -- releasing would only turn a retry's 409 into a 402 -- and an
+   un-claimed header is exactly the double-fulfillment window this design
+   closes. A retry after a fulfillment failure is a reconciliation, not a
+   new request.
+4. mark_fulfilled never raises and is idempotent; a route does not need to
+   guard it. It logs at ERROR with the txid if the flip itself fails.
 """
 
 from __future__ import annotations
@@ -24,9 +54,13 @@ from app.core.http_errors import json_error_response
 from app.core.request_headers import header_value
 from app.modules.x402.guard import PaymentResult, require_payment
 from app.modules.x402.replay import claim_payment, release_claim
-from app.modules.x402.settlement import SettlementStore, record_settlement
+from app.modules.x402.settlement import SettlementStore, mark_fulfilled, record_settlement
 
 logger = logging.getLogger(__name__)
+
+# mark_fulfilled is re-exported so a route imports its whole paid-request
+# contract from one module (see the module docstring).
+__all__ = ["mark_fulfilled", "require_paid_request"]
 
 
 def _payment_header(request: Request) -> str:
@@ -47,6 +81,8 @@ def require_paid_request(
 
     Returns the same PaymentResult shape require_payment does, so a handler
     reads identically: check `.error`, then use `.payer` / `.settlement_headers`.
+    On success the ledger row is written as unfulfilled; the route calls
+    mark_fulfilled(result.payment_txid, ...) after its product write.
     """
     header = _payment_header(request)
     claim_key, already_seen = claim_payment(header)

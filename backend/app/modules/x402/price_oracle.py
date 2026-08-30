@@ -1,7 +1,15 @@
-"""USD rates for the non-USDC assets the payment gate accepts.
+"""USD and EUR rates for the assets the payment gate accepts.
 
-One CoinGecko call fetches every non-USDC rate at once and caches each in Redis
-for an hour. There is no scheduler here — this backend has none, and adding a
+Two consumers, one fetch:
+
+* `get_usd_rate` prices the non-USDC assets for the 402 offer (USDC is the unit
+  of account and needs no oracle there).
+* `get_eur_rate` prices EVERY accepted asset, USDC included, so the settlement
+  ledger can record the EUR value of each payment at settlement time
+  (CLAUDE.md section 9). USDC is priced under CoinGecko's `usd-coin` id.
+
+One CoinGecko call fetches every rate in both currencies at once and caches
+each in Redis for an hour. There is no scheduler here — this backend has none, and adding a
 dependency on workers/'s Celery beat (a different service) to price a payment
 would couple the payment path to a service that can be down. So the refresh is
 lazy: the first read after the hour expires pays for the refetch.
@@ -31,7 +39,7 @@ from decimal import Decimal, InvalidOperation
 import httpx
 
 from app.core.redis_client import get_redis
-from app.modules.x402.assets import ACCEPTED_ASSETS
+from app.modules.x402.assets import ACCEPTED_ASSETS, AcceptedAsset
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +57,13 @@ _FRESH_TTL_SECONDS = 3600
 # CoinGecko outage degrades to a stale quote rather than to no quote.
 _LKG_KEY = _KEY_PREFIX + "lkg:"
 _FRESH_KEY = _KEY_PREFIX + "fresh:"
+# Keys are "<prefix><currency>:<coingecko id>", one per quote currency, so a
+# USD rate and a EUR rate for the same asset never overwrite each other.
+_QUOTE_CURRENCIES: tuple[str, ...] = ("usd", "eur")
+# USDC needs no oracle for the 402 offer (it IS the unit of account), but it
+# still needs a EUR quote for the ledger. Kept here rather than on the
+# AcceptedAsset so the offer builder keeps treating USDC as oracle-free.
+USDC_COINGECKO_ID = "usd-coin"
 # After a failed fetch, don't re-hit CoinGecko on every single request — that
 # would put an outbound HTTP call with a 5s timeout in front of every paid
 # route while the provider is down.
@@ -59,6 +74,20 @@ _COOLDOWN_SECONDS = 60
 def _oracle_priced_ids() -> list[str]:
     """CoinGecko ids for every accepted asset that needs an oracle (i.e. not USDC)."""
     return [a.coingecko_id for a in ACCEPTED_ASSETS if a.coingecko_id is not None]
+
+
+def _all_priced_ids() -> list[str]:
+    """Every id one fetch asks for: the oracle-priced assets plus USDC for its EUR quote."""
+    return [*_oracle_priced_ids(), USDC_COINGECKO_ID]
+
+
+def eur_pricing_id(asset: AcceptedAsset) -> str:
+    """The CoinGecko id under which `asset` is priced in EUR (USDC included)."""
+    return asset.coingecko_id if asset.coingecko_id is not None else USDC_COINGECKO_ID
+
+
+def _cache_key(prefix: str, currency: str, coingecko_id: str) -> str:
+    return f"{prefix}{currency}:{coingecko_id}"
 
 
 def _parse_rate(raw: str | None) -> Decimal | None:
@@ -76,24 +105,27 @@ def _parse_rate(raw: str | None) -> Decimal | None:
     return value
 
 
-def _fetch_rates(*, transport: httpx.BaseTransport | None = None) -> dict[str, Decimal]:
-    """Fetch every oracle-priced rate in one call. Returns {} on any failure.
+# {currency: {coingecko id: rate}} -- the shape one fetch returns and _refresh
+# writes. A currency whose every rate was unusable is simply absent.
+FetchedRates = dict[str, dict[str, Decimal]]
 
-    One call for all of them: the CoinGecko endpoint batches ids, and three
-    separate calls would triple both the latency in front of a paid route and
-    our footprint against a free, rate-limited API.
+
+def _fetch_rates(*, transport: httpx.BaseTransport | None = None) -> FetchedRates:
+    """Fetch every rate, in every quote currency, in one call. Returns {} on any failure.
+
+    One call for all of them: the CoinGecko endpoint batches both ids and
+    quote currencies, and separate calls would multiply both the latency in
+    front of a paid route and our footprint against a free, rate-limited API.
 
     `transport` is the test seam (same shape as media/api/routes.py's fetch) —
     production passes nothing.
     """
-    ids = _oracle_priced_ids()
-    if not ids:
-        return {}
+    ids = _all_priced_ids()
     try:
         with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS, transport=transport) as client:
             response = client.get(
                 COINGECKO_URL,
-                params={"ids": ",".join(ids), "vs_currencies": "usd"},
+                params={"ids": ",".join(ids), "vs_currencies": ",".join(_QUOTE_CURRENCIES)},
             )
             response.raise_for_status()
             body = response.json()
@@ -105,27 +137,34 @@ def _fetch_rates(*, transport: httpx.BaseTransport | None = None) -> dict[str, D
         logger.warning("x402 price oracle got a non-object response: %r", type(body))
         return {}
 
-    rates: dict[str, Decimal] = {}
+    rates: FetchedRates = {}
     for coingecko_id in ids:
         entry = body.get(coingecko_id)
         if not isinstance(entry, dict):
             logger.warning("x402 price oracle response is missing %s", coingecko_id)
             continue
-        usd = entry.get("usd")
-        if not isinstance(usd, int | float) or isinstance(usd, bool):
-            logger.warning(
-                "x402 price oracle got a non-numeric usd value for %s: %r", coingecko_id, usd
-            )
-            continue
-        # str() first: Decimal(float) would carry the float's binary error into
-        # an amount someone is charged.
-        rate = Decimal(str(usd))
-        if rate <= 0:
-            logger.warning(
-                "x402 price oracle got a non-positive rate for %s: %r", coingecko_id, usd
-            )
-            continue
-        rates[coingecko_id] = rate
+        for currency in _QUOTE_CURRENCIES:
+            raw = entry.get(currency)
+            if not isinstance(raw, int | float) or isinstance(raw, bool):
+                logger.warning(
+                    "x402 price oracle got a non-numeric %s value for %s: %r",
+                    currency,
+                    coingecko_id,
+                    raw,
+                )
+                continue
+            # str() first: Decimal(float) would carry the float's binary error
+            # into an amount someone is charged.
+            rate = Decimal(str(raw))
+            if rate <= 0:
+                logger.warning(
+                    "x402 price oracle got a non-positive %s rate for %s: %r",
+                    currency,
+                    coingecko_id,
+                    raw,
+                )
+                continue
+            rates.setdefault(currency, {})[coingecko_id] = rate
     return rates
 
 
@@ -141,14 +180,67 @@ def _refresh(redis: object) -> None:
         if not rates:
             redis.set(_COOLDOWN_KEY, "1", ex=_COOLDOWN_SECONDS)  # type: ignore[attr-defined]
             return
-        for coingecko_id, rate in rates.items():
-            # Store before mark: the durable last-known-good is written first,
-            # so a crash between the two can only cost freshness, never the
-            # fallback value itself.
-            redis.set(_LKG_KEY + coingecko_id, str(rate))  # type: ignore[attr-defined]
-            redis.set(_FRESH_KEY + coingecko_id, str(rate), ex=_FRESH_TTL_SECONDS)  # type: ignore[attr-defined]
+        for currency, by_id in rates.items():
+            for coingecko_id, rate in by_id.items():
+                # Store before mark: the durable last-known-good is written
+                # first, so a crash between the two can only cost freshness,
+                # never the fallback value itself.
+                redis.set(_cache_key(_LKG_KEY, currency, coingecko_id), str(rate))  # type: ignore[attr-defined]
+                redis.set(  # type: ignore[attr-defined]
+                    _cache_key(_FRESH_KEY, currency, coingecko_id),
+                    str(rate),
+                    ex=_FRESH_TTL_SECONDS,
+                )
     except Exception:
         logger.warning("x402 price oracle could not write rates to Redis", exc_info=True)
+
+
+def _get_rate(asset: str, currency: str, *, purpose: str) -> Decimal | None:
+    """The cache ladder shared by every quote currency: fresh, refetch, stale, None.
+
+    `purpose` only shapes the log lines, so an operator can tell a missing
+    offer price from a missing ledger valuation.
+    """
+    fresh_key = _cache_key(_FRESH_KEY, currency, asset)
+    try:
+        redis = get_redis()
+        fresh = _parse_rate(redis.get(fresh_key))
+        if fresh is not None:
+            return fresh
+
+        if not redis.exists(_COOLDOWN_KEY):
+            _refresh(redis)
+            refreshed = _parse_rate(redis.get(fresh_key))
+            if refreshed is not None:
+                return refreshed
+
+        stale = _parse_rate(redis.get(_cache_key(_LKG_KEY, currency, asset)))
+    except Exception:
+        logger.warning(
+            "x402 price oracle could not reach Redis for %s/%s; %s",
+            asset,
+            currency,
+            purpose,
+            exc_info=True,
+        )
+        return None
+
+    if stale is not None:
+        logger.warning(
+            "x402 price oracle serving a stale %s rate for %s (refresh failed); "
+            "the quoted value may lag the market",
+            currency,
+            asset,
+        )
+        return stale
+
+    logger.warning(
+        "x402 price oracle has no %s rate for %s and no last-known-good value; %s",
+        currency,
+        asset,
+        purpose,
+    )
+    return None
 
 
 def get_usd_rate(asset: str) -> Decimal | None:
@@ -158,39 +250,18 @@ def get_usd_rate(asset: str) -> Decimal | None:
     routine case, because a missing rate must degrade the 402 offer rather than
     fail the request. The caller drops that asset from `accepts`.
     """
-    try:
-        redis = get_redis()
-        fresh = _parse_rate(redis.get(_FRESH_KEY + asset))
-        if fresh is not None:
-            return fresh
-
-        if not redis.exists(_COOLDOWN_KEY):
-            _refresh(redis)
-            refreshed = _parse_rate(redis.get(_FRESH_KEY + asset))
-            if refreshed is not None:
-                return refreshed
-
-        stale = _parse_rate(redis.get(_LKG_KEY + asset))
-    except Exception:
-        logger.warning(
-            "x402 price oracle could not reach Redis for %s; this asset will be omitted "
-            "from the payment offer (USDC is unaffected)",
-            asset,
-            exc_info=True,
-        )
-        return None
-
-    if stale is not None:
-        logger.warning(
-            "x402 price oracle serving a stale rate for %s (refresh failed); "
-            "the quoted price may lag the market",
-            asset,
-        )
-        return stale
-
-    logger.warning(
-        "x402 price oracle has no rate for %s and no last-known-good value; "
-        "omitting it from the payment offer",
+    return _get_rate(
         asset,
+        "usd",
+        purpose="this asset will be omitted from the payment offer (USDC is unaffected)",
     )
-    return None
+
+
+def get_eur_rate(asset: str) -> Decimal | None:
+    """EUR price of one unit of `asset`, where `asset` is its CoinGecko id.
+
+    Same ladder and failure behaviour as get_usd_rate. None means the
+    settlement ledger records that no EUR valuation was available (see
+    settlement.py's EUR_VALUE_UNAVAILABLE) — it never blocks the settlement.
+    """
+    return _get_rate(asset, "eur", purpose="the settlement ledger will record no EUR valuation")

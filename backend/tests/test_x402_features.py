@@ -1,4 +1,4 @@
-"""x402 feature-request board tests: paid file, paid vote, free browse, paid demand.
+"""x402 feature-request board tests: free file, paid vote, free browse, paid demand.
 
 Fully offline. The facilitator is a stub that never touches the network (same
 shape as test_x402_board.py's), Redis is a fake at the get_redis seam, and the
@@ -8,7 +8,8 @@ payment or reaches TestNet.
 Replay protection and the settlement ledger are shared infrastructure
 (modules/x402/) already covered by test_x402_directory.py -- they are not
 re-tested here. What IS feature-board-specific and tested here: the free/paid
-split (the free browse must never carry a vote total), the vote counter's
+split (the free browse must never carry a vote total; filing is free and
+anonymous while voting on the result is still paid), the vote counter's
 behaviour under concurrency, voting on a missing request costing nothing, and
 the demand ranking.
 """
@@ -207,45 +208,54 @@ def _file_request(
 
 
 # --------------------------------------------------------------------------- #
-# POST /features — the 402 offer and pre-payment validation
+# POST /features — free, anonymous, rate-limited filing
 # --------------------------------------------------------------------------- #
-@pytest.mark.usefixtures("testnet_settings", "fake_redis", "wired")
-def test_submit_without_payment_returns_402_with_correct_fields(
-    monkeypatch: pytest.MonkeyPatch,
+def _never_paid(*_a: object, **_kw: object) -> Never:
+    raise AssertionError("the free submit route must never reach the payment gate")
+
+
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_filing_is_free_and_needs_no_payment_header(
+    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No payment header yields a 402 whose offer carries the configured payTo, TestNet CAIP-2 id, USDC TestNet asset id, the feature board's own request price and the challenge tag."""
-    from x402.http.utils import decode_payment_required_header
-    from x402.mechanisms.avm.constants import USDC_TESTNET_ASA_ID
-
-    monkeypatch.setattr(settings, "x402_features_request_price", "$0.05")
+    """A bare POST with no payment header files the request: 201, no 402, no payment headers, and the gate is never consulted."""
+    monkeypatch.setattr(feature_routes, "require_paid_request", _never_paid)
 
     response = feature_routes.x402_features_submit(
-        _request(body=b'{"title":"Candles endpoint","description":"OHLCV"}')
+        _request(
+            body=json.dumps(
+                {"title": "  Candles endpoint  ", "description": "  OHLCV for any ASA.  "}
+            ).encode()
+        )
     )
 
-    assert response.status_code == 402
-    offer = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"]).accepts[0]
-    assert offer.pay_to == _PAY_TO
-    assert offer.network == ALGORAND_TESTNET_CAIP2
-    assert offer.asset == str(USDC_TESTNET_ASA_ID)
-    # 0.05 USDC in atomic units at 6 decimals.
-    assert offer.amount == "50000"
-    assert offer.extra["tag"] == x402_client.CHALLENGE_TAG
+    assert response.status_code == 201
+    assert "PAYMENT-REQUIRED" not in response.headers
+    assert "PAYMENT-RESPONSE" not in response.headers
+    body = json.loads(response.description)
+    assert set(body) == {"request"}
+    item = body["request"]
+    assert item["title"] == "Candles endpoint"
+    assert item["description"] == "OHLCV for any ASA."
+    assert set(item) == {"request_id", "title", "description", "created_at_epoch"}
+    stored = wired.get(item["request_id"])
+    assert stored is not None
 
 
-@pytest.mark.usefixtures("testnet_settings", "fake_redis", "wired")
-def test_submit_402_declares_a_json_body_discovery_extension() -> None:
-    """The submit 402 declares the Bazaar discovery extension as a JSON-body one, since a POST takes its input as a body rather than query params."""
-    from x402.http.utils import decode_payment_required_header
-
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_a_free_filing_is_anonymous_even_if_the_body_names_a_wallet(
+    wired: InMemoryFeatureStore,
+) -> None:
+    """No self-declared submitter: a wallet in the body is ignored and the stored submitter and settlement txid are empty."""
     response = feature_routes.x402_features_submit(
-        _request(body=b'{"title":"Candles endpoint","description":"OHLCV"}')
+        _request(body=json.dumps({"title": "X", "submitter": _OTHER_PAYER}).encode())
     )
 
-    payment_required = decode_payment_required_header(response.headers["PAYMENT-REQUIRED"])
-    bazaar = (payment_required.extensions or {}).get("bazaar")
-    assert bazaar is not None
-    assert "body" in json.dumps(bazaar)
+    stored = wired.get(json.loads(response.description)["request"]["request_id"])
+    assert stored is not None
+    assert stored.submitter == ""
+    assert stored.settlement_tx_id == ""
+    assert _OTHER_PAYER not in response.description
 
 
 @pytest.mark.usefixtures("testnet_settings", "fake_redis", "wired")
@@ -256,10 +266,12 @@ def test_submit_402_declares_a_json_body_discovery_extension() -> None:
         b"{}",  # title is required
         b'{"title":""}',  # and must not be empty
         b'{"description":"no title here"}',
+        json.dumps({"title": "z" * 121}).encode(),  # over the 120-char cap
+        json.dumps({"title": "ok", "description": "d" * 2001}).encode(),  # over 2000
     ],
 )
-def test_a_malformed_submit_body_is_rejected_before_the_payment_gate(bad_body: bytes) -> None:
-    """A malformed body is a 400, not a 402 — nobody is charged to submit an invalid request."""
+def test_a_malformed_submit_body_is_a_400(bad_body: bytes) -> None:
+    """Title/description validation and bounds survive the move to free filing."""
     response = feature_routes.x402_features_submit(_request(body=bad_body))
 
     assert response.status_code == 400
@@ -267,86 +279,100 @@ def test_a_malformed_submit_body_is_rejected_before_the_payment_gate(bad_body: b
 
 
 @pytest.mark.usefixtures("testnet_settings", "fake_redis", "wired")
-def test_an_over_long_title_is_rejected_before_the_payment_gate() -> None:
-    """A title beyond the 120-character cap is a 400, not a charged request."""
-    response = feature_routes.x402_features_submit(
-        _request(body=json.dumps({"title": "z" * 121}).encode())
-    )
+def test_filing_is_rate_limited_per_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An IP over the hourly filing budget gets a 429 and nothing is stored; a different IP is unaffected."""
+    monkeypatch.setattr(settings, "x402_features_submit_rate_limit_per_hour", 2)
 
-    assert response.status_code == 400
-    assert "invalid_request" in response.description
-
-
-# --------------------------------------------------------------------------- #
-# POST /features — the paid path
-# --------------------------------------------------------------------------- #
-def test_a_settled_payment_stores_the_request_and_returns_its_txid(
-    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Once payment settles, the request is stored and returned with the settlement txid and headers."""
-    monkeypatch.setattr(
-        feature_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
-    )
-
-    response = feature_routes.x402_features_submit(
-        _request(
-            body=json.dumps(
-                {"title": "  Candles endpoint  ", "description": "  OHLCV for any ASA.  "}
-            ).encode()
+    def _file(ip: str) -> Response:
+        return feature_routes.x402_features_submit(
+            _request(body=b'{"title":"Candles"}', headers={"X-Real-IP": ip})
         )
-    )
 
-    assert response.status_code == 200
-    assert response.headers["PAYMENT-RESPONSE"] == "ok"
-    body = json.loads(response.description)
-    assert body["settlement_tx_id"] == "TX123"
-    item = body["request"]
-    assert item["title"] == "Candles endpoint"
-    assert item["description"] == "OHLCV for any ASA."
-    # Durably stored under the id derived from the settling payment.
-    stored = wired.get(request_id_for(settlement_tx_id="TX123"))
-    assert stored is not None
-    # The submitter comes from the settled payment, never from the request body.
-    assert stored.submitter == _PAYER
+    assert _file("203.0.113.7").status_code == 201
+    assert _file("203.0.113.7").status_code == 201
+    limited = _file("203.0.113.7")
+    assert limited.status_code == 429
+    assert "rate_limited" in limited.description
+    assert _file("203.0.113.9").status_code == 201
+    assert len(feature_routes.feature_service.list_recent(limit=50)) == 3
 
 
-def test_the_submitter_in_the_body_cannot_override_the_settled_payer(
-    wired: InMemoryFeatureStore, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.usefixtures("testnet_settings", "fake_redis", "wired")
+def test_the_filing_budget_is_separate_from_the_browse_budget(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A caller cannot file a request in someone else's wallet's name."""
-    monkeypatch.setattr(
-        feature_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
+    """Exhausting the filing budget must not lock the same IP out of browsing, and vice versa."""
+    monkeypatch.setattr(settings, "x402_features_submit_rate_limit_per_hour", 1)
+    monkeypatch.setattr(settings, "x402_features_rate_limit_per_hour", 1)
+    headers = {"X-Real-IP": "203.0.113.7"}
+
+    assert (
+        feature_routes.x402_features_submit(
+            _request(body=b'{"title":"Candles"}', headers=headers)
+        ).status_code
+        == 201
+    )
+    assert (
+        feature_routes.x402_features_submit(
+            _request(body=b'{"title":"Candles"}', headers=headers)
+        ).status_code
+        == 429
+    )
+    assert "items" in feature_routes.x402_features_browse(_request(method="GET", headers=headers))
+
+
+@pytest.mark.usefixtures("testnet_settings", "wired")
+def test_filing_fails_open_when_redis_is_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Redis outage must not take free filing offline."""
+    monkeypatch.setattr(rate_limit_core, "get_redis", lambda **_kw: _BrokenRedis())
+
+    response = feature_routes.x402_features_submit(
+        _request(body=b'{"title":"Candles"}', headers={"X-Real-IP": "203.0.113.7"})
     )
 
-    feature_routes.x402_features_submit(
-        _request(body=json.dumps({"title": "X", "submitter": _OTHER_PAYER}).encode())
-    )
-
-    stored = wired.get(request_id_for(settlement_tx_id="TX123"))
-    assert stored is not None
-    assert stored.submitter == _PAYER
+    assert response.status_code == 201
 
 
-def test_the_same_wallet_filing_the_same_title_twice_gets_two_requests(
-    service: FeatureService,
+@pytest.mark.usefixtures("testnet_settings", "fake_redis")
+def test_a_free_filing_is_browsable_and_its_vote_still_costs_money(
+    wired: InMemoryFeatureStore,
 ) -> None:
-    """A feature request is an event, not a renewable slot — paying twice states demand twice and must not collapse onto one row."""
-    first = _file_request(service, title="Candles endpoint", txid="TX-1")
-    second = _file_request(service, title="Candles endpoint", txid="TX-2")
+    """The free/paid split end to end: a freely filed request shows up on the free browse, ranks with vote_total 0, and voting on it is still a 402 at the vote price."""
+    from x402.http.utils import decode_payment_required_header
+
+    filed = feature_routes.x402_features_submit(_request(body=b'{"title":"Candles"}'))
+    request_id = json.loads(filed.description)["request"]["request_id"]
+
+    browse = feature_routes.x402_features_browse(_request(method="GET"))
+    assert [item["request_id"] for item in browse["items"]] == [request_id]
+
+    ranked = FeatureService(wired).rank_by_demand(limit=10)
+    assert [(r.request.request_id, r.vote_total) for r in ranked] == [(request_id, 0)]
+
+    vote = feature_routes.x402_features_vote(_request(path_params={"request_id": request_id}))
+    assert vote.status_code == 402
+    offer = decode_payment_required_header(vote.headers["PAYMENT-REQUIRED"]).accepts[0]
+    assert offer.amount == "20000"
+    assert wired.get_vote_total(request_id) == 0
+
+
+def test_filing_the_same_title_twice_gets_two_requests(service: FeatureService) -> None:
+    """A feature request is an event, not a renewable slot — restating a wish states it twice and must not collapse onto one row."""
+    first = _file_request(service, title="Candles endpoint", txid="")
+    second = _file_request(service, title="Candles endpoint", txid="")
 
     assert first != second
     assert len(service.list_recent(limit=50)) == 2
 
 
-def test_unattributable_payments_do_not_collide_onto_one_request(
-    service: FeatureService,
+def test_a_settlement_txid_when_present_still_derives_the_request_id(
+    service: FeatureService, store: InMemoryFeatureStore
 ) -> None:
-    """With no txid to key on, two requests must still get distinct ids rather than overwriting each other."""
-    first = _file_request(service, title="One", submitter="", txid="")
-    second = _file_request(service, title="Two", submitter="", txid="")
+    """A caller that does have a settled payment to attach gets the ledger-traceable id."""
+    request_id = _file_request(service, txid="TX-A", submitter=_PAYER)
 
-    assert first != second
-    assert len(service.list_recent(limit=50)) == 2
+    assert request_id == request_id_for(settlement_tx_id="TX-A")
+    assert store.get(request_id).submitter == _PAYER
 
 
 # --------------------------------------------------------------------------- #
@@ -667,9 +693,28 @@ def test_the_paid_demand_read_ranks_by_vote_total_and_shows_the_counts(
     body = json.loads(response.description)
     assert [item["title"] for item in body["items"]] == ["high", "middle", "low"]
     assert [item["vote_total"] for item in body["items"]] == [9, 4, 1]
-    # The paid surface carries what the free one withholds.
+    # The paid surface carries what the free one withholds; the submitter of
+    # a paid-attributed request is served, and a request's own settlement is
+    # not (it is not the demand signal).
     assert body["items"][0]["submitter"] == _PAYER
+    assert "settlement_tx_id" not in body["items"][0]
     assert body["settlement_tx_id"] == "TXD1"
+
+
+@pytest.mark.usefixtures("wired")
+def test_the_paid_demand_read_serves_an_anonymous_submitter_as_null(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A freely filed request has no submitter, and the paid read says so with null rather than an empty or invented value."""
+    feature_routes.x402_features_submit(_request(body=b'{"title":"Candles"}'))
+    monkeypatch.setattr(
+        feature_routes, "require_paid_request", lambda *_a, **_kw: _settled_result()
+    )
+
+    body = json.loads(feature_routes.x402_features_demand(_request(method="GET")).description)
+
+    assert body["items"][0]["submitter"] is None
+    assert body["items"][0]["vote_total"] == 0
 
 
 def test_an_unvoted_request_still_appears_in_the_demand_ranking_with_zero(

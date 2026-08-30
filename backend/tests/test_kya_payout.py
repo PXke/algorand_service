@@ -1,4 +1,4 @@
-"""KYC payout amount rounding, settled-asset selection, and failure handling."""
+"""KYA payout amount rounding, settled-asset selection, and failure handling."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from algosdk.transaction import SuggestedParams
 from x402.mechanisms.avm.constants import ALGORAND_MAINNET_CAIP2
 
 from app.core.config import settings
-from app.modules.kyc.services import payout_service
-from app.modules.kyc.services.payout_service import payout_share, send_payout
+from app.modules.kya.services import payout_service
+from app.modules.kya.services.payout_service import payout_share, send_payout
 from app.modules.x402.assets import EURQ, USDC, USDQ
 
 _, RECEIVER = account.generate_account()

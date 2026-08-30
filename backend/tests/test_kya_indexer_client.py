@@ -7,7 +7,7 @@ from typing import Never
 import httpx
 import pytest
 
-from app.modules.kyc.services.indexer_client import fetch_wallet_signals
+from app.modules.kya.services.indexer_client import fetch_wallet_signals
 
 WALLET = "W" * 58
 

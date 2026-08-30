@@ -1,4 +1,4 @@
-"""HTTP routes for KYC enrollment and the x402-gated lookup endpoint."""
+"""HTTP routes for KYA enrollment and the x402-gated lookup endpoint."""
 
 from __future__ import annotations
 
@@ -9,18 +9,18 @@ from app.core.config import settings
 from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
-from app.modules.kyc.models.domain import KycError
-from app.modules.kyc.services.consent_message import build_kyc_consent_message
-from app.modules.kyc.services.enrollment_service import EnrollmentService
-from app.modules.kyc.services.lookup_service import LookupService
-from app.modules.kyc.services.payout_service import send_payout
-from app.modules.kyc.services.rate_limit import (
+from app.modules.kya.models.domain import KycError
+from app.modules.kya.services.consent_message import build_kyc_consent_message
+from app.modules.kya.services.enrollment_service import EnrollmentService
+from app.modules.kya.services.lookup_service import LookupService
+from app.modules.kya.services.payout_service import send_payout
+from app.modules.kya.services.rate_limit import (
     consent_message_rate_limited,
     enroll_ip_rate_limited,
     enroll_wallet_rate_limited,
 )
 from app.modules.x402.discovery import describe_json_endpoint
-from app.modules.x402.paid_request import require_paid_request
+from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
 from app.schemas import EnrollRequest, KycPayoutRetryRequest
 
 
@@ -51,7 +51,7 @@ def kyc_consent_message(request: Request) -> Response:
 
 
 def kyc_enroll(request: Request) -> Response:
-    """Free enrollment: wallet-signed consent is the only gate. Computes trust signals from the public indexer and stores/overwrites the wallet's current KYC level — see EnrollmentService.
+    """Free enrollment: wallet-signed consent is the only gate. Computes trust signals from the public indexer and stores/overwrites the wallet's current KYA level — see EnrollmentService.
 
     Limited both per IP and per WALLET, and both checks run BEFORE the
     enrollment service is reached, so neither the outbound indexer requests nor
@@ -95,7 +95,7 @@ def kyc_enroll(request: Request) -> Response:
 
 
 def kyc_verify(request: Request) -> Response:
-    """The paid product: any third party (an exchange, a faucet, ...) pays to check a wallet's KYC status. Charged whether or not the wallet is enrolled (same as any paid lookup/search API) — the payout to the enrolled wallet only fires on a hit, since there's no subject to reward on a miss. See LookupService for the core rule (payout always goes to the LOOKED-UP wallet, never the payer).
+    """The paid product: any third party (an exchange, a faucet, ...) pays to check a wallet's KYA status. Charged whether or not the wallet is enrolled (same as any paid lookup/search API) — the payout to the enrolled wallet only fires on a hit, since there's no subject to reward on a miss. See LookupService for the core rule (payout always goes to the LOOKED-UP wallet, never the payer).
 
     Everything checkable without knowing who is paying is checked BEFORE the
     payment gate, so nobody is charged for a request that was doomed: the
@@ -144,6 +144,7 @@ def kyc_verify(request: Request) -> Response:
         amount_atomic=result.amount_atomic or "0",
         asset_id=result.asset_id or "",
     )
+    mark_fulfilled(result.payment_txid, resource="kyc-verify")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -177,8 +178,8 @@ def kyc_payout_retry(request: Request) -> Response:
     }
 
 
-def register_kyc_routes(app: Router) -> None:
-    """Register the KYC enrollment, consent-message, x402-gated lookup, and payout-retry routes."""
+def register_kya_routes(app: Router) -> None:
+    """Register the KYA enrollment, consent-message, x402-gated lookup, and payout-retry routes."""
     app.get("/api/v1/kyc/consent-message")(kyc_consent_message)
     app.post("/api/v1/kyc/enroll")(kyc_enroll)
     app.get("/api/v1/kyc/verify")(kyc_verify)

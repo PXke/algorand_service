@@ -1,4 +1,4 @@
-"""KYC route-level regressions: the shared paid gate, the free-endpoint limits, and the pre-gate wallet check.
+"""KYA route-level regressions: the shared paid gate, the free-endpoint limits, and the pre-gate wallet check.
 
 Fully offline. The facilitator is never reached (the payment gate itself is
 monkeypatched at modules/x402/paid_request.py's own seam, exactly as
@@ -35,21 +35,21 @@ from x402.mechanisms.avm.constants import ALGORAND_TESTNET_CAIP2
 from app.core import rate_limit as rate_limit_core
 from app.core.config import settings
 from app.core.http import QueryParams, Request, Response
-from app.modules.kyc.api import routes as kyc_routes
-from app.modules.kyc.models.domain import StoredEnrollment
-from app.modules.kyc.services import rate_limit as kyc_rate_limit
-from app.modules.kyc.services.enrollment_service import EnrollmentService
-from app.modules.kyc.services.indexer_client import WalletSignals
-from app.modules.kyc.services.lookup_service import LookupService
-from app.modules.kyc.services.payout_service import PayoutResult
-from app.modules.kyc.stores.memory import InMemoryEnrollmentStore
+from app.modules.kya.api import routes as kyc_routes
+from app.modules.kya.models.domain import StoredEnrollment
+from app.modules.kya.services import rate_limit as kyc_rate_limit
+from app.modules.kya.services.enrollment_service import EnrollmentService
+from app.modules.kya.services.indexer_client import WalletSignals
+from app.modules.kya.services.lookup_service import LookupService
+from app.modules.kya.services.payout_service import PayoutResult
+from app.modules.kya.stores.memory import InMemoryEnrollmentStore
 from app.modules.x402 import guard as x402_guard
 from app.modules.x402 import paid_request as payment_service
 from app.modules.x402 import replay as replay_module
 from app.modules.x402.settlement import InMemorySettlementStore, set_settlement_store
 
 # Real, checksum-valid Algorand addresses. kyc_verify validates with algosdk's
-# own is_valid_address, so the "X" * 58 placeholders the service-level KYC
+# own is_valid_address, so the "X" * 58 placeholders the service-level KYA
 # tests use would (correctly) be rejected by the route.
 _WALLET = encode_address(bytes([1]) + bytes(31))
 _PAYER = encode_address(bytes([2]) + bytes(31))
@@ -150,7 +150,7 @@ def ledger() -> Iterator[InMemorySettlementStore]:
     """The shared settlement ledger, installed at modules/x402's own seam and torn down.
 
     Installed at the shared seam rather than passed to the route: the point of
-    K-1 is that KYC now writes to the SAME ledger the other paid modules use,
+    K-1 is that KYA now writes to the SAME ledger the other paid modules use,
     and a test that handed the route its own store would not prove that.
     """
     store = InMemorySettlementStore()
@@ -233,7 +233,7 @@ def test_a_settled_kyc_lookup_writes_a_row_to_the_shared_settlement_ledger(
     assert record.asset_id == "10458941"
     assert record.amount_atomic == "50000"
     assert record.payer == _PAYER
-    # The resource id KYC's payments are booked under in the shared ledger.
+    # The resource id KYA's payments are booked under in the shared ledger.
     assert record.resource == "kyc-verify"
     assert record.network == ALGORAND_TESTNET_CAIP2
     assert record.settled_at_epoch > 0
@@ -568,7 +568,7 @@ def test_no_throwaway_test_ping_route_is_registered() -> None:
             registered.append(path)
             return lambda handler: handler
 
-    kyc_routes.register_kyc_routes(_Recorder())
+    kyc_routes.register_kya_routes(_Recorder())
 
     assert not any("_test" in path or "ping" in path for path in registered)
     assert not hasattr(kyc_routes, "kyc_test_ping")
@@ -576,7 +576,7 @@ def test_no_throwaway_test_ping_route_is_registered() -> None:
 
 
 def test_no_kyc_price_is_a_hardcoded_literal() -> None:
-    """Every KYC price comes from Settings — the ping's hardcoded "$0.01" was the only price literal in the marketplace."""
+    """Every KYA price comes from Settings — the ping's hardcoded "$0.01" was the only price literal in the marketplace."""
     import inspect
 
     source = inspect.getsource(kyc_routes)

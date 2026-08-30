@@ -1,15 +1,15 @@
-"""Verify consent, fetch on-chain signals, and store a wallet's KYC enrollment."""
+"""Verify consent, fetch on-chain signals, and store a wallet's KYA enrollment."""
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
 
-from app.modules.kyc.models.domain import KycError, StoredEnrollment
-from app.modules.kyc.services.consent_message import build_kyc_consent_message
-from app.modules.kyc.services.indexer_client import WalletSignals, fetch_wallet_signals
-from app.modules.kyc.stores.base import EnrollmentStore
-from app.modules.kyc.stores.factory import get_enrollment_store
+from app.modules.kya.models.domain import KycError, StoredEnrollment
+from app.modules.kya.services.consent_message import build_kyc_consent_message
+from app.modules.kya.services.indexer_client import WalletSignals, fetch_wallet_signals
+from app.modules.kya.stores.base import EnrollmentStore
+from app.modules.kya.stores.factory import get_enrollment_store
 
 SignatureVerifier = Callable[[str, str, str], bool]
 SignalsFetcher = Callable[[str], WalletSignals]
@@ -26,7 +26,7 @@ _ESTABLISHED_MIN_RECENT_TXNS = 3
 
 def _default_signature_verifier(wallet_address: str, message: str, signature_b64: str) -> bool:
     # MX-prefixed (Pera's algo_signData dialect), not the raw-message
-    # verifier the suggestions/upvote flow uses — the KYC frontend signs
+    # verifier the suggestions/upvote flow uses — the KYA frontend signs
     # consent via the automated WalletConnect algo_signData call (see
     # wallet_auth_flutter's signArbitraryData), matching how this app's own
     # login flow already signs, rather than the suggestions module's
@@ -50,7 +50,7 @@ def _derive_kyc_level(signals: WalletSignals, *, current_round: int | None) -> s
 
 
 class EnrollmentService:
-    """Verify consent, fetch on-chain signals, and store a wallet's KYC enrollment."""
+    """Verify consent, fetch on-chain signals, and store a wallet's KYA enrollment."""
 
     def __init__(
         self,

@@ -1,10 +1,10 @@
-"""In-memory KYC enrollment store for tests."""
+"""In-memory KYA enrollment store for tests."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.modules.kyc.models.domain import StoredEnrollment
+from app.modules.kya.models.domain import StoredEnrollment
 
 
 @dataclass
@@ -19,7 +19,7 @@ class _LookupEvent:
 
 
 class InMemoryEnrollmentStore:
-    """In-memory KYC enrollment store for tests."""
+    """In-memory KYA enrollment store for tests."""
 
     def __init__(self) -> None:
         """Start with an empty in-process enrollment table and lookup-event log."""
@@ -27,7 +27,7 @@ class InMemoryEnrollmentStore:
         self._lookup_events: list[_LookupEvent] = []
 
     def upsert(self, item: StoredEnrollment) -> None:
-        """Insert or update a KYC enrollment record."""
+        """Insert or update a KYA enrollment record."""
         self._items[item.wallet_address] = item
 
     def get(self, wallet_address: str) -> StoredEnrollment | None:

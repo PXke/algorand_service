@@ -1,11 +1,11 @@
-"""Paid KYC lookup: charges regardless of hit/miss, pays out only the enrolled wallet."""
+"""Paid KYA lookup: charges regardless of hit/miss, pays out only the enrolled wallet."""
 
 from __future__ import annotations
 
-from app.modules.kyc.models.domain import StoredEnrollment
-from app.modules.kyc.services.lookup_service import LookupService
-from app.modules.kyc.services.payout_service import PayoutResult
-from app.modules.kyc.stores.memory import InMemoryEnrollmentStore
+from app.modules.kya.models.domain import StoredEnrollment
+from app.modules.kya.services.lookup_service import LookupService
+from app.modules.kya.services.payout_service import PayoutResult
+from app.modules.kya.stores.memory import InMemoryEnrollmentStore
 
 WALLET = "W" * 58
 PAYER = "P" * 58

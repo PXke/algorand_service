@@ -15,7 +15,7 @@ from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
 from app.modules.x402.discovery import describe_json_endpoint
-from app.modules.x402.paid_request import require_paid_request
+from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
 from app.modules.x402_board.models.domain import BoardError, StoredPlacement
 from app.modules.x402_board.services.board_service import BoardService, normalize_link
 from app.modules.x402_board.services.rate_limit import board_read_rate_limited
@@ -123,6 +123,7 @@ def x402_board_place(request: Request) -> Response:
         # ending in a 4xx, so a new rule belongs before the gate, not after it.
         return json_error_from_platform(exc)
 
+    mark_fulfilled(result.payment_txid, resource="x402-board-place")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},

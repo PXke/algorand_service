@@ -1,17 +1,17 @@
-"""Storage interface for KYC enrollments and lookup events."""
+"""Storage interface for KYA enrollments and lookup events."""
 
 from __future__ import annotations
 
 from typing import Protocol
 
-from app.modules.kyc.models.domain import StoredEnrollment
+from app.modules.kya.models.domain import StoredEnrollment
 
 
 class EnrollmentStore(Protocol):
-    """Storage interface for KYC enrollments."""
+    """Storage interface for KYA enrollments."""
 
     def upsert(self, item: StoredEnrollment) -> None:
-        """Insert or update a KYC enrollment record."""
+        """Insert or update a KYA enrollment record."""
         ...
 
     def get(self, wallet_address: str) -> StoredEnrollment | None:

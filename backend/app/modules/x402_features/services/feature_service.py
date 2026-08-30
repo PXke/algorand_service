@@ -1,4 +1,4 @@
-"""Feature-request rules: request identity, paid voting, demand ranking.
+"""Feature-request rules: request identity, free filing, paid voting, demand ranking.
 
 Three product decisions live in this file and are documented at the code that
 implements them, because none of them is derivable from the roadmap line
@@ -33,26 +33,19 @@ _MAX_TITLE_LENGTH = 120
 _MAX_DESCRIPTION_LENGTH = 2000
 
 
-def request_id_for(*, settlement_tx_id: str) -> str:
-    """Identity of one feature request: a hex SHA-256 of the settling payment's txid.
+def request_id_for(*, settlement_tx_id: str = "") -> str:
+    """Identity of one feature request.
 
-    One payment creates exactly one request, so the payment's own txid is a
-    natural unique key, and deriving the id from it means any row in the
-    settlement ledger can be traced forward to the request it bought. Replay
-    protection in modules/x402/replay.py already stops the same payment header
-    being presented twice, so this cannot collide with itself.
+    Filing is free and anonymous, so there is normally no settlement to key
+    on and the id is a random uuid: each filing is its own event, and two
+    identical titles are two requests, never folded onto one row. NOT keyed on
+    (submitter, title) the way the board keys placements on (payer, link) --
+    a placement is a rented slot the same payer renews; a request is a
+    statement of demand and restating it is a second statement.
 
-    NOT keyed on (submitter, title) the way the board keys placements on
-    (payer, link). A board placement is a rented slot the same payer renews;
-    a feature request is an event. The same wallet asking for the same thing
-    twice has paid twice and stated its demand twice -- folding those onto one
-    row would silently delete a paid request.
-
-    When the gate could not give us a txid, a random id stands in rather than a
-    constant: falling back to a fixed value would make every unattributable
-    payment collide onto one row, so the last such payer would overwrite the
-    previous one's paid request. Same failure mode the board's _owner_key
-    guards against.
+    When a settlement txid IS supplied (a request created by a paid path), the
+    id is the hex SHA-256 of that txid so the settlement ledger row can be
+    traced forward to the request it bought.
     """
     txid = settlement_tx_id.strip()
     if not txid:
@@ -69,7 +62,7 @@ def _clean_title(raw: str) -> str:
 
 
 class FeatureService:
-    """Creates feature requests, records paid votes, and ranks demand."""
+    """Creates (free, anonymous) feature requests, records paid votes, and ranks demand."""
 
     def __init__(self, store: FeatureStore | None = None) -> None:
         """Take an explicit store for tests; otherwise resolve the configured one lazily."""
@@ -85,11 +78,16 @@ class FeatureService:
         *,
         title: str,
         description: str,
-        submitter: str,
-        settlement_tx_id: str,
+        submitter: str = "",
+        settlement_tx_id: str = "",
         now: datetime | None = None,
     ) -> StoredFeatureRequest:
-        """Store a paid feature request and return it."""
+        """Store one feature request and return it.
+
+        The HTTP route files anonymously (no submitter, no settlement); the
+        two attribution fields exist for callers that do have a settled
+        payment to attach.
+        """
         moment = now or datetime.now(tz=UTC)
         item = StoredFeatureRequest(
             request_id=request_id_for(settlement_tx_id=settlement_tx_id),

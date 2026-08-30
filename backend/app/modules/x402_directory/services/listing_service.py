@@ -15,6 +15,11 @@ from app.modules.x402_directory.stores.factory import get_listing_store
 _ALLOWED_SCHEMES = ("http", "https")
 _MAX_URL_LENGTH = 2048
 
+# Per-tag length bound, matching X402ListingRequest.tags' per-item bound: a
+# search tag longer than any storable tag cannot match anything, and bounding
+# it keeps a free query param from carrying an arbitrarily long partition key.
+MAX_TAG_LENGTH = 64
+
 # Cap on one listing's serialized request schema. Deliberately far below the
 # 256 KiB global body cap (core/falcon_router.py): a listing is paid input that
 # GET /x402/search serves back inline, for free, up to
@@ -64,6 +69,26 @@ def encode_schema(schema: dict | None) -> str:
             f"schema must serialize to at most {MAX_SCHEMA_JSON_BYTES} bytes",
         )
     return encoded
+
+
+def normalize_tag(raw: str) -> str:
+    """Canonical stored/searched form of one tag: trimmed and lowercased.
+
+    The ONE normalization both sides use -- create() runs every submitted tag
+    through it before storing, and search() runs the `tag` query param
+    through it before reading the by-tag projection -- so "FX", " fx " and
+    "fx" all name the same partition. Returns "" for a blank tag, which
+    create() drops and search() rejects.
+    """
+    return raw.strip().lower()
+
+
+def search_tag(raw: str) -> str:
+    """Validate and normalize the `tag` search filter, raising invalid_request if unusable."""
+    tag = normalize_tag(raw)
+    if not tag or len(tag) > MAX_TAG_LENGTH:
+        raise DirectoryError("invalid_request", f"tag must be 1-{MAX_TAG_LENGTH} characters")
+    return tag
 
 
 def url_hash(normalized_url: str) -> str:
@@ -140,6 +165,17 @@ class ListingService:
         exact check this exists for. An unattributable payer can still create
         a brand-new listing (existing is None) or claim an unowned one
         (existing.payer == ""), same as any other payer.
+
+        Write ordering: the first-time path is the store's atomic
+        insert_if_absent (a Cassandra lightweight transaction), NOT a read
+        followed by an upsert. Two concurrent first-time listers of one url
+        would both read "not listed", both pass the ownership check, and the
+        last upsert would silently discard the other payer's paid listing.
+        With the conditional insert exactly one of them creates the row; the
+        other gets False, re-reads the winner's row and is held to the same
+        ownership rule as any relist -- refused if the winner is a different
+        live payer, otherwise allowed through the relist path. The relist
+        path (same owner, unowned, or expired) is a plain upsert.
         """
         moment = now or datetime.now(tz=UTC)
         if not normalized_url.strip():
@@ -156,6 +192,25 @@ class ListingService:
                 f"schema must serialize to at most {MAX_SCHEMA_JSON_BYTES} bytes",
             )
         key = url_hash(normalized_url)
+        listing = StoredListing(
+            url_hash=key,
+            url=normalized_url,
+            price=price,
+            description=description.strip(),
+            schema_json=schema_json,
+            settlement_tx_id=settlement_tx_id,
+            term_end_epoch=int(
+                (moment + timedelta(days=settings.x402_listing_term_days)).timestamp()
+            ),
+            created_at_epoch=int(moment.timestamp()),
+            assets=sorted({a.strip() for a in assets if a.strip()}),
+            tags=sorted({normalize_tag(t) for t in tags if normalize_tag(t)}),
+            payer=payer,
+        )
+        if self.store.insert_if_absent(listing):
+            return listing
+        # Lost the first-insert (or the url was already listed): apply the
+        # ownership rule against whatever is there now.
         existing = self.store.get(key)
         existing_is_owned = (
             existing is not None
@@ -169,26 +224,20 @@ class ListingService:
                 "This url is already listed by a different payer. Payment has "
                 "settled but the existing listing was not changed.",
             )
-        listing = StoredListing(
-            url_hash=key,
-            url=normalized_url,
-            price=price,
-            description=description.strip(),
-            schema_json=schema_json,
-            settlement_tx_id=settlement_tx_id,
-            term_end_epoch=int(
-                (moment + timedelta(days=settings.x402_listing_term_days)).timestamp()
-            ),
-            created_at_epoch=int(moment.timestamp()),
-            assets=sorted({a.strip() for a in assets if a.strip()}),
-            tags=sorted({t.strip().lower() for t in tags if t.strip()}),
-            payer=payer,
-        )
         self.store.upsert(listing)
         return listing
 
-    def search(self, *, limit: int, now: datetime | None = None) -> list[StoredListing]:
+    def search(
+        self, *, limit: int, tag: str | None = None, now: datetime | None = None
+    ) -> list[StoredListing]:
         """Return listings whose term is still running, newest-first, clamped.
+
+        With `tag` (raw, as received -- normalized here with the same rule
+        create() stores tags under), only listings carrying that tag are
+        returned, read from the by-tag projection (migration 096) instead of
+        the recency feed; an unknown tag is simply an empty partition. The
+        same term-expiry filter applies after the LIMITed read either way.
+        Raises invalid_request for a blank or over-long tag.
 
         The name stays `search` rather than becoming `search_active`: for a
         search endpoint, live results are what a caller already expects, and it
@@ -214,9 +263,11 @@ class ListingService:
         moment = now or datetime.now(tz=UTC)
         cutoff = int(moment.timestamp())
         clamped = max(1, min(limit, settings.x402_search_max_results))
-        return [
-            item for item in self.store.list_recent(limit=clamped) if item.term_end_epoch > cutoff
-        ]
+        if tag is None:
+            items = self.store.list_recent(limit=clamped)
+        else:
+            items = self.store.list_by_tag(search_tag(tag), limit=clamped)
+        return [item for item in items if item.term_end_epoch > cutoff]
 
     def delete(self, normalized_url: str) -> bool:
         """Admin-only: remove a listing outright, feed projection included.

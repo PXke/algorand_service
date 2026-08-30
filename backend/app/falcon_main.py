@@ -21,7 +21,7 @@ from app.modules.chain.algod_proxy import register_algod_proxy
 from app.modules.contact.api.routes import register_contact_routes
 from app.modules.glossary.api.routes import register_glossary_routes
 from app.modules.ingest.api.routes import register_ingest_routes
-from app.modules.kyc.api.routes import register_kyc_routes
+from app.modules.kya.api.routes import register_kya_routes
 from app.modules.media.api.routes import register_media_routes
 from app.modules.metrics.api.routes import register_metrics_routes
 from app.modules.news.api.routes import register_news_routes
@@ -153,7 +153,7 @@ def create_app() -> falcon.App:
         # until its own store is explicitly set to something durable, rather
         # than going live silently alongside whichever products actually are.
         if settings.kyc_store != "memory":
-            register_kyc_routes(router)
+            register_kya_routes(router)
         if settings.x402_directory_store != "memory":
             register_x402_directory_routes(router)
         if settings.x402_board_store != "memory":

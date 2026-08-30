@@ -448,15 +448,16 @@ class X402BoardItem(msgspec.Struct, kw_only=True):
 
 # ── x402 feature-request board ────────────────────────────────────────────────
 class X402FeatureRequestSubmission(msgspec.Struct, kw_only=True):
-    """Request body for POST /x402/features — one paid feature request.
+    """Request body for POST /x402/features — one free, anonymous feature request.
 
     `title` is what the board lists and `description` is the detail a builder
     reads before deciding to build it, so the title is required and tightly
     capped while the description gets the same 2000-character headroom as a
     directory listing's.
 
-    The submitter is NOT a field: it comes from the settled payment, so a
-    caller cannot file a request in someone else's wallet's name.
+    There is NO submitter field: filing is anonymous. A self-declared wallet
+    would be unverifiable and would let a caller file in someone else's name,
+    so none is accepted and any extra key is ignored.
 
     There is no matching struct for the vote route — POST
     /x402/features/:id/vote takes no body at all. The request voted on is in

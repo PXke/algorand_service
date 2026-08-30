@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from app.modules.kyc.services.payout_service import PayoutResult, send_payout
-from app.modules.kyc.stores.base import EnrollmentStore
-from app.modules.kyc.stores.factory import get_enrollment_store
+from app.modules.kya.services.payout_service import PayoutResult, send_payout
+from app.modules.kya.stores.base import EnrollmentStore
+from app.modules.kya.stores.factory import get_enrollment_store
 
 PayoutFn = Callable[..., PayoutResult]
 
 
 class LookupService:
-    """Paid KYC-status lookup, paying out to the enrolled wallet on a hit."""
+    """Paid KYA-status lookup, paying out to the enrolled wallet on a hit."""
 
     def __init__(
         self,

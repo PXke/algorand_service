@@ -1,4 +1,4 @@
-"""Build the message a wallet signs to consent to KYC enrollment."""
+"""Build the message a wallet signs to consent to KYA enrollment."""
 
 from __future__ import annotations
 

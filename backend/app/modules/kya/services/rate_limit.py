@@ -1,8 +1,8 @@
-"""Per-IP and per-wallet rate limits for the two free KYC endpoints.
+"""Per-IP and per-wallet rate limits for the two free KYA endpoints.
 
 Same shape and same primitive as the other x402 modules' rate limiters
 (app/core/rate_limit.py's incr_with_expiry), under this module's own key
-prefix so a KYC flood cannot exhaust a caller's directory/board/search
+prefix so a KYA flood cannot exhaust a caller's directory/board/search
 budget and vice versa.
 
 Enroll carries a second, wallet-keyed limit that the other modules have no
@@ -22,9 +22,9 @@ from app.core.http import Request
 from app.core.rate_limit import incr_with_expiry
 from app.core.request_headers import client_ip
 
-_CONSENT_KEY_PREFIX = "algorand:kyc:consent_rl:"
-_ENROLL_IP_KEY_PREFIX = "algorand:kyc:enroll_ip_rl:"
-_ENROLL_WALLET_KEY_PREFIX = "algorand:kyc:enroll_wallet_rl:"
+_CONSENT_KEY_PREFIX = "algorand:kya:consent_rl:"
+_ENROLL_IP_KEY_PREFIX = "algorand:kya:enroll_ip_rl:"
+_ENROLL_WALLET_KEY_PREFIX = "algorand:kya:enroll_wallet_rl:"
 
 _HOUR_SECONDS = 3600
 _DAY_SECONDS = 86400

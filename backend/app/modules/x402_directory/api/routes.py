@@ -16,10 +16,11 @@ from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
 from app.modules.admin.auth import require_admin_wallet
 from app.modules.x402.discovery import describe_json_endpoint
-from app.modules.x402.paid_request import require_paid_request
+from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
 from app.modules.x402_directory.models.domain import DirectoryError, StoredListing
 from app.modules.x402_directory.services.listing_service import (
     MAX_SCHEMA_JSON_BYTES,
+    MAX_TAG_LENGTH,
     ListingService,
     encode_schema,
     normalize_url,
@@ -93,9 +94,11 @@ def x402_list(request: Request) -> Response:
         # commit — the term length is not derivable from the price alone.
         description=(
             f"List one x402 endpoint in the public PXke x402 directory for {term_days} days. "
-            f"Discoverable immediately at GET /api/v1/x402/search, and removed from it when "
-            f"the {term_days} days are up. Optional `schema` must serialize to at most "
-            f"{MAX_SCHEMA_JSON_BYTES} bytes."
+            f"Discoverable immediately at GET /api/v1/x402/search (free; optional "
+            f"`?tag=<tag>` filters to listings carrying that tag, `?limit=` caps results), "
+            f"and removed from it when the {term_days} days are up. `tags` are stored "
+            f"trimmed and lowercased and are what `?tag=` matches on. Optional `schema` "
+            f"must serialize to at most {MAX_SCHEMA_JSON_BYTES} bytes."
         ),
         extensions=describe_json_endpoint(
             # POST carries its input as a JSON body, so this must declare a
@@ -118,7 +121,11 @@ def x402_list(request: Request) -> Response:
                     "tags": {
                         "type": "array",
                         "maxItems": 16,
-                        "items": {"type": "string", "maxLength": 64},
+                        "items": {"type": "string", "maxLength": MAX_TAG_LENGTH},
+                        "description": (
+                            "Stored trimmed and lowercased; searchable via "
+                            "GET /api/v1/x402/search?tag=<tag>."
+                        ),
                     },
                     # JSON Schema has no serialized-byte-size keyword, so the
                     # 4 KiB cap enforced by encode_schema() above cannot be
@@ -157,6 +164,7 @@ def x402_list(request: Request) -> Response:
         # rule belongs there too, never here.
         return json_error_from_platform(exc)
 
+    mark_fulfilled(result.payment_txid, resource="x402-directory-list")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -173,8 +181,10 @@ def x402_list(request: Request) -> Response:
 def x402_search(request: Request) -> Response | dict:
     """Free: the directory's unexpired listings, newest first, rate-limited per IP.
 
-    Listings whose paid term has ended are excluded — see
-    listing_service.search().
+    Query params: `limit` (integer, clamped to settings.x402_search_max_results)
+    and optional `tag` (1-MAX_TAG_LENGTH characters, matched trimmed and
+    lowercased against the tags a listing was stored with). Listings whose
+    paid term has ended are excluded — see listing_service.search().
     """
     if search_rate_limited(request):
         return json_error_response(
@@ -187,7 +197,11 @@ def x402_search(request: Request) -> Response | dict:
     except ValueError:
         return json_error_response(400, "invalid_request", "limit must be an integer")
 
-    items = listing_service.search(limit=limit)
+    raw_tag = query_param(request.query_params.get("tag", ""))
+    try:
+        items = listing_service.search(limit=limit, tag=raw_tag or None)
+    except DirectoryError as exc:
+        return json_error_from_platform(exc)
     return {"items": [_listing_json(item) for item in items]}
 
 

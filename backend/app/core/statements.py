@@ -800,6 +800,17 @@ class X402DirectoryStmts:
         "term_end, settlement_tx_id, created_at, payer"
         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
+    # First-time listing path: a lightweight transaction, so two concurrent
+    # first-time listers of the same url cannot both observe "not listed" and
+    # then both write -- only one INSERT is applied; the loser reads back
+    # `was_applied == False` and re-evaluates ownership against the winner's
+    # row (listing_service.create()). Same column list as UPSERT_LISTING.
+    INSERT_LISTING_IF_ABSENT = _Stmt(
+        "INSERT INTO algorand_platform.x402_listings ("
+        "url_hash, url, price, assets, description, schema_json, tags, "
+        "term_end, settlement_tx_id, created_at, payer"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS"
+    )
     GET_LISTING = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
         "term_end, settlement_tx_id, created_at, payer "
@@ -826,9 +837,30 @@ class X402DirectoryStmts:
     # and the caller clamps it (no unbounded listings, CLAUDE.md section 4).
     LIST_RECENT = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at "
+        "term_end, settlement_tx_id, created_at, payer "
         "FROM algorand_platform.x402_listings_by_recency "
         "WHERE directory = ? LIMIT ?"
+    )
+    # Tag lookup projection (migration 096): one row per (normalized tag,
+    # listing), written next to the recency projection, so a tag search is a
+    # single-partition newest-first read with no ALLOW FILTERING.
+    INSERT_BY_TAG = _Stmt(
+        "INSERT INTO algorand_platform.x402_listings_by_tag ("
+        "tag, created_at, url_hash, url, price, assets, description, "
+        "schema_json, tags, term_end, settlement_tx_id, payer"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    # Same addressing rule as DELETE_RECENCY: created_at is a clustering
+    # column, so the previous listing's exact created_at is needed.
+    DELETE_BY_TAG = _Stmt(
+        "DELETE FROM algorand_platform.x402_listings_by_tag "
+        "WHERE tag = ? AND created_at = ? AND url_hash = ?"
+    )
+    LIST_BY_TAG = _Stmt(
+        "SELECT url_hash, url, price, assets, description, schema_json, tags, "
+        "term_end, settlement_tx_id, created_at, payer "
+        "FROM algorand_platform.x402_listings_by_tag "
+        "WHERE tag = ? LIMIT ?"
     )
 
 
@@ -931,11 +963,38 @@ class X402Stmts:
     modules/x402/settlement.py.
     """
 
+    # Full INSERT of every column, fulfilled included (migration 095), so the
+    # row never has an unwritten column reading back as null.
     INSERT_SETTLEMENT = _Stmt(
         "INSERT INTO algorand_platform.x402_settlements ("
         "day, settled_at, tx_id, asset_id, amount_atomic, payer, resource, "
-        "network, eur_value"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "network, eur_value, fulfilled"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    # By-txid lookup (migration 095): the ledger's key is (day, settled_at,
+    # tx_id) and a route only holds the txid, so mark_fulfilled needs this to
+    # find the ledger row's full key without ALLOW FILTERING.
+    INSERT_SETTLEMENT_BY_TX = _Stmt(
+        "INSERT INTO algorand_platform.x402_settlements_by_tx ("
+        "tx_id, day, settled_at, asset_id, amount_atomic, payer, resource, "
+        "network, eur_value, fulfilled"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    GET_SETTLEMENT_BY_TX = _Stmt(
+        "SELECT tx_id, day, settled_at, asset_id, amount_atomic, payer, resource, "
+        "network, eur_value, fulfilled "
+        "FROM algorand_platform.x402_settlements_by_tx WHERE tx_id = ?"
+    )
+    # Single-column UPDATEs are safe here ONLY because the caller has just
+    # read the row's full key from x402_settlements_by_tx -- an UPDATE on a
+    # key that does not exist would upsert a phantom row. See
+    # CassandraSettlementStore.mark_fulfilled.
+    MARK_SETTLEMENT_FULFILLED = _Stmt(
+        "UPDATE algorand_platform.x402_settlements SET fulfilled = ? "
+        "WHERE day = ? AND settled_at = ? AND tx_id = ?"
+    )
+    MARK_SETTLEMENT_BY_TX_FULFILLED = _Stmt(
+        "UPDATE algorand_platform.x402_settlements_by_tx SET fulfilled = ? WHERE tx_id = ?"
     )
 
 

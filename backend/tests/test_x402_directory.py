@@ -271,7 +271,10 @@ def test_settlement_is_written_to_the_ledger_with_every_required_field(
     assert record.resource == "x402-directory-list"
     assert record.network == ALGORAND_TESTNET_CAIP2
     assert record.settled_at_epoch > 0
-    assert record.eur_value == 0.0
+    # No oracle is reachable in this test, so the EUR value is the explicit
+    # "unavailable" sentinel -- never a 0.0 that reads as a real valuation.
+    assert record.eur_value == settlement_service.EUR_VALUE_UNAVAILABLE
+    assert record.fulfilled is False
 
 
 def test_a_ledger_write_failure_never_drops_the_paid_response(
@@ -1050,3 +1053,334 @@ def test_admin_delist_nonexistent_listing_returns_404(
     )
 
     assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# First-insert race (INSERT ... IF NOT EXISTS)
+# --------------------------------------------------------------------------- #
+class _RacingStore(InMemoryListingStore):
+    """A store where a rival's first-time insert lands between our check and our write.
+
+    On the FIRST insert_if_absent call it behaves as if a concurrent lister
+    (`rival`) won the lightweight transaction a moment earlier: the rival's
+    row is stored, the caller's is not, and False is returned -- exactly what
+    Cassandra's `[applied] = false` means. Every later call is the plain
+    in-memory behaviour. Nothing here goes through get() first, so a service
+    that still did read-then-upsert would never see the rival's row.
+    """
+
+    def __init__(self, rival: StoredListing) -> None:
+        super().__init__()
+        self._rival = rival
+        self.insert_attempts = 0
+
+    def insert_if_absent(self, item: StoredListing) -> bool:
+        self.insert_attempts += 1
+        if self.insert_attempts == 1:
+            super().upsert(self._rival)
+            return False
+        return super().insert_if_absent(item)
+
+
+def _rival_listing(*, payer: str, now: datetime, term_days: int = 30) -> StoredListing:
+    return StoredListing(
+        url_hash=url_hash("https://api.example.com/v1/quote"),
+        url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="the rival got there first",
+        schema_json="",
+        settlement_tx_id="TX-RIVAL",
+        term_end_epoch=int((now + timedelta(days=term_days)).timestamp()),
+        created_at_epoch=int(now.timestamp()),
+        payer=payer,
+    )
+
+
+def test_a_first_time_lister_who_loses_the_insert_race_is_refused_not_overwriting() -> None:
+    """Regression: two concurrent first-time listers of one url must not silently overwrite each other.
+
+    Before the conditional insert, create() did get() -> None, then upsert():
+    both racers passed the ownership check and the last write won, discarding
+    the other payer's paid listing. Now the loser of the INSERT IF NOT EXISTS
+    is held to the ownership rule against the winner's row.
+    """
+    now = datetime.now(tz=UTC)
+    store = _RacingStore(_rival_listing(payer="AGENT1", now=now))
+    service = ListingService(store)
+
+    with pytest.raises(DirectoryError, match="already listed by a different payer"):
+        service.create(
+            normalized_url="https://api.example.com/v1/quote",
+            price="$999.00",
+            description="the loser's version",
+            assets=[],
+            tags=[],
+            schema_json="",
+            settlement_tx_id="TX-LOSER",
+            payer="AGENT2",
+            now=now,
+        )
+
+    stored = store.get(url_hash("https://api.example.com/v1/quote"))
+    assert stored is not None
+    assert stored.payer == "AGENT1"
+    assert stored.settlement_tx_id == "TX-RIVAL"
+    assert store.insert_attempts == 1
+
+
+def test_losing_the_insert_race_to_your_own_wallet_still_relists() -> None:
+    """The race loser proceeds through the relist path when the winner is the same payer (or the row is unowned)."""
+    now = datetime.now(tz=UTC)
+    store = _RacingStore(_rival_listing(payer="AGENT1", now=now))
+    service = ListingService(store)
+
+    listing = service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.02",
+        description="my own retry",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX-RETRY",
+        payer="AGENT1",
+        now=now,
+    )
+
+    stored = store.get(url_hash("https://api.example.com/v1/quote"))
+    assert stored == listing
+    assert stored.settlement_tx_id == "TX-RETRY"
+
+
+def test_losing_the_insert_race_to_an_expired_listing_still_relists() -> None:
+    """A winner whose term has already ended is unowned, so the race loser may take the url."""
+    now = datetime.now(tz=UTC)
+    store = _RacingStore(_rival_listing(payer="AGENT1", now=now - timedelta(days=60)))
+    service = ListingService(store)
+
+    service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.02",
+        description="fresh term",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX-NEW",
+        payer="AGENT2",
+        now=now,
+    )
+
+    stored = store.get(url_hash("https://api.example.com/v1/quote"))
+    assert stored is not None
+    assert stored.payer == "AGENT2"
+
+
+def test_a_first_time_listing_goes_through_the_conditional_insert(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first-time path never falls back to a blind upsert -- that is the race the LWT exists to close."""
+    calls: list[str] = []
+    real_insert = store.insert_if_absent
+    real_upsert = store.upsert
+    monkeypatch.setattr(
+        store, "insert_if_absent", lambda item: calls.append("insert") or real_insert(item)
+    )
+    monkeypatch.setattr(store, "upsert", lambda item: calls.append("upsert") or real_upsert(item))
+
+    ListingService(store).create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="first",
+        assets=[],
+        tags=[],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+
+    assert calls == ["insert"]
+
+
+# --------------------------------------------------------------------------- #
+# Tag-filtered search
+# --------------------------------------------------------------------------- #
+def _seed_tagged(service: ListingService, *, now: datetime) -> None:
+    service.create(
+        normalized_url="https://fx.example.com/quote",
+        price="$0.01",
+        description="fx live",
+        assets=[],
+        tags=["FX", " Market-Data "],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+        now=now - timedelta(days=1),
+    )
+    service.create(
+        normalized_url="https://nft.example.com/floor",
+        price="$0.01",
+        description="nft live",
+        assets=[],
+        tags=["nft"],
+        schema_json="",
+        settlement_tx_id="TX2",
+        payer="AGENT2",
+        now=now - timedelta(hours=1),
+    )
+    service.create(
+        normalized_url="https://old-fx.example.com/quote",
+        price="$0.01",
+        description="fx expired",
+        assets=[],
+        tags=["fx"],
+        schema_json="",
+        settlement_tx_id="TX3",
+        payer="AGENT3",
+        now=now - timedelta(days=31),
+    )
+
+
+def test_search_by_tag_returns_only_live_listings_carrying_that_tag(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`tag=` narrows to listings stored with that tag, still dropping expired ones."""
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    service = ListingService(store)
+    now = datetime.now(tz=UTC)
+    _seed_tagged(service, now=now)
+
+    assert [i.description for i in service.search(limit=50, tag="fx", now=now)] == ["fx live"]
+    # Normalized the same way the write side normalizes: case and whitespace insensitive.
+    assert [i.description for i in service.search(limit=50, tag=" FX ", now=now)] == ["fx live"]
+    assert [i.description for i in service.search(limit=50, tag="market-data", now=now)] == [
+        "fx live"
+    ]
+    # Unfiltered search still serves every live listing, newest first.
+    assert [i.description for i in service.search(limit=50, now=now)] == ["nft live", "fx live"]
+
+
+def test_search_by_unknown_tag_is_empty(store: InMemoryListingStore) -> None:
+    """A tag nobody listed under is an empty result, not an error."""
+    service = ListingService(store)
+    _seed_tagged(service, now=datetime.now(tz=UTC))
+
+    assert service.search(limit=50, tag="nonexistent") == []
+
+
+@pytest.mark.parametrize("bad_tag", ["   ", "x" * 65])
+def test_search_rejects_blank_or_overlong_tags(store: InMemoryListingStore, bad_tag: str) -> None:
+    """A blank or over-long tag is invalid_request, not a silent empty result or an unbounded key."""
+    with pytest.raises(DirectoryError, match="tag must be"):
+        ListingService(store).search(limit=50, tag=bad_tag)
+
+
+@pytest.mark.usefixtures("fake_redis")
+def test_search_route_accepts_a_tag_query_param(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /x402/search?tag= is wired through to the tag-filtered search, and a bad tag is a 400."""
+    monkeypatch.setattr(settings, "x402_listing_term_days", 30)
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    _seed_tagged(ListingService(store), now=datetime.now(tz=UTC))
+
+    result = directory_routes.x402_search(
+        _request(method="GET", path="/api/v1/x402/search", query={"tag": "NFT"})
+    )
+    assert [item["description"] for item in result["items"]] == ["nft live"]
+
+    empty = directory_routes.x402_search(
+        _request(method="GET", path="/api/v1/x402/search", query={"tag": "nothing"})
+    )
+    assert empty["items"] == []
+
+    bad = directory_routes.x402_search(
+        _request(method="GET", path="/api/v1/x402/search", query={"tag": "x" * 65})
+    )
+    assert bad.status_code == 400
+
+
+def test_the_listing_offer_advertises_the_tag_filter(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 402 offer's resource description tells a payer that search takes ?tag=."""
+    monkeypatch.setattr(directory_routes, "listing_service", ListingService(store))
+    captured: dict[str, Any] = {}
+
+    def _capture(_request: Request, **kwargs: Any) -> Never:  # noqa: ANN401 -- mirrors the gate's kwargs
+        captured.update(kwargs)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(directory_routes, "require_paid_request", _capture)
+    with pytest.raises(RuntimeError, match="stop"):
+        directory_routes.x402_list(
+            _request(
+                body=json.dumps({"url": "https://api.example.com/v1/quote", "price": "$1"}).encode()
+            )
+        )
+
+    assert "?tag=" in captured["description"]
+    body_schema = captured["extensions"]["bazaar"]["schema"]["properties"]["input"]["properties"][
+        "body"
+    ]
+    assert "?tag=" in body_schema["properties"]["tags"]["description"]
+
+
+def test_relisting_with_different_tags_moves_the_tag_projection(
+    store: InMemoryListingStore,
+) -> None:
+    """A relist drops the url from tags it no longer carries and adds it to the new ones."""
+    service = ListingService(store)
+    key = url_hash("https://api.example.com/v1/quote")
+    service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="v1",
+        assets=[],
+        tags=["fx", "old"],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+    service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="v2",
+        assets=[],
+        tags=["fx", "new"],
+        schema_json="",
+        settlement_tx_id="TX2",
+        payer="AGENT1",
+    )
+
+    assert store.tag_rows("old") == []
+    assert store.tag_rows("new") == [key]
+    assert [i.description for i in service.search(limit=50, tag="fx")] == ["v2"]
+
+
+def test_admin_delist_removes_the_tag_projection_rows(
+    store: InMemoryListingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting a listing also removes every by-tag row for it, so a tag search cannot resurrect it."""
+    service = ListingService(store)
+    key = url_hash("https://api.example.com/v1/quote")
+    service.create(
+        normalized_url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="tagged",
+        assets=[],
+        tags=["fx", "market-data"],
+        schema_json="",
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+    assert store.tag_rows("fx") == [key]
+    monkeypatch.setattr(directory_routes, "listing_service", service)
+    monkeypatch.setattr(directory_routes, "require_admin_wallet", lambda _request: None)
+
+    response = directory_routes.x402_admin_delete_listing(
+        _delete_request("https://api.example.com/v1/quote")
+    )
+
+    assert getattr(response, "status_code", 200) == 200
+    assert store.tag_rows("fx") == []
+    assert store.tag_rows("market-data") == []
+    assert service.search(limit=50, tag="fx") == []

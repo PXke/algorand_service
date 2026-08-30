@@ -1,4 +1,4 @@
-"""Payout leg: after a paid KYC lookup settles and finds an enrolled wallet, send it half the fee from a dedicated hot wallet.
+"""Payout leg: after a paid KYA lookup settles and finds an enrolled wallet, send it half the fee from a dedicated hot wallet.
 
 Genuinely new territory for this backend — no algosdk signing code exists
 anywhere else in the codebase. Deliberately isolated here: the mnemonic is
@@ -28,7 +28,7 @@ _CONFIRM_WAIT_ROUNDS = 4
 
 @dataclass(frozen=True)
 class PayoutResult:
-    """Outcome of one KYC lookup payout attempt."""
+    """Outcome of one KYA lookup payout attempt."""
 
     status: str  # "sent" | "failed" | "skipped"
     txid: str | None = None
@@ -73,7 +73,7 @@ def send_payout(*, receiver: str, amount_atomic: str, asset_id: str) -> PayoutRe
     asset = _asset_for(asset_id, network)
     if asset is None:
         logger.warning(
-            "kyc payout skipped for %s: settled asset id %r is not an accepted asset on network %s",
+            "kya payout skipped for %s: settled asset id %r is not an accepted asset on network %s",
             receiver,
             asset_id,
             network,
@@ -100,7 +100,7 @@ def send_payout(*, receiver: str, amount_atomic: str, asset_id: str) -> PayoutRe
         return PayoutResult(status="sent", txid=txid)
     except Exception as exc:
         logger.warning(
-            "kyc payout failed for %s (%s atomic of asset %s / %s): %s",
+            "kya payout failed for %s (%s atomic of asset %s / %s): %s",
             receiver,
             amount_atomic,
             asset.symbol,

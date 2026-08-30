@@ -20,6 +20,7 @@ from app.modules.x402 import price_oracle
 
 _EURQ = "quantoz-eurq"
 _USDQ = "quantoz-usdq"
+_USDC = price_oracle.USDC_COINGECKO_ID
 
 
 class _FakeRedis:
@@ -74,21 +75,30 @@ def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
     return client
 
 
-def _fresh_key(coingecko_id: str) -> str:
-    return price_oracle._FRESH_KEY + coingecko_id
+def _fresh_key(coingecko_id: str, currency: str = "usd") -> str:
+    return price_oracle._cache_key(price_oracle._FRESH_KEY, currency, coingecko_id)
 
 
-def _lkg_key(coingecko_id: str) -> str:
-    return price_oracle._LKG_KEY + coingecko_id
+def _lkg_key(coingecko_id: str, currency: str = "usd") -> str:
+    return price_oracle._cache_key(price_oracle._LKG_KEY, currency, coingecko_id)
 
 
-def _counting_fetch(monkeypatch: pytest.MonkeyPatch, rates: dict[str, Decimal]) -> list[int]:
-    """Replace the batch fetch with a canned result, returning a call counter."""
+def _counting_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    rates: dict[str, Decimal],
+    eur_rates: dict[str, Decimal] | None = None,
+) -> list[int]:
+    """Replace the batch fetch with canned USD (and optional EUR) rates, returning a call counter."""
     calls = [0]
 
-    def _fetch(**_kwargs: object) -> dict[str, Decimal]:
+    def _fetch(**_kwargs: object) -> price_oracle.FetchedRates:
         calls[0] += 1
-        return dict(rates)
+        fetched: price_oracle.FetchedRates = {}
+        if rates:
+            fetched["usd"] = dict(rates)
+        if eur_rates:
+            fetched["eur"] = dict(eur_rates)
+        return fetched
 
     monkeypatch.setattr(price_oracle, "_fetch_rates", _fetch)
     return calls
@@ -189,21 +199,27 @@ def test_fetch_parses_the_real_coingecko_shape() -> None:
         return httpx.Response(
             200,
             json={
-                "algorand": {"usd": 0.08694},
-                "quantoz-eurq": {"usd": 1.12},
-                "quantoz-usdq": {"usd": 0.998693},
+                "algorand": {"usd": 0.08694, "eur": 0.0745},
+                "quantoz-eurq": {"usd": 1.12, "eur": 1.0},
+                "quantoz-usdq": {"usd": 0.998693, "eur": 0.8912},
+                "usd-coin": {"usd": 1.0, "eur": 0.8924},
             },
         )
 
     rates = _fetch_with(_handler)
 
-    assert rates[_EURQ] == Decimal("1.12")
-    assert rates[_USDQ] == Decimal("0.998693")
-    # One request, carrying every oracle-priced id.
+    assert rates["usd"][_EURQ] == Decimal("1.12")
+    assert rates["usd"][_USDQ] == Decimal("0.998693")
+    assert rates["eur"][_EURQ] == Decimal("1.0")
+    assert rates["eur"][_USDQ] == Decimal("0.8912")
+    # USDC is fetched for its EUR quote only (the ledger needs it); it stays
+    # oracle-free for the 402 offer.
+    assert rates["eur"][_USDC] == Decimal("0.8924")
+    # One request, carrying every priced id and both quote currencies.
     assert len(seen) == 1
     requested = seen[0].url.params["ids"].split(",")
-    assert set(requested) == {_EURQ, _USDQ}
-    assert seen[0].url.params["vs_currencies"] == "usd"
+    assert set(requested) == {_EURQ, _USDQ, _USDC}
+    assert set(seen[0].url.params["vs_currencies"].split(",")) == {"usd", "eur"}
 
 
 def test_fetch_rejects_unusable_rates() -> None:
@@ -212,10 +228,15 @@ def test_fetch_rejects_unusable_rates() -> None:
     def _handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={"quantoz-eurq": {"usd": "not-a-number"}, "quantoz-usdq": {"usd": 0}},
+            json={
+                "quantoz-eurq": {"usd": "not-a-number", "eur": -1},
+                "quantoz-usdq": {"usd": 0, "eur": True},
+                "usd-coin": {"usd": 1.0},
+            },
         )
 
-    assert _fetch_with(_handler) == {}
+    # usd-coin's usd quote is the only usable value; every eur one was dropped.
+    assert _fetch_with(_handler) == {"usd": {_USDC: Decimal("1.0")}}
 
 
 def test_fetch_returns_empty_on_http_error() -> None:
@@ -227,6 +248,44 @@ def test_fetch_returns_empty_on_http_error() -> None:
     assert _fetch_with(_handler) == {}
 
 
-def _fetch_with(handler: object) -> dict[str, Decimal]:
+def test_eur_rate_uses_its_own_cache_keys_and_the_same_batch(
+    fake_redis: _FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A EUR read is served from the same one fetch as USD, under separate keys, so neither overwrites the other."""
+    calls = _counting_fetch(
+        monkeypatch,
+        {_EURQ: Decimal("1.12")},
+        eur_rates={_EURQ: Decimal("1.0"), _USDC: Decimal("0.89")},
+    )
+
+    assert price_oracle.get_eur_rate(_USDC) == Decimal("0.89")
+    assert price_oracle.get_usd_rate(_EURQ) == Decimal("1.12")
+    assert price_oracle.get_eur_rate(_EURQ) == Decimal("1.0")
+    assert calls[0] == 1
+    assert fake_redis.store[_fresh_key(_EURQ, "eur")] == "1.0"
+    assert fake_redis.store[_fresh_key(_EURQ, "usd")] == "1.12"
+    assert fake_redis.store[_lkg_key(_USDC, "eur")] == "0.89"
+    assert _lkg_key(_USDC, "eur") not in fake_redis.expires
+
+
+def test_eur_rate_falls_back_to_last_known_good_then_none(
+    fake_redis: _FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The EUR ladder degrades exactly like the USD one: stale value, then a clean None, never a zero or a raise."""
+    fake_redis.store[_lkg_key(_USDC, "eur")] = "0.88"
+    _counting_fetch(monkeypatch, {})
+
+    assert price_oracle.get_eur_rate(_USDC) == Decimal("0.88")
+    assert price_oracle.get_eur_rate(_EURQ) is None
+
+
+def test_eur_rate_redis_outage_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Redis outage yields no EUR valuation rather than an exception in the settlement path."""
+    monkeypatch.setattr(price_oracle, "get_redis", lambda **_kw: _BrokenRedis())
+
+    assert price_oracle.get_eur_rate(_USDC) is None
+
+
+def _fetch_with(handler: object) -> price_oracle.FetchedRates:
     """Run the real fetch against a mocked transport."""
     return price_oracle._fetch_rates(transport=httpx.MockTransport(handler))

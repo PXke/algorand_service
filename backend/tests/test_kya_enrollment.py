@@ -1,19 +1,19 @@
-"""Signature verification and enrollment storage for the KYC enroll flow."""
+"""Signature verification and enrollment storage for the KYA enroll flow."""
 
 from __future__ import annotations
 
 import pytest
 from algosdk import account, util
 
-from app.modules.kyc.models.domain import KycError
-from app.modules.kyc.services.consent_message import build_kyc_consent_message
-from app.modules.kyc.services.enrollment_service import (
+from app.modules.kya.models.domain import KycError
+from app.modules.kya.services.consent_message import build_kyc_consent_message
+from app.modules.kya.services.enrollment_service import (
     EnrollmentService,
     _default_signature_verifier,
     _derive_kyc_level,
 )
-from app.modules.kyc.services.indexer_client import WalletSignals
-from app.modules.kyc.stores.memory import InMemoryEnrollmentStore
+from app.modules.kya.services.indexer_client import WalletSignals
+from app.modules.kya.stores.memory import InMemoryEnrollmentStore
 
 WALLET = "W" * 58
 
@@ -28,7 +28,7 @@ def _always_invalid(_wallet: str, _message: str, _signature: str) -> bool:
 
 def test_default_signature_verifier_accepts_real_pera_dialect_signature() -> None:
     """Accepts an MX-prefixed algosdk signBytes signature (the Pera/WalletConnect signData convention)."""
-    # The KYC frontend signs consent via the automated WalletConnect
+    # The KYA frontend signs consent via the automated WalletConnect
     # algo_signData call (wallet_auth_flutter's signArbitraryData), which
     # produces an MX-prefixed algosdk signBytes signature — confirms the
     # default verifier actually checks THAT convention, not the suggestions
@@ -49,7 +49,7 @@ def test_default_signature_verifier_rejects_raw_non_mx_signature() -> None:
     sk, addr = account.generate_account()
     message = build_kyc_consent_message(wallet_address=addr)
     # Raw signature (no "MX" prefix) — what the suggestions module's
-    # verify_wallet_signature accepts, but the KYC default must not.
+    # verify_wallet_signature accepts, but the KYA default must not.
     private_key_bytes = base64.b64decode(sk)[:32]
     raw_sig = base64.b64encode(
         SigningKey(private_key_bytes).sign(message.encode()).signature
@@ -59,7 +59,7 @@ def test_default_signature_verifier_rejects_raw_non_mx_signature() -> None:
 
 
 def test_enroll_success_stores_signals_and_level() -> None:
-    """A valid enrollment stores the wallet's signals and derived KYC level in the store."""
+    """A valid enrollment stores the wallet's signals and derived KYA level in the store."""
     store = InMemoryEnrollmentStore()
     service = EnrollmentService(
         store=store,

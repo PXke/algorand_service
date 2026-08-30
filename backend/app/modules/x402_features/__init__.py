@@ -1,15 +1,16 @@
-"""x402 feature-request board: paid requests, paid votes, free browse, paid demand.
+"""x402 feature-request board: free requests, paid votes, free browse, paid demand.
 
 The Algorand Global x402 Challenge entry's fourth paid product (after
 modules/kyc, modules/x402_directory and modules/x402_board), roadmap item 4 in
-CLAUDE.md section 9.1: "agents pay to request an endpoint and vote; builders
-pay to read demand."
+CLAUDE.md section 9.1. Filing is free (owner decision 2026-08-30: the board's
+first job is collecting endpoint ideas from agents, and a fee is friction
+against that); voting and reading demand are paid.
 
 Four surfaces, not the two the directory and the board each have:
 
-  POST /api/v1/x402/features            paid  -- submit a request
+  POST /api/v1/x402/features            free  -- file an anonymous request (rate-limited per IP)
   POST /api/v1/x402/features/:id/vote   paid  -- add one unit of demand to it
-  GET  /api/v1/x402/features            free  -- browse what is being asked for
+  GET  /api/v1/x402/features            free  -- browse what is being asked for (rate-limited per IP)
   GET  /api/v1/x402/features/demand     paid  -- the ranked demand signal
 
 The free/paid split is the product. The free browse answers "what has anyone

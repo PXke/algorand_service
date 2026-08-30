@@ -168,9 +168,11 @@ class Settings(msgspec.Struct, kw_only=True):
     # Public address only — no private key is held by this module.
     x402_pay_to_address: str = ""
 
-    # KYC-as-a-service (the x402 challenge's actual product): free wallet
+    # Know Your Agent (KYA, the x402 challenge's actual product): free wallet
     # enrollment + trust-signal computation, then a paid x402 lookup that
-    # splits its fee with the enrolled wallet. See app/modules/kyc/.
+    # splits its fee with the enrolled wallet. The module lives in
+    # app/modules/kya/; the kyc_* setting names are kept because prod env
+    # names depend on them.
     kyc_store: str = "memory"
     kyc_lookup_price: str = "$0.05"
     # Share of the lookup fee paid out to the enrolled wallet (the rest stays
@@ -242,33 +244,32 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_board_rate_limit_per_hour: int = 120
     # Hard cap on a board page — no unbounded listings (CLAUDE.md section 4).
     x402_board_max_results: int = 100
-    # x402 feature-request board (POST /x402/features paid, POST
+    # x402 feature-request board (POST /x402/features free, POST
     # /x402/features/:id/vote paid, GET /x402/features free, GET
     # /x402/features/demand paid). See app/modules/x402_features/. Separate
     # settings from the directory's and the board's on purpose: a third product
     # whose prices should move independently of theirs.
     x402_features_store: str = "memory"
-    # Flat fee to file one feature request. Money strings, parsed by the tagged
-    # money parser in modules/x402/client.py (which is also what attaches the
-    # challenge tag).
-    #
-    # Priced at the board's placement fee, not the directory's listing fee:
-    # both are one paid write of a short piece of text, and filing a request is
-    # meant to be as low-friction as putting up a tile.
-    x402_features_request_price: str = "$0.05"
-    # Flat fee per vote. Below the request fee on purpose: a vote is a smaller
-    # act than authoring a request, and the demand signal is only as good as
-    # the number of honest agents willing to cast one. Not free and not dust,
-    # because the entire point of a PAID vote board is that the payment is the
-    # costly signal a free upvote cannot be. Keep this flat -- the ranking
-    # counts votes, and a count is only amount-weighted while every vote costs
-    # the same (see FeatureService.vote).
+    # Filing a request is free and anonymous (owner decision 2026-08-30: the
+    # board's job is collecting endpoint ideas from agents, and a fee is
+    # friction against that), so there is no request price. The only brake on
+    # a flood of free filings is this per-IP hourly budget (CLAUDE.md section
+    # 9: rate limit every free endpoint), counted under its own key, separate
+    # from the browse budget below. Low on purpose: an honest agent files a
+    # handful of ideas, not hundreds.
+    x402_features_submit_rate_limit_per_hour: int = 20
+    # Flat fee per vote. Money strings, parsed by the tagged money parser in
+    # modules/x402/client.py (which is also what attaches the challenge tag).
+    # Not free and not dust, because the entire point of a PAID vote board is
+    # that the payment is the costly signal a free upvote cannot be. Keep this
+    # flat -- the ranking counts votes, and a count is only amount-weighted
+    # while every vote costs the same (see FeatureService.vote).
     x402_features_vote_price: str = "$0.02"
     # Fee to read the ranked demand signal. Still the most expensive surface
     # in the module (it resells every vote every agent has paid for, not one
     # write), but cut from $0.25 to $0.05 on 2026-08-30 -- $0.25 was an outlier
     # against every other paid-read price point in the marketplace (board
-    # placement, feature request, KYC lookup all sit at $0.05), and a price
+    # placement, KYC lookup both sit at $0.05), and a price
     # that high directly suppresses the paid-intent volume the competition's
     # Volume score is counting. $0.05 keeps it priced above a single vote
     # while matching the marketplace's established paid-read tier.

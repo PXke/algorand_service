@@ -17,7 +17,7 @@ from app.core.http import Request, Response, Router
 from app.core.http_errors import json_error_from_platform, json_error_response
 from app.core.query_params import query_param
 from app.modules.x402.discovery import describe_json_endpoint
-from app.modules.x402.paid_request import require_paid_request
+from app.modules.x402.paid_request import mark_fulfilled, require_paid_request
 from app.modules.x402_grading.models.domain import (
     MAX_COMMENT_LENGTH,
     MAX_SCORE,
@@ -215,6 +215,7 @@ def x402_grade_submit(request: Request) -> Response:
             description=serialization.dumps({"error": {"code": exc.code, "message": exc.message}}),
         )
 
+    mark_fulfilled(result.payment_txid, resource="x402-grading-submit")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},
@@ -305,6 +306,7 @@ def x402_grade_score(request: Request) -> Response:
         return result.error
 
     aggregate = grading_service.aggregate(endpoint)
+    mark_fulfilled(result.payment_txid, resource="x402-grading-score")
     return Response(
         status_code=200,
         headers={"Content-Type": "application/json", **result.settlement_headers},

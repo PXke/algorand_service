@@ -1,4 +1,4 @@
-"""Domain types for paid feature requests and the paid votes cast on them.
+"""Domain types for feature requests and the paid votes cast on them.
 
 The settlement ledger is shared infrastructure and lives in
 modules/x402/settlement.py -- nothing feature-board-specific about it.
@@ -25,17 +25,18 @@ class FeatureError(PlatformError):
 
 @dataclass
 class StoredFeatureRequest:
-    """One paid feature request: what somebody paid to ask for.
+    """One feature request: what somebody asked for.
 
     No term_end, unlike StoredPlacement. A board tile is rented advertising
     that must expire; a feature request is a durable statement of demand whose
     whole value is accumulating votes over time. Expiring one would silently
     destroy the demand signal its voters paid to build.
 
-    `submitter` is the paying wallet -- a public Algorand address the payer
-    themselves put on-chain by paying, already in the settlement ledger, and
-    not personal data. It is deliberately absent from the FREE browse surface
-    and present on the PAID demand surface, along with the vote counts.
+    Filing is free and anonymous, so `submitter` and `settlement_tx_id` are
+    empty for requests filed through the HTTP route. Both columns are kept
+    so a request created against a settled payment can still be attributed;
+    the paid demand surface serves an empty submitter as null, never as a
+    made-up value.
     """
 
     request_id: str
