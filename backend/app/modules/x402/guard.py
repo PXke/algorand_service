@@ -20,6 +20,7 @@ from x402.http.types import (
 from x402.http.x402_http_server import x402HTTPResourceServerSync
 
 from app.core import serialization
+from app.core.config import settings
 from app.core.http import Request, Response
 from app.modules.x402.adapter import PlatformHTTPAdapter
 from app.modules.x402.client import build_payment_offer, get_resource_server
@@ -77,6 +78,19 @@ def _instructions_to_response(instr: HTTPResponseInstructions) -> Response:
     return Response(status_code=instr.status, headers=instr.headers, description=body)
 
 
+def _resource_url(request: Request, resource: str) -> str:
+    """The absolute public URL a 402 offer advertises for this route.
+
+    Built from the configured public API base plus the request path; falls
+    back to the short ledger id only when the request carries no path (a
+    bare test Request), so a real request always advertises a real URL.
+    """
+    path = request.url.path or ""
+    if not path:
+        return resource
+    return f"{settings.x402_public_api_base.rstrip('/')}{path}"
+
+
 def require_payment(
     request: Request,
     *,
@@ -93,7 +107,8 @@ def require_payment(
     rate), each carrying the required challenge tag. See
     client.build_payment_offer; callers need no say in this and get multi-asset
     automatically.
-    `resource` is a short stable id for this endpoint, shown to the payer.
+    `resource` is a short stable id for this endpoint, recorded in the
+    settlement ledger; the 402 offer itself advertises the route's public URL.
     `description` is free text reaching the payer as the 402's
     resource.description, before they commit — the place to state anything the
     price alone doesn't say (a term length, what the fee buys). The
@@ -104,10 +119,18 @@ def require_payment(
     route Bazaar-discoverable (required for the leaderboard, not automatic).
     """
     offer = build_payment_offer(price)
+    # RouteConfig.resource is used VERBATIM by the x402 package as the offer's
+    # resource.url (x402_http_server_base.py), and the GoPlausible facilitator
+    # catalogs a route in the Bazaar from that url after settlement -- a
+    # non-URL value settles fine (it counts on the leaderboard) but can never
+    # be catalogued. So the offer carries the public absolute URL of this
+    # route, while `resource` (the short stable id) stays what the settlement
+    # ledger records.
     route_config = RouteConfig(
         accepts=offer.options,
-        resource=resource,
+        resource=_resource_url(request, resource),
         description=_describe(description, offer.preference_note()),
+        mime_type="application/json",
         extensions=extensions,
     )
     # A fresh wrapper per call (route compilation is cheap, local regex work)

@@ -167,6 +167,11 @@ class Settings(msgspec.Struct, kw_only=True):
     x402_network: str = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI="
     # Public address only — no private key is held by this module.
     x402_pay_to_address: str = ""
+    # Public absolute base of this API as agents reach it. Every 402 offer's
+    # resource.url is this base + the route path: the facilitator's Bazaar
+    # catalogs resources by that URL, so it must be the real public origin,
+    # never the internal bind address.
+    x402_public_api_base: str = "https://algorand-api.pxke.me"
     # ── Probe / self wallets, excluded from every ranking in code ──────────
     # Comma-separated Algorand addresses of OUR payers (the probe beat's hot
     # wallet and anything else we pay our own endpoints from). CLAUDE.md
