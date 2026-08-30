@@ -111,12 +111,12 @@ def x402_list(request: Request) -> Response:
             tags=payload.tags,
             schema=payload.schema,
             settlement_tx_id=result.payment_txid or "",
+            payer=result.payer or "",
         )
     except DirectoryError as exc:
-        # Unreachable in practice — the URL is validated during decode and the
-        # only other raiser is normalize_url, which runs on the same input.
-        # Kept explicit so a future validation rule cannot silently 500 a
-        # request whose payment has already been taken.
+        # Reachable now (migration 094): a relist attempt by a different
+        # payer than the current owner is refused here, payment already
+        # taken — see listing_service.create()'s ownership check.
         return json_error_from_platform(exc)
 
     return Response(

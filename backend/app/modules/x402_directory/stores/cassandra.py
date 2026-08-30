@@ -29,6 +29,7 @@ def _row_to_listing(row: object) -> StoredListing:
         created_at_epoch=_epoch(row.created_at),
         assets=sorted(row.assets or []),
         tags=sorted(row.tags or []),
+        payer=getattr(row, "payer", None) or "",
     )
 
 
@@ -64,6 +65,7 @@ class CassandraListingStore:
                 _dt(item.term_end_epoch),
                 item.settlement_tx_id,
                 _dt(item.created_at_epoch),
+                item.payer,
             ),
         )
         if previous is not None and previous.created_at_epoch != item.created_at_epoch:
@@ -85,6 +87,7 @@ class CassandraListingStore:
                 set(item.tags),
                 _dt(item.term_end_epoch),
                 item.settlement_tx_id,
+                item.payer,
             ),
         )
 

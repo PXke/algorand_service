@@ -67,6 +67,7 @@ class ListingService:
         tags: list[str],
         schema: dict | None,
         settlement_tx_id: str,
+        payer: str,
         now: datetime | None = None,
     ) -> StoredListing:
         """Store a paid listing for the configured term and return it.
@@ -74,11 +75,41 @@ class ListingService:
         Re-listing a URL already in the directory replaces it and re-stamps both
         created_at and term_end: the payer paid for a fresh term starting now,
         not for an extension of whatever the previous term was.
+
+        Ownership check (migration 094): if this url already has a listing
+        owned by a DIFFERENT non-empty payer, this raises rather than
+        overwriting. A directory entry states a fact about a real third-party
+        endpoint -- letting any payer take over any listing by paying the fee
+        would let anyone quietly misrepresent someone else's endpoint. An
+        empty existing payer (pre-migration data) is unowned and gets claimed
+        by whoever relists it next, so old listings aren't locked forever.
+
+        This check runs AFTER payment already settled (the route already
+        collected it before calling create()), so a blocked hijack attempt
+        still costs the attacker the listing fee -- named plainly rather than
+        hidden, the same tradeoff x402_grading's eligibility check accepted
+        for the same reason: payer identity isn't known until settlement.
+
+        Deliberately no `and payer` guard on the new side: an unattributable
+        new payer (empty string) must NOT be able to overwrite an existing
+        OWNED listing just because its own identity is unknown -- that would
+        turn "we couldn't attribute this payment" into a free bypass of the
+        exact check this exists for. An unattributable payer can still create
+        a brand-new listing (existing is None) or claim an unowned one
+        (existing.payer == ""), same as any other payer.
         """
         moment = now or datetime.now(tz=UTC)
         normalized = normalize_url(url)
+        key = url_hash(normalized)
+        existing = self.store.get(key)
+        if existing is not None and existing.payer and existing.payer != payer:
+            raise DirectoryError(
+                "listing_owned_by_another_payer",
+                "This url is already listed by a different payer. Payment has "
+                "settled but the existing listing was not changed.",
+            )
         listing = StoredListing(
-            url_hash=url_hash(normalized),
+            url_hash=key,
             url=normalized,
             price=price,
             description=description.strip(),
@@ -90,6 +121,7 @@ class ListingService:
             created_at_epoch=int(moment.timestamp()),
             assets=sorted({a.strip() for a in assets if a.strip()}),
             tags=sorted({t.strip().lower() for t in tags if t.strip()}),
+            payer=payer,
         )
         self.store.upsert(listing)
         return listing

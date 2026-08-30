@@ -24,6 +24,7 @@ def http_status_for_code(code: str, *, default: int = 400) -> int:
         "not_found": 404,
         "duplicate_txid": 409,
         "duplicate_upvote": 409,
+        "listing_owned_by_another_payer": 403,
         "rate_limited": 429,
         "treasury_not_configured": 503,
     }

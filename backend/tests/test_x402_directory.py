@@ -32,6 +32,7 @@ from app.modules.x402 import replay as replay_module
 from app.modules.x402 import settlement as settlement_service
 from app.modules.x402.settlement import InMemorySettlementStore, SettlementRecord
 from app.modules.x402_directory.api import routes as directory_routes
+from app.modules.x402_directory.models.domain import DirectoryError, StoredListing
 from app.modules.x402_directory.services.listing_service import (
     ListingService,
     normalize_url,
@@ -437,6 +438,7 @@ def test_relisting_the_same_url_replaces_it_rather_than_duplicating(
         tags=[],
         schema=None,
         settlement_tx_id="TX1",
+        payer="AGENT1",
     )
     service.create(
         url="https://API.example.com/v1/quote",
@@ -446,12 +448,110 @@ def test_relisting_the_same_url_replaces_it_rather_than_duplicating(
         tags=[],
         schema=None,
         settlement_tx_id="TX2",
+        payer="AGENT1",
     )
 
     items = service.search(limit=50)
     assert len(items) == 1
     assert items[0].description == "second"
     assert items[0].settlement_tx_id == "TX2"
+
+
+def test_relisting_by_a_different_payer_is_refused(store: InMemoryListingStore) -> None:
+    """A listing already owned by one payer cannot be silently overwritten by another."""
+    service = ListingService(store)
+    service.create(
+        url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="the real thing",
+        assets=[],
+        tags=[],
+        schema=None,
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+
+    with pytest.raises(DirectoryError, match="already listed by a different payer"):
+        service.create(
+            url="https://api.example.com/v1/quote",
+            price="$999.00",
+            description="hijacked",
+            assets=[],
+            tags=[],
+            schema=None,
+            settlement_tx_id="TX2",
+            payer="AGENT2",
+        )
+
+    # The original listing is untouched — payment for the hijack attempt was
+    # taken (that's the route's problem, not this check's), but the entry
+    # other agents see is still the real one.
+    items = service.search(limit=50)
+    assert len(items) == 1
+    assert items[0].description == "the real thing"
+    assert items[0].settlement_tx_id == "TX1"
+
+
+def test_an_unowned_legacy_listing_can_be_claimed_by_anyone(store: InMemoryListingStore) -> None:
+    """A listing with no recorded payer (pre-ownership-tracking data) isn't locked forever."""
+    service = ListingService(store)
+    store.upsert(
+        StoredListing(
+            url_hash=url_hash("https://api.example.com/v1/quote"),
+            url="https://api.example.com/v1/quote",
+            price="$0.01",
+            description="pre-migration listing",
+            schema_json="",
+            settlement_tx_id="OLDTX",
+            term_end_epoch=0,
+            created_at_epoch=0,
+            payer="",
+        )
+    )
+
+    service.create(
+        url="https://api.example.com/v1/quote",
+        price="$0.02",
+        description="claimed",
+        assets=[],
+        tags=[],
+        schema=None,
+        settlement_tx_id="TX2",
+        payer="AGENT1",
+    )
+
+    items = service.search(limit=50)
+    assert len(items) == 1
+    assert items[0].description == "claimed"
+
+
+def test_an_unattributable_payer_cannot_overwrite_an_owned_listing(
+    store: InMemoryListingStore,
+) -> None:
+    """An empty/unattributable new payer must not bypass the ownership check."""
+    service = ListingService(store)
+    service.create(
+        url="https://api.example.com/v1/quote",
+        price="$0.01",
+        description="the real thing",
+        assets=[],
+        tags=[],
+        schema=None,
+        settlement_tx_id="TX1",
+        payer="AGENT1",
+    )
+
+    with pytest.raises(DirectoryError, match="already listed by a different payer"):
+        service.create(
+            url="https://api.example.com/v1/quote",
+            price="$0.01",
+            description="unattributable overwrite attempt",
+            assets=[],
+            tags=[],
+            schema=None,
+            settlement_tx_id="TX2",
+            payer="",
+        )
 
 
 @pytest.mark.parametrize(
@@ -488,6 +588,7 @@ def test_search_returns_listings_newest_first(
             tags=[],
             schema=None,
             settlement_tx_id=f"TX{index}",
+            payer=f"AGENT{index}",
             now=base + timedelta(hours=index),
         )
 
@@ -517,6 +618,7 @@ def test_search_limit_is_clamped_to_the_configured_maximum(
             tags=[],
             schema=None,
             settlement_tx_id=f"TX{index}",
+            payer=f"AGENT{index}",
         )
 
     result = directory_routes.x402_search(

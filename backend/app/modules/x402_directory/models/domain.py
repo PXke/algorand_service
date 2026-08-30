@@ -26,7 +26,13 @@ class DirectoryError(PlatformError):
 
 @dataclass
 class StoredListing:
-    """One listed x402 endpoint, as stored and as served by search."""
+    """One listed x402 endpoint, as stored and as served by search.
+
+    `payer` is the wallet whose settlement paid for the CURRENT term -- see
+    migration 094 and listing_service.py's ownership check. Empty string
+    means unowned (a listing created before 094, or a genuine edge case),
+    never used as a real wallet's identity.
+    """
 
     url_hash: str
     url: str
@@ -38,3 +44,4 @@ class StoredListing:
     created_at_epoch: int
     assets: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    payer: str = ""

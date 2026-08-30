@@ -797,19 +797,19 @@ class X402DirectoryStmts:
     UPSERT_LISTING = _Stmt(
         "INSERT INTO algorand_platform.x402_listings ("
         "url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "term_end, settlement_tx_id, created_at, payer"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     GET_LISTING = _Stmt(
         "SELECT url_hash, url, price, assets, description, schema_json, tags, "
-        "term_end, settlement_tx_id, created_at "
+        "term_end, settlement_tx_id, created_at, payer "
         "FROM algorand_platform.x402_listings WHERE url_hash = ?"
     )
     INSERT_RECENCY = _Stmt(
         "INSERT INTO algorand_platform.x402_listings_by_recency ("
         "directory, created_at, url_hash, url, price, assets, description, "
-        "schema_json, tags, term_end, settlement_tx_id"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "schema_json, tags, term_end, settlement_tx_id, payer"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     # Deletes the row a re-listing supersedes. Needs the exact created_at of
     # the previous listing (read from x402_listings first), since created_at is
